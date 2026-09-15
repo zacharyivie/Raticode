@@ -274,7 +274,7 @@ jobs:
         run: node scripts/verify-update-metadata.cjs
 
       - name: Smoke-test final distributions
-        run: python scripts/test-release-packages.py
+        run: uv run --locked python scripts/test-release-packages.py
 
       - name: Generate Linux checksums
         if: runner.os == 'Linux'

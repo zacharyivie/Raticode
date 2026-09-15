@@ -330,6 +330,9 @@ def test_signing_defaults_to_unsigned_and_environment_settings_are_scoped() -> N
     assert matrix["macos"]["electron_builder_args"].endswith("--arm64")
     steps = _steps_by_name(build)
     names = list(steps)
+    assert steps["Smoke-test final distributions"]["run"] == (
+        "uv run --locked python scripts/test-release-packages.py"
+    )
     for test in ("Verify final updater hashes", "Smoke-test final distributions"):
         assert "if" not in steps[test]
         assert names.index("Verify macOS signatures and notarization") < names.index(test)
