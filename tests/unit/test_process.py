@@ -16,6 +16,42 @@ from gofer.utils.process import (
 )
 
 
+@pytest.mark.anyio
+async def test_task_cancellation_settles_process_tree_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settled = []
+
+    class FakeProcess:
+        stdin = None
+        stdout = None
+        stderr = None
+        returncode = None
+
+        async def wait(self):
+            await anyio.sleep_forever()
+
+        async def aclose(self):
+            settled.append("closed")
+
+    process = FakeProcess()
+
+    async def open_process(*args, **kwargs):
+        return process
+
+    async def terminate_tree(target):
+        assert target is process
+        await anyio.sleep(0.01)
+        settled.append("terminated")
+
+    monkeypatch.setattr(process_module.anyio, "open_process", open_process)
+    monkeypatch.setattr(process_module, "_terminate_process_tree", terminate_tree)
+    with anyio.move_on_after(0.02) as scope:
+        await run_subprocess(["fake-process-only"])
+    assert scope.cancel_called
+    assert settled == ["terminated", "closed"]
+
+
 def test_env_with_executable_on_path_prepends_missing_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

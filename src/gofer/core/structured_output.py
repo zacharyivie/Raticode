@@ -268,7 +268,7 @@ def _combine_constraints(keyword: str, constraints: list[dict[str, Any]]) -> dic
 def _attach_root_definitions(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
     if not _schema_references(schema):
         return schema
-    definitions = {
+    definitions: dict[str, Any] = {
         key: root[key] for key in ("$defs", "definitions") if key in root and key not in schema
     }
     return {**schema, **definitions} if definitions else schema

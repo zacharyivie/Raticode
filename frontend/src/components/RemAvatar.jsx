@@ -1,8 +1,12 @@
 import { useEffect, useId, useRef, useState } from "react";
-import seated from "../assets/rem-options/indigo-android-open.png";
-import closed from "../assets/rem-options/indigo-android.png";
-import waving from "../assets/rem-options/indigo-android-wave.png";
-import sleeping from "../assets/rem-options/indigo-android-sleep.png";
+import seated from "../assets/rem-options/display/indigo-android-open-224.png";
+import seated3x from "../assets/rem-options/display/indigo-android-open-336.png";
+import closed from "../assets/rem-options/display/indigo-android-224.png";
+import closed3x from "../assets/rem-options/display/indigo-android-336.png";
+import waving from "../assets/rem-options/display/indigo-android-wave-224.png";
+import waving3x from "../assets/rem-options/display/indigo-android-wave-336.png";
+import sleeping from "../assets/rem-options/display/indigo-android-sleep-224.png";
+import sleeping3x from "../assets/rem-options/display/indigo-android-sleep-336.png";
 
 export default function RemAvatar({ visible = true, animated = true, reducedMotion = "system" }) {
   const backgroundFilterId = `rem-background-${useId()}`;
@@ -81,11 +85,11 @@ export default function RemAvatar({ visible = true, animated = true, reducedMoti
           </filter>
         </defs>
       </svg>
-      <img alt="" style={spriteStyle} className="rem-avatar-seated" draggable={false} height={112} width={112} src={seated} onLoad={() => setLoaded((value) => ({ ...value, seated: true }))} />
+      <img alt="" style={spriteStyle} className="rem-avatar-seated" draggable={false} height={112} width={112} src={seated} srcSet={`${seated} 2x, ${seated3x} 3x`} onLoad={() => setLoaded((value) => ({ ...value, seated: true }))} />
       {/* Only the eyelid changes during a blink, keeping the body pixel-still. */}
-      <img alt="" style={spriteStyle} className="rem-avatar-eyelid" draggable={false} height={112} width={112} src={closed} onLoad={() => setLoaded((value) => ({ ...value, closed: true }))} />
-      <img alt="" style={spriteStyle} className="rem-avatar-wave" draggable={false} height={112} width={112} src={waving} onLoad={() => setLoaded((value) => ({ ...value, waving: true }))} />
-      <img alt="" style={spriteStyle} className="rem-avatar-sleep" draggable={false} height={112} width={112} src={sleeping} />
+      <img alt="" style={spriteStyle} className="rem-avatar-eyelid" draggable={false} height={112} width={112} src={closed} srcSet={`${closed} 2x, ${closed3x} 3x`} onLoad={() => setLoaded((value) => ({ ...value, closed: true }))} />
+      <img alt="" style={spriteStyle} className="rem-avatar-wave" draggable={false} height={112} width={112} src={waving} srcSet={`${waving} 2x, ${waving3x} 3x`} onLoad={() => setLoaded((value) => ({ ...value, waving: true }))} />
+      <img alt="" style={spriteStyle} className="rem-avatar-sleep" draggable={false} height={112} width={112} src={sleeping} srcSet={`${sleeping} 2x, ${sleeping3x} 3x`} />
     </div>
   );
 }

@@ -1,0 +1,136 @@
+{
+  "contract_version": 1,
+  "cases": {
+    "agent": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "3061f627bb24fef8035f0265e60859b3fae32339938cc62f95a779b7f204185c",
+      "ir_sha256": "f280d0b66d6ab4112f6b5bf4e228cd315c5c28aa1f02c59d522a8358f66b496b"
+    },
+    "approval-gate": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "902deb4f3ea2ee95390b7475c85fe7d5c4c672e457dd9029d02bfc918e1c2b59",
+      "ir_sha256": "6ebc153af6be18defc671d04212affa7f827bd487e2b7087f2da2c03ef5a6879"
+    },
+    "bash-command": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "d88991d683b4e458cda02099fa4985bd0456ce963a9c23eaf41adac453d4ef94",
+      "ir_sha256": "4423ac37e89ba53b8f8e74e286b08c2cf7a22e29c0e382d2d61e2786dc9f10ca"
+    },
+    "break": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_INVALID_BREAK_TARGET",
+      "ast_sha256": "2e507e8110a0899394a75c87b51aab0dcdc318c9eb23c581159a4b1d5a99a7f1",
+      "ir_sha256": "4a2a0840e17396fbcd159dadc34bbb01eb0f79ec2f62f4a6609476d95603b945"
+    },
+    "common-llm-task": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "b66c15518efe93c60d7e7432f9ac089fdc05239ba5779bbef2478e8f938f6ccb",
+      "ir_sha256": "4211023f5c0b4df48bf6b02f2f1c3d32f18ccfe3dabd9fa9326cb1ad90c5234f"
+    },
+    "copy-file": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "514658c5956765043bfd961d9d3bd52231972c8cb784f62f03ed607fa0a41893",
+      "ir_sha256": "a6817b7dd7b67a3e10ca0f2b284eddfdf13e374c4ef0073c2d2a9c392b19bf64"
+    },
+    "delete-file": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "a55c1e488a79e31358b9de7b5b2e8f40ce8da953860168ae2bf7d760e77b8516",
+      "ir_sha256": "c9e0e6fdec55a8259d22eec1d8a838f390f330a7def59f8997ad3a9eaabab994"
+    },
+    "file": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "390147777ab30a835933b54bad90ac8229f4f9cafc211f5a9e47c07f238b4f0d",
+      "ir_sha256": "374668c354ab430fa1f771252ed99ded556e1644882330b1cf39e887a98c77ed"
+    },
+    "folder": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "81cbcce93438ccd316f7b0da47620568ddcfc3719c5124caae12a94ff64741a4",
+      "ir_sha256": "8f224ff03eb105ca6dba9e00c40964801dfea7b663c5454f973867103e909916"
+    },
+    "http-request": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "1f9587cc9b32eabc261b938a3b12fcd3e21dcac0606ad0c37bf9a02751da9899",
+      "ir_sha256": "8574e2b13461566d5c61cf6f0719a60b0d4c1dad9ca30f2c663037a9b9184683"
+    },
+    "local-search": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "0dd205d3e0266d9b759fea3ebb59312b1ce55e4cb51e62a7923a35320e354148",
+      "ir_sha256": "2a0f961b13ff3aad04b423e34e5f8ef2b00d2642e74262869a20f3c7625490d0"
+    },
+    "local-vectorize": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "a5a8665dc97a19d1db62b253b76996aaea2c68116a27903fd309dc227334f9b7",
+      "ir_sha256": "c4b17d1144d36d7b665755ded490ba451a30eda50cb7a7919a076358283c541c"
+    },
+    "loop": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "a4b5fa01b88d583d2e5c95eff7ddeb9258abe5250fa2860bbd344d0ea9d8656d",
+      "ir_sha256": "7ef5f4acc7ef7885644116033adfa7e2d869d6842c5ecf891bcdb429236135c2"
+    },
+    "move-file": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "1697f69e8fa471ded14c46f330a2feea68d95d0c77d158cafb1130721d6e2414",
+      "ir_sha256": "7f8102d8519f4d6577e36cd6dd867b93970503affd96edc697fdd1f53d71fde7"
+    },
+    "notification": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_INVALID_FIELD_VALUE",
+      "ast_sha256": "a70afe5e09be2d8cecfa91246cf6714fd015d23c65a14ebadcd34e9bf212d3de",
+      "ir_sha256": "1f7d7a89b7eb7f8979c65a6fa5843c3d194bdf78a03f4af95f6eb26d29121bf9"
+    },
+    "open-resource": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "96bac83e42df45c48ce6ac05669cf5c016b76e166d016cb2b300fd782793b792",
+      "ir_sha256": "25356998294d507e89153c32b5d3c20392cec6d3ab5cad0243f590ea2f7e2af5"
+    },
+    "prompt-file": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MUTUALLY_EXCLUSIVE_FIELDS",
+      "ast_sha256": "86951493fdf34363ab14be4099badf9e0c91d66744b317d04eec2c7e6e1c8e18",
+      "ir_sha256": "48cbe2ad60f18fb14f241f05b76eace7ff1d9c20c47d487a8b5c76fb2ed620a9"
+    },
+    "python-script": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "67754e4eb328a483b4bb8eaf49cd40c6ea80c3565224c46dbfdf6bd8681e82ee",
+      "ir_sha256": "954a0c65e1d9308bc35f6c3ea5e3a75313967dd39f4f73b880de86ae427bf9a9"
+    },
+    "read-file": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "dbade98b111d102e28327c33e235604e42815126c5bb4cf5cbed6ef34eefee2d",
+      "ir_sha256": "846904b38e620cca4b17de7df89dc4a3ca76ded9cb9937c2297cfbe9f127b130"
+    },
+    "shell-script": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "e8452ccab99c20f2739c40175804dddf2d4263b95ba78c64d9ed57071022a65a",
+      "ir_sha256": "df414f5fde518acfb293698460f9f7875b9d396b5031b82bb81b8c21aa98e3a5"
+    },
+    "workflow": {
+      "outcome": "compiled",
+      "ast_sha256": "7a714e639a30fedea4995849da78789b8bd13fd9c3d966511f56f21979380002",
+      "ir_sha256": "f1cdc79a23652f1171d0fe0253a6ea21e59e06cec289cc42200ad55e317e0fce"
+    },
+    "write-file": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "026deed0c5b9b1225258a6c84a60167c38b30b81e42fb7fdf1356efb6b89eb48",
+      "ir_sha256": "cecc6f904d050db03aa862f3afaa7c2d0eb81cf4ce00043491e8da330ae1832d"
+    }
+  }
+}

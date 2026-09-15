@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Read contract
+Node example:
+  type: read-file
+  path: "input.txt"

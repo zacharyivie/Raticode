@@ -2644,7 +2644,7 @@ def add_node(
         False, "--notify", help="Send a desktop notification for approval_gate"
     ),
     notification_title: str = typer.Option(
-        "Taskurotta notification", "--title", help="Notification or approval title"
+        "Raticode notification", "--title", help="Notification or approval title"
     ),
     notification_body: str = typer.Option("", "--notification-body", help="Notification body"),
     notification_channel: str = typer.Option("desktop", "--channel", help="Notification channel"),
@@ -3242,7 +3242,7 @@ def recipe_watch_folder_summarize(
 
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(
-        """Summarize this changed file for a Taskurotta user.
+        """Summarize this changed file for a Raticode user.
 
 Event kind: {{kind}}
 File path: {{path}}

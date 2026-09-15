@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gofer-flow"
-version = "0.2.6"
+version = "0.3.0"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
@@ -47,11 +47,11 @@ gof = "gofer.cli.main:app"
 packages = ["src/gofer"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"radish/contracts" = "gofer/radish/assets/contracts"
-"radish/providers" = "gofer/radish/assets/providers"
-"radish/schemas" = "gofer/radish/assets/schemas"
-"radish/spec" = "gofer/radish/assets/docs"
-"skills/gofer-flow-workflow-builder" = "gofer/radish/assets/assistant-skill"
+"rattish/contracts" = "gofer/rattish/assets/contracts"
+"rattish/providers" = "gofer/rattish/assets/providers"
+"rattish/schemas" = "gofer/rattish/assets/schemas"
+"rattish/spec" = "gofer/rattish/assets/docs"
+"skills/gofer-flow-workflow-builder" = "gofer/rattish/assets/assistant-skill"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

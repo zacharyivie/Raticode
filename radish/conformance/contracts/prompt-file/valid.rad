@@ -1,9 +1,0 @@
-Radish: 1
-Workflow:
-  name: Prompt file contract
-Node example:
-  type: prompt-file
-  output-path: generated/review.md
-  template: |
-    Review {{change}}.
-  variables: {"change": "the patch"}

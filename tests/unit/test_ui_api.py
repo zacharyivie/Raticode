@@ -13,7 +13,7 @@ from gofer.core.executor import NodeOutput
 from gofer.core.operations import OperationType
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits, byte_len
 from gofer.core.runner import RunnerQueueStore
-from gofer.radish.editor import RadishRevisionConflict
+from gofer.rattish.editor import RattishRevisionConflict
 from gofer.ui import api as api_module
 from gofer.ui.api import (
     WorkflowAlreadyExistsError,
@@ -21,7 +21,7 @@ from gofer.ui.api import (
     WorkflowLogError,
     WorkflowRunError,
     WorkflowUpdateError,
-    analyze_radish_document_payload,
+    analyze_rattish_document_payload,
     apply_workflow_validation_fix_payload,
     cancel_queued_run_payload,
     create_registered_workflow_payload,
@@ -35,9 +35,9 @@ from gofer.ui.api import (
     list_workflow_approvals_payload,
     list_workflow_payloads,
     list_workflow_run_logs_payload,
-    mutate_radish_document_payload,
+    mutate_rattish_document_payload,
     open_project_payload,
-    open_radish_document_payload,
+    open_rattish_document_payload,
     prune_workflow_run_logs_payload,
     queue_workflow_run_payload,
     rename_workflow_payload,
@@ -45,8 +45,8 @@ from gofer.ui.api import (
     retention_settings_payload,
     run_workflow_payload,
     runner_queue_payload,
-    save_radish_document_payload,
-    save_radish_metadata_payload,
+    save_rattish_document_payload,
+    save_rattish_metadata_payload,
     stop_workflow_run_payload,
     update_retention_settings_payload,
     update_workflow_payload,
@@ -109,7 +109,7 @@ condition = "on_success"
     ]
 
 
-def test_ui_creation_registers_radish_workflow_under_selected_project(tmp_path: Path) -> None:
+def test_ui_creation_registers_rattish_workflow_under_selected_project(tmp_path: Path) -> None:
     app_data = tmp_path / "app-data"
     project = tmp_path / "project"
     project.mkdir()
@@ -123,19 +123,19 @@ def test_ui_creation_registers_radish_workflow_under_selected_project(tmp_path: 
 
     assert created["id"] == "review-pr"
     assert created["projectRoot"] == str(project)
-    assert created["sourcePath"] == str(project / ".taskurotta" / "review-pr" / "workflow.rad")
-    assert created["sourceFormat"] == "radish"
+    assert created["sourcePath"] == str(project / ".raticode" / "review-pr" / "workflow.rattish")
+    assert created["sourceFormat"] == "rattish"
     assert [workflow["id"] for workflow in listed["workflows"]] == ["review-pr"]
 
 
-def test_open_project_payload_discovers_existing_radish_workflows(tmp_path: Path) -> None:
+def test_open_project_payload_discovers_existing_rattish_workflows(tmp_path: Path) -> None:
     app_data = tmp_path / "app-data"
     project = tmp_path / "project"
-    workflow_root = project / ".taskurotta" / "existing"
+    workflow_root = project / ".raticode" / "existing"
     workflow_root.mkdir(parents=True)
-    source_path = workflow_root / "workflow.rad"
+    source_path = workflow_root / "workflow.rattish"
     source_path.write_text(
-        'Radish: 1\n\nWorkflow:\n  name: "Existing"\n',
+        'Rattish: 1\n\nWorkflow:\n  name: "Existing"\n',
         encoding="utf-8",
     )
 
@@ -147,11 +147,11 @@ def test_open_project_payload_discovers_existing_radish_workflows(tmp_path: Path
     ]
 
 
-def test_radish_document_api_analyzes_and_saves_with_revisions(tmp_path: Path) -> None:
+def test_rattish_document_api_analyzes_and_saves_with_revisions(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     create_registered_workflow_payload("Editor API", project, registry_dir=tmp_path)
-    opened = open_radish_document_payload("editor-api", tmp_path)
+    opened = open_rattish_document_payload("editor-api", tmp_path)
     source = (
         opened["source"]
         + """Node prepare:
@@ -160,8 +160,8 @@ def test_radish_document_api_analyzes_and_saves_with_revisions(tmp_path: Path) -
 """
     )
 
-    analyzed = analyze_radish_document_payload("editor-api", source, tmp_path)
-    saved = save_radish_document_payload(
+    analyzed = analyze_rattish_document_payload("editor-api", source, tmp_path)
+    saved = save_rattish_document_payload(
         "editor-api",
         source,
         opened["sourceRevision"],
@@ -171,8 +171,8 @@ def test_radish_document_api_analyzes_and_saves_with_revisions(tmp_path: Path) -
     assert analyzed["dirty"] is True
     assert analyzed["graph"]["nodes"][0]["id"] == "prepare"
     assert saved["dirty"] is False
-    with pytest.raises(RadishRevisionConflict):
-        save_radish_document_payload(
+    with pytest.raises(RattishRevisionConflict):
+        save_rattish_document_payload(
             "editor-api",
             source,
             opened["sourceRevision"],
@@ -181,7 +181,7 @@ def test_radish_document_api_analyzes_and_saves_with_revisions(tmp_path: Path) -
 
     metadata = saved["metadata"]
     metadata["canvas"]["nodes"]["prepare"] = {"x": 12, "y": 24}
-    metadata_saved = save_radish_metadata_payload(
+    metadata_saved = save_rattish_metadata_payload(
         "editor-api",
         metadata,
         saved["metadataRevision"],
@@ -193,7 +193,7 @@ def test_radish_document_api_analyzes_and_saves_with_revisions(tmp_path: Path) -
     }
 
 
-def test_radish_document_mutations_preserve_unrelated_source_and_update_references(
+def test_rattish_document_mutations_preserve_unrelated_source_and_update_references(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -201,7 +201,7 @@ def test_radish_document_mutations_preserve_unrelated_source_and_update_referenc
     registered = create_registered_workflow_payload("Mutation API", project, registry_dir=tmp_path)
     source_path = Path(registered["sourcePath"])
     source_path.write_text(
-        """Radish: 1
+        """Rattish: 1
 
 # Keep this workflow comment.
 Workflow:
@@ -220,8 +220,8 @@ Node review:
 """,
         encoding="utf-8",
     )
-    opened = open_radish_document_payload("mutation-api", tmp_path)
-    mutated = mutate_radish_document_payload(
+    opened = open_rattish_document_payload("mutation-api", tmp_path)
+    mutated = mutate_rattish_document_payload(
         "mutation-api",
         [
             {
@@ -247,12 +247,12 @@ Node review:
     assert mutated["sourceEdits"]
 
 
-def test_radish_document_mutations_add_delete_and_rewrite_routes(tmp_path: Path) -> None:
+def test_rattish_document_mutations_add_delete_and_rewrite_routes(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     create_registered_workflow_payload("Graph API", project, registry_dir=tmp_path)
-    opened = open_radish_document_payload("graph-api", tmp_path)
-    added = mutate_radish_document_payload(
+    opened = open_rattish_document_payload("graph-api", tmp_path)
+    added = mutate_rattish_document_payload(
         "graph-api",
         [
             {"kind": "add_node", "node": "first", "node_type": "bash-command"},
@@ -263,7 +263,7 @@ def test_radish_document_mutations_add_delete_and_rewrite_routes(tmp_path: Path)
         opened["sourceRevision"],
         tmp_path,
     )
-    deleted = mutate_radish_document_payload(
+    deleted = mutate_rattish_document_payload(
         "graph-api",
         [{"kind": "delete_node", "node": "first"}],
         added["sourceRevision"],
@@ -275,7 +275,7 @@ def test_radish_document_mutations_add_delete_and_rewrite_routes(tmp_path: Path)
     assert [node["id"] for node in deleted["graph"]["nodes"]] == ["second"]
 
 
-def test_radish_change_node_type_removes_only_previous_contract_fields(
+def test_rattish_change_node_type_removes_only_previous_contract_fields(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -287,7 +287,7 @@ def test_radish_change_node_type_removes_only_previous_contract_fields(
     )
     source_path = Path(registered["sourcePath"])
     source_path.write_text(
-        """Radish: 1
+        """Rattish: 1
 
 Workflow:
   name: Something proper
@@ -312,9 +312,9 @@ Node things:
 """,
         encoding="utf-8",
     )
-    opened = open_radish_document_payload("type-change", tmp_path)
+    opened = open_rattish_document_payload("type-change", tmp_path)
 
-    mutated = mutate_radish_document_payload(
+    mutated = mutate_rattish_document_payload(
         "type-change",
         [{"kind": "change_node_type", "node": "asdf", "node_type": "approval-gate"}],
         opened["sourceRevision"],
@@ -1169,12 +1169,12 @@ def test_delete_workflow_payload_removes_toml_and_logs(tmp_path: Path) -> None:
     assert not chat_prompt_path.exists()
 
 
-def test_delete_workflow_payload_removes_registered_radish_workspace(tmp_path: Path) -> None:
+def test_delete_workflow_payload_removes_registered_rattish_workspace(tmp_path: Path) -> None:
     app_data = tmp_path / "app-data"
     project = tmp_path / "project"
     project.mkdir()
     created = create_registered_workflow_payload(
-        "Delete Radish",
+        "Delete Rattish",
         project,
         registry_dir=app_data,
     )
@@ -1183,12 +1183,12 @@ def test_delete_workflow_payload_removes_registered_radish_workspace(tmp_path: P
     source_path.chmod(0o444)
 
     result = delete_workflow_payload(
-        "delete-radish",
+        "delete-rattish",
         app_data,
-        source_format="radish",
+        source_format="rattish",
     )
 
-    assert result == {"workflowId": "delete-radish", "deleted": True}
+    assert result == {"workflowId": "delete-rattish", "deleted": True}
     assert not workflow_root.exists()
     assert list_workflow_payloads(app_data)["workflows"] == []
 

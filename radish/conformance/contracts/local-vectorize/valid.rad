@@ -1,7 +1,0 @@
-Radish: 1
-Workflow:
-  name: Local vectorize contract
-Node example:
-  type: local-vectorize
-  source-path: docs
-  index-path: cache/index.json

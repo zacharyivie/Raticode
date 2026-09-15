@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=Taskurotta
+Name=Raticode
 Comment=Local workflow automation studio
 Exec=gofer-flow %U
 Terminal=false

@@ -1,12 +1,12 @@
 pkgbase = gofer-flow-cli
-	pkgdesc = Command line workflow automation tool for Taskurotta
-	pkgver = 0.2.6
+	pkgdesc = Command line workflow automation tool for Raticode
+	pkgver = 0.3.0
 	pkgrel = 1
-	url = https://github.com/zacharyivie/Taskurotta
+	url = https://github.com/zacharyivie/gofer-flow
 	arch = x86_64
 	license = AGPL-3.0-only
 	options = !strip
-	source_x86_64 = gof-linux-x64-0.2.6::https://github.com/zacharyivie/Taskurotta/releases/download/v0.2.6/gof-linux-x64
+	source_x86_64 = gof-linux-x64-0.3.0::https://github.com/zacharyivie/gofer-flow/releases/download/v0.3.0/gof-linux-x64
 	sha256sums_x86_64 = SKIP
 
 pkgname = gofer-flow-cli

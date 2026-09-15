@@ -75,3 +75,40 @@ test('deletion discards pending writes without resurrecting the thread', () => {
   assert.deepEqual(f.writes, []);
   assert.deepEqual(f.snapshot, {});
 });
+
+test('recent-page hydration keeps a running conversation in order and preserves unsaved text', () => {
+  const messages = Array.from({ length: 60 }, (_, index) => ({ id: String(index), role: 'assistant', body: String(index) }));
+  const f = fixture({ load: () => messages });
+  f.cache.get('thread');
+  f.cache.activate(['thread']);
+  f.cache.hydrate('thread', messages.slice(-40), { recent: true });
+  assert.deepEqual(f.snapshot.thread.map(message => message.id), messages.map(message => message.id));
+  f.cache.trim('thread', 40);
+  f.cache.hydrate('thread', messages.slice(0, 20));
+  assert.deepEqual(f.snapshot.thread.map(message => message.id), messages.map(message => message.id));
+});
+
+test('a pending asynchronous save remains pinned until it commits', async () => {
+  let complete;
+  const f = fixture({ maxInactive: 0, save: () => new Promise(resolve => { complete = resolve; }) });
+  f.cache.update('thread', [{ id: 'one', role: 'user', body: 'Unsaved' }]);
+  f.cache.activate([]);
+  assert.equal(f.snapshot.thread[0].body, 'Unsaved');
+  complete(true);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(f.snapshot.thread, undefined);
+});
+
+
+test('hydration during an asynchronous save does not leave the cache permanently pinned', async () => {
+  let complete;
+  const f = fixture({ load: () => [], maxInactive: 0, save: () => new Promise(resolve => { complete = resolve; }) });
+  f.cache.activate(['thread']);
+  f.cache.update('thread', [{ id: 'new', role: 'user', body: 'New' }]);
+  f.cache.hydrate('thread', [{ id: 'old', role: 'user', body: 'Old' }]);
+  f.cache.activate([]);
+  assert.equal(f.snapshot.thread.length, 2);
+  complete(true);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(f.snapshot.thread, undefined);
+});

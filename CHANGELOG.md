@@ -1,9 +1,17 @@
 # Changelog
 
-This file records the major user-facing changes in Taskurotta. Releases through
+This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
 ## 0.2.6 - 2026-09-11
+
+### Branding
+
+- Rename the desktop product to Raticode across the UI, CLI messages,
+  documentation, Rattish contracts, and release artifacts.
+- Write new workflows and bundles with the `.raticode` names while retaining
+  reads of previous workflows, bundles, and saved preferences. See the
+  [naming and compatibility guide](docs/branding.md).
 
 ### Added
 
@@ -11,9 +19,11 @@ version 0.1.3 used the Gofer Flow name.
   migration of existing recent projects, including temporarily offline folders.
 - Added release gates for Python lint, type checks, tests, and dependency audits,
   plus native terminal and Electron security smoke tests across platforms.
-- Added required Windows signing and macOS signing and notarization for tagged
-  releases, artifact verification, provenance attestations, and a release
-  verification guide. Unsigned dry runs remain available.
+- Added verified release candidates on main, exact-file publication on version
+  tags, artifact verification and provenance attestations. Releases default to
+  unsigned; Windows signing and macOS signing/notarization are optional.
+- Record signing status in candidate manifests and release notes. Unsigned macOS
+  builds use manual update downloads.
 
 ### Changed
 
@@ -30,7 +40,7 @@ version 0.1.3 used the Gofer Flow name.
 - Added a filesystem-watched Second Brain search index with polling fallback,
   incremental updates, and immediate invalidation after saving a note.
 - Reduced repeated Git commands, project validation, workflow discovery, and
-  Radish asset loading through caching and shared pending requests. Background
+  Rattish asset loading through caching and shared pending requests. Background
   polling pauses while the window is hidden and resumes on focus.
 
 ### Fixed
@@ -71,7 +81,7 @@ version 0.1.3 used the Gofer Flow name.
   Failed renewal clears the stale cached grant so a later retry can recover.
 - Replaced the generic bundle-path error for denied Second Brain access with
   guidance to retry the message, reselect the folder in Settings > Rem, or
-  restart Taskurotta.
+  restart Raticode.
 - Added folder registration success and failure logs with the folder path,
   HTTP status when available, elapsed time, and failure reason, plus a dedicated
   Second Brain access-denial log. Credentials and grant IDs stay out of these
@@ -148,7 +158,7 @@ version 0.1.3 used the Gofer Flow name.
   the branch name in repositories without an initial commit.
 - Fixed integrated-browser focus and navigation before the guest is ready,
   stale attachment errors, and browser shortcuts intercepting terminal input.
-- Fixed Radish syntax highlighting for indented declarations and fields.
+- Fixed Rattish syntax highlighting for indented declarations and fields.
 - Fixed workflow studio browser-test timeouts caused by counting unrelated
   settings tabs, updated stale editor and menu checks and desktop mocks, and
   improved headless execution and failure diagnostics.
@@ -173,7 +183,7 @@ version 0.1.3 used the Gofer Flow name.
   follow the application settings.
 - Improved split-pane tab dragging and kept overflowing tabs readable with a
   compact scrollbar that appears on interaction.
-- Refreshed the Taskurotta browser home page.
+- Refreshed the Raticode browser home page.
 
 ### Fixed
 
@@ -186,14 +196,14 @@ version 0.1.3 used the Gofer Flow name.
 
 ### Added
 
-- Added portable `.taskurotta` bundles for Radish workflows, with preview,
+- Added portable `.raticode` bundles for Rattish workflows, with preview,
   import, and export actions in the graph and empty-workspace screens.
 - Added bundle validation for ignored files, unsafe archive paths, symbolic
   links, duplicate entries, compression ratios, file counts, and size limits.
 - Added app-wide text zoom from 80% to 150%, recent-file cards in the empty IDE,
   tab cycling shortcuts, and save-or-discard prompts for unsaved files when
   autosave is disabled.
-- Added a Taskurotta browser home page, configurable single-word search,
+- Added a Raticode browser home page, configurable single-word search,
   modified-click tabs, Backspace history navigation, and Markdown file-link
   opening from local browser previews.
 - Added a daily TODO implementation workflow that creates tickets, implements
@@ -204,10 +214,10 @@ version 0.1.3 used the Gofer Flow name.
 
 ### Changed
 
-- Redesigned the empty Graph and Code views, refreshed Taskurotta branding and
+- Redesigned the empty Graph and Code views, refreshed Raticode branding and
   application icons, and expanded the studio design tokens.
 - Discover project workflows before opening or refreshing a project so newly
-  created Radish workflows appear without restarting the studio.
+  created Rattish workflows appear without restarting the studio.
 - Keep assistant conversations pinned only when the reader is already at the
   bottom, grow the composer with its draft, and allow the latest user message
   to be edited and resent from that point in the conversation.
@@ -266,22 +276,22 @@ version 0.1.3 used the Gofer Flow name.
 
 ### Added
 
-- Introduced Radish as the workflow authoring language, with a formal grammar,
+- Introduced Rattish as the workflow authoring language, with a formal grammar,
   lexer, parser, compiler, formatter, semantic validation, diagnostics, and a
   versioned JSON intermediate representation.
-- Added machine-readable contracts for providers and every supported Radish
+- Added machine-readable contracts for providers and every supported Rattish
   node, plus conformance fixtures and schemas for ASTs, compiled workflows,
   run records, diagnostics, metadata, and workspace registries.
-- Added Radish runtime support for local bindings, interpolation, structured
+- Added Rattish runtime support for local bindings, interpolation, structured
   outputs, explicit routing, cycles, joins, retries, timeouts, cancellation,
   public workflow interfaces, and nested workflow execution.
-- Added project-based workflow storage under `.taskurotta`, portable workflow
+- Added project-based workflow storage under `.raticode`, portable workflow
   bundles, metadata files, ignore rules, project labels, and workflow discovery.
-- Added a Monaco code workspace with Radish diagnostics, graph and code view
+- Added a Monaco code workspace with Rattish diagnostics, graph and code view
   switching, file tabs, project file management, and native file explorer
   actions.
 - Brought graph editing, node inspection, workflow settings, approvals, run
-  controls, and timeline inspection to Radish workflows.
+  controls, and timeline inspection to Rattish workflows.
 - Added an integrated terminal, browser, and problems panel, with project-scoped
   terminal groups, browser previews, and configurable keyboard shortcuts.
 - Added Git status decorations, deleted-file visibility, commit history, diff
@@ -296,16 +306,16 @@ version 0.1.3 used the Gofer Flow name.
   traces, elapsed time, and guarded undo and redo actions.
 - Added crash recovery screens with reload, reset, diagnostic copy, and issue
   reporting actions.
-- Added `gof radish docs` and bundled the Radish authoring documentation, schemas,
+- Added `gof rattish docs` and bundled the Rattish authoring documentation, schemas,
   contracts, and workflow-builder skill in packaged installs.
 
 ### Changed
 
-- Renamed the user-facing application from Gofer Flow to Taskurotta.
-- Made Radish source files the editable workflow definition while compiled IR
+- Renamed the user-facing application from Gofer Flow to Raticode.
+- Made Rattish source files the editable workflow definition while compiled IR
   and run artifacts remain internal implementation details.
 - Moved workflow organization from a global workspace model to project folders.
-- Discover and register existing Radish workflows when a project opens, including
+- Discover and register existing Rattish workflows when a project opens, including
   projects that do not yet contain a workflow.
 - Store compiled artifacts, run logs, and agent memory inside each registered
   workflow directory, with migration from the previous application-data layout.
@@ -316,13 +326,13 @@ version 0.1.3 used the Gofer Flow name.
 
 ### Fixed
 
-- Hardened Radish parsing, lowering, contract validation, activation lineage,
+- Hardened Rattish parsing, lowering, contract validation, activation lineage,
   cyclic execution, output resolution, and interpolation behavior.
 - Fixed workflow switching, editor saving, graph refresh, node inspector focus,
   type changes, approval rendering, and runtime error reporting in the studio.
 - Prevented cancelled frontend requests from producing noisy backend broken-pipe
   tracebacks.
-- Fixed dirty Radish edits, stale live-analysis responses, duplicate file tab
+- Fixed dirty Rattish edits, stale live-analysis responses, duplicate file tab
   labels, Markdown file navigation, and project-aware editor tab persistence.
 - Fixed terminal lifecycle, grouping, clipboard shortcuts, and late session cleanup.
 

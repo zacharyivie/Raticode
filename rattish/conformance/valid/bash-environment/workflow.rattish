@@ -1,0 +1,14 @@
+Rattish: 1
+
+Workflow:
+  name: Build
+  timeout: 2h
+  max-runs: 50
+
+Node test:
+  type: bash-command
+  command: echo build
+  env:
+    "BUILD_MODE": local
+  with:
+    build-mode: release

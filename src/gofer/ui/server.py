@@ -31,8 +31,8 @@ from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.usage import summarize_node_outputs
 from gofer.core.watcher import WorkflowWatcher
 from gofer.core.workflow import AgenticWorkflow
-from gofer.radish.editor import RadishEditorError, RadishRevisionConflict
-from gofer.radish.workspaces import list_registered_workflows
+from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
+from gofer.rattish.workspaces import list_registered_workflows
 from gofer.ui.api import (
     ProviderProfileError,
     RunnerQueueError,
@@ -46,7 +46,7 @@ from gofer.ui.api import (
     WorkflowRunError,
     WorkflowTriggerError,
     WorkflowUpdateError,
-    analyze_radish_document_payload,
+    analyze_rattish_document_payload,
     apply_workflow_validation_fix_payload,
     cancel_queued_run_payload,
     create_registered_workflow_payload,
@@ -56,10 +56,10 @@ from gofer.ui.api import (
     delete_workflow_chat_payload,
     delete_workflow_payload,
     duplicate_workflow_payload,
-    export_radish_bundle_payload,
+    export_rattish_bundle_payload,
     export_workflow_bundle_payload,
     health_payload,
-    import_radish_bundle_payload,
+    import_rattish_bundle_payload,
     import_workflow_bundle_payload,
     import_workflow_payload,
     latest_workflow_log_payload,
@@ -68,10 +68,10 @@ from gofer.ui.api import (
     list_workflow_payloads,
     list_workflow_run_logs_payload,
     list_workflow_templates_payload,
-    mutate_radish_document_payload,
+    mutate_rattish_document_payload,
     open_project_payload,
-    open_radish_document_payload,
-    preview_radish_bundle_payload,
+    open_rattish_document_payload,
+    preview_rattish_bundle_payload,
     preview_workflow_bundle_payload,
     provider_profiles_payload,
     prune_workflow_run_logs_payload,
@@ -83,8 +83,9 @@ from gofer.ui.api import (
     retention_settings_payload,
     run_workflow_payload,
     runner_queue_payload,
-    save_radish_document_payload,
-    save_radish_metadata_payload,
+    save_rattish_document_payload,
+    save_rattish_metadata_payload,
+    stop_rattish_runs_for_shutdown,
     stop_workflow_run_payload,
     trigger_workflow_payload,
     update_retention_settings_payload,
@@ -121,6 +122,7 @@ from gofer.ui.chat_media import (
     stream_chat_transcription,
     transcribe_chat_audio,
 )
+from gofer.ui.swarms import SwarmManager
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 
@@ -306,6 +308,17 @@ class GoferUiServer(ThreadingHTTPServer):
         self._continuous_lock = threading.Lock()
         self._continuous_stop = threading.Event()
         self._continuous_thread: threading.Thread | None = None
+        self.swarms = SwarmManager(
+            data_dir,
+            resource_limits=self.resource_limits,
+            max_concurrency=int(os.environ.get("GOFER_SWARM_MAX_CONCURRENCY", "8")),
+        )
+
+    def server_close(self) -> None:
+        swarms = getattr(self, "swarms", None)
+        if swarms is not None:
+            swarms.close()
+        super().server_close()
 
     def process_request(self, request: Any, client_address: Any) -> None:
         # Reject before ThreadingMixIn allocates a thread. The accept loop never waits.
@@ -519,6 +532,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Too many active requests; retry shortly"}, status=503)
                 return
         try:
+            if parsed.path == "/api/swarms" or parsed.path.startswith("/api/swarms/"):
+                self._dispatch_swarm_request(method)
+                return
             getattr(self, f"_dispatch_{method}")()
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             self._send_json({"error": str(exc)}, status=400)
@@ -527,6 +543,90 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         finally:
             if acquired and slots is not None:
                 slots.release()
+
+    def _dispatch_swarm_request(self, method: str) -> None:
+        if method == "OPTIONS":
+            self._dispatch_OPTIONS()
+            return
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        body = self._read_json() if method in {"POST", "PUT"} else {}
+        project_value = body.get("projectRoot") or _optional_query(query, "projectRoot")
+        if not isinstance(project_value, str) or not project_value.strip():
+            raise ValueError("Choose a project for this swarm.")
+        project = Path(project_value).expanduser()
+        if not project.is_absolute():
+            raise ValueError("The swarm project must be an absolute folder path.")
+        parts = parsed.path.removeprefix("/api/swarms").strip("/").split("/")
+        swarm_id = parts[0]
+        action = parts[1] if len(parts) == 2 else ""
+        if len(parts) > 2:
+            self._send_json({"error": "Not found"}, status=404)
+            return
+        starts_work = method == "POST" and (
+            not swarm_id
+            or action == "start"
+            or (action == "execution" and body.get("action") in {"verify", "integrate"})
+            or (action == "control" and body.get("action") == "resume")
+        )
+        if starts_work:
+            try:
+                project = self._assert_bundle_path_allowed(
+                    project, body.get("grantId"), must_exist=True
+                )
+            except WorkflowBundleError as exc:
+                self._send_json({"error": str(exc)}, status=403)
+                return
+            if not project.is_dir():
+                raise ValueError("Choose an existing project folder.")
+        server = self.server
+        if not isinstance(server, GoferUiServer):
+            raise ValueError("Swarms are unavailable on this server.")
+        manager = server.swarms
+        project_root = str(project.resolve())
+        if method == "GET" and not swarm_id:
+            self._send_json({"swarms": manager.list(project_root)})
+            return
+        if method == "GET" and action == "history":
+            self._send_json(
+                {"run": manager.history_run(project_root, swarm_id, query["runId"][0])}
+                if query.get("runId", [""])[0]
+                else {
+                    "history": manager.history(
+                        project_root, swarm_id, int(_optional_query(query, "offset") or "0")
+                    )
+                }
+            )
+            return
+        if method == "GET" and not action:
+            result = manager.get(
+                project_root,
+                swarm_id,
+                include_history=query.get("history", ["1"])[0] not in {"0", "false"},
+                history_summaries=query.get("history", [""])[0] == "summary",
+                since=query.get("since", [""])[0],
+            )
+        elif method == "POST" and not swarm_id:
+            result = manager.create(project_root, body)
+        elif method == "PUT" and swarm_id and not action:
+            result = manager.update(project_root, swarm_id, body)
+        elif method == "POST" and action == "start":
+            result = manager.start(project_root, swarm_id, body.get("task", ""))
+        elif method == "POST" and action == "control":
+            result = manager.control(project_root, swarm_id, body.get("action", ""))
+        elif method == "POST" and action == "messages":
+            result = manager.message(project_root, swarm_id, body)
+        elif method == "POST" and action == "deliveries":
+            result = manager.resolve_delivery(project_root, swarm_id, body)
+        elif method == "POST" and action == "execution":
+            manager.execution(project_root, swarm_id, body)
+            result = manager.get(project_root, swarm_id, include_history=False)
+        elif method == "POST" and action == "objectives":
+            result = manager.objectives(project_root, swarm_id, body)
+        else:
+            self._send_json({"error": "Not found"}, status=404)
+            return
+        self._send_json({"swarm": result or None})
 
     def _dispatch_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -602,11 +702,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             workflow_id = parsed.path.removeprefix("/api/workflows/").removesuffix("/document")
             query = parse_qs(parsed.query)
             try:
-                payload = open_radish_document_payload(
+                payload = open_rattish_document_payload(
                     workflow_id,
                     self._request_data_dir(query),
                 )
-            except RadishEditorError as exc:
+            except RattishEditorError as exc:
                 self._send_json({"error": str(exc)}, status=404)
                 return
             self._send_json({"document": payload})
@@ -869,13 +969,13 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 body = self._read_json()
                 source = body.get("source")
                 if not isinstance(source, str):
-                    raise ValueError("Radish document analysis requires string source.")
-                payload = analyze_radish_document_payload(
+                    raise ValueError("Rattish document analysis requires string source.")
+                payload = analyze_rattish_document_payload(
                     workflow_id,
                     source,
                     self._request_data_dir(query),
                 )
-            except (RadishEditorError, json.JSONDecodeError, ValueError) as exc:
+            except (RattishEditorError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
             self._send_json({"document": payload})
@@ -890,18 +990,18 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 expected_revision = body.get("expectedRevision")
                 if not isinstance(source, str) or not isinstance(expected_revision, str):
                     raise ValueError(
-                        "Radish document save requires source and expectedRevision strings."
+                        "Rattish document save requires source and expectedRevision strings."
                     )
-                payload = save_radish_document_payload(
+                payload = save_rattish_document_payload(
                     workflow_id,
                     source,
                     expected_revision,
                     self._request_data_dir(query),
                 )
-            except RadishRevisionConflict as exc:
+            except RattishRevisionConflict as exc:
                 self._send_json(exc.to_payload(), status=409)
                 return
-            except (RadishEditorError, json.JSONDecodeError, ValueError) as exc:
+            except (RattishEditorError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
             self._send_json({"document": payload})
@@ -922,18 +1022,18 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     or not isinstance(expected_revision, str)
                 ):
                     raise ValueError(
-                        "Radish document mutation requires mutations and expectedRevision."
+                        "Rattish document mutation requires mutations and expectedRevision."
                     )
-                payload = mutate_radish_document_payload(
+                payload = mutate_rattish_document_payload(
                     workflow_id,
                     mutations,
                     expected_revision,
                     self._request_data_dir(query),
                 )
-            except RadishRevisionConflict as exc:
+            except RattishRevisionConflict as exc:
                 self._send_json(exc.to_payload(), status=409)
                 return
-            except (RadishEditorError, json.JSONDecodeError, ValueError) as exc:
+            except (RattishEditorError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
             self._send_json({"document": payload})
@@ -947,17 +1047,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 metadata = body.get("metadata")
                 expected_revision = body.get("expectedRevision")
                 if not isinstance(metadata, dict) or not isinstance(expected_revision, str):
-                    raise ValueError("Radish metadata save requires metadata and expectedRevision.")
-                payload = save_radish_metadata_payload(
+                    raise ValueError(
+                        "Rattish metadata save requires metadata and expectedRevision."
+                    )
+                payload = save_rattish_metadata_payload(
                     workflow_id,
                     metadata,
                     expected_revision,
                     self._request_data_dir(query),
                 )
-            except RadishRevisionConflict as exc:
+            except RattishRevisionConflict as exc:
                 self._send_json(exc.to_payload(), status=409)
                 return
-            except (RadishEditorError, json.JSONDecodeError, ValueError) as exc:
+            except (RattishEditorError, json.JSONDecodeError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
             self._send_json(payload)
@@ -979,19 +1081,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
-        if parsed.path == "/api/radish/workflows/import/preview":
+        if parsed.path == "/api/rattish/workflows/import/preview":
             try:
                 body = self._read_json()
                 with _bundle_path_from_body(body) as bundle_path:
                     if bundle_path is None:
-                        raise WorkflowBundleError("A .taskurotta bundle is required")
+                        raise WorkflowBundleError("A .raticode bundle is required")
                     if body.get("bundlePath"):
                         self._assert_bundle_path_allowed(
                             bundle_path,
                             body.get("grantId"),
                             must_exist=True,
                         )
-                    payload = preview_radish_bundle_payload(
+                    payload = preview_rattish_bundle_payload(
                         bundle_path,
                         resource_limits=self._resource_limits(),
                     )
@@ -1001,7 +1103,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"bundle": payload})
             return
 
-        if parsed.path == "/api/radish/workflows/import":
+        if parsed.path == "/api/rattish/workflows/import":
             query = parse_qs(parsed.query)
             try:
                 body = self._read_json()
@@ -1016,14 +1118,14 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 )
                 with _bundle_path_from_body(body) as bundle_path:
                     if bundle_path is None:
-                        raise WorkflowBundleError("A .taskurotta bundle is required")
+                        raise WorkflowBundleError("A .raticode bundle is required")
                     if body.get("bundlePath"):
                         self._assert_bundle_path_allowed(
                             bundle_path,
                             body.get("grantId"),
                             must_exist=True,
                         )
-                    workflow = import_radish_bundle_payload(
+                    workflow = import_rattish_bundle_payload(
                         bundle_path,
                         project_root,
                         self._request_data_dir(query),
@@ -1036,8 +1138,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"workflow": workflow}, status=201)
             return
 
-        if parsed.path.startswith("/api/radish/workflows/") and parsed.path.endswith("/export"):
-            workflow_id = parsed.path.removeprefix("/api/radish/workflows/").removesuffix("/export")
+        if parsed.path.startswith("/api/rattish/workflows/") and parsed.path.endswith("/export"):
+            workflow_id = parsed.path.removeprefix("/api/rattish/workflows/").removesuffix(
+                "/export"
+            )
             query = parse_qs(parsed.query)
             try:
                 body = self._read_json()
@@ -1050,7 +1154,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     body.get("grantId"),
                     must_exist=False,
                 )
-                payload = export_radish_bundle_payload(
+                payload = export_rattish_bundle_payload(
                     workflow_id,
                     output_path,
                     self._request_data_dir(query),
@@ -1288,16 +1392,29 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
             try:
                 body = self._read_json(limit=COMMIT_MESSAGE_MAX_BODY_BYTES)
+                commit_project_root: Path | None = None
+                if body.get("projectRoot"):
+                    commit_project_root = self._assert_bundle_path_allowed(
+                        Path(str(body["projectRoot"])), body.get("grantId"), must_exist=True
+                    )
                 result = self._run_async(
                     generate_commit_message(
                         provider=str(body.get("provider", "codex")),
                         model=str(body.get("model", "cli-default")),
                         effort=_optional_body_str(body, "effort"),
                         diff=body.get("diff", ""),
+                        project_root=commit_project_root,
+                        inspect_staged=body.get("inspectStaged") is True,
                     )
                 )
                 self._send_json(result)
-            except (ValueError, ChatProviderError, OSError, TimeoutError) as exc:
+            except (
+                ValueError,
+                WorkflowBundleError,
+                ChatProviderError,
+                OSError,
+                TimeoutError,
+            ) as exc:
                 self._send_json({"error": str(exc)}, status=400)
             return
 
@@ -1306,17 +1423,17 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 self._validate_second_brain(body)
+                with self._rem_swarm_session(body) as (chat_body, swarm_url):
+                    self._send_stream_headers()
+                    self._run_async(
+                        self._stream_chat_response(
+                            body=chat_body,
+                            data_dir=self._request_data_dir(query),
+                            trusted_swarm_url=swarm_url,
+                        )
+                    )
             except (json.JSONDecodeError, WorkflowBundleError, ValueError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
-                return
-
-            self._send_stream_headers()
-            self._run_async(
-                self._stream_chat_response(
-                    body=body,
-                    data_dir=self._request_data_dir(query),
-                )
-            )
             return
 
         if parsed.path == "/api/chat":
@@ -1324,18 +1441,20 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 self._validate_second_brain(body)
-                response = self._run_async(
-                    run_workflow_chat(
-                        provider=str(body.get("provider", "codex")),
-                        model=str(body.get("model", "cli-default")),
-                        effort=_optional_body_str(body, "effort"),
-                        permission_mode=_optional_body_str(body, "permissionMode"),
-                        messages=body.get("messages") or [],
-                        workflow=body.get("workflow"),
-                        data_dir=self._request_data_dir(query),
-                        resource_limits=self._resource_limits(),
+                with self._rem_swarm_session(body) as (chat_body, swarm_url):
+                    response = self._run_async(
+                        run_workflow_chat(
+                            provider=str(body.get("provider", "codex")),
+                            model=str(body.get("model", "cli-default")),
+                            effort=_optional_body_str(body, "effort"),
+                            permission_mode=_optional_body_str(body, "permissionMode"),
+                            messages=body.get("messages") or [],
+                            workflow=chat_body.get("workflow"),
+                            trusted_swarm_url=swarm_url,
+                            data_dir=self._request_data_dir(query),
+                            resource_limits=self._resource_limits(),
+                        )
                     )
-                )
             except (
                 ChatProviderError,
                 json.JSONDecodeError,
@@ -1651,6 +1770,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 dry_run = bool(body.get("dryRun", False))
+                run_options: dict[str, Any] = {}
+                if "background" in body:
+                    if not isinstance(body["background"], bool):
+                        raise WorkflowRunError("background must be a boolean")
+                    run_options["background"] = body["background"]
+                if "expectedRevision" in body:
+                    if not isinstance(body["expectedRevision"], str):
+                        raise WorkflowRunError("expectedRevision must be a string")
+                    run_options["expected_revision"] = body["expectedRevision"]
                 trigger_context = body.get("triggerContext")
                 if trigger_context is not None and not isinstance(trigger_context, dict):
                     raise WorkflowRunError("triggerContext must be an object")
@@ -1667,6 +1795,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                             self._request_data_dir(query),
                             dry_run=dry_run,
                             trigger_context=trigger_context,
+                            **run_options,
                         )
                     )
                 else:
@@ -1678,6 +1807,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                             trigger_context=trigger_context,
                             parameters=parameters,
                             inputs=inputs,
+                            **run_options,
                         )
                     )
             except (WorkflowRunError, json.JSONDecodeError) as exc:
@@ -1910,7 +2040,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 return None
             raise
 
-    async def _stream_chat_response(self, body: dict[str, Any], data_dir: Path) -> None:
+    async def _stream_chat_response(
+        self, body: dict[str, Any], data_dir: Path, trusted_swarm_url: str | None = None
+    ) -> None:
         cancel_event = threading.Event()
         try:
             async for event in stream_workflow_chat(
@@ -1920,6 +2052,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 permission_mode=_optional_body_str(body, "permissionMode"),
                 messages=body.get("messages") or [],
                 workflow=body.get("workflow"),
+                trusted_swarm_url=trusted_swarm_url,
                 cancel_event=cancel_event,
                 data_dir=data_dir,
                 resource_limits=self._resource_limits(),
@@ -1956,6 +2089,38 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
     def _request_data_dir(self, _query: dict[str, list[str]]) -> Path:
         return self._default_data_dir()
 
+    @contextmanager
+    def _rem_swarm_session(
+        self, body: dict[str, Any]
+    ) -> Iterator[tuple[dict[str, Any], str | None]]:
+        workflow = body.get("workflow") or {}
+        config = workflow.get("remSwarmAccess") or {}
+        if config.get("enabled") is not True:
+            yield body, None
+            return
+        project_value = workflow.get("projectRoot")
+        if not project_value:
+            # Project-less conversations stay usable with the global toggle enabled.
+            yield body, None
+            return
+        if not isinstance(project_value, str) or not Path(project_value).is_absolute():
+            raise ValueError("Swarm access requires an absolute project folder")
+        project = self._assert_bundle_path_allowed(
+            Path(project_value), config.get("grantId"), must_exist=True
+        )
+        if not project.is_dir():
+            raise ValueError("Swarm access requires an existing project folder")
+        server = self.server
+        if not isinstance(server, GoferUiServer):
+            raise ValueError("Swarms are unavailable on this server")
+        read_only = body.get("permissionMode") in {"read-only", "plan"}
+        with server.swarms.rem_session(project, read_only=read_only) as url:
+            resources = dict(workflow.get("remResources") or {})
+            resources["mcpServers"] = [
+                item for item in resources.get("mcpServers", []) if item.get("name") != "swarm"
+            ] + [{"name": "swarm", "type": "http", "url": url}]
+            yield {**body, "workflow": {**workflow, "remResources": resources}}, url
+
     def _validate_second_brain(self, body: dict[str, Any]) -> None:
         config = (body.get("workflow") or {}).get("remSecondBrain") or {}
         if config.get("enabled") is not True:
@@ -1968,9 +2133,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         except WorkflowBundleError as exc:
             log.warning("SECOND_BRAIN_PATH_DENIED root=%r", str(root))
             raise WorkflowBundleError(
-                "Taskurotta could not confirm access to the Second Brain folder. "
+                "Raticode could not confirm access to the Second Brain folder. "
                 "Retry your message to renew folder access. If it keeps failing, "
-                "reselect the folder in Settings > Rem or restart Taskurotta."
+                "reselect the folder in Settings > Rem or restart Raticode."
             ) from exc
         if config.get("format", "md") not in {"md", "html"}:
             raise ValueError("Choose Markdown or HTML for Second Brain reports.")
@@ -1999,7 +2164,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         grant_value = str(grant_id or "").strip()
         if grants.covers_canonical(canonical_target, grant_value):
             return canonical_target
-        raise WorkflowBundleError("Bundle path is outside the approved Taskurotta desktop roots")
+        raise WorkflowBundleError("Bundle path is outside the approved Raticode desktop roots")
 
     def _register_desktop_path_grant(self, body: dict[str, Any]) -> dict[str, str]:
         server = self.server
@@ -2442,7 +2607,7 @@ def _bundle_path_from_body(body: dict[str, Any]) -> Iterator[Path | None]:
 
 def _install_shutdown_handlers(server: GoferUiServer) -> None:
     def request_shutdown(signum: int, _frame: object) -> None:
-        log.info("Received signal %s; shutting down Taskurotta UI server", signum)
+        log.info("Received signal %s; shutting down Raticode UI server", signum)
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -2467,6 +2632,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = Non
         pass
     finally:
         server.stop_continuous_monitor()
+        stop_rattish_runs_for_shutdown(server.data_dir)
         server.watcher.shutdown(wait=False)
         server.scheduler.shutdown(wait=False)
         server.server_close()

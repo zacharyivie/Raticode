@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Invalid break contract
+Node example:
+  type: break
+  loop: missing-loop

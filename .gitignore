@@ -13,8 +13,18 @@ build/
 # local dev testing files
 math problems/
 
-# Taskurotta Workflows
-.taskurotta/
+# Raticode Workflows
+.raticode/*
+!.raticode/daily-todo-implementation/
+.raticode/daily-todo-implementation/*
+!.raticode/daily-todo-implementation/workflow.rattish
+!.raticode/daily-todo-implementation/workflow.metadata.json
+!.raticode/daily-todo-implementation/.raticodeignore
+!.raticode/registry/
+.raticode/registry/*
+!.raticode/registry/radish/
+.raticode/registry/radish/*
+!.raticode/registry/radish/workspace-registry.json
 
 # Virtual environments
 .venv/
@@ -24,9 +34,6 @@ env/
 
 # Hatch
 .hatch/
-
-# impeccable critique
-.impeccable/critique*
 
 # local dev reporting
 reports*
@@ -69,3 +76,6 @@ logs/
 
 # Generated dependency audit evidence
 audit-evidence/
+
+# Local performance fixture builds
+frontend/perf-dist/

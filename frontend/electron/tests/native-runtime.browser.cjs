@@ -17,13 +17,13 @@ function finish(error) {
   app.exit(error ? 1 : 0);
 }
 app.whenReady().then(async () => {
-  const packagedRequire = createRequire(path.join(process.env.TASKUROTTA_SMOKE_ASAR, "package.json"));
+  const packagedRequire = createRequire(path.join(process.env.RATICODE_SMOKE_ASAR, "package.json"));
   const pty = packagedRequire("node-pty");
   const equal = packagedRequire("lodash.isequal");
   assert.equal(equal, packagedRequire("lodash/isEqual"));
   assert.equal(equal({ size: 0 }, { size: -0 }), true);
   const { DownloadedUpdateHelper } = packagedRequire("electron-updater/out/DownloadedUpdateHelper.js");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-packaged-update-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-packaged-update-"));
   try {
     const file = path.join(root, "fixture");
     fs.writeFileSync(file, "fixture");
@@ -38,14 +38,14 @@ app.whenReady().then(async () => {
   // This exercises the rebuilt native module with Electron's actual ABI.
   const windows = process.platform === "win32";
   terminal = pty.spawn(windows ? "cmd.exe" : "/bin/sh", windows
-    ? ["/d", "/s", "/c", "echo TASKUROTTA_PTY_OK"]
-    : ["-c", "printf TASKUROTTA_PTY_OK"], { cwd: os.tmpdir(), cols: 80, rows: 24 });
+    ? ["/d", "/s", "/c", "echo RATICODE_PTY_OK"]
+    : ["-c", "printf RATICODE_PTY_OK"], { cwd: os.tmpdir(), cols: 80, rows: 24 });
   let output = "";
   terminal.onData((data) => { output += data; });
   terminal.onExit(({ exitCode }) => {
     try {
       assert.equal(exitCode, 0);
-      assert.match(output, /TASKUROTTA_PTY_OK/);
+      assert.match(output, /RATICODE_PTY_OK/);
       finish();
     } catch (error) { finish(error); }
   });

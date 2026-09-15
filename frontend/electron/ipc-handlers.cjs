@@ -18,6 +18,8 @@ const desktopIpcHandlers = [
   ["gofer:open-path", "openPath"],
   ["gofer:reveal-path", "revealPath"],
   ["gofer:path-info", "pathInfo"],
+  ["gofer:missing-recent-files", "missingRecentFiles"],
+  ["gofer:missing-thread-roots", "missingThreadRoots"],
   ["gofer:resolve-project-file", "resolveProjectFile"],
   ["gofer:git-repo-action", "gitRepoAction"],
   ["gofer:git-status", "gitStatus"],

@@ -61,7 +61,7 @@ def test_doctor_human_reports_ready_checks_when_all_diagnostics_ok(
     result = runner.invoke(app, ["doctor", "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert "Taskurotta doctor" in result.output
+    assert "Raticode doctor" in result.output
     assert "Ready checks" in result.output
     assert "- Python version is supported." in result.output
     assert "- Data directory is writable." in result.output
@@ -158,7 +158,7 @@ def test_doctor_human_with_no_diagnostics_prints_only_header(
     result = runner.invoke(app, ["doctor", "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert result.output == "Taskurotta doctor\n"
+    assert result.output == "Raticode doctor\n"
 
 
 def test_doctor_human_workflow_option_prints_workflow_diagnostics(
@@ -631,7 +631,7 @@ def test_global_health_rejects_workflow_assistant_cli_source_inside_data_dir(
     assert any(
         item["id"] == "packaging.gofer_cli"
         and item["severity"] == "warning"
-        and "mutable Taskurotta data directory" in item["message"]
+        and "mutable Raticode data directory" in item["message"]
         for item in payload["warnings"]
     )
 

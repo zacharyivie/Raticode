@@ -1,6 +1,0 @@
-Radish: 1
-Workflow:
-  name: File contract
-Node example:
-  type: file
-  path: artifacts/report.txt

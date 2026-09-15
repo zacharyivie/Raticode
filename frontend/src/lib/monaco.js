@@ -29,25 +29,25 @@ if (typeof self !== "undefined") {
 
 let registered = false;
 
-export function loadRadishMonaco() {
+export function loadRattishMonaco() {
   if (!registered) {
-    registerRadishLanguage();
+    registerRattishLanguage();
     registered = true;
   }
   return monaco;
 }
 
-function registerRadishLanguage() {
+function registerRattishLanguage() {
   monaco.languages.register({
-    id: "radish",
-    aliases: ["Radish", "radish"],
-    extensions: [".rad"],
+    id: "rattish",
+    aliases: ["Rattish", "rattish"],
+    extensions: [".rattish", ".rad"],
   });
-  monaco.languages.setLanguageConfiguration("radish", {
+  monaco.languages.setLanguageConfiguration("rattish", {
     comments: { lineComment: "#" },
     indentationRules: {
       increaseIndentPattern: /^\s*(?:Workflow|Node\s+[A-Za-z][A-Za-z0-9-]*|with|needs|to|inputs|outputs|environment)\s*:\s*(?:#.*)?$/i,
-      decreaseIndentPattern: /^\s*(?:Radish|Workflow|Node\s+[A-Za-z][A-Za-z0-9-]*)\b/i,
+      decreaseIndentPattern: /^\s*(?:Rattish|Radish|Workflow|Node\s+[A-Za-z][A-Za-z0-9-]*)\b/i,
     },
     onEnterRules: [
       {
@@ -56,14 +56,14 @@ function registerRadishLanguage() {
       },
     ],
   });
-  monaco.languages.setMonarchTokensProvider("radish", {
+  monaco.languages.setMonarchTokensProvider("rattish", {
     defaultToken: "",
     ignoreCase: true,
     tokenizer: {
       root: [
-        [/^(\s*)(Radish)(\s*:)/, ["", "keyword.radish", "delimiter"]],
-        [/^(\s*)(Workflow)(\s*:)/, ["", "keyword.radish", "delimiter"]],
-        [/^(\s*)(Node)(\s+)([A-Za-z][A-Za-z0-9-]*)(\s*:)/, ["", "keyword.radish", "", "type.identifier", "delimiter"]],
+        [/^(\s*)(Rattish|Radish)(\s*:)/, ["", "keyword.rattish", "delimiter"]],
+        [/^(\s*)(Workflow)(\s*:)/, ["", "keyword.rattish", "delimiter"]],
+        [/^(\s*)(Node)(\s+)([A-Za-z][A-Za-z0-9-]*)(\s*:)/, ["", "keyword.rattish", "", "type.identifier", "delimiter"]],
         [/#.*$/, "comment"],
         [/\{\{[^}]+\}\}/, "variable.predefined"],
         [/"(?:\\.|[^"\\])*"/, "string"],
@@ -77,7 +77,7 @@ function registerRadishLanguage() {
       ],
     },
   });
-  monaco.editor.defineTheme("gofer-radish-light", {
+  monaco.editor.defineTheme("gofer-rattish-light", {
     base: "vs",
     inherit: true,
     colors: {
@@ -98,7 +98,7 @@ function registerRadishLanguage() {
       "editorOverviewRuler.background": "#e4dfd5",
     },
     rules: [
-      { token: "keyword.radish", foreground: "6D28D9", fontStyle: "bold" },
+      { token: "keyword.rattish", foreground: "6D28D9", fontStyle: "bold" },
       { token: "type.identifier", foreground: "18181B", fontStyle: "bold" },
       { token: "attribute.name", foreground: "1D4ED8" },
       { token: "type", foreground: "0D6F8A", fontStyle: "bold" },
@@ -110,7 +110,7 @@ function registerRadishLanguage() {
       { token: "comment", foreground: "62635F", fontStyle: "italic" },
     ],
   });
-  monaco.editor.defineTheme("gofer-radish-dark", {
+  monaco.editor.defineTheme("gofer-rattish-dark", {
     base: "vs-dark",
     inherit: true,
     colors: {
@@ -119,7 +119,7 @@ function registerRadishLanguage() {
       "editorGutter.background": "#19191b",
     },
     rules: [
-      { token: "keyword.radish", foreground: "C4B5FD", fontStyle: "bold" },
+      { token: "keyword.rattish", foreground: "C4B5FD", fontStyle: "bold" },
       { token: "type.identifier", foreground: "F4F4F5", fontStyle: "bold" },
       { token: "attribute.name", foreground: "93C5FD" },
       { token: "type", foreground: "67E8F9", fontStyle: "bold" },

@@ -1,0 +1,29 @@
+[
+  {
+    "$schema": "urn:raticode:rattish:schema:diagnostic-1.json",
+    "code": "RATTISH_BLANK_AGENT_PROMPT",
+    "severity": "warning",
+    "phase": "semantic",
+    "message": "Agent 'review' has no inline prompt or prompt path.",
+    "file": "workflow.rattish",
+    "span": {
+      "start": {
+        "offset": 55,
+        "line": 6,
+        "column": 6
+      },
+      "end": {
+        "offset": 61,
+        "line": 6,
+        "column": 12
+      }
+    },
+    "related": [],
+    "details": {
+      "node": "review"
+    },
+    "suggestions": [
+      "Add prompt or prompt-path if the Agent does not receive its task another way."
+    ]
+  }
+]

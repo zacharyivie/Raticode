@@ -2,6 +2,7 @@ import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Search,
+  Waypoints,
   ArrowDown,
   ArrowUp,
   Check,
@@ -28,19 +29,29 @@ import {
 } from "lucide-react";
 import GitIntegrationControls from "./GitIntegrationControls.jsx";
 import WorktreeContextMenu, { historyOperations, integrationOperations } from "./WorktreeContextMenu.jsx";
+import SwarmSidebar from "./SwarmSidebar.jsx";
+import RatSwarmIcon from "./RatSwarmIcon.jsx";
 import ProjectSearch from "./ProjectSearch.jsx";
 import { Dialog } from "./Dialog.jsx";
 import { hasUnsavedCodeChanges } from "./CodeWorkspace.jsx";
-import { PathNameDialog } from "./DagCanvas.jsx";
+import { PathNameDialog } from "./PathNameDialog.jsx";
 import { DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
 
 export default function CodeFileExplorer({
   activeFilePath = "",
+  sidebarView: controlledSidebarView,
+  onSidebarViewChange,
+  workflowsContent,
+  workflowsHeader,
+  hideProjectSelector = false,
+  paneVisible = true,
   newFileRequest = 0,
   query = "",
   recentProjects = [],
   settings = DEFAULT_APP_SETTINGS,
   workflow,
+  onOpenSwarm,
+  selectedSwarmId,
   onFilesystemChange,
   onCloseActiveFile,
   onOpenFile,
@@ -93,7 +104,9 @@ export default function CodeFileExplorer({
   useEffect(() => { setCommitMessage(""); setBlockedBranch(""); setGitError(""); setGitNotice(""); setRemote(""); }, [rootPath]);
   const [sourceTab, setSourceTab] = useState("changes");
   const stagedCount = sourceControl.entries.filter((entry) => entry.staged && entry.status !== "!").length;
-  const [sidebarView, setSidebarView] = useState("files");
+  const [localSidebarView, setLocalSidebarView] = useState("files");
+  const sidebarView = controlledSidebarView || localSidebarView;
+  const setSidebarView = useCallback((value) => { setLocalSidebarView(value); onSidebarViewChange?.(value); }, [onSidebarViewChange]);
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   useEffect(() => {
     function openSearch(event) {
@@ -104,7 +117,7 @@ export default function CodeFileExplorer({
     }
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, []);
+  }, [setSidebarView]);
   const [gitHistory, setGitHistory] = useState({ active: false, commits: [], loading: false });
   const [expandedCommits, setExpandedCommits] = useState(() => new Set());
   const [copiedCommitHash, setCopiedCommitHash] = useState("");
@@ -201,12 +214,12 @@ export default function CodeFileExplorer({
     setGeneratingMessage(true); setGitError("");
     try {
       const snapshot = await window.goferDesktop.workspace.gitRepoAction(rootPath, "staged-diff");
-      if (snapshot?.error || !snapshot?.diff) throw new Error(snapshot?.error || "No staged diff available.");
+      if (snapshot?.error || (!snapshot?.diff && !snapshot?.inspectStaged)) throw new Error(snapshot?.error || "No staged diff available.");
       if (controller.signal.aborted) return;
       const message = await new Promise((resolve, reject) => {
         const cancel = () => reject(new Error("Generation cancelled."));
         controller.signal.addEventListener("abort", cancel, { once: true });
-        window.dispatchEvent(new CustomEvent("gofer:rem-commit-message", { detail: { projectRoot: rootPath, diff: snapshot.diff, signal: controller.signal, resolve, reject } }));
+        window.dispatchEvent(new CustomEvent("gofer:rem-commit-message", { detail: { projectRoot: rootPath, diff: snapshot.diff, inspectStaged: snapshot.inspectStaged, signal: controller.signal, resolve, reject } }));
       });
       if (controller.signal.aborted || currentRootRef.current !== rootPath) return;
       const current = await window.goferDesktop.workspace.gitRepoAction(rootPath, "staged-diff");
@@ -295,6 +308,12 @@ export default function CodeFileExplorer({
           ? await bridge?.gitRepoAction?.(rootPath, action, value)
           : await bridge?.gitFileAction?.(rootPath, value, action);
       if (!result) throw new Error("Restart the desktop app to enable Git actions.");
+      if (action === "branch-delete" && result.branchDeleteUnmerged) {
+        if (currentRootRef.current !== rootPath) return;
+        if (!window.confirm(`Branch ${value} may have unmerged changes. Delete it anyway? Those commits may be lost.`)) return;
+        result = await bridge.gitRepoAction(rootPath, "branch-delete-force", value);
+        if (!result) throw new Error("Unable to delete branch.");
+      }
       if (result.error) { if (result.active) setSourceControl(result); throw new Error(result.error); }
       setBlockedBranch(result.switchBlocked ? result.requestedBranch : "");
       setGitNotice(result.notice || (action === "commit" ? "Committed staged changes." : ""));
@@ -690,7 +709,6 @@ export default function CodeFileExplorer({
 
   async function deleteBranch(branch) {
     if (gitBusy || branch === sourceControl.branch || worktrees.items.some(item => item.branch === branch)) return;
-    if (!window.confirm(`Delete local branch ${branch}? Git will refuse if it has unmerged commits.`)) return;
     await changeSourceControl("branch-delete", branch);
   }
 
@@ -821,15 +839,17 @@ export default function CodeFileExplorer({
   const rootLoading = loadingPaths.has(rootPath);
   return (
     <div
-      className="flex h-full min-h-0 min-w-0"
+      className={`flex h-full min-h-0 min-w-0 ${paneVisible ? "" : "[&>[role=tabpanel]]:hidden [&>section]:hidden"}`}
       aria-label="Project sidebar"
       onKeyDownCapture={handleExplorerKeyDown}
     >
       <div role="tablist" aria-label="Project sidebar views" aria-orientation="vertical" className="flex w-10 shrink-0 flex-col border-r border-line">
         {[
+          ...(workflowsContent !== undefined ? [{ id: "workflows", label: "Workflows", icon: Waypoints }] : []),
           { id: "files", label: "File explorer", icon: Folder },
           { id: "search", label: "Search", icon: Search },
           { id: "source-control", label: "Source control", icon: GitBranch },
+          { id: "swarms", label: "Swarms", icon: RatSwarmIcon },
         ].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
@@ -846,7 +866,7 @@ export default function CodeFileExplorer({
             onKeyDown={(event) => {
               if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
               event.preventDefault();
-              const views = ["files", "search", "source-control"];
+              const views = [...(workflowsContent !== undefined ? ["workflows"] : []), "files", "search", "source-control", "swarms"];
               const next = event.key === "Home" ? views[0] : event.key === "End" ? views.at(-1) : views[(views.indexOf(id) + (event.key === "ArrowDown" ? 1 : views.length - 1)) % views.length];
               setSidebarView(next);
               setContextMenu(null);
@@ -856,6 +876,19 @@ export default function CodeFileExplorer({
           ><Icon aria-hidden="true" size={19} strokeWidth={1.5} /></button>
         ))}
       </div>
+      {workflowsContent !== undefined ? (
+        <div
+          id="sidebar-panel-workflows"
+          role="tabpanel"
+          aria-labelledby="sidebar-tab-workflows"
+          hidden={sidebarView !== "workflows"}
+          className={`min-h-0 min-w-0 flex-1 flex-col ${sidebarView === "workflows" ? "flex" : "hidden"}`}
+        >
+          {workflowsHeader ? <div className="shrink-0 px-2 pb-2">{workflowsHeader}</div> : null}
+          <div className="min-h-0 flex-1 overflow-y-auto px-2">{workflowsContent}</div>
+        </div>
+      ) : null}
+      <SwarmSidebar key={`swarms:${rootPath}`} rootPath={rootPath} active={sidebarView === "swarms"} selectedId={selectedSwarmId} onSelect={onOpenSwarm} />
       <ProjectSearch key={rootPath} rootPath={rootPath} active={sidebarView === "search"} focusRequest={searchFocusRequest} onOpenFile={onOpenFile} disabled={gitBusy} onBusy={setGitBusy} onReplace={() => { void refreshTree(); onFilesystemChange?.({ type: "git", rootPath }); }} />
       <div id="sidebar-panel-files" role="tabpanel" aria-labelledby="sidebar-tab-files" hidden={sidebarView !== "files"} className={`min-h-0 min-w-0 flex-1 flex-col ${sidebarView === "files" ? "flex" : "hidden"}`}>
       <div className="flex h-7 items-center justify-between px-1.5">
@@ -908,16 +941,16 @@ export default function CodeFileExplorer({
       >
         <div ref={recentMenuRef} className="relative z-10 shrink-0 bg-white">
           <button
-            aria-expanded={recentMenuOpen}
-            aria-haspopup="menu"
+            aria-expanded={hideProjectSelector ? undefined : recentMenuOpen}
+            aria-haspopup={hideProjectSelector ? undefined : "menu"}
             aria-selected={selectedPath === rootPath}
             className={`flex h-7 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-xs font-semibold ${selectedPath === rootPath ? "bg-indigo-100 text-indigo-700" : "text-ink hover:bg-slate-100"}`}
             role="treeitem"
-            title={`${rootPath}\nChoose a recent project`}
+            title={hideProjectSelector ? rootPath : `${rootPath}\nChoose a recent project`}
             type="button"
             onClick={() => {
               setSelectedPath(rootPath);
-              setRecentMenuOpen((current) => !current);
+              if (!hideProjectSelector) setRecentMenuOpen((current) => !current);
             }}
             onContextMenu={(event) => showContextMenu(event)}
           >
@@ -931,7 +964,7 @@ export default function CodeFileExplorer({
               statuses={sourceControl.entries}
             />
           </button>
-          {recentMenuOpen ? (
+          {!hideProjectSelector && recentMenuOpen ? (
             <div
               aria-label="Recent projects"
               className="absolute left-0 top-8 z-50 w-full min-w-56 rounded-lg border border-line bg-white p-1 shadow-panel"
@@ -1257,9 +1290,9 @@ export default function CodeFileExplorer({
                   </div>
                   {isExpanded ? (
                     <div className="ml-5 border-t border-line/80 px-2 pb-2 pt-1.5 text-[10px]">
-                      <div className="flex items-center gap-2 font-mono text-[9px]" aria-label={`${commit.insertions ?? 0} insertions, ${commit.deletions ?? 0} deletions`}>
-                        <span className="font-medium text-emerald-600">+{commit.insertions ?? 0}</span>
-                        <span className="font-medium text-red-600">-{commit.deletions ?? 0}</span>
+                      <div className="flex items-center gap-2 font-mono text-[9px]" aria-label={`${commit.insertions ?? 0} insertions, ${commit.deletions ?? 0} deletions${commit.binaryFiles ? `, ${commit.binaryFiles} binary files without line counts` : ""}`}>
+                        {!commit.binaryFiles || commit.insertions || commit.deletions ? <><span className="font-medium text-emerald-600">+{commit.insertions ?? 0}</span><span className="font-medium text-red-600">-{commit.deletions ?? 0}</span></> : null}
+                        {commit.binaryFiles ? <span className="text-muted">{commit.binaryFiles} binary {commit.binaryFiles === 1 ? "file" : "files"}</span> : null}
                       </div>
                     </div>
                   ) : null}
@@ -1400,7 +1433,7 @@ function ExplorerIcon({ entry, expanded }) {
       : <Folder className="shrink-0 text-muted" size={13} />;
   }
   const lower = entry.name.toLowerCase();
-  if (lower.endsWith(".rad")) return <FileCode2 className="shrink-0 text-brand" size={13} />;
+  if (lower.endsWith(".rattish")) return <FileCode2 className="shrink-0 text-brand" size={13} />;
   if (lower.endsWith(".json")) return <FileJson2 className="shrink-0 text-amber-600" size={13} />;
   return <FileText className="shrink-0 text-muted" size={13} />;
 }

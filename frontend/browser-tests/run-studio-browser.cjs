@@ -8,9 +8,9 @@ const childEnv = {
 };
 delete childEnv.ELECTRON_RUN_AS_NODE;
 
-function runBrowserTest(script) {
+function runBrowserTest(script, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(electronPath, [script], { env: childEnv, stdio: "inherit" });
+    const child = spawn(electronPath, [script], { env: { ...childEnv, ...extraEnv }, stdio: "inherit" });
     child.on("exit", (code, signal) => {
       if (code === 0 && !signal) resolve();
       else reject(new Error(`Browser regression ${path.basename(script)} exited with ${signal || code}.`));
@@ -20,7 +20,11 @@ function runBrowserTest(script) {
 }
 
 async function main() {
+  await runBrowserTest(path.join(__dirname, "studio.browser.cjs"), { GOFER_EMPTY_WORKSPACE_ONLY: "1" });
   await runBrowserTest(path.join(__dirname, "studio.browser.cjs"));
+  await runBrowserTest(path.join(__dirname, "studio.browser.cjs"), { GOFER_TERMINAL_ONLY: "1" });
+  await runBrowserTest(path.join(__dirname, "workflow-tabs.browser.cjs"));
+  await runBrowserTest(path.join(__dirname, "studio.browser.cjs"), { GOFER_SWARM_ONLY: "1" });
   await runBrowserTest(path.join(__dirname, "../electron/tests/studio-policy.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "../electron/tests/conversation-storage.browser.cjs"));
 }

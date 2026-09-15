@@ -303,7 +303,7 @@ class WorkflowBuilder:
             path_str = questionary.text("Path to delete:").ask()
             if not path_str:
                 return
-            use_trash = questionary.confirm("Move to Taskurotta trash?", default=True).ask()
+            use_trash = questionary.confirm("Move to Raticode trash?", default=True).ask()
             recursive = questionary.confirm("Allow recursive folder delete?", default=False).ask()
             missing_ok = questionary.confirm("Succeed if missing?", default=False).ask()
             op = DeleteFileOperation(

@@ -91,7 +91,7 @@ def binding_contract() -> dict[str, Any]:
         "layers": [
             {
                 "id": "gofer-interpolation",
-                "description": "Taskurotta resolves explicit references and {{...}} templates.",
+                "description": "Raticode resolves explicit references and {{...}} templates.",
             },
             {
                 "id": "input-mapping",
@@ -107,7 +107,7 @@ def binding_contract() -> dict[str, Any]:
                 "id": "shell-expansion",
                 "description": (
                     "The shell owns expressions such as ${FILE_NAME}; "
-                    "Taskurotta does not parse them."
+                    "Raticode does not parse them."
                 ),
             },
         ],

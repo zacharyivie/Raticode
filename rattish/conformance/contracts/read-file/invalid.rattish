@@ -1,0 +1,5 @@
+Rattish: 1
+Workflow:
+  name: Invalid Read contract
+Node example:
+  type: read-file

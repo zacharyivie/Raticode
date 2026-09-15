@@ -1,0 +1,150 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "agent",
+  "runtime_handler": "raticode.agent",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "provider": {"type": "string", "minLength": 1, "x-rattish-role": "provider_id"},
+      "profile": {"type": ["string", "null"]},
+      "model": {"type": "string", "minLength": 1},
+      "effort": {"type": "string", "minLength": 1},
+      "working_dir": {"type": "string", "x-rattish-type": "Path"},
+      "prompt": {"type": "string"},
+      "prompt_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
+      "skill": {"type": ["string", "null"]},
+      "memory": {"enum": ["none", "run", "all"]},
+      "tools": {"type": "array", "items": {"type": "string"}},
+      "mcp_servers": {"type": "array", "items": {"type": "string"}},
+      "env": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      },
+      "extra_paths": {
+        "type": "array",
+        "items": {"type": "string", "x-rattish-type": "Path"}
+      },
+      "output_schema": {"type": ["object", "null"]},
+      "output_schema_path": {"type": ["string", "null"], "x-rattish-type": "Path"},
+      "repair_attempts": {"type": "integer", "minimum": 0, "maximum": 3}
+    },
+    "required": ["provider"],
+    "allOf": [
+      {
+        "not": {
+          "properties": {
+            "output_schema": {"type": "object"},
+            "output_schema_path": {"type": "string"}
+          },
+          "required": ["output_schema", "output_schema_path"]
+        }
+      }
+    ],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "profile": null,
+    "working_dir": ".",
+    "prompt": "",
+    "prompt_path": null,
+    "skill": null,
+    "memory": "none",
+    "tools": [],
+    "mcp_servers": [],
+    "env": {},
+    "extra_paths": [],
+    "output_schema": null,
+    "output_schema_path": null,
+    "repair_attempts": 0
+  },
+  "computed_defaults": {
+    "model": {
+      "source": "provider_contract",
+      "field": "default_model",
+      "description": "Resolve the provider contract's default model and freeze it in IR."
+    },
+    "effort": {
+      "source": "provider_contract",
+      "field": "default_effort",
+      "description": "Resolve the provider contract's default effort and freeze it in IR."
+    }
+  },
+  "input_ports": {
+    "mode": "open",
+    "ports": {},
+    "additional_port_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "additional_port_delivery": {
+      "delivery": "local_binding",
+      "name_transform": "identity",
+      "encoding": "identity"
+    }
+  },
+  "success_output": {
+    "kind": "configuration_selected",
+    "schema_fields": ["output_schema", "output_schema_path"],
+    "default_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "string"
+    }
+  },
+  "error_kinds": [
+    "budget",
+    "cancelled",
+    "configuration",
+    "filesystem",
+    "internal",
+    "output_validation",
+    "provider",
+    "timeout"
+  ],
+  "effects": ["filesystem_read", "filesystem_write", "network", "provider"],
+  "preflight_checks": [
+    {
+      "id": "provider-available",
+      "severity": "error",
+      "description": "The selected provider runtime must be installed and available."
+    },
+    {
+      "id": "profile-compatible",
+      "severity": "error",
+      "description": "A selected deployment profile must exist and support the provider."
+    },
+    {
+      "id": "prompt-path-readable",
+      "severity": "error",
+      "description": "A selected prompt path must exist and be readable."
+    },
+    {
+      "id": "working-dir-available",
+      "severity": "error",
+      "description": "The working directory must exist and be accessible."
+    }
+  ],
+  "static_diagnostics": [
+    {
+      "code": "RATTISH_MUTUALLY_EXCLUSIVE_FIELDS",
+      "severity": "error",
+      "rule": "mutually_exclusive_fields",
+      "fields": ["prompt", "prompt_path"],
+      "description": "Inline prompt and prompt path cannot both be authored."
+    },
+    {
+      "code": "RATTISH_BLANK_AGENT_PROMPT",
+      "severity": "warning",
+      "rule": "blank_prompt",
+      "fields": ["prompt", "prompt_path"],
+      "description": "Warn when the Agent has no inline prompt and no prompt path."
+    },
+    {
+      "code": "RATTISH_SUSPECTED_PLAINTEXT_SECRET",
+      "severity": "warning",
+      "rule": "suspected_plaintext_secret",
+      "fields": ["env"],
+      "description": "Warn about credential-shaped plaintext environment entries without rejecting the source."
+    }
+  ]
+}

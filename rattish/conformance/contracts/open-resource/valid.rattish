@@ -1,0 +1,7 @@
+Rattish: 1
+Workflow:
+  name: Open resource contract
+Node example:
+  type: open-resource
+  target: https://example.com
+  resource-type: URL

@@ -26,6 +26,7 @@ export default function ChatComposer({
   onSend,
   onStop,
   sending = false,
+  sendDisabled = false,
   provider = "codex",
   permissionMode = defaultPermissionMode(provider),
   onPermissionModeChange = () => {},
@@ -269,7 +270,7 @@ export default function ChatComposer({
                 : "bg-brand text-white hover:bg-indigo-700"
             }`}
             disabled={
-              (!sending && !draft.trim() && !attachments.length)
+              (!sending && (sendDisabled || (!draft.trim() && !attachments.length)))
               || transcribing
               || transcriptionPending
             }

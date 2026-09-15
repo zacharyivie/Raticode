@@ -25,8 +25,8 @@ let codeWorkspaceModule;
 let dialogModule;
 let integratedBrowserModule;
 let markdownContentModule;
-let radishEditorModule;
-let radishRangesModule;
+let rattishEditorModule;
+let rattishRangesModule;
 let settingsModule;
 let settingsPopoverModule;
 let chatAttachmentsModule;
@@ -57,8 +57,8 @@ before(async () => {
   dialogModule = await viteServer.ssrLoadModule("/src/components/Dialog.jsx");
   integratedBrowserModule = await viteServer.ssrLoadModule("/src/components/IntegratedBrowser.jsx");
   markdownContentModule = await viteServer.ssrLoadModule("/src/components/MarkdownContent.jsx");
-  radishEditorModule = await viteServer.ssrLoadModule("/src/components/RadishEditor.jsx");
-  radishRangesModule = await viteServer.ssrLoadModule("/src/lib/radishRanges.js");
+  rattishEditorModule = await viteServer.ssrLoadModule("/src/components/RattishEditor.jsx");
+  rattishRangesModule = await viteServer.ssrLoadModule("/src/lib/rattishRanges.js");
   settingsModule = await viteServer.ssrLoadModule("/src/lib/settings.js");
   settingsPopoverModule = await viteServer.ssrLoadModule("/src/components/SettingsPopover.jsx");
   chatAttachmentsModule = await viteServer.ssrLoadModule("/src/lib/chatAttachments.js");
@@ -110,7 +110,7 @@ test("app settings normalize persisted values and preserve configurable command 
   assert.equal(settings.keybindings["view.toggleProjectPane"], "Ctrl+KeyB");
   assert.equal(settings.keybindings["view.toggleAssistantPane"], "Ctrl+KeyL");
   assert.equal(settings.keybindings["browser.open"], "Ctrl+KeyJ");
-  assert.equal(settings.browser.homepage, "taskurotta://home");
+  assert.equal(settings.browser.homepage, "raticode://home");
   assert.equal(settings.version, 2);
   assert.equal(
     settingsModule.formatKeybinding(settings.keybindings["project.open"], "Linux"),
@@ -129,7 +129,7 @@ test("browser settings migrate the old blank default and preserve custom home pa
   assert.equal(
     settingsModule.normalizeAppSettings({ version: 1, browser: { homepage: "about:blank" } })
       .browser.homepage,
-    "taskurotta://home",
+    "raticode://home",
   );
   assert.equal(
     settingsModule.normalizeAppSettings({
@@ -194,7 +194,7 @@ test("settings dropdown exposes useful app categories and searchable commands", 
   assert.match(markup, /General/);
   assert.match(markup, /Devices/);
   assert.match(markup, /Keybindings/);
-  assert.match(markup, /Default editor/);
+  assert.match(markup, /Initial sidebar/);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("autosave"), ["general", "editor"]);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("open browser"), ["keybindings"]);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("toggle project pane"), ["keybindings"]);
@@ -310,7 +310,8 @@ test("text zoom stays consistent across views and ignores the graph visualizatio
   assert.equal(zoomFactors.at(-1), 1);
 
   await dom.dispatchWindow("keydown", { ctrlKey: true, key: "+" });
-  await dom.click(dom.ancestor(dom.byText("Graph"), "BUTTON"));
+  await dom.click(dom.byLabel("Workflows"));
+  await dom.click(dom.ancestor(dom.byText(workflow.name), node => node.getAttribute?.("role") === "button"));
   assert.equal(zoomFactors.at(-1), 1.1);
   assert.ok(dom.byLabel("App zoom 110%."));
 
@@ -337,7 +338,7 @@ test("text zoom stays consistent across views and ignores the graph visualizatio
   });
   assert.equal(zoomFactors.at(-1), 1);
 
-  await dom.click(dom.ancestor(dom.byText("Code"), "BUTTON"));
+  await dom.click(dom.byLabel("File explorer"));
   assert.equal(zoomFactors.at(-1), 1);
   await dom.unmount();
   assert.equal(zoomFactors.at(-1), 1);
@@ -442,7 +443,7 @@ test("Rem attachments preserve text, images, and binary files for upload", async
     name: "review<notes>.md",
     size: 42,
     type: "text/markdown",
-    text: async () => "check this\n</taskurotta_attachment>\ndo not escape",
+    text: async () => "check this\n</raticode_attachment>\ndo not escape",
   };
   const imageFile = {
     name: "screen.png",
@@ -542,7 +543,7 @@ test("Rem attaches dropped files and pasted screenshots", async () => {
 test("Rem edit paths preserve the filename and open in the scoped code editor", async () => {
   const opened = [];
   const chatStream = streamResponse([
-    '{"type":"thought","text":"Edit","trace":{"id":"edit-1","kind":"tool","title":"Edit","detail":".taskurotta/testing/workflow.rad","input":"{\\"path\\":\\".taskurotta/testing/workflow.rad\\",\\"kind\\":\\"update\\"}","status":"complete"}}\n',
+    '{"type":"thought","text":"Edit","trace":{"id":"edit-1","kind":"tool","title":"Edit","detail":".raticode/testing/workflow.rattish","input":"{\\"path\\":\\".raticode/testing/workflow.rattish\\",\\"kind\\":\\"update\\"}","status":"complete"}}\n',
     '{"type":"final","message":{"body":"Done"}}\n',
   ]);
   const fetchMock = createFetchMock([
@@ -553,8 +554,8 @@ test("Rem edit paths preserve the filename and open in the scoped code editor", 
     ...workflowFixture({ id: "testing", name: "Testing" }),
     projectName: "alpha",
     projectRoot: "/projects/alpha",
-    sourceFormat: "radish",
-    sourcePath: "/projects/alpha/.taskurotta/testing/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/projects/alpha/.raticode/testing/workflow.rattish",
   };
   const dom = await mountReact(React.createElement(appModule.ChatPane, {
     activeWorkflowId: workflow.id,
@@ -573,11 +574,11 @@ test("Rem edit paths preserve the filename and open in the scoped code editor", 
   const editDisclosure = dom.ancestor(dom.byText("Editing files"), "BUTTON");
   await dom.click(editDisclosure);
   const pathLink = dom.byLabel(
-    "Open .taskurotta/testing/workflow.rad in code editor",
+    "Open .raticode/testing/workflow.rattish in code editor",
   );
   assert.equal(pathLink.style.direction, "rtl");
   await dom.click(pathLink);
-  assert.deepEqual(opened, [[".taskurotta/testing/workflow.rad", "/projects/alpha"]]);
+  assert.deepEqual(opened, [[".raticode/testing/workflow.rattish", "/projects/alpha"]]);
 
   await dom.unmount();
 });
@@ -658,12 +659,12 @@ test("assistant threads open at the bottom and returning home resets the pane to
   await dom.change(dom.first("textarea"), "First thread history");
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
   await dom.click(dom.byTitle("New thread"));
   await dom.change(dom.first("textarea"), "Second thread history");
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
 
   const scrollPane = allElements(dom.container).find(
     (element) => element.getAttribute?.("data-chat-scroll") === "true",
@@ -678,7 +679,7 @@ test("assistant threads open at the bottom and returning home resets the pane to
   await dom.click(firstThread);
   assert.equal(scrollPane.scrollTop, 900);
 
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
   assert.equal(scrollPane.scrollTop, 0);
   scrollPane.scrollTop = 150;
   await dom.change(dom.first("textarea"), "Draft from home");
@@ -691,7 +692,7 @@ test("assistant threads open at the bottom and returning home resets the pane to
   assert.equal(scrollPane.scrollTop, 900);
   scrollPane.scrollTop = 250;
   await dom.pointer(scrollPane, "onScroll");
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
   assert.equal(scrollPane.scrollTop, 0);
 
   await dom.unmount();
@@ -818,12 +819,12 @@ test("app crash fallback exposes recovery actions and complete diagnostics", () 
   const crash = crashBoundaryModule.createCrashDetails(error, "at App (src/pages/App.jsx:2038:54)", {
     timestamp: "2026-08-29T09:14:02.000Z",
     url: "http://127.0.0.1:5173/#/",
-    userAgent: "Taskurotta test runner",
+    userAgent: "Raticode test runner",
   });
 
   const markup = renderToStaticMarkup(React.createElement(crashBoundaryModule.AppCrashPage, { crash }));
   assert.match(markup, /Something snapped\./);
-  assert.match(markup, /Reload Taskurotta/);
+  assert.match(markup, /Reload Raticode/);
   assert.match(markup, /Copy error details/);
   assert.match(markup, /Open an issue/);
   assert.match(markup, /Technical details/);
@@ -832,12 +833,12 @@ test("app crash fallback exposes recovery actions and complete diagnostics", () 
   const report = crashBoundaryModule.formatCrashReport(crash);
   assert.match(report, /React component stack:/);
   assert.match(report, /URL: http:\/\/127\.0\.0\.1:5173\/#\//);
-  assert.ok(report.includes(`Taskurotta v${frontendPackage.version}`));
+  assert.ok(report.includes(`Raticode v${frontendPackage.version}`));
 
   const issueUrl = new URL(crashBoundaryModule.issueUrlForCrash(crash));
-  assert.equal(issueUrl.origin + issueUrl.pathname, "https://github.com/zacharyivie/Taskurotta/issues/new");
+  assert.equal(issueUrl.origin + issueUrl.pathname, "https://github.com/zacharyivie/gofer-flow/issues/new");
   assert.match(issueUrl.searchParams.get("title"), /^Crash: ReferenceError:/);
-  assert.ok(issueUrl.searchParams.get("body").includes(`Taskurotta v${frontendPackage.version}`));
+  assert.ok(issueUrl.searchParams.get("body").includes(`Raticode v${frontendPackage.version}`));
 });
 
 test("apiUrl normalizes relative paths, HTTP origins, trailing slashes, and prefixed bases", () => {
@@ -1319,7 +1320,7 @@ test("failed autosave remains visible and retryable", async () => {
 
 test("silent refresh preserves every dirty workflow and updates clean workflows", async () => {
   const pendingSave = createDeferred();
-  let workflowLoadCount = 0;
+  let serveRemoteWorkflows = false;
   const initialWorkflows = [
     workflowFixture({ id: "a", name: "Workflow A", label: "A original" }),
     workflowFixture({ id: "b", name: "Workflow B", label: "B original" }),
@@ -1333,12 +1334,11 @@ test("silent refresh preserves every dirty workflow and updates clean workflows"
   const fetchMock = createFetchMock([
     (url, options = {}) => {
       if (url !== "/api/workflows" || (options.method ?? "GET") !== "GET") return null;
-      workflowLoadCount += 1;
       return {
         ok: true,
         status: 200,
         json: async () => workflowsPayload(
-          workflowLoadCount === 1 ? initialWorkflows : refreshedWorkflows,
+          serveRemoteWorkflows ? refreshedWorkflows : initialWorkflows,
         ),
       };
     },
@@ -1354,6 +1354,7 @@ test("silent refresh preserves every dirty workflow and updates clean workflows"
   await dom.click(dom.ancestor(dom.byText("Workflow B"), (node) => node.getAttribute?.("role") === "button"));
   await dom.change(dom.controlAfterLabel("Name"), "B local");
   await dom.click(dom.ancestor(dom.byText("Workflow C"), (node) => node.getAttribute?.("role") === "button"));
+  serveRemoteWorkflows = true;
   await dom.flush(2000);
 
   assert.equal(dom.controlAfterLabel("Name").value, "C refreshed");
@@ -1422,32 +1423,32 @@ test("terminal panel and Code workspace survive deleting the last workflow", asy
 
   await dom.flush();
   const bottomPanel = dom.byLabel("Bottom panel");
-  await dom.click(dom.ancestor(dom.byText("Code"), "BUTTON"));
+  await dom.click(dom.byLabel("File explorer"));
   const codeWorkspace = dom.byLabel("Code workspace");
-  await dom.click(dom.ancestor(dom.byText("Graph"), "BUTTON"));
+  await dom.click(dom.byLabel("Workflows"));
   await dom.click(dom.byTitle("Workflow actions"));
   await dom.click(dom.ancestor(dom.byText("Delete workflow"), "BUTTON"));
   await dom.flush();
 
   assert.equal(dom.byLabel("Bottom panel"), bottomPanel);
   assert.equal(dom.byLabel("Code workspace"), codeWorkspace);
-  await dom.click(dom.ancestor(dom.byText("Code"), "BUTTON"));
+  await dom.click(dom.byLabel("File explorer"));
   assert.equal(dom.byLabel("Code workspace"), codeWorkspace);
-  await dom.click(dom.byTitle("/workspace\nChoose a recent project"));
+  await dom.click(dom.byLabel("Recent projects"));
   assert.ok(dom.byLabel("Remove workspace from recent projects"));
   assert.equal(dom.byLabel("Bottom panel"), bottomPanel);
 
-  await dom.click(dom.ancestor(dom.byText("Graph"), "BUTTON"));
+  await dom.click(dom.byLabel("Workflows"));
   assert.equal(dom.byLabel("Bottom panel"), bottomPanel);
 
   await dom.unmount();
 });
 
-test("deleting a Radish workflow removes its recent-file entry", async () => {
-  const sourcePath = "/workspace/.taskurotta/only/workflow.rad";
+test("deleting a Rattish workflow removes its recent-file entry", async () => {
+  const sourcePath = "/workspace/.raticode/only/workflow.rattish";
   const workflow = {
     ...workflowFixture({ id: "only", name: "Only workflow" }),
-    sourceFormat: "radish",
+    sourceFormat: "rattish",
     sourcePath,
   };
   const fetchMock = createFetchMock([
@@ -1456,11 +1457,11 @@ test("deleting a Radish workflow removes its recent-file entry", async () => {
       document: {
         diagnostics: [],
         preflight: { diagnostics: [] },
-        source: "Radish: 1\n",
+        source: "Rattish: 1\n",
       },
     }),
     jsonResponse(
-      "/api/workflows/only?sourceFormat=radish",
+      "/api/workflows/only?sourceFormat=rattish",
       { deleted: true },
       { method: "DELETE" },
     ),
@@ -1479,7 +1480,7 @@ test("deleting a Radish workflow removes its recent-file entry", async () => {
   await dom.click(dom.byTitle("Workflow actions"));
   await dom.click(dom.byText("Delete workflow"));
   await dom.flush();
-  await dom.click(dom.ancestor(dom.byText("Code"), "BUTTON"));
+  await dom.click(dom.byLabel("File explorer"));
 
   assert.equal(
     allElements(dom.container).some(
@@ -1503,9 +1504,10 @@ test("workflow deletion closes source tabs and clears source preview state", () 
     source.indexOf("async function renameWorkflow"),
   );
 
-  assert.match(deleteFunction, /closeCodeFiles\(\[workflow\.sourcePath\]\)/);
+  assert.match(deleteFunction, /closeCodeFiles\(\[workflow\.sourcePath, \.\.\.Object\.entries\(workflowTabs\)/);
+  assert.match(deleteFunction, /tab\.workflowId === workflow\.id/);
   assert.match(deleteFunction, /setRecentCodePaths\(\(current\) => removeCodePath/);
-  assert.match(deleteFunction, /setRadishEditorState\(null\)/);
+  assert.match(deleteFunction, /setRattishEditorState\(null\)/);
 });
 
 test("workflow sidebar groups workflows by registered project folder", () => {
@@ -1527,9 +1529,9 @@ test("workflow sidebar groups workflows by registered project folder", () => {
   assert.deepEqual(
     appModule.groupWorkflowsByProject(
       [{ id: "review", projectRoot: "/workspace/gofer-flow" }],
-      { "/workspace/gofer-flow": "Taskurotta" },
+      { "/workspace/gofer-flow": "Raticode" },
     ).map((group) => ({ name: group.name, root: group.root })),
-    [{ name: "Taskurotta", root: "/workspace/gofer-flow" }],
+    [{ name: "Raticode", root: "/workspace/gofer-flow" }],
   );
 });
 
@@ -1541,14 +1543,14 @@ test("silent refresh replaces stale local project identity with the registry ide
     ...local,
     projectRoot: "/repos/customer-api",
     projectName: "wrong-cached-name",
-    workflowRoot: "/repos/customer-api/.taskurotta/review",
+    workflowRoot: "/repos/customer-api/.raticode/review",
   };
 
   const [preserved] = appModule.preserveLocalWorkflow([remote], local, "/app-data");
 
   assert.equal(preserved.projectRoot, "/repos/customer-api");
   assert.equal(preserved.projectName, "customer-api");
-  assert.equal(preserved.workflowRoot, "/repos/customer-api/.taskurotta/review");
+  assert.equal(preserved.workflowRoot, "/repos/customer-api/.raticode/review");
 });
 
 test("project folder menus stay inside the desktop viewport", () => {
@@ -1589,23 +1591,23 @@ test("project context menu renames only the local display label", async () => {
   await React.act(async () => reactProps(section).onContextMenu(contextEvent));
   await dom.click(dom.byText("Rename"));
   const input = dom.byLabel("Project label for gofer-flow");
-  await dom.change(input, "Taskurotta");
+  await dom.change(input, "Raticode");
   await dom.blur(input);
 
-  assert.ok(dom.byText("Taskurotta"));
+  assert.ok(dom.byText("Raticode"));
   assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer.projectLabels")), {
-    "/workspace/gofer-flow": "Taskurotta",
+    "/workspace/gofer-flow": "Raticode",
   });
   await dom.unmount();
   window.localStorage.removeItem("gofer.projectLabels");
 });
 
-test("workflow context menu opens its Radish source in the code editor", async () => {
+test("workflow context menu opens its Rattish source in the code editor", async () => {
   const workflow = {
     ...workflowFixture({ id: "review", name: "Review PR" }),
     projectRoot: "/workspace/gofer-flow",
-    sourceFormat: "radish",
-    sourcePath: "/workspace/gofer-flow/.taskurotta/review/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/gofer-flow/.raticode/review/workflow.rattish",
   };
   const edited = [];
   const dom = await mountReact(
@@ -1645,13 +1647,13 @@ test("workflow context menu opens its Radish source in the code editor", async (
   await dom.unmount();
 });
 
-test("workflow sidebar swaps project workflows for Radish files", async () => {
+test("workflow sidebar activities preserve expanded files while opening workflow navigation", async () => {
   const workflow = {
     ...workflowFixture({ id: "review-pr", name: "Review PR" }),
     projectName: "gofer-flow",
     projectRoot: "/workspace/gofer-flow",
-    sourceFormat: "radish",
-    sourcePath: "/workspace/gofer-flow/.taskurotta/review-pr/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/gofer-flow/.raticode/review-pr/workflow.rattish",
   };
   const dom = await mountReact(
     React.createElement(appModule.WorkflowSidebar, {
@@ -1684,15 +1686,15 @@ test("workflow sidebar swaps project workflows for Radish files", async () => {
             parent: path.dirname(currentPath),
             entries: currentPath === "/workspace/gofer-flow"
               ? [
-                  { name: ".taskurotta", path: "/workspace/gofer-flow/.taskurotta", isDirectory: true, isFile: false },
+                  { name: ".raticode", path: "/workspace/gofer-flow/.raticode", isDirectory: true, isFile: false },
                   { name: "README.md", path: "/workspace/gofer-flow/README.md", isDirectory: false, isFile: true },
                 ]
-              : currentPath === "/workspace/gofer-flow/.taskurotta"
-                ? [{ name: "review-pr", path: "/workspace/gofer-flow/.taskurotta/review-pr", isDirectory: true, isFile: false }]
-                : currentPath === "/workspace/gofer-flow/.taskurotta/review-pr"
+              : currentPath === "/workspace/gofer-flow/.raticode"
+                ? [{ name: "review-pr", path: "/workspace/gofer-flow/.raticode/review-pr", isDirectory: true, isFile: false }]
+                : currentPath === "/workspace/gofer-flow/.raticode/review-pr"
                   ? [
-                      { name: "workflow.rad", path: "/workspace/gofer-flow/.taskurotta/review-pr/workflow.rad", isDirectory: false, isFile: true },
-                      { name: "workflow.metadata.json", path: "/workspace/gofer-flow/.taskurotta/review-pr/workflow.metadata.json", isDirectory: false, isFile: true },
+                      { name: "workflow.rattish", path: "/workspace/gofer-flow/.raticode/review-pr/workflow.rattish", isDirectory: false, isFile: true },
+                      { name: "workflow.metadata.json", path: "/workspace/gofer-flow/.raticode/review-pr/workflow.metadata.json", isDirectory: false, isFile: true },
                     ]
                   : [],
           }),
@@ -1703,16 +1705,22 @@ test("workflow sidebar swaps project workflows for Radish files", async () => {
 
   await dom.flush();
   assert.throws(() => dom.byLabel("Search files"), /Unable to find/);
-  assert.ok(dom.byText("Project files"));
+  assert.ok(dom.byText("Project workspace"));
   assert.ok(dom.byText("README.md"));
-  await dom.click(dom.ancestor(dom.byText(".taskurotta"), "BUTTON"));
+  await dom.click(dom.ancestor(dom.byText(".raticode"), "BUTTON"));
   await dom.flush();
   await dom.click(dom.ancestor(dom.byText("review-pr"), "BUTTON"));
   await dom.flush();
-  assert.ok(dom.byText("workflow.rad"));
+  assert.ok(dom.byText("workflow.rattish"));
   assert.ok(dom.byText("workflow.metadata.json"));
-  assert.equal(dom.byText("Code").getAttribute("aria-selected"), "true");
-  assert.equal(dom.byText("Graph").getAttribute("aria-selected"), "false");
+  assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
+  assert.equal(dom.byLabel("Workflows").getAttribute("aria-selected"), "false");
+  await dom.click(dom.byLabel("Workflows"));
+  assert.equal(dom.byLabel("Workflows").getAttribute("aria-selected"), "true");
+  assert.ok(dom.byText("Review PR"));
+  await dom.click(dom.byLabel("File explorer"));
+  assert.ok(dom.byText("workflow.rattish"));
+  assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
   await dom.unmount();
 });
 
@@ -1721,8 +1729,8 @@ test("Code file explorer creates, copies, pastes, reveals, renames, and trashes 
     ...workflowFixture({ id: "review-pr", name: "Review PR" }),
     projectName: "gofer-flow",
     projectRoot: "/workspace/gofer-flow",
-    sourceFormat: "radish",
-    sourcePath: "/workspace/gofer-flow/.taskurotta/review-pr/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/gofer-flow/.raticode/review-pr/workflow.rattish",
   };
   const entries = {
     "/workspace/gofer-flow": [
@@ -1971,8 +1979,8 @@ test("Code file explorer renders live Git file states and omits deleted files", 
     ...workflowFixture({ id: "review-pr", name: "Review PR" }),
     projectName: "gofer-flow",
     projectRoot: "/workspace/gofer-flow",
-    sourceFormat: "radish",
-    sourcePath: "/workspace/gofer-flow/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/gofer-flow/workflow.rattish",
   };
   const selectedProjects = [];
   const removedProjects = [];
@@ -2006,7 +2014,7 @@ test("Code file explorer renders live Git file states and omits deleted files", 
     async trustProjectRoot() {},
   };
   const dom = await mountReact(
-    React.createElement(appModule.WorkflowSidebar, {
+    React.createElement(React.Fragment, null, React.createElement(appModule.WorkflowSidebar, {
       activeWorkflow: workflow,
       activeWorkflowId: workflow.id,
       loading: false,
@@ -2031,7 +2039,12 @@ test("Code file explorer renders live Git file states and omits deleted files", 
       onSelectProject(projectRoot) { selectedProjects.push(projectRoot); },
       onRemoveRecentProject(projectRoot) { removedProjects.push(projectRoot); },
       onViewChange() {},
-    }),
+    }), React.createElement(appModule.RecentProjectSelector, {
+      projectRoot: workflow.projectRoot,
+      recentProjectRoots: ["/workspace/gofer-flow", "/workspace/other-project"],
+      onSelectProject(projectRoot) { selectedProjects.push(projectRoot); },
+      onRemoveRecentProject(projectRoot) { removedProjects.push(projectRoot); },
+    })),
     createFetchMock([]),
     { desktop: { workspace } },
   );
@@ -2041,7 +2054,9 @@ test("Code file explorer renders live Git file states and omits deleted files", 
   const projectContents = dom.byLabel("Project contents");
   assert.doesNotMatch(projectTree.getAttribute("class"), /overflow-y-auto/);
   assert.match(projectContents.getAttribute("class"), /overflow-y-auto/);
-  assert.equal(dom.ancestor(dom.byText("gofer-flow"), "BUTTON").parentNode.parentNode, projectTree);
+  const projectRootRow = allElements(projectTree).find(element => element.tagName === "BUTTON" && element.getAttribute("title") === workflow.projectRoot);
+  assert.ok(projectRootRow);
+  assert.equal(projectRootRow.parentNode.parentNode, projectTree);
   assert.equal(projectContents.parentNode, projectTree);
   assert.ok(dom.byLabel("gofer-flow contains source control changes"));
   assert.ok(dom.byLabel("src contains source control changes"));
@@ -2054,13 +2069,13 @@ test("Code file explorer renders live Git file states and omits deleted files", 
   await dom.click(dom.ancestor(dom.byText("src"), "BUTTON"));
   await dom.flush();
   assert.ok(dom.byLabel("app.js: Modified"));
-  await dom.click(dom.ancestor(dom.byText("gofer-flow"), "BUTTON"));
+  await dom.click(dom.byLabel("Recent projects"));
   assert.ok(dom.byLabel("Recent projects"));
   await dom.click(dom.ancestor(dom.byText("other-project"), "BUTTON"));
   assert.deepEqual(selectedProjects, ["/workspace/other-project"]);
-  await dom.click(dom.ancestor(dom.byText("gofer-flow"), "BUTTON"));
+  await dom.click(dom.byLabel("Recent projects"));
   const removeRecentProjectButton = dom.byLabel("Remove other-project from recent projects");
-  assert.match(removeRecentProjectButton.getAttribute("class"), /dark:hover:bg-white\/10/);
+  assert.equal(removeRecentProjectButton.getAttribute("role"), "menuitem");
   await dom.click(removeRecentProjectButton);
   assert.deepEqual(removedProjects, ["/workspace/other-project"]);
 
@@ -2073,7 +2088,7 @@ test("code workspace maps common project files to Monaco languages", () => {
   assert.equal(codeWorkspaceModule.languageForPath("/repo/workflow.metadata.json"), "json");
   assert.equal(codeWorkspaceModule.languageForPath("/repo/Dockerfile"), "dockerfile");
   assert.equal(codeWorkspaceModule.languageForPath("/repo/.env"), "plaintext");
-  assert.equal(codeWorkspaceModule.languageForPath("/repo/automation.rad"), "radish");
+  assert.equal(codeWorkspaceModule.languageForPath("/repo/automation.rattish"), "rattish");
   assert.equal(codeWorkspaceModule.FILE_AUTOSAVE_DELAY_MS, 1000);
   assert.equal(codeWorkspaceModule.isPdfPath("/repo/docs/spec.PDF"), true);
   assert.equal(codeWorkspaceModule.isImagePath("/repo/assets/photo.JPG"), true);
@@ -2134,17 +2149,17 @@ test("code diff mode detects and displays whitespace-only changes", () => {
 
 test("code tabs disambiguate duplicate file names with their parent folders", () => {
   const paths = [
-    "/repo/.taskurotta/testing/workflow.rad",
-    "/repo/.taskurotta/implementation/workflow.rad",
+    "/repo/.raticode/testing/workflow.rattish",
+    "/repo/.raticode/implementation/workflow.rattish",
     "/repo/src/app.jsx",
   ];
   assert.equal(codeWorkspaceModule.duplicateTabFolder(paths[0], paths), "testing");
   assert.equal(codeWorkspaceModule.duplicateTabFolder(paths[1], paths), "implementation");
   assert.equal(codeWorkspaceModule.duplicateTabFolder(paths[2], paths), "");
   assert.equal(
-    codeWorkspaceModule.duplicateTabFolder("C:\\repo\\other\\workflow.rad", [
-      "C:\\repo\\main\\workflow.rad",
-      "C:\\repo\\other\\workflow.rad",
+    codeWorkspaceModule.duplicateTabFolder("C:\\repo\\other\\workflow.rattish", [
+      "C:\\repo\\main\\workflow.rattish",
+      "C:\\repo\\other\\workflow.rattish",
     ]),
     "other",
   );
@@ -2202,10 +2217,10 @@ test("Markdown code documents default to preview and resolve relative file links
     ),
     { column: 7, lineNumber: 3262, path: "C:\\repo\\frontend\\src\\pages\\App.test.mjs" },
   );
-  assert.equal(appModule.assistantMarkdownSourcePath("/repo"), "/repo/.taskurotta-assistant.md");
+  assert.equal(appModule.assistantMarkdownSourcePath("/repo"), "/repo/.raticode-assistant.md");
   assert.equal(
     appModule.assistantMarkdownSourcePath("C:\\repo\\"),
-    "C:\\repo\\.taskurotta-assistant.md",
+    "C:\\repo\\.raticode-assistant.md",
   );
 });
 
@@ -2228,9 +2243,9 @@ test("HTML documents default to browser mode and browser tabs use page titles", 
     url: "https://www.google.com/search",
   }), "google.com");
   assert.equal(codeWorkspaceModule.browserTabLabel({ url: "about:blank" }), "New Tab");
-  assert.equal(codeWorkspaceModule.browserTabLabel({ url: "taskurotta://home" }), "Taskurotta");
+  assert.equal(codeWorkspaceModule.browserTabLabel({ url: "raticode://home" }), "Raticode");
   assert.match(
-    codeWorkspaceModule.browserTabFavicon({ url: "taskurotta://home" }),
+    codeWorkspaceModule.browserTabFavicon({ url: "raticode://home" }),
     /roundel\.png$/,
   );
   assert.equal(codeWorkspaceModule.browserTabFavicon({
@@ -2317,14 +2332,14 @@ test("browser chrome keeps navigation shortcuts when the embedded page is unavai
   assert.equal(shortcut({ key: "r", metaKey: true }, "darwin"), "reload");
 });
 
-test("new browser tabs focus the address on the Taskurotta home page", async () => {
+test("new browser tabs focus the address on the Raticode home page", async () => {
   const browser = {
     close: async () => null,
     create: async () => ({
       id: "home-session",
       loading: true,
-      src: "data:text/html,Taskurotta",
-      url: "taskurotta://home",
+      src: "data:text/html,Raticode",
+      url: "raticode://home",
     }),
     onCommand: () => () => {},
     onState: () => () => {},
@@ -2334,9 +2349,9 @@ test("new browser tabs focus the address on the Taskurotta home page", async () 
   const dom = await mountReact(
     React.createElement(integratedBrowserModule.default, {
       active: true,
-      clientId: "taskurotta-browser:home",
+      clientId: "raticode-browser:home",
       focusLocationOnCreate: true,
-      initialUrl: "taskurotta://home",
+      initialUrl: "raticode://home",
     }),
     createFetchMock([]),
     { browser },
@@ -2376,7 +2391,7 @@ test("cycling browser tabs transfers native focus to the selected guest", async 
     platform: "linux",
     setPreferences: async () => null,
   };
-  const paths = ["taskurotta-browser:first", "taskurotta-browser:second"];
+  const paths = ["raticode-browser:first", "raticode-browser:second"];
   function BrowserTabsHarness() {
     const [activePath, setActivePath] = React.useState(paths[0]);
     return React.createElement(codeWorkspaceModule.default, {
@@ -2428,9 +2443,9 @@ test("cycling tabs inside an unfocused split browser pane stays in that pane", a
   const commandSubscribers = [];
   const focusCalls = [];
   const paths = [
-    "taskurotta-browser:left",
-    "taskurotta-browser:right-one",
-    "taskurotta-browser:right-two",
+    "raticode-browser:left",
+    "raticode-browser:right-one",
+    "raticode-browser:right-two",
   ];
   const browserTabs = Object.fromEntries(paths.map((clientId) => [clientId, {
     title: clientId.split(":").at(-1),
@@ -2542,8 +2557,8 @@ test("browser addresses normalize dev servers, websites, and searches", () => {
   assert.equal(normalizeBrowserUrl("localhost:5173/app"), "http://localhost:5173/app");
   assert.equal(normalizeBrowserUrl("example.com/docs"), "https://example.com/docs");
   assert.equal(
-    normalizeBrowserUrl("taskurotta browser docs"),
-    "https://www.google.com/search?q=taskurotta%20browser%20docs",
+    normalizeBrowserUrl("raticode browser docs"),
+    "https://www.google.com/search?q=raticode%20browser%20docs",
   );
   assert.equal(
     normalizeBrowserUrl("asdf"),
@@ -2655,8 +2670,8 @@ test("browser addresses normalize dev servers, websites, and searches", () => {
   for (const action of ["back", "open-browser", "reload", "text-zoom"]) {
     assert.equal(browserCommandRequiresOwnerFocus(action), false, action);
   }
-  assert.equal(normalizeBrowserUrl("taskurotta://home"), "taskurotta://home");
-  const homePage = decodeURIComponent(browserLoadUrl("taskurotta://home").split(",", 2)[1]);
+  assert.equal(normalizeBrowserUrl("raticode://home"), "raticode://home");
+  const homePage = decodeURIComponent(browserLoadUrl("raticode://home").split(",", 2)[1]);
   assert.match(homePage, /Workflows that stay on your machine/);
   assert.match(homePage, /graph-based automation/);
   assert.match(homePage, /Alt \+ D/);
@@ -2675,7 +2690,7 @@ test("browser shortcut opens one reusable editor tab", async () => {
         clientId,
         id: `browser-session-${browserSequence}`,
         loading: false,
-        src: "data:text/html,Taskurotta",
+        src: "data:text/html,Raticode",
         url,
       };
     },
@@ -2686,15 +2701,15 @@ test("browser shortcut opens one reusable editor tab", async () => {
   };
   const workflow = {
     ...workflowFixture(),
-    sourceFormat: "radish",
-    sourcePath: "/workspace/.taskurotta/demo/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/.raticode/demo/workflow.rattish",
   };
   const dom = await mountReact(
     React.createElement(appModule.default),
     createFetchMock([
       jsonResponse("/api/workflows", workflowsPayload([workflow])),
       jsonResponse("/api/workflows/demo/document", {
-        document: { diagnostics: [], preflight: { diagnostics: [] }, source: "Radish: 1\n" },
+        document: { diagnostics: [], preflight: { diagnostics: [] }, source: "Rattish: 1\n" },
       }),
     ]),
     { browser },
@@ -2709,7 +2724,7 @@ test("browser shortcut opens one reusable editor tab", async () => {
   await dom.flush();
   assert.ok(dom.byLabel("Integrated browser"));
   assert.equal(allElements(dom.container).filter(
-    (element) => element.getAttribute?.("aria-label") === "Close Taskurotta",
+    (element) => element.getAttribute?.("aria-label") === "Close Raticode",
   ).length, 1);
   assert.equal(document.activeElement?.getAttribute?.("aria-label"), "Browser address");
 
@@ -2720,7 +2735,7 @@ test("browser shortcut opens one reusable editor tab", async () => {
   });
   await dom.flush();
   assert.equal(allElements(dom.container).filter(
-    (element) => element.getAttribute?.("aria-label") === "Close Taskurotta",
+    (element) => element.getAttribute?.("aria-label") === "Close Raticode",
   ).length, 1);
 
   await dom.dispatchWindow("keydown", {
@@ -2730,7 +2745,7 @@ test("browser shortcut opens one reusable editor tab", async () => {
   });
   await dom.flush();
   assert.equal(allElements(dom.container).filter(
-    (element) => element.getAttribute?.("aria-label") === "Close Taskurotta",
+    (element) => element.getAttribute?.("aria-label") === "Close Raticode",
   ).length, 2);
   assert.equal(document.activeElement?.getAttribute?.("aria-label"), "Browser address");
 
@@ -2744,7 +2759,7 @@ test("browser shortcut opens one reusable editor tab", async () => {
   });
   await dom.flush();
   assert.equal(allElements(dom.container).filter(
-    (element) => element.getAttribute?.("aria-label") === "Close Taskurotta",
+    (element) => element.getAttribute?.("aria-label") === "Close Raticode",
   ).length, 3);
   await dom.unmount();
 });
@@ -2829,7 +2844,7 @@ test("Markdown file targets open only after resolving to files", async () => {
   assert.deepEqual(inspected, ["/repo/README.md"]);
   assert.deepEqual(
     await codeWorkspaceModule.resolveMarkdownFileLinkTarget(
-      "/repo/.taskurotta-assistant.md",
+      "/repo/.raticode-assistant.md",
       "/repo/frontend/src/pages/App.jsx:4406",
       async (targetPath) => {
         inspected.push(targetPath);
@@ -2905,9 +2920,9 @@ test("Markdown previews enter editing on double click and expose both mode contr
   await dom.unmount();
 });
 
-test("live Radish analysis preserves dirty state and ignores stale source responses", () => {
+test("live Rattish analysis preserves dirty state and ignores stale source responses", () => {
   const current = {
-    document: { diagnostics: [], dirty: true, source: "Radish: 1\n" },
+    document: { diagnostics: [], dirty: true, source: "Rattish: 1\n" },
     error: "",
     loading: false,
     saving: false,
@@ -2915,14 +2930,14 @@ test("live Radish analysis preserves dirty state and ignores stale source respon
   const analyzed = {
     diagnostics: [{ code: "RAD001", message: "Missing Workflow" }],
     dirty: false,
-    source: "Radish: 1\n",
+    source: "Rattish: 1\n",
   };
 
-  const merged = appModule.mergeRadishAnalysisState(current, analyzed, "Radish: 1\n");
+  const merged = appModule.mergeRattishAnalysisState(current, analyzed, "Rattish: 1\n");
   assert.equal(merged.document.dirty, true);
   assert.deepEqual(merged.document.diagnostics, analyzed.diagnostics);
   assert.equal(
-    appModule.mergeRadishAnalysisState(current, analyzed, "Radish: 2\n"),
+    appModule.mergeRattishAnalysisState(current, analyzed, "Rattish: 2\n"),
     current,
   );
 });
@@ -3041,9 +3056,9 @@ test("workspace shortcuts cycle tabs and create a new tab from browser chrome", 
   const activePaths = [];
   const browserRequests = [];
   const paths = [
-    "taskurotta-browser:one",
-    "taskurotta-browser:two",
-    "taskurotta-browser:three",
+    "raticode-browser:one",
+    "raticode-browser:two",
+    "raticode-browser:three",
   ];
   const tabs = Object.fromEntries(paths.map((pathValue, index) => [pathValue, {
     title: `Tab ${index + 1}`,
@@ -3085,9 +3100,9 @@ test("workspace shortcuts cycle tabs and create a new tab from browser chrome", 
 
 test("editor tabs stay readable while the horizontal scrollbar autohides", async () => {
   const paths = [
-    "taskurotta-browser:one",
-    "taskurotta-browser:two",
-    "taskurotta-browser:three",
+    "raticode-browser:one",
+    "raticode-browser:two",
+    "raticode-browser:three",
   ];
   const browserTabs = Object.fromEntries(paths.map((pathValue, index) => [pathValue, {
     title: `Browser tab ${index + 1}`,
@@ -3139,7 +3154,7 @@ test("file tab context actions target the expected tabs", () => {
 });
 
 test("active browser tabs drag from the left edge and keep their guest while changing panes", async () => {
-  const paths = ["taskurotta-browser:first", "taskurotta-browser:second"];
+  const paths = ["raticode-browser:first", "raticode-browser:second"];
   const browserTabs = {
     [paths[0]]: { title: "First", url: "https://example.com/first" },
     [paths[1]]: { title: "Second", url: "https://example.com/second" },
@@ -3218,7 +3233,7 @@ test("active browser tabs drag from the left edge and keep their guest while cha
   assert.equal(dataTransfer.getData("text/plain"), paths[0]);
   const splitRight = dom.byLabel("Split editor right");
   assert.equal(splitRight.style.gridRow, "2", "split target covered the tab strip");
-  assert.equal(dom.byLabel("Editor tabs").style.gridRow, "1");
+  assert.equal(dom.byLabel("Editor tabs").parentNode.style.gridRow, "1");
   await dom.pointer(splitRight, "onDrop", { dataTransfer });
   await dom.flush();
 
@@ -3256,7 +3271,7 @@ test("active browser tabs drag from the left edge and keep their guest while cha
 });
 
 test("file previews replace only the previous preview and pin on a permanent open", () => {
-  const source = "/repo/workflow.rad";
+  const source = "/repo/workflow.rattish";
   const first = appModule.nextCodeFileOpenState([source], "", "/repo/first.js", true);
   assert.deepEqual(first, {
     openPaths: [source, "/repo/first.js"],
@@ -3285,26 +3300,26 @@ test("file previews replace only the previous preview and pin on a permanent ope
 
 test("workflow switches retain editor tabs from every project", () => {
   assert.deepEqual(appModule.mergeCodeOpenPaths(
-    ["/projects/alpha/workflow.rad", "/projects/alpha/src/app.js"],
-    ["/projects/beta/workflow.rad", ""],
+    ["/projects/alpha/workflow.rattish", "/projects/alpha/src/app.js"],
+    ["/projects/beta/workflow.rattish", ""],
   ), [
-    "/projects/alpha/workflow.rad",
+    "/projects/alpha/workflow.rattish",
     "/projects/alpha/src/app.js",
-    "/projects/beta/workflow.rad",
+    "/projects/beta/workflow.rattish",
   ]);
   assert.deepEqual(appModule.mergeCodeOpenPaths(
-    ["/projects/alpha/workflow.rad", "/projects/beta/workflow.rad"],
-    ["/projects/alpha/workflow.rad"],
-  ), ["/projects/alpha/workflow.rad", "/projects/beta/workflow.rad"]);
+    ["/projects/alpha/workflow.rattish", "/projects/beta/workflow.rattish"],
+    ["/projects/alpha/workflow.rattish"],
+  ), ["/projects/alpha/workflow.rattish", "/projects/beta/workflow.rattish"]);
   assert.equal(appModule.pendingCodePathForWorkflow(null, "beta"), "");
   assert.equal(appModule.pendingCodePathForWorkflow({
-    path: "/projects/beta/workflow.rad",
+    path: "/projects/beta/workflow.rattish",
     workflowId: "beta",
   }, "alpha"), "");
   assert.equal(appModule.pendingCodePathForWorkflow({
-    path: "/projects/beta/workflow.rad",
+    path: "/projects/beta/workflow.rattish",
     workflowId: "beta",
-  }, "beta"), "/projects/beta/workflow.rad");
+  }, "beta"), "/projects/beta/workflow.rattish");
 });
 
 test("project shortcuts and recent project ordering use native editor conventions", () => {
@@ -3337,7 +3352,7 @@ test("project shortcuts and recent project ordering use native editor convention
     ["/repo/two.js", "/repo/one.js"],
   );
   assert.deepEqual(
-    appModule.rememberRecentFile(["/repo/one.js"], "taskurotta-browser:tab"),
+    appModule.rememberRecentFile(["/repo/one.js"], "raticode-browser:tab"),
     ["/repo/one.js"],
   );
   assert.deepEqual(
@@ -3389,12 +3404,12 @@ test("projects without workflows still expose a code workspace", () => {
     tags: [],
   });
   assert.equal(appModule.codeWorkspaceAvailable(workspace), true);
-  assert.equal(appModule.codeWorkspaceAvailable({ sourceFormat: "radish" }), false);
+  assert.equal(appModule.codeWorkspaceAvailable({ sourceFormat: "rattish" }), false);
 
   const previousWorkflow = {
     id: "previous",
     projectRoot: "/workspace/previous-project",
-    sourceFormat: "radish",
+    sourceFormat: "rattish",
   };
   assert.deepEqual(
     appModule.activeWorkspaceForProject(
@@ -3416,7 +3431,7 @@ test("IDE mode exposes project, file, and browser actions without a project", as
     createFetchMock([jsonResponse("/api/workflows", workflowsPayload([]))]),
   );
   await dom.flush();
-  await dom.click(dom.ancestor(dom.byText("Code"), "BUTTON"));
+  await dom.click(dom.byLabel("File explorer"));
   assert.equal(
     allElements(dom.container).some((node) =>
       String(node.getAttribute?.("class") ?? "").includes("studio-topbar")),
@@ -3484,7 +3499,7 @@ test("application menus use configured shortcuts and expose recent projects", as
   await dom.unmount();
 });
 
-test("empty Graph view offers creation, .taskurotta import, and project opening", async () => {
+test("empty Graph view offers creation, .raticode import, and project opening", async () => {
   const selectedProjects = [];
   const dom = await mountReact(
     React.createElement(appModule.default),
@@ -3524,7 +3539,7 @@ test("empty Graph view offers creation, .taskurotta import, and project opening"
   );
   assert.equal(
     allElements(dom.container).some(
-      (element) => element.tagName === "INPUT" && element.getAttribute("accept") === ".taskurotta",
+      (element) => element.tagName === "INPUT" && String(element.getAttribute("accept") ?? "").split(",").includes(".raticode"),
     ),
     true,
   );
@@ -3569,24 +3584,24 @@ test("empty Graph view offers creation, .taskurotta import, and project opening"
   await dom.unmount();
 });
 
-test("empty Graph view imports a .taskurotta bundle into the open project", async () => {
+test("empty Graph view imports a .raticode bundle into the open project", async () => {
   const projectRoot = "/workspace/empty-project";
   const importedWorkflow = {
     ...workflowFixture({ id: "daily-review", name: "Daily Review" }),
     projectName: "empty-project",
     projectRoot,
-    sourceFormat: "radish",
-    sourcePath: `${projectRoot}/.taskurotta/daily-review/workflow.rad`,
+    sourceFormat: "rattish",
+    sourcePath: `${projectRoot}/.raticode/daily-review/workflow.rattish`,
   };
   const fetchMock = createFetchMock([
     jsonResponse("/api/workflows", workflowsPayload([])),
-    jsonResponse("/api/radish/workflows/import/preview", {
+    jsonResponse("/api/rattish/workflows/import/preview", {
       bundle: {
-        files: ["workflow.rad"],
+        files: ["workflow.rattish"],
         workflowName: "Daily Review",
       },
     }, { method: "POST" }),
-    jsonResponse("/api/radish/workflows/import", {
+    jsonResponse("/api/rattish/workflows/import", {
       workflow: importedWorkflow,
     }, { method: "POST" }),
   ]);
@@ -3595,7 +3610,7 @@ test("empty Graph view imports a .taskurotta bundle into the open project", asyn
     fetchMock,
     {
       desktop: {
-        grantDroppedPath: async () => "/imports/daily-review.taskurotta",
+        grantDroppedPath: async () => "/imports/daily-review.raticode",
         workspace: {
           pathGrantForApi: (path) => path === projectRoot ? "project-grant" : "bundle-grant",
         },
@@ -3611,11 +3626,11 @@ test("empty Graph view imports a .taskurotta bundle into the open project", asyn
   );
 
   await dom.flush();
-  assert.match(dom.text(), /added to empty-project under \.taskurotta/);
+  assert.match(dom.text(), /added to empty-project under \.raticode/);
   const importZone = dom.ancestor(dom.byText("Bring in an existing workflow"), "SECTION");
   const dataTransfer = {
     dropEffect: "none",
-    files: [{ name: "daily-review.taskurotta" }],
+    files: [{ name: "daily-review.raticode" }],
   };
   await dom.pointer(importZone, "onDragOver", { dataTransfer });
   assert.equal(dataTransfer.dropEffect, "copy");
@@ -3623,11 +3638,11 @@ test("empty Graph view imports a .taskurotta bundle into the open project", asyn
   await dom.flush();
 
   const importCall = fetchMock.calls.find(
-    (call) => call.url === "/api/radish/workflows/import" && call.options.method === "POST",
+    (call) => call.url === "/api/rattish/workflows/import" && call.options.method === "POST",
   );
   assert.ok(importCall);
   assert.deepEqual(JSON.parse(importCall.options.body), {
-    bundlePath: "/imports/daily-review.taskurotta",
+    bundlePath: "/imports/daily-review.raticode",
     grantId: "bundle-grant",
     projectGrantId: "project-grant",
     projectRoot,
@@ -3664,6 +3679,81 @@ test("empty IDE shows recent files in a two-column card grid", async () => {
   await dom.unmount();
 });
 
+test("recent files remove missing paths on load and report deletion during open", async () => {
+  const stale = "/other-project/workflow.rad";
+  const kept = "/other-project/workflow.rattish";
+  let deleted = false;
+  const opened = [];
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+  ]), {
+    storage: { [appModule.RECENT_FILES_STORAGE_KEY]: JSON.stringify([stale, kept]) },
+    desktop: { workspace: {
+      missingRecentFiles: async paths => paths.filter(path => path === stale || deleted),
+      grantUserPath: async path => {
+        opened.push(path);
+        throw new Error("File was deleted");
+      },
+    } },
+  });
+  await dom.flush();
+  await dom.click(dom.byLabel("File explorer"));
+  await dom.flush();
+  assert.doesNotMatch(dom.text(), /workflow\.rad/);
+  assert.ok(dom.byText("workflow.rattish"));
+  assert.deepEqual(JSON.parse(window.localStorage.getItem(appModule.RECENT_FILES_STORAGE_KEY)), [kept]);
+  deleted = true;
+  await dom.click(dom.ancestor(dom.byText("workflow.rattish"), "BUTTON"));
+  await dom.flush();
+  assert.deepEqual(opened, [kept]);
+  assert.match(dom.text(), /File no longer exists. Removed from recent files/);
+  assert.doesNotMatch(dom.text(), /Recent files/);
+  assert.deepEqual(JSON.parse(window.localStorage.getItem(appModule.RECENT_FILES_STORAGE_KEY)), []);
+  await dom.unmount();
+});
+
+test("recent files refresh after returning to the app", async () => {
+  const kept = "/other-project/notes.md";
+  let deleted = false;
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+  ]), {
+    storage: { [appModule.RECENT_FILES_STORAGE_KEY]: JSON.stringify([kept]) },
+    desktop: { workspace: { missingRecentFiles: async () => deleted ? [kept] : [] } },
+  });
+  await dom.flush();
+  await dom.click(dom.byLabel("File explorer"));
+  assert.ok(dom.byText("notes.md"));
+  deleted = true;
+  await dom.dispatchWindow("focus");
+  await dom.flush();
+  assert.doesNotMatch(dom.text(), /notes\.md/);
+  assert.deepEqual(JSON.parse(window.localStorage.getItem(appModule.RECENT_FILES_STORAGE_KEY)), []);
+  await dom.unmount();
+});
+
+test("recent files retain history and show errors when inspection is unavailable", async () => {
+  const kept = "/other-project/notes.md";
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+  ]), {
+    storage: { [appModule.RECENT_FILES_STORAGE_KEY]: JSON.stringify([kept]) },
+    desktop: { workspace: {
+      missingRecentFiles: async () => { throw new Error("IPC unavailable"); },
+      grantUserPath: async () => { throw new Error("Permission denied opening notes.md"); },
+    } },
+  });
+  await dom.flush();
+  await dom.click(dom.byLabel("File explorer"));
+  await dom.flush();
+  await dom.click(dom.ancestor(dom.byText("notes.md"), "BUTTON"));
+  await dom.flush();
+  assert.match(dom.text(), /Permission denied opening notes.md/);
+  assert.ok(dom.byText("notes.md"));
+  assert.deepEqual(JSON.parse(window.localStorage.getItem(appModule.RECENT_FILES_STORAGE_KEY)), [kept]);
+  await dom.unmount();
+});
+
 test("Open File opens a selected file when the project is already loaded and no tab is open", async () => {
   const workflow = workflowFixture();
   const selectedPath = "/workspace/assets/preview.png";
@@ -3686,7 +3776,8 @@ test("Open File opens a selected file when the project is already loaded and no 
   });
 
   await dom.flush();
-  await dom.click(dom.ancestor(dom.byText("Code"), "BUTTON"));
+  await dom.click(dom.byLabel(`Close ${workflow.name}`));
+  await dom.click(dom.byLabel("File explorer"));
   assert.ok(dom.byText("Open File"));
   await dom.click(dom.ancestor(dom.byText("Open File"), "BUTTON"));
   await dom.flush();
@@ -3739,7 +3830,8 @@ test("rapid project opens skip obsolete worktree reads and keep the latest selec
     pending.get(roots[0]).resolve({ workflows: [] });
     pending.get(roots[1]).resolve({ workflows: [] });
     await dom.flush();
-    assert.deepEqual(gitCalls, [roots[2]]);
+    assert.ok(gitCalls.length > 0, "The selected project loads its worktrees");
+    assert.deepEqual([...new Set(gitCalls)], [roots[2]], "Obsolete projects never load worktrees");
     assert.equal(appModule.loadStudioSession().projectRoot, roots[2]);
   } finally {
     for (const deferred of pending.values()) deferred.resolve({ workflows: [] });
@@ -3747,13 +3839,13 @@ test("rapid project opens skip obsolete worktree reads and keep the latest selec
   }
 });
 
-test("project workflow discovery registers Radish files before a workflow refresh", async () => {
+test("project workflow discovery registers Rattish files before a workflow refresh", async () => {
   const trusted = [];
   const workflow = {
     ...workflowFixture({ id: "daily-todos", name: "Daily Todos" }),
     projectRoot: "/workspace/gofer-flow",
-    sourceFormat: "radish",
-    sourcePath: "/workspace/gofer-flow/.taskurotta/daily-todos/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/gofer-flow/.raticode/daily-todos/workflow.rattish",
   };
   const fetchMock = createFetchMock([
     jsonResponse("/api/projects/open", { workflows: [workflow] }, { method: "POST" }),
@@ -3779,23 +3871,23 @@ test("project workflow discovery registers Radish files before a workflow refres
   });
 });
 
-test("workflow bundle paths use the selected folder and the Radish export route", () => {
-  const radishWorkflow = {
+test("workflow bundle paths use the selected folder and the Rattish export route", () => {
+  const rattishWorkflow = {
     id: "daily-review",
-    sourceFormat: "radish",
+    sourceFormat: "rattish",
   };
 
   assert.equal(
-    appModule.workflowBundlePath("/home/user/Exports/", radishWorkflow),
-    "/home/user/Exports/daily-review.taskurotta",
+    appModule.workflowBundlePath("/home/user/Exports/", rattishWorkflow),
+    "/home/user/Exports/daily-review.raticode",
   );
   assert.equal(
-    appModule.workflowBundlePath("C:\\Users\\dev\\Exports\\", radishWorkflow),
-    "C:\\Users\\dev\\Exports\\daily-review.taskurotta",
+    appModule.workflowBundlePath("C:\\Users\\dev\\Exports\\", rattishWorkflow),
+    "C:\\Users\\dev\\Exports\\daily-review.raticode",
   );
   assert.equal(
-    appModule.workflowExportEndpoint(radishWorkflow),
-    "/radish/workflows/daily-review/export",
+    appModule.workflowExportEndpoint(rattishWorkflow),
+    "/rattish/workflows/daily-review/export",
   );
 });
 
@@ -3815,12 +3907,12 @@ test("graph workflow selection is independent from the code explorer project", (
   );
 });
 
-test("Radish byte spans convert to Monaco text ranges across Unicode", () => {
+test("Rattish byte spans convert to Monaco text ranges across Unicode", () => {
   const source = "a😀é\nz";
-  assert.equal(radishRangesModule.utf8ByteOffsetToTextOffset(source, 0), 0);
-  assert.equal(radishRangesModule.utf8ByteOffsetToTextOffset(source, 1), 1);
-  assert.equal(radishRangesModule.utf8ByteOffsetToTextOffset(source, 5), 3);
-  assert.equal(radishRangesModule.utf8ByteOffsetToTextOffset(source, 7), 4);
+  assert.equal(rattishRangesModule.utf8ByteOffsetToTextOffset(source, 0), 0);
+  assert.equal(rattishRangesModule.utf8ByteOffsetToTextOffset(source, 1), 1);
+  assert.equal(rattishRangesModule.utf8ByteOffsetToTextOffset(source, 5), 3);
+  assert.equal(rattishRangesModule.utf8ByteOffsetToTextOffset(source, 7), 4);
 
   const model = {
     getLineMaxColumn: () => 5,
@@ -3830,37 +3922,37 @@ test("Radish byte spans convert to Monaco text ranges across Unicode", () => {
       return { lineNumber: lines.length, column: lines.at(-1).length + 1 };
     },
   };
-  const marker = radishRangesModule.diagnosticToMarker(
+  const marker = rattishRangesModule.diagnosticToMarker(
     { MarkerSeverity: { Warning: 4, Info: 2, Error: 8 } },
     model,
     source,
     {
-      code: "RADISH_TEST",
+      code: "RATTISH_TEST",
       message: "Unicode warning",
       severity: "warning",
       span: { start: { offset: 1 }, end: { offset: 7 } },
     },
   );
   assert.deepEqual(marker, {
-    code: "RADISH_TEST",
+    code: "RATTISH_TEST",
     endColumn: 5,
     endLineNumber: 1,
     message: "Unicode warning",
     severity: 4,
-    source: "Radish",
+    source: "Rattish",
     startColumn: 2,
     startLineNumber: 1,
   });
 });
 
-test("Radish editor projection populates the graph with source-backed route details", () => {
+test("Rattish editor projection populates the graph with source-backed route details", () => {
   const workflow = {
     ...workflowFixture({ id: "review-pr", name: "Review PR" }),
-    sourceFormat: "radish",
+    sourceFormat: "rattish",
     nodes: [],
     edges: [],
   };
-  const projected = appModule.radishGraphWorkflow(workflow, {
+  const projected = appModule.rattishGraphWorkflow(workflow, {
     workflowId: "review-pr",
     workflow: { name: "Review the PR" },
     metadata: { canvas: { nodes: { prepare: { x: 32, y: 48 } } } },
@@ -3880,7 +3972,7 @@ test("Radish editor projection populates the graph with source-backed route deta
           type: "agent",
           configuration: { provider: "codex" },
           execution: { allow_fail: false, max_concurrency: 1 },
-          diagnostics: [{ code: "RADISH_TEST", message: "Review is incomplete", severity: "error" }],
+          diagnostics: [{ code: "RATTISH_TEST", message: "Review is incomplete", severity: "error" }],
         },
       ],
       edges: [
@@ -3899,11 +3991,11 @@ test("Radish editor projection populates the graph with source-backed route deta
   assert.equal(projected.validationDiagnostics[0].targetId, "review");
 });
 
-test("Radish graph restores selection and emits targeted inspector mutations", async () => {
+test("Rattish graph restores selection and emits targeted inspector mutations", async () => {
   const mutations = [];
   const document = {
-    workflowId: "radish-inspector",
-    source: "Radish: 1\nWorkflow:\n  name: Inspector\nNode prepare:\n  type: bash-command\n  command: echo ready\n",
+    workflowId: "rattish-inspector",
+    source: "Rattish: 1\nWorkflow:\n  name: Inspector\nNode prepare:\n  type: bash-command\n  command: echo ready\n",
     workflow: { name: "Inspector", fields: { name: { value: "Inspector" } } },
     nodeContracts: [
       {
@@ -3932,15 +4024,15 @@ test("Radish graph restores selection and emits targeted inspector mutations", a
       edges: [],
     },
   };
-  const workflow = appModule.radishGraphWorkflow(
-    { ...workflowFixture({ id: "radish-inspector", name: "Inspector" }), sourceFormat: "radish", nodes: [], edges: [] },
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rattish-inspector", name: "Inspector" }), sourceFormat: "rattish", nodes: [], edges: [] },
     document,
   );
   const dom = await mountReact(
     React.createElement(DagCanvasHarness, {
       workflow,
-      radishDocument: document,
-      onRadishMutation(next) {
+      rattishDocument: document,
+      onRattishMutation(next) {
         mutations.push(next);
         if (next[0]?.kind === "rename_node") {
           const renamedId = next[0].name.toLowerCase();
@@ -4007,29 +4099,29 @@ test("Radish graph restores selection and emits targeted inspector mutations", a
   await dom.unmount();
 });
 
-test("Radish edits become dirty immediately without adding a code-mode top bar", async () => {
-  const savedSource = "Radish: 1\n\nWorkflow:\n  name: Demo\n";
+test("Rattish edits become dirty immediately without adding a code-mode top bar", async () => {
+  const savedSource = "Rattish: 1\n\nWorkflow:\n  name: Demo\n";
   const editedSource = `${savedSource}\nNode prepare:\n  type: bash-command\n  command: echo ready\n`;
-  const edited = radishEditorModule.editorDocumentAfterChange(
+  const edited = rattishEditorModule.editorDocumentAfterChange(
     { diagnostics: [], dirty: false, source: savedSource },
     editedSource,
     savedSource,
   );
   assert.equal(edited.dirty, true);
   assert.equal(
-    radishEditorModule.editorDocumentAfterChange(edited, savedSource, savedSource).dirty,
+    rattishEditorModule.editorDocumentAfterChange(edited, savedSource, savedSource).dirty,
     false,
   );
 
   const workflow = {
     ...workflowFixture({ id: "demo", name: "Demo" }),
     projectName: "gofer-flow",
-    sourceFormat: "radish",
-    sourcePath: "/workspace/gofer-flow/.taskurotta/demo/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/gofer-flow/.raticode/demo/workflow.rattish",
   };
   const dom = await mountReact(
     React.createElement(appModule.TopBar, {
-      activeCodePath: "/workspace/gofer-flow/.taskurotta/demo/workflow.rad",
+      activeCodePath: "/workspace/gofer-flow/.raticode/demo/workflow.rattish",
       editorState: { ...edited, saving: false },
       theme: "light",
       updateState: {},
@@ -4043,11 +4135,11 @@ test("Radish edits become dirty immediately without adding a code-mode top bar",
     }),
     createFetchMock([]),
   );
-  assert.equal(dom.byText("workflow.rad").tagName, "H2");
-  assert.match(dom.byText("workflow.rad").getAttribute("class"), /text-\[15px\]/);
-  assert.equal(dom.byText("/workspace/gofer-flow/.taskurotta/demo").tagName, "SPAN");
+  assert.equal(dom.byText("workflow.rattish").tagName, "H2");
+  assert.match(dom.byText("workflow.rattish").getAttribute("class"), /text-\[15px\]/);
+  assert.equal(dom.byText("/workspace/gofer-flow/.raticode/demo").tagName, "SPAN");
   assert.doesNotMatch(dom.text(), /\d+ lines/);
-  const topBar = dom.ancestor(dom.byText("workflow.rad"), "HEADER");
+  const topBar = dom.ancestor(dom.byText("workflow.rattish"), "HEADER");
   assert.match(topBar.getAttribute("class"), /studio-topbar/);
   assert.equal(
     allElements(topBar).some(
@@ -4104,18 +4196,14 @@ test("studio header separates quiet paths from focused workflow and file names",
     }),
     createFetchMock([]),
   );
-  const projectPathLabel = dom.ancestor(dom.byText("gofer-flow"), (element) =>
-    String(element.getAttribute?.("class") ?? "").includes("text-muted"));
-  assert.match(projectPathLabel.getAttribute("class"), /text-muted.*text-\[11px\]/);
-  assert.match(projectPathLabel.getAttribute("class"), /leading-4/);
-  assert.match(projectPathLabel.getAttribute("class"), /shrink-0/);
-  assert.doesNotMatch(projectPathLabel.getAttribute("class"), /flex-1/);
   const workflowTitle = dom.byText("Review PR");
-  assert.match(workflowTitle.getAttribute("class"), /font-semibold.*dark:text-white.*text-xl.*leading-6/);
-  assert.doesNotMatch(workflowTitle.getAttribute("class"), /max-w-\[55%\]/);
+  assert.equal(workflowTitle.getAttribute("title"), "gofer-flow/Review PR");
+  assert.match(workflowTitle.getAttribute("class"), /truncate.*font-semibold/);
   assert.doesNotMatch(workflowTitle.getAttribute("class"), /shrink-0/);
-  assert.ok(dom.ancestor(workflowTitle, (element) =>
-    String(element.getAttribute?.("class") ?? "").includes("gap-1")));
+  const header = dom.ancestor(workflowTitle, "HEADER");
+  const toolbar = allElements(header).find(element => element.getAttribute?.("data-graph-toolbar-target") === "true");
+  assert.ok(toolbar, "The graph has a dedicated toolbar row");
+  assert.notEqual(toolbar.parentNode, workflowTitle.parentNode, "Controls cannot overlap the workflow title row");
   await dom.unmount();
 });
 
@@ -4123,7 +4211,7 @@ test("create workflow dialog submits the selected project folder", async () => {
   const submissions = [];
   const dom = await mountReact(
     React.createElement(appModule.CreateWorkflowDialog, {
-      defaultProjectRoot: "/repos/taskurotta",
+      defaultProjectRoot: "/repos/raticode",
       error: "",
       open: true,
       saving: false,
@@ -4144,18 +4232,18 @@ test("create workflow dialog submits the selected project folder", async () => {
   assert.deepEqual(submissions, [{
     name: "Review PR",
     options: {
-      projectRoot: "/repos/taskurotta",
+      projectRoot: "/repos/raticode",
       projectGrantId: "",
     },
   }]);
   await dom.unmount();
 });
 
-test("new workflow dialog imports a .taskurotta bundle into the selected project", async () => {
+test("new workflow dialog imports a .raticode bundle into the selected project", async () => {
   const submissions = [];
   const dom = await mountReact(
     React.createElement(appModule.CreateWorkflowDialog, {
-      defaultProjectRoot: "/repos/taskurotta",
+      defaultProjectRoot: "/repos/raticode",
       error: "",
       open: true,
       saving: false,
@@ -4167,8 +4255,8 @@ test("new workflow dialog imports a .taskurotta bundle into the selected project
   );
 
   await dom.click(dom.ancestor(dom.byText("Import"), "BUTTON"));
-  const importZone = dom.ancestor(dom.byText("Choose a .taskurotta bundle"), "BUTTON");
-  const file = { name: "daily-review.taskurotta" };
+  const importZone = dom.ancestor(dom.byText("Choose a .raticode bundle"), "BUTTON");
+  const file = { name: "daily-review.raticode" };
   await dom.pointer(importZone, "onDrop", {
     dataTransfer: { dropEffect: "none", files: [file] },
   });
@@ -4177,7 +4265,7 @@ test("new workflow dialog imports a .taskurotta bundle into the selected project
     reactProps(form).onSubmit(testEvent(form));
   });
 
-  assert.deepEqual(submissions, [{ file, projectRoot: "/repos/taskurotta" }]);
+  assert.deepEqual(submissions, [{ file, projectRoot: "/repos/raticode" }]);
   await dom.unmount();
 });
 
@@ -4516,7 +4604,7 @@ test("chat helpers parse stream events, group thoughts, and build request payloa
 
   const markdownMarkup = renderToStaticMarkup(
     React.createElement(markdownContentModule.default, {
-      value: "## Result\n\n[Docs](https://example.com/docs)\n\n- [x] Ready\n\n| File | State |\n| --- | --- |\n| workflow.rad | valid |\n\n```sh\npwd\n```",
+      value: "## Result\n\n[Docs](https://example.com/docs)\n\n- [x] Ready\n\n| File | State |\n| --- | --- |\n| workflow.rattish | valid |\n\n```sh\npwd\n```",
     }),
   );
   assert.match(markdownMarkup, /id="result"/);
@@ -4800,6 +4888,8 @@ test("App loads workflows, preserves local edits on silent refreshes, saves erro
 
   await dom.flush();
   assert.match(dom.text(), /Demo/);
+  await dom.click(dom.ancestor(dom.byText("Run Timeline"), "BUTTON"));
+  await dom.flush();
   assert.match(dom.text(), /latest demo log/);
   const graphToolbar = dom.ancestor(
     dom.byTitle("Select workflow run"),
@@ -4879,9 +4969,9 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
     '{"type":"thought","text":"Search","trace":{"id":"search-1","kind":"tool","title":"Search","category":"search","input":"{\\"search_query\\":[{\\"q\\":\\"Amsterdam current weather\\"}]}","status":"complete"}}\n',
     '{"type":"thought","text":"Read","trace":{"id":"tool-1","kind":"tool","title":"Read","detail":"workflow.toml","input":"workflow.toml","status":"running"}}\n',
     '{"type":"thought","text":"Read","trace":{"id":"tool-1","kind":"tool","title":"Tool result","output":"[workflow]","status":"complete"}}\n',
-    '{"type":"thought","text":"Edit","trace":{"id":"edit-1","kind":"tool","title":"Edit","detail":".taskurotta/demo/workflow.rad","input":"{\\"path\\":\\".taskurotta/demo/workflow.rad\\",\\"kind\\":\\"update\\"}","status":"complete"}}\n',
-    '{"type":"changes","changes":{"id":null,"projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":1,"undoable":false,"undoUnavailableReason":"Undo is available when the assistant finishes","undone":false,"live":true,"files":[{"path":".taskurotta/demo/workflow.rad","status":"modified","additions":1,"deletions":1,"binary":false,"diff":"--- a/.taskurotta/demo/workflow.rad\\n+++ b/.taskurotta/demo/workflow.rad\\n-old\\n+working\\n"}]}}\n',
-    '{"type":"final","message":{"body":"**Looks ready**\\n\\n1. Read files\\n2. Classify tickets"},"completedAt":"2026-08-31T12:34:00.000Z","durationMs":2400,"changes":{"id":"change-1","projectRoot":"/workspace","fileCount":1,"additions":2,"deletions":1,"undoable":true,"undone":false,"files":[{"path":".taskurotta/demo/workflow.rad","status":"modified","additions":2,"deletions":1,"binary":false,"diff":"--- a/.taskurotta/demo/workflow.rad\\n+++ b/.taskurotta/demo/workflow.rad\\n-old\\n+new\\n+route\\n"}]}}\n',
+    '{"type":"thought","text":"Edit","trace":{"id":"edit-1","kind":"tool","title":"Edit","detail":".raticode/demo/workflow.rattish","input":"{\\"path\\":\\".raticode/demo/workflow.rattish\\",\\"kind\\":\\"update\\"}","status":"complete"}}\n',
+    '{"type":"changes","changes":{"id":null,"projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":1,"undoable":false,"undoUnavailableReason":"Undo is available when the assistant finishes","undone":false,"live":true,"files":[{"path":".raticode/demo/workflow.rattish","status":"modified","additions":1,"deletions":1,"binary":false,"diff":"--- a/.raticode/demo/workflow.rattish\\n+++ b/.raticode/demo/workflow.rattish\\n-old\\n+working\\n"}]}}\n',
+    '{"type":"final","message":{"body":"**Looks ready**\\n\\n1. Read files\\n2. Classify tickets"},"completedAt":"2026-08-31T12:34:00.000Z","durationMs":2400,"changes":{"id":"change-1","projectRoot":"/workspace","fileCount":1,"additions":2,"deletions":1,"undoable":true,"undone":false,"files":[{"path":".raticode/demo/workflow.rattish","status":"modified","additions":2,"deletions":1,"binary":false,"diff":"--- a/.raticode/demo/workflow.rattish\\n+++ b/.raticode/demo/workflow.rattish\\n-old\\n+new\\n+route\\n"}]}}\n',
   ]);
   const fetchMock = createFetchMock([
     jsonResponse("/api/workflows", workflowsPayload([
@@ -4943,7 +5033,7 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
       },
     }, { method: "POST" }),
     jsonResponse("/api/workflows/demo/logs?limit=100", { runs: [] }),
-    jsonResponse("/api/workflows/demo/stop", { stopped: true }, { method: "POST" }),
+    jsonResponse("/api/workflows/demo/runs/run-1/stop", { stopped: true }, { method: "POST" }),
     jsonResponse("/api/chat/changes/undo", { id: "change-1", undone: true, fileCount: 1 }, { method: "POST" }),
     jsonResponse("/api/chat/changes/redo", { id: "change-1", undone: false, fileCount: 1 }, { method: "POST" }),
     (url, options) => {
@@ -4965,15 +5055,20 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
     },
     (url) => (url === "/api/chat/stream" ? chatStream(url) : null),
   ]);
-  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: {
+      [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/workspace", workflowId: "demo" }),
+    },
+  });
 
   await dom.flush();
   assert.throws(() => dom.byLabel("Search workflows"), /Unable to find/);
-  const stopButton = dom.byTitle("Stop all runs");
+  const stopButton = dom.byTitle("Stop this run");
   assert.equal(stopButton.disabled, false);
   await dom.click(stopButton);
   await dom.flush();
-  assert.equal(fetchMock.calls.some((call) => call.url === "/api/workflows/demo/stop"), true);
+  assert.equal(fetchMock.calls.some((call) => call.url === "/api/workflows/demo/runs/run-1/stop" && call.options.method === "POST"), true);
+  assert.equal(fetchMock.calls.some((call) => call.url === "/api/workflows/demo/stop"), false);
 
   await dom.click(dom.byTitle("Start another workflow run"));
   await dom.flush();
@@ -4987,6 +5082,8 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   assert.match(previewRunButton.getAttribute("class"), /gap-2/);
 
   await dom.click(previewRunButton);
+  await dom.flush();
+  await dom.click(dom.ancestor(dom.byText("Run Timeline"), "BUTTON"));
   await dom.flush();
   assert.match(dom.text(), /run stopped/);
   assert.match(dom.text(), /Stopped/);
@@ -5092,13 +5189,13 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   assert.equal(editDisclosure.getAttribute("aria-expanded"), "false");
   await dom.click(editDisclosure);
   assert.equal(editDisclosure.getAttribute("aria-expanded"), "true");
-  assert.match(textOf(thoughtGroup), /\.taskurotta\/demo\/workflow\.rad/);
+  assert.match(textOf(thoughtGroup), /\.raticode\/demo\/workflow\.rattish/);
   const editedFileLink = dom.byLabel(
-    "Open .taskurotta/demo/workflow.rad in code editor",
+    "Open .raticode/demo/workflow.rattish in code editor",
   );
   assert.equal(editedFileLink.tagName, "BUTTON");
   assert.equal(editedFileLink.style.direction, "rtl");
-  assert.equal(editedFileLink.getAttribute("title"), ".taskurotta/demo/workflow.rad");
+  assert.equal(editedFileLink.getAttribute("title"), ".raticode/demo/workflow.rattish");
   assert.match(dom.text(), /Looks ready/);
   assert.equal(
     allElements(dom.container).some(
@@ -5192,7 +5289,7 @@ test("assistant threads keep streaming after navigation and report running and c
   await dom.change(dom.first("textarea"), "Keep tracking this response");
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
 
   assert.equal(dom.byTitle("Rem response running").tagName, "SPAN");
   assert.match(dom.text(), /Keep tracking this response/);
@@ -5222,7 +5319,7 @@ test("assistant threads keep streaming after navigation and report running and c
   await dom.flush();
   assert.match(dom.text(), /Background response finished/);
 
-  await dom.click(dom.byTitle("Recent threads"));
+  await dom.click(dom.byTitle("Active threads"));
   assert.equal(
     allElements(dom.container).some(
       (element) => element.getAttribute?.("title") === "Rem response complete",
@@ -5235,8 +5332,8 @@ test("assistant threads keep streaming after navigation and report running and c
 
 test("assistant file changes and elapsed time update before the turn completes", async () => {
   const controlledStream = controlledStreamResponse([
-    '{"type":"changes","changes":{"id":null,"projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":0,"undoable":false,"live":true,"files":[{"path":"workflow.rad","status":"modified","additions":1,"deletions":0,"binary":false,"diff":"+working\\n"}]}}\n',
-    '{"type":"final","message":{"body":"Done"},"completedAt":"2026-08-31T12:34:00.000Z","durationMs":2100,"changes":{"id":"change-1","projectRoot":"/workspace","fileCount":1,"additions":2,"deletions":0,"undoable":true,"undone":false,"files":[{"path":"workflow.rad","status":"modified","additions":2,"deletions":0,"binary":false,"diff":"+done\\n+tested\\n"}]}}\n',
+    '{"type":"changes","changes":{"id":null,"projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":0,"undoable":false,"live":true,"files":[{"path":"workflow.rattish","status":"modified","additions":1,"deletions":0,"binary":false,"diff":"+working\\n"}]}}\n',
+    '{"type":"final","message":{"body":"Done"},"completedAt":"2026-08-31T12:34:00.000Z","durationMs":2100,"changes":{"id":"change-1","projectRoot":"/workspace","fileCount":1,"additions":2,"deletions":0,"undoable":true,"undone":false,"files":[{"path":"workflow.rattish","status":"modified","additions":2,"deletions":0,"binary":false,"diff":"+done\\n+tested\\n"}]}}\n',
   ]);
   const fetchMock = createFetchMock([
     jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
@@ -5274,9 +5371,9 @@ test("assistant file changes and elapsed time update before the turn completes",
 
 test("assistant keeps an open live edit preview stable while new messages arrive", async () => {
   const controlledStream = controlledStreamResponse([
-    '{"type":"changes","changes":{"id":null,"projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":0,"undoable":false,"live":true,"files":[{"path":"workflow.rad","status":"modified","additions":1,"deletions":0,"binary":false,"diff":"+working\\n"}]}}\n',
+    '{"type":"changes","changes":{"id":null,"projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":0,"undoable":false,"live":true,"files":[{"path":"workflow.rattish","status":"modified","additions":1,"deletions":0,"binary":false,"diff":"+working\\n"}]}}\n',
     '{"type":"thought","text":"Checking the updated workflow"}\n',
-    '{"type":"final","message":{"body":"Done"},"completedAt":"2026-08-31T12:34:00.000Z","durationMs":2100,"changes":{"id":"change-1","projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":0,"undoable":true,"undone":false,"files":[{"path":"workflow.rad","status":"modified","additions":1,"deletions":0,"binary":false,"diff":"+working\\n"}]}}\n',
+    '{"type":"final","message":{"body":"Done"},"completedAt":"2026-08-31T12:34:00.000Z","durationMs":2100,"changes":{"id":"change-1","projectRoot":"/workspace","fileCount":1,"additions":1,"deletions":0,"undoable":true,"undone":false,"files":[{"path":"workflow.rattish","status":"modified","additions":1,"deletions":0,"binary":false,"diff":"+working\\n"}]}}\n',
   ]);
   const fetchMock = createFetchMock([
     jsonResponse("/api/provider/capabilities", { providers: [] }),
@@ -5488,6 +5585,50 @@ test("assistant threads keep their project scope until the user changes it", asy
   await dom.unmount();
 });
 
+test("Rem with no open folder does not inherit a selected workflow's stale scope", async () => {
+  const workflow = { ...workflowFixture(), projectRoot: "/worktrees/perf-improvements" };
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    activeProjectRoot: "", workflow, workflows: [workflow], width: 380,
+  }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]));
+  assert.ok(dom.byLabel("Scoped to No project. Change project scope"));
+  await dom.click(dom.byLabel("New thread"));
+  assert.ok(dom.byLabel("Scoped to No project. Change project scope"));
+  assert.equal(dom.fetchCalls.some(call => call.url === "/api/projects/open"), false);
+  await dom.unmount();
+});
+
+test("Rem returns to the open folder after leaving a thread with a deleted worktree", async () => {
+  const staleWorkflow = { ...workflowFixture(), projectRoot: "/worktrees/perf-improvements" };
+  function Harness() {
+    const [root, setRoot] = React.useState(staleWorkflow.projectRoot);
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { onClick: () => setRoot("/projects/gofer-flow") }, "Open gofer-flow"),
+      React.createElement(appModule.ChatPane, {
+        activeProjectRoot: root, workflow: staleWorkflow, workflows: [staleWorkflow], width: 380,
+        recentProjectRoots: ["/projects/gofer-flow"],
+      }));
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+  ]), { desktop: { workspace: {
+    getPathInfo: async root => ({ isDirectory: root === "/projects/gofer-flow" }),
+    gitWorktrees: async () => ({ worktrees: [] }),
+  } } });
+  await dom.click(dom.byLabel("New thread"));
+  await dom.click(dom.byText("Open gofer-flow"));
+  assert.ok(dom.byLabel("Scoped to perf-improvements. Change project scope"));
+  await dom.click(dom.byTitle("Back to active threads"));
+  assert.ok(dom.byLabel("Scoped to gofer-flow. Change project scope"));
+  await dom.click(dom.byLabel("Scoped to gofer-flow. Change project scope"));
+  await dom.flush();
+  assert.deepEqual(allElements(dom.byLabel("Rem project scope"))
+    .filter(el => el.getAttribute("role") === "menuitem").map(el => el.getAttribute("title")),
+  ["/projects/gofer-flow"]);
+  await dom.click(dom.byLabel("New thread"));
+  assert.ok(dom.byLabel("Scoped to gofer-flow. Change project scope"));
+  await dom.unmount();
+});
+
 test("changing project scope from assistant home keeps the thread list visible", async () => {
   const alpha = {
     ...workflowFixture({ id: "alpha-workflow", name: "Alpha workflow" }),
@@ -5519,7 +5660,7 @@ test("changing project scope from assistant home keeps the thread list visible",
   assert.ok(allElements(dom.container).find(
     (element) => element.getAttribute?.("data-assistant-home") !== null,
   ));
-  assert.match(dom.text(), /Recent threads/);
+  assert.match(dom.text(), /Active threads/);
 
   await dom.click(dom.byLabel("Scoped to alpha. Change project scope"));
   const scopeMenu = dom.byLabel("Rem project scope");
@@ -5533,8 +5674,8 @@ test("changing project scope from assistant home keeps the thread list visible",
   assert.ok(allElements(dom.container).find(
     (element) => element.getAttribute?.("data-assistant-home") !== null,
   ));
-  assert.match(dom.text(), /Recent threads/);
-  assert.equal(dom.allByTitle("Back to recent threads").length, 0);
+  assert.match(dom.text(), /Active threads/);
+  assert.equal(dom.allByTitle("Back to active threads").length, 0);
 
   await dom.unmount();
 });
@@ -5558,7 +5699,7 @@ test("deleting a background assistant thread disposes its pending stream state",
   await dom.flush();
   const chatRequest = fetchMock.calls.find((call) => call.url === "/api/chat/stream");
   const threadId = JSON.parse(chatRequest.options.body).workflow.chatThreadId;
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
   await dom.click(dom.byTitle("Delete thread"));
   await dom.flush();
 
@@ -5599,12 +5740,12 @@ test("assistant activity remains independent across concurrent threads", async (
   await dom.change(dom.first("textarea"), "First background thread");
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
   await dom.click(dom.byTitle("New thread"));
   await dom.change(dom.first("textarea"), "Second background thread");
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
-  await dom.click(dom.byTitle("Back to recent threads"));
+  await dom.click(dom.byTitle("Back to active threads"));
   assert.equal(dom.allByTitle("Rem response running").length, 2);
 
   secondStream.releaseNext();
@@ -6239,8 +6380,10 @@ test("bottom panel state and project trust stay global across workflow switches"
     React.createElement(appModule.default),
     createFetchMock([
       jsonResponse("/api/workflows", workflowsPayload([first, second])),
+      jsonResponse("/api/projects/open", { workflows: [second] }, { method: "POST" }),
     ]),
     {
+      storage: { "gofer.recentProjects": JSON.stringify(["/repos/first", "/repos/second"]) },
       desktop: {
         workspace: {
           trustProjectRoot: async (projectRoot) => {
@@ -6280,6 +6423,8 @@ test("bottom panel state and project trust stay global across workflow switches"
   await dom.keyDown(resizer, "ArrowUp");
   assert.equal(resizer.getAttribute("aria-valuenow"), "310");
 
+  await dom.click(dom.byLabel("Recent projects"));
+  await dom.click(dom.byTitle("/repos/second"));
   await dom.click(dom.ancestor(
     dom.byText("Second"),
     (node) => node.getAttribute?.("role") === "button",
@@ -7373,6 +7518,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
   assert.deepEqual(parseGitHistory("\0abc\x1fa1b2c3\x1fAda\x1f2026-08-31T12:00:00Z\x1fShip it\x1fShip it\n\nFull details.\n\x1fHEAD -> main\n12\t3\tapp.js\n-\t-\timage.png\n5\t0\ttest.js\n"), [{
     author: "Ada",
     authoredAt: "2026-08-31T12:00:00Z",
+    binaryFiles: 1,
     deletions: 3,
     hash: "abc",
     insertions: 17,
@@ -7407,7 +7553,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
     async runGit(args) {
       calls.push(args);
       if (args.includes("--show-toplevel")) return "/workspace/project\n";
-      if (args.includes("status")) return " M workflow.rad\0";
+      if (args.includes("status")) return "# branch.head main\0# branch.ab +2 -3\0" + "1 .M N... 100644 100644 100644 abc abc workflow.rattish\0";
       if (args.includes("branch")) return "main\n";
       if (args.includes("for-each-ref")) return "main\nfeature\n";
       if (args.includes("remote") || args.includes("stash")) return "";
@@ -7416,7 +7562,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
   });
   assert.deepEqual(result, {
     active: true,
-    entries: [{ path: "workflow.rad", status: "M", indexStatus: " ", worktreeStatus: "M", staged: false, unstaged: true }],
+    entries: [{ path: "workflow.rattish", status: "M", indexStatus: " ", worktreeStatus: "M", staged: false, unstaged: true }],
     root: "/workspace/project",
     branch: "main", branches: ["main", "feature"], ahead: 2, behind: 3, remotes: [], stashCount: 0,
   });
@@ -7424,7 +7570,8 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
     "-C",
     "/workspace/project",
     "status",
-    "--porcelain=v1",
+    "--porcelain=v2",
+    "--branch",
     "-z",
     "--untracked-files=all",
     "--",
@@ -7489,7 +7636,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
   assert.ok(baselineCalls.some((args) => args.includes("HEAD")));
 
   const removeCalls = [];
-  const missingPath = path.join(os.tmpdir(), "taskurotta-missing-worktree-test");
+  const missingPath = path.join(os.tmpdir(), "raticode-missing-worktree-test");
   const removed = await removeGitWorktree("/workspace/project", missingPath, {
     async runGit(args) {
       removeCalls.push(args);
@@ -7509,7 +7656,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
 test("worktree removal deletes the folder and registration while preserving the branch", async () => {
   const { execFileSync } = require("node:child_process");
   const { removeGitWorktree } = require("../../electron/git-status.cjs");
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-remove-worktree-"));
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-remove-worktree-"));
   const projectRoot = path.join(temporaryRoot, "main");
   const targetPath = path.join(temporaryRoot, "feature");
   const git = (...args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -7656,6 +7803,7 @@ test("commit history refreshes in the background and rows expand on click", asyn
   const commit = {
     author: "Ada",
     authoredAt: "2026-08-31T12:00:00Z",
+    binaryFiles: 1,
     deletions: 3,
     hash: "abc123def456",
     insertions: 17,
@@ -7722,7 +7870,7 @@ test("commit history refreshes in the background and rows expand on click", asyn
   assert.equal(commitButton.parentNode.getAttribute("title"), null);
   assert.match(dom.text(), /Ship it/);
   assert.doesNotMatch(dom.text(), /Full commit details\./);
-  assert.throws(() => dom.byLabel("17 insertions, 3 deletions"));
+  assert.throws(() => dom.byLabel("17 insertions, 3 deletions, 1 binary files without line counts"));
 
   await dom.click(refreshButton);
   assert.equal(historyCalls, 2);
@@ -7746,7 +7894,7 @@ test("commit history refreshes in the background and rows expand on click", asyn
     (node) => node.tagName === "P" && directText(node) === "Ada",
   );
   assert.equal(authorLines.length, 0, "author name should only appear once, in the row header");
-  assert.ok(dom.byLabel("17 insertions, 3 deletions"));
+  assert.ok(dom.byLabel("17 insertions, 3 deletions, 1 binary files without line counts"));
 
   await dom.click(commitButton);
   assert.equal(commitButton.getAttribute("aria-expanded"), "false");
@@ -7785,22 +7933,22 @@ test("Electron Git editor handoff keeps the terminal PTY flowing", () => {
 test("Electron path inspection reports deleted files without rejecting the request", async () => {
   const { inspectPath } = require("../../electron/path-info.cjs");
   const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "gofer-path-info-"));
-  const existingPath = path.join(tempRoot, "workflow.rad");
-  await fs.promises.writeFile(existingPath, "Radish: 1\n", "utf8");
+  const existingPath = path.join(tempRoot, "workflow.rattish");
+  await fs.promises.writeFile(existingPath, "Rattish: 1\n", "utf8");
 
   assert.deepEqual(await inspectPath(existingPath), {
-    basename: "workflow.rad",
+    basename: "workflow.rattish",
     exists: true,
-    extension: ".rad",
+    extension: ".rattish",
     isDirectory: false,
     isFile: true,
     path: existingPath,
   });
   await fs.promises.rm(existingPath);
   assert.deepEqual(await inspectPath(existingPath), {
-    basename: "workflow.rad",
+    basename: "workflow.rattish",
     exists: false,
-    extension: ".rad",
+    extension: ".rattish",
     isDirectory: false,
     isFile: false,
     path: existingPath,
@@ -7858,7 +8006,7 @@ test("Electron integrated browser uses locked-down webview guests", () => {
   assert.doesNotMatch(source, /new WebContentsView/);
   assert.match(source, /webviewTag: true/);
   assert.match(source, /will-attach-webview/);
-  assert.match(source, /params\.partition !== "persist:taskurotta-browser"/);
+  assert.match(source, /params\.partition !== "persist:raticode-browser"/);
   assert.match(source, /isPendingBrowserSessionSrc\(terminalOwnerId, params\.src\)/);
   assert.match(source, /webPreferences\.preload = browserPreloadPath/);
   assert.match(source, /webPreferences\.contextIsolation = true/);
@@ -7886,7 +8034,7 @@ test("Electron integrated browser uses locked-down webview guests", () => {
   assert.match(source, /session\.ownerZoomFactor/);
   assert.doesNotMatch(source, /accelerator: "CommandOrControl\+Alt\+\//);
   assert.match(componentSource, /document\.createElement\("webview"\)/);
-  assert.match(componentSource, /setAttribute\("partition", "persist:taskurotta-browser"\)/);
+  assert.match(componentSource, /setAttribute\("partition", "persist:raticode-browser"\)/);
   assert.match(componentSource, /bridge\.adopt\(sessionId, element\.getWebContentsId\(\)\)/);
   assert.match(componentSource, /page-favicon-updated/);
   assert.match(source, /page-favicon-updated/);
@@ -7914,7 +8062,7 @@ test("open editors refresh Git baselines after external branch changes", () => {
     path.join(repoRoot, "frontend/src/components/CodeWorkspace.jsx"),
     "utf8",
   );
-  assert.match(source, /startPolling\(refreshGitBaseline\)/);
+  assert.match(source, /if \(!visible\) return undefined;\s+return startPolling\(refreshGitBaseline, \{ immediate: true \}\)/);
   const polling = fs.readFileSync(path.join(repoRoot, "frontend/src/lib/refresh.js"), "utf8");
   assert.match(polling, /addEventListener\("focus", wake\)/);
   assert.match(polling, /addEventListener\("visibilitychange", wake\)/);
@@ -8076,7 +8224,7 @@ test("Electron IPC security validates sender origins and external URL schemes", 
     false,
   );
 
-  assert.equal(isSafeExternalUrl("https://github.com/zacharyivie/Taskurotta"), true);
+  assert.equal(isSafeExternalUrl("https://github.com/zacharyivie/gofer-flow"), true);
   assert.equal(isSafeExternalUrl("http://127.0.0.1:8765/docs"), true);
   assert.equal(isSafeExternalUrl("mailto:help@example.com"), true);
   assert.equal(isSafeExternalUrl("file:///etc/passwd"), false);
@@ -8936,6 +9084,8 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "gitWorktrees",
     "grantUserPath",
     "listDirectory",
+    "missingRecentFiles",
+    "missingThreadRoots",
     "openPath",
     "pathGrantForApi",
     "removeWorktree",
@@ -9321,17 +9471,17 @@ function DagCanvasHarness({
   notice,
   onDecideApproval,
   onPruneRunLogs,
-  onRadishMutation,
+  onRattishMutation,
   onReplayRunLog,
   onRetentionSettingsChange,
   onResumeRunLog,
   onWorkflowChange,
   retentionSettings,
-  radishDocument,
+  rattishDocument,
   workflow,
 }) {
   const [currentWorkflow, setCurrentWorkflow] = React.useState(workflow);
-  const [currentRadishDocument, setCurrentRadishDocument] = React.useState(radishDocument);
+  const [currentRattishDocument, setCurrentRattishDocument] = React.useState(rattishDocument);
   const [currentRetentionSettings, setCurrentRetentionSettings] = React.useState(
     retentionSettings,
   );
@@ -9346,11 +9496,11 @@ function DagCanvasHarness({
     onRetentionSettingsChange?.(nextSettings);
   }
 
-  async function handleRadishMutation(mutations) {
-    const nextDocument = await onRadishMutation?.(mutations);
+  async function handleRattishMutation(mutations) {
+    const nextDocument = await onRattishMutation?.(mutations);
     if (nextDocument) {
-      setCurrentRadishDocument(nextDocument);
-      setCurrentWorkflow((current) => appModule.radishGraphWorkflow(current, nextDocument));
+      setCurrentRattishDocument(nextDocument);
+      setCurrentWorkflow((current) => appModule.rattishGraphWorkflow(current, nextDocument));
     }
     return nextDocument;
   }
@@ -9360,7 +9510,7 @@ function DagCanvasHarness({
     logState: logState ?? { loading: false, error: "", text: "", path: null, runs: [] },
     notice,
     retentionSettings: currentRetentionSettings,
-    radishDocument: currentRadishDocument,
+    rattishDocument: currentRattishDocument,
     approvalState: approvalState ?? { approvals: [], error: "", loading: false },
     runResult: null,
     runState: { running: false },
@@ -9369,7 +9519,7 @@ function DagCanvasHarness({
     onImportWorkflow: () => {},
     onLoadLatestLog: () => {},
     onPruneRunLogs: onPruneRunLogs ?? (() => {}),
-    onRadishMutation: handleRadishMutation,
+    onRattishMutation: handleRattishMutation,
     onReplayRunLog: onReplayRunLog ?? (() => {}),
     onRetentionSettingsChange: handleRetentionSettingsChange,
     onResumeRunLog: onResumeRunLog ?? (() => {}),
@@ -9766,6 +9916,11 @@ async function mountReact(element, fetchMock, { browser, desktop = {}, storage =
       assert.ok(match, `Unable to find text: ${text}`);
       return match;
     },
+    byExactText(text) {
+      const match = allElements(container).find((node) => directText(node) === text);
+      assert.ok(match, `Unable to find exact text: ${text}`);
+      return match;
+    },
     byTitle(title) {
       const match = allElements(container).find((node) => node.getAttribute?.("title") === title);
       assert.ok(match, `Unable to find title: ${title}`);
@@ -9778,7 +9933,7 @@ async function mountReact(element, fetchMock, { browser, desktop = {}, storage =
     },
     controlAfterLabel(labelText) {
       const label = allElements(container).find((node) =>
-        node.tagName === "LABEL" && textOf(node).includes(labelText),
+        node.tagName === "LABEL" && textOf(node).includes(labelText) && !isInactiveGraphDescendant(node),
       );
       assert.ok(label, `Unable to find label: ${labelText}`);
       const control = allElements(label).find((node) =>
@@ -9803,6 +9958,13 @@ async function mountReact(element, fetchMock, { browser, desktop = {}, storage =
       return textOf(container);
     },
   };
+}
+
+function isInactiveGraphDescendant(node) {
+  for (let current = node; current; current = current.parentNode) {
+    if (current.getAttribute?.("data-graph-active") === "false") return true;
+  }
+  return false;
 }
 
 function testEvent(target, patch = {}) {
@@ -10279,7 +10441,7 @@ test("Developer and Memory settings can be found by task words", () => {
 
 test("Git commit, protected switch, stash, publish, pull and staged comparisons use real repositories", async () => {
   const { runGit, gitRepositoryAction, switchGitBranch, readGitFileBaseline } = require("../../electron/git-status.cjs");
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-scm-"));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-scm-"));
   const root = path.join(base, "repo");
   const remote = path.join(base, "remote.git");
   fs.mkdirSync(root);
@@ -10326,7 +10488,7 @@ test("Git commit, protected switch, stash, publish, pull and staged comparisons 
 
 test("conversation archive retains structured revisions, attachments, and deterministic search metadata", () => {
   const { archiveConversation } = require("../../electron/conversation-archive.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-archive-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-archive-"));
   const archive = path.join(root, "archive"); fs.mkdirSync(archive);
   const storageName = "a".repeat(32) + "-note.txt";
   const attachments = path.join(root, "chat-attachments", "thread-1"); fs.mkdirSync(attachments, { recursive: true });
@@ -10354,16 +10516,18 @@ test("conversation archive retains structured revisions, attachments, and determ
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("app logging rotates files, redacts common credentials and preserves structured entries", () => {
+test("app logging rotates files, redacts common credentials and preserves structured entries", async () => {
   const { createAppLog } = require("../../electron/app-log.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-log-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-log-"));
   try {
     const log = createAppLog(root, { maxBytes: 240, backups: 2 });
     log.write("error", "renderer", "apiToken=super-secret password=hunter2 Authorization: Bearer abc123");
+    await log.flush();
     const entry = JSON.parse(fs.readFileSync(log.file, "utf8"));
     assert.equal(entry.source, "renderer");
     assert.ok(!entry.message.includes("super-secret")); assert.ok(!entry.message.includes("hunter2")); assert.ok(!entry.message.includes("abc123"));
     for (let i = 0; i < 10; i++) log.write("info", "backend", "x".repeat(120));
+    await log.close();
     assert.deepEqual(fs.readdirSync(root).sort(), ["app.jsonl", "app.jsonl.1", "app.jsonl.2"]);
     for (const file of fs.readdirSync(root)) for (const line of fs.readFileSync(path.join(root, file), "utf8").trim().split("\n")) assert.ok(JSON.parse(line).time);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -10371,7 +10535,7 @@ test("app logging rotates files, redacts common credentials and preserves struct
 
 test("archive continues when old attachments are missing and rejects symlink destinations", () => {
   const { archiveConversation } = require("../../electron/conversation-archive.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-archive-missing-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-archive-missing-"));
   try {
     const messages = [{ id: "m", role: "user", body: "Historic text", attachments: [{ storageName: "a".repeat(32) + "-gone.txt", name: "gone.txt" }] }];
     const result = archiveConversation(root, { id: "t" }, messages, { dataDir: root });
@@ -10388,7 +10552,7 @@ test("archive continues when old attachments are missing and rejects symlink des
 
 test("Git comparisons cover empty additions, renamed files, and binary versions", async () => {
   const { runGit, readGitFileBaseline } = require("../../electron/git-status.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-diff-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-diff-"));
   const git = (...args) => runGit(["-C", root, ...args]);
   try {
     await git("init", "-b", "main"); await git("config", "user.name", "Test"); await git("config", "user.email", "test@example.invalid");
@@ -10588,7 +10752,7 @@ test("source control bulk actions stay within their group and confirm discards o
 test("project search finds literal matches and respects ignored files and symlinks", async () => {
   const { searchProject } = require("../../electron/project-search.cjs");
   const runGit = require("node:util").promisify(require("node:child_process").execFile);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-search-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-search-"));
   try {
     await runGit("git", ["init", root]);
     fs.writeFileSync(path.join(root, ".gitignore"), "ignored.txt\n");
@@ -10650,7 +10814,7 @@ test("project search preserves drafts and opens results at their line and column
 
 test("regex replacement preserves line endings, supports captures, exclusions, and stale-file protection", async () => {
   const { searchProject, replaceProject } = require("../../electron/project-search.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-replace-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-replace-"));
   const target = path.join(root, "sample.txt");
   try {
     fs.mkdirSync(path.join(root, "nested"));
@@ -10737,7 +10901,7 @@ test("project search sends regex and exclusion drafts and replaces a file", asyn
 
 test("search UI applies regex queries and regex exclusions through the real worker", async () => {
   const { searchProject, replaceProject } = require("../../electron/project-search.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-regex-ui-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-regex-ui-"));
   fs.writeFileSync(path.join(root, "sample.txt"), "hello12 hello34");
   fs.writeFileSync(path.join(root, "skip12.log"), "hello56");
   const workspace = {
@@ -10784,7 +10948,7 @@ test("search UI applies regex queries and regex exclusions through the real work
 
 test("regex exclusions preserve escapes and quantifier commas during replacement", async () => {
   const { searchProject, replaceProject } = require("../../electron/project-search.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-regex-exclude-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-regex-exclude-"));
   try {
     fs.mkdirSync(path.join(root, "nested"));
     fs.writeFileSync(path.join(root, "nested", "skip12.log"), "hello56");
@@ -10960,8 +11124,8 @@ test("project sidebar announces project switching", () => {
   assert.match(markup, /aria-busy="true"/);
 });
 
-test("recent project switching shows progress and does not open discovered Radish files", async () => {
-  const workflow = { ...workflowFixture({ id: "second" }), projectRoot: "/second", sourceFormat: "radish", sourcePath: "/second/.taskurotta/demo/workflow.rad" };
+test("recent project switching shows progress and does not open discovered Rattish files", async () => {
+  const workflow = { ...workflowFixture({ id: "second" }), projectRoot: "/second", sourceFormat: "rattish", sourcePath: "/second/.raticode/demo/workflow.rattish" };
   let finishTrust;
   const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
     jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
@@ -10977,12 +11141,12 @@ test("recent project switching shows progress and does not open discovered Radis
     } },
   });
   await dom.flush();
-  await dom.click(dom.byTitle("/workspace\nChoose a recent project"));
+  await dom.click(dom.byLabel("Recent projects"));
   await dom.click(dom.byTitle("/second"));
   assert.match(dom.text(), /Opening second/);
   finishTrust();
   await dom.flush();
-  assert.ok(dom.byTitle("/second\nChoose a recent project"));
+  assert.equal(dom.byLabel("Recent projects").getAttribute("title"), "/second");
   assert.doesNotMatch(dom.text(), /Opening second/);
   assert.ok(dom.byText("Open File"));
   await dom.unmount();
@@ -11129,7 +11293,7 @@ test("Rem avatar preferences default on and persist explicit opt-outs", () => {
 
 test("project search inclusion globs narrow search and replacement with exclusions taking precedence", async () => {
   const { searchProject, replaceProject } = require("../../electron/project-search.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-include-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-include-"));
   try {
     fs.mkdirSync(path.join(root, "src"));
     for (const file of ["main.py", "notes.txt", "src/app.py", "src/skip.py", "src/app.js"]) {
@@ -11154,7 +11318,7 @@ test("project search inclusion globs narrow search and replacement with exclusio
 
 test("Git integration previews preserve worktrees, detect conflicts, and support resolution and abort", async () => {
   const { runGit, gitRepositoryAction, readGitStatus, changeGitFile, readGitFileBaseline } = require("../../electron/git-status.cjs");
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-integration-"));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-integration-"));
   const root = path.join(base, "main"); const feature = path.join(base, "feature");
   fs.mkdirSync(root);
   const git = (...args) => runGit(["-C", root, ...args]);
@@ -11205,7 +11369,7 @@ test("Git integration previews preserve worktrees, detect conflicts, and support
 
 test("stash previews include untracked files, detect conflicts and guard discard against stale lists", async () => {
   const { runGit, gitRepositoryAction, readGitStatus } = require("../../electron/git-status.cjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-stashes-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-stashes-"));
   const git = (...args) => runGit(["-C", root, ...args]);
   try {
     await git("init", "-b", "main"); await git("config", "user.name", "Test"); await git("config", "user.email", "test@example.invalid");
@@ -11262,6 +11426,112 @@ test("Ask Rem keeps the selected text attached in a new thread scoped to its own
   await dom.change(dom.first("textarea"), "Why does this work?");
   assert.equal(dom.first("textarea").value, "Why does this work?");
   assert.match(dom.text(), /editor-selection.txt/);
+  await dom.unmount();
+});
+
+test("Workflow repair sends once in a fresh thread in the workflow project", async () => {
+  let uploaded;
+  const chatStream = streamResponse(['{"type":"final","message":{"body":"Fixed"}}\n']);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url, options) => {
+      if (url !== "/api/chat/attachments") return null;
+      uploaded = JSON.parse(options.body);
+      return jsonResponse(url, { attachments: [{ id: "source", name: "editor-selection.txt", type: "text/plain", storageName: "source.txt" }] }, { method: "POST" })(url, options);
+    },
+    url => url === "/api/chat/stream" ? chatStream(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    workflows: [], width: 380, workflow: { projectRoot: "/projects/alpha" },
+  }), fetchMock);
+  await dom.click(dom.byLabel("New thread"));
+  await dom.change(dom.first("textarea"), "Keep my existing draft");
+  const draft = "Fix the invalid workflow definition in /worktrees/beta/workflow.rattish. Do not execute the workflow.";
+  await dom.dispatchWindow("gofer:rem-context", { detail: {
+    mode: "ask", autoSend: true, projectRoot: "/worktrees/beta", path: "/worktrees/beta/workflow.rattish",
+    text: "Rattish: 1\n\nValidation diagnostics:\nMissing node type", draft,
+  } });
+  await dom.flush();
+  assert.ok(dom.byLabel("Scoped to beta. Change project scope"));
+  const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream");
+  assert.equal(requests.length, 1);
+  const request = JSON.parse(requests[0].options.body);
+  assert.equal(request.workflow.projectRoot, "/worktrees/beta");
+  assert.equal(request.workflow.chatThreadId, uploaded.threadId);
+  assert.equal(request.messages.at(-1).body || request.messages.at(-1).content, draft);
+  assert.match(Buffer.from(uploaded.files[0].data, "base64").toString(), /Missing node type/);
+  await dom.unmount();
+});
+
+test("Rem project picker discovers worktrees and scopes a thread to their exact paths", async () => {
+  const workspace = { gitWorktrees: async root => {
+    if (root === "/broken") throw new Error("unavailable");
+    return { worktrees: [{ path: root, branch: "main" },
+      { path: "/worktrees/feature", branch: "feature" },
+      { path: "/missing", missing: true }, { path: "/pruned", prunable: true }] };
+  } };
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    workflows: [], width: 380, recentProjectRoots: ["/repo", "/broken"], workflow: { projectRoot: "/repo" },
+  }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]), { desktop: { workspace } });
+  await dom.click(dom.byLabel("New thread"));
+  await dom.click(dom.byLabel("Scoped to repo. Change project scope"));
+  await dom.flush();
+  const choices = allElements(dom.byLabel("Rem project scope")).filter(el => el.getAttribute("role") === "menuitem");
+  assert.deepEqual(choices.map(el => el.getAttribute("title")), ["/repo", "/worktrees/feature"]);
+  assert.doesNotMatch(dom.text(), /Some worktrees could not be loaded/);
+  await dom.click(choices.at(-1));
+  assert.ok(dom.byLabel("Scoped to feature. Change project scope"));
+  await dom.unmount();
+});
+
+test("Rem project picker rechecks saved workspace folders on every opening", async () => {
+  const directories = new Set(["/repo", "/worktrees/feature", "/plain-folder"]);
+  const checked = [];
+  const workspace = {
+    getPathInfo: async root => {
+      checked.push(root);
+      if (root === "/deleted-workflow") throw new Error("ENOENT: no such file or directory");
+      if (root === "/unavailable") throw new Error("Permission denied");
+      return { isDirectory: directories.has(root) };
+    },
+    gitWorktrees: async root => ({ worktrees: root === "/repo"
+      ? [{ path: "/repo" }, { path: "/worktrees/feature" }, { path: "/stale-discovered" }]
+      : [] }),
+  };
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    workflows: [{ projectRoot: "/deleted-workflow" }], width: 380,
+    recentProjectRoots: ["/repo", "/worktrees/feature", "/plain-folder", "/file", "/unavailable"],
+    workflow: { projectRoot: "/worktrees/feature" },
+  }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]), { desktop: { workspace } });
+  const choices = () => allElements(dom.byLabel("Rem project scope"))
+    .filter(el => el.getAttribute("role") === "menuitem").map(el => el.getAttribute("title"));
+  await dom.click(dom.byLabel("New thread"));
+  await dom.click(dom.byLabel("Scoped to feature. Change project scope"));
+  await dom.flush();
+  assert.deepEqual(choices(), ["/worktrees/feature", "/repo", "/plain-folder"]);
+  assert.doesNotMatch(dom.text(), /Some worktrees could not be loaded/);
+  await dom.click(dom.byLabel("Scoped to feature. Change project scope"));
+  directories.delete("/worktrees/feature");
+  await dom.click(dom.byLabel("Scoped to feature. Change project scope"));
+  await dom.flush();
+  assert.deepEqual(choices(), ["/repo", "/plain-folder"]);
+  assert.equal(checked.filter(root => root === "/worktrees/feature").length, 2);
+  // The existing conversation retains its scope even when that folder disappears.
+  assert.ok(dom.byLabel("Scoped to feature. Change project scope"));
+  await dom.unmount();
+});
+
+test("Rem project picker excludes roots reported missing by the desktop Git bridge", async () => {
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    workflows: [], width: 380, workflow: { projectRoot: "/deleted" },
+  }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]), {
+    desktop: { workspace: { gitWorktrees: async () => ({ missing: true, worktrees: [] }) } },
+  });
+  await dom.click(dom.byLabel("Scoped to deleted. Change project scope"));
+  await dom.flush();
+  assert.equal(allElements(dom.byLabel("Rem project scope")).filter(el => el.getAttribute("role") === "menuitem").length, 0);
+  assert.match(dom.text(), /No workspace folders available/);
+  assert.equal(dom.byLabel("Scoped to deleted. Change project scope").disabled, false);
   await dom.unmount();
 });
 
@@ -11381,7 +11651,7 @@ test("worktree context menus list operations and defer target selection without 
 
 test("Git merge strategies, commit resets, and worktree starting commits preserve their distinct semantics", async () => {
   const { runGit, gitRepositoryAction, addGitWorktree } = require("../../electron/git-status.cjs");
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-history-"));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-history-"));
   const root = path.join(base, "repo"); fs.mkdirSync(root);
   const git = (...args) => runGit(["-C", root, ...args]);
   try {
@@ -11444,6 +11714,14 @@ test("Conventional Commit generation uses the restricted endpoint and rejects in
     assert.equal(request.provider, "codex");
     assert.equal(request.effort, "high");
     assert.equal(request.diff, "+staged");
+    for (const diff of ["x".repeat(120001), "\u0000".repeat(2100000)]) {
+      await generateConventionalCommit({ provider: "codex", model: "cli-default", projectRoot: "/repo", diff });
+      assert.equal(request.inspectStaged, true);
+      assert.equal(request.projectRoot, "/repo");
+      assert.equal(request.diff, undefined);
+    }
+    await generateConventionalCommit({ provider: "codex", projectRoot: "/repo", inspectStaged: true });
+    assert.equal(request.inspectStaged, true);
   } finally { globalThis.fetch = previousFetch; }
 });
 
@@ -11484,12 +11762,12 @@ test("commit history menu requests resets and prepopulates a worktree at the sel
 });
 
 test("Rem commit button uses staged diff, preserves typed drafts, and rejects stale index results", async () => {
-  let tree = "tree-1", pending;
+  let tree = "tree-1", pending, inspectStaged = false;
   const calls = [];
   const snapshot = { active: true, branch: "main", branches: ["main"], entries: [{ path: "note", status: "M", staged: true, unstaged: true }] };
   const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => snapshot,
     gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [] }),
-    gitRepoAction: async (_root, action) => { calls.push(action); return { tree, diff: "+staged-only" }; },
+    gitRepoAction: async (_root, action) => { calls.push(action); return inspectStaged ? { tree, inspectStaged: true } : { tree, diff: "+staged-only" }; },
   };
   const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
   window.dispatchEvent = event => { if (event.type === "gofer:rem-commit-message") pending = event.detail; return true; };
@@ -11508,6 +11786,13 @@ test("Rem commit button uses staged diff, preserves typed drafts, and rejects st
     await React.act(async () => pending.resolve("feat: outdated message")); await dom.flush();
     assert.match(dom.text(), /Staged changes changed/);
     assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: my edited draft");
+    inspectStaged = true;
+    await dom.click(dom.byLabel("Generate commit message with Rem")); await dom.flush();
+    assert.equal(pending.inspectStaged, true);
+    assert.equal(pending.diff, undefined);
+    assert.equal(pending.projectRoot, "/repo");
+    await React.act(async () => pending.resolve("fix: summarize large changes")); await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: summarize large changes");
     assert.ok(calls.every(action => action === "staged-diff"));
   } finally { await dom.unmount(); }
 });
@@ -11522,7 +11807,8 @@ test("Rem accepts staged diffs larger than 200000 characters", async () => {
     if (args.includes("--cached")) return diff;
     throw new Error(`Unexpected Git command: ${args}`);
   } });
-  assert.equal(result.diff, diff);
+  assert.equal(result.diff, undefined);
+  assert.equal(result.inspectStaged, true);
   assert.equal(result.tree, "staged-tree");
 });
 
@@ -11612,7 +11898,7 @@ test("Electron preload clears a failed renewal and permits a later retry", async
   const exposed = runPreload({
     argv: ["electron", "preload"],
     invoke() {
-      if (fail) throw new Error("Could not renew Taskurotta folder access. Retry the action.");
+      if (fail) throw new Error("Could not renew Raticode folder access. Retry the action.");
       return { grantId: "grant-brain", path: "/outside/brain" };
     },
   });
@@ -11631,7 +11917,7 @@ test("Rem stops before sending chat when folder renewal fails and allows retry",
   let fail = true;
   const desktop = { workspace: {
     trustProjectRoot: async () => {
-      if (fail) throw new Error("Could not renew Taskurotta folder access. Retry the action.");
+      if (fail) throw new Error("Could not renew Raticode folder access. Retry the action.");
     },
     pathGrantForApi: () => "renewed-grant",
   } };
@@ -11648,7 +11934,7 @@ test("Rem stops before sending chat when folder renewal fails and allows retry",
   await dom.change(dom.first("textarea"), "Search my notes");
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
-  assert.match(dom.text(), /Could not renew Taskurotta folder access/);
+  assert.match(dom.text(), /Could not renew Raticode folder access/);
   assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 0);
   fail = false;
   await dom.change(dom.first("textarea"), "Try again");
@@ -11668,14 +11954,14 @@ test('workspace keeps dirty tabs when closing is cancelled or the editor cannot 
       active: true,
       activePath: filePath,
       openPaths,
-      radishDirty: true,
+      rattishDirty: true,
       settings: { ...settingsModule.DEFAULT_APP_SETTINGS, general: { ...settingsModule.DEFAULT_APP_SETTINGS.general, autosave: false } },
       workflow: { projectRoot: '/repo', sourcePath: filePath },
       onClosePaths: paths => {
         closed.push(...paths);
         setOpenPaths(current => current.filter(path => !paths.includes(path)));
       },
-      onRadishDiscard: () => discarded.push(filePath),
+      onRattishDiscard: () => discarded.push(filePath),
     });
   }
   // The editor is unavailable in this harness, so Save returns null. The
@@ -11709,7 +11995,7 @@ test("recent projects drop deleted folders and reset missing worktree selections
     jsonResponse("/api/projects/open", { workflows: [] }, { method: "POST" }),
   ]), {
     storage: {
-      "taskurotta.studioSession.v1": JSON.stringify({ projectRoot: "/feature", view: "code" }),
+      "raticode.studioSession.v1": JSON.stringify({ projectRoot: "/feature", view: "code" }),
       "gofer.recentProjects": JSON.stringify(["/main", "/deleted"]),
       "gofer.lastWorktreeByProject": JSON.stringify({ "/main": "/feature", "/deleted": "/deleted" }),
     },
@@ -11995,7 +12281,7 @@ test("Branches lists inactive branches without checkout and offers deletion and 
   };
   const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: '/repo' }, onSelectProject: path => selected.push(path) }), createFetchMock([]), { desktop: { workspace } });
   const oldConfirm = window.confirm;
-  window.confirm = () => true;
+  window.confirm = () => { assert.fail("Merged branch deletion must not prompt"); };
   try {
     await dom.click(dom.byLabel('Source control')); await dom.flush(); await dom.click(dom.byText('Branches'));
     const row = dom.byLabel('Branch feature');
@@ -12023,4 +12309,666 @@ test("Branches lists inactive branches without checkout and offers deletion and 
     assert.deepEqual(calls.at(-1), ['branch-delete', 'feature']);
     assert.equal(allElements(dom.container).some(el => el.getAttribute('aria-label') === 'Branch feature'), false);
   } finally { window.confirm = oldConfirm; await dom.unmount(); }
+});
+
+
+test("inactive graph tabs ignore global node shortcuts and relinquish fullscreen", async () => {
+  const changes = [];
+  const alpha = workflowFixture({ id: "alpha", label: "Alpha node" });
+  const beta = workflowFixture({ id: "beta", label: "Beta node" });
+  function Harness() {
+    const [activeId, setActiveId] = React.useState("alpha");
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { onClick: () => setActiveId("beta") }, "Activate beta"),
+      [alpha, beta].map(workflow => React.createElement(canvasModule.default, {
+        key: workflow.id, active: activeId === workflow.id, workflow,
+        logState: { runs: [], loading: false }, approvalState: { approvals: [] }, runState: { running: false },
+        onWorkflowChange: next => changes.push(next),
+      })),
+    );
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]));
+  // Select alpha while active, then leave it selected in a retained hidden tab.
+  await dom.dispatchWindow("keydown", { key: "a", code: "KeyA", ctrlKey: true });
+  await dom.click(dom.allByTitle("Enter full screen")[0]);
+  assert.ok(dom.byTitle("Exit full screen"));
+  await dom.click(dom.byText("Activate beta"));
+  assert.equal(dom.allByTitle("Exit full screen").length, 0, "inactive graph retained a fixed fullscreen overlay");
+  await dom.dispatchWindow("keydown", { key: "a", code: "KeyA", ctrlKey: true });
+  await dom.dispatchWindow("keydown", { key: "Delete", code: "Delete" });
+  assert.deepEqual(changes.map(item => item.id), ["beta"], "hidden selected graph consumed Delete");
+  assert.deepEqual(changes[0].nodes, []);
+  await dom.unmount();
+});
+
+test("inactive graph tab retains its selected edge without deleting it from another editor", async () => {
+  const changes = [];
+  const workflow = workflowFixture({ id: "edge-tab", label: "First" });
+  workflow.nodes.push({ ...workflow.nodes[0], id: "next", label: "Next", x: 300 });
+  workflow.edges = [{ id: "route", from: "step", to: "next", condition: "always" }];
+  function Harness() {
+    const [active, setActive] = React.useState(true);
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { onClick: () => setActive(false) }, "Activate file"),
+      React.createElement(canvasModule.default, {
+        active, workflow, logState: { runs: [], loading: false }, approvalState: { approvals: [] }, runState: { running: false },
+        onWorkflowChange: next => changes.push(next),
+      }),
+    );
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]));
+  await dom.click(dom.byTitle("Map"));
+  const edge = allElements(dom.byLabel("Graph outline")).find(element => element.tagName === "BUTTON" && element.getAttribute("aria-label")?.startsWith("First to Next"));
+  assert.ok(edge);
+  await dom.focus(edge);
+  assert.equal(edge.getAttribute("aria-current"), "true");
+  await dom.click(dom.byText("Activate file"));
+  await dom.dispatchWindow("keydown", { key: "Delete", code: "Delete" });
+  assert.deepEqual(changes, [], "hidden graph deleted its previously selected edge");
+  await dom.unmount();
+});
+
+function workflowDocumentWriteHarness(request) {
+  const source = fs.readFileSync(path.join(frontendRoot, 'src/pages/App.jsx'), 'utf8');
+  const block = source.slice(source.indexOf('  function queueWorkflowDocumentWrite('), source.indexOf('  function updateRattishGraphMetadata('));
+  const sessions = new Map();
+  const accepted = [];
+  const analyses = [];
+  function documentSession(id) {
+    if (!sessions.has(id)) {
+      const state = { current: null };
+      sessions.set(id, { documentWritesRef: { current: Promise.resolve() }, rattishEditorStateRef: state,
+        rattishAnalysisTimerRef: { current: null }, rattishAnalysisRequestRef: { current: 0 }, rattishMetadataPendingRef: { current: false }, rattishMetadataSavingRef: { current: null },
+        setRattishEditorState(next) { state.current = next; } });
+    }
+    return sessions.get(id);
+  }
+  const functions = vm.runInNewContext(`(function () { ${block}; return { saveWorkflowDocument, mutateActiveRattish }; })()`, {
+    documentSession, fetch: request, apiUrl: value => value, window: { clearTimeout },
+    scheduleRattishAnalysis: (...args) => analyses.push(args),
+    rattishEditorRef: { current: { acceptDocument: (...args) => accepted.push(args) } },
+    setTopBarNotice() {}, loadWorkflows: async () => {}, saveRattishMetadataNow: async () => true,
+  });
+  return { ...functions, documentSession, accepted, analyses };
+}
+
+function deferredDocumentResponse() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve: document => resolve({ ok: true, json: async () => ({ document }) }) };
+}
+
+const writeTestWorkflow = id => ({ id, sourceFormat: 'rattish', sourcePath: `/projects/${id}/workflow.rattish` });
+const writeTestDocument = (source, savedRevision = 'r1', dirty = false) => ({ source, savedRevision, dirty, runnable: true });
+
+test('workflow source typed during save retains its draft and advances the saved revision', async () => {
+  const pending = deferredDocumentResponse();
+  const harness = workflowDocumentWriteHarness(() => pending.promise);
+  const target = writeTestWorkflow('alpha');
+  const session = harness.documentSession(target.id);
+  session.setRattishEditorState({ document: writeTestDocument('submitted', 'r1', true) });
+  const saving = harness.saveWorkflowDocument(target);
+  await Promise.resolve(); await Promise.resolve();
+  session.setRattishEditorState({ document: writeTestDocument('newer draft', 'r1', true) });
+  pending.resolve(writeTestDocument('submitted', 'r2'));
+  await assert.rejects(saving, /changed during save/);
+  assert.equal(session.rattishEditorStateRef.current.document.source, 'newer draft');
+  assert.equal(session.rattishEditorStateRef.current.document.savedRevision, 'r2');
+  assert.equal(session.rattishEditorStateRef.current.document.savedSource, 'submitted');
+  assert.equal(session.rattishEditorStateRef.current.document.dirty, true);
+  assert.equal(harness.accepted.length, 0, 'new source buffer was reset');
+  assert.deepEqual(harness.analyses, [['newer draft', target.sourcePath]]);
+});
+
+test('workflow graph mutation cannot overwrite source typed while its request is pending', async () => {
+  const pending = deferredDocumentResponse();
+  let started;
+  const requested = new Promise(resolve => { started = resolve; });
+  const harness = workflowDocumentWriteHarness(() => { started(); return pending.promise; });
+  const target = writeTestWorkflow('alpha');
+  const session = harness.documentSession(target.id);
+  session.setRattishEditorState({ document: writeTestDocument('disk') });
+  const mutation = harness.mutateActiveRattish([{ kind: 'edit-node' }], target);
+  await requested;
+  session.setRattishEditorState({ document: writeTestDocument('newer source', 'r1', true) });
+  pending.resolve(writeTestDocument('graph edit', 'r2'));
+  assert.equal(await mutation, null);
+  assert.equal(session.rattishEditorStateRef.current.document.source, 'newer source');
+  assert.equal(session.rattishEditorStateRef.current.document.savedRevision, 'r2');
+  assert.equal(session.rattishEditorStateRef.current.document.dirty, true);
+  assert.equal(harness.accepted.length, 0);
+});
+
+test('workflow document writes serialize per workflow and run independently across workflows', async () => {
+  const calls = [];
+  const pending = [];
+  const harness = workflowDocumentWriteHarness((url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) });
+    const request = deferredDocumentResponse(); pending.push(request); return request.promise;
+  });
+  const alpha = writeTestWorkflow('alpha'); const beta = writeTestWorkflow('beta');
+  harness.documentSession(alpha.id).setRattishEditorState({ document: writeTestDocument('alpha') });
+  harness.documentSession(beta.id).setRattishEditorState({ document: writeTestDocument('beta') });
+  const first = harness.mutateActiveRattish([{ kind: 'first' }], alpha);
+  const second = harness.mutateActiveRattish([{ kind: 'second' }], alpha);
+  const other = harness.mutateActiveRattish([{ kind: 'other' }], beta);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.map(item => item.url), ['/workflows/alpha/document/mutate', '/workflows/beta/document/mutate']);
+  pending[0].resolve(writeTestDocument('alpha first', 'r2'));
+  pending[1].resolve(writeTestDocument('beta other', 'b2'));
+  await first; await other; await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls[2].url, '/workflows/alpha/document/mutate');
+  assert.equal(calls[2].body.expectedRevision, 'r2');
+  pending[2].resolve(writeTestDocument('alpha second', 'r3')); await second;
+  assert.equal(harness.documentSession('alpha').rattishEditorStateRef.current.document.savedRevision, 'r3');
+  assert.equal(harness.documentSession('beta').rattishEditorStateRef.current.document.savedRevision, 'b2');
+});
+
+test('closing mixed workflow tabs prompts every last dirty view and aborts on cancel', async () => {
+  const source = fs.readFileSync(path.join(frontendRoot, 'src/pages/App.jsx'), 'utf8');
+  const block = source.slice(source.indexOf('  async function beforeCloseWorkflowViews('), source.indexOf('  function renderWorkflowGraph('));
+  const workflows = [writeTestWorkflow('alpha'), writeTestWorkflow('beta')];
+  const prompts = [];
+  const beforeClose = vm.runInNewContext(`(function () { ${block}; return beforeCloseWorkflowViews; })()`, {
+    workflows, codeOpenPaths: ['graph:alpha', 'graph:beta', workflows[0].sourcePath],
+    workflowTabs: { 'graph:alpha': { workflowId: 'alpha' }, 'graph:beta': { workflowId: 'beta' } },
+    documentSession: () => ({ rattishEditorStateRef: { current: { document: { dirty: true } } }, rattishMetadataPendingRef: { current: false }, rattishMetadataSavingRef: { current: null } }),
+    setWorkflowClosePrompt: prompt => prompts.push(prompt), saveRattishMetadataNow: async () => true,
+  });
+  const closing = beforeClose(['graph:alpha', 'graph:beta', workflows[0].sourcePath]);
+  assert.equal(prompts.length, 1); assert.equal(prompts[0].workflow.id, 'alpha');
+  prompts[0].resolve(true); await Promise.resolve(); await Promise.resolve();
+  assert.equal(prompts.length, 2); assert.equal(prompts[1].workflow.id, 'beta');
+  prompts[1].resolve(false); assert.equal(await closing, false);
+  prompts.length = 0;
+  assert.equal(await beforeClose(['graph:alpha']), true, 'closing one view should retain the dirty shared source');
+  assert.equal(prompts.length, 0);
+});
+
+test("legacy editor defaults migrate to sidebar activities", () => {
+  assert.equal(settingsModule.normalizeAppSettings({ general: { defaultView: "code" } }).general.initialActivity, "files");
+  assert.equal(settingsModule.normalizeAppSettings({ general: { defaultView: "graph" } }).general.initialActivity, "workflows");
+  assert.equal(settingsModule.normalizeAppSettings({ general: { defaultView: "graph", initialActivity: "search" } }).general.initialActivity, "search");
+  assert.equal(settingsModule.normalizeAppSettings({ general: { initialActivity: "invalid" } }).general.initialActivity, "workflows");
+});
+
+test("persistent project picker names its browsing project and loading target", () => {
+  const html = renderToStaticMarkup(React.createElement(appModule.RecentProjectSelector, { projectRoot: "/projects/Atlas", recentProjectRoots: ["/projects/Beacon"] }));
+  assert.match(html, /aria-label="Recent projects"/);
+  assert.match(html, /Atlas/);
+  assert.doesNotMatch(html, /Studio view/);
+  const loading = renderToStaticMarkup(React.createElement(appModule.RecentProjectSelector, { projectRoot: "/projects/Atlas", openingProjectRoot: "/projects/Beacon" }));
+  assert.match(loading, /Opening Beacon/);
+  assert.match(loading, /aria-busy="true"/);
+});
+
+test("compact pane toggles preserve desktop preferences and allow only one open pane", async () => {
+  let panes;
+  function PaneHarness() {
+    panes = appModule.useResponsivePanes();
+    return React.createElement("div", null, `${panes.projectPaneVisible}/${panes.assistantPaneVisible}`);
+  }
+  const dom = await mountReact(React.createElement(PaneHarness), createFetchMock([]));
+  try {
+    window.innerWidth = 1440;
+    await dom.dispatchWindow("resize");
+    assert.equal(panes.projectPaneVisible, true);
+    assert.equal(panes.assistantPaneVisible, true);
+    await React.act(async () => panes.setAssistantPaneVisible(false));
+    window.innerWidth = 960;
+    await dom.dispatchWindow("resize");
+    assert.equal(panes.projectPaneVisible, false);
+    assert.equal(panes.assistantPaneVisible, false);
+    await React.act(async () => panes.setProjectPaneVisible(true));
+    assert.equal(panes.projectPaneVisible, true);
+    await React.act(async () => panes.setAssistantPaneVisible(true));
+    assert.equal(panes.projectPaneVisible, false);
+    assert.equal(panes.assistantPaneVisible, true);
+    await React.act(async () => panes.closeCompactPane());
+    assert.equal(panes.assistantPaneVisible, false);
+    window.innerWidth = 1440;
+    await dom.dispatchWindow("resize");
+    assert.equal(panes.projectPaneVisible, true);
+    assert.equal(panes.assistantPaneVisible, false);
+  } finally { await dom.unmount(); }
+});
+
+test('analysis keeps the saved source revision, current layout and last valid graph while reporting syntax errors', () => {
+  const graph = { nodes: [{ id: 'kept' }], edges: [] };
+  const metadata = { canvas: { nodes: { kept: { x: 420, y: 80 } } } };
+  const current = { saving: true, document: { source: 'invalid draft', dirty: true, runnable: true, graph, metadata, metadataRevision: 'layout-new', savedRevision: 'disk-new', savedSource: 'saved source' } };
+  const analyzed = { source: 'invalid draft', runnable: false, graph: null, diagnostics: [{ message: 'Syntax error' }], savedRevision: 'old', metadataRevision: 'old', metadata: {} };
+  const merged = appModule.mergeRattishAnalysisState(current, analyzed, 'invalid draft');
+  assert.equal(merged.document.runnable, false);
+  assert.deepEqual(merged.document.diagnostics, analyzed.diagnostics);
+  assert.equal(merged.document.graph, graph);
+  assert.equal(merged.document.metadata, metadata);
+  assert.equal(merged.document.savedRevision, 'disk-new');
+  assert.equal(merged.document.savedSource, 'saved source');
+  assert.equal(merged.document.metadataRevision, 'layout-new');
+  assert.equal(merged.saving, true);
+  const validGraph = { nodes: [{ id: 'fixed' }], edges: [] };
+  const fixed = appModule.mergeRattishAnalysisState(merged, { ...analyzed, compilation: { state: "valid" }, runnable: true, graph: validGraph, diagnostics: [] }, 'invalid draft');
+  assert.equal(fixed.document.graph, validGraph);
+  assert.equal(fixed.document.lastValidGraph, validGraph);
+});
+
+test('successive node drags retain newest positions and serialize layout revision writes', async () => {
+  const source = fs.readFileSync(path.join(frontendRoot, 'src/pages/App.jsx'), 'utf8');
+  const block = source.slice(source.indexOf('  async function saveRattishMetadataNow('), source.indexOf('  const loadWorkflows = ', source.indexOf('  async function saveRattishMetadataNow(')));
+  const firstLayout = { canvas: { nodes: { node: { x: 10, y: 20 } } } };
+  const lastLayout = { canvas: { nodes: { node: { x: 900, y: 400 } } } };
+  const state = { current: { document: { source: 'unchanged', metadata: firstLayout, metadataRevision: 'm1' } } };
+  const session = { rattishEditorStateRef: state, rattishMetadataSaveTimerRef: { current: null }, rattishMetadataPendingRef: { current: true }, rattishMetadataSavingRef: { current: null },
+    setRattishEditorState(update) { state.current = typeof update === 'function' ? update(state.current) : update; } };
+  const pending = []; const requests = [];
+  const save = vm.runInNewContext(`(function () { ${block}; return saveRattishMetadataNow; })()`, {
+    documentSession: () => session, window: { clearTimeout }, apiUrl: value => value, setTopBarNotice() {},
+    fetch: (url, init) => { requests.push({ url, body: JSON.parse(init.body) }); return new Promise(resolve => pending.push(resolve)); },
+  });
+  const first = save('alpha');
+  state.current = { document: { ...state.current.document, metadata: lastLayout } };
+  session.rattishMetadataPendingRef.current = true;
+  const overlapping = save('alpha');
+  assert.equal(requests.length, 1, 'overlapping layout writes used the same revision');
+  pending[0]({ ok: true, json: async () => ({ metadata: firstLayout, metadataRevision: 'm2' }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.current.document.metadata, lastLayout, 'old response snapped the node back');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].body.expectedRevision, 'm2');
+  assert.deepEqual(requests[1].body.metadata, lastLayout);
+  pending[1]({ ok: true, json: async () => ({ metadata: lastLayout, metadataRevision: 'm3' }) });
+  assert.equal(await first, true); assert.equal(await overlapping, true);
+  assert.equal(state.current.document.metadataRevision, 'm3');
+  assert.equal(session.rattishMetadataPendingRef.current, false);
+});
+
+test('splitting a workflow creates independent graph views with shared edits and protects only the last dirty view', async () => {
+  const primary = 'workflow-graph:alpha';
+  const duplicate = 'workflow-graph:alpha:view:second';
+  const workflow = { id: 'alpha', name: 'Review', sourcePath: '/alpha/workflow.rattish' };
+  const mounted = []; const prompts = [];
+  const source = fs.readFileSync(path.join(frontendRoot, 'src/pages/App.jsx'), 'utf8');
+  const closeBlock = source.slice(source.indexOf('  async function beforeCloseWorkflowViews('), source.indexOf('  function renderWorkflowGraph('));
+  function GraphView({ viewPath, source, onEdit }) {
+    const [zoom, setZoom] = React.useState(100);
+    React.useEffect(() => { mounted.push(viewPath); }, []);
+    return React.createElement('section', { 'aria-label': `${viewPath} graph view` },
+      React.createElement('span', null, `Source: ${source}`),
+      React.createElement('span', { 'aria-label': `${viewPath} zoom` }, String(zoom)),
+      React.createElement('button', { 'aria-label': `Zoom ${viewPath}`, onClick: () => setZoom(value => value + 10) }, 'Zoom'),
+      React.createElement('button', { 'aria-label': `Edit ${viewPath}`, onClick: () => onEdit('Updated') }, 'Edit'),
+    );
+  }
+  function Harness() {
+    const [openPaths, setOpenPaths] = React.useState([primary]);
+    const [activePath, setActivePath] = React.useState(primary);
+    const [source, setSource] = React.useState('Original');
+    const [tabs, setTabs] = React.useState({ [primary]: { workflowId: workflow.id, name: workflow.name, sourcePath: workflow.sourcePath, contextLabel: '/alpha' } });
+    const guard = vm.runInNewContext(`(function () { ${closeBlock}; return beforeCloseWorkflowViews; })()`, {
+      workflows: [workflow], codeOpenPaths: openPaths, workflowTabs: tabs,
+      documentSession: () => ({ rattishEditorStateRef: { current: { document: { dirty: source !== 'Original' } } }, rattishMetadataPendingRef: { current: false }, rattishMetadataSavingRef: { current: null } }),
+      setWorkflowClosePrompt: prompt => { prompts.push(prompt); prompt.resolve(false); }, saveRattishMetadataNow: async () => true,
+    });
+    return React.createElement(codeWorkspaceModule.default, {
+      active: true, activePath, openPaths, workflowTabs: tabs,
+      onActivePathChange: setActivePath, onBeforeCloseWorkflowTabs: guard,
+      onDuplicateWorkflowTab: path => { setTabs(current => ({ ...current, [duplicate]: { ...current[path] } })); setOpenPaths(current => [...current, duplicate]); return duplicate; },
+      onClosePaths: paths => { setOpenPaths(current => current.filter(path => !paths.includes(path))); if (paths.includes(activePath)) setActivePath(openPaths.find(path => !paths.includes(path)) || ''); },
+      renderWorkflowTab: (_tab, { path }) => React.createElement(GraphView, { viewPath: path, source, onEdit: setSource }),
+    });
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]));
+  window.innerWidth = 1200; window.innerHeight = 800;
+  const tabButton = allElements(dom.byLabel('Editor tabs')).find(element => element.getAttribute?.('role') === 'tab');
+  await dom.pointer(tabButton.parentNode, 'onContextMenu', { clientX: 50, clientY: 50 });
+  await dom.click(dom.byText('Split right')); await dom.flush();
+  assert.ok(dom.byLabel('Split editor tabs'));
+  assert.deepEqual(mounted, [primary, duplicate], 'split moved or remounted the original graph');
+  await dom.click(dom.byLabel(`Zoom ${duplicate}`));
+  assert.equal(dom.byLabel(`${primary} zoom`).textContent, '100');
+  assert.equal(dom.byLabel(`${duplicate} zoom`).textContent, '110');
+  await dom.click(dom.byLabel(`Edit ${duplicate}`));
+  assert.equal(allElements(dom.container).filter(element => element.tagName === 'SPAN' && element.textContent === 'Source: Updated').length, 2, 'graph views did not share source edits');
+  await dom.click(allElements(dom.container).filter(element => element.getAttribute?.('aria-label') === 'Close Review')[1]); await dom.flush();
+  assert.equal(prompts.length, 0, 'closing one graph view prompted for its retained shared document');
+  assert.ok(dom.byLabel(`${primary} graph view`));
+  await dom.click(dom.byLabel('Close Review')); await dom.flush();
+  assert.equal(prompts.length, 1, 'closing the last dirty graph view did not prompt');
+  assert.ok(dom.byLabel(`${primary} graph view`), 'cancel closed the dirty last view');
+  await dom.unmount();
+});
+
+
+test("graph updates preserve source editor undo boundaries", () => {
+  const calls = [];
+  let content = "before";
+  const model = {
+    getValue: () => content,
+    getFullModelRange: () => ({ startLineNumber: 1 }),
+    pushStackElement: () => calls.push("boundary"),
+    pushEditOperations: (_selections, edits) => { calls.push(edits[0].text); content = edits[0].text; },
+    setValue: () => assert.fail("A graph edit must not erase source undo history"),
+  };
+  codeWorkspaceModule.replaceEditorModelContent(model, "after");
+  codeWorkspaceModule.replaceEditorModelContent(model, "after");
+  assert.deepEqual(calls, ["boundary", "after", "boundary"]);
+});
+
+test("restored run tabs show the executed graph and return explicitly to the current document", async () => {
+  const current = workflowFixture({ id: "snapshot-demo", name: "Snapshot demo", label: "Current step" });
+  const historical = { ...current, nodes: current.nodes.map(node => ({ ...node, label: "Executed step" })), runId: "old-run" };
+  const graphPath = "workflow-graph:snapshot-demo";
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([current])),
+    (url) => String(url).includes("/logs/old-run?") ? { ok: true, json: async () => ({ log: { graphSnapshot: historical, logText: "Saved execution", runNodes: {} } }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: {
+    'raticode.editorSession.v2': JSON.stringify({ version: 2, paths: [graphPath], activePath: graphPath, workflowTabs: { [graphPath]: { workflowId: current.id, name: current.name, projectRoot: current.projectRoot } }, pinnedRun: { workflowId: current.id, runId: "old-run" } }),
+  } });
+  try {
+    await dom.flush();
+    assert.ok(dom.byText("Executed step"));
+    assert.ok(dom.byText("Run snapshot"));
+    assert.equal(allElements(dom.container).some(node => node.textContent === "Current step"), false);
+    await dom.click(dom.byText("Current graph"));
+    await dom.flush();
+    assert.ok(dom.byText("Current step"));
+    assert.equal(fetchMock.calls.some(call => String(call.url).endsWith('/run')), false);
+  } finally { await dom.unmount(); }
+});
+
+test("Rattish background submissions bind the reviewed source revision and preserve synchronous defaults", () => {
+  const request = appModule.workflowRunRequest("demo", { background: true, expectedRevision: "reviewed-revision", parameters: { name: "Ada" } });
+  assert.deepEqual(JSON.parse(request.options.body), { dryRun: false, triggerContext: {}, background: true, expectedRevision: "reviewed-revision", inputs: { name: "Ada" } });
+  assert.equal(JSON.parse(appModule.workflowRunRequest("demo").options.body).background, undefined);
+});
+
+function rattishValidationHarness(initialDocument, request) {
+  const source = fs.readFileSync(path.join(frontendRoot, 'src/pages/App.jsx'), 'utf8');
+  const block = source.slice(source.indexOf('  async function validateWorkflow('), source.indexOf('  async function loadWorkflowHistory('));
+  const state = { current: { document: initialDocument, saving: false } };
+  const notices = [];
+  const session = { rattishEditorStateRef: state, rattishAnalysisRequestRef: { current: 0 }, rattishAnalysisTimerRef: { current: null }, setRattishEditorState: next => { state.current = next; } };
+  const validate = vm.runInNewContext(`(function () { ${block}; return validateWorkflow; })()`, {
+    documentSession: () => session, window: { clearTimeout }, apiUrl: value => value, fetch: request,
+    loadWorkflowDraft: () => null, mergeRattishAnalysisState: appModule.mergeRattishAnalysisState,
+    setTopBarNotice: notice => notices.push(notice), persistWorkflow() { throw new Error('Validation must not persist Rattish'); }, summarizeWorkflow() { throw new Error('Rattish source must not be converted'); },
+  });
+  return { validate, state, notices };
+}
+
+test('validating dirty invalid Rattish analyzes its exact source without writing or replacing the saved revision', async () => {
+  const draft = { source: 'Rattish: 1\nWorkflow: broken draft', dirty: true, savedRevision: 'disk-9', graph: { nodes: [{ id: 'prior' }] }, runnable: true };
+  const calls = [];
+  const harness = rattishValidationHarness(draft, async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, json: async () => ({ document: { source: draft.source, savedRevision: 'analyzed-old', runnable: false, graph: null, diagnostics: [{ severity: 'error', message: 'Workflow.name is required' }] } }) };
+  });
+  await harness.validate(writeTestWorkflow('alpha'));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/workflows/alpha/document/analyze');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { source: draft.source });
+  assert.equal(harness.state.current.document.dirty, true);
+  assert.equal(harness.state.current.document.savedRevision, 'disk-9');
+  assert.equal(harness.state.current.document.graph, draft.graph);
+  assert.match(harness.notices.at(-1).message, /Workflow.name is required/);
+  assert.equal(harness.notices.at(-1).type, 'error');
+});
+
+test('manual Rattish validation ignores results after newer source edits', async () => {
+  const pending = deferredDocumentResponse();
+  const harness = rattishValidationHarness(writeTestDocument('old draft', 'r1', true), () => pending.promise);
+  const validating = harness.validate(writeTestWorkflow('alpha'));
+  harness.state.current = { document: writeTestDocument('new draft', 'r1', true) };
+  pending.resolve({ source: 'old draft', runnable: true, diagnostics: [] });
+  await validating;
+  assert.equal(harness.state.current.document.source, 'new draft');
+  assert.equal(harness.notices.length, 0, 'stale validation announced success for newer unvalidated edits');
+});
+
+test('Rattish validation loads an unopened document and reports preflight failures without saving', async () => {
+  const calls = [];
+  const document = writeTestDocument('loaded source');
+  const harness = rattishValidationHarness(null, async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, json: async () => ({ document: url.endsWith('/analyze') ? { ...document, preflight: { diagnostics: [{ severity: 'error', message: 'Provider is unavailable' }] } } : document }) };
+  });
+  await harness.validate(writeTestWorkflow('beta'));
+  assert.deepEqual(calls.map(item => item.url), ['/workflows/beta/document', '/workflows/beta/document/analyze']);
+  assert.equal(calls[0].init, undefined);
+  assert.equal(harness.notices.at(-1).type, 'error');
+  assert.match(harness.notices.at(-1).message, /Provider is unavailable/);
+});
+
+
+test("Run shortcut ignores an unrelated file even when a workflow graph remains open", async () => {
+  const workflow = workflowFixture({ id: "shortcut-context", name: "Workflow context" });
+  const graphPath = "workflow-graph:shortcut-context";
+  const subscribers = new Set();
+  const fetchMock = createFetchMock([jsonResponse("/api/workflows", workflowsPayload([workflow]))]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    browser: { onCommand: callback => { subscribers.add(callback); return () => subscribers.delete(callback); } },
+    storage: { 'raticode.editorSession.v2': JSON.stringify({ version: 2, paths: [graphPath, "/tmp/unrelated.png"], activePath: "/tmp/unrelated.png", workflowTabs: { [graphPath]: { workflowId: workflow.id, name: workflow.name, projectRoot: workflow.projectRoot } } }) },
+  });
+  try {
+    await dom.flush();
+    await React.act(async () => { for (const callback of subscribers) callback({ action: "application-shortcut", commandId: "workflow.run" }); });
+    await dom.flush();
+    assert.equal(fetchMock.calls.some(call => /\/(run|run-preview)$/.test(String(call.url))), false);
+  } finally { await dom.unmount(); }
+});
+
+test("All tabs filters combine exact project identity with active and unread run status", async () => {
+  const selected = [];
+  const entries = [
+    { path: "graph:a", label: "Review", projectRoot: "/first/project", tab: { status: "running", statusLabel: "Running", unreadFailure: true } },
+    { path: "graph:b", label: "Review", projectRoot: "/second/project", tab: { status: "failed", statusLabel: "Failed", unread: true } },
+    { path: "/first/project/config.txt", label: "config.txt", projectRoot: "/first/project" },
+    { path: "browser:docs", label: "Docs", browser: { url: "https://example.test" } },
+  ];
+  const dom = await mountReact(React.createElement(codeWorkspaceModule.EditorTabsMenu, {
+    activePath: "graph:a", entries, onActivate: path => selected.push(path),
+  }), createFetchMock([]));
+  const results = () => allElements(dom.byLabel("Open tabs")).filter(node => node.getAttribute?.("data-open-tab") !== null && node.tagName === "BUTTON");
+  try {
+    const summary = dom.byLabel("All editor tabs");
+    await dom.keyDown(summary, "ArrowDown");
+    assert.equal(summary.parentNode.open, true);
+    assert.equal(results().length, 4);
+    await dom.change(dom.byLabel("Filter tabs by project"), "/first/project");
+    assert.equal(results().length, 2);
+    await dom.change(dom.byLabel("Filter tabs by run status"), "active");
+    assert.equal(results().length, 1);
+    assert.match(textOf(results()[0]), /Running/);
+    await dom.change(dom.byLabel("Filter tabs by project"), "/second/project");
+    assert.equal(results().length, 0);
+    assert.match(dom.text(), /No tabs match these filters/);
+    await dom.change(dom.byLabel("Filter tabs by run status"), "unread");
+    assert.equal(results().length, 1);
+    await dom.click(results()[0]);
+    assert.deepEqual(selected, ["graph:b"]);
+    assert.equal(summary.parentNode.open, false);
+    assert.ok(document.activeElement === summary, "Focus returns to the All tabs summary");
+    await dom.keyDown(summary, "ArrowDown");
+    await dom.keyDown(summary.parentNode, "Escape");
+    assert.equal(summary.parentNode.open, false);
+  } finally { await dom.unmount(); }
+});
+
+
+test('preflight failure keeps a valid graph editable and uses newly analyzed nodes', () => {
+  const graph = { nodes: [{ id: 'updated' }], edges: [] };
+  const analyzed = { source: 'draft', compilation: { state: 'valid' }, runnable: false, graph,
+    preflight: { ready: false, diagnostics: [{ severity: 'error', message: 'Approval store unavailable' }] } };
+  assert.equal(appModule.rattishGraphIsValid(analyzed), true);
+  assert.equal(appModule.rattishGraphIsValid({ ...analyzed, compilation: { state: 'invalid' } }), false);
+  assert.equal(appModule.rattishGraphIsValid(null), false);
+  const current = { document: { source: 'draft', graph: { nodes: [{ id: 'stale' }] } } };
+  const merged = appModule.mergeRattishAnalysisState(current, analyzed, 'draft');
+  assert.equal(merged.document.graph, graph);
+  assert.equal(merged.document.runnable, false);
+  assert.deepEqual(merged.document.preflight, analyzed.preflight);
+});
+
+
+test("Rem falls back on Git diff buffer overflow and preserves other errors", async () => {
+  const { gitRepositoryAction } = require("../../electron/git-status.cjs");
+  const error = Object.assign(new Error("too large"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+  const runGit = async args => {
+    if (args.includes("rev-parse")) return "/repo\n";
+    if (args.includes("--diff-filter=U")) return "";
+    if (args.includes("write-tree")) return "staged-tree\n";
+    throw error;
+  };
+  assert.deepEqual(await gitRepositoryAction("/repo", "staged-diff", "", { runGit }), { tree: "staged-tree", inspectStaged: true });
+  error.code = "EACCES";
+  await assert.rejects(gitRepositoryAction("/repo", "staged-diff", "", { runGit }), /too large/);
+});
+
+test("Rem swarm access persists and is searchable in settings", () => {
+  assert.equal(settingsModule.normalizeAppSettings({}).assistant.swarmAccessEnabled, true);
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+  const disabled = settingsModule.updateSetting(settingsModule.DEFAULT_APP_SETTINGS, "assistant.swarmAccessEnabled", false);
+  settingsModule.saveAppSettings(disabled, storage);
+  assert.equal(settingsModule.loadAppSettings(storage).assistant.swarmAccessEnabled, false);
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("swarm access"), ["assistant"]);
+});
+
+for (const enabled of [true, false]) {
+  test(`Rem chat sends the swarm access toggle (${enabled}) and the thread's project grant`, async () => {
+    const trusted = [];
+    const desktop = { workspace: {
+      trustProjectRoot: async root => { trusted.push(root); },
+      pathGrantForApi: root => `grant:${root}`,
+    } };
+    const chatStream = streamResponse(['{"type":"final","message":{"body":"Ready"}}\n']);
+    const fetchMock = createFetchMock([
+      jsonResponse("/api/provider/capabilities", { providers: [] }),
+      url => url === "/api/chat/stream" ? chatStream(url) : null,
+    ]);
+    const workflow = { ...workflowFixture({ id: "team-project" }), projectRoot: "/projects/team", projectName: "team" };
+    const dom = await mountReact(React.createElement(appModule.ChatPane, {
+      workflows: [workflow], workflow, width: 380,
+      assistantDefaults: { swarmAccessEnabled: enabled },
+    }), fetchMock, { desktop });
+    try {
+      await dom.flush();
+      await dom.change(dom.first("textarea"), "List my swarms");
+      await dom.click(dom.byTitle("Send message"));
+      await dom.flush();
+      const call = fetchMock.calls.find(call => call.url === "/api/chat/stream");
+      assert.ok(call);
+      const request = JSON.parse(call.options.body);
+      assert.equal(request.workflow.projectRoot, "/projects/team");
+      assert.deepEqual(request.workflow.remSwarmAccess, { enabled, grantId: "grant:/projects/team" });
+      assert.equal(trusted.includes("/projects/team"), enabled);
+    } finally { await dom.unmount(); }
+  });
+}
+
+for (const scenario of ["confirm", "cancel", "unrelated-error", "force-error"]) {
+  test(`branch deletion handles ${scenario} after the safe attempt`, async () => {
+    const calls = [], prompts = [];
+    let snapshot = { active: true, root: '/repo', branch: 'main', branches: ['main', 'feature'], entries: [] };
+    const workspace = {
+      trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+      gitStatus: async () => snapshot, gitHistory: async () => ({ commits: [] }),
+      gitWorktrees: async () => ({ active: true, worktrees: [{ path: '/repo', branch: 'main' }] }),
+      gitRepoAction: async (_root, action, value) => {
+        if (action === 'stash-list') return { stashes: [] };
+        calls.push([action, value]);
+        if (action === 'branch-delete') return scenario === 'unrelated-error'
+          ? { ...snapshot, error: 'Permission denied' } : { branchDeleteUnmerged: true };
+        return scenario === 'force-error' ? { ...snapshot, error: 'Branch is checked out' }
+          : (snapshot = { ...snapshot, branches: ['main'] });
+      },
+    };
+    const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: '/repo' } }), createFetchMock([]), { desktop: { workspace } });
+    const oldConfirm = window.confirm;
+    window.confirm = message => {
+      assert.deepEqual(calls, [['branch-delete', 'feature']]);
+      prompts.push(message);
+      return scenario !== 'cancel';
+    };
+    try {
+      await dom.click(dom.byLabel('Source control')); await dom.flush(); await dom.click(dom.byText('Branches'));
+      await dom.click(dom.byLabel('Delete branch feature'));
+      assert.equal(prompts.length, scenario === 'unrelated-error' ? 0 : 1);
+      if (prompts.length) assert.match(prompts[0], /feature.*unmerged/);
+      assert.deepEqual(calls, scenario === 'confirm' || scenario === 'force-error'
+        ? [['branch-delete', 'feature'], ['branch-delete-force', 'feature']]
+        : [['branch-delete', 'feature']]);
+      assert.equal(allElements(dom.container).some(el => el.getAttribute('aria-label') === 'Branch feature'), scenario !== 'confirm');
+      if (scenario === 'unrelated-error') assert.ok(dom.byText('Permission denied'));
+      if (scenario === 'force-error') assert.ok(dom.byText('Branch is checked out'));
+      if (scenario === 'cancel') assert.equal(allElements(dom.container).some(el => el.textContent === 'Technical details'), false);
+    } finally { window.confirm = oldConfirm; await dom.unmount(); }
+  });
+}
+
+test("Rem archives are collapsed without metadata reads and load ten at a time", async () => {
+  const old = Array.from({ length: 23 }, (_, i) => ({ id: `archived-${i}`, title: `Archived conversation ${i}`, updatedAt: new Date(Date.now() - (11 + i) * 86400000).toISOString(), projectRoot: "/repo" }));
+  const live = { id: "live", title: "Current conversation", updatedAt: new Date().toISOString(), projectRoot: "/repo" };
+  const gone = { id: "gone", title: "Deleted workspace conversation", updatedAt: new Date().toISOString(), projectRoot: "/gone" };
+  const all = [live, gone, ...old];
+  const storage = Object.fromEntries(all.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
+  storage["gofer-flow-chat-threads"] = JSON.stringify(all.map(({ id, updatedAt, projectRoot }) => ({ id, updatedAt, projectRoot, scopeIndexed: true })));
+  const reads = [];
+  let wrapped = false;
+  function Harness() {
+    if (!wrapped) {
+      wrapped = true;
+      const getItem = window.localStorage.getItem.bind(window.localStorage);
+      window.localStorage.getItem = key => { reads.push(key); return getItem(key); };
+    }
+    return React.createElement(appModule.ThreadSections, { threads: [], onOpen() {}, onDelete() {} });
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]), {
+    storage, desktop: { workspace: { missingThreadRoots: async () => ["/gone"] } },
+  });
+  await dom.flush();
+  assert.match(dom.text(), /Current conversation/);
+  assert.doesNotMatch(dom.text(), /Archived conversation|Deleted workspace conversation/);
+  assert.equal(dom.byText("Archived threads").getAttribute("aria-expanded"), "false");
+  assert.equal(reads.some(key => key.includes("meta:archived-") || key.includes("meta:gone")), false);
+  await dom.click(dom.byText("Archived threads"));
+  assert.match(dom.text(), /Deleted workspace conversation/);
+  assert.equal((dom.text().match(/Archived conversation/g) || []).length, 9);
+  await dom.click(dom.byText("Show older threads"));
+  assert.equal((dom.text().match(/Archived conversation/g) || []).length, 19);
+  await dom.click(dom.byText("Show older threads"));
+  assert.equal((dom.text().match(/Archived conversation/g) || []).length, 23);
+  await dom.click(dom.byText("Archived threads"));
+  reads.length = 0;
+  await dom.flush();
+  assert.equal(reads.some(key => key.includes("meta:archived-")), false);
+  await dom.click(dom.byText("Archived threads"));
+  assert.equal((dom.text().match(/Archived conversation/g) || []).length, 9);
+  await dom.unmount();
+});
+
+test("Rem retains a thread's branch and archives it after that branch is deleted", async () => {
+  let branch = "feature";
+  let branches = ["main", "feature"];
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+  ]), { desktop: { workspace: {
+    gitStatus: async () => ({ active: true, branch, branches }),
+    missingThreadRoots: async () => [],
+  } } });
+  await dom.click(dom.byLabel("New thread"));
+  await dom.flush();
+  assert.equal(appModule.loadChatThreads()[0].projectBranch, "feature");
+  branch = "main";
+  await dom.click(dom.byTitle("Back to active threads"));
+  assert.match(dom.text(), /New thread/);
+  branches = ["main"];
+  await dom.flush(60000);
+  assert.equal(dom.allByTitle("Delete thread").length, 0);
+  await dom.click(dom.byText("Archived threads"));
+  assert.equal(dom.allByTitle("Delete thread").length, 1);
+  assert.equal(appModule.loadChatThreads()[0].projectBranch, "feature");
+  await dom.unmount();
 });

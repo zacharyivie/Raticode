@@ -1,9 +1,10 @@
-const TASKUROTTA_HOME_URL = "taskurotta://home";
+const legacyBrand = require("./brand-compat.json");
+const RATICODE_HOME_URL = "raticode://home";
 
 function normalizeBrowserUrl(value) {
   const input = String(value ?? "").trim();
   if (!input || input === "about:blank") return "about:blank";
-  if (input === TASKUROTTA_HOME_URL) return TASKUROTTA_HOME_URL;
+  if (input === RATICODE_HOME_URL || legacyBrand.previousBrands.some((item) => input === `${item.brand}://home`)) return RATICODE_HOME_URL;
   if (/^https?:\/\//i.test(input)) return new URL(input).toString();
   if (/^(?:localhost|127\.0\.0\.1|\[?::1\]?)(?::\d+)?(?:[/?#]|$)/i.test(input)) {
     return new URL(`http://${input}`).toString();
@@ -132,7 +133,7 @@ function browserProjectChordAction(session, input = {}, platform = process.platf
 }
 
 function browserLoadUrl(value) {
-  return value === TASKUROTTA_HOME_URL ? taskurottaHomeDataUrl() : value;
+  return value === RATICODE_HOME_URL ? raticodeHomeDataUrl() : value;
 }
 
 function browserContentZoomFactor(ownerZoomFactor = 1, pageZoomFactor = 1) {
@@ -149,7 +150,7 @@ function clamp(value, minimum, maximum) {
   return Math.min(Math.max(value, minimum), maximum);
 }
 
-function taskurottaHomeDataUrl() {
+function raticodeHomeDataUrl() {
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -157,7 +158,7 @@ function taskurottaHomeDataUrl() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
-  <title>Taskurotta</title>
+  <title>Raticode</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -214,7 +215,7 @@ function taskurottaHomeDataUrl() {
   <main>
     <div class="brand">
       <svg viewBox="0 0 512 512" role="img" aria-labelledby="brandmark-title" width="56" height="56">
-        <title id="brandmark-title">Taskurotta</title>
+        <title id="brandmark-title">Raticode</title>
         <rect width="512" height="512" rx="104" fill="#151521"/>
         <path d="m256 66 166 96v188l-166 96L90 350V162Z" fill="#151521" stroke="#9A8CFF" stroke-width="18"/>
         <path d="m168 190 88-51 88 51v103l-88 75-88-75Z" fill="#9A8CFF"/>
@@ -223,25 +224,25 @@ function taskurottaHomeDataUrl() {
         <path d="m256 276 25 20-25 20-25-20Z" fill="#F0EEFF"/><path d="m204 305-65 24m169-24 65 24" stroke="#F0EEFF" stroke-width="11" stroke-linecap="round"/>
       </svg>
       <div class="brand-text">
-        <span>Taskurotta</span>
+        <span>Raticode</span>
         <small>Local-first workflow studio</small>
       </div>
     </div>
     <div class="hero">
       <div>
         <h1><span class="grad">Workflows that stay on your machine.</span></h1>
-        <p class="lede">Taskurotta is a local workflow studio and CLI for building graph-based automation with shell commands, scripts, HTTP requests, and AI agents.</p>
+        <p class="lede">Raticode is a local workflow studio and CLI for building graph-based automation with shell commands, scripts, HTTP requests, and AI agents.</p>
         <div class="command">
           <kbd>Alt + D</kbd>
           <p>Type a URL or search in the address bar. Your home page is configurable in Browser settings.</p>
         </div>
       </div>
-      <ol class="timeline" aria-label="Taskurotta capabilities">
+      <ol class="timeline" aria-label="Raticode capabilities">
         <li>
           <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2.4"/><circle cx="19" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M7 7.5 10 16M17 7.5 14 16M7.4 6h9.2"/></svg></div>
           <div>
             <h2>Build visually</h2>
-            <p>Shape routes, branches, loops, and joins in the graph editor or write the same workflow in Radish.</p>
+            <p>Shape routes, branches, loops, and joins in the graph editor or write the same workflow in Rattish.</p>
           </div>
         </li>
         <li>
@@ -292,7 +293,7 @@ function browserInputCode(input) {
 }
 
 module.exports = {
-  TASKUROTTA_HOME_URL,
+  RATICODE_HOME_URL,
   browserApplicationShortcutAction,
   browserCommandRequiresOwnerFocus,
   browserContentZoomFactor,
@@ -303,5 +304,5 @@ module.exports = {
   browserWheelZoomAction,
   matchesBrowserBinding,
   normalizeBrowserUrl,
-  taskurottaHomeDataUrl,
+  raticodeHomeDataUrl,
 };

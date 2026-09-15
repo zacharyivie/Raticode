@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Loop contract
+Node example:
+  type: loop
+  source: {"type": "count", "count": 3, "max-concurrency": 2}

@@ -1,0 +1,30 @@
+[
+  {
+    "$schema": "urn:raticode:rattish:schema:diagnostic-1.json",
+    "code": "RATTISH_INVALID_BREAK_ROUTE",
+    "severity": "error",
+    "phase": "semantic",
+    "message": "Break node 'stop' cannot declare to.",
+    "file": "workflow.rattish",
+    "span": {
+      "start": {
+        "offset": 166,
+        "line": 14,
+        "column": 3
+      },
+      "end": {
+        "offset": 168,
+        "line": 14,
+        "column": 5
+      }
+    },
+    "related": [],
+    "details": {
+      "node": "stop",
+      "target": "done"
+    },
+    "suggestions": [
+      "Remove the to field. The named loop routes after its running branches settle."
+    ]
+  }
+]

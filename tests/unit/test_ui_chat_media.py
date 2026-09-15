@@ -145,9 +145,7 @@ def test_local_vosk_recognizer_rejects_compressed_audio(tmp_path) -> None:
 
 def test_vosk_uses_desktop_sized_streaming_model() -> None:
     assert chat_media.VOSK_MODEL_NAME == "vosk-model-en-us-0.22-lgraph"
-    assert chat_media.VOSK_MODEL_URL.endswith(
-        "/vosk-model-en-us-0.22-lgraph.zip"
-    )
+    assert chat_media.VOSK_MODEL_URL.endswith("/vosk-model-en-us-0.22-lgraph.zip")
     assert chat_media.VOSK_MODEL_DOWNLOAD_MAX_BYTES >= 128 * 1024 * 1024
 
 

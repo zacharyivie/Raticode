@@ -1,0 +1,9 @@
+Rattish: 1
+
+Workflow:
+  name: Broken route
+
+Node build:
+  type: bash-command
+  command: echo build
+  to: missing

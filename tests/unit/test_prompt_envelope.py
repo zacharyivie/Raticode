@@ -71,7 +71,10 @@ def test_rem_keeps_early_messages_and_persona_when_switching_provider() -> None:
         envelope = json.loads("{" + prompt.split("\n\n{", 1)[1])
         assert "USER: turn 0\n" in envelope["request"]
         assert "USER: turn 19" in envelope["request"]
-        assert prompt.startswith("You are Rem, the coding agent for Taskurotta.")
+        assert prompt.startswith("You are Rem, the coding agent for Raticode.")
+        assert "Rem stands for Raticode Environment Manager." in prompt
+        assert 'always use "Rem"' in prompt
+        assert 'never "REM"' in prompt
         assert "<gofer_flow_skill>" not in prompt
 
 
@@ -178,16 +181,16 @@ def test_codex_server_alias_avoids_inherited_and_selected_names(
     (tmp_path / "config.toml").write_text('[mcp_servers.docs]\ncommand="old"\n')
     project_config = tmp_path / ".codex" / "config.toml"
     project_config.parent.mkdir()
-    project_config.write_text('[mcp_servers.taskurotta_docs_1]\ncommand="old"\n')
+    project_config.write_text('[mcp_servers.raticode_docs_1]\ncommand="old"\n')
     resources = AgentResources.model_validate(
         {
             "mcpServers": [
                 {"name": name, "url": "https://example.com/mcp"}
-                for name in ["docs", "taskurotta_docs_2"]
+                for name in ["docs", "raticode_docs_2"]
             ]
         }
     )
     assert codex_mcp_server_names(resources, tmp_path) == {
-        "docs": "taskurotta_docs_3",
-        "taskurotta_docs_2": "taskurotta_docs_2",
+        "docs": "raticode_docs_3",
+        "raticode_docs_2": "raticode_docs_2",
     }

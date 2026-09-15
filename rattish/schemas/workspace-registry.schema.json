@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:raticode:rattish:schema:workspace-registry-1.json",
+  "title": "Raticode Rattish workspace registry",
+  "type": "object",
+  "properties": {
+    "registry_version": {"const": 1},
+    "workflows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+          "name": {"type": "string", "minLength": 1},
+          "project_root": {"type": "string", "minLength": 1},
+          "workflow_root": {"type": "string", "minLength": 1},
+          "entrypoint": {"type": "string", "minLength": 1},
+          "created_at": {"type": "string", "format": "date-time"}
+        },
+        "required": [
+          "id",
+          "name",
+          "project_root",
+          "workflow_root",
+          "entrypoint",
+          "created_at"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["registry_version", "workflows"],
+  "additionalProperties": false
+}

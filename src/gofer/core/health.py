@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -241,7 +242,7 @@ def _data_dir_diagnostic(data_dir: Path) -> HealthDiagnostic:
 def _scheduler_db_diagnostic(db_path: Path) -> HealthDiagnostic:
     try:
         if db_path.exists():
-            with sqlite3.connect(f"file:{db_path}?mode=rw", uri=True) as connection:
+            with closing(sqlite3.connect(f"file:{db_path}?mode=rw", uri=True)) as connection:
                 connection.execute("PRAGMA user_version")
         else:
             parent = db_path.parent
@@ -454,8 +455,7 @@ def _workflow_assistant_cli_diagnostic(data_dir: Path) -> HealthDiagnostic:
                 severity="warning",
                 subject=str(source),
                 message=(
-                    "Workflow assistant CLI source is inside the mutable "
-                    "Taskurotta data directory."
+                    "Workflow assistant CLI source is inside the mutable Raticode data directory."
                 ),
                 detail=detail,
             )
@@ -473,7 +473,7 @@ def _workflow_assistant_cli_diagnostic(data_dir: Path) -> HealthDiagnostic:
         subject=str(source),
         message=(
             "Workflow assistant CLI helper has an authoritative source outside the "
-            "Taskurotta data directory."
+            "Raticode data directory."
         ),
         detail=detail,
     )

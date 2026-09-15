@@ -36,7 +36,7 @@ from gofer.core.references import (
     ReferenceNamespace,
 )
 from gofer.core.workflow import AgenticWorkflow
-from gofer.radish.artifacts import RadishArtifactError
+from gofer.rattish.artifacts import RattishArtifactError
 from gofer.ui.chat import _load_skill_text
 from tests.conftest import FakeSubscription
 
@@ -356,9 +356,7 @@ def test_reference_contract_is_the_runtime_registry_without_drift() -> None:
         "nodes[type=common_llm_task].model",
         "nodes[type=common_llm_task].effort",
     }
-    assert recursively_resolved_string_and_path_fields <= set(
-        REFERENCE_FIELD_CAPABILITIES
-    )
+    assert recursively_resolved_string_and_path_fields <= set(REFERENCE_FIELD_CAPABILITIES)
     assert all(
         "interpolation" in REFERENCE_FIELD_CAPABILITIES[field]
         for field in recursively_resolved_string_and_path_fields
@@ -544,8 +542,8 @@ def test_human_help_and_missing_skill_recovery_point_to_authoring_contract(
     root_help = runner.invoke(app, ["--help"], color=color)
     node_help = runner.invoke(app, ["workflow", "add-node", "--help"], color=color)
     monkeypatch.setattr(
-        "gofer.ui.chat.radish_assistant_skill_path",
-        lambda: (_ for _ in ()).throw(RadishArtifactError("missing")),
+        "gofer.ui.chat.rattish_assistant_skill_path",
+        lambda: (_ for _ in ()).throw(RattishArtifactError("missing")),
     )
 
     assert root_help.exit_code == 0
@@ -557,4 +555,4 @@ def test_human_help_and_missing_skill_recovery_point_to_authoring_contract(
     node_text = " ".join(Text.from_ansi(node_help.output).plain.split())
     assert "gof schema --format json" in root_text
     assert "gof schema --operation TYPE" in node_text
-    assert "gof radish docs --format json" in _load_skill_text()
+    assert "gof rattish docs --format json" in _load_skill_text()

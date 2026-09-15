@@ -1,0 +1,105 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "python-script",
+  "runtime_handler": "raticode.python_script",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "script_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "args": {
+        "type": "array",
+        "items": {"type": "string"}
+      },
+      "env": {
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+      }
+    },
+    "required": ["script_path"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "args": [],
+    "env": {}
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "open",
+    "ports": {
+      "stdin": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "string"
+        },
+        "required": false,
+        "delivery": "stdin",
+        "encoding": "utf8",
+        "description": "Text supplied to the script's standard input."
+      }
+    },
+    "additional_port_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "additional_port_delivery": {
+      "delivery": "environment",
+      "name_transform": "kebab_to_upper_snake",
+      "encoding": "string_or_canonical_json"
+    }
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+        "exit_code": {"type": "integer"},
+        "script_path": {"type": "string"}
+      },
+      "required": ["stdout", "stderr", "exit_code", "script_path"],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": [
+    "cancelled",
+    "command",
+    "configuration",
+    "filesystem",
+    "internal",
+    "output_validation",
+    "timeout"
+  ],
+  "effects": ["command", "filesystem_read"],
+  "preflight_checks": [
+    {
+      "id": "interpreter-available",
+      "severity": "error",
+      "description": "The Python interpreter must be available on PATH."
+    },
+    {
+      "id": "script-readable",
+      "severity": "error",
+      "description": "The selected Python script must exist and be readable."
+    }
+  ],
+  "static_diagnostics": [
+    {
+      "code": "RATTISH_SUSPECTED_PLAINTEXT_SECRET",
+      "severity": "warning",
+      "rule": "suspected_plaintext_secret",
+      "fields": ["env"],
+      "description": "Warn about credential-shaped plaintext environment entries without rejecting the source."
+    }
+  ],
+  "runtime_environment": {
+    "sources_low_to_high_precedence": [
+      "inherited_process",
+      "node_configuration",
+      "input_bindings"
+    ],
+    "ambient_values_affect_compilation": false
+  }
+}

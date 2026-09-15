@@ -133,7 +133,7 @@ def test_codex_grants_only_builtin_second_brain_tools(
         (tmp_path / "codex" / "config.toml").write_text(
             '[mcp_servers.second_brain]\nurl="https://old.example/mcp"\n'
         )
-    server_name = "taskurotta_second_brain_1" if inherited else "second_brain"
+    server_name = "raticode_second_brain_1" if inherited else "second_brain"
     cli = tmp_path / "gof"
     workflow = with_second_brain({"remSecondBrain": {"enabled": True, "root": str(tmp_path)}}, cli)
     assert workflow is not None

@@ -1,0 +1,7 @@
+Rattish: 1
+Workflow:
+  name: Agent contract
+Node example:
+  type: agent
+  provider: codex
+  prompt: Review the current change.

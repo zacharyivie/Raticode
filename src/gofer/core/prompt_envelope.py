@@ -160,7 +160,7 @@ def codex_mcp_server_names(
         if name in inherited:
             suffix = 1
             while True:
-                name = f"taskurotta_{server.name[:40]}_{suffix}"
+                name = f"raticode_{server.name[:40]}_{suffix}"
                 if name not in occupied:
                     break
                 suffix += 1

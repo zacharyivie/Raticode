@@ -1,0 +1,50 @@
+[
+  {
+    "$schema": "urn:raticode:rattish:schema:diagnostic-1.json",
+    "code": "RATTISH_MUTUALLY_EXCLUSIVE_FIELDS",
+    "severity": "error",
+    "phase": "semantic",
+    "message": "Workflow node 'child' cannot declare both workflow-id and workflow-path.",
+    "file": "workflow.rattish",
+    "span": {
+      "start": {
+        "offset": 107,
+        "line": 9,
+        "column": 3
+      },
+      "end": {
+        "offset": 120,
+        "line": 9,
+        "column": 16
+      }
+    },
+    "related": [
+      {
+        "file": "workflow.rattish",
+        "span": {
+          "start": {
+            "offset": 84,
+            "line": 8,
+            "column": 3
+          },
+          "end": {
+            "offset": 95,
+            "line": 8,
+            "column": 14
+          }
+        },
+        "message": "The conflicting workflow-id field is here."
+      }
+    ],
+    "details": {
+      "fields": [
+        "workflow-id",
+        "workflow-path"
+      ],
+      "node": "child"
+    },
+    "suggestions": [
+      "Remove either workflow-id or workflow-path."
+    ]
+  }
+]

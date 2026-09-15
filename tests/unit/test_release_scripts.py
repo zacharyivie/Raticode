@@ -118,12 +118,12 @@ def test_release_metadata_uses_agpl_3_only() -> None:
 
 
 def test_release_metadata_uses_canonical_repository() -> None:
-    repository = "https://github.com/zacharyivie/Taskurotta"
+    repository = "https://github.com/zacharyivie/gofer-flow"
     frontend_package = _read_json(REPO_ROOT / "frontend" / "package.json")
 
     assert frontend_package["homepage"] == repository
     assert frontend_package["build"]["publish"] == [
-        {"provider": "github", "owner": "zacharyivie", "repo": "Taskurotta"}
+        {"provider": "github", "owner": "zacharyivie", "repo": "gofer-flow"}
     ]
     assert repository in (REPO_ROOT / "scripts" / "package-cli-linux.sh").read_text(encoding="utf8")
 
@@ -156,15 +156,15 @@ def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path)
 
     arch_pkgbuild = (repo / "packaging" / "arch" / "PKGBUILD").read_text(encoding="utf8")
     assert "pkgver=1.2.3" in arch_pkgbuild
-    assert "Taskurotta-${pkgver}-x86_64.AppImage" in arch_pkgbuild
+    assert "Raticode-${pkgver}-x86_64.AppImage" in arch_pkgbuild
     assert appimage_sha.lower() in arch_pkgbuild
 
     arch_srcinfo = (repo / "packaging" / "arch" / ".SRCINFO").read_text(encoding="utf8")
     assert "pkgver = 1.2.3" in arch_srcinfo
     assert (
-        "source_x86_64 = Taskurotta-1.2.3-x86_64.AppImage::"
-        "https://github.com/zacharyivie/Taskurotta/releases/download/v1.2.3/"
-        "Taskurotta-1.2.3-x86_64.AppImage"
+        "source_x86_64 = Raticode-1.2.3-x86_64.AppImage::"
+        "https://github.com/zacharyivie/gofer-flow/releases/download/v1.2.3/"
+        "Raticode-1.2.3-x86_64.AppImage"
     ) in arch_srcinfo
     assert f"sha256sums_x86_64 = {appimage_sha.lower()}" in arch_srcinfo
 
@@ -176,7 +176,7 @@ def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path)
     assert "pkgver = 1.2.3" in cli_srcinfo
     assert (
         "source_x86_64 = gof-linux-x64-1.2.3::"
-        "https://github.com/zacharyivie/Taskurotta/releases/download/v1.2.3/gof-linux-x64"
+        "https://github.com/zacharyivie/gofer-flow/releases/download/v1.2.3/gof-linux-x64"
     ) in cli_srcinfo
     assert f"sha256sums_x86_64 = {cli_sha}" in cli_srcinfo
 
@@ -250,6 +250,10 @@ def test_package_cli_linux_uses_mocked_package_builders(tmp_path: Path) -> None:
     binary.parent.mkdir()
     binary.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf8")
     binary.chmod(0o755)
+    notices = binary.parent / "third-party-licenses"
+    notices.mkdir()
+    (notices / "inventory.json").write_text('[{"name":"fixture","version":"1"}]')
+    (notices / "LICENSE").write_text("fixture notice")
     output_dir = repo / "release"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -266,6 +270,8 @@ for arg in "$@"; do
   fi
 done
 cat "$deb_root/DEBIAN/control" >>"{log_path}"
+test -f "$deb_root/usr/share/doc/gofer-flow-cli/third-party-licenses/inventory.json"
+test -f "$deb_root/usr/share/doc/gofer-flow-cli/third-party-licenses/LICENSE"
 out="${{@: -1}}"
 mkdir -p "$(dirname "$out")"
 touch "$out"
@@ -285,6 +291,8 @@ while [[ $# -gt 0 ]]; do
   shift || true
 done
 cat "$spec_path" >>"{log_path}"
+test -f "$topdir/SOURCES/third-party-licenses/inventory.json"
+test -f "$topdir/SOURCES/third-party-licenses/LICENSE"
 mkdir -p "$topdir/RPMS/x86_64"
 touch "$topdir/RPMS/x86_64/gofer-flow-cli-{current_version}-1.mock.x86_64.rpm"
 """,

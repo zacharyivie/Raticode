@@ -1,8 +1,0 @@
-Radish: 1
-Workflow:
-  name: Common LLM task contract
-Node example:
-  type: common-llm-task
-  provider: codex
-  task: summarize
-  target: Release notes

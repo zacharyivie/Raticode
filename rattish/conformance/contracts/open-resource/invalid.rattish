@@ -1,0 +1,5 @@
+Rattish: 1
+Workflow:
+  name: Invalid open resource contract
+Node example:
+  type: open-resource

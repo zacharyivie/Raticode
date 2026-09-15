@@ -34,11 +34,11 @@ async function readSlowMetadata(projectRoot, branch, runner, options) {
       && existing.branch === branch && now - existing.at < METADATA_MAX_AGE_MS) return existing.pending;
   const generation = gitReadGeneration;
   const pending = (async () => {
-    let branches = [], remotes = [], stashCount = 0;
-    try { branches = String(await runner(["-C", projectRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/"])).trim().split("\n").filter(Boolean); } catch { /* Unborn repository. */ }
+    let branches = [], remotes = [], stashCount = 0, branchesUnavailable = false;
+    try { branches = String(await runner(["-C", projectRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/"])).trim().split("\n").filter(Boolean); } catch { branchesUnavailable = true; }
     try { remotes = String(await runner(["-C", projectRoot, "remote"])).trim().split("\n").filter(Boolean); } catch { /* Optional remote metadata. */ }
     try { stashCount = String(await runner(["-C", projectRoot, "stash", "list", "--format=%gd"])).trim().split("\n").filter(Boolean).length; } catch { /* Unborn repository. */ }
-    return { branches, remotes, stashCount };
+    return { branches, remotes, stashCount, ...(branchesUnavailable ? { branchesUnavailable } : {}) };
   })();
   cache.delete(key);
   cache.set(key, { branch, generation, at: now, pending });
@@ -72,10 +72,13 @@ async function repositoryLocation(projectRoot, runner) {
   }
 }
 
-function readPorcelain(projectRoot, runner) {
-  const read = () => runner(["-C", projectRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]);
+function readPorcelain(projectRoot, runner, includeBranch = false) {
+  const read = () => runner(["-C", projectRoot, "status", "--porcelain=v2", ...(includeBranch ? ["--branch"] : []), "-z", "--untracked-files=all", "--", "."]);
   if (runner !== runGit) return read();
-  const key = `${gitReadGeneration}:${projectRoot}`;
+  const base = `${gitReadGeneration}:${projectRoot}`;
+  // Baselines can share a pending branch read, but need no ahead/behind traversal themselves.
+  if (!includeBranch && statusReads.has(`${base}:true`)) return statusReads.get(`${base}:true`);
+  const key = `${base}:${includeBranch}`;
   if (statusReads.has(key)) return statusReads.get(key);
   const pending = read().finally(() => statusReads.delete(key));
   statusReads.set(key, pending);
@@ -96,7 +99,7 @@ function runGit(args, options = {}) {
         maxBuffer: GIT_OUTPUT_LIMIT,
         windowsHide: true,
         timeout: 120000,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: "0", ...(!mutates ? { GIT_OPTIONAL_LOCKS: "0" } : {}) },
       },
       (error, stdout) => {
         if (mutates) gitReadGeneration += 1;
@@ -123,8 +126,16 @@ function parseGitStatus(output = "") {
   const records = String(output).split("\0");
   const entries = [];
   for (let index = 0; index < records.length; index += 1) {
-    const record = records[index];
-    if (!record || record.length < 4) continue;
+    let record = records[index];
+    if (!record || record.startsWith("# ")) continue;
+    // v2 has fixed metadata fields, followed by the unquoted path. Keep spaces/newlines.
+    if (/^[12u] /.test(record)) {
+      const fields = record[0] === "1" ? 8 : record[0] === "2" ? 9 : 10;
+      const parts = record.split(" ");
+      record = `${parts[1].replaceAll(".", " ")} ${parts.slice(fields).join(" ")}`;
+    } else if (record.startsWith("? ")) record = `?? ${record.slice(2)}`;
+    else if (record.startsWith("! ")) continue;
+    if (record.length < 4) continue;
     const xy = record.slice(0, 2);
     const relativePath = record.slice(3);
     const status = sourceControlStatus(xy);
@@ -144,7 +155,7 @@ async function readGitStatus(projectRoot, options = {}) {
   const runner = options.runGit || runGit;
   try {
     const { root, gitDir } = await repositoryLocation(projectRoot, runner);
-    const output = await readPorcelain(projectRoot, runner);
+    const output = await readPorcelain(projectRoot, runner, true);
     const projectPrefix = path.relative(root, projectRoot).replaceAll("\\", "/");
     const entries = parseGitStatus(output).flatMap((entry) => {
       if (!projectPrefix) return [entry];
@@ -153,15 +164,16 @@ async function readGitStatus(projectRoot, options = {}) {
         ? [{ ...entry, path: entry.path.slice(prefix.length), ...(entry.originalPath ? { originalPath: path.relative(projectRoot, path.join(root, entry.originalPath)) } : {}) }]
         : [];
     });
-    let branch = "";
-    let ahead = null;
-    let behind = null;
-    try {
-      branch = String(await runner(["-C", projectRoot, "branch", "--show-current"])).trim();
-      const counts = String(await runner(["-C", projectRoot, "rev-list", "--left-right", "--count", "HEAD...@{upstream}"])).trim().split(/\s+/).map(Number);
-      if (counts.length === 2 && counts.every(Number.isFinite)) [ahead, behind] = counts;
-    } catch { /* Unborn branches and branches without an upstream have no counts. */ }
-    const { branches, remotes, stashCount } = await readSlowMetadata(projectRoot, branch, runner, options);
+    let branch = "", ahead = null, behind = null;
+    for (const record of String(output).split("\0")) {
+      if (record.startsWith("# branch.head ")) {
+        branch = record.slice(14);
+        if (branch === "(detached)") branch = "";
+      }
+      const counts = /^# branch\.ab \+(\d+) -(\d+)$/.exec(record);
+      if (counts) { ahead = Number(counts[1]); behind = Number(counts[2]); }
+    }
+    const { branches, remotes, stashCount, branchesUnavailable } = await readSlowMetadata(projectRoot, branch, runner, options);
     let operation;
     for (const [marker, kind] of [["rebase-merge", "rebase"], ["rebase-apply", "rebase"], ["MERGE_HEAD", "merge"]]) {
       try {
@@ -169,7 +181,7 @@ async function readGitStatus(projectRoot, options = {}) {
         if (markerPath && fs.existsSync(path.resolve(projectRoot, markerPath))) { operation = kind; break; }
       } catch { /* Optional operation metadata. */ }
     }
-    return { active: true, entries, root, branch, branches, ahead, behind, remotes, stashCount, ...(operation ? { operation } : {}) };
+    return { active: true, entries, root, branch, branches, ahead, behind, remotes, stashCount, ...(branchesUnavailable ? { branchesUnavailable } : {}), ...(operation ? { operation } : {}) };
   } catch {
     return { active: false, entries: [], root: "" };
   }
@@ -248,7 +260,14 @@ async function gitRepositoryAction(projectRoot, action, value = "", options = {}
     const conflicts = String(await git("diff", "--name-only", "--diff-filter=U"));
     if (conflicts.trim()) throw new Error("Resolve and stage conflicts before generating a commit message.");
     const tree = String(await git("write-tree")).trim();
-    const diff = String(await git("diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color"));
+    let diff;
+    try {
+      diff = String(await git("diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color"));
+    } catch (error) {
+      if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return { tree, inspectStaged: true };
+      throw error;
+    }
+    if (diff.length > 120000) return { tree, inspectStaged: true };
     if (!diff.trim()) throw new Error("Stage changes before generating a commit message.");
     return { diff, tree };
   } else if (["reset-soft", "reset-hard", "detach-commit", "branch-commit"].includes(action)) {
@@ -263,12 +282,19 @@ async function gitRepositoryAction(projectRoot, action, value = "", options = {}
       await git("check-ref-format", "--branch", value.branch);
       await git("switch", "-c", value.branch, value.hash);
     }
-  } else if (action === "branch-delete") {
+  } else if (action === "branch-delete" || action === "branch-delete-force") {
     if (typeof value !== "string" || !value || value.startsWith("-")) throw new Error("Choose an existing local branch.");
     await git("check-ref-format", "--branch", value);
     await git("show-ref", "--verify", `refs/heads/${value}`);
-    // Git also refuses branches checked out in any worktree and unmerged branches.
-    await git("branch", "--delete", "--", value);
+    // Even forced deletion refuses branches checked out in any worktree.
+    try {
+      await runner(["-C", projectRoot, "branch", action === "branch-delete-force" ? "-D" : "--delete", "--", value], { env: { LC_ALL: "C" } });
+    } catch (error) {
+      if (action === "branch-delete" && /not fully merged/.test(String(error.stderr || error.message))) {
+        return { branchDeleteUnmerged: true };
+      }
+      throw error;
+    }
     return readGitStatus(projectRoot, { ...options, forceMetadata: true });
   } else if (action === "commit") {
     if (typeof value !== "string" || !value.trim() || value.length > 72000) throw new Error("Enter a commit message.");
@@ -291,7 +317,7 @@ async function gitRepositoryAction(projectRoot, action, value = "", options = {}
     const snapshot = await readGitStatus(projectRoot, { ...options, forceMetadata: true });
     if (!snapshot.branches?.includes(value) || value.startsWith("-")) throw new Error("Choose an existing local branch.");
     // Leave the stash intact even if switching fails. Never pop onto another branch automatically.
-    await git("stash", "push", "--include-untracked", "-m", `Taskurotta: before switching from ${snapshot.branch} to ${value}`);
+    await git("stash", "push", "--include-untracked", "-m", `Raticode: before switching from ${snapshot.branch} to ${value}`);
     const result = await switchGitBranch(projectRoot, value, options);
     return { ...result, notice: result.switchBlocked ? result.notice : "Branch switched. Your changes are saved in the stash." };
   } else if (action === "stash-apply") {
@@ -308,16 +334,19 @@ function parseGitHistory(output = "") {
       const normalizedRecord = record.replace(/^\n+/, "");
       const [hash = "", shortHash = "", author = "", authoredAt = "", subject = "", message = "", refsAndStats = ""] = normalizedRecord.split("\x1f");
       const [refs = "", ...statLines] = refsAndStats.split("\n");
+      let binaryFiles = 0;
       let insertions = 0;
       let deletions = 0;
       for (const line of statLines) {
         const [added, deleted] = line.split("\t");
+        if (added === "-" && deleted === "-") binaryFiles += 1;
         if (/^\d+$/.test(added)) insertions += Number(added);
         if (/^\d+$/.test(deleted)) deletions += Number(deleted);
       }
       return {
         author,
         authoredAt,
+        binaryFiles,
         deletions,
         hash,
         insertions,
@@ -335,7 +364,7 @@ async function readGitHistory(projectRoot, options = {}) {
   try {
     const root = String(await runner(["-C", projectRoot, "rev-parse", "--show-toplevel"])).trim();
     const output = await runner([
-      "-C", projectRoot, "log", "--max-count=100", "--date=iso-strict", "--numstat",
+      "-C", projectRoot, "log", "--max-count=100", "--date=iso-strict", "--numstat", "--diff-merges=first-parent",
       "--pretty=format:%x00%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%B%x1f%D",
     ]);
     return { active: true, commits: parseGitHistory(output), root };
@@ -453,19 +482,39 @@ function parseGitDiffHunks(output = "") {
   return hunks;
 }
 
+const baselineCache = new Map();
+let baselineCacheBytes = 0;
+const BASELINE_CACHE_LIMIT = 16 * 1024 * 1024;
+
+async function baselineRevision(gitDir, targetPath) {
+  let commonDir = gitDir;
+  try { commonDir = path.resolve(gitDir, (await fs.promises.readFile(path.join(gitDir, "commondir"), "utf8")).trim()); } catch { /* Ordinary repository. */ }
+  const head = await fs.promises.readFile(path.join(gitDir, "HEAD"), "utf8");
+  const ref = head.startsWith("ref: ") ? path.join(commonDir, head.slice(5).trim()) : path.join(gitDir, "HEAD");
+  const stamps = await Promise.all([targetPath, path.join(gitDir, "index"), ref, path.join(commonDir, "packed-refs")].map(async (file) => {
+    try { const s = await fs.promises.stat(file, { bigint: true }); return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`; }
+    catch (error) { if (error.code === "ENOENT") return "missing"; throw error; }
+  }));
+  return `${gitReadGeneration}:${head}:${stamps.join("|")}`;
+}
+
 async function readGitFileBaseline(targetPath, options = {}) {
   const runner = options.runGit || runGit;
   // Deleted folders may no longer exist; locate the nearest existing ancestor.
   let directory = path.dirname(targetPath);
   while (!fs.existsSync(directory) && path.dirname(directory) !== directory) directory = path.dirname(directory);
   try {
-    const { root } = await repositoryLocation(directory, runner);
+    const { root, gitDir } = await repositoryLocation(directory, runner);
     const relativePath = path.relative(root, targetPath).replaceAll("\\", "/");
     if (!relativePath || relativePath.startsWith("../")) return { changed: false, content: "", hunks: [], tracked: false };
     const git = (...args) => runner(["-C", root, ...args]);
     const status = parseGitStatus(await readPorcelain(root, runner));
     const entry = status.find((item) => item.path === relativePath);
     const group = options.group;
+    const cacheKey = `${root}:${targetPath}:${group || ""}`;
+    const revision = gitDir ? `${await baselineRevision(gitDir, targetPath)}:${JSON.stringify(entry)}` : null;
+    const cached = baselineCache.get(cacheKey);
+    if (revision && cached?.revision === revision) return structuredClone(cached.result);
     const original = entry?.status === "!" ? `:2:${relativePath}` : group === "unstaged" ? `:${relativePath}` : `HEAD:${entry?.originalPath || relativePath}`;
     const readVersion = async (spec) => {
       try { const output = await runner(["-C", root, "show", spec], { encoding: "buffer" }); return Buffer.isBuffer(output) ? output : Buffer.from(String(output)); }
@@ -489,9 +538,23 @@ async function readGitFileBaseline(targetPath, options = {}) {
     try {
       diff = String(await git("diff", ...(group === "staged" ? ["--cached"] : group === "unstaged" ? [] : ["HEAD"]), "--no-color", "--no-ext-diff", "--unified=0", "--", `:(literal)${relativePath}`));
     } catch { /* New repository. */ }
-    return { ...(entry?.status === "!" ? { conflict: true, incomingContent: incomingBytes.toString("utf8") } : {}), changed: Boolean(entry && (group ? entry[group] : true)) || !originalBytes.equals(modifiedBytes), content: binary ? "" : content, modifiedContent: binary ? "" : modifiedContent, deleted, hunks: parseGitDiffHunks(diff), tracked: Boolean(entry) || content.length > 0,
+    const result = { ...(entry?.status === "!" ? { conflict: true, incomingContent: incomingBytes.toString("utf8") } : {}), changed: Boolean(entry && (group ? entry[group] : true)) || !originalBytes.equals(modifiedBytes), content: binary ? "" : content, modifiedContent: binary ? "" : modifiedContent, deleted, hunks: parseGitDiffHunks(diff), tracked: Boolean(entry) || content.length > 0,
       ...(binary ? { binary: true, originalBytes: originalBytes.length, modifiedBytes: modifiedBytes.length,
         originalData: originalBytes.toString("base64"), modifiedData: modifiedBytes.toString("base64") } : {}) };
+    if (revision && revision === `${await baselineRevision(gitDir, targetPath)}:${JSON.stringify(entry)}`) {
+      const bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+      if (cached) { baselineCacheBytes -= cached.bytes; baselineCache.delete(cacheKey); }
+      if (bytes <= BASELINE_CACHE_LIMIT) {
+        while (baselineCache.size && (baselineCacheBytes + bytes > BASELINE_CACHE_LIMIT || baselineCache.size >= 64)) {
+          const key = baselineCache.keys().next().value;
+          baselineCacheBytes -= baselineCache.get(key).bytes;
+          baselineCache.delete(key);
+        }
+        baselineCache.set(cacheKey, { revision, result: structuredClone(result), bytes });
+        baselineCacheBytes += bytes;
+      }
+    }
+    return result;
   } catch {
     return { changed: false, content: "", hunks: [], tracked: false };
   }

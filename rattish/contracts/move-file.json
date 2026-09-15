@@ -1,0 +1,44 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "move-file",
+  "runtime_handler": "raticode.move_file",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "source_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "destination_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "create_dirs": {"type": "boolean"},
+      "overwrite": {"type": "boolean"}
+    },
+    "required": ["source_path", "destination_path"],
+    "additionalProperties": false
+  },
+  "defaults": {"create_dirs": true, "overwrite": false},
+  "computed_defaults": {},
+  "input_ports": {"mode": "closed", "ports": {}},
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "source_path": {"type": "string"}, "destination_path": {"type": "string"},
+        "source_name": {"type": "string"}, "destination_name": {"type": "string"},
+        "destination_directory": {"type": "string"},
+        "path_kind": {"enum": ["file", "directory", "symlink"]}
+      },
+      "required": ["source_path", "destination_path", "source_name", "destination_name", "destination_directory", "path_kind"],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": ["cancelled", "configuration", "filesystem", "internal", "output_validation", "timeout"],
+  "effects": ["filesystem_read", "filesystem_write"],
+  "preflight_checks": [
+    {"id": "path-policy", "severity": "error", "description": "Source and destination must remain inside the workflow project root."},
+    {"id": "source-readable", "severity": "error", "description": "The source and its parent must be accessible for moving."},
+    {"id": "destination-ready", "severity": "error", "description": "The destination must be writable under the authored overwrite and directory policy."}
+  ],
+  "static_diagnostics": []
+}

@@ -119,57 +119,6 @@ def _release_workflow() -> dict[str, Any]:
     return _parse_workflow_yaml(REPO_ROOT / ".github" / "workflows" / "release-build.yml")
 
 
-@pytest.mark.parametrize("runner_os", ["macOS", "Windows", "Linux"])
-@pytest.mark.parametrize("signed", [False, True])
-def test_electron_build_signing_environment(runner_os: str, signed: bool) -> None:
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash is required to exercise the release build step")
-    step = _steps_by_name(_build_job(_release_workflow()))["Build Electron packages"]
-    script = step["run"].replace("${{ matrix.electron_builder_args }}", "--mac dmg zip")
-    credential_names = (
-        "CSC_LINK",
-        "CSC_KEY_PASSWORD",
-        "APPLE_ID",
-        "APPLE_APP_SPECIFIC_PASSWORD",
-        "APPLE_TEAM_ID",
-    )
-    env = {
-        **os.environ,
-        **dict.fromkeys(credential_names, "test-credential" if signed else ""),
-        "SIGNED_RELEASE": str(signed).lower(),
-        "RUNNER_OS": runner_os,
-        "CSC_IDENTITY_AUTO_DISCOVERY": str(signed).lower(),
-    }
-    # Replace build tools with shell functions to inspect the actual workflow script.
-    probe = r"""
-    npm() { :; }
-    npx() {
-      for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
-        if [ "$SIGNED_RELEASE" = "true" ]; then
-          [ "${!name}" = "test-credential" ] || return 1
-        else
-          [ -z "${!name+x}" ] || return 1
-        fi
-      done
-      [ "$CSC_IDENTITY_AUTO_DISCOVERY" = "$SIGNED_RELEASE" ] || return 1
-      printf '%s\n' "$@"
-    }
-    """
-    result = subprocess.run(
-        [bash, "-eo", "pipefail", "-c", probe + script],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    args = result.stdout.splitlines()
-    assert "--publish=never" in args
-    assert ("--config.forceCodeSigning=true" in args) == (signed and runner_os != "Linux")
-    assert ("--config.mac.notarize=true" in args) == (signed and runner_os == "macOS")
-    assert ("--config.dmg.sign=true" in args) == (signed and runner_os == "macOS")
-
-
 def _entry_workflow(name: str) -> dict[str, Any]:
     return _parse_workflow_yaml(REPO_ROOT / ".github" / "workflows" / name)
 
@@ -216,109 +165,6 @@ def _powershell_checksum_patterns(run: str) -> set[str]:
     return set(re.findall(r'\$_.Name -(?:like|eq) "([^"]+)"', run))
 
 
-def test_main_and_tag_entries_call_the_same_release_build() -> None:
-    dry_run = _job(_entry_workflow("release-dry-run.yml"), "release-dry-run")
-    tagged_release = _job(_entry_workflow("release.yml"), "release-build")
-
-    assert dry_run["uses"] == "./.github/workflows/release-build.yml"
-    assert dry_run["with"] == {"checkout_ref": "${{ github.sha }}"}
-    assert tagged_release["uses"] == "./.github/workflows/release-build.yml"
-    assert tagged_release["with"] == {"checkout_ref": "${{ github.ref }}", "signed_release": True}
-    assert tagged_release["secrets"] == "inherit"
-
-
-def test_only_tag_entry_can_publish() -> None:
-    dry_run = _entry_workflow("release-dry-run.yml")
-    tagged_release = _entry_workflow("release.yml")
-
-    assert dry_run["permissions"] == {"contents": "read"}
-    assert "publish" not in cast(dict[str, Any], dry_run["jobs"])
-    assert tagged_release["permissions"] == {"contents": "read"}
-
-    publish_job = _job(tagged_release, "publish")
-    assert publish_job["needs"] == "release-build"
-    assert publish_job["permissions"] == {
-        "contents": "write",
-        "id-token": "write",
-        "attestations": "write",
-    }
-
-
-def test_release_workflow_matrix_matches_supported_platforms() -> None:
-    matrix = _matrix_by_platform(_build_job(_release_workflow()))
-
-    assert matrix == {
-        "linux": {
-            "name": "linux",
-            "os": "ubuntu-24.04",
-            "electron_builder_args": "--linux AppImage deb rpm",
-            "artifact-name": "gofer-flow-linux",
-            "artifact-glob": (
-                "frontend/release/*.AppImage\n"
-                "frontend/release/*.AppImage.blockmap\n"
-                "frontend/release/*.deb\n"
-                "frontend/release/*.rpm\n"
-                "frontend/release/latest-linux.yml\n"
-                "frontend/release/gof-linux-x64\n"
-                "frontend/release/checksums-linux.txt\n"
-            ),
-        },
-        "windows": {
-            "name": "windows",
-            "os": "windows-latest",
-            "electron_builder_args": "--win nsis",
-            "artifact-name": "gofer-flow-windows",
-            "artifact-glob": (
-                "frontend/release/*.exe\n"
-                "frontend/release/*.exe.blockmap\n"
-                "frontend/release/latest.yml\n"
-                "frontend/release/checksums-windows.txt\n"
-                "frontend/release/signatures-windows.json\n"
-            ),
-        },
-        "macos": {
-            "name": "macos",
-            "os": "macos-latest",
-            "electron_builder_args": "--mac dmg zip",
-            "artifact-name": "gofer-flow-macos",
-            "artifact-glob": (
-                "frontend/release/*.dmg\n"
-                "frontend/release/*.dmg.blockmap\n"
-                "frontend/release/*.zip\n"
-                "frontend/release/*.zip.blockmap\n"
-                "frontend/release/latest-mac.yml\n"
-                "frontend/release/gof-macos-*\n"
-                "frontend/release/checksums-macos.txt\n"
-                "frontend/release/notarization-macos-*.json\n"
-            ),
-        },
-    }
-
-
-def test_release_workflow_cli_steps_match_documented_artifact_names() -> None:
-    workflow = _release_workflow()
-    steps = _steps_by_name(_build_job(workflow))
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf8")
-    documented_cli_names = set(re.findall(r"- (?:Linux|Windows|macOS): `([^`]+)`", readme))
-
-    linux_copy = cast(str, steps["Copy Linux CLI artifact"]["run"])
-    assert "cp dist/gof frontend/release/gof-linux-x64" in linux_copy
-    assert "chmod +x frontend/release/gof-linux-x64" in linux_copy
-    assert "gof-linux-x64" in documented_cli_names
-
-    linux_package = cast(str, steps["Build Linux CLI packages"]["run"])
-    assert linux_package == "scripts/package-cli-linux.sh dist/gof frontend/release"
-
-    windows_copy = cast(str, steps["Copy Windows CLI artifact"]["run"])
-    assert windows_copy == "Copy-Item dist/gof.exe frontend/release/gof-windows-x64.exe"
-    assert "gof-windows-x64.exe" in documented_cli_names
-
-    macos_copy = cast(str, steps["Copy macOS CLI artifact"]["run"])
-    assert 'cp dist/gof "frontend/release/gof-macos-${artifact_arch}"' in macos_copy
-    assert 'chmod +x "frontend/release/gof-macos-${artifact_arch}"' in macos_copy
-    assert "gof-macos-<arch>" in documented_cli_names
-
-
 def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
     workflow = _release_workflow()
     build_job = _build_job(workflow)
@@ -333,12 +179,14 @@ def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
         "frontend/release/latest-linux.yml",
         "frontend/release/gof-linux-x64",
         "frontend/release/checksums-linux.txt",
+        "frontend/release/package-tests-linux.json",
     ]
     assert _artifact_globs(matrix["windows"]) == [
         "frontend/release/*.exe",
         "frontend/release/*.exe.blockmap",
         "frontend/release/latest.yml",
         "frontend/release/checksums-windows.txt",
+        "frontend/release/package-tests-windows.json",
         "frontend/release/signatures-windows.json",
     ]
     assert _artifact_globs(matrix["macos"]) == [
@@ -349,6 +197,7 @@ def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
         "frontend/release/latest-mac.yml",
         "frontend/release/gof-macos-*",
         "frontend/release/checksums-macos.txt",
+        "frontend/release/package-tests-macos.json",
         "frontend/release/notarization-macos-*.json",
     ]
 
@@ -367,70 +216,9 @@ def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
     assert "checksums-windows.txt" in windows_checksum_run
 
 
-def test_release_workflow_publication_and_artifact_upload_contract() -> None:
-    workflow = _release_workflow()
-    build_job = _build_job(workflow)
-    build_steps = _steps_by_name(build_job)
-
-    assert build_job["needs"] == "validate"
-    workflow_upload = build_steps["Upload workflow artifacts"]
-    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", workflow_upload["uses"])
-    assert workflow_upload["with"] == {
-        "name": "${{ matrix.artifact-name }}",
-        "path": "${{ matrix.artifact-glob }}",
-        "if-no-files-found": "error",
-    }
-
-    assert "Upload GitHub release artifacts" not in build_steps
-
-    assert "publish" not in cast(dict[str, Any], workflow["jobs"])
-
-    publish_job = _job(_entry_workflow("release.yml"), "publish")
-    assert publish_job["runs-on"] == "ubuntu-24.04"
-    publish_steps = _steps_by_name(publish_job)
-    download = publish_steps["Download packaged artifacts"]
-    assert re.fullmatch(r"actions/download-artifact@[0-9a-f]{40}", download["uses"])
-    assert download["with"] == {
-        "pattern": "gofer-flow-*",
-        "path": "release-artifacts",
-        "merge-multiple": True,
-    }
-    release_upload = publish_steps["Upload GitHub release artifacts"]
-    assert re.fullmatch(r"softprops/action-gh-release@[0-9a-f]{40}", release_upload["uses"])
-    assert release_upload["with"] == {
-        "files": "release-artifacts/*",
-        "fail_on_unmatched_files": True,
-    }
-
-
-def test_release_validation_gates_packages_and_checks_tag_versions() -> None:
-    workflow = _release_workflow()
-    validation_job = _job(workflow, "validate")
-    validation_steps = _steps_by_name(validation_job)
-
-    assert validation_job["runs-on"] == "ubuntu-24.04"
-    assert validation_steps["Verify tag matches package versions"]["if"] == (
-        "startsWith(inputs.checkout_ref, 'refs/tags/v')"
-    )
-    version_check = cast(str, validation_steps["Verify tag matches package versions"]["run"])
-    assert 'Path("pyproject.toml")' in version_check
-    assert 'Path("frontend/package.json")' in version_check
-    assert 'os.environ["CHECKOUT_REF"].removeprefix("refs/tags/v")' in version_check
-    assert validation_steps["Lint frontend source"]["run"] == "npm run lint"
-    assert validation_steps["Test frontend"]["run"] == "npm test"
-    assert validation_steps["Browser-test workflow studio"]["run"] == (
-        "xvfb-run -a npm run test:browser"
-    )
-
-    build_steps = _steps_by_name(_build_job(workflow))
-    assert "Lint frontend source" not in build_steps
-    assert "Test frontend" not in build_steps
-    assert "Browser-test workflow studio" not in build_steps
-
-
 def test_release_security_gates_are_mandatory_and_publish_provenance() -> None:
     workflow = _release_workflow()
-    validation = _steps_by_name(_job(workflow, "validate"))
+    validation = _steps_by_name(_job(_entry_workflow("validate-source.yml"), "validate"))
     expected = {
         "Install locked Python dependencies": (
             "uv sync --locked --extra dev --extra xlsx --group dev"
@@ -474,11 +262,11 @@ def test_release_security_gates_are_mandatory_and_publish_provenance() -> None:
         "Verify Windows release signatures",
         "Verify macOS signatures and notarization",
     ):
-        assert "inputs.signed_release" in build[name]["if"]
+        assert "inputs.signed_release && runner.os" in build[name]["if"]
         assert "continue-on-error" not in build[name]
     assert "env" not in build["Install frontend dependencies"]
     assert "env" not in _build_job(workflow)
-    publish = _steps_by_name(_job(_entry_workflow("release.yml"), "publish"))
+    publish = _steps_by_name(_job(_entry_workflow("release-candidate.yml"), "stage"))
     provenance = publish["Attest all desktop, CLI, checksum and audit artifacts"]
     assert re.fullmatch(r"actions/attest-build-provenance@[0-9a-f]{40}", provenance["uses"])
     assert provenance["with"]["subject-path"] == "release-artifacts/*"
@@ -494,8 +282,151 @@ def test_all_external_workflow_actions_are_immutable_and_have_update_configurati
 
 
 def test_validation_and_platform_builds_checkout_the_same_event_commit() -> None:
-    workflow = _release_workflow()
-    for job_name in ("validate", "build"):
-        checkout = _steps_by_name(_job(workflow, job_name))["Check out repository"]
+    for workflow, job_name in (("validate-source.yml", "validate"), ("release-build.yml", "build")):
+        checkout = _steps_by_name(_job(_entry_workflow(workflow), job_name))["Check out repository"]
         assert checkout["with"]["ref"] == "${{ github.sha }}"
-        assert "checkout_ref" not in checkout["with"]["ref"]
+
+
+def test_triggers_separate_validation_preparation_and_publication() -> None:
+    validation = _entry_workflow("validate-source.yml")
+    candidate = _entry_workflow("release-candidate.yml")
+    publish = _entry_workflow("release.yml")
+    assert set(validation["on"]) == {"pull_request", "workflow_call"}
+    assert candidate["on"]["push"]["branches"] == ["main"]
+    assert set(candidate["on"]) == {"push", "workflow_dispatch"}
+    assert publish["on"] == {"push": {"tags": ["v*"]}}
+    assert _job(candidate, "prepare")["if"] == "github.ref == 'refs/heads/main'"
+    assert _job(candidate, "prepare")["secrets"] == "inherit"
+    assert _job(candidate, "stage")["needs"] == "prepare"
+    assert set(publish["jobs"]) == {"publish"}
+    assert publish["concurrency"]["cancel-in-progress"] is False
+    steps = _steps_by_name(_job(publish, "publish"))
+    assert steps["Verify candidate and publish existing draft"]["run"] == (
+        "python scripts/release-candidate.py publish"
+    )
+    assert not any("build" in s.get("run", "") for s in steps.values())
+    assert not (REPO_ROOT / ".github/workflows/release-dry-run.yml").exists()
+    assert not (REPO_ROOT / ".github/workflows/frontend-checks.yml").exists()
+
+
+def test_signing_defaults_to_unsigned_and_environment_settings_are_scoped() -> None:
+    workflow = _release_workflow()
+    assert workflow["on"]["workflow_call"]["inputs"]["signed_release"]["default"] is False
+    assert workflow["on"]["workflow_call"]["inputs"]["signed_release"]["type"] == "boolean"
+    for name in ("build", "credentials"):
+        assert (
+            _job(workflow, name)["environment"]
+            == "${{ inputs.signed_release && 'release-signing' || 'release-unsigned' }}"
+        )
+    build = _build_job(workflow)
+    assert build["needs"] == "[validate, credentials]"
+    matrix = _matrix_by_platform(build)
+    assert {k: v["os"] for k, v in matrix.items()} == {
+        "linux": "ubuntu-24.04",
+        "windows": "windows-2022",
+        "macos": "macos-15",
+    }
+    assert matrix["windows"]["electron_builder_args"].endswith("--x64")
+    assert matrix["macos"]["electron_builder_args"].endswith("--arm64")
+    steps = _steps_by_name(build)
+    names = list(steps)
+    for test in ("Verify final updater hashes", "Smoke-test final distributions"):
+        assert "if" not in steps[test]
+        assert names.index("Verify macOS signatures and notarization") < names.index(test)
+        assert names.index(test) < names.index("Generate Linux checksums")
+    candidate = _entry_workflow("release-candidate.yml")
+    assert _job(candidate, "stage")["permissions"]["attestations"] == "write"
+    assert _job(_entry_workflow("release.yml"), "publish")["permissions"]["attestations"] == "read"
+
+
+@pytest.mark.parametrize("runner_os", ["macOS", "Windows", "Linux"])
+@pytest.mark.parametrize("signed", [False, True])
+def test_electron_build_obeys_signing_policy(runner_os: str, signed: bool) -> None:
+    step = _steps_by_name(_build_job(_release_workflow()))["Build Electron packages"]
+    script = step["run"].replace("${{ matrix.electron_builder_args }}", "--native-test")
+    env = {
+        **os.environ,
+        "RUNNER_OS": runner_os,
+        "SIGNED_RELEASE": str(signed).lower(),
+        "CSC_LINK": "certificate",
+        "CSC_KEY_PASSWORD": "password",
+        "APPLE_ID": "apple",
+        "APPLE_APP_SPECIFIC_PASSWORD": "apple-password",
+        "APPLE_TEAM_ID": "team",
+    }
+    probe = r"""
+    npm() { :; }
+    npx() {
+      if [ "$SIGNED_RELEASE" != "true" ] || [ "$RUNNER_OS" = "Linux" ]; then
+        [ -z "${CSC_LINK+x}" ] && [ -z "${APPLE_ID+x}" ] || return 1
+      else
+        [ "$CSC_LINK" = "certificate" ] || return 1
+      fi
+      printf '%s\n' "$@"
+    }
+    """
+    result = subprocess.run(
+        [shutil.which("bash") or "bash", "-eo", "pipefail", "-c", probe + script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    args = result.stdout.splitlines()
+    assert "--publish=never" in args
+    assert ("--config.forceCodeSigning=true" in args) == (signed and runner_os != "Linux")
+    assert ("--config.mac.notarize=true" in args) == (signed and runner_os == "macOS")
+    assert ("--config.dmg.sign=true" in args) == (signed and runner_os == "macOS")
+    assert ("--config.mac.identity=-" in args) == (not signed and runner_os == "macOS")
+    assert ("--config.mac.notarize=false" in args) == (not signed and runner_os == "macOS")
+    mode = "signed" if signed and runner_os != "Linux" else "unsigned"
+    assert f"--config.extraMetadata.raticodeReleaseSigning={mode}" in args
+
+
+def test_credential_preflight_reports_all_missing_names_without_values() -> None:
+    step = _steps_by_name(_job(_release_workflow(), "credentials"))[
+        "Check all required settings without printing values"
+    ]
+    assert step["if"] == "inputs.signed_release"
+    # Exercise the actual embedded Python rather than merely checking YAML strings.
+    source = step["run"].split("<<'PYCODE'\n", 1)[1].rsplit("PYCODE", 1)[0]
+    env = {k: v for k, v in os.environ.items() if k not in step["env"]}
+    env["WINDOWS_CERTIFICATE"] = "do-not-print-this"
+    result = subprocess.run(
+        [os.sys.executable, "-c", source],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "do-not-print-this" not in result.stderr
+    for name in set(step["env"]) - {"WINDOWS_CERTIFICATE"}:
+        assert name in result.stderr
+    env.update(dict.fromkeys(step["env"], "configured"))
+    assert subprocess.run([os.sys.executable, "-c", source], env=env).returncode == 0
+
+
+def test_candidate_manifest_receives_the_build_policy() -> None:
+    workflow = _entry_workflow("release-candidate.yml")
+    assert (
+        _job(workflow, "prepare")["with"]["signed_release"]
+        == "${{ vars.RELEASE_SIGNING == 'true' }}"
+    )
+    step = _steps_by_name(_job(workflow, "stage"))[
+        "Create candidate manifest and verify completeness"
+    ]
+    assert step["env"]["SIGNED_RELEASE"] == "${{ needs.prepare.outputs.signed_release }}"
+    build = _release_workflow()
+    assert (
+        build["on"]["workflow_call"]["outputs"]["signed_release"]["value"]
+        == "${{ jobs.credentials.outputs.signed_release }}"
+    )
+    assert (
+        _job(build, "credentials")["outputs"]["signed_release"]
+        == "${{ steps.policy.outputs.signed_release }}"
+    )
+    steps = _steps_by_name(_build_job(build))
+    assert (
+        steps["Build Electron packages"]["env"]["SIGNED_RELEASE"] == "${{ inputs.signed_release }}"
+    )
+    assert "inputs.signed_release" in steps["Build backend"]["env"]["GOFER_CODESIGN_IDENTITY"]

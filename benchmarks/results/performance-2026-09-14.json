@@ -1,0 +1,477 @@
+{
+  "baseline_commit": "9aacc8e1a48004480ba0723c928ee0aaea7cecfc",
+  "platform": "Linux-7.0.11-1-cachyos-x86_64-with-glibc2.43",
+  "python": "3.14.5",
+  "editor": {
+    "before": [
+      {
+        "avatarDecodeMedianMs": 15.700000047683716,
+        "characters": 2000080,
+        "typing": {
+          "fullDocumentReads": 240,
+          "reactCommits": 160,
+          "medianMs": 2.699999988079071,
+          "p95Ms": 4.5
+        },
+        "idleGitCalls": 10,
+        "activationGitCalls": 0,
+        "heapBytes": 49482213,
+        "images": [
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:46637/assets/indigo-android-open-C737guGt.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:46637/assets/indigo-android-BxPNyMK5.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:46637/assets/indigo-android-wave-7aHkYuxW.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:46637/assets/indigo-android-sleep-D3mQrr5L.png"
+          }
+        ],
+        "saveMatches": true,
+        "rendererCpuSeconds": 1.3400000000000003,
+        "retainedHeap": {
+          "backingStorageSize": 5812314,
+          "embedderHeapUsedSize": 5142744,
+          "totalSize": 26882048,
+          "usedSize": 25620744
+        }
+      },
+      {
+        "avatarDecodeMedianMs": 16,
+        "characters": 2000080,
+        "typing": {
+          "fullDocumentReads": 240,
+          "reactCommits": 160,
+          "medianMs": 3.5,
+          "p95Ms": 6.300000011920929
+        },
+        "idleGitCalls": 10,
+        "activationGitCalls": 0,
+        "heapBytes": 56555677,
+        "images": [
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:42587/assets/indigo-android-open-C737guGt.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:42587/assets/indigo-android-BxPNyMK5.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:42587/assets/indigo-android-wave-7aHkYuxW.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:42587/assets/indigo-android-sleep-D3mQrr5L.png"
+          }
+        ],
+        "saveMatches": true,
+        "rendererCpuSeconds": 1.62,
+        "retainedHeap": {
+          "backingStorageSize": 5812288,
+          "embedderHeapUsedSize": 5029536,
+          "totalSize": 27930624,
+          "usedSize": 25629972
+        }
+      },
+      {
+        "avatarDecodeMedianMs": 15.799999952316284,
+        "characters": 2000080,
+        "typing": {
+          "fullDocumentReads": 240,
+          "reactCommits": 160,
+          "medianMs": 2.699999988079071,
+          "p95Ms": 5.199999988079071
+        },
+        "idleGitCalls": 10,
+        "activationGitCalls": 0,
+        "heapBytes": 66194008,
+        "images": [
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:34367/assets/indigo-android-open-C737guGt.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:34367/assets/indigo-android-BxPNyMK5.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:34367/assets/indigo-android-wave-7aHkYuxW.png"
+          },
+          {
+            "width": 1254,
+            "url": "http://127.0.0.1:34367/assets/indigo-android-sleep-D3mQrr5L.png"
+          }
+        ],
+        "saveMatches": true,
+        "rendererCpuSeconds": 1.3599999999999999,
+        "retainedHeap": {
+          "backingStorageSize": 5812287,
+          "embedderHeapUsedSize": 4533720,
+          "totalSize": 27144192,
+          "usedSize": 25630240
+        }
+      }
+    ],
+    "after": [
+      {
+        "avatarDecodeMedianMs": 1.199999988079071,
+        "characters": 2000080,
+        "typing": {
+          "fullDocumentReads": 1,
+          "reactCommits": 2,
+          "medianMs": 0.5,
+          "p95Ms": 1
+        },
+        "idleGitCalls": 1,
+        "activationGitCalls": 1,
+        "heapBytes": 44038763,
+        "images": [
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:33843/assets/indigo-android-open-224-MPZtvbYR.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:33843/assets/indigo-android-224-Cd8VBkuM.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:33843/assets/indigo-android-wave-224-Cx4YgVmq.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:33843/assets/indigo-android-sleep-224-lHvzb7Fn.png"
+          }
+        ],
+        "saveMatches": true,
+        "rendererCpuSeconds": 0.8099999999999999,
+        "retainedHeap": {
+          "backingStorageSize": 5814027,
+          "embedderHeapUsedSize": 4915000,
+          "totalSize": 26882048,
+          "usedSize": 25280464
+        }
+      },
+      {
+        "avatarDecodeMedianMs": 1,
+        "characters": 2000080,
+        "typing": {
+          "fullDocumentReads": 1,
+          "reactCommits": 2,
+          "medianMs": 0.5,
+          "p95Ms": 0.7000000476837158
+        },
+        "idleGitCalls": 1,
+        "activationGitCalls": 1,
+        "heapBytes": 43100311,
+        "images": [
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:36477/assets/indigo-android-open-224-MPZtvbYR.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:36477/assets/indigo-android-224-Cd8VBkuM.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:36477/assets/indigo-android-wave-224-Cx4YgVmq.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:36477/assets/indigo-android-sleep-224-lHvzb7Fn.png"
+          }
+        ],
+        "saveMatches": true,
+        "rendererCpuSeconds": 0.7100000000000001,
+        "retainedHeap": {
+          "backingStorageSize": 5814028,
+          "embedderHeapUsedSize": 5090360,
+          "totalSize": 26619904,
+          "usedSize": 25279312
+        }
+      },
+      {
+        "avatarDecodeMedianMs": 1.7000000476837158,
+        "characters": 2000080,
+        "typing": {
+          "fullDocumentReads": 1,
+          "reactCommits": 2,
+          "medianMs": 0.6000000238418579,
+          "p95Ms": 0.9000000357627869
+        },
+        "idleGitCalls": 1,
+        "activationGitCalls": 1,
+        "heapBytes": 33825755,
+        "images": [
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:46879/assets/indigo-android-open-224-MPZtvbYR.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:46879/assets/indigo-android-224-Cd8VBkuM.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:46879/assets/indigo-android-wave-224-Cx4YgVmq.png"
+          },
+          {
+            "width": 224,
+            "url": "http://127.0.0.1:46879/assets/indigo-android-sleep-224-lHvzb7Fn.png"
+          }
+        ],
+        "saveMatches": true,
+        "rendererCpuSeconds": 0.61,
+        "retainedHeap": {
+          "backingStorageSize": 5814194,
+          "embedderHeapUsedSize": 5269088,
+          "totalSize": 26882048,
+          "usedSize": 25435820
+        }
+      }
+    ]
+  },
+  "scheduler": {
+    "before": [
+      {
+        "archives": 0,
+        "cpu_ms": 0.888,
+        "selects": 6,
+        "list_ms": 0.126,
+        "list_bytes": 2
+      },
+      {
+        "archives": 20,
+        "cpu_ms": 85.477,
+        "selects": 6,
+        "list_ms": 13.94,
+        "list_bytes": 10680
+      },
+      {
+        "archives": 100,
+        "cpu_ms": 372.107,
+        "selects": 5,
+        "list_ms": 61.621,
+        "list_bytes": 53400
+      }
+    ],
+    "after": [
+      {
+        "archives": 0,
+        "cpu_ms": 0.251,
+        "selects": 1,
+        "list_ms": 0.102,
+        "list_bytes": 2
+      },
+      {
+        "archives": 20,
+        "cpu_ms": 0.253,
+        "selects": 1,
+        "list_ms": 0.222,
+        "list_bytes": 10680
+      },
+      {
+        "archives": 100,
+        "cpu_ms": 0.276,
+        "selects": 1,
+        "list_ms": 0.686,
+        "list_bytes": 53400
+      }
+    ]
+  },
+  "writes": {
+    "before": [
+      {
+        "archives": 0,
+        "events": 10,
+        "elapsed_ms": 3.124313021544367,
+        "cpu_ms": 3.116003000000034,
+        "peak_python_bytes": 19086,
+        "wal_bytes": 82432
+      },
+      {
+        "archives": 20,
+        "events": 10,
+        "elapsed_ms": 560.1268489845097,
+        "cpu_ms": 557.4960920000001,
+        "peak_python_bytes": 31687442,
+        "wal_bytes": 106007632
+      },
+      {
+        "archives": 100,
+        "events": 10,
+        "elapsed_ms": 2916.007980995346,
+        "cpu_ms": 2906.4267959999997,
+        "peak_python_bytes": 158341621,
+        "wal_bytes": 529296432
+      }
+    ],
+    "after": [
+      {
+        "archives": 0,
+        "events": 10,
+        "elapsed_ms": 5.6821550242602825,
+        "cpu_ms": 5.666671000000012,
+        "peak_python_bytes": 33474,
+        "wal_bytes": 123632
+      },
+      {
+        "archives": 20,
+        "events": 10,
+        "elapsed_ms": 5.766439018771052,
+        "cpu_ms": 5.740233000000039,
+        "peak_python_bytes": 28153,
+        "wal_bytes": 123632
+      },
+      {
+        "archives": 100,
+        "events": 10,
+        "elapsed_ms": 5.732894001994282,
+        "cpu_ms": 5.718854000000051,
+        "peak_python_bytes": 27964,
+        "wal_bytes": 123632
+      }
+    ]
+  },
+  "git": {
+    "before": [
+      {
+        "ms": 21.39918200000001,
+        "subprocesses": 21
+      },
+      {
+        "ms": 23.388678999999996,
+        "subprocesses": 21
+      },
+      {
+        "ms": 22.494542999999993,
+        "subprocesses": 21
+      },
+      {
+        "ms": 22.828362999999996,
+        "subprocesses": 21
+      },
+      {
+        "ms": 21.57540799999998,
+        "subprocesses": 21
+      }
+    ],
+    "after": [
+      {
+        "ms": 2.7690620000000052,
+        "subprocesses": 1
+      },
+      {
+        "ms": 3.019193999999999,
+        "subprocesses": 1
+      },
+      {
+        "ms": 2.983481000000012,
+        "subprocesses": 1
+      },
+      {
+        "ms": 7.382170000000002,
+        "subprocesses": 1
+      },
+      {
+        "ms": 3.695205999999999,
+        "subprocesses": 1
+      }
+    ]
+  },
+  "split": {
+    "splitGitCalls": 2,
+    "splitVisible": true,
+    "rendererCpuSeconds": 0.27,
+    "retainedHeap": {
+      "backingStorageSize": 5814410,
+      "embedderHeapUsedSize": 5325264,
+      "totalSize": 20779008,
+      "usedSize": 20128720
+    }
+  },
+  "avatar_sources": {
+    "1": [
+      {
+        "zoom": 1,
+        "dpr": 1,
+        "sources": [
+          "http://127.0.0.1:37557/assets/indigo-android-open-224-MPZtvbYR.png",
+          "http://127.0.0.1:37557/assets/indigo-android-224-Cd8VBkuM.png",
+          "http://127.0.0.1:37557/assets/indigo-android-wave-224-Cx4YgVmq.png",
+          "http://127.0.0.1:37557/assets/indigo-android-sleep-224-lHvzb7Fn.png"
+        ]
+      },
+      {
+        "zoom": 1.5,
+        "dpr": 1.5,
+        "sources": [
+          "http://127.0.0.1:37557/assets/indigo-android-open-224-MPZtvbYR.png",
+          "http://127.0.0.1:37557/assets/indigo-android-224-Cd8VBkuM.png",
+          "http://127.0.0.1:37557/assets/indigo-android-wave-224-Cx4YgVmq.png",
+          "http://127.0.0.1:37557/assets/indigo-android-sleep-224-lHvzb7Fn.png"
+        ]
+      }
+    ],
+    "2": [
+      {
+        "zoom": 1,
+        "dpr": 2,
+        "sources": [
+          "http://127.0.0.1:45845/assets/indigo-android-open-336-C0VJ5vtx.png",
+          "http://127.0.0.1:45845/assets/indigo-android-336-B4lhkmno.png",
+          "http://127.0.0.1:45845/assets/indigo-android-wave-336-Bd-8cQXr.png",
+          "http://127.0.0.1:45845/assets/indigo-android-sleep-336-iE55pBQ7.png"
+        ]
+      },
+      {
+        "zoom": 1.5,
+        "dpr": 3,
+        "sources": [
+          "http://127.0.0.1:45845/assets/indigo-android-open-336-C0VJ5vtx.png",
+          "http://127.0.0.1:45845/assets/indigo-android-336-B4lhkmno.png",
+          "http://127.0.0.1:45845/assets/indigo-android-wave-336-Bd-8cQXr.png",
+          "http://127.0.0.1:45845/assets/indigo-android-sleep-336-iE55pBQ7.png"
+        ]
+      }
+    ],
+    "3": [
+      {
+        "zoom": 1,
+        "dpr": 3,
+        "sources": [
+          "http://127.0.0.1:43011/assets/indigo-android-open-336-C0VJ5vtx.png",
+          "http://127.0.0.1:43011/assets/indigo-android-336-B4lhkmno.png",
+          "http://127.0.0.1:43011/assets/indigo-android-wave-336-Bd-8cQXr.png",
+          "http://127.0.0.1:43011/assets/indigo-android-sleep-336-iE55pBQ7.png"
+        ]
+      },
+      {
+        "zoom": 1.5,
+        "dpr": 4.5,
+        "sources": [
+          "http://127.0.0.1:43011/assets/indigo-android-open-336-C0VJ5vtx.png",
+          "http://127.0.0.1:43011/assets/indigo-android-336-B4lhkmno.png",
+          "http://127.0.0.1:43011/assets/indigo-android-wave-336-Bd-8cQXr.png",
+          "http://127.0.0.1:43011/assets/indigo-android-sleep-336-iE55pBQ7.png"
+        ]
+      }
+    ]
+  },
+  "avatar_bytes": {
+    "original": 4713706,
+    "224": 205899,
+    "336": 425211
+  }
+}

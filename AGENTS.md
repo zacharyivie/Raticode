@@ -4,7 +4,7 @@ This file provides guidance for AI coding agents, including Codex, Claude Code, 
 
 ## Project Summary
 
-`gofer-flow` is a Python CLI and desktop workflow studio. Workflows use the Radish language in `workflow.rad`; the compiler validates them and emits versioned JSON IR. Execution supports explicit routes, joins, branches, and cycles.
+`gofer-flow` is a Python CLI and desktop workflow studio. Workflows use the Rattish language in `workflow.rattish`; the compiler validates them and emits versioned JSON IR. Execution supports explicit routes, joins, branches, and cycles.
 
 ## Commands
 
@@ -43,7 +43,7 @@ Layer structure:
 
 Execution flow:
 
-1. The Radish lexer and parser build a source-faithful AST.
+1. The Rattish lexer and parser build a source-faithful AST.
 2. Semantic analysis applies machine-readable node and provider contracts.
 3. The compiler emits schema-valid, versioned JSON IR with explicit defaults.
 4. Preflight checks whether the compiled workflow has the resources needed to run.
@@ -51,15 +51,15 @@ Execution flow:
 
 Key patterns:
 
-- Built-in node behavior must agree with the Radish machine contract, compiler, preflight, runtime handler, and conformance fixtures.
+- Built-in node behavior must agree with the Rattish machine contract, compiler, preflight, runtime handler, and conformance fixtures.
 - Loop nodes provide runtime fan-out with explicit concurrency and failure behavior.
 - `WorkflowScheduler` wraps APScheduler with a SQLite job store persisted at `~/.local/share/gofer/schedules.db`.
 - Tests use `FakeSubscription` from `tests/conftest.py` to avoid requiring real `claude` or `codex` CLIs.
 
-## Radish workflow format
+## Rattish workflow format
 
 ```yaml
-Radish: 1
+Rattish: 1
 
 Workflow:
   name: My Workflow

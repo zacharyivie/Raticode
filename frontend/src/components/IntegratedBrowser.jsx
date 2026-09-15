@@ -70,7 +70,7 @@ export default function IntegratedBrowser({
     if (!bridge?.create) {
       setState((current) => ({
         ...current,
-        error: "The integrated browser is available in the Taskurotta desktop app.",
+        error: "The integrated browser is available in the Raticode desktop app.",
         loading: false,
       }));
       return undefined;
@@ -375,7 +375,7 @@ export function browserChromeShortcutAction(event, platform = "") {
 function attachBrowserWebview(bridge, sessionId, container, webviewRef, src, onUpdate) {
   if (!container || typeof document.createElement !== "function") return;
   const element = document.createElement("webview");
-  element.setAttribute("partition", "persist:taskurotta-browser");
+  element.setAttribute("partition", "persist:raticode-browser");
   element.setAttribute("plugins", "true");
   if (bridge.preloadPath) element.setAttribute("preload", bridge.preloadPath);
   element.setAttribute("src", src || "about:blank");

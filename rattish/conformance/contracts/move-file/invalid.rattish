@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Invalid Move contract
+Node example:
+  type: move-file
+  destination-path: destination.txt

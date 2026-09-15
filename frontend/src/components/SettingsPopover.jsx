@@ -1,6 +1,6 @@
 /*
 THESIS: Settings behave like an editor command center, not a form dumped into a modal.
-OWN-WORLD: Taskurotta's zinc surfaces, indigo selection, compact rows, and restrained floating depth.
+OWN-WORLD: Raticode's zinc surfaces, indigo selection, compact rows, and restrained floating depth.
 STORY: Choose a category, change a value, and see it take effect without leaving the workspace.
 FIRST VIEWPORT: A searchable two-column dropdown with categories left and dense setting rows right.
 FORM: Operate-mode app popover extending the existing studio chrome.
@@ -213,11 +213,11 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   if (category === "developer") return [{ searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> }];
   if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown", element: <RemMemorySettings key="memory" value={settings.memory} onChange={onChange} /> }];
   if (category === "general") return [
-    row("dataDir", "Application data directory", "Stores global Taskurotta state, run artifacts, and registries.", (
+    row("dataDir", "Application data directory", "Stores global Raticode state, run artifacts, and registries.", (
       <PathControl value={appControls.dataDir} onChoose={appControls.onChooseDataDirectory} />
     )),
-    row("defaultView", "Default editor", "Used on first launch or when the last editor cannot be restored.", (
-      <SelectControl value={settings.general.defaultView} onChange={(value) => onChange("general.defaultView", value)} options={[["graph", "Graph"], ["code", "Code"]]} />
+    row("initialActivity", "Initial sidebar", "Shown on first launch or when the last sidebar cannot be restored.", (
+      <SelectControl value={settings.general.initialActivity} onChange={(value) => onChange("general.initialActivity", value)} options={[["workflows", "Workflows"], ["files", "Files"], ["search", "Search"], ["source-control", "Source control"]]} />
     )),
     row("autosave", "Autosave files", "Save file edits after a short delay.", (
       <SwitchControl checked={settings.general.autosave} onChange={(value) => onChange("general.autosave", value)} />
@@ -246,7 +246,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     )),
   ];
   if (category === "editor") return [
-    row("fontSize", "Font size", "Text size in Radish and regular code editors.", <NumberControl value={settings.editor.fontSize} min={10} max={24} suffix="px" onCommit={(value) => onChange("editor.fontSize", value)} />),
+    row("fontSize", "Font size", "Text size in Rattish and regular code editors.", <NumberControl value={settings.editor.fontSize} min={10} max={24} suffix="px" onCommit={(value) => onChange("editor.fontSize", value)} />),
     row("lineHeight", "Line height", "Vertical spacing between editor lines.", <NumberControl value={settings.editor.lineHeight} min={14} max={40} suffix="px" onCommit={(value) => onChange("editor.lineHeight", value)} />),
     row("tabSize", "Tab size", "Spaces inserted for one indentation level.", <NumberControl value={settings.editor.tabSize} min={1} max={8} onCommit={(value) => onChange("editor.tabSize", value)} />),
     row("wordWrap", "Word wrap", "Wrap long lines instead of scrolling horizontally.", <SwitchControl checked={settings.editor.wordWrap} onChange={(value) => onChange("editor.wordWrap", value)} />),
@@ -288,6 +288,7 @@ function assistantRows(settings, onChange, row, providerState) {
   return [
     row("avatar", "Show Rem avatar", "Show Rem on the chat welcome screen.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
     row("avatarAnimation", "Animate Rem", "Greet you when the pane opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
+    row("swarmAccess", "Swarm access", "Let Rem manage project teams and runs when asked. Instructions load on demand. Changes apply to the next message.", <SwitchControl checked={settings.assistant.swarmAccessEnabled} onChange={(value) => onChange("assistant.swarmAccessEnabled", value)} />),
     row("resources", "Rem resources", "Defaults copied into new threads. Each thread can change its own selection.", <RemResources value={settings.assistant.resources} onChange={(value) => onChange("assistant.resources", value)} />),
     row("provider", "Default provider", "Provider selected for new Rem conversations.", (
       <SelectControl disabled={loading || !availableProviders.length} value={provider?.id ?? settings.assistant.provider} onChange={(value) => onChange("assistant.provider", value)} options={availableProviders.map((item) => [item.id, item.displayName ?? item.id])} />
@@ -732,7 +733,7 @@ function categoryKeywords(category) {
     editor: "font line tab wrap minimap autosave markdown html preview code",
     browser: "homepage new tab search engine url web",
     terminal: "font line cursor blink scrollback shell",
-    assistant: "rem provider model effort codex claude conversation skills tools mcp servers resources",
+    assistant: "rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
     developer: "developer diagnostics logs logging app data storage version backend restart tools",
     layout: "width pane sidebar panel inspector",

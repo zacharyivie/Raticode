@@ -1,0 +1,10 @@
+Rattish: 1
+Workflow:
+  name: Notification contract
+Node example:
+  type: notification
+  title: Build finished
+  body: Artifacts are ready.
+  channel: webhook
+  webhook-url: https://example.com/hooks/build
+  payload: {"state": "ready"}

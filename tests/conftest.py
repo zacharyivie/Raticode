@@ -18,7 +18,7 @@ def isolated_gofer_data_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path:
-    """Keep tests from touching the developer's real Taskurotta data directory."""
+    """Keep tests from touching the developer's real Raticode data directory."""
     env_root = tmp_path / "gofer-env"
     home = env_root / "home"
     xdg_data = env_root / "xdg-data"

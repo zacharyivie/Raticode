@@ -103,7 +103,7 @@ class Subscription(ABC):
 
     def _prompt_file_instruction(self, prompt_path: Path) -> str:
         return (
-            "Read the complete Taskurotta agent prompt from this file, "
+            "Read the complete Raticode agent prompt from this file, "
             f"then follow it exactly: {prompt_path}"
         )
 

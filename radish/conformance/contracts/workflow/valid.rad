@@ -1,6 +1,0 @@
-Radish: 1
-Workflow:
-  name: Workflow contract
-Node example:
-  type: workflow
-  workflow-path: child/workflow.rad

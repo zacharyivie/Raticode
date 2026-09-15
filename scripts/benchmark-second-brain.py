@@ -55,7 +55,7 @@ def main() -> None:
     indexing.read_note_bytes = measured_read
     indexing.NoteIndex.reconcile = measured_reconcile
     try:
-        with tempfile.TemporaryDirectory(prefix="taskurotta-brain-benchmark-") as raw:
+        with tempfile.TemporaryDirectory(prefix="raticode-brain-benchmark-") as raw:
             root = Path(raw)
             corpus_bytes = 0
             for number in range(arguments.notes):
@@ -91,7 +91,7 @@ def main() -> None:
             while True:
                 with index.lock:
                     with closing(
-                        sqlite3.connect(root / ".taskurotta/second-brain.sqlite3")
+                        sqlite3.connect(root / ".raticode/second-brain.sqlite3")
                     ) as connection:
                         count = connection.execute(
                             "SELECT COUNT(*) FROM notes WHERE notes MATCH 'backgroundrecovered'"

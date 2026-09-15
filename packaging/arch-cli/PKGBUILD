@@ -1,10 +1,10 @@
-# Maintainer: Taskurotta <maintainers@goferflow.local>
+# Maintainer: Raticode <maintainers@goferflow.local>
 pkgname=gofer-flow-cli
-pkgver=0.2.6
+pkgver=0.3.0
 pkgrel=1
-pkgdesc="Command line workflow automation tool for Taskurotta"
+pkgdesc="Command line workflow automation tool for Raticode"
 arch=("x86_64")
-url="https://github.com/zacharyivie/Taskurotta"
+url="https://github.com/zacharyivie/gofer-flow"
 license=("AGPL-3.0-only")
 options=(!strip)
 source_x86_64=(

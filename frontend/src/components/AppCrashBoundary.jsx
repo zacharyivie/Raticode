@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { useRouteError } from "react-router-dom";
 import packageMetadata from "../../package.json";
-import TaskurottaMark from "./TaskurottaMark.jsx";
+import RaticodeMark from "./RaticodeMark.jsx";
 
 const THEME_STORAGE_KEY = "gofer-ui-theme";
 const ISSUE_URL = `${packageMetadata.homepage}/issues/new`;
@@ -64,7 +64,7 @@ export function formatCrashReport(crash) {
     crash.componentStack ? `React component stack:\n${crash.componentStack}` : "",
     `URL: ${crash.url}`,
     `Time: ${crash.timestamp}`,
-    `Taskurotta v${packageMetadata.version}`,
+    `Raticode v${packageMetadata.version}`,
     `User agent: ${crash.userAgent}`,
   ];
   return sections.filter(Boolean).join("\n\n");
@@ -95,7 +95,7 @@ function initialTheme() {
     // Storage can be disabled in hardened browser contexts. The crash page must still render.
   }
   if (saved === "dark" || saved === "light") return saved;
-  if (typeof document !== "undefined" && document.documentElement.classList.contains("dark")) return "dark";
+  if (typeof document !== "undefined" && document.documentElement?.classList?.contains("dark")) return "dark";
   if (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches) return "dark";
   return "light";
 }
@@ -187,8 +187,8 @@ export function AppCrashPage({ crash }) {
     <div className="flex min-h-screen flex-col bg-canvas text-ink">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4 sm:px-[18px]">
         <div className="flex items-center gap-2.5">
-          <TaskurottaMark className="h-[26px] w-[26px]" />
-          <span className="text-[13px] font-semibold">Taskurotta</span>
+          <RaticodeMark className="h-[26px] w-[26px]" />
+          <span className="text-[13px] font-semibold">Raticode</span>
         </div>
         <button
           aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
@@ -221,7 +221,7 @@ export function AppCrashPage({ crash }) {
             Something snapped.
           </h1>
           <p className="mx-auto mb-4 max-w-[48ch] text-[15px] leading-6 text-muted">
-            Taskurotta hit an unexpected error and could not keep the studio running. Reloading usually clears it. If it happens again, copy the details and open an issue.
+            Raticode hit an unexpected error and could not keep the studio running. Reloading usually clears it. If it happens again, copy the details and open an issue.
           </p>
 
           <div className="mx-auto mb-6 inline-flex max-w-full items-center gap-2 overflow-x-auto whitespace-nowrap rounded-md border border-line bg-slate-50 px-3 py-1.5 font-mono text-[11px] text-muted">
@@ -237,7 +237,7 @@ export function AppCrashPage({ crash }) {
               type="button"
             >
               <RefreshCw aria-hidden="true" className={reloading ? "animate-spin" : ""} size={14} />
-              {reloading ? "Reloading" : "Reload Taskurotta"}
+              {reloading ? "Reloading" : "Reload Raticode"}
             </button>
             <button
               className="inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-white px-3.5 text-[13px] font-semibold text-ink transition-colors hover:bg-slate-50"
@@ -274,7 +274,7 @@ export function AppCrashPage({ crash }) {
           </details>
 
           <footer className="mx-auto max-w-[48ch] text-xs leading-5 text-muted">
-            Taskurotta is an open source project. If reloading does not help, an issue report is the fastest way to get this fixed.
+            Raticode is an open source project. If reloading does not help, an issue report is the fastest way to get this fixed.
             <span className="mt-2 block font-mono text-[10px]">v{packageMetadata.version}</span>
           </footer>
         </section>

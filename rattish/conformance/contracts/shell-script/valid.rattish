@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Shell contract
+Node example:
+  type: shell-script
+  script-path: scripts/task.sh

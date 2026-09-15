@@ -1,10 +1,10 @@
-# Maintainer: Taskurotta <maintainers@goferflow.local>
+# Maintainer: Raticode <maintainers@goferflow.local>
 pkgname=gofer-flow
-pkgver=0.2.6
+pkgver=0.3.0
 pkgrel=1
-pkgdesc="Local workflow automation studio for Taskurotta"
+pkgdesc="Local workflow automation studio for Raticode"
 arch=("x86_64")
-url="https://github.com/zacharyivie/Taskurotta"
+url="https://github.com/zacharyivie/gofer-flow"
 license=("AGPL-3.0-only")
 depends=(
   "fuse2"
@@ -17,7 +17,7 @@ depends=(
 )
 options=(!strip)
 source_x86_64=(
-  "Taskurotta-${pkgver}-x86_64.AppImage::${url}/releases/download/v${pkgver}/Taskurotta-${pkgver}-x86_64.AppImage"
+  "Raticode-${pkgver}-x86_64.AppImage::${url}/releases/download/v${pkgver}/Raticode-${pkgver}-x86_64.AppImage"
 )
 source=(
   "gofer-flow"
@@ -25,12 +25,12 @@ source=(
   "gofer-flow.svg"
 )
 sha256sums=('d47d296d0ee293e7f2bc46c6997dd44b327c0699548c71b1d80abed020d97973'
-            '3af3ff41ae4c9974e7f3e7b4d450384d02c3c57d8382585b8c2671012228dc89'
-            '05f187078ee51f2c237ae4271d9383ff9dd5bc240bada6c8cc0361392730c553')
+            '3bc092d4b9b9d4f13c0da69496b82e16958dbc5364d2075379a3381d34218db6'
+            '5f23b392f8adf4b863c4a03c47319aaafba72b762830a4427272c6ab71f8f6e1')
 sha256sums_x86_64=('ecd0abe89a201104dc68cf2263f75cfa71e8e0ccef324ee6d33597a57f3222ce')
 
 package() {
-  install -Dm755 "${srcdir}/Taskurotta-${pkgver}-x86_64.AppImage" \
+  install -Dm755 "${srcdir}/Raticode-${pkgver}-x86_64.AppImage" \
     "${pkgdir}/opt/gofer-flow/gofer-flow.AppImage"
   install -Dm755 "${srcdir}/gofer-flow" "${pkgdir}/usr/bin/gofer-flow"
   install -Dm644 "${srcdir}/gofer-flow.desktop" \

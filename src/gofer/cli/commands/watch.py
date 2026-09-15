@@ -59,7 +59,7 @@ def _print_agent_access_summary(wf: AgenticWorkflow) -> None:
 
 @app.command("list")
 def list_watchers(
-    data_dir: Path | None = typer.Option(None, "--data-dir", help="Taskurotta data directory"),
+    data_dir: Path | None = typer.Option(None, "--data-dir", help="Raticode data directory"),
 ) -> None:
     """List workflows in the data directory that have file/folder watchers."""
     base = data_dir or get_data_dir()
@@ -91,7 +91,7 @@ def list_watchers(
 
 @app.command("start")
 def start(
-    data_dir: Path | None = typer.Option(None, "--data-dir", help="Taskurotta data directory"),
+    data_dir: Path | None = typer.Option(None, "--data-dir", help="Raticode data directory"),
     poll_interval: float = typer.Option(
         1.0,
         "--poll-interval",

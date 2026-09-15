@@ -9,6 +9,7 @@ export default [
       "build/**",
       "coverage/**",
       "dist/**",
+      "perf-dist/**",
       "out/**",
       "release/**",
       "**/*.bundle.js",
@@ -18,7 +19,7 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ["src/**/*.{js,jsx}"],
+    files: ["src/**/*.{js,jsx}", "benchmarks/*.jsx"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
@@ -50,6 +51,7 @@ export default [
   {
     files: [
       "*.config.js",
+      "benchmarks/*.{js,cjs}",
       "browser-tests/run-*.cjs",
       "electron/**/*.{cjs,js}",
     ],

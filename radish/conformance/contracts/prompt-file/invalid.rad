@@ -1,8 +1,0 @@
-Radish: 1
-Workflow:
-  name: Invalid prompt file contract
-Node example:
-  type: prompt-file
-  output-path: generated/review.md
-  template: Inline
-  template-path: prompts/review.md

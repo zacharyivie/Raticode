@@ -1,0 +1,97 @@
+name: Validate source
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release source
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      - name: Install locked Python dependencies
+        run: uv sync --locked --extra dev --extra xlsx --group dev
+
+      - name: Lint Python
+        run: uv run --locked ruff check src tests
+
+      - name: Type-check Python
+        run: uv run --locked mypy src tests
+
+      - name: Test Python
+        run: uv run --locked pytest
+
+      - name: Audit all locked Python platform dependencies
+        run: uv run --locked python scripts/audit-dependencies.py
+
+      - name: Verify package versions agree
+        run: python scripts/release-candidate.py versions
+
+      - name: Install browser runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Verify third-party license bundle
+        run: uv run --locked --extra xlsx python scripts/collect-licenses.py
+
+      - name: Audit frontend and shipped Electron dependencies
+        working-directory: frontend
+        run: |
+          mkdir -p ../audit-evidence
+          npm audit --include=peer --audit-level=low --json > ../audit-evidence/npm-audit.json
+
+      - name: Save dependency audit evidence
+        # Earlier validation failures can skip both audits entirely.
+        if: always() && hashFiles('audit-evidence/*') != ''
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0 (Node 24)
+        with:
+          name: gofer-flow-audit-evidence
+          path: audit-evidence/*
+          if-no-files-found: error
+          # A rerun may replace temporary Actions artifacts; staged release files stay immutable.
+          overwrite: true
+
+      - name: Lint frontend source
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
+      - name: Browser-test workflow studio
+        working-directory: frontend
+        run: xvfb-run -a npm run test:browser
+

@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from gofer.core.executor import WorkflowExecutor
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimitError, ResourceLimits
@@ -49,6 +54,15 @@ class WatchEvent:
         }
 
 
+class _DirtyEvents(FileSystemEventHandler):
+    def __init__(self, dirty: threading.Event) -> None:
+        self.dirty = dirty
+
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        if event.event_type in {"created", "deleted", "modified", "moved"}:
+            self.dirty.set()
+
+
 @dataclass
 class WatchedWorkflow:
     workflow_id: str
@@ -60,6 +74,11 @@ class WatchedWorkflow:
     running_count: int = 0
     queued_events: list[list[WatchEvent]] = field(default_factory=list)
     dropped_event_batches: int = 0
+    dirty: threading.Event = field(default_factory=threading.Event)
+    observer: BaseObserver | None = None
+    observer_identity: tuple[int, int] | None = None
+    reconciled_at: float = 0.0
+    observer_retry_at: float = 0.0
 
 
 class WorkflowWatcher:
@@ -67,7 +86,9 @@ class WorkflowWatcher:
         self,
         poll_interval_seconds: float = 1.0,
         resource_limits: ResourceLimits | None = None,
+        reconciliation_seconds: float = 30.0,
     ) -> None:
+        self._reconciliation_seconds = max(poll_interval_seconds, reconciliation_seconds)
         self._poll_interval_seconds = poll_interval_seconds
         self._resource_limits = resource_limits or DEFAULT_RESOURCE_LIMITS
         self._workflows: dict[str, WatchedWorkflow] = {}
@@ -102,12 +123,16 @@ class WorkflowWatcher:
             ),
         )
         with self._lock:
+            if existing is not None:
+                self._stop_observer(existing)
             self._workflows[workflow.config.id] = watched
         log.info("Watching workflow '%s' path='%s'", workflow.config.id, workflow.config.watch.path)
 
     def remove_workflow(self, workflow_id: str) -> None:
         with self._lock:
-            self._workflows.pop(workflow_id, None)
+            watched = self._workflows.pop(workflow_id, None)
+            if watched is not None:
+                self._stop_observer(watched)
 
     def list_workflows(self) -> list[dict[str, str]]:
         with self._lock:
@@ -132,18 +157,90 @@ class WorkflowWatcher:
         if wait and self._thread is not None:
             self._thread.join(timeout=2)
 
+        with self._lock:
+            for watched in self._workflows.values():
+                self._stop_observer(watched)
+
+    @staticmethod
+    def _stop_observer(watched: WatchedWorkflow) -> None:
+        if watched.observer is not None:
+            watched.observer.stop()
+            watched.observer.join(timeout=2)
+            watched.observer = None
+            watched.observer_identity = None
+
+    def _ensure_observer(self, watched: WatchedWorkflow) -> None:
+        if watched.observer is None and time.monotonic() < watched.observer_retry_at:
+            return
+        target = watched.config.path
+        if not target.is_absolute():
+            target = watched.workflow_path.parent / target
+        try:
+            info = target.stat()
+            identity = (info.st_dev, info.st_ino)
+            if watched.observer is not None:
+                if watched.observer.is_alive() and watched.observer_identity == identity:
+                    return
+                self._stop_observer(watched)
+            # UNC shares retain polling. Native observers on local Linux/macOS stay native.
+            if str(target).startswith(("\\\\", "//")):
+                return
+            watched.observer_retry_at = time.monotonic() + self._reconciliation_seconds
+            observer = Observer()
+            handler = _DirtyEvents(watched.dirty)
+            observer.schedule(handler, str(target.parent), recursive=False)
+            if stat.S_ISDIR(info.st_mode):
+                observer.schedule(
+                    handler,
+                    str(target),
+                    recursive=(
+                        watched.config.recursive
+                        or "**" in watched.config.glob
+                        or "/" in watched.config.glob
+                        or "\\" in watched.config.glob
+                    ),
+                )
+            try:
+                observer.start()
+            except (OSError, RuntimeError):
+                observer.stop()
+                if observer.is_alive():
+                    observer.join(timeout=2)
+                raise
+            watched.observer = observer
+            watched.observer_identity = identity
+            watched.dirty.set()
+        except (OSError, RuntimeError):
+            self._stop_observer(watched)
+            watched.observer_retry_at = time.monotonic() + self._reconciliation_seconds
+            # Missing directories, unsupported filesystems and exhausted watches poll.
+
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
     def _run_loop(self) -> None:
         while not self._stop_event.wait(self._poll_interval_seconds):
-            self.poll_once()
+            self.poll_once(force=False)
 
-    def poll_once(self) -> None:
+    def poll_once(self, *, force: bool = True) -> None:
         with self._lock:
             watched_items = list(self._workflows.values())
 
         for watched in watched_items:
+            if not force:
+                with self._lock:
+                    if (
+                        self._stop_event.is_set()
+                        or self._workflows.get(watched.workflow_id) is not watched
+                    ):
+                        continue
+                    self._ensure_observer(watched)
+                reconcile = time.monotonic() - watched.reconciled_at >= self._reconciliation_seconds
+                if watched.observer is not None and not watched.dirty.is_set() and not reconcile:
+                    self._start_queued_runs(watched)
+                    continue
+            # Clear before scanning so notifications received during the scan survive.
+            watched.dirty.clear()
             try:
                 next_snapshot = self._snapshot(
                     watched.workflow_path,
@@ -151,9 +248,11 @@ class WorkflowWatcher:
                     watched.resource_limits,
                 )
             except Exception as exc:  # noqa: BLE001
+                watched.dirty.set()
                 log.warning("Could not scan watcher for '%s': %s", watched.workflow_id, exc)
                 continue
 
+            watched.reconciled_at = time.monotonic()
             if next_snapshot == watched.snapshot:
                 self._start_queued_runs(watched)
                 continue
@@ -339,9 +438,12 @@ class WorkflowWatcher:
                     "watcher scan exceeded limit "
                     f"{limits.max_files_scanned} files for path '{config.path}'"
                 )
-            if path.exists() and path.is_file():
-                stat = path.stat()
-                snapshot[str(path)] = (stat.st_mtime_ns, stat.st_size)
+            try:
+                info = path.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if stat.S_ISREG(info.st_mode):
+                snapshot[str(path)] = (info.st_mtime_ns, info.st_size)
         return snapshot
 
     def _watched_paths(self, workflow_path: Path, config: WatchConfig) -> Iterator[Path]:

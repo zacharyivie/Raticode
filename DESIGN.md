@@ -1,6 +1,6 @@
 ---
-name: Taskurotta Studio
-description: A compact local workflow cockpit built around the graph.
+name: Raticode
+description: A compact local workflow studio with a shared document editor.
 colors:
   primary: "#4f46e5"
   canvas: "#e4dfd5"
@@ -56,13 +56,13 @@ components:
     padding: "0 12px"
 ---
 
-# Design System: Taskurotta Studio
+# Design System: Raticode
 
 ## Overview
 
 **Creative North Star: "The Local Workflow Cockpit"**
 
-The graph is the workspace, not a card inside a dashboard. Navigation and assistance frame it with compact, predictable tools. Light mode uses a deep indigo navigation rail, a warm stone workspace and editor, and a muted sage assistant pane. Indigo marks selection, focus, and the primary action. Dark mode retains its existing zinc palette.
+Workflow graphs, source files, and browser pages share persistent editor tabs. An activity rail chooses what to browse; the project selector changes the browsing folder without retargeting open documents. Navigation and assistance frame the editor with compact, predictable tools. Light mode uses a deep indigo navigation rail, a warm stone workspace and editor, and a muted sage assistant pane. Indigo marks selection, focus, and the primary action. Dark mode retains its existing zinc palette.
 
 The interface is dense enough for builders but uses plain labels and familiar controls so workflow authors do not need to know the TOML model first.
 
@@ -87,7 +87,7 @@ The hierarchy stays compact: 14px titles, 13px body copy, 11px supporting labels
 
 ## Layout
 
-The default desktop layout uses a 272px workflow rail, a flexible graph canvas, and a 380px assistant pane. Each side pane remains resizable. Headers are 54px high and stay to one row. The inspector overlays the canvas and appears only when requested or when a node opens.
+The desktop layout uses a 41px activity rail within a resizable 272px project pane, a flexible tabbed editor, and a 380px assistant pane. Workflows, Files, Search, and Source control share the rail. The recent-project selector sits below the sidebar identity header and stays in place across activities. New Workflow belongs inside the Workflows panel, to the right of the activity rail. When the sidebar is collapsed, File > Open Recent retains project access. Each graph view owns its toolbar, camera, selection, and inspector. Graph headers wrap controls when space is limited. Below 1000 CSS pixels, both side panes collapse; users can open one at a time, and desktop preferences return when the window widens.
 
 Floating canvas controls must keep 16px from the viewport edge and move clear of the inspector. The application targets desktop windows and keeps keyboard access for every graph action.
 
@@ -121,7 +121,7 @@ Inputs use warm paper in the workspace, pale sage in chat, and a raised indigo f
 
 ### Navigation
 
-Workflow groups use collapsible folder rows. The selected workflow receives an indigo tint without an extra border. Thread history lives in a popover opened from the assistant header.
+Workflow groups use collapsible folder rows. Selecting a workflow opens or focuses its persistent graph tab. Graph and source views share one document buffer; split graph views retain independent cameras and selections. Foreign-project tabs show their owning path. The selected workflow receives an indigo tint without an extra border. Run status and actions are separate from tab selection and closing. The global Runs list retains background results and opens exact run snapshots. Thread history lives in a popover opened from the assistant header.
 
 ### Graph map
 
@@ -140,3 +140,24 @@ Outline and minimap share one bottom-right Map popover. The popover defaults clo
 - **Don't** stack multiple permanent panels over the canvas.
 - **Don't** use native selects for provider and model discovery when grouped availability matters.
 - **Don't** add explanatory wireframe notes to the product UI.
+
+### Swarm dashboard
+
+Swarms use one Operate-mode mission dashboard. The current task and run controls lead;
+message board, accepted milestone progress, and agent roster share the page. At widths
+above 740px within the workspace, the board takes the wider left column and progress
+sits above the roster on the right. Narrow panes stack these sections in reading order.
+
+Agent identity groups a 48×56 portrait slot, name, responsibility, and role. Initials
+occupy the portrait until character sprites are available. Inset activity updates and
+thin accepted-milestone meters borrow from a game party stats screen. Progress uses
+real weighted accepted work; agents without assigned milestones have no invented meter.
+Three-dot menus open individual agent settings. Activity and conversation expand inline.
+Team setup uses the quiet header settings action. Previous runs are collapsed below the
+live dashboard and open the same composition with read-only controls and an explicit
+return to the current run. The sidebar lists teams without duplicating their rosters.
+
+Swarm surfaces retain the studio's indigo actions and semantic state colors. Dark mode
+uses #18181a for the workspace, #1e1e21 for the board, and #151517 for inset status areas.
+Light mode uses the existing warm workspace, paper, and stone colors. Task titles can
+reach 32px; roster names remain 14px. Progress fill transitions honor reduced motion.

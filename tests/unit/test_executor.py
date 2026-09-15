@@ -3141,7 +3141,7 @@ async def test_agent_node_memory_compaction_logs_info(
                     "extra_paths": extra_paths or [],
                 }
             )
-            if prompt_text.startswith("Compact this Taskurotta agent-node"):
+            if prompt_text.startswith("Compact this Raticode agent-node"):
                 return AgentResult(
                     agent_id="",
                     success=True,
@@ -3237,7 +3237,7 @@ async def test_agent_node_memory_compaction_uses_fallback_summary(
         ) -> AgentResult:
             prompt_text = prompt
             self.calls.append({"prompt": prompt_text})
-            if prompt_text.startswith("Compact this Taskurotta agent-node"):
+            if prompt_text.startswith("Compact this Raticode agent-node"):
                 return AgentResult(
                     agent_id="",
                     success=compact_mode != "failed",

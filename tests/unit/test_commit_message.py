@@ -45,6 +45,7 @@ async def test_generation_uses_temporary_directory_and_validates_result(
     directory = run.call_args.kwargs["cwd"]
     assert not directory.exists()
     assert run.call_args.kwargs["timeout"] == 150
+    assert run.call_args.kwargs["stdin"].decode().endswith('{"staged_diff": "+resolved"}')
     run.return_value = (
         0,
         '{"type":"item.completed","item":{"type":"agent_message","text":"Here is a message"}}',
@@ -64,8 +65,8 @@ async def test_generation_rejects_empty_diff() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["codex", "claude_code"])
-async def test_large_commit_preserves_all_files_and_rem_selection(
-    monkeypatch: pytest.MonkeyPatch, provider: str
+async def test_large_commit_inspects_repository_with_rem_selection(
+    monkeypatch: pytest.MonkeyPatch, provider: str, tmp_path: Path
 ) -> None:
     diff = "".join(
         f"diff --git a/file-{i}.py b/file-{i}.py\n" + "+change\n" * 1000 for i in range(92)
@@ -79,7 +80,7 @@ async def test_large_commit_preserves_all_files_and_rem_selection(
         commit_message, "_provider_final_message", lambda *_: "feat: update project"
     )
     await commit_message.generate_commit_message(
-        provider=provider, model="selected-model", effort="high", diff=diff
+        provider=provider, model="selected-model", effort="high", diff=diff, project_root=tmp_path
     )
     validate.assert_awaited_once_with(provider, "selected-model", "high")
     command = run.call_args.args[0]
@@ -87,12 +88,41 @@ async def test_large_commit_preserves_all_files_and_rem_selection(
     assert 'model_reasoning_effort="high"' in command if provider == "codex" else "high" in command
     prompt = run.call_args.kwargs["stdin"].decode()
     assert prompt not in command
-    assert "patch excerpt omitted" in prompt
-    for i in range(92):
-        assert f"diff --git a/file-{i}.py b/file-{i}.py" in prompt
-    assert len(commit_message.staged_diff_preview(diff)) <= 120000
+    assert prompt.startswith("Review the staged changes and summarize.")
+    assert "git diff --cached" in prompt
+    assert "diff --git" not in prompt
+    assert "Do not use tools" not in prompt
+    assert run.call_args.kwargs["cwd"] == tmp_path
+    if provider == "codex":
+        assert "features.shell_tool=true" in command
+        assert command[command.index("--sandbox") + 1] == "read-only"
+        assert command[command.index("--cd") + 1] == str(tmp_path)
+    else:
+        assert command[command.index("--tools") + 1] == "Read,Glob,Grep,Bash"
+        assert "Bash(git diff:*)" in command
+        assert "Edit" not in command
 
 
-def test_small_staged_diff_is_not_abbreviated() -> None:
-    diff = "diff --git a/file b/file\n-old\n+new\n"
-    assert commit_message.staged_diff_preview(diff) == diff
+@pytest.mark.asyncio
+async def test_inspection_requires_project() -> None:
+    with pytest.raises(ValueError, match="project folder"):
+        await commit_message.generate_commit_message(
+            provider="codex", model="cli-default", diff="", inspect_staged=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_inspection_omits_diff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/codex")
+    run = AsyncMock(return_value=(0, "", ""))
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    monkeypatch.setattr(
+        commit_message, "_provider_final_message", lambda *_: "fix: handle large commits"
+    )
+    result = await commit_message.generate_commit_message(
+        provider="codex", model="cli-default", diff="", project_root=tmp_path, inspect_staged=True
+    )
+    assert result == {"message": "fix: handle large commits"}
+    assert run.call_args.kwargs["cwd"] == tmp_path

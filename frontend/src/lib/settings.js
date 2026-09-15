@@ -1,3 +1,4 @@
+import brandCompat from "./brandCompat.js";
 import { cloneJson } from "./jsonValue.js";
 export const REPORT_THEMES = [
   {
@@ -66,8 +67,8 @@ export const REPORT_THEMES = [
   }
 ];
 
-export const SETTINGS_STORAGE_KEY = "taskurotta.settings.v1";
-export const TASKUROTTA_BROWSER_HOME = "taskurotta://home";
+export const SETTINGS_STORAGE_KEY = "raticode.settings.v1";
+export const RATICODE_BROWSER_HOME = "raticode://home";
 
 export const KEYBINDING_COMMANDS = [
   { id: "settings.open", label: "Open settings", group: "Application", scope: "global", defaultBinding: "Mod+Comma" },
@@ -102,6 +103,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
   general: {
     autosave: true,
     defaultView: "graph",
+    initialActivity: "workflows",
     executionMode: "local",
     checkForUpdates: true,
   },
@@ -123,7 +125,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     wordWrap: false,
   },
   browser: {
-    homepage: TASKUROTTA_BROWSER_HOME,
+    homepage: RATICODE_BROWSER_HOME,
     searchUrl: "https://www.google.com/search?q={query}",
   },
   terminal: {
@@ -133,6 +135,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     scrollback: 5000,
   },
   assistant: {
+    swarmAccessEnabled: true,
     avatarEnabled: true,
     avatarAnimated: true,
     resources: { shell: true, web: false, skills: [], mcpServers: [] },
@@ -153,7 +156,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
 export function loadAppSettings(storage = globalThis.window?.localStorage) {
   let stored = null;
   try {
-    stored = storage?.getItem(SETTINGS_STORAGE_KEY);
+    stored = brandCompat.readBrandedStorage(storage, SETTINGS_STORAGE_KEY);
   } catch {
     return migrateLegacySettings(defaultSettingsSnapshot(), storage);
   }
@@ -179,10 +182,13 @@ export function normalizeAppSettings(value = {}) {
   const settings = mergeSettings(defaultSettingsSnapshot(), value);
   const storedVersion = Number(value?.version) || 1;
   settings.version = 2;
+  settings.assistant.swarmAccessEnabled = settings.assistant.swarmAccessEnabled !== false;
   settings.assistant.avatarEnabled = settings.assistant.avatarEnabled !== false;
   settings.assistant.avatarAnimated = settings.assistant.avatarAnimated !== false;
   settings.general.autosave = settings.general.autosave !== false;
-  settings.general.defaultView = enumValue(settings.general.defaultView, ["graph", "code"], "graph");
+  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["workflows", "files", "search", "source-control"], value?.general?.defaultView === "code" ? "files" : "workflows");
+  // Retain the old field for older installations reading these settings.
+  settings.general.defaultView = settings.general.initialActivity === "workflows" ? "graph" : "code";
   settings.general.executionMode = enumValue(settings.general.executionMode, ["local", "remote"], "local");
   settings.general.checkForUpdates = settings.general.checkForUpdates !== false;
   settings.appearance.theme = enumValue(settings.appearance.theme, ["system", "light", "dark"], "system");
@@ -198,9 +204,9 @@ export function normalizeAppSettings(value = {}) {
   settings.editor.wordWrap = settings.editor.wordWrap === true;
   settings.browser.homepage = safeString(
     storedVersion < 2 && settings.browser.homepage === "about:blank"
-      ? TASKUROTTA_BROWSER_HOME
-      : settings.browser.homepage,
-    TASKUROTTA_BROWSER_HOME,
+      ? RATICODE_BROWSER_HOME
+      : brandCompat.canonicalHomeUrl(settings.browser.homepage),
+    RATICODE_BROWSER_HOME,
     2048,
   );
   settings.browser.searchUrl = searchUrlValue(settings.browser.searchUrl);

@@ -1,6 +1,0 @@
-Radish: 1
-Workflow:
-  name: Invalid Agent contract
-Node example:
-  type: agent
-  prompt: Review the current change.

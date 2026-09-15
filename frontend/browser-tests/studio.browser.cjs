@@ -1,4 +1,4 @@
-/* global localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
+/* global structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -8,7 +8,7 @@ const { URL } = require("node:url");
 const { app, BrowserWindow } = require("electron");
 
 const frontendRoot = path.resolve(__dirname, "..");
-const distRoot = path.join(frontendRoot, "dist");
+const distRoot = process.env.GOFER_PERF_DIST_ROOT || path.join(frontendRoot, "dist");
 const timeout = setTimeout(() => fail(new Error("Browser studio smoke test timed out.")), 30000);
 
 let server;
@@ -49,8 +49,48 @@ async function run() {
   });
 
   observeRendererErrors(windowRef);
+  const startupAt = process.hrtime.bigint();
   await windowRef.loadURL(baseUrl);
-  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Studio view']"))));
+  if (process.env.GOFER_STARTUP_PERF_OUTPUT) {
+    windowRef.webContents.debugger.attach("1.3");
+    await windowRef.webContents.debugger.sendCommand("Performance.enable");
+  }
+  windowRef.show();
+  windowRef.focus();
+  windowRef.webContents.focus();
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Project sidebar views']"))));
+  if (process.env.GOFER_EMPTY_WORKSPACE_ONLY === "1") {
+    await require("./empty-workspace.browser.cjs")({ windowRef, evaluate, waitFor });
+    clearTimeout(timeout);
+    assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
+    console.log("Browser empty workspace responsiveness regressions passed.");
+    await cleanup(0);
+    return;
+  }
+  if (process.env.GOFER_STARTUP_PERF_OUTPUT) {
+    const readyMs = Number(process.hrtime.bigint() - startupAt) / 1e6;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const { metrics } = await windowRef.webContents.debugger.sendCommand("Performance.getMetrics");
+    const values = Object.fromEntries(metrics.map(item => [item.name, item.value]));
+    const result = { readyMs, postLoadScriptCpuMs: values.ScriptDuration * 1000,
+      postLoadTaskCpuMs: values.TaskDuration * 1000, jsHeapBytes: values.JSHeapUsedSize,
+      processes: app.getAppMetrics().map(item => ({ type: item.type, workingSetKiB: item.memory.workingSetSize })),
+      images: await evaluate(() => [...document.querySelectorAll(".rem-avatar img")].map(img => ({ width: img.naturalWidth, height: img.naturalHeight }))),
+    };
+    fs.writeFileSync(process.env.GOFER_STARTUP_PERF_OUTPUT, JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(result, null, 2));
+    clearTimeout(timeout);
+    await cleanup(0);
+    return;
+  }
+  if (process.env.GOFER_SWARM_ONLY === "1") {
+    await exerciseSwarms();
+    clearTimeout(timeout);
+    assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
+    console.log("Browser swarm regressions passed.");
+    await cleanup(0);
+    return;
+  }
   if (process.env.GOFER_TERMINAL_ONLY === "1") {
     await exerciseBottomPanelTerminal();
     clearTimeout(timeout);
@@ -81,6 +121,7 @@ async function run() {
     await cleanup(0);
     return;
   }
+  await waitFor(() => evaluate(() => window.innerWidth >= 1000));
   await exerciseCreateDialog();
   await exerciseDesignRegressions();
   await exerciseKeyboardGraphAndResizers();
@@ -110,6 +151,13 @@ async function exerciseConversationEfficiency() {
     window.__conversationReads = {};
     window.__conversationWrites = {};
     const read = Storage.prototype.getItem;
+    window.__historyTransactions = 0;
+    const transaction = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function (stores, mode, ...args) {
+      const tx = transaction.call(this, stores, mode, ...args);
+      if (mode === "readwrite" && Array.from(stores).includes("messages")) tx.addEventListener("complete", () => { window.__historyTransactions += 1; });
+      return tx;
+    };
     const write = Storage.prototype.setItem;
     Storage.prototype.getItem = function (key) {
       if (key.startsWith("gofer-flow-chat-thread:")) window.__conversationReads[key] = (window.__conversationReads[key] || 0) + 1;
@@ -129,13 +177,13 @@ async function exerciseConversationEfficiency() {
     await waitFor(() => evaluate((index) => document.querySelector("[data-chat-pane]").textContent.includes(`History for Efficiency thread ${index}`), index));
   }
   async function back() {
-    await evaluate(() => document.querySelector("button[title='Back to recent threads']").click());
+    await evaluate(() => document.querySelector("button[title='Back to active threads']").click());
     await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
   }
   for (let i = 0; i < 8; i++) { await open(i); await back(); }
   assert.equal(await evaluate(() => window.__conversationReads["gofer-flow-chat-thread:efficiency-0"]), 1, "Initial visit parses history once");
   await open(0);
-  assert.equal(await evaluate(() => window.__conversationReads["gofer-flow-chat-thread:efficiency-0"]), 2, "Evicted history reloads on return");
+  assert.equal(await evaluate(() => window.__conversationReads["gofer-flow-chat-thread:efficiency-0"]), 1, "Revisiting migrated history reads IndexedDB, not legacy localStorage");
   await evaluate(() => {
     const textarea = document.querySelector("[data-chat-composer] textarea");
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(textarea, "Test batched thought stream");
@@ -145,25 +193,184 @@ async function exerciseConversationEfficiency() {
   await evaluate(() => document.querySelector("button[title='Send message']").click());
   await waitFor(() => evaluate(() => Boolean(window.__conversationStream)));
   await evaluate(() => {
+    window.__historyTransactions = 0;
+    window.__conversationStream.enqueue(new TextEncoder().encode(JSON.stringify({ type: "compaction", messages: [{ id: "memory", role: "system", kind: "memory", body: "Saved model summary" }] }) + "\n"));
+  });
+  await waitFor(() => evaluate(() => window.__historyTransactions === 2));
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("History for Efficiency thread 0")), true, "Compaction retains visible history");
+  await evaluate(() => {
     window.__conversationWrites = {};
+    window.__historyTransactions = 0;
     window.__conversationStream.enqueue(new TextEncoder().encode(Array.from({ length: 100 }, (_, i) => JSON.stringify({ type: "thought", text: `Thought ${i}` })).join("\n") + "\n"));
   });
-  await waitFor(() => evaluate(() => window.__conversationWrites["gofer-flow-chat-thread:efficiency-0"] === 1));
+  await waitFor(() => evaluate(() => window.__historyTransactions === 1));
   await back();
   await open(1);
   await evaluate(() => {
     window.__conversationStream.enqueue(new TextEncoder().encode(JSON.stringify({ type: "final", message: { body: "Background response complete" } }) + "\n"));
     window.__conversationStream.close();
   });
-  await waitFor(() => evaluate(() => window.__conversationWrites["gofer-flow-chat-thread:efficiency-0"] === 2));
+  await waitFor(() => evaluate(() => window.__historyTransactions === 2));
   await back();
   assert.equal(await evaluate(() => [...document.querySelectorAll("[data-assistant-home] button")].find((button) => button.textContent.includes("Efficiency thread 0")).textContent.includes("Completed")), true);
-  await open(0);
-  assert.equal(await evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("Background response complete")), true);
-  const history = await evaluate(() => JSON.parse(localStorage.getItem("gofer-flow-chat-thread:efficiency-0")));
+  await evaluate(() => [...document.querySelectorAll("[data-assistant-home] button")].find(button => button.textContent.includes("Efficiency thread 0")).click());
+  await waitFor(() => evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("Background response complete")));
+  const history = await evaluate(async () => {
+    const database = await new Promise((resolve, reject) => { const request = indexedDB.open("gofer-flow-conversations"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+    return new Promise(resolve => { const request = database.transaction("messages").objectStore("messages").getAll(); request.onsuccess = () => { database.close(); resolve(request.result.filter(row => row.threadId === "efficiency-0").sort((a, b) => a.sequence - b.sequence).map(row => row.message)); }; });
+  });
   assert.equal(history.filter((message) => message.kind === "thought").length, 100);
   assert.equal(history.at(-1).body, "Background response complete");
+  // Search finds the oldest message even though reopening loaded only 40 rows.
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("History for Efficiency thread 0")), false);
+  await evaluate(() => document.querySelector("button[aria-label='Search threads']").click());
+  await waitFor(() => evaluate(() => document.activeElement?.getAttribute("aria-label") === "Search all thread history"));
+  await evaluate(() => {
+    const input = document.querySelector("input[aria-label='Search all thread history']");
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, "History for Efficiency thread 0");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Thread search results']")?.textContent.includes("Efficiency thread 0")));
+  await wait(220);
+  const searchInputStyle = await evaluate(() => {
+    const input = document.querySelector("input[aria-label='Search all thread history']");
+    const style = getComputedStyle(input);
+    return { outline: style.outlineStyle, color: style.outlineColor, width: style.outlineWidth };
+  });
+  // Tailwind's outline-none is a transparent solid outline when focus-visible is absent.
+  const invisibleOutline = searchInputStyle.outline === "none" || searchInputStyle.width === "0px"
+    || searchInputStyle.color === "transparent" || /^rgba\(.*,[ ]*0(?:\.0+)?\)$/.test(searchInputStyle.color);
+  assert.equal(invisibleOutline, true, `Search input must not draw an extra outline: ${JSON.stringify(searchInputStyle)}`);
+  fs.writeFileSync("/tmp/rem-thread-search.png", (await windowRef.webContents.capturePage()).toPNG());
+  await evaluate(() => document.querySelector("input[aria-label='Search all thread history']").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  assert.equal(await evaluate(() => document.activeElement?.getAttribute("aria-label")), "Search threads");
+  // Scroll restoration keeps a visible message at the same viewport position.
+  const anchor = await evaluate(() => {
+    const scroll = document.querySelector("[data-chat-scroll]");
+    scroll.scrollTop = 0;
+    const message = scroll.querySelector("[data-history-anchor]");
+    const anchor = { id: message?.dataset.historyAnchor, top: message?.getBoundingClientRect().top };
+    scroll.dispatchEvent(new Event("scroll", { bubbles: true }));
+    return anchor;
+  });
+  await waitFor(() => evaluate(() => !document.querySelector(".rem-history-loader [role='status']")));
+  if (anchor.id) assert.ok(Math.abs(await evaluate(id => document.querySelector('[data-history-anchor="' + id + '"]').getBoundingClientRect().top, anchor.id) - anchor.top) < 3, "Prepending preserves the visible message position");
+  for (let i = 0; i < 4; i++) {
+    const button = await evaluate(() => [...document.querySelectorAll(".rem-history-loader button")].some(button => button.textContent.includes("Load earlier")));
+    if (!button) break;
+    await evaluate(() => document.querySelector(".rem-history-loader button").click());
+    await waitFor(() => evaluate(() => !document.querySelector(".rem-history-loader [role='status']")));
+  }
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("History for Efficiency thread 0")), true);
+  fs.writeFileSync("/tmp/rem-thread-history.png", (await windowRef.webContents.capturePage()).toPNG());
   console.log("Conversation fixture: 8 thread visits; one load per first visit; 100 thoughts in one chunk -> one history write; background completion and unread preserved.");
+  await exerciseThreadSearchNavigation();
+}
+
+async function exerciseThreadSearchNavigation() {
+  await evaluate(() => {
+    const thread = { id: "search-navigation", title: "Search navigation", updatedAt: new Date(Date.now() - 11 * 86400000).toISOString(), projectRoot: "/workspace", provider: "codex" };
+    const other = { ...thread, id: "search-other", title: "Another thread" };
+    localStorage.setItem("gofer-flow-chat-threads", JSON.stringify([thread, other].map(({ id, updatedAt }) => ({ id, updatedAt }))));
+    localStorage.setItem(`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread));
+    localStorage.setItem(`gofer-flow-chat-thread-meta:${other.id}`, JSON.stringify(other));
+    localStorage.setItem(`gofer-flow-chat-thread:${other.id}`, JSON.stringify([{ id: "other-0", role: "assistant", body: "Other thread marker" }]));
+    const messages = Array.from({ length: 200 }, (_, i) => ({ id: `search-${i}`, role: "assistant", body: `Message ${i}\n\nMore context for this message.` }));
+    messages[15].body = "Long message introduction.\n\n".repeat(50) + "Find the **archived needle** here.";
+    messages[90] = { id: "search-90", role: "user", body: "Unicode ＮＥＥＤＬＥ and literal [a+b]." };
+    messages[130] = { id: "search-130", role: "assistant", kind: "thought", groupId: "search-thoughts", body: "Hidden thought needle", trace: { id: "tool-match", kind: "tool", title: "Read", input: "Hidden thought needle" } };
+    messages[145].body = "[Documentation](https://example.com/source-only-match)";
+    localStorage.setItem(`gofer-flow-chat-thread:${thread.id}`, JSON.stringify(messages));
+  });
+  await windowRef.reload();
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
+  assert.equal(await evaluate(() => document.querySelector("[data-assistant-home]").textContent.includes("Search navigation")), false, "Archived thread stays out of the active list");
+  assert.equal(await evaluate(() => [...document.querySelectorAll("[data-assistant-home] button")].find(button => button.textContent.includes("Archived threads"))?.getAttribute("aria-expanded")), "false");
+  const search = async (query, failRead = false) => {
+    await evaluate(() => document.querySelector("button[aria-label='Search threads']").click());
+    await evaluate(value => {
+      const input = document.querySelector("input[aria-label='Search all thread history']");
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, query);
+    await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Thread search results'] button"))));
+    if (failRead) await evaluate(() => {
+      const get = window.IDBObjectStore.prototype.get;
+      window.IDBObjectStore.prototype.get = function (key) {
+        if (this.name === "messages" && key[1] === "search-15") {
+          window.IDBObjectStore.prototype.get = get;
+          throw new Error("Matching history read failed for test");
+        }
+        return get.call(this, key);
+      };
+    });
+    await evaluate(() => document.querySelector("[aria-label='Thread search results'] button").click());
+    if (failRead) {
+      await waitFor(() => evaluate(() => document.querySelector("[data-search-history] [role='alert']")?.textContent.includes("read failed")));
+      assert.equal(await evaluate(() => Boolean(document.querySelector('[data-message-id="search-199"]'))), false, "A failed seek must not silently open the latest messages");
+      await evaluate(() => [...document.querySelectorAll("[data-search-history] button")].find(button => button.textContent === "Retry").click());
+    }
+    await waitFor(() => evaluate(() => Boolean(window.CSS.highlights.get("rem-thread-match")?.size)));
+    const bounds = await evaluate(() => {
+      const range = [...window.CSS.highlights.get("rem-thread-match")][0];
+      const rect = range.getBoundingClientRect();
+      const scroll = document.querySelector("[data-chat-scroll]").getBoundingClientRect();
+      return { text: range.toString(), visible: rect.top >= scroll.top && rect.bottom <= scroll.bottom, count: document.querySelectorAll("[data-search-history] [data-message-id]").length };
+    });
+    assert.equal(bounds.visible, true, `Search match must be in the viewport: ${query}`);
+    assert.ok(bounds.count <= 40, "Opening a search result renders a bounded page");
+    return bounds.text;
+  };
+  assert.equal(await search("archived needle"), "archived needle");
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[data-thread-search-match] strong"))), true, "Markdown formatting survives highlighting");
+  fs.writeFileSync("/tmp/rem-search-match.png", (await windowRef.webContents.capturePage()).toPNG());
+  // Search again while this thread is already open, then return to the same hit.
+  assert.equal(await search("unicode needle"), "Unicode ＮＥＥＤＬＥ");
+  assert.equal(await search("Hidden thought needle"), "Hidden thought needle");
+  assert.equal(await evaluate(() => document.querySelector("[data-thread-search-match] button")?.getAttribute("aria-expanded")), "true");
+  const thoughtTop = await evaluate(() => [...window.CSS.highlights.get("rem-thread-match")][0].getBoundingClientRect().top);
+  await evaluate(() => [...document.querySelectorAll("[data-search-history] button")].find(button => button.textContent === "Load earlier messages").click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector('[data-message-id="search-70"]'))));
+  const thoughtTopAfter = await evaluate(() => [...window.CSS.highlights.get("rem-thread-match")][0].getBoundingClientRect().top);
+  assert.ok(Math.abs(thoughtTopAfter - thoughtTop) < 3, `Earlier pages preserve the match position: ${thoughtTop} -> ${thoughtTopAfter}`);
+  await evaluate(() => document.querySelector("[data-thread-search-match] button").click());
+  await evaluate(() => document.querySelector("[data-thread-search-match] button").click());
+  await waitFor(() => evaluate(() => Boolean(window.CSS.highlights.get("rem-thread-match")?.size)));
+  assert.equal(await search("source-only-match"), "source-only-match");
+  assert.equal(await search("Other thread marker"), "Other thread marker");
+  assert.equal(await search("archived needle"), "archived needle");
+  assert.equal(await search("archived needle", true), "archived needle");
+  // A later page must adjoin the search page instead of skipping to recent history.
+  await evaluate(() => [...document.querySelectorAll("[data-search-history] button")].find(button => button.textContent === "Load later messages").click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector('[data-message-id="search-79"]'))));
+  assert.equal(await evaluate(() => Boolean(document.querySelector('[data-message-id="search-199"]'))), false);
+  await evaluate(() => [...document.querySelectorAll("[data-chat-pane] button")].find(button => button.textContent === "Latest messages").click());
+  await waitFor(() => evaluate(() => !document.querySelector("[data-search-history]") && !window.CSS.highlights.has("rem-thread-match")));
+  assert.equal(await evaluate(() => {
+    const scroll = document.querySelector("[data-chat-scroll]");
+    return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 3;
+  }), true, "Latest messages returns to the bottom");
+  // A response completing while the reader is at an old match must not scroll.
+  await evaluate(() => {
+    const fetch = window.fetch;
+    window.fetch = (...args) => String(args[0]).includes("/chat/stream")
+      ? Promise.resolve(new Response(new ReadableStream({ start(controller) { window.__searchStream = controller; } }))) : fetch(...args);
+    const textarea = document.querySelector("[data-chat-composer] textarea");
+    Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Continue this thread");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await waitFor(() => evaluate(() => !document.querySelector("button[title='Send message']").disabled));
+  await evaluate(() => document.querySelector("button[title='Send message']").click());
+  await waitFor(() => evaluate(() => Boolean(window.__searchStream)));
+  await search("archived needle");
+  const matchTop = await evaluate(() => [...window.CSS.highlights.get("rem-thread-match")][0].getBoundingClientRect().top);
+  await evaluate(() => {
+    window.__searchStream.enqueue(new TextEncoder().encode(JSON.stringify({ type: "final", message: { body: "Reply while searching history" } }) + "\n"));
+    window.__searchStream.close();
+  });
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("button[title='Send message']"))));
+  assert.ok(Math.abs(await evaluate(() => [...window.CSS.highlights.get("rem-thread-match")][0].getBoundingClientRect().top) - matchTop) < 3, "Live completion must preserve the match position");
+  console.log("Search navigation: old and same-thread matches, bounded pages, Unicode, Markdown, expanded thoughts, source-only text and return to latest passed.");
 }
 
 async function exerciseRemAvatar() {
@@ -175,7 +382,7 @@ async function exerciseRemAvatar() {
     return { width: avatar.offsetWidth, imagesLoaded: [...avatar.querySelectorAll("img")].every((img) => img.complete && img.naturalWidth > 0), waveOpacity: getComputedStyle(avatar.querySelector(".rem-avatar-wave")).opacity };
   });
   assert.deepEqual(metrics, { width: 112, imagesLoaded: true, waveOpacity: "0" });
-  fs.writeFileSync("/tmp/taskurotta-rem-seated.png", (await windowRef.webContents.capturePage()).toPNG());
+  fs.writeFileSync("/tmp/raticode-rem-seated.png", (await windowRef.webContents.capturePage()).toPNG());
   await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.blinking === "true"));
   await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.blinking === "false"));
   const toggle = () => evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", code: "KeyL", ctrlKey: true, bubbles: true })));
@@ -188,7 +395,7 @@ async function exerciseRemAvatar() {
     const style = getComputedStyle(wave);
     return { opacity: style.opacity, transitionDuration: style.transitionDuration };
   }), { opacity: "1", transitionDuration: "0s" });
-  fs.writeFileSync("/tmp/taskurotta-rem-wave.png", (await windowRef.webContents.capturePage()).toPNG());
+  fs.writeFileSync("/tmp/raticode-rem-wave.png", (await windowRef.webContents.capturePage()).toPNG());
 }
 
 async function exerciseBottomPanelTerminal() {
@@ -203,9 +410,13 @@ async function exerciseBottomPanelTerminal() {
     await evaluate(() => document.querySelector("[aria-label='Bottom panel'] button[role='tab'][aria-selected='true']")?.textContent.trim()),
     "Terminal",
   );
-  assert.equal(await evaluate(() => document.querySelector("[aria-label='Bottom panel']").getBoundingClientRect().height), 240);
+  await waitFor(() => evaluate(() => {
+    const panel = document.querySelector("[aria-label='Bottom panel']");
+    const expected = Number(panel.querySelector("[aria-label='Resize bottom panel']")?.getAttribute("aria-valuenow"));
+    return expected > 36 && panel.getBoundingClientRect().height === expected;
+  }));
   await evaluate(() => document.querySelector("button[aria-label='New terminal']").click());
-  await waitFor(() => evaluate(() => document.querySelectorAll("button[title='Close terminal']").length === 2));
+  await waitFor(() => evaluate(() => document.querySelectorAll("button[title^='Close terminal']").length === 2));
   assert.equal(await evaluate(() => window.__goferBridgeCalls
     .filter((call) => call.method === "terminal.create").length), 2);
 
@@ -217,9 +428,9 @@ async function exerciseBottomPanelTerminal() {
   await waitFor(() => evaluate(() => document.querySelector("[aria-label='Bottom panel']").getBoundingClientRect().height === 36));
 }
 
-async function openRadishWorkflowFile() {
+async function openRattishWorkflowFile() {
   await evaluate(() => [...document.querySelectorAll("[role='button']")]
-    .find((button) => button.textContent.includes("Radish editor"))
+    .find((button) => button.textContent.includes("Rattish editor"))
     .parentElement.querySelector("button[title='Workflow actions']").click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[role='menu']"))), 25, "workflow actions menu");
   await evaluate(() => [...document.querySelectorAll("[role='menuitem']")]
@@ -228,30 +439,30 @@ async function openRadishWorkflowFile() {
 
 async function exerciseMonacoEditor() {
   await waitFor(() => evaluate(() => [...document.querySelectorAll("[role='button']")]
-    .some((button) => button.textContent.includes("Radish editor"))));
+    .some((button) => button.textContent.includes("Rattish editor"))));
   await evaluate(() => [...document.querySelectorAll("[role='button']")]
-    .find((button) => button.textContent.includes("Radish editor")).click());
+    .find((button) => button.textContent.includes("Rattish editor")).click());
   await waitFor(() => evaluate(() => [...document.querySelectorAll("article")]
     .some((node) => node.textContent.includes("Prepare"))));
-  await evaluate(() => document.querySelector("button[title='Run workflow now']").click());
+  await evaluate(() => document.querySelector("[data-graph-active='true'] button[title='Run workflow now']").click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[role='dialog']"))));
   assert.equal(await evaluate(() => document.querySelector("[role='dialog']").textContent.includes("prepare")), true);
   await evaluate(() => [...document.querySelectorAll("[role='dialog'] button")]
     .find((button) => button.textContent.trim() === "Run workflow").click());
   await waitFor(() => evaluate(() => !document.querySelector("[role='dialog']")));
   await waitFor(() => evaluate(() => [...document.querySelectorAll("[role='button']")]
-    .some((button) => button.textContent.includes("Radish editor") && button.textContent.includes("Success"))));
-  await openRadishWorkflowFile();
+    .some((button) => button.textContent.includes("Rattish editor") && button.textContent.includes("Success"))));
+  await openRattishWorkflowFile();
   await waitFor(() => evaluate(() => Boolean(document.querySelector(".monaco-editor"))));
   assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Search files']"))), false);
   await waitFor(() => evaluate(() => [...document.querySelectorAll(".view-line")]
-    .some((line) => line.textContent.includes("Radish"))));
+    .some((line) => line.textContent.includes("Rattish"))));
   await evaluate(() => [...document.querySelectorAll("button[role='tab']")]
-    .find((button) => button.textContent.trim() === "Graph").click());
+    .find((button) => button.closest("[aria-label=\"Editor tabs\"]") && button.textContent.includes("Rattish editor")).click());
   assert.equal(await evaluate(() => Boolean(document.querySelector(".monaco-editor"))), true);
   await waitFor(() => evaluate(() => [...document.querySelectorAll("article")]
     .some((node) => node.textContent.includes("Prepare"))));
-  assert.equal(await evaluate(() => document.querySelector("[aria-label='Studio view'] [aria-selected='true']")?.textContent.trim()), "Graph");
+  assert.match(await evaluate(() => document.querySelector("[aria-label='Editor tabs'] [aria-selected='true']")?.textContent.trim()), /Rattish editor/);
 }
 
 async function exercisePackagedMonacoWorker(baseUrl) {
@@ -273,15 +484,15 @@ async function exercisePackagedMonacoWorker(baseUrl) {
   await packagedWindow.loadFile(path.join(distRoot, "index.html"));
   windowRef = packagedWindow;
   if (httpWindow && !httpWindow.isDestroyed()) httpWindow.destroy();
-  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Studio view']"))));
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Project sidebar views']"))));
   await waitFor(() => evaluate(() => [...document.querySelectorAll("[role='button']")]
-    .some((button) => button.textContent.includes("Radish editor"))));
+    .some((button) => button.textContent.includes("Rattish editor"))));
   await evaluate(() => [...document.querySelectorAll("[role='button']")]
-    .find((button) => button.textContent.includes("Radish editor")).click());
-  await openRadishWorkflowFile();
+    .find((button) => button.textContent.includes("Rattish editor")).click());
+  await openRattishWorkflowFile();
   await waitFor(() => evaluate(() => Boolean(document.querySelector(".monaco-editor"))));
   await waitFor(() => evaluate(() => [...document.querySelectorAll(".view-line")]
-    .some((line) => /command:\s*echo\s*ready/.test(line.textContent))), 25, "packaged editor to render indented Radish fields");
+    .some((line) => /command:\s*echo\s*ready/.test(line.textContent))), 25, "packaged editor to render indented Rattish fields");
   const workerResult = await evaluate(() => {
     try {
       const worker = self.MonacoEnvironment.getWorker();
@@ -444,10 +655,10 @@ async function exerciseDesignRegressions() {
   await evaluate(() => document.querySelector("[data-picker-trigger='effort']").click());
 
   assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='New thread']"))), true);
-  assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='Recent threads']"))), true);
+  assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='Active threads']"))), true);
   await evaluate(() => document.querySelector("button[title='New thread']").click());
-  await waitFor(() => evaluate(() => Boolean(document.querySelector("button[title='Back to recent threads']"))));
-  await evaluate(() => document.querySelector("button[title='Back to recent threads']").click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("button[title='Back to active threads']"))));
+  await evaluate(() => document.querySelector("button[title='Back to active threads']").click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
   assert.equal(
     await evaluate(() => document.querySelector("[data-assistant-home] h2")?.textContent.trim()),
@@ -456,18 +667,18 @@ async function exerciseDesignRegressions() {
   );
   assert.match(
     await evaluate(() => document.querySelector("[data-assistant-home]").textContent),
-    /Your coding agent in Taskurotta\./,
+    /Your coding agent in Raticode\./,
   );
   assert.equal(
     await evaluate(() => document.querySelector("[data-assistant-home] #assistant-home-recent")?.textContent.trim()),
-    "Recent threads",
+    "Active threads",
   );
   assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='New thread']"))), true);
-  assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='Back to recent threads']"))), false);
-  await evaluate(() => document.querySelector("button[title='Recent threads']").click());
+  assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='Back to active threads']"))), false);
+  await evaluate(() => document.querySelector("button[title='Active threads']").click());
   await waitFor(() => evaluate(() => Boolean([...document.querySelectorAll("p")]
-    .find((item) => item.textContent.trim() === "Recent threads"))));
-  await evaluate(() => document.querySelector("button[title='Recent threads']").click());
+    .find((item) => item.textContent.trim() === "Active threads"))));
+  await evaluate(() => document.querySelector("button[title='Active threads']").click());
 
   const composerLayout = await evaluate(() => {
     const composer = document.querySelector("[data-chat-composer]");
@@ -697,6 +908,8 @@ async function exerciseKeyboardGraphAndResizers() {
 }
 
 async function exerciseCreateDialog() {
+  await evaluate(() => document.querySelector(".studio-sidebar #sidebar-tab-workflows").click());
+  await waitFor(() => evaluate(() => document.querySelector(".studio-sidebar #sidebar-panel-workflows").hidden === false));
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[title='New Workflow']"))));
   await evaluate(() => {
     const opener = document.querySelector("[title='New Workflow']");
@@ -779,11 +992,398 @@ async function pressNativeKey(keyCode, modifiers = []) {
   await wait(60);
 }
 
+let swarmFixture = {
+  id: "swarm-demo", name: "Release team", charter: "Ship a reviewed, tested release.",
+  agents: [{ id: "lead", name: "Lead", role: "Coordinate and review work", provider: "codex", model: "gpt-5.6-sol", effort: "high", isOrchestrator: true, allowSteering: false }, { id: "builder", name: "Builder", role: "Implement the frontend", provider: "codex", model: "gpt-5.6-luna", effort: "medium", isOrchestrator: false, allowSteering: false }],
+  wakeIntervalSeconds: 60, maxTurns: 100,
+  run: { id: "run-1", state: "paused", createdAt: "2026-09-14T12:00:00Z", turnCount: 8, task: "Prepare the release", revision: 1, agentStates: {}, messages: [{ id: "msg1", senderId: "lead", recipientIds: ["builder"], body: "Build the editor and report validation results.", createdAt: "2026-09-12T12:00:00Z", deliveries: [{ agentId: "builder", state: "uncertain", reason: "Restarted before delivery was confirmed" }] }], events: [], objectives: [{ id: "objective1", title: "Release editor", milestones: [{ id: "m1", title: "Plan", weight: 1, ownerId: "lead", status: "accepted", evidence: "Plan reviewed" }, { id: "m2", title: "Build editor", weight: 3, ownerId: "builder", status: "accepted", evidence: "Tests pass" }, { id: "m3", title: "Review", weight: 1, ownerId: "builder", status: "planned" }] }] },
+};
+swarmFixture.run.agentStates = { builder: { state: "idle", messages: [{ role: "assistant", body: "Editor implementation passes validation." }], traces: [{ title: "Run tests", text: "npm test passed" }] } };
+swarmFixture.run.usage = { input_tokens: null, output_tokens: 42 };
+swarmFixture.run.workspace = { mode: "git", path: "/workspace/swarm/integration" };
+swarmFixture.run.attempts = [{ id: "attempt-1", milestoneId: "m3", ownerId: "builder", state: "uncertain", workspace: { path: "/workspace/swarm/attempt-1" }, result: { passed: false, checks: [{ command: ["python", "-m", "pytest"], exitCode: 1, logPath: "/workspace/swarm/check.log" }] } }];
+swarmFixture.run.configuration = { agents: structuredClone(swarmFixture.agents) };
+swarmFixture.history = [{ ...structuredClone(swarmFixture.run), id: "prior-run", task: "Previous release", state: "completed" }];
+let swarmMutations = [];
+
+async function checkSwarmWidths(layoutSelector, longTextSelector = "") {
+  windowRef.setSize(2400, 1000);
+  const originalText = await evaluate(selector => [...document.querySelectorAll(selector || ".no-long-text-fixture")].map(element => {
+    const text = element.textContent;
+    element.textContent = "LongUnbrokenRepositoryOrAgentName".repeat(12);
+    return text;
+  }), longTextSelector);
+  for (const width of [320, 480, 760, 761, 1024, 1920]) {
+    await evaluate(width => {
+      const pane = document.querySelector(".swarm-workspace");
+      pane.style.flex = "none";
+      pane.style.width = `${width}px`;
+    }, width);
+    await wait(60);
+    const result = await evaluate(layoutSelector => {
+      const pane = document.querySelector(".swarm-workspace");
+      const layout = pane.querySelector(layoutSelector);
+      const bounds = pane.getBoundingClientRect();
+      const scrollContainers = [pane, ...pane.querySelectorAll("*")].filter(element => element.getClientRects().length && !element.closest("[hidden]") && /auto|scroll/.test(getComputedStyle(element).overflowX) && !element.matches("input, textarea"));
+      const controls = [...layout.querySelectorAll("input, textarea, select, button")].filter(element => element.getClientRects().length);
+      return {
+        width: pane.clientWidth,
+        layoutWidth: layout.getBoundingClientRect().width,
+        overflow: scrollContainers.filter(element => element.scrollWidth > element.clientWidth + 1).map(element => element.className),
+        outsideControls: controls.filter(element => {
+          const rect = element.getBoundingClientRect();
+          return rect.left < bounds.left - 1 || rect.right > bounds.right + 1;
+        }).map(element => element.getAttribute("aria-label") || element.textContent),
+      };
+    }, layoutSelector);
+    assert.equal(result.width, width, "Test resizes the swarm pane independently of the window");
+    assert.ok(Math.abs(result.layoutWidth - width) <= 16, `${layoutSelector} fills its ${width}px pane`);
+    assert.deepEqual(result.overflow, [], `No horizontal scroll containers at ${width}px`);
+    assert.deepEqual(result.outsideControls, [], `Controls remain inside the ${width}px pane`);
+    if (width === 320 && layoutSelector === ".swarm-setup-layout") {
+      assert.equal(await evaluate(() => {
+        const buttons = [...document.querySelectorAll(".swarm-setup-agent[open] .model-picker-trigger > button")];
+        return buttons.length === 3 && buttons.every(button => button.getBoundingClientRect().height >= 34) && buttons[1].getBoundingClientRect().top >= buttons[0].getBoundingClientRect().bottom;
+      }), true, "Narrow model controls stack into readable rows");
+    }
+  }
+  await evaluate(({ selector, texts }) => {
+    document.querySelectorAll(selector || ".no-long-text-fixture").forEach((element, index) => { element.textContent = texts[index]; });
+    const pane = document.querySelector(".swarm-workspace");
+    pane.style.removeProperty("flex");
+    pane.style.removeProperty("width");
+  }, { selector: longTextSelector, texts: originalText });
+  windowRef.setSize(1440, 900);
+}
+
+async function exerciseSwarms() {
+  await waitFor(() => evaluate(() => [...document.querySelectorAll("[role='button']")].some((button) => button.textContent.includes("Rattish editor"))));
+  await evaluate(() => [...document.querySelectorAll("[role='button']")].find((button) => button.textContent.includes("Rattish editor")).click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("#sidebar-tab-swarms"))));
+  await evaluate(() => {
+    const tab = document.querySelector("#sidebar-tab-workflows");
+    tab.focus();
+    tab.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  });
+  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-swarms", "End reaches Swarms from Workflows");
+  await evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })));
+  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-workflows", "Home returns to Workflows");
+  const editorTabs = await evaluate(() => document.querySelector("[aria-label='Editor tabs']").textContent);
+  await evaluate(() => document.querySelector("#sidebar-tab-swarms").click());
+  await waitFor(() => evaluate(() => document.querySelector("#sidebar-panel-swarms").textContent.includes("Release team")));
+  await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find((button) => button.textContent.includes("Release team")).click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Message to swarm']"))));
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent.includes("Builder")), true);
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Swarm sections']"))), false, "Dashboard replaces section tabs");
+  assert.match(await evaluate(() => document.querySelector("[aria-label='Execution and verification']").textContent), /Input tokens: Unknown.*Output tokens: 42/);
+  await evaluate(() => document.querySelector("[aria-label='Execution and verification'] summary").click());
+  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Execution and verification']").textContent.includes("Exit 1: python -m pytest")));
+  await evaluate(() => {
+    const input = document.querySelector("[aria-label='Execution and verification'] textarea");
+    input.focus();
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "Prior worker stopped; inspected the saved artifact.");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Keep output for verification").click());
+  await waitFor(() => swarmMutations.some(item => item.path.endsWith("/execution")));
+  assert.equal(swarmMutations.at(-1).body.action, "resolve_attempt");
+  assert.equal(swarmMutations.at(-1).body.attemptId, "attempt-1");
+  await evaluate(() => document.querySelector("[aria-label='Execution and verification'] summary").click());
+  assert.equal(await evaluate(() => document.querySelector(".swarm-history").open), false, "Previous runs start collapsed");
+  await evaluate(() => {
+    const menu = document.querySelector("[aria-label='Lead agent'] .swarm-agent-menu");
+    menu.open = true;
+    menu.querySelector("button").focus();
+    menu.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+  assert.equal(await evaluate(() => document.activeElement.getAttribute("aria-label")), "Options for Lead", "Escape returns focus to the agent menu trigger");
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Lead agent'] .swarm-agent-menu").open), false);
+
+  assert.equal(await evaluate(() => ["Message board", "Run progress", "Agent roster"].every(label => document.querySelector(`[aria-label="${label}"]`).getBoundingClientRect().height > 0)), true, "Board, progress and agents appear together");
+  await evaluate(() => document.querySelector("[aria-label='Back to editor']").click());
+  await waitFor(() => evaluate(() => !document.querySelector("[aria-label='Swarm workspace']")));
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Editor tabs']").textContent), editorTabs, "Swarm navigation preserves workflow tabs");
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Editor tabs']").getBoundingClientRect().height > 0), true);
+  await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find((button) => button.textContent.includes("Release team")).click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Message to swarm']"))));
+
+  await wait(150);
+  fs.writeFileSync("/tmp/raticode-swarm-active.png", (await windowRef.webContents.capturePage()).toPNG());
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Retry message").click());
+  await waitFor(() => swarmMutations.some((item) => item.path.endsWith("/deliveries")));
+  assert.deepEqual(swarmMutations.at(-1).body, { messageId: "msg1", agentId: "builder", action: "retry", projectRoot: "/workspace/gofer-flow" });
+
+  await evaluate(() => { document.querySelector(".swarm-objectives").open = true; });
+  assert.equal(await evaluate(() => document.querySelector("progress[aria-label='Overall progress']").value), 80);
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Edit milestones").click());
+  await checkSwarmWidths(".swarm-dashboard", ".swarm-message-content > p");
+  await evaluate(() => {
+    const input = document.querySelector("[aria-label='Milestone 3 weight']");
+    input.focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Milestone 3 weight']").value), "", "Weight can be cleared while focused");
+  await evaluate(() => {
+    const input = document.querySelector("[aria-label='Milestone 3 weight']");
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "6");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await wait(50);
+  await evaluate(() => document.querySelector("[aria-label='Milestone 3 weight']").blur());
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Milestone 3 weight']").value), "6");
+  await waitFor(() => evaluate(() => document.querySelector("progress[aria-label='Overall progress']").value === 40));
+  await evaluate(() => { document.querySelector(".swarm-objectives").open = false; });
+  await evaluate(() => { document.querySelector(".swarm-objectives").open = true; });
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Milestone 3 weight']").value), "6", "Milestone drafts survive collapsing objectives");
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Save progress").click());
+  await waitFor(() => swarmMutations.some((item) => item.path.endsWith("/objectives")));
+  assert.equal(swarmMutations.at(-1).body.objectives[0].milestones[2].weight, 6);
+  assert.equal(swarmMutations.at(-1).body.revision, 1);
+  await waitFor(() => evaluate(() => !document.querySelector("[aria-label='Milestone 3 weight']")));
+  await wait(200);
+  await windowRef.webContents.capturePage().then((image) => fs.writeFileSync("/tmp/raticode-swarm-progress.png", image.toPNG()));
+  await evaluate(() => { document.querySelector(".swarm-objectives").open = false; });
+  await evaluate(() => {
+    const input = document.querySelector("[aria-label='Message to swarm']");
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "Please prioritize review.");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Send message").click());
+  await waitFor(() => swarmMutations.some((item) => item.path.endsWith("/messages")));
+  assert.equal(swarmMutations.at(-1).body.body, "Please prioritize review.");
+  await evaluate(() => document.querySelector("button[aria-label='Swarm settings']").click());
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").disabled), true, "An active run locks team edits");
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Team details'] input").disabled), true);
+  assert.equal(await evaluate(() => document.querySelector("[data-swarm-agent='lead']").disabled), true);
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Back to dashboard").click());
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Stop").click());
+  await waitFor(() => swarmMutations.some((item) => item.body.action === "stop"));
+  await evaluate(() => document.querySelector("button[aria-label='Swarm settings']").click());
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Team details'] select").value), "lead");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-run-options").open), false, "Run limits start collapsed");
+  assert.equal(await evaluate(() => [...document.querySelectorAll(".swarm-setup-agent .swarm-setup-advanced")].every(el => !el.open)), true, "Agent advanced settings start collapsed");
+  assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent[open]").length), 1, "Only one agent is expanded");
+  await evaluate(() => document.querySelector(".swarm-setup-agent > summary").focus());
+  assert.equal(await evaluate(() => document.activeElement.matches(".swarm-setup-agent > summary")), true, "Agent summary can receive focus");
+  await pressNativeKey("Return");
+  assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent[open]").length), 0, "Agent summaries support keyboard collapse");
+  await pressNativeKey("Return");
+  assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent[open]").length), 1);
+  await evaluate(() => {
+    document.querySelector(".swarm-setup-run-options").open = true;
+    document.querySelector(".swarm-setup-agent[open] .swarm-setup-advanced").open = true;
+    document.querySelector(".swarm-setup-agent[open] .swarm-setup-resources").open = true;
+  });
+  await checkSwarmWidths(".swarm-setup-layout", ".swarm-setup-agent-identity strong");
+  await evaluate(() => {
+    document.querySelector(".swarm-setup-run-options").open = false;
+    document.querySelector(".swarm-setup-agent[open] .swarm-setup-advanced").open = false;
+    document.querySelector(".swarm-setup-agent[open] .swarm-setup-resources").open = false;
+  });
+  await wait(200);
+  await windowRef.webContents.capturePage().then((image) => fs.writeFileSync("/tmp/raticode-team-setup-dark.png", image.toPNG()));
+  await evaluate(() => { document.querySelector("main").classList.remove("dark"); document.documentElement.classList.remove("dark"); });
+  await wait(150);
+  fs.writeFileSync("/tmp/raticode-team-setup-light.png", (await windowRef.webContents.capturePage()).toPNG());
+  windowRef.setSize(780, 900);
+  await wait(150);
+  assert.equal(await evaluate(() => { const pane = document.querySelector(".swarm-setup-scroll"); return pane.scrollWidth <= pane.clientWidth; }), true, "Narrow setup does not overflow");
+  assert.equal(await evaluate(() => { const footer = document.querySelector(".swarm-setup-footer").getBoundingClientRect(); return footer.bottom <= window.innerHeight && footer.top > 0; }), true, "Save remains visible on narrow screens");
+  fs.writeFileSync("/tmp/raticode-team-setup-narrow.png", (await windowRef.webContents.capturePage()).toPNG());
+  windowRef.setSize(1440, 900);
+  await evaluate(() => document.documentElement.classList.add("dark"));
+  await evaluate(() => document.querySelector(".swarm-setup-run-options summary").click());
+  for (const [label, value] of [["Concurrent agents", "2"], ["Maximum turns per run", "120"], ["Check interval (seconds)", "90"], ["Maximum run duration (seconds)", "7200"], ["Repair attempts per milestone", "3"], ["Turns without progress before replanning", "8"]]) {
+    await evaluate((label) => {
+      const input = document.querySelector(`[aria-label="${label}"]`);
+      input.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, label);
+    assert.equal(await evaluate(label => document.querySelector(`[aria-label="${label}"]`).value, label), "", "Numeric drafts can be cleared");
+    await evaluate(({ label, value }) => {
+      const input = document.querySelector(`[aria-label="${label}"]`);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, { label, value });
+    await evaluate(label => document.querySelector(`[aria-label="${label}"]`).blur(), label);
+    assert.equal(await evaluate(label => document.querySelector(`[aria-label="${label}"]`).value, label), value);
+  }
+  await evaluate(() => document.querySelector(".swarm-setup-run-options summary").click());
+  await evaluate(() => document.querySelector("[data-swarm-agent='builder']").closest("details").querySelector("summary").click());
+  await evaluate(() => document.querySelector("[data-swarm-agent='builder'] .swarm-setup-advanced summary").click());
+  await evaluate(() => document.querySelector("[data-swarm-agent='builder'] input[type='checkbox']").click());
+  await evaluate(() => document.querySelector("[data-swarm-agent='lead']").closest("details").querySelector("summary").click());
+  await evaluate(() => document.querySelector("[data-swarm-agent='builder']").closest("details").querySelector("summary").click());
+  assert.equal(await evaluate(() => document.querySelector("[data-swarm-agent='builder'] input[type='checkbox']").checked), true, "Switching agents preserves drafts");
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Add agent").click());
+  assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent").length), 3);
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-agent[open] strong").textContent), "New agent");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").disabled), true, "Incomplete agents cannot be saved");
+  await evaluate(() => document.querySelector(".swarm-setup-agent[open] .swarm-setup-remove").click());
+  assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent").length), 2);
+  await evaluate(() => {
+    const select = document.querySelector("[aria-label='Team details'] select");
+    select.value = "builder";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent .swarm-agent-portrait svg").length), 1, "Changing the orchestrator retains exactly one lead");
+  await evaluate(() => {
+    const select = document.querySelector("[aria-label='Team details'] select");
+    select.value = "lead";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await evaluate(() => document.querySelector(".swarm-setup-footer button").click());
+  await waitFor(() => swarmMutations.some(item => item.body.maxTurns === 120));
+  assert.equal(swarmMutations.at(-1).body.maxConcurrency, 2);
+  assert.equal(swarmMutations.at(-1).body.maxRunSeconds, 7200);
+  assert.equal(swarmMutations.at(-1).body.maxRepairAttempts, 3);
+  assert.equal(swarmMutations.at(-1).body.stallTurnLimit, 8);
+  assert.equal(swarmMutations.at(-1).body.wakeIntervalSeconds, 90);
+  assert.equal(swarmMutations.at(-1).body.agents.find(agent => agent.id === "builder").allowSteering, true);
+  await waitFor(() => evaluate(() => !document.querySelector(".swarm-setup")));
+  await evaluate(() => document.querySelector("[aria-label='Options for Builder']").click());
+  await evaluate(() => document.querySelector("[aria-label='Builder agent'] .swarm-agent-menu button").click());
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Agent settings']").textContent.includes("Builder settings")), true);
+  assert.equal(await evaluate(() => document.querySelectorAll("[aria-label='Agent settings'] fieldset[data-swarm-agent]").length), 1, "Agent menu opens only that agent's settings");
+  await checkSwarmWidths(".swarm-setup-layout", "[aria-label='Agent settings'] .swarm-toolbar h3");
+  await evaluate(() => {
+    const input = document.querySelector("[aria-label='Agent settings'] textarea");
+    input.focus();
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "Implement and verify the frontend");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.blur();
+  });
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Save agent").click());
+  await waitFor(() => swarmMutations.some(item => item.body.agents?.find(agent => agent.id === "builder")?.role === "Implement and verify the frontend"));
+  assert.equal(swarmMutations.at(-1).body.agents.find(agent => agent.id === "lead").role, "Coordinate and review work", "Saving one agent preserves teammates");
+  await waitFor(() => evaluate(() => !document.querySelector("[aria-label='Agent settings']")));
+  await evaluate(() => { document.querySelector("[aria-label='Builder agent'] .swarm-agent-details").open = true; });
+  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Builder agent']").textContent.includes("Editor implementation passes validation.")));
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Builder agent']").textContent.includes("Editor implementation passes validation.")), true);
+  await evaluate(() => { document.querySelector(".swarm-history").open = true; });
+  await waitFor(() => evaluate(() => document.querySelector(".swarm-history").textContent.includes("Previous release")));
+  await evaluate(() => document.querySelector(".swarm-history-list button").click());
+  await waitFor(() => evaluate(() => document.querySelector(".swarm-run-heading h1").textContent === "Previous release"));
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Message to swarm']"))), false, "Archived board cannot send messages");
+  assert.equal(await evaluate(() => Boolean(document.querySelector(".swarm-agent-menu"))), false, "Archived agents cannot be configured");
+  assert.equal(await evaluate(() => [...document.querySelectorAll("button")].some(button => button.textContent === "Edit milestones")), false, "Archived progress is read only");
+  await evaluate(() => { document.querySelector(".swarm-objectives").open = true; });
+  await checkSwarmWidths(".swarm-dashboard", ".swarm-objectives h4, .swarm-history-list strong");
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Return to current run").click());
+  await waitFor(() => evaluate(() => document.querySelector(".swarm-run-heading h1").textContent === "Prepare the release"));
+  await evaluate(() => { document.querySelector(".swarm-history").open = false; });
+  await evaluate(() => { document.querySelector(".swarm-scroll").scrollTop = 0; });
+  await wait(100);
+  fs.writeFileSync("/tmp/raticode-swarm-dashboard-dark.png", (await windowRef.webContents.capturePage()).toPNG());
+  await evaluate(() => { document.querySelector("main").classList.remove("dark"); document.documentElement.classList.remove("dark"); });
+  await wait(200);
+  fs.writeFileSync("/tmp/raticode-swarm-light.png", (await windowRef.webContents.capturePage()).toPNG());
+  windowRef.setSize(1000, 800);
+  await wait(200);
+  assert.equal(await evaluate(() => { const pane = document.querySelector("[aria-label='Swarm workspace']"); return pane.scrollWidth <= pane.clientWidth; }), true, "Narrow swarm workspace does not overflow horizontally");
+  fs.writeFileSync("/tmp/raticode-swarm-narrow.png", (await windowRef.webContents.capturePage()).toPNG());
+
+  // Saved membership and the stopped run's immutable roster may differ.
+  swarmFixture.agents = swarmFixture.agents.filter(agent => agent.id !== "builder");
+  swarmFixture.run.task = "Review the release. " + "Check the implementation and validation evidence. ".repeat(12);
+  swarmFixture.run.configuration.agents[0].role = "Coordinate the team. " + "Review each change and keep the plan up to date. ".repeat(10);
+  await evaluate(() => document.querySelector("[aria-label='Back to editor']").click());
+  await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find(button => button.textContent.includes("Release team")).click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Builder agent']"))));
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Options for Builder']"))), false, "Removed snapshot agents cannot open empty settings");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-run-heading h1").classList.contains("swarm-clamped-text")), true, "Long task prompts keep the dashboard in view");
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Show full task").click());
+  assert.equal(await evaluate(() => document.querySelector(".swarm-run-heading h1").classList.contains("swarm-clamped-text")), false);
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Show less task").click());
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Lead agent'] .swarm-agent-role").classList.contains("swarm-clamped-text")), true);
+  await evaluate(() => { document.querySelector(".swarm-new-run").open = true; });
+  await evaluate(() => {
+    const input = document.querySelector("#swarm-task");
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "Review the next release");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Start run").click());
+  await waitFor(() => swarmMutations.some(item => item.path.endsWith("/start") && item.body.task === "Review the next release"));
+  await waitFor(() => evaluate(() => document.querySelector(".swarm-run-heading h1").textContent === "Review the next release"));
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent.includes("Builder")), false, "New run uses the saved team");
+  assert.equal(await evaluate(() => document.querySelector("progress[aria-label='Overall progress']").value), 0, "New run resets progress");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-board-empty").textContent), "No messages yet", "An active run with no messages uses a neutral empty state");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-progress-value").textContent), "Not planned", "An unplanned run does not claim measured completion");
+
+  // The first-run dashboard must keep its draft through settings navigation.
+  swarmFixture.run = null;
+  await evaluate(() => window.dispatchEvent(new Event("gofer:swarms-changed")));
+  await evaluate(() => document.querySelector("[aria-label='Back to editor']").click());
+  await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find(button => button.textContent.includes("Release team")).click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("#swarm-task"))));
+  assert.equal(await evaluate(() => document.querySelector(".swarm-new-run").open), true);
+  assert.equal(await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Start run").disabled), true);
+  assert.equal(await evaluate(() => /mission|Build teamwork|Give your team a task/.test(document.querySelector(".swarm-dashboard").textContent)), false, "The dashboard has no promotional task copy");
+  await evaluate(() => {
+    const input = document.querySelector("#swarm-task");
+    input.focus();
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "Review the staged changes");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.blur();
+  });
+  await evaluate(() => document.querySelector("[aria-label='Swarm settings']").click());
+  await waitFor(() => evaluate(() => [...document.querySelectorAll("button")].some(button => button.textContent === "Back to dashboard")));
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Back to dashboard").click());
+  assert.equal(await evaluate(() => document.querySelector("#swarm-task").value), "Review the staged changes", "Settings preserve the first task draft");
+  assert.equal(await evaluate(() => {
+    const board = document.querySelector(".swarm-board-panel").getBoundingClientRect();
+    const roster = document.querySelector(".swarm-roster").getBoundingClientRect();
+    return board.top < roster.top;
+  }), true, "Narrow layout places the board before the roster");
+  windowRef.setSize(1800, 1000);
+  await evaluate(() => { document.documentElement.classList.add("dark"); document.querySelector(".swarm-scroll").scrollTop = 0; });
+  await wait(150);
+  fs.writeFileSync("/tmp/raticode-swarm-ready.png", (await windowRef.webContents.capturePage()).toPNG());
+  await evaluate(() => document.querySelector("[aria-label='New swarm']").click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector(".swarm-setup-footer"))));
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").textContent), "Create swarm");
+  await evaluate(() => {
+    const input = document.querySelector("[aria-label='Team details'] input");
+    input.focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "Review team");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await evaluate(() => document.querySelector("[aria-label='Team details'] input").blur());
+  await evaluate(() => document.querySelector(".swarm-setup-footer button").click());
+  await waitFor(() => swarmMutations.some(item => item.path === "/api/swarms" && item.body.name === "Review team"));
+  assert.equal(swarmMutations.at(-1).body.agents.length, 1);
+  assert.equal(swarmMutations.at(-1).body.agents[0].isOrchestrator, true);
+  assert.equal(swarmMutations.at(-1).body.wakeIntervalSeconds, 60, "Hidden run limits retain their defaults on creation");
+}
+
 async function startServer() {
   server = http.createServer((request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     if (url.pathname.startsWith("/api/")) {
       response.setHeader("Access-Control-Allow-Origin", "*");
+      if (url.pathname.startsWith("/api/swarms")) {
+        if (request.method === "GET") {
+          const view = { ...swarmFixture, history: url.searchParams.get("history") === "summary" ? swarmFixture.history.map(({ id, task, state, createdAt }) => ({ id, task, state, createdAt })) : [] };
+          json(response, url.pathname === "/api/swarms" ? { swarms: [swarmFixture] } : url.pathname.endsWith("/history") ? { run: swarmFixture.history.find(run => run.id === url.searchParams.get("runId")) } : { swarm: view }); return;
+        }
+        let body = "";
+        request.on("data", (chunk) => { body += chunk; });
+        request.on("end", () => {
+          const payload = JSON.parse(body);
+          swarmMutations.push({ path: url.pathname, body: payload });
+          if (url.pathname.endsWith("/start")) {
+            swarmFixture.history.push(structuredClone(swarmFixture.run));
+            swarmFixture.run = { id: "run-2", task: payload.task, state: "running", configuration: { agents: structuredClone(swarmFixture.agents) }, messages: [], objectives: [], agentStates: {}, revision: 0 };
+          }
+          if (url.pathname.endsWith("/objectives")) { swarmFixture.run.objectives = payload.objectives; swarmFixture.run.revision += 1; }
+          if (request.method === "PUT") { swarmFixture = { ...swarmFixture, ...payload }; }
+          if (payload.action === "stop") swarmFixture.run.state = "stopped";
+          json(response, { swarm: swarmFixture });
+        });
+        return;
+      }
       if (request.method === "PUT" && url.pathname === "/api/workflows/demo") {
         let body = "";
         request.on("data", (chunk) => { body += chunk; });
@@ -827,7 +1427,7 @@ function routeApi(pathname, response) {
     json(response, {
       dataDir: "/workspace",
       promptAgentIds: [],
-      workflows: [workflowFixture(), radishWorkflowFixture()],
+      workflows: process.env.GOFER_EMPTY_WORKSPACE_ONLY === "1" ? [] : [workflowFixture(), rattishWorkflowFixture()],
     });
     return;
   }
@@ -898,19 +1498,19 @@ function routeApi(pathname, response) {
     json(response, { templates: [] });
     return;
   }
-  if (pathname === "/api/workflows/radish-editor/document") {
-    json(response, { document: radishDocumentFixture() });
+  if (pathname === "/api/workflows/rattish-editor/document") {
+    json(response, { document: rattishDocumentFixture() });
     return;
   }
-  if (pathname === "/api/workflows/radish-editor/document/analyze") {
-    json(response, { document: radishDocumentFixture() });
+  if (pathname === "/api/workflows/rattish-editor/document/analyze") {
+    json(response, { document: rattishDocumentFixture() });
     return;
   }
-  if (pathname === "/api/workflows/radish-editor/document/save") {
-    json(response, { document: radishDocumentFixture() });
+  if (pathname === "/api/workflows/rattish-editor/document/save") {
+    json(response, { document: rattishDocumentFixture() });
     return;
   }
-  if (pathname === "/api/workflows/radish-editor/plan") {
+  if (pathname === "/api/workflows/rattish-editor/plan") {
     json(response, {
       plan: {
         blockingDiagnostics: [],
@@ -919,7 +1519,7 @@ function routeApi(pathname, response) {
           index: 0,
           nodes: [{ id: "prepare", detail: "echo ready", sideEffects: ["command"], type: "bash-command" }],
         }],
-        kind: "radish",
+        kind: "rattish",
         providerRequirements: [],
         requiredSecrets: [],
         runnable: true,
@@ -928,17 +1528,17 @@ function routeApi(pathname, response) {
     });
     return;
   }
-  if (pathname === "/api/workflows/radish-editor/run") {
+  if (pathname === "/api/workflows/rattish-editor/run") {
     json(response, {
       run: {
-        logPath: "/workspace/radish/run.json",
+        logPath: "/workspace/rattish/run.json",
         logText: "prepare: ready",
         nodeOutputs: { prepare: { data: { stdout: "ready" }, output: "ready", success: true } },
         runEvents: [],
         runNodes: { prepare: { status: "success" } },
         status: "success",
         success: true,
-        workflowId: "radish-editor",
+        workflowId: "rattish-editor",
       },
     });
     return;
@@ -964,6 +1564,8 @@ function workflowFixture() {
     edges: [],
     id: "demo",
     name: "Demo workflow",
+    projectRoot: "/workspace/gofer-flow",
+    projectName: "gofer-flow",
     nodes: [
       {
         id: "step",
@@ -989,27 +1591,27 @@ function workflowFixture() {
   };
 }
 
-function radishWorkflowFixture() {
+function rattishWorkflowFixture() {
   return {
     agents: {},
     edges: [],
-    id: "radish-editor",
-    name: "Radish editor",
+    id: "rattish-editor",
+    name: "Rattish editor",
     nodes: [],
     parameters: {},
     projectName: "gofer-flow",
     projectRoot: "/workspace/gofer-flow",
     readOnly: true,
-    sourceFormat: "radish",
-    sourcePath: "/workspace/gofer-flow/.taskurotta/radish-editor/workflow.rad",
+    sourceFormat: "rattish",
+    sourcePath: "/workspace/gofer-flow/.raticode/rattish-editor/workflow.rattish",
     status: "Ready",
     tags: ["ready"],
-    workflowRoot: "/workspace/gofer-flow/.taskurotta/radish-editor",
+    workflowRoot: "/workspace/gofer-flow/.raticode/rattish-editor",
   };
 }
 
-function radishDocumentFixture() {
-  const source = "Radish: 1\n\nWorkflow:\n  name: Radish editor\n\nNode prepare:\n  type: bash-command\n  command: echo ready\n";
+function rattishDocumentFixture() {
+  const source = "Rattish: 1\n\nWorkflow:\n  name: Rattish editor\n\nNode prepare:\n  type: bash-command\n  command: echo ready\n";
   return {
     compilation: { fingerprint: "sha256:test", irVersion: 1, lastValidFingerprint: "sha256:test", state: "valid" },
     diagnostics: [],
@@ -1034,10 +1636,10 @@ function radishDocumentFixture() {
     runnable: true,
     savedRevision: "sha256:source",
     source,
-    sourcePath: "/workspace/gofer-flow/.taskurotta/radish-editor/workflow.rad",
+    sourcePath: "/workspace/gofer-flow/.raticode/rattish-editor/workflow.rattish",
     sourceRevision: "sha256:source",
-    workflow: { name: "Radish editor" },
-    workflowId: "radish-editor",
+    workflow: { name: "Rattish editor" },
+    workflowId: "rattish-editor",
   };
 }
 
@@ -1047,9 +1649,9 @@ function json(response, payload) {
 }
 
 async function evaluate(callback, argument) {
-  const result = await windowRef.webContents.executeJavaScript(`(() => {
+  const result = await windowRef.webContents.executeJavaScript(`(async () => {
     try {
-      return { value: (${callback.toString()})(${JSON.stringify(argument) ?? "undefined"}) };
+      return { value: await (${callback.toString()})(${JSON.stringify(argument) ?? "undefined"}) };
     } catch (error) {
       return { error: String(error?.stack || error) };
     }
@@ -1099,6 +1701,10 @@ async function fail(error) {
 }
 
 async function exerciseSourceControl() {
+  windowRef.show();
+  windowRef.focus();
+  windowRef.webContents.focus();
+  await waitFor(() => evaluate(() => document.hasFocus()), 25, "source control window focus");
   await evaluate(() => {
     window.goferDesktop.workspace.gitStatus = async () => ({ active: true, branch: "main", branches: ["main", "feature"], remotes: [], entries: Array.from({ length: 24 }, (_, i) => ({ path: `frontend/src/components/Example${i}.jsx`, status: "M", staged: i === 0, unstaged: i !== 0 })) });
     window.goferDesktop.workspace.gitHistory = async () => ({ active: true, commits: [] });
@@ -1138,7 +1744,7 @@ async function exerciseSourceControl() {
     const afterHover = await evaluate(() => [...document.querySelector(".scm-file").querySelectorAll("button")].slice(1).map((button) => button.getBoundingClientRect().x));
     assert.deepEqual(afterHover, beforeHover.map((button) => button.x), "Git action buttons must stay in place on hover");
     const screenshot = await windowRef.webContents.capturePage();
-    fs.writeFileSync(`/tmp/taskurotta-source-control-${dark ? "dark" : "light"}.png`, screenshot.toPNG());
+    fs.writeFileSync(`/tmp/raticode-source-control-${dark ? "dark" : "light"}.png`, screenshot.toPNG());
   }
   await evaluate(() => document.querySelector("#scm-tab-branches").click());
   for (const dark of [false, true]) {
@@ -1146,7 +1752,7 @@ async function exerciseSourceControl() {
     await wait(50);
     await windowRef.webContents.executeJavaScript(`document.documentElement.classList.toggle("dark", ${dark})`);
     await evaluate(() => document.querySelector('[aria-label="Integrate main worktree"]').dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 120, clientY: 240 })));
-    await waitFor(() => evaluate(() => document.activeElement?.dataset.operation === "merge"), 25, "initial worktree menu focus");
+    await waitFor(() => evaluate(() => document.activeElement?.dataset.operation === "merge" && document.activeElement.matches(":focus")), 25, "initial worktree menu focus");
     assert.deepEqual(await evaluate(() => [...document.querySelectorAll("[data-operation]")].map((item) => item.dataset.operation)),
       ["merge", "squash", "ff-only", "no-ff", "rebase"]);
     const merge = await evaluate(() => {
@@ -1169,7 +1775,7 @@ async function exerciseSourceControl() {
     await pressNativeKey("Home");
     await waitFor(() => evaluate(() => document.activeElement?.dataset.operation === "merge"));
     assert.equal(await evaluate(() => getComputedStyle(document.activeElement).outlineStyle), "solid");
-    fs.writeFileSync(`/tmp/taskurotta-worktree-menu-${dark ? "dark" : "light"}.png`, (await windowRef.webContents.capturePage()).toPNG());
+    fs.writeFileSync(`/tmp/raticode-worktree-menu-${dark ? "dark" : "light"}.png`, (await windowRef.webContents.capturePage()).toPNG());
     windowRef.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
     await waitFor(() => evaluate(() => !document.querySelector('[data-operation="merge"]')));
   }

@@ -1,4 +1,4 @@
-# Taskurotta CLI AUR Package
+# Raticode CLI AUR Package
 
 This directory contains the AUR metadata for `gofer-flow-cli`, the CLI-only
 package. It installs the standalone Linux release binary as `/usr/bin/gof`

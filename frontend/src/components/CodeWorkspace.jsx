@@ -16,6 +16,11 @@ import {
 } from "react";
 import {
   AlertTriangle,
+  Check,
+  ChevronDown,
+  Play,
+  Square,
+  Workflow,
   Eye,
   FileCode2,
   FileJson2,
@@ -28,14 +33,14 @@ import {
   Save,
   X,
 } from "lucide-react";
-import { diagnosticsToMarkers, diagnosticToMarker } from "../lib/radishRanges.js";
+import { diagnosticsToMarkers, diagnosticToMarker } from "../lib/rattishRanges.js";
 import {
   DEFAULT_APP_SETTINGS,
   matchesCommand,
   matchesKeybinding,
   settingBinding,
 } from "../lib/settings.js";
-import taskurottaIcon from "../assets/roundel.png";
+import raticodeIcon from "../assets/roundel.png";
 import { Dialog } from "./Dialog.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
@@ -89,13 +94,14 @@ export function applyCodeFilesystemChange(change) {
 
 const CodeWorkspace = forwardRef(function CodeWorkspace({
   active,
+  emptyContent,
   activePath,
   openPaths,
   navigationRequest,
   previewPath,
   recentPaths = [],
-  radishDocument,
-  radishDirty = false,
+  rattishDocument,
+  rattishDirty = false,
   settings = DEFAULT_APP_SETTINGS,
   theme,
   workflow,
@@ -113,12 +119,20 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   onOpenPath,
   onOpenPathsChange,
   onPinPath,
-  onRadishContentChange,
-  onRadishDiscard,
-  onRadishSaved,
+  onRattishContentChange,
+  onRattishDiscard,
+  onRattishSaved,
   onSettingChange,
   saveBeforeClosePaths = [],
   browserTabs = {},
+  workflowTabs = {},
+  renderWorkflowTab,
+  onWorkflowTabAction,
+  onDuplicateWorkflowTab,
+  onOpenGraph,
+  onBeforeCloseWorkflowTabs,
+  rattishDocuments = {},
+  onSaveRattishDocument,
 }, ref) {
   const textEditorRefs = useRef(new Map());
   const workspaceRef = useRef(null);
@@ -144,7 +158,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   const [splitActivePath, setSplitActivePath] = useState("");
   const sourcePath = workflow?.sourcePath ?? "";
   const currentPath = activePath || openPaths[0] || "";
-  const localOpenPaths = openPaths.filter((path) => !browserTabs[path]);
+  const localOpenPaths = openPaths.filter((path) => !browserTabs[path] && !workflowTabs[path]);
   const splitPaths = useMemo(
     () => (splitGroup ? splitGroup.paths.filter((path) => openPaths.includes(path)) : []),
     [openPaths, splitGroup],
@@ -171,7 +185,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     draggedPathRef.current = path;
     setDraggedPath(path);
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/x-taskurotta-tab", path);
+    event.dataTransfer.setData("text/x-raticode-tab", path);
     event.dataTransfer.setData("text/plain", path);
   }
 
@@ -181,7 +195,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   }
 
   function draggedTabFrom(event) {
-    return event.dataTransfer.getData("text/x-taskurotta-tab")
+    return event.dataTransfer.getData("text/x-raticode-tab")
       || event.dataTransfer.getData("text/plain")
       || draggedPathRef.current;
   }
@@ -234,8 +248,17 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     });
   }
 
+  async function splitEditorTab(path, side) {
+    const nextPath = workflowTabs[path] ? await onDuplicateWorkflowTab?.(path) : path;
+    if (!nextPath) return;
+    addToSplitGroup(nextPath, side);
+    onActivePathChange?.(nextPath);
+    setTabMenu(null);
+  }
+
+  const currentVirtualDocument = Boolean(browserTabs[currentPath] || workflowTabs[currentPath]);
   useEffect(() => {
-    if (!currentPath || browserTabs[currentPath]) {
+    if (!currentPath || currentVirtualDocument) {
       onActiveDocumentStateChange?.(null);
       return;
     }
@@ -248,14 +271,17 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       ...fileStates[currentPath],
       path: currentPath,
     });
-  }, [browserTabs, currentPath, fileStates, onActiveDocumentStateChange]);
+  }, [currentVirtualDocument, currentPath, fileStates, onActiveDocumentStateChange]);
 
-  const finishClosingWorkspacePaths = useCallback((targets, discardRadish = false) => {
+  const finishClosingWorkspacePaths = useCallback((targets, discardRattish = false) => {
     closeEditorLifetimes(editorLifetimesRef.current, targets);
     setFileStates((current) => Object.fromEntries(
       Object.entries(current).filter(([path]) => !targets.includes(path)),
     ));
-    for (const path of targets) textEditorRefs.current.get(path)?.discard?.();
+    for (const path of targets) {
+      const retainedGraph = Object.entries(workflowTabs).some(([tabPath, tab]) => tab.sourcePath === path && !targets.includes(tabPath));
+      if (!retainedGraph) textEditorRefs.current.get(path)?.discard?.();
+    }
     setBrowserViewStates((current) => Object.fromEntries(
       Object.entries(current).filter(([path]) => !targets.includes(path)),
     ));
@@ -268,16 +294,19 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     setDiffOnOpenPaths((current) => new Set([...current].filter((path) => !targets.includes(path))));
     if (onClosePaths) onClosePaths(targets);
     else for (const path of targets) onClosePath?.(path);
-    if (discardRadish) onRadishDiscard?.();
+    if (discardRattish) onRattishDiscard?.();
     setTabMenu(null);
-  }, [onClosePath, onClosePaths, onRadishDiscard]);
+  }, [onClosePath, onClosePaths, onRattishDiscard, workflowTabs]);
 
   const closeWorkspacePaths = useCallback(async (paths) => {
     const targets = [...new Set(paths)].filter((path) => openPaths.includes(path));
     if (!targets.length) return;
-    const dirtyPaths = targets.filter((path) => (
-      path === sourcePath ? radishDirty : Boolean(fileStates[path]?.dirty)
-    ));
+    if (onBeforeCloseWorkflowTabs && await onBeforeCloseWorkflowTabs(targets) === false) return;
+    const dirtyPaths = targets.filter((path) => {
+      if (workflowTabs[path] || (onBeforeCloseWorkflowTabs && rattishDocuments[path])) return false;
+      if (openPaths.some(candidate => !targets.includes(candidate) && workflowTabs[candidate]?.sourcePath === path)) return false;
+      return rattishDocuments[path]?.document?.dirty ?? (path === sourcePath ? rattishDirty : Boolean(fileStates[path]?.dirty));
+    });
     const requiredSavePaths = dirtyPaths.filter((path) => saveBeforeClosePaths.includes(path));
     if (requiredSavePaths.length) {
       const results = await Promise.all(requiredSavePaths.map(
@@ -299,7 +328,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       if (!window.confirm(message)) return;
     }
     finishClosingWorkspacePaths(targets, remainingDirtyPaths.includes(sourcePath));
-  }, [fileStates, finishClosingWorkspacePaths, openPaths, radishDirty, saveBeforeClosePaths, settings.general.autosave, sourcePath]);
+  }, [fileStates, finishClosingWorkspacePaths, workflowTabs, openPaths, rattishDirty, rattishDocuments, onBeforeCloseWorkflowTabs, saveBeforeClosePaths, settings.general.autosave, sourcePath]);
 
   const saveAndClosePromptedPaths = useCallback(async () => {
     if (!unsavedClosePrompt || unsavedClosePrompt.saving) return;
@@ -311,7 +340,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     if (results.some((result) => !result)) {
       setUnsavedClosePrompt((current) => current ? {
         ...current,
-        error: "Taskurotta couldn't save every file. Fix the error in the editor, then try again.",
+        error: "Raticode couldn't save every file. Fix the error in the editor, then try again.",
         saving: false,
       } : null);
       return;
@@ -358,8 +387,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   useImperativeHandle(
     ref,
     () => ({
-      acceptDocument: (document) =>
-        textEditorRefs.current.get(sourcePath)?.acceptContent?.(document?.source ?? ""),
+      acceptDocument: (document, path = sourcePath) =>
+        textEditorRefs.current.get(path)?.acceptContent?.(document?.source ?? ""),
+      savePath: (path) => textEditorRefs.current.get(path)?.save?.(),
+      acceptPathDocument: (path, document) => textEditorRefs.current.get(path)?.acceptContent?.(document?.source ?? ""),
+      getPathState: (path) => fileStates[path],
       closeActive: () => {
         closeWorkspacePath(currentPath);
       },
@@ -367,9 +399,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         textEditorRefs.current.get(sourcePath)?.revealDiagnostic?.(diagnostic),
       runCommand: (command) => textEditorRefs.current.get(currentPath)?.runCommand?.(command),
       save: () => textEditorRefs.current.get(sourcePath)?.save?.(),
-      saveActive: () => textEditorRefs.current.get(currentPath)?.save?.(),
+      saveActive: () => workflowTabs[currentPath]
+        ? onWorkflowTabAction?.(workflowTabs[currentPath], "save")
+        : textEditorRefs.current.get(currentPath)?.save?.(),
     }),
-    [closeWorkspacePath, currentPath, sourcePath],
+    [closeWorkspacePath, currentPath, sourcePath, workflowTabs, onWorkflowTabAction, fileStates],
   );
 
   useEffect(() => {
@@ -402,7 +436,8 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       return;
     }
     if (action === "save") {
-      void textEditorRefs.current.get(currentPath)?.save?.();
+      if (workflowTabs[currentPath]) void onWorkflowTabAction?.(workflowTabs[currentPath], "save");
+      else void textEditorRefs.current.get(currentPath)?.save?.();
       return;
     }
     if (action === "toggle-word-wrap") {
@@ -437,17 +472,22 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       groupPaths,
       left: Math.max(8, Math.min(requestedLeft, window.innerWidth - 184)),
       path,
-      top: Math.max(8, Math.min(requestedTop, window.innerHeight - 188)),
+      top: Math.max(8, Math.min(requestedTop, window.innerHeight - 276)),
     });
   }
 
   function renderTabStrip(paths, activeForGroup, isSplit, column) {
+    const projectRoots = [...new Set([workflow?.projectRoot, ...Object.values(workflowTabs).map(item => item.projectRoot)].filter(Boolean))].sort((left, right) => right.length - left.length);
+    const normalizeProjectPath = (value) => String(value || "").replaceAll("\\", "/").replace(/\/$/, "");
     return (
       <div
-        aria-label={isSplit ? "Split editor tabs" : "Editor tabs"}
-        className={`tab-strip-scrollbar flex h-9 min-w-0 items-center overflow-x-auto overflow-y-hidden border-b border-line bg-slate-50 ${column === 2 ? "border-l" : ""}`}
-        role="tablist"
+        className={`relative flex min-w-0 border-b border-line bg-slate-50 ${column === 2 ? "border-l" : ""}`}
         style={{ gridColumn: column, gridRow: 1 }}
+      >
+      <div
+        aria-label={isSplit ? "Split editor tabs" : "Editor tabs"}
+        className="tab-strip-scrollbar flex h-9 min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden"
+        role="tablist"
         onDragOver={(event) => {
           if (!draggedPathRef.current) return;
           event.preventDefault();
@@ -462,16 +502,18 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         }}
       >
         {paths.map((path) => {
+          const graphTab = workflowTabs[path];
           const browserTab = browserTabs[path];
+          const workflowTab = workflowTabs[path];
           const browserViewState = browserViewStates[path];
           const tabMetadata = browserViewTabMetadata(browserTab, browserViewState);
           const selected = path === activeForGroup;
-          const isRadish = !browserTab && path === sourcePath;
-          const dirty = isRadish ? radishDirty : fileStates[path]?.dirty;
-          const preview = !browserTab && path === previewPath;
-          const folderLabel = browserTab ? "" : duplicateTabFolder(path, localOpenPaths);
-          const label = codeTabLabel(path, tabMetadata);
-          const title = tabMetadata
+          const isRattish = !browserTab && !graphTab && path === sourcePath;
+          const dirty = workflowTab ? workflowTab.dirty : rattishDocuments[path] ? (rattishDocuments[path].dirty ?? rattishDocuments[path].document?.dirty) : isRattish ? rattishDirty : fileStates[path]?.dirty;
+          const preview = !browserTab && !workflowTab && path === previewPath;
+          const folderLabel = workflowTab ? workflowTab.contextLabel || fileName(workflowTab.projectRoot || "") : browserTab ? "" : duplicateTabFolder(path, localOpenPaths);
+          const label = workflowTab?.name || codeTabLabel(path, tabMetadata);
+          const title = workflowTab ? [label, workflowTab.sourcePath, workflowTab.statusLabel].filter(Boolean).join("\n") : tabMetadata
             ? [label, tabMetadata.url].filter(Boolean).join("\n")
             : path;
           return (
@@ -495,16 +537,26 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
             >
               <button
                 aria-selected={selected}
+                ref={(element) => { if (selected) element?.scrollIntoView?.({ block: "nearest", inline: "nearest" }); }}
+                tabIndex={selected ? 0 : -1}
+                onKeyDown={(event) => {
+                  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                  event.preventDefault();
+                  const next = event.key === "Home" ? paths[0] : event.key === "End" ? paths.at(-1) : adjacentCodeTab(paths, path, event.key === "ArrowLeft" ? -1 : 1);
+                  onActivePathChange?.(next);
+                  const buttons = event.currentTarget.closest("[role=tablist]")?.querySelectorAll("[role=tab]");
+                  buttons?.[paths.indexOf(next)]?.focus();
+                }}
                 className="flex h-full min-w-0 flex-1 items-center gap-2 py-0 pl-3 pr-2 text-left"
                 draggable
                 role="tab"
                 type="button"
                 onClick={() => onActivePathChange?.(path)}
-                onDoubleClick={() => onPinPath?.(path)}
+                onDoubleClick={() => { if (!graphTab) onPinPath?.(path); }}
                 onDragEnd={endTabDrag}
                 onDragStart={(event) => beginTabDrag(event, path)}
               >
-                <FileTypeIcon browserTab={tabMetadata} path={path} />
+                {workflowTab ? <Workflow aria-hidden="true" className="shrink-0 text-brand" size={14} /> : <FileTypeIcon browserTab={tabMetadata} path={path} />}
                 <span className={`flex min-w-0 flex-col justify-center ${preview ? "italic" : ""}`}>
                   {folderLabel ? (
                     <span className="max-w-full truncate text-[9px] font-normal leading-[11px] text-muted">
@@ -515,9 +567,10 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                 </span>
                 {dirty ? <span aria-label="Unsaved changes" className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" /> : null}
               </button>
+              {workflowTab ? <WorkflowTabControls tab={workflowTab} onAction={onWorkflowTabAction} /> : null}
               <button
                 aria-label={`Close ${label}`}
-                className="mr-1 grid h-5 w-5 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-slate-100 hover:text-ink focus:opacity-100 group-hover:opacity-100"
+                className="mr-1 grid h-5 w-5 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-slate-100 hover:text-ink focus:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100"
                 draggable={false}
                 type="button"
                 onClick={(event) => {
@@ -530,11 +583,26 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           );
         })}
       </div>
+      <EditorTabsMenu
+        activePath={activeForGroup}
+        label={isSplit ? "All split editor tabs" : "All editor tabs"}
+        entries={paths.map((path) => {
+          const tab = workflowTabs[path];
+          const browser = browserTabs[path];
+          const projectRoot = tab?.projectRoot || rattishDocuments[path]?.document?.projectRoot || (!browser && projectRoots.find(root => normalizeProjectPath(path).startsWith(`${normalizeProjectPath(root)}/`))) || "";
+          return { path, tab, browser, projectRoot, label: tab?.name || codeTabLabel(path, browserViewTabMetadata(browser, browserViewStates[path])) };
+        })}
+        onActivate={onActivePathChange}
+      />
+      </div>
     );
   }
 
   function renderDocuments(paths) {
     return paths.map((path) => {
+      const workflowTab = workflowTabs[path];
+      const pathDocument = rattishDocuments[path]?.document ?? (path === sourcePath ? rattishDocument : null);
+      const isRattishDocument = Boolean(rattishDocuments[path]) || path === sourcePath;
       const editorLifetime = editorLifetimesRef.current.get(path);
       const inSplitGroup = splitPaths.includes(path);
       const groupPaths = inSplitGroup ? splitPaths : primaryGroupPaths;
@@ -553,10 +621,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         <div
           key={path}
           aria-hidden={!selected}
-          className={`flex min-h-0 min-w-0 flex-col ${selected ? "visible z-10" : "invisible z-0 pointer-events-none"} ${splitGroup && column === 2 ? "border-l border-line" : ""}`}
-          style={{ gridColumn: column, gridRow: 2 }}
+          inert={!selected ? "" : undefined}
+          className={`flex min-h-0 min-w-0 overflow-hidden flex-col ${selected ? "visible z-10" : "invisible z-0 pointer-events-none"} ${splitGroup && column === 2 ? "border-l border-line" : ""}`}
+          style={{ gridColumn: column, gridRow: 2, contentVisibility: selected ? "visible" : "hidden" }}
         >
-          {diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
+          {workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
             <PreviewBrowser
               active={active && currentPath === path}
               applicationKeybindings={settings.keybindings}
@@ -607,12 +676,15 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           ) : (
           <TextCodeEditor
             active={active && currentPath === path}
-            diagnostics={path === sourcePath
+            visible={active && selected}
+            diagnostics={isRattishDocument
               ? [
-                  ...(radishDocument?.diagnostics ?? []),
-                  ...(radishDocument?.preflight?.diagnostics ?? []),
+                  ...(pathDocument?.diagnostics ?? []),
+                  ...(pathDocument?.preflight?.diagnostics ?? []),
                 ]
               : []}
+            managedDocument={rattishDocuments[path]?.document}
+            onSaveDocument={rattishDocuments[path] && onSaveRattishDocument ? (content) => onSaveRattishDocument(path, content) : undefined}
             editing={mode === "edit"}
             html={html}
             initialDiffMode={diffOnOpenPaths.has(path)}
@@ -648,9 +720,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               setFileStates((current) => acceptsEditorState(editorLifetimesRef.current, path, editorLifetime)
                 ? { ...current, [path]: nextState } : current);
               if (nextState.dirty) onPinPath?.(path);
-              if (path === sourcePath) {
-                const currentDocument = radishDocument;
-                onDocumentStateChange?.({
+              if (isRattishDocument && !nextState.loading && nextState.content != null) {
+                const currentDocument = pathDocument;
+                const documentState = {
                   document: nextState.content == null
                     ? currentDocument
                     : {
@@ -663,11 +735,12 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                   error: nextState.error,
                   loading: nextState.loading,
                   saving: nextState.saving,
-                });
+                };
+                onDocumentStateChange?.(documentState, path);
               }
             }}
-            onSaved={path === sourcePath ? onRadishSaved : undefined}
-            onContentChange={path === sourcePath ? onRadishContentChange : undefined}
+            onSaved={isRattishDocument ? (...args) => onRattishSaved?.(...args, path) : undefined}
+            onContentChange={isRattishDocument ? (...args) => onRattishContentChange?.(...args, path) : undefined}
           />
           )}
         </div>
@@ -709,7 +782,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           splitGroup.side === "left" ? 1 : 2,
         ) : null}
         {renderDocuments(documentPaths)}
-        {!currentPath ? (
+        {!currentPath ? emptyContent || (
           <div className="min-h-0 overflow-y-auto px-8 pb-10 pt-12" style={{ gridColumn: 1, gridRow: 1 }}>
             <div className="mx-auto w-full max-w-2xl">
               <div className="mx-auto max-w-sm">
@@ -749,7 +822,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         >
           <button
             className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100 disabled:cursor-default disabled:text-muted disabled:hover:bg-transparent"
-            disabled={Boolean(browserTabs[tabMenu.path]) || tabMenu.path !== previewPath}
+            disabled={Boolean(browserTabs[tabMenu.path] || workflowTabs[tabMenu.path]) || tabMenu.path !== previewPath}
             role="menuitem"
             type="button"
             onClick={() => {
@@ -759,6 +832,15 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           >
             Pin file
           </button>
+          {onOpenGraph && !workflowTabs[tabMenu.path] && fileName(tabMenu.path) === "workflow.rattish" ? <button type="button" role="menuitem" className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" onClick={() => { onOpenGraph(tabMenu.path); setTabMenu(null); }}>Open graph</button> : null}
+          {["left", "right"].map(side => <button
+            key={side}
+            type="button"
+            role="menuitem"
+            className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100 disabled:text-muted"
+            disabled={workflowTabs[tabMenu.path] ? !onDuplicateWorkflowTab : openPaths.length < 2}
+            onClick={() => void splitEditorTab(tabMenu.path, side)}
+          >Split {side}</button>)}
           <div className="my-1 border-t border-line" role="separator" />
           <button
             ref={tabMenuFirstActionRef}
@@ -981,6 +1063,7 @@ function SplitDropZone({ onDrop, side }) {
 
 const TextCodeEditor = forwardRef(function TextCodeEditor({
   active,
+  visible = active,
   autosaveEnabled = true,
   diagnostics = [],
   editing = true,
@@ -997,6 +1080,8 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   onSaved,
   onContentChange,
   onStateChange,
+  managedDocument,
+  onSaveDocument,
 }, ref) {
   const containerRef = useRef(null);
   const editorRef = useRef(null);
@@ -1006,6 +1091,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   const modelRef = useRef(null);
   const originalModelRef = useRef(null);
   const savedContentRef = useRef("");
+  const savedVersionRef = useRef(null);
   const savingRef = useRef(false);
   const autosaveTimerRef = useRef(null);
   const scheduleAutosaveRef = useRef(() => {});
@@ -1015,6 +1101,10 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   const gitBaselineRef = useRef(null);
   const onContentChangeRef = useRef(onContentChange);
   const onSavedRef = useRef(onSaved);
+  const managedDocumentRef = useRef(managedDocument);
+  const onSaveDocumentRef = useRef(onSaveDocument);
+  managedDocumentRef.current = managedDocument;
+  onSaveDocumentRef.current = onSaveDocument;
   const onStateChangeRef = useRef(onStateChange);
   const navigationRequestRef = useRef(navigationRequest);
   const [diffMode, setDiffMode] = useState(initialDiffMode);
@@ -1076,21 +1166,26 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   }, [path, gitGroup]);
 
   useEffect(() => {
-    void refreshGitBaseline();
-  }, [refreshGitBaseline]);
-
-  useEffect(() => {
-    return startPolling(refreshGitBaseline);
-  }, [refreshGitBaseline]);
+    if (!visible) return undefined;
+    return startPolling(refreshGitBaseline, { immediate: true });
+  }, [visible, refreshGitBaseline]);
 
   useEffect(() => {
     gitBaselineRef.current = gitBaseline;
   }, [gitBaseline]);
 
+  useEffect(() => {
+    if (!editing && modelRef.current) {
+      const content = modelRef.current.getValue();
+      setState((current) => current.content === content ? current : { ...current, content });
+    }
+  }, [editing]);
+
   const save = useCallback(async () => {
     const model = modelRef.current;
     if (!model || !editableRef.current || savingRef.current) return null;
     const content = model.getValue();
+    const savingVersion = model.getAlternativeVersionId();
     if (content === savedContentRef.current) return true;
     let fileWritten = false;
     window.clearTimeout(autosaveTimerRef.current);
@@ -1098,18 +1193,24 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     savingRef.current = true;
     setState((current) => ({ ...current, error: "", saving: true }));
     try {
-      const writeTextFile = window.goferDesktop?.textFiles?.write;
-      if (!writeTextFile) throw new Error("The desktop file editor is unavailable.");
-      await writeTextFile({ targetPath: path, content });
+      if (onSaveDocumentRef.current) {
+        const result = await onSaveDocumentRef.current(content);
+        if (!result) throw new Error("Unable to save workflow. Review its diagnostics and try again.");
+      } else {
+        const writeTextFile = window.goferDesktop?.textFiles?.write;
+        if (!writeTextFile) throw new Error("The desktop file editor is unavailable.");
+        await writeTextFile({ targetPath: path, content });
+      }
       fileWritten = true;
       savedContentRef.current = content;
+      savedVersionRef.current = savingVersion;
       const currentContent = model.getValue();
       textEditorSessions.set(path, {
         content: currentContent,
         savedContent: content,
         viewState: editorRef.current?.saveViewState() ?? null,
       });
-      const savedResult = await onSavedRef.current?.(content);
+      const savedResult = onSaveDocumentRef.current ? true : await onSavedRef.current?.(content);
       void refreshGitBaseline();
       setState({
         content: currentContent,
@@ -1155,6 +1256,21 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   }, [autosaveEnabled, editorSettings.autosaveDelay, save]);
 
   useEffect(() => {
+    const model = modelRef.current;
+    if (!model || !managedDocument || managedDocument.source == null || !editableRef.current) return;
+    if (!managedDocument.dirty) savedContentRef.current = managedDocument.source;
+    else if (managedDocument.savedSource != null) savedContentRef.current = managedDocument.savedSource;
+    if (model.getValue() !== managedDocument.source) {
+      editableRef.current = false;
+      replaceEditorModelContent(model, managedDocument.source);
+      editableRef.current = true;
+    }
+    const content = model.getValue();
+    textEditorSessions.set(path, { content, savedContent: savedContentRef.current, viewState: editorRef.current?.saveViewState() ?? null });
+    setState((current) => current.content === content && current.dirty === Boolean(managedDocument.dirty) ? current : { ...current, content, dirty: Boolean(managedDocument.dirty) });
+  }, [managedDocument, path]);
+
+  useEffect(() => {
     onSavedRef.current = onSaved;
   }, [onSaved]);
 
@@ -1184,7 +1300,11 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       const model = modelRef.current;
       if (!model) return;
       savedContentRef.current = content;
-      model.setValue(content);
+      const wasEditable = editableRef.current;
+      editableRef.current = false;
+      replaceEditorModelContent(model, content);
+      savedVersionRef.current = model.getAlternativeVersionId();
+      editableRef.current = wasEditable;
       textEditorSessions.set(path, {
         content,
         savedContent: content,
@@ -1232,7 +1352,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       const commandId = commandIds[command];
       if (!commandId) return false;
       editor.focus();
-      editor.trigger("taskurotta-menu", commandId, null);
+      editor.trigger("raticode-menu", commandId, null);
       return true;
     },
     save,
@@ -1245,11 +1365,17 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     let originalRemActions;
     let conflictControls;
     let resizeObserver;
-    import("../lib/monaco.js").then(async ({ loadRadishMonaco }) => {
+    import("../lib/monaco.js").then(async ({ loadRattishMonaco }) => {
       if (disposed || !containerRef.current) return;
-      const monaco = loadRadishMonaco();
+      const monaco = loadRattishMonaco();
       monacoRef.current = monaco;
-      const session = textEditorSessions.get(path);
+      const cachedSession = textEditorSessions.get(path);
+      const managed = managedDocumentRef.current;
+      const session = managed?.source != null ? {
+        content: managed.source,
+        savedContent: managed.dirty ? (managed.savedSource ?? cachedSession?.savedContent ?? null) : managed.source,
+        viewState: cachedSession?.viewState ?? null,
+      } : cachedSession;
       editableRef.current = false;
       const initialGitBaseline = await refreshGitBaseline();
       if (disposed || !containerRef.current) return;
@@ -1259,9 +1385,10 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         monaco.Uri.parse(`file://${encodeURI(path)}`),
       );
       modelRef.current = model;
+      savedVersionRef.current = session?.content === session?.savedContent ? model.getAlternativeVersionId() : null;
       monaco.editor.setModelMarkers(
         model,
-        "radish",
+        "rattish",
         diagnosticsToMarkers(monaco, model, model.getValue(), diagnosticsRef.current),
       );
       const initialEditorSettings = editorSettingsRef.current;
@@ -1278,7 +1405,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         scrollBeyondLastLine: false,
         smoothScrolling: true,
         tabSize: initialEditorSettings.tabSize,
-        theme: theme === "dark" ? "gofer-radish-dark" : "gofer-radish-light",
+        theme: theme === "dark" ? "gofer-rattish-dark" : "gofer-rattish-light",
         wordWrap: initialEditorSettings.wordWrap ? "on" : "off",
       };
       let editor;
@@ -1308,20 +1435,22 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         trackedChangeDecorations(initialGitBaseline, diffMode),
       );
       contentListener = model.onDidChangeContent(() => {
-        const content = model.getValue();
+        const publishContent = Boolean(onContentChangeRef.current);
+        const content = publishContent ? model.getValue() : undefined;
+        const dirty = editableRef.current && model.getAlternativeVersionId() !== savedVersionRef.current
+          && (model.getValueLength() !== savedContentRef.current.length || model.getValue() !== savedContentRef.current);
         if (editableRef.current) textEditorSessions.set(path, {
-          content,
+          // Materialize only when session persistence or a Git operation asks.
+          get content() { return model.getValue(); },
           savedContent: savedContentRef.current,
-          viewState: editor.saveViewState(),
+          viewState: null,
         });
-        setState((current) => ({
-          ...current,
-          content,
-          dirty: editableRef.current && content !== savedContentRef.current,
-          error: "",
-        }));
+        setState((current) => {
+          if (!publishContent && current.dirty === dirty && !current.error) return current;
+          return { ...current, ...(publishContent ? { content } : {}), dirty, error: "" };
+        });
         if (editableRef.current) {
-          onContentChangeRef.current?.(content);
+          if (publishContent) onContentChangeRef.current(content);
           scheduleAutosaveRef.current();
         }
       });
@@ -1331,6 +1460,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       if (session && !initialGitBaseline?.deleted && !initialGitBaseline?.binary && gitGroup !== "staged") {
         editableRef.current = true;
         savedContentRef.current = session.savedContent;
+        savedVersionRef.current = session.content === session.savedContent ? model.getAlternativeVersionId() : null;
         editor.restoreViewState(session.viewState);
         setState({
           content: session.content,
@@ -1365,6 +1495,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         editor.updateOptions({ readOnly: Boolean(comparisonOnly || initialGitBaseline?.binary || gitOperationRef.current) });
         savedContentRef.current = content;
         model.setValue(content);
+        savedVersionRef.current = model.getAlternativeVersionId();
         if (!comparisonOnly && !initialGitBaseline?.binary) textEditorSessions.set(path, { content, savedContent: content, viewState: null });
         setState({ content, dirty: false, error: "", loading: false, saving: false });
         revealEditorLocation(editor, navigationRequestRef.current);
@@ -1441,14 +1572,14 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     if (!monaco || !model) return;
     monaco.editor.setModelMarkers(
       model,
-      "radish",
+      "rattish",
       diagnosticsToMarkers(monaco, model, model.getValue(), diagnostics),
     );
   }, [diagnostics]);
 
   useEffect(() => {
-    const monacoTheme = theme === "dark" ? "gofer-radish-dark" : "gofer-radish-light";
-    import("../lib/monaco.js").then(({ loadRadishMonaco }) => loadRadishMonaco().editor.setTheme(monacoTheme));
+    const monacoTheme = theme === "dark" ? "gofer-rattish-dark" : "gofer-rattish-light";
+    import("../lib/monaco.js").then(({ loadRattishMonaco }) => loadRattishMonaco().editor.setTheme(monacoTheme));
   }, [theme]);
 
   useEffect(() => {
@@ -1674,6 +1805,15 @@ export function ImagePreview({ path }) {
   );
 }
 
+export function replaceEditorModelContent(model, content) {
+  if (model.getValue() === content) return;
+  if (model.pushEditOperations && model.getFullModelRange) {
+    model.pushStackElement?.();
+    model.pushEditOperations([], [{ range: model.getFullModelRange(), text: content }], () => null);
+    model.pushStackElement?.();
+  } else model.setValue(content);
+}
+
 export function codeWorkspaceShortcutAction(event, options = {}) {
   if (!options.active || event.repeat) return null;
   if (
@@ -1759,6 +1899,91 @@ export function adjacentCodeTab(openPaths, currentPath, direction = 1) {
   return openPaths[(currentIndex + direction + openPaths.length) % openPaths.length];
 }
 
+const ACTIVE_TAB_RUN_STATES = new Set(["running", "starting", "submitting", "queued", "stopping"]);
+
+export function EditorTabsMenu({ entries, activePath, label = "All editor tabs", onActivate }) {
+  const detailsRef = useRef(null);
+  const summaryRef = useRef(null);
+  const [project, setProject] = useState("");
+  const [runFilter, setRunFilter] = useState("");
+  const projectKey = (entry) => entry.projectRoot || (entry.browser ? "browser" : "unassigned");
+  const projects = [...new Set(entries.map(projectKey))];
+  const selectedProject = projects.includes(project) ? project : "";
+  const matching = entries.filter((entry) => {
+    if (selectedProject && projectKey(entry) !== selectedProject) return false;
+    const status = String(entry.tab?.status || "").toLowerCase();
+    if (runFilter === "active") return ACTIVE_TAB_RUN_STATES.has(status);
+    if (runFilter === "unread") return Boolean(entry.tab?.unread || entry.tab?.unreadFailure);
+    if (runFilter === "failed") return ["failed", "error"].includes(status) || Boolean(entry.tab?.unreadFailure);
+    return true;
+  });
+  useEffect(() => {
+    const outside = (event) => {
+      if (detailsRef.current?.open && !detailsRef.current.contains(event.target)) detailsRef.current.open = false;
+    };
+    window.addEventListener("pointerdown", outside);
+    return () => window.removeEventListener("pointerdown", outside);
+  }, []);
+  function close(restoreFocus = false) {
+    detailsRef.current.open = false;
+    if (restoreFocus) summaryRef.current?.focus();
+  }
+  return <details ref={detailsRef} className="group/tabs relative shrink-0" onKeyDown={(event) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); }
+  }}>
+    <summary ref={summaryRef} aria-label={label} title="All tabs" className="grid h-9 w-8 cursor-pointer list-none place-items-center text-muted hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onKeyDown={(event) => {
+      if (event.key !== "ArrowDown") return;
+      event.preventDefault();
+      detailsRef.current.open = true;
+      detailsRef.current.querySelector("[data-open-tab]")?.focus();
+    }}><ChevronDown aria-hidden="true" size={14} /></summary>
+    <div className="absolute right-0 top-full z-50 w-80 max-w-[calc(100vw-3rem)] rounded-b-md border border-line bg-white p-2 shadow-lg" aria-label="Open tabs">
+      <div className="mb-2 grid grid-cols-2 gap-2">
+        <label className="min-w-0 text-[10px] text-muted">Project
+          <select aria-label="Filter tabs by project" className="mt-1 h-7 w-full min-w-0 rounded border border-line bg-white px-1 text-xs text-ink" value={selectedProject} onChange={event => setProject(event.target.value)}>
+            <option value="">All projects</option>
+            {projects.map(root => <option key={root} value={root}>{root === "browser" ? "Browser tabs" : root === "unassigned" ? "Other files" : root}</option>)}
+          </select>
+        </label>
+        <label className="min-w-0 text-[10px] text-muted">Run status
+          <select aria-label="Filter tabs by run status" className="mt-1 h-7 w-full rounded border border-line bg-white px-1 text-xs text-ink" value={runFilter} onChange={event => setRunFilter(event.target.value)}>
+            <option value="">All statuses</option><option value="active">Active runs</option><option value="unread">Unread results</option><option value="failed">Failures</option>
+          </select>
+        </label>
+      </div>
+      <div className="workflow-scrollbar max-h-64 overflow-y-auto" onKeyDown={(event) => {
+        if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+        event.preventDefault(); event.stopPropagation();
+        const buttons = [...event.currentTarget.querySelectorAll("[data-open-tab]")];
+        const index = buttons.indexOf(document.activeElement);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length;
+        buttons[next]?.focus();
+      }}>
+        {matching.map(({ path, label: title, projectRoot, browser, tab }) => <button key={path} data-open-tab type="button" aria-current={path === activePath ? "page" : undefined} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-xs hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand" onClick={() => { onActivate?.(path); close(true); }}>
+          {tab ? <Workflow aria-hidden="true" size={14} className="shrink-0 text-brand" /> : <FileTypeIcon browserTab={browser} path={path} />}
+          <span className="min-w-0 flex-1"><span className="block truncate">{title}</span><span className="block truncate text-[10px] text-muted">{tab?.contextLabel || projectRoot || path}</span></span>
+          {tab?.statusLabel ? <span className="max-w-24 shrink-0 truncate text-[10px] text-muted" title={tab.statusLabel}>{tab.statusLabel}</span> : null}
+        </button>)}
+      </div>
+      <p aria-live="polite" className="px-2 pt-2 text-[10px] text-muted">{matching.length ? `${matching.length} of ${entries.length} tabs` : "No tabs match these filters."}</p>
+    </div>
+  </details>;
+}
+
+export function WorkflowTabControls({ tab, onAction }) {
+  const status = tab.status || "ready";
+  const StatusIcon = ["running", "starting", "submitting", "queued", "stopping"].includes(status) ? Loader2 : ["failed", "error", "disconnected"].includes(status) ? AlertTriangle : ["success", "succeeded", "completed"].includes(status) ? Check : tab.unreadFailure ? AlertTriangle : null;
+  return <>
+    {StatusIcon ? <button type="button" aria-label={`${tab.name}: ${tab.statusLabel || status}. Review runs`} title={tab.statusLabel || status} className={`relative grid h-7 w-6 shrink-0 place-items-center rounded hover:bg-slate-100 ${["failed", "error"].includes(status) ? "text-red-600" : "text-muted"}`} onClick={() => onAction?.(tab, "review")}>
+      <StatusIcon aria-hidden="true" size={13} className={status === "running" ? "motion-safe:animate-spin" : ""} />
+      {tab.unread || tab.unreadFailure ? <span aria-label="Unread run result" className="absolute right-0 top-1 h-1.5 w-1.5 rounded-full bg-red-600" /> : null}
+    </button> : null}
+    {tab.action ? <button type="button" aria-label={tab.actionLabel || `${tab.action === "stop" ? "Stop" : tab.action === "review" ? "Review runs for" : tab.dirty ? "Save and run" : "Run"} ${tab.name}`} title={tab.actionLabel || (tab.action === "stop" ? "Stop run" : tab.action === "review" ? "Review runs" : tab.dirty ? "Save and run" : "Run workflow")} disabled={tab.actionDisabled} className="grid h-7 w-6 shrink-0 place-items-center rounded text-muted opacity-0 hover:bg-slate-100 hover:text-ink group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 disabled:opacity-40" onClick={() => onAction?.(tab, tab.action)}>
+      {tab.action === "stop" ? <Square aria-hidden="true" size={12} /> : tab.action === "review" ? <Eye aria-hidden="true" size={12} /> : <Play aria-hidden="true" size={12} />}
+    </button> : null}
+  </>;
+}
+
 function FileTypeIcon({ browserTab, path }) {
   const favicon = browserTabFavicon(browserTab);
   const [faviconFailed, setFaviconFailed] = useState(false);
@@ -1790,7 +2015,8 @@ export function languageForPath(path) {
     ".jsx": "javascript", ".markdown": "markdown", ".md": "markdown",
     ".mdown": "markdown", ".mjs": "javascript", ".mkd": "markdown", ".php": "php",
     ".ps1": "powershell", ".py": "python", ".rb": "ruby", ".rs": "rust",
-    ".rad": "radish",
+    ".rattish": "rattish",
+    ".rad": "rattish",
     ".scss": "scss", ".sh": "shell", ".sql": "sql", ".svg": "xml", ".toml": "ini",
     ".ts": "typescript", ".tsx": "typescript", ".txt": "plaintext", ".xml": "xml",
     ".yaml": "yaml", ".yml": "yaml", ".zsh": "shell",
@@ -1839,7 +2065,7 @@ export function browserTabLabel(tab = {}) {
   if (title) return title;
   const url = String(tab.url ?? "").trim();
   if (!url || url === "about:blank") return "New Tab";
-  if (url === "taskurotta://home") return "Taskurotta";
+  if (url === "raticode://home") return "Raticode";
   try {
     return new URL(url).hostname.replace(/^www\./i, "") || url;
   } catch {
@@ -1850,7 +2076,7 @@ export function browserTabLabel(tab = {}) {
 export function browserTabFavicon(tab = {}) {
   const favicon = String(tab?.favicon ?? "").trim();
   if (/^(?:https?:|file:|data:image\/)/i.test(favicon)) return favicon;
-  return String(tab?.url ?? "").trim() === "taskurotta://home" ? taskurottaIcon : "";
+  return String(tab?.url ?? "").trim() === "raticode://home" ? raticodeIcon : "";
 }
 
 export function browserViewTabMetadata(browserTab, viewState) {

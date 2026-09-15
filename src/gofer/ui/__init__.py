@@ -1,1 +1,1 @@
-"""HTTP support for the Taskurotta React UI."""
+"""HTTP support for the Raticode React UI."""

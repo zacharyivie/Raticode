@@ -1,3 +1,8 @@
+import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
+export { autoLayoutWorkflow } from "../lib/workflowLayout.js";
+import { PathNameDialog } from "./PathNameDialog.jsx";
+export { PathNameDialog } from "./PathNameDialog.jsx";
+import brandCompat from "../lib/brandCompat.js";
 import { cloneJson } from "../lib/jsonValue.js";
 import { PROVIDER_PERMISSIONS } from "../lib/providerPermissions.js";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -229,8 +234,6 @@ const graphWorldSize = 20000;
 const graphWorldOffset = graphWorldSize / 2;
 const nodeWidth = 220;
 const nodeHeight = 96;
-const layoutColumnGap = 330;
-const layoutRowGap = 154;
 const minimapWidth = 124;
 const minimapHeight = 86;
 const nodeStack = {
@@ -429,12 +432,12 @@ export function defaultOperation(type, nodeNumber = 1) {
         timeout_decision: "timeout",
         approvers: [],
         notify: false,
-        notification_title: "Taskurotta approval needed",
+        notification_title: "Raticode approval needed",
       };
     case "notification":
       return {
         type,
-        title: "Taskurotta notification",
+        title: "Raticode notification",
         body: "",
         channel: "desktop",
         urgency: "normal",
@@ -972,21 +975,23 @@ function structuredCloneCompatible(value) {
 }
 
 export default function DagCanvas({
+  active = true,
   approvalState,
   dataDir = "",
   logState,
   notice,
-  radishDocument = null,
+  rattishDocument = null,
   readOnly = false,
   runState,
   settings = DEFAULT_APP_SETTINGS,
   workflow,
   toolbarTarget = null,
+  canvasOverlay = null,
   onExportWorkflow,
   onImportWorkflow,
   onLoadLatestLog,
   onDecideApproval,
-  onRadishMutation,
+  onRattishMutation,
   onRunWorkflow,
   onReplayRunLog,
   onSettingChange,
@@ -994,6 +999,8 @@ export default function DagCanvas({
   onSelectRunLog,
   onStopRunLog,
   onStopWorkflow,
+  stopDisabled,
+  stopTitle = "Stop all runs",
   onValidateWorkflow,
   onWorkflowChange,
   usedAgentIds = [],
@@ -1045,6 +1052,10 @@ export default function DagCanvas({
   const [mapOpen, setMapOpen] = useState(false);
   const [mapTab, setMapTab] = useState("outline");
   const [graphFullscreen, setGraphFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (!active) setGraphFullscreen(false);
+  }, [active]);
   const [nodeContextMenu, setNodeContextMenu] = useState(null);
   const [nodeRenameDialog, setNodeRenameDialog] = useState(null);
   deleteSelectedNodeRef.current = deleteSelectedNode;
@@ -1066,7 +1077,7 @@ export default function DagCanvas({
   }, []);
 
   const invalidWorkflow = Boolean(workflow.invalid);
-  const radishMode = Boolean(radishDocument);
+  const rattishMode = Boolean(rattishDocument);
   const editingDisabled = invalidWorkflow || readOnly;
   const validationDiagnostics = workflowValidationDiagnostics(workflow);
   const blockingValidationErrors = validationDiagnostics.filter(
@@ -1184,11 +1195,11 @@ export default function DagCanvas({
       const nextEdge = remainingEdges[Math.min(edgeIndex, remainingEdges.length - 1)];
       const nextNode = deletedEdge ? nodesById[deletedEdge.from] : workflowNodes[0];
 
-      if (radishMode && deletedEdge) {
+      if (rattishMode && deletedEdge) {
         const routes = remainingEdges
           .filter((edge) => edge.from === deletedEdge.from)
-          .map((edge) => radishRouteValue(edge, radishDocument?.source));
-        void onRadishMutation?.([
+          .map((edge) => rattishRouteValue(edge, rattishDocument?.source));
+        void onRattishMutation?.([
           { kind: "set_routes", node: deletedEdge.from, routes },
         ]);
       } else {
@@ -1213,10 +1224,10 @@ export default function DagCanvas({
     },
     [
       nodesById,
-      onRadishMutation,
+      onRattishMutation,
       onWorkflowChange,
-      radishDocument?.source,
-      radishMode,
+      rattishDocument?.source,
+      rattishMode,
       selectedEdgeId,
       workflow,
       workflowEdges,
@@ -1261,7 +1272,7 @@ export default function DagCanvas({
 
   useEffect(() => {
     function handleKeyDown(event) {
-      if (readOnly || !selectedEdgeId || event.defaultPrevented) return;
+      if (!active || readOnly || !selectedEdgeId || event.defaultPrevented) return;
       const target = event.target;
       const tagName = target?.tagName?.toLowerCase?.();
       if (
@@ -1280,11 +1291,11 @@ export default function DagCanvas({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deleteEdge, readOnly, selectedEdgeId, settings]);
+  }, [active, deleteEdge, readOnly, selectedEdgeId, settings]);
 
   useEffect(() => {
     function handleKeyDown(event) {
-      if (event.defaultPrevented) return;
+      if (!active || event.defaultPrevented) return;
       const target = event.target;
       const tagName = target?.tagName?.toLowerCase?.();
       const editingText =
@@ -1306,7 +1317,7 @@ export default function DagCanvas({
         return;
       }
 
-      if (editingText) return;
+      if (editingText || canvasOverlay) return;
 
       if (matchesCommand(event, settings, "graph.selectAll")) {
         event.preventDefault();
@@ -1372,7 +1383,7 @@ export default function DagCanvas({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [graphFullscreen, settings, workflowNodes, selectedNodeId]);
+  }, [active, canvasOverlay, graphFullscreen, settings, workflowNodes, selectedNodeId]);
 
   useEffect(() => {
     if (panningPointerId === null) return undefined;
@@ -1573,9 +1584,9 @@ export default function DagCanvas({
 
   function addNode(event) {
     const nextNumber = nextAvailableNodeNumber(workflowNodes);
-    if (radishMode) {
+    if (rattishMode) {
       const nodeId = `node-${nextNumber}`;
-      void Promise.resolve(onRadishMutation?.([
+      void Promise.resolve(onRattishMutation?.([
         {
           kind: "add_node",
           node: nodeId,
@@ -1814,8 +1825,8 @@ export default function DagCanvas({
     const nextSelectedId = remainingNodes[Math.min(nodeIndex, remainingNodes.length - 1)]?.id;
     const deletingSelectedNode = selectedNodeId === nodeId || selectedNodeIds.includes(nodeId);
 
-    if (radishMode) {
-      void onRadishMutation?.([{ kind: "delete_node", node: nodeId }]);
+    if (rattishMode) {
+      void onRattishMutation?.([{ kind: "delete_node", node: nodeId }]);
     } else {
       onWorkflowChange({
         ...workflow,
@@ -1835,7 +1846,7 @@ export default function DagCanvas({
   }
 
   function duplicateNode(nodeId) {
-    if (radishMode) {
+    if (rattishMode) {
       const existing = new Set(workflowNodes.map((node) => node.id));
       let suffix = 2;
       let nextId = `${nodeId}-copy`;
@@ -1843,7 +1854,7 @@ export default function DagCanvas({
         nextId = `${nodeId}-copy-${suffix}`;
         suffix += 1;
       }
-      void Promise.resolve(onRadishMutation?.([
+      void Promise.resolve(onRattishMutation?.([
         { kind: "duplicate_node", node: nodeId, name: nextId },
       ])).then((document) => {
         if (!document) return;
@@ -1912,8 +1923,8 @@ export default function DagCanvas({
       setNodeRenameDialog(null);
       return;
     }
-    if (radishMode) {
-      void renameRadishNode(nodeId, trimmedLabel);
+    if (rattishMode) {
+      void renameRattishNode(nodeId, trimmedLabel);
     } else {
       updateNode(nodeId, { label: trimmedLabel });
       setSelectedNodeId(nodeId);
@@ -1923,12 +1934,12 @@ export default function DagCanvas({
     setNodeRenameDialog(null);
   }
 
-  function renameRadishNode(nodeId, nextId) {
+  function renameRattishNode(nodeId, nextId) {
     const trimmedId = String(nextId ?? "").trim();
     if (!trimmedId || trimmedId === nodeId) return null;
     const canonicalId = trimmedId.toLowerCase();
     return Promise.resolve(
-      onRadishMutation?.([
+      onRattishMutation?.([
         { kind: "rename_node", node: nodeId, name: trimmedId },
       ]),
     ).then((document) => {
@@ -2300,14 +2311,14 @@ export default function DagCanvas({
     const nextCondition = condition || "always";
     const nextOutputPattern = nextCondition === "output_matches" ? outputPattern || "" : null;
     const nextEdgeId = uniqueEdgeId(workflowEdges, fromNodeId, toNodeId);
-    if (radishMode) {
+    if (rattishMode) {
       const routes = [
         ...workflowEdges
           .filter((edge) => edge.from === fromNodeId)
-          .map((edge) => radishRouteValue(edge, radishDocument?.source)),
+          .map((edge) => rattishRouteValue(edge, rattishDocument?.source)),
         toNodeId,
       ];
-      void onRadishMutation?.([{ kind: "set_routes", node: fromNodeId, routes }]);
+      void onRattishMutation?.([{ kind: "set_routes", node: fromNodeId, routes }]);
       setSelectedNodeId(undefined);
       setSelectedNodeIds([]);
       setSelectedEdgeId(nextEdgeId);
@@ -2345,16 +2356,16 @@ export default function DagCanvas({
   }
 
   function updateEdge(edgeId, patch) {
-    if (radishMode) {
+    if (rattishMode) {
       const edge = workflowEdges.find((candidate) => candidate.id === edgeId);
       if (!edge) return;
       const nextEdge = { ...edge, ...patch };
       const routes = workflowEdges
         .filter((candidate) => candidate.from === edge.from)
         .map((candidate) =>
-          radishRouteValue(candidate.id === edgeId ? nextEdge : candidate, radishDocument?.source),
+          rattishRouteValue(candidate.id === edgeId ? nextEdge : candidate, rattishDocument?.source),
         );
-      void onRadishMutation?.([{ kind: "set_routes", node: edge.from, routes }]);
+      void onRattishMutation?.([{ kind: "set_routes", node: edge.from, routes }]);
       return;
     }
     onWorkflowChange({
@@ -2441,7 +2452,7 @@ export default function DagCanvas({
           >
             <input
               ref={importInputRef}
-              accept={radishMode ? ".taskurotta" : ".toml,.zip,.gof"}
+              accept={rattishMode ? brandCompat.BUNDLE_ACCEPT : ".toml,.zip,.gof"}
               className="hidden"
               type="file"
               onChange={(event) => {
@@ -2463,8 +2474,8 @@ export default function DagCanvas({
             </button>
             <button
               className="grid h-8 w-8 place-items-center rounded-lg border border-line bg-white text-muted transition hover:border-slate-300 hover:bg-slate-50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-              disabled={invalidWorkflow || !workflowHasRunningRuns || Boolean(runState?.stopping)}
-              title="Stop all runs"
+              disabled={stopDisabled ?? (invalidWorkflow || !workflowHasRunningRuns || Boolean(runState?.stopping))}
+              title={stopTitle}
               type="button"
               onClick={() => onStopWorkflow(workflow)}
             >
@@ -2519,7 +2530,7 @@ export default function DagCanvas({
             <button
               className="grid h-8 w-8 place-items-center rounded-lg border border-line bg-white text-muted transition hover:border-slate-300 hover:bg-slate-50 hover:text-ink"
               disabled={readOnly}
-              title={readOnly ? "Radish graph positions are managed in workflow metadata" : "Auto-layout graph"}
+              title={readOnly ? "Rattish graph positions are managed in workflow metadata" : "Auto-layout graph"}
               type="button"
               onClick={applyAutoLayout}
             >
@@ -2584,11 +2595,11 @@ export default function DagCanvas({
             >
               <Download size={17} />
             </button>
-            {radishMode ? (
+            {rattishMode ? (
               <div className="flex items-center rounded-lg border border-line bg-white p-0.5">
                 <button
                   className="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-600"
-                  title="Import a .taskurotta workflow"
+                  title="Import a .raticode workflow"
                   type="button"
                   onClick={() => importInputRef.current?.click()}
                 >
@@ -2599,7 +2610,7 @@ export default function DagCanvas({
                 <button
                   className="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-40"
                   disabled={editingDisabled}
-                  title="Export this workflow as a .taskurotta bundle"
+                  title="Export this workflow as a .raticode bundle"
                   type="button"
                   onClick={onExportWorkflow}
                 >
@@ -2640,7 +2651,7 @@ export default function DagCanvas({
                   onStopRun={onStopRunLog}
                   selectedNodeId={selectedNodeId}
                 />
-                {!radishMode ? (
+                {!rattishMode ? (
                   <>
                     <button className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-ink hover:bg-slate-50" type="button" onClick={() => importInputRef.current?.click()}>
                       <Upload size={14} /> Import legacy workflow
@@ -2656,6 +2667,11 @@ export default function DagCanvas({
           </div>
         </GraphToolbarPortal>
 
+        <div className="relative isolate flex min-h-0 flex-1" data-graph-canvas-region="true">
+        <div
+          inert={canvasOverlay ? "" : undefined}
+          className={`flex min-h-0 min-w-0 flex-1 ${canvasOverlay ? "pointer-events-none opacity-30 grayscale" : ""}`}
+        >
         <div
           ref={canvasRef}
           aria-label="Workflow graph visualization"
@@ -2987,25 +3003,32 @@ export default function DagCanvas({
             </div>
           ) : null}
         </div>
+        </div>
+        {canvasOverlay ? (
+          <div className="absolute inset-0 z-40 grid place-items-center overflow-auto bg-slate-100/60 p-4 dark:bg-zinc-900/60" data-graph-error-overlay="true">
+            {canvasOverlay}
+          </div>
+        ) : null}
+        </div>
       </div>
 
-        {!invalidWorkflow && radishMode ? (
-          <RadishInspector
+        {!canvasOverlay && !invalidWorkflow && rattishMode ? (
+          <RattishInspector
             collapsed={inspectorCollapsed}
-            document={radishDocument}
+            document={rattishDocument}
             edge={selectedEdge}
             node={selectedNode}
             nodeOutput={selectedNodeOutput}
             nodeRun={selectedRunNode}
             runEvents={runEvents}
             width={inspectorWidth}
-            onMutate={onRadishMutation}
-            onRenameNode={renameRadishNode}
+            onMutate={onRattishMutation}
+            onRenameNode={renameRattishNode}
             onResizeStart={startInspectorResize}
             onResizeKeyDown={handleInspectorResizeKeyDown}
             onToggleCollapsed={() => setInspectorCollapsed((current) => !current)}
           />
-        ) : !invalidWorkflow && !readOnly ? (
+        ) : !canvasOverlay && !invalidWorkflow && !readOnly ? (
           <Inspector
             agents={workflow.agents ?? {}}
             approval={selectedApproval}
@@ -3064,7 +3087,7 @@ function InvalidWorkflowCanvas({ workflow }) {
     workflow.description ||
     "The workflow TOML could not be parsed or validated.";
   const markdown = [
-    "# Taskurotta workflow TOML validation error",
+    "# Raticode workflow TOML validation error",
     "",
     `Workflow file: \`${sourcePath}\``,
     "",
@@ -4937,7 +4960,7 @@ function handleInspectorTabKeyDown(event, onChange) {
   nextTab.focus();
 }
 
-function RadishInspector({
+function RattishInspector({
   collapsed,
   document,
   edge,
@@ -4988,14 +5011,14 @@ function RadishInspector({
   return (
     <aside
       id="workflow-inspector"
-      aria-label="Radish workflow settings and node inspector"
+      aria-label="Rattish workflow settings and node inspector"
       className="absolute bottom-0 right-0 top-0 z-40 shrink-0 overflow-visible border-l border-line bg-white shadow-panel transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
       style={{ width: collapsed ? 0 : width }}
       tabIndex={-1}
     >
       {!collapsed ? (
         <div
-          aria-label="Resize Radish inspector"
+          aria-label="Resize Rattish inspector"
           aria-orientation="vertical"
           aria-valuemax={520}
           aria-valuemin={280}
@@ -5072,7 +5095,7 @@ function RadishInspector({
                     commitOnBlur
                     label="ID"
                     value={node.id}
-                    parseDraft={parseRadishIdentifierDraft}
+                    parseDraft={parseRattishIdentifierDraft}
                     onChange={(value) => onRenameNode?.(node.id, value)}
                   />
                   <SelectField
@@ -5080,7 +5103,7 @@ function RadishInspector({
                     value={graphNode?.type ?? ""}
                     options={(document?.nodeContracts ?? []).map((item) => [
                       item.nodeType,
-                      humanizeRadishField(item.nodeType),
+                      humanizeRattishField(item.nodeType),
                     ])}
                     onChange={(value) =>
                       onMutate?.([
@@ -5093,9 +5116,9 @@ function RadishInspector({
               ) : null}
 
               {nodeTab === "action" ? (
-                <InspectorSection title={humanizeRadishField(graphNode?.type || "Action")}>
+                <InspectorSection title={humanizeRattishField(graphNode?.type || "Action")}>
                   {Object.entries(schemaProperties).map(([field, fieldSchema]) => (
-                    <RadishContractField
+                    <RattishContractField
                       key={field}
                       authored={Boolean(graphNode?.authoredFields?.[field.replaceAll("_", "-")])}
                       field={field}
@@ -5131,7 +5154,7 @@ function RadishInspector({
                     </p>
                   </InspectorSection>
                   <InspectorSection title="Bindings">
-                    <RadishBindingSummary bindings={graphNode?.bindings ?? []} />
+                    <RattishBindingSummary bindings={graphNode?.bindings ?? []} />
                     <p className="text-xs leading-5 text-muted">
                       Rich binding editing is available in Code for now. Graph changes preserve the existing with block.
                     </p>
@@ -5162,7 +5185,7 @@ function RadishInspector({
                     commitOnBlur
                     label="Timeout"
                     placeholder="none or 30m"
-                    value={radishDurationFromMilliseconds(graphNode?.execution?.timeout_ms)}
+                    value={rattishDurationFromMilliseconds(graphNode?.execution?.timeout_ms)}
                     onChange={(value) => setNodeField("timeout", value || "none", { source: true })}
                   />
                   <NumberField
@@ -5189,7 +5212,7 @@ function RadishInspector({
                   <TextField
                     commitOnBlur
                     label="Retry delay"
-                    value={radishDurationFromMilliseconds(graphNode?.execution?.retry_delay_ms) || "1s"}
+                    value={rattishDurationFromMilliseconds(graphNode?.execution?.retry_delay_ms) || "1s"}
                     onChange={(value) => setNodeField("retry-delay", value || "1s", { source: true })}
                   />
                 </InspectorSection>
@@ -5262,7 +5285,7 @@ function RadishInspector({
                 value={graphEdge?.mode ?? "unconditional"}
                 options={[["unconditional", "Always"], ["when", "When"], ["otherwise", "Otherwise"]]}
                 onChange={(mode) =>
-                  updateRadishRoute(document, graphEdge, { mode }, onMutate)
+                  updateRattishRoute(document, graphEdge, { mode }, onMutate)
                 }
               />
               {graphEdge?.mode === "when" ? (
@@ -5271,12 +5294,12 @@ function RadishInspector({
                   label="Condition"
                   value={graphEdge.predicateSource ?? ""}
                   onChange={(predicateSource) =>
-                    updateRadishRoute(document, graphEdge, { predicateSource }, onMutate)
+                    updateRattishRoute(document, graphEdge, { predicateSource }, onMutate)
                   }
                 />
               ) : null}
               <p className="text-xs leading-5 text-muted">
-                Route edits replace only the selected node&apos;s to block in workflow.rad.
+                Route edits replace only the selected node&apos;s to block in workflow.rattish.
               </p>
             </InspectorSection>
           </div>
@@ -5335,7 +5358,7 @@ function RadishInspector({
                 onChange={(value) => setWorkflowField("outputs", value || "{}", { source: true })}
               />
               <p className="text-xs leading-5 text-muted">
-                Output references and schemas are checked again by the Radish compiler after every change.
+                Output references and schemas are checked again by the Rattish compiler after every change.
               </p>
             </InspectorSection>
           </div>
@@ -5345,8 +5368,8 @@ function RadishInspector({
   );
 }
 
-function RadishContractField({ authored, field, onChange, onReset, schema, value }) {
-  const label = humanizeRadishField(field);
+function RattishContractField({ authored, field, onChange, onReset, schema, value }) {
+  const label = humanizeRattishField(field);
   const reset = authored ? (
     <button
       className="text-[11px] font-medium text-indigo-700 hover:underline"
@@ -5362,7 +5385,7 @@ function RadishContractField({ authored, field, onChange, onReset, schema, value
         <SelectField
           label={label}
           value={value ?? schema.enum[0]}
-          options={schema.enum.map((item) => [String(item), humanizeRadishField(String(item))])}
+          options={schema.enum.map((item) => [String(item), humanizeRattishField(String(item))])}
           onChange={(next) => onChange(next, { source: true })}
         />
         {reset}
@@ -5420,7 +5443,7 @@ function RadishContractField({ authored, field, onChange, onReset, schema, value
   );
 }
 
-function RadishBindingSummary({ bindings }) {
+function RattishBindingSummary({ bindings }) {
   if (!bindings.length) return <p className="text-xs text-muted">No with bindings.</p>;
   return (
     <div className="space-y-2">
@@ -5436,7 +5459,7 @@ function RadishBindingSummary({ bindings }) {
   );
 }
 
-function humanizeRadishField(value) {
+function humanizeRattishField(value) {
   return String(value || "")
     .replaceAll("_", "-")
     .split("-")
@@ -5445,7 +5468,7 @@ function humanizeRadishField(value) {
     .join(" ");
 }
 
-function radishDurationFromMilliseconds(value) {
+function rattishDurationFromMilliseconds(value) {
   if (value === null || value === undefined || value === "") return "none";
   if (value % 3_600_000 === 0) return `${value / 3_600_000}h`;
   if (value % 60_000 === 0) return `${value / 60_000}m`;
@@ -5453,7 +5476,7 @@ function radishDurationFromMilliseconds(value) {
   return `${value}ms`;
 }
 
-function parseRadishIdentifierDraft(text) {
+function parseRattishIdentifierDraft(text) {
   const value = String(text).trim();
   if (!value) return { ok: false, error: "Enter a node ID." };
   if (!/^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*$/.test(value)) {
@@ -5465,7 +5488,7 @@ function parseRadishIdentifierDraft(text) {
   return { ok: true, value };
 }
 
-function radishRouteValue(edge, source = "") {
+function rattishRouteValue(edge, source = "") {
   const mode = edge.mode ?? edge.displayLabel ?? "unconditional";
   if (mode === "unconditional" || mode === "always") return edge.to;
   if (mode === "otherwise") return { target: edge.to, mode: "otherwise" };
@@ -5483,12 +5506,12 @@ function sourceTextForSpan(source, span) {
   return new TextDecoder().decode(bytes.slice(span.start.offset, span.end.offset));
 }
 
-function updateRadishRoute(document, edge, patch, onMutate) {
+function updateRattishRoute(document, edge, patch, onMutate) {
   if (!edge) return;
   const routes = (document?.graph?.edges ?? [])
     .filter((candidate) => candidate.from === edge.from)
     .map((candidate) =>
-      radishRouteValue(
+      rattishRouteValue(
         candidate.id === edge.id ? { ...candidate, ...patch } : candidate,
         document?.source,
       ),
@@ -6796,7 +6819,7 @@ function Inspector({
               <ToggleField
                 allowRuntimeReference
                 checked={operation.use_trash ?? true}
-                label="Move to Taskurotta trash"
+                label="Move to Raticode trash"
                 onChange={(checked) => onOperationChange({ use_trash: checked })}
               />
               <ToggleField
@@ -7374,7 +7397,7 @@ function Inspector({
                 />
                 <TextField
                   label="Notification title"
-                  value={operation.notification_title ?? "Taskurotta approval needed"}
+                  value={operation.notification_title ?? "Raticode approval needed"}
                   onChange={(value) => onOperationChange({ notification_title: value })}
                 />
               </InspectorSection>
@@ -8625,90 +8648,6 @@ export function moveWorkflowNode(workflow, nodeId, delta) {
         : node,
     ),
   };
-}
-
-export function autoLayoutWorkflow(workflow, options = {}) {
-  const nodes = [...(workflow.nodes ?? [])];
-  const edges = workflow.edges ?? [];
-  if (!nodes.length) return { ...workflow, nodes };
-
-  const columnGap = options.columnGap ?? layoutColumnGap;
-  const rowGap = options.rowGap ?? layoutRowGap;
-  const startX = options.startX ?? 80;
-  const startY = options.startY ?? 80;
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const outgoing = new Map(nodes.map((node) => [node.id, []]));
-  const indegree = new Map(nodes.map((node) => [node.id, 0]));
-
-  for (const edge of edges) {
-    if (!nodesById.has(edge.from) || !nodesById.has(edge.to)) continue;
-    outgoing.get(edge.from).push(edge.to);
-    indegree.set(edge.to, indegree.get(edge.to) + 1);
-  }
-
-  const layers = new Map(nodes.map((node) => [node.id, 0]));
-  const queue = nodes
-    .filter((node) => indegree.get(node.id) === 0)
-    .sort(compareNodesForLayout);
-  const visited = new Set();
-
-  while (queue.length) {
-    const node = queue.shift();
-    if (visited.has(node.id)) continue;
-    visited.add(node.id);
-
-    const targets = [...outgoing.get(node.id)].sort((left, right) =>
-      compareNodesForLayout(nodesById.get(left), nodesById.get(right)),
-    );
-    for (const targetId of targets) {
-      layers.set(targetId, Math.max(layers.get(targetId), layers.get(node.id) + 1));
-      indegree.set(targetId, indegree.get(targetId) - 1);
-      if (indegree.get(targetId) === 0) {
-        queue.push(nodesById.get(targetId));
-        queue.sort(compareNodesForLayout);
-      }
-    }
-  }
-
-  for (const node of nodes) {
-    if (!visited.has(node.id)) {
-      const connectedLayer = edges
-        .filter((edge) => edge.to === node.id && layers.has(edge.from))
-        .map((edge) => layers.get(edge.from) + 1);
-      layers.set(node.id, connectedLayer.length ? Math.max(...connectedLayer) : 0);
-    }
-  }
-
-  const grouped = new Map();
-  for (const node of nodes) {
-    const layer = layers.get(node.id) ?? 0;
-    if (!grouped.has(layer)) grouped.set(layer, []);
-    grouped.get(layer).push(node);
-  }
-
-  const positioned = new Map();
-  for (const layer of [...grouped.keys()].sort((left, right) => left - right)) {
-    const layerNodes = grouped.get(layer).sort(compareNodesForLayout);
-    layerNodes.forEach((node, row) => {
-      positioned.set(node.id, {
-        ...node,
-        x: startX + layer * columnGap,
-        y: startY + row * rowGap,
-      });
-    });
-  }
-
-  return {
-    ...workflow,
-    nodes: nodes.map((node) => positioned.get(node.id) ?? node),
-  };
-}
-
-function compareNodesForLayout(left, right) {
-  const leftY = Number.isFinite(left?.y) ? left.y : 0;
-  const rightY = Number.isFinite(right?.y) ? right.y : 0;
-  if (leftY !== rightY) return leftY - rightY;
-  return String(left?.id ?? "").localeCompare(String(right?.id ?? ""));
 }
 
 export function graphBounds(nodes, padding = 0) {
@@ -10064,74 +10003,6 @@ export function PathPickerDialog({ currentPath, label, onClose, onSelect }) {
             </button>
           </div>
         </div>
-    </Dialog>
-  );
-}
-
-export function PathNameDialog({ directory, initialName = "", kind, mode, onClose, onSubmit }) {
-  const [name, setName] = useState(initialName);
-  const [submitting, setSubmitting] = useState(false);
-  const title =
-    mode === "rename"
-      ? `Rename ${kind}`
-      : kind === "file"
-        ? "Create file"
-        : "Create folder";
-  const action = mode === "rename" ? "Rename" : "Create";
-
-  async function submit(event) {
-    event.preventDefault();
-    const trimmedName = name.trim();
-    if (!trimmedName) return;
-    setSubmitting(true);
-    try {
-      await onSubmit(trimmedName);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Dialog
-      description={directory}
-      onClose={onClose}
-      overlayClassName="fixed inset-0 z-[95] grid place-items-center bg-slate-950/25 px-4"
-      panelClassName="w-full max-w-sm rounded-lg border border-line bg-white p-4 shadow-panel"
-      title={title}
-    >
-      <form onSubmit={submit}>
-        <div className="mb-3">
-          <h3 className="text-sm font-semibold text-strong">{title}</h3>
-          <p className="mt-1 truncate text-xs text-muted" title={directory}>
-            {directory}
-          </p>
-        </div>
-        <input
-          autoFocus
-          className="h-10 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none transition focus:border-teal-500"
-          placeholder={kind === "file" ? "new-file.txt" : "new-folder"}
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-        />
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            className="h-9 rounded-lg border border-line bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-            disabled={submitting}
-            type="button"
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          <button
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={submitting || !name.trim()}
-            type="submit"
-          >
-            {submitting ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
-            {action}
-          </button>
-        </div>
-      </form>
     </Dialog>
   );
 }

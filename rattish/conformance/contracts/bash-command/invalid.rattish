@@ -1,0 +1,5 @@
+Rattish: 1
+Workflow:
+  name: Invalid Bash contract
+Node example:
+  type: bash-command

@@ -26,7 +26,7 @@ def doctor(
     ),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Inspect local Taskurotta readiness without making network calls."""
+    """Inspect local Raticode readiness without making network calls."""
     report = run_health_checks(data_dir=data_dir, workflow=workflow)
     if json_output:
         sys.stdout.write(json.dumps(report.to_dict(), indent=2) + "\n")
@@ -42,7 +42,7 @@ def _print_human_report(diagnostics: list[HealthDiagnostic]) -> None:
     warnings = [item for item in diagnostics if item.severity == "warning"]
     ok_items = [item for item in diagnostics if item.severity == "ok"]
 
-    console.print("[bold]Taskurotta doctor[/bold]")
+    console.print("[bold]Raticode doctor[/bold]")
     if errors:
         console.print("\n[red]Errors[/red]")
         for item in errors:

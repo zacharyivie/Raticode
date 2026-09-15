@@ -1,0 +1,5 @@
+Rattish: 1
+Workflow:
+  name: Invalid Delete contract
+Node example:
+  type: delete-file

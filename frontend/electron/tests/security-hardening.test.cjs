@@ -13,6 +13,12 @@ const corpus = require("../../../tests/fixtures/path-containment.json");
 const mainSource = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
 
 function mainFunction(name, context) {
+  if (name !== "resolveWorkflowSource" && context.resolveExactPath) {
+    context.resolveWorkflowSource = mainFunction("resolveWorkflowSource", {
+      resolveExactPath: context.resolveExactPath,
+      migrateSource: require("../rattish-migration.cjs").migrateSource,
+    });
+  }
   const start = mainSource.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
   assert.ok(start >= 0);
   const remainder = mainSource.slice(start);
@@ -21,7 +27,7 @@ function mainFunction(name, context) {
 }
 
 async function fixture(t) {
-  const base = await fsp.mkdtemp(path.join(os.tmpdir(), "taskurotta-security-"));
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), "raticode-security-"));
   t.after(() => fsp.rm(base, { recursive: true, force: true }));
   const inside = path.join(base, "inside");
   const outside = path.join(base, "outside");
@@ -120,7 +126,7 @@ test("new paths require native selection and persisted roots renew without a pic
   await assert.rejects(renew(null, { targetPath: path.dirname(outside) }), /outside/);
 });
 
-test("every directory listing mode requires an existing grant", async (t) => {
+test("agent resolver requires an existing grant for every directory listing mode", async (t) => {
   const { outside, security } = await fixture(t);
   const list = mainFunction("listDirectory", {
     path, fs, resolveExactPath: security.resolveAllowedPath,
@@ -304,7 +310,7 @@ test("grant renewal returns missing without rejecting IPC after a trusted folder
   await assert.rejects(grant(null, { targetPath: untrusted }), /outside/);
 });
 
-test("background filesystem and Git reads handle deleted folders but reject access violations", async (t) => {
+test("injected agent resolver distinguishes missing folders from access violations", async (t) => {
   const { outside, security } = await fixture(t);
   const handle = security.trustPath(outside);
   await fsp.rm(outside, { recursive: true });
@@ -386,4 +392,47 @@ test("Rem, Markdown and HTML shared file opener requests a user grant and uses i
   await recent(file);
   assert.equal(opened.length, 2);
   assert.equal(opened[1][1].preview, false);
+});
+
+test("desktop Git and files work outside agent roots with absent or stale grants", async (t) => {
+  const { outside, security } = await fixture(t);
+  const { execFileSync } = require("node:child_process");
+  const git = require("../git-status.cjs");
+  execFileSync("git", ["init", "-b", "main", outside]);
+  execFileSync("git", ["-C", outside, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "Desktop history"]);
+  const file = path.join(outside, "draft.txt");
+  await fsp.writeFile(file, "draft");
+  const context = { fs, path, getIpcSecurity: () => security, ...git };
+  context.resolveExactPath = mainFunction("resolveExactPath", context);
+  context.resolveGitProjectDirectory = mainFunction("resolveGitProjectDirectory", context);
+  context.pathHandle = mainFunction("pathHandle", context);
+  context.entryPathHandle = mainFunction("entryPathHandle", context);
+  context.registerBackendPathGrant = () => assert.fail("Desktop navigation must not grant agent access");
+  for (const grantId of [undefined, "expired-grant"]) {
+    const options = { projectRoot: outside, currentPath: outside, targetPath: file, grantId };
+    const status = await mainFunction("gitStatus", context)(null, options);
+    assert.equal(status.active, true);
+    assert.equal(status.entries[0].path, "draft.txt");
+    const history = await mainFunction("gitHistory", context)(null, options);
+    assert.equal(history.active, true);
+    assert.equal(history.commits.length, 1);
+    assert.equal((await mainFunction("gitWorktrees", context)(null, options)).worktrees.length, 1);
+    assert.equal((await mainFunction("listDirectory", context)(null, options)).directory, outside);
+    assert.equal((await mainFunction("readTextFile", context)(null, options)).content, "draft");
+  }
+  assert.equal(security.grantForPath(outside), "");
+  assert.throws(() => security.renewPath(outside), /outside/);
+  assert.throws(() => security.resolveAllowedPath(outside), /outside/);
+  await fsp.rm(outside, { recursive: true });
+  for (const name of ["gitStatus", "gitHistory", "gitWorktrees", "listDirectory"]) {
+    assert.equal((await mainFunction(name, context)(null, { projectRoot: outside, currentPath: outside })).missing, true);
+  }
+});
+
+test("desktop child paths retain name validation without requiring agent grants", async (t) => {
+  const { outside, security } = await fixture(t);
+  const resolve = mainFunction("resolveNewChildPath", { getIpcSecurity: () => security });
+  assert.equal(resolve(outside, "new.txt", "expired"), path.join(outside, "new.txt"));
+  assert.throws(() => resolve(outside, "../escape"), /plain file or folder name/);
+  assert.equal(security.grantForPath(outside), "");
 });

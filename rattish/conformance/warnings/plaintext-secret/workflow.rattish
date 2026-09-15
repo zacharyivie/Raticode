@@ -1,0 +1,10 @@
+Rattish: 1
+
+Workflow:
+  name: Plaintext credential warning
+
+Node call-api:
+  type: bash-command
+  command: call-api
+  env:
+    "API_TOKEN": visible-in-source

@@ -154,13 +154,7 @@ async def stream_subprocess(
     """Run a subprocess and yield stdout/stderr chunks as they arrive."""
     merged_env = build_subprocess_env(env)
 
-    async def _stream() -> AsyncIterator[ProcessStreamEvent]:
-        process = await anyio.open_process(
-            cmd,
-            cwd=cwd,
-            env=merged_env,
-            start_new_session=True,
-        )
+    async def _stream(process: anyio.abc.Process) -> AsyncIterator[ProcessStreamEvent]:
         deadline = time.monotonic() + timeout if timeout is not None else None
 
         if process.stdin is not None:
@@ -314,8 +308,22 @@ async def stream_subprocess(
             "returncode": returncode if returncode is not None else 130,
         }
 
-    async for event in _stream():
-        yield event
+    process = await anyio.open_process(
+        cmd,
+        cwd=cwd,
+        env=merged_env,
+        start_new_session=True,
+    )
+    try:
+        async for event in _stream(process):
+            yield event
+    finally:
+        # Cancellation must settle the whole process group before the owning
+        # workflow can report Stopped. Cleanup must survive its cancelled scope.
+        with anyio.CancelScope(shield=True):
+            if process.returncode is None:
+                await _terminate_process_tree(process)
+            await process.aclose()
 
 
 async def _terminate_process_tree(process: Any) -> None:

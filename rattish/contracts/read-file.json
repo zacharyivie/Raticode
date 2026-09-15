@@ -1,0 +1,72 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "read-file",
+  "runtime_handler": "raticode.read_file",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "encoding": {"type": "string", "minLength": 1},
+      "errors": {"type": "string", "minLength": 1}
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "encoding": "utf-8",
+    "errors": "strict"
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "closed",
+    "ports": {}
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "content": {"type": "string"},
+        "path": {"type": "string"},
+        "file_name": {"type": "string"},
+        "file_stem": {"type": "string"},
+        "file_extension": {"type": "string"},
+        "directory": {"type": "string"}
+      },
+      "required": [
+        "content",
+        "path",
+        "file_name",
+        "file_stem",
+        "file_extension",
+        "directory"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": [
+    "cancelled",
+    "configuration",
+    "filesystem",
+    "internal",
+    "output_validation",
+    "timeout"
+  ],
+  "effects": ["filesystem_read"],
+  "preflight_checks": [
+    {
+      "id": "path-readable",
+      "severity": "error",
+      "description": "The selected file must exist and be readable."
+    },
+    {
+      "id": "encoding-supported",
+      "severity": "error",
+      "description": "The selected text encoding and error mode must be supported."
+    }
+  ],
+  "static_diagnostics": []
+}

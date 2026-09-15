@@ -507,7 +507,7 @@ async def test_codex_subscription_execute_uses_prompt_file_instead_of_full_promp
 
     assert result.success
     assert captured["prompt_file_text"] == long_prompt
-    assert "Read the complete Taskurotta agent prompt" in str(captured["prompt_arg"])
+    assert "Read the complete Raticode agent prompt" in str(captured["prompt_arg"])
     assert long_prompt not in list(captured["cmd"])  # type: ignore[arg-type]
     assert not Path(captured["prompt_path"]).exists()
 
@@ -541,7 +541,7 @@ async def test_claude_subscription_execute_uses_prompt_file_instead_of_full_prom
 
     assert result.success
     assert captured["prompt_file_text"] == long_prompt
-    assert "Read the complete Taskurotta agent prompt" in str(captured["prompt_arg"])
+    assert "Read the complete Raticode agent prompt" in str(captured["prompt_arg"])
     assert long_prompt not in list(captured["cmd"])  # type: ignore[arg-type]
     assert not Path(captured["prompt_path"]).exists()
 

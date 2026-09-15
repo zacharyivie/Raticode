@@ -400,3 +400,19 @@ def test_recovery_releases_watcher_when_native_scope_outgrows_limit(
     assert observer.stopped
     assert tracker.observer is None
     assert preview is not None and preview["fileCount"] == 1
+
+
+def test_line_counts_include_diff_like_text_and_count_before_preview_truncation(
+    tmp_path, monkeypatch
+):
+    file = tmp_path / "patch.txt"
+    file.write_text("--old\n---separator\nold\n", encoding="utf-8")
+    before = chat._capture_chat_project(tmp_path)
+    file.write_text("++new\n+++separator\nnew\nlast", encoding="utf-8")
+    monkeypatch.setattr(chat, "CHAT_CHANGE_MAX_DIFF_CHARS", 40)
+    result = chat._preview_chat_changes(tmp_path, before)
+    assert result is not None
+    assert result["additions"] == 4
+    assert result["deletions"] == 3
+    assert result["files"][0]["binary"] is False
+    assert "diff truncated" in result["files"][0]["diff"]

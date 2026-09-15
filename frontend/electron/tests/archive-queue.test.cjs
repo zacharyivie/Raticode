@@ -59,7 +59,7 @@ test("worker failures reject active and queued writes and a later request starts
 });
 
 test("real worker preserves archive schema and no-op calls do not rewrite snapshots or index", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-archive-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-archive-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const queue = createArchiveQueue();
   t.after(() => queue.close());
@@ -79,7 +79,7 @@ test("real worker preserves archive schema and no-op calls do not rewrite snapsh
 });
 
 test("attachment cache avoids rereading unchanged bytes and detects changed source", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-attachments-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-attachments-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
   const storage = path.join(dataDir, "chat-attachments");
@@ -105,7 +105,7 @@ test("attachment cache avoids rereading unchanged bytes and detects changed sour
 });
 
 test("archive repairs an index left stale by a crash after snapshot replacement", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-archive-recovery-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-archive-recovery-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const thread = { id: "recovery" };
   const messages = [{ id: "message", body: "Durable message" }];
@@ -119,7 +119,7 @@ test("archive repairs an index left stale by a crash after snapshot replacement"
 });
 
 test("a failed index write remains retryable even when its previous index is cached", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-index-failure-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-index-failure-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const thread = { id: "retry" };
   const first = [{ id: "message", body: "First" }];
@@ -150,7 +150,7 @@ function archiveWithFixedClock() {
 
 for (const restart of [false, true]) {
   test(`same-millisecond same-count body edits recover a failed index write${restart ? " after worker restart" : " on retry"}`, (t) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-index-clock-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-index-clock-"));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     let archive = archiveWithFixedClock();
     const thread = { id: "same-clock", title: "Same timestamp" };

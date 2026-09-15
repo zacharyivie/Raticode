@@ -1,0 +1,116 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "http-request",
+  "runtime_handler": "raticode.http_request",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "method": {"type": "string", "minLength": 1},
+      "url": {"type": "string", "minLength": 1},
+      "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+      "params": {"type": "object", "additionalProperties": {"type": "string"}},
+      "json": {},
+      "body": {"type": ["string", "null"]},
+      "request_timeout": {"type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d)$"},
+      "retry": {
+        "type": "object",
+        "x-rattish-apply-property-defaults": true,
+        "properties": {
+          "attempts": {"type": "integer", "minimum": 1, "default": 1},
+          "backoff": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:ms|s|m|h|d)$", "default": "0s"},
+          "retry_on_statuses": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 100, "maximum": 599},
+            "uniqueItems": true,
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "expected_statuses": {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 100, "maximum": 599},
+        "minItems": 1,
+        "uniqueItems": true
+      },
+      "response_mode": {
+        "type": "string",
+        "enum": ["auto", "json", "text", "none"],
+        "x-rattish-case-insensitive": true
+      },
+      "output_mapping": {"type": "object", "additionalProperties": {"type": "string"}},
+      "secret_fields": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+      "network_allowlist": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+    },
+    "required": ["url"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "method": "GET",
+    "headers": {},
+    "params": {},
+    "json": null,
+    "body": null,
+    "request_timeout": "30s",
+    "retry": {"attempts": 1, "backoff": "0s", "retry_on_statuses": []},
+    "expected_statuses": [200],
+    "response_mode": "auto",
+    "output_mapping": {},
+    "secret_fields": [],
+    "network_allowlist": []
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "closed",
+    "ports": {
+      "url": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "headers": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": {"type": "string"}}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "params": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": {"type": "string"}}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "json": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "body": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"}
+    }
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "status": {"type": "integer"},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "body": {"type": "string"},
+        "json": {},
+        "value": {},
+        "selected": {"type": "object"},
+        "url": {"type": "string"},
+        "method": {"type": "string"},
+        "attempts": {"type": "integer", "minimum": 1}
+      },
+      "required": ["status", "headers", "body", "json", "value", "selected", "url", "method", "attempts"],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": ["cancelled", "configuration", "internal", "network", "output_validation", "timeout"],
+  "effects": ["network"],
+  "preflight_checks": [
+    {"id": "network-target-valid", "severity": "error", "description": "The URL must use HTTP or HTTPS and satisfy the network policy."}
+  ],
+  "static_diagnostics": [
+    {
+      "code": "RATTISH_MUTUALLY_EXCLUSIVE_FIELDS",
+      "severity": "error",
+      "rule": "mutually_exclusive_fields",
+      "fields": ["json", "body"],
+      "description": "Choose json or body, not both."
+    },
+    {
+      "code": "RATTISH_SUSPECTED_PLAINTEXT_SECRET",
+      "severity": "warning",
+      "rule": "suspected_plaintext_secret",
+      "fields": ["headers", "params", "json", "body", "url"],
+      "description": "Warn about credential-shaped plaintext request data without rejecting the source."
+    }
+  ]
+}

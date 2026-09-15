@@ -1,0 +1,7 @@
+Rattish: 1
+Workflow:
+  name: Write contract
+Node example:
+  type: write-file
+  path: output.txt
+  content: ready

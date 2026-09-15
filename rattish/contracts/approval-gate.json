@@ -1,0 +1,13 @@
+{
+  "$schema": "../schemas/node-contract.schema.json", "contract_version": 1, "node_type": "approval-gate", "runtime_handler": "raticode.approval_gate",
+  "configuration_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {
+    "message": {"type": "string"}, "decision_timeout": {"type": ["string", "null"], "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d)$"},
+    "timeout_decision": {"enum": ["reject", "timeout"], "x-rattish-case-insensitive": true}, "approvers": {"type": "array", "items": {"type": "string"}},
+    "notify": {"type": "boolean"}, "notification_title": {"type": "string"}, "subject": {"type": ["string", "null"]}
+  }, "required": ["message"], "additionalProperties": false},
+  "defaults": {"decision_timeout": null, "timeout_decision": "timeout", "approvers": [], "notify": false, "notification_title": "Raticode approval needed", "subject": null},
+  "computed_defaults": {}, "input_ports": {"mode": "closed", "ports": {"message": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"}, "subject": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"}}},
+  "success_output": {"kind": "fixed", "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {"decision": {"enum": ["approved", "rejected", "timeout"]}, "approved": {"type": "boolean"}, "decided_by": {"type": "string"}, "notes": {"type": "string"}, "message": {"type": "string"}, "subject": {"type": ["string", "null"]}}, "required": ["decision", "approved", "decided_by", "notes", "message", "subject"], "additionalProperties": false}},
+  "error_kinds": ["cancelled", "configuration", "internal", "timeout"], "effects": ["approval", "state_write"],
+  "preflight_checks": [{"id": "approval-store-ready", "severity": "error", "description": "The approval request store must be writable."}], "static_diagnostics": []
+}

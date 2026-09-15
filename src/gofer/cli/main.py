@@ -8,7 +8,7 @@ from gofer.cli.commands import (
     agent,
     doctor,
     provider,
-    radish,
+    rattish,
     runner,
     schedule,
     schema,
@@ -18,7 +18,7 @@ from gofer.cli.commands import (
 
 app = typer.Typer(
     name="gof",
-    help="Taskurotta. For machine-readable authoring help, run: gof schema --format json",
+    help="Raticode. For machine-readable authoring help, run: gof schema --format json",
     no_args_is_help=True,
 )
 app.add_typer(workflow.app, name="workflow")
@@ -27,7 +27,7 @@ app.add_typer(provider.app, name="provider")
 app.add_typer(runner.app, name="runner")
 app.add_typer(schedule.app, name="schedule")
 app.add_typer(watch.app, name="watch")
-app.add_typer(radish.app, name="radish")
+app.add_typer(rattish.app, name="rattish")
 app.command("doctor")(doctor.doctor)
 app.command("schema")(schema.schema_command)
 
@@ -59,8 +59,7 @@ def serve_ui(
         None,
         "--data-dir",
         help=(
-            "Taskurotta app data directory for global settings, schedules, registries, "
-            "and app state."
+            "Raticode app data directory for global settings, schedules, registries, and app state."
         ),
     ),
 ) -> None:
@@ -68,6 +67,32 @@ def serve_ui(
     from gofer.ui.server import serve
 
     serve(host=host, port=port, data_dir=data_dir)
+
+
+@app.command("licenses")
+def export_licenses(
+    output: Path = typer.Option(
+        ..., "--output", help="New directory for licenses and source archives"
+    ),
+) -> None:
+    """Export the third-party notices bundled with this build."""
+    import shutil
+    import sys
+
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    root = Path(frozen_root) if frozen_root else Path(__file__).resolve().parents[3] / "dist"
+    bundle = root / "third-party-licenses"
+    if not (bundle / "inventory.json").is_file():
+        typer.echo(
+            "License bundle is missing. Build the backend before exporting notices.", err=True
+        )
+        raise typer.Exit(1)
+    try:
+        shutil.copytree(bundle, output)
+    except OSError as exc:
+        typer.echo(f"Could not export licenses: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Exported licenses and sources to {output.resolve()}")
 
 
 if __name__ == "__main__":

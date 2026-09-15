@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -127,7 +128,7 @@ def test_runner_marks_lost_runner_runs(tmp_path: Path) -> None:
     claimed = store.claim_next("runner-1")
     assert claimed is not None
     stale = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
-    with sqlite3.connect(tmp_path / "runner-queue.db") as conn:
+    with closing(sqlite3.connect(tmp_path / "runner-queue.db")) as conn, conn:
         conn.execute(
             "UPDATE runners SET last_seen_at = ? WHERE id = ?",
             (stale, "runner-1"),
@@ -139,3 +140,25 @@ def test_runner_marks_lost_runner_runs(tmp_path: Path) -> None:
     assert lost is not None
     assert lost.status == "lost_runner"
     assert lost.message == "Runner heartbeat expired"
+
+
+def test_queue_connections_close_after_commit_and_rollback(tmp_path: Path) -> None:
+    import pytest
+
+    store = RunnerQueueStore(tmp_path)
+    with store._connect() as connection:
+        connection.execute("CREATE TABLE cleanup_probe (value TEXT)")
+        connection.execute("INSERT INTO cleanup_probe VALUES ('committed')")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+
+    with pytest.raises(RuntimeError, match="abort"):
+        with store._connect() as failed:
+            failed.execute("INSERT INTO cleanup_probe VALUES ('rolled back')")
+            raise RuntimeError("abort")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        failed.execute("SELECT 1")
+    with store._connect() as reopened:
+        assert [row[0] for row in reopened.execute("SELECT value FROM cleanup_probe")] == [
+            "committed"
+        ]

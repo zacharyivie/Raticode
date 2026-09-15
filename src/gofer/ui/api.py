@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import tomllib
 import urllib.parse
 import uuid
@@ -99,22 +100,27 @@ from gofer.core.workflow import (
     validate_workflow_id,
 )
 from gofer.prompts.manager import PromptManager
-from gofer.radish.artifacts import RadishArtifactError, compile_radish_file
-from gofer.radish.bundles import (
-    RadishBundleError,
-    export_radish_bundle,
-    import_radish_bundle,
-    preview_radish_bundle,
+from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
+from gofer.rattish.bundles import (
+    RattishBundleError,
+    export_rattish_bundle,
+    import_rattish_bundle,
+    preview_rattish_bundle,
 )
-from gofer.radish.diagnostics import RadishError
-from gofer.radish.editor import (
-    DEFAULT_RADISH_EDITOR_SERVICE,
+from gofer.rattish.diagnostics import RattishError
+from gofer.rattish.editor import (
+    DEFAULT_RATTISH_EDITOR_SERVICE,
 )
-from gofer.radish.preflight import run_preflight
-from gofer.radish.run_service import RadishRunArtifactError, RadishRunResult, run_radish_file
-from gofer.radish.storage import migrate_legacy_directory, workflow_owned_directory
-from gofer.radish.workspaces import (
-    RadishWorkspaceError,
+from gofer.rattish.preflight import run_preflight
+from gofer.rattish.run_service import (
+    RattishRunArtifactError,
+    RattishRunResult,
+    is_rattish_run_active,
+    run_rattish_file,
+)
+from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
+from gofer.rattish.workspaces import (
+    RattishWorkspaceError,
     RegisteredWorkflow,
     create_registered_workflow,
     delete_registered_workflow,
@@ -125,6 +131,7 @@ from gofer.subscriptions.claude_code import ClaudeCodeSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
 from gofer.ui.chat import delete_workflow_chat_prompt, workflow_chat_prompt_path
+from gofer.utils.brand_compat import LEGACY_WORKSPACE_DIRECTORIES
 from gofer.utils.paths import get_data_dir
 from gofer.utils.run_state import (
     request_workflow_run_stop,
@@ -192,6 +199,7 @@ _subscriptions = {
 _active_run_stop_events: dict[tuple[str, str], set[threading.Event]] = {}
 _active_run_log_paths: dict[tuple[str, str], dict[threading.Event, Path]] = {}
 _active_run_lock = threading.Lock()
+_active_rattish_runs: dict[tuple[str, str, str], threading.Event] = {}
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9_.+-]+\.log")
 CHAT_THREAD_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 RUN_NODE_OUTPUTS_SUFFIX = ".outputs.json"
@@ -207,14 +215,14 @@ RUN_INDEX_PREFIX = "runs-"
 
 
 def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
-    """Return registered Radish workflow summaries for Studio."""
+    """Return registered Rattish workflow summaries for Studio."""
     base = _data_dir(data_dir)
     workflows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
     if not base.exists():
         return {
-            "authoringLanguage": "radish",
+            "authoringLanguage": "rattish",
             "dataDir": str(base),
             "workflows": workflows,
             "errors": errors,
@@ -256,7 +264,7 @@ def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
 
     try:
         registered = list_registered_workflows(registry_dir=base)
-    except RadishWorkspaceError as exc:
+    except RattishWorkspaceError as exc:
         errors.append({"path": "workspace-registry.json", "message": str(exc)})
         registered = ()
     legacy_ids = {str(workflow.get("id", "")).lower() for workflow in workflows}
@@ -266,16 +274,16 @@ def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
                 {
                     "path": str(registered_workflow.entrypoint),
                     "message": (
-                        f"Registered Radish workflow ID {registered_workflow.workflow_id!r} "
+                        f"Registered Rattish workflow ID {registered_workflow.workflow_id!r} "
                         "conflicts with a legacy workflow ID."
                     ),
                 }
             )
             continue
-        workflows.append(_registered_radish_payload(registered_workflow, base))
+        workflows.append(_registered_rattish_payload(registered_workflow, base))
 
     return {
-        "authoringLanguage": "radish",
+        "authoringLanguage": "rattish",
         "dataDir": str(base),
         "workflows": workflows,
         "errors": errors,
@@ -289,13 +297,13 @@ def create_registered_workflow_payload(
     *,
     registry_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Create a registered Radish workflow and return its read-only studio summary."""
+    """Create a registered Rattish workflow and return its read-only studio summary."""
     base = _data_dir(registry_dir)
     try:
         registered = create_registered_workflow(project_root, name, registry_dir=base)
-    except (RadishWorkspaceError, RadishArtifactError, RadishError) as exc:
+    except (RattishWorkspaceError, RattishArtifactError, RattishError) as exc:
         raise WorkflowCreateError(str(exc)) from exc
-    return _registered_radish_payload(registered, base)
+    return _registered_rattish_payload(registered, base)
 
 
 def open_project_payload(
@@ -303,47 +311,47 @@ def open_project_payload(
     *,
     registry_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Register existing Radish workflows discovered inside a project folder."""
+    """Register existing Rattish workflows discovered inside a project folder."""
     base = _data_dir(registry_dir)
     try:
         registered = discover_registered_workflows(project_root, registry_dir=base)
-    except RadishWorkspaceError as exc:
+    except RattishWorkspaceError as exc:
         raise WorkflowCreateError(str(exc)) from exc
     return {
         "projectRoot": str(project_root.expanduser().resolve()),
-        "workflows": [_registered_radish_payload(workflow, base) for workflow in registered],
+        "workflows": [_registered_rattish_payload(workflow, base) for workflow in registered],
     }
 
 
-def open_radish_document_payload(workflow_id: str, data_dir: Path | None = None) -> dict[str, Any]:
-    """Open one registered Radish workflow for Studio editing."""
-    return DEFAULT_RADISH_EDITOR_SERVICE.open_document(
+def open_rattish_document_payload(workflow_id: str, data_dir: Path | None = None) -> dict[str, Any]:
+    """Open one registered Rattish workflow for Studio editing."""
+    return DEFAULT_RATTISH_EDITOR_SERVICE.open_document(
         workflow_id,
         data_dir=_data_dir(data_dir),
     )
 
 
-def analyze_radish_document_payload(
+def analyze_rattish_document_payload(
     workflow_id: str,
     source: str,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Analyze an unsaved Radish buffer without changing the workflow file."""
-    return DEFAULT_RADISH_EDITOR_SERVICE.analyze_document(
+    """Analyze an unsaved Rattish buffer without changing the workflow file."""
+    return DEFAULT_RATTISH_EDITOR_SERVICE.analyze_document(
         workflow_id,
         source,
         data_dir=_data_dir(data_dir),
     )
 
 
-def save_radish_document_payload(
+def save_rattish_document_payload(
     workflow_id: str,
     source: str,
     expected_revision: str,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Save a Radish buffer if its on-disk revision still matches."""
-    return DEFAULT_RADISH_EDITOR_SERVICE.save_document(
+    """Save a Rattish buffer if its on-disk revision still matches."""
+    return DEFAULT_RATTISH_EDITOR_SERVICE.save_document(
         workflow_id,
         source,
         expected_revision,
@@ -351,14 +359,14 @@ def save_radish_document_payload(
     )
 
 
-def mutate_radish_document_payload(
+def mutate_rattish_document_payload(
     workflow_id: str,
     mutations: list[dict[str, Any]],
     expected_revision: str,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Apply targeted graph edits to a registered Radish source document."""
-    return DEFAULT_RADISH_EDITOR_SERVICE.mutate_document(
+    """Apply targeted graph edits to a registered Rattish source document."""
+    return DEFAULT_RATTISH_EDITOR_SERVICE.mutate_document(
         workflow_id,
         mutations,
         expected_revision,
@@ -366,14 +374,14 @@ def mutate_radish_document_payload(
     )
 
 
-def save_radish_metadata_payload(
+def save_rattish_metadata_payload(
     workflow_id: str,
     metadata: dict[str, Any],
     expected_revision: str,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Save workflow editor metadata with optimistic concurrency."""
-    return DEFAULT_RADISH_EDITOR_SERVICE.save_metadata(
+    return DEFAULT_RATTISH_EDITOR_SERVICE.save_metadata(
         workflow_id,
         metadata,
         expected_revision,
@@ -381,22 +389,22 @@ def save_radish_metadata_payload(
     )
 
 
-def _registered_radish_payload(
+def _registered_rattish_payload(
     workflow: RegisteredWorkflow,
     registry_dir: Path,
 ) -> dict[str, Any]:
     status = "Ready"
     validation_error = None
     try:
-        artifact = compile_radish_file(
+        artifact = compile_rattish_file(
             workflow.entrypoint,
             data_dir=registry_dir,
             workflow_id=workflow.workflow_id,
         )
         node_count = len(artifact.ir["nodes"])
         edge_count = sum(len(node["routes"]) for node in artifact.ir["nodes"])
-        inputs = _radish_workflow_inputs(artifact.ir["workflow"]["inputs"])
-    except (RadishArtifactError, RadishError) as exc:
+        inputs = _rattish_workflow_inputs(artifact.ir["workflow"]["inputs"])
+    except (RattishArtifactError, RattishError) as exc:
         status = "Error"
         validation_error = str(exc)
         node_count = 0
@@ -405,11 +413,11 @@ def _registered_radish_payload(
     return {
         "id": workflow.workflow_id,
         "name": workflow.name,
-        "description": f"{node_count} Radish nodes, {edge_count} routes.",
+        "description": f"{node_count} Rattish nodes, {edge_count} routes.",
         "status": status,
         "updatedAt": _updated_at(workflow.entrypoint),
         "sourcePath": str(workflow.entrypoint),
-        "sourceFormat": "radish",
+        "sourceFormat": "rattish",
         "readOnly": False,
         "projectRoot": str(workflow.project_root),
         "projectName": workflow.project_root.name or str(workflow.project_root),
@@ -937,57 +945,57 @@ def export_workflow_bundle_payload(
     return {"bundlePath": str(output_path), "manifest": manifest.to_dict()}
 
 
-def export_radish_bundle_payload(
+def export_rattish_bundle_payload(
     workflow_id: str,
     output_path: Path,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Export a registered Radish workspace as a portable .taskurotta archive."""
+    """Export a registered Rattish workspace as a portable .raticode archive."""
     base = _data_dir(data_dir)
     try:
-        preview = export_radish_bundle(workflow_id, output_path, registry_dir=base)
-    except (RadishBundleError, RadishWorkspaceError, RadishArtifactError, RadishError) as exc:
+        preview = export_rattish_bundle(workflow_id, output_path, registry_dir=base)
+    except (RattishBundleError, RattishWorkspaceError, RattishArtifactError, RattishError) as exc:
         raise WorkflowBundleError(str(exc)) from exc
     bundle_path = output_path.expanduser().resolve()
-    if bundle_path.suffix.lower() != ".taskurotta":
-        bundle_path = bundle_path.with_name(f"{bundle_path.name}.taskurotta")
+    if bundle_path.suffix.lower() != ".raticode":
+        bundle_path = bundle_path.with_name(f"{bundle_path.name}.raticode")
     return {"bundlePath": str(bundle_path), "bundle": preview.to_dict()}
 
 
-def preview_radish_bundle_payload(
+def preview_rattish_bundle_payload(
     bundle_path: Path,
     *,
     resource_limits: ResourceLimits | None = None,
 ) -> dict[str, Any]:
-    """Inspect a .taskurotta archive without writing project files."""
+    """Inspect a .raticode archive without writing project files."""
     try:
-        return preview_radish_bundle(
+        return preview_rattish_bundle(
             bundle_path,
             limits=resource_limits or DEFAULT_RESOURCE_LIMITS,
         ).to_dict()
-    except RadishBundleError as exc:
+    except RattishBundleError as exc:
         raise WorkflowBundleError(str(exc)) from exc
 
 
-def import_radish_bundle_payload(
+def import_rattish_bundle_payload(
     bundle_path: Path,
     project_root: Path,
     data_dir: Path | None = None,
     *,
     resource_limits: ResourceLimits | None = None,
 ) -> dict[str, Any]:
-    """Install a .taskurotta archive into a project and register it."""
+    """Install a .raticode archive into a project and register it."""
     base = _data_dir(data_dir)
     try:
-        registered = import_radish_bundle(
+        registered = import_rattish_bundle(
             bundle_path,
             project_root,
             registry_dir=base,
             limits=resource_limits or DEFAULT_RESOURCE_LIMITS,
         )
-    except (RadishBundleError, RadishWorkspaceError, RadishArtifactError, RadishError) as exc:
+    except (RattishBundleError, RattishWorkspaceError, RattishArtifactError, RattishError) as exc:
         raise WorkflowBundleError(str(exc)) from exc
-    return _registered_radish_payload(registered, base)
+    return _registered_rattish_payload(registered, base)
 
 
 def preview_workflow_bundle_payload(
@@ -1050,10 +1058,10 @@ def delete_workflow_payload(
     source_format: str | None = None,
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
-    if source_format == "radish":
+    if source_format == "rattish":
         try:
             delete_registered_workflow(workflow_id, registry_dir=base)
-        except (OSError, RadishWorkspaceError) as exc:
+        except (OSError, RattishWorkspaceError) as exc:
             raise WorkflowUpdateError(str(exc)) from exc
         delete_workflow_chat_prompt(base, workflow_id)
         return {"workflowId": workflow_id, "deleted": True}
@@ -1372,28 +1380,50 @@ async def run_workflow_payload(
     parameters: dict[str, Any] | None = None,
     resume_options: ResumeOptions | None = None,
     inputs: dict[str, Any] | None = None,
+    background: bool = False,
+    expected_revision: str | None = None,
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
-    registered = _registered_radish_workflow(workflow_id, base)
+    registered = _registered_rattish_workflow(workflow_id, base)
     if registered is not None:
         supplied_inputs = _merged_run_inputs(parameters, inputs, WorkflowRunError)
         if dry_run:
-            return _radish_plan_payload(
+            return _rattish_plan_payload(
                 registered,
                 base,
                 trigger_context=trigger_context,
                 error_cls=WorkflowRunError,
             )
+        if background:
+            return await _start_rattish_background_run(
+                workflow_id,
+                registered.entrypoint,
+                base,
+                supplied_inputs,
+                trigger_context,
+                expected_revision,
+            )
+        run_id = uuid.uuid4().hex
+        cancel_event = threading.Event()
+        active_key = (*_run_key(base, workflow_id), run_id)
+        with _active_run_lock:
+            _active_rattish_runs[active_key] = cancel_event
         try:
-            radish_result = await run_radish_file(
+            rattish_result = await run_rattish_file(
                 registered.entrypoint,
                 workflow_inputs=supplied_inputs,
                 trigger_events=([trigger_context] if trigger_context else None),
                 data_dir=base,
+                run_id=run_id,
+                cancel_event=cancel_event,
+                expected_revision=expected_revision,
             )
-        except (RadishArtifactError, RadishError, RadishRunArtifactError, OSError) as exc:
+        except (RattishArtifactError, RattishError, RattishRunArtifactError, OSError) as exc:
             raise WorkflowRunError(str(exc)) from exc
-        return _radish_run_payload(radish_result)
+        finally:
+            with _active_run_lock:
+                _active_rattish_runs.pop(active_key, None)
+        return _rattish_run_payload(rattish_result)
     path = _workflow_toml_path(workflow_id, base, error_cls=WorkflowRunError)
     if not path.exists():
         raise WorkflowRunError(f"Workflow '{workflow_id}' not found")
@@ -1741,10 +1771,10 @@ def workflow_plan_payload(
     inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
-    registered = _registered_radish_workflow(workflow_id, base)
+    registered = _registered_rattish_workflow(workflow_id, base)
     if registered is not None:
         _merged_run_inputs(parameters, inputs, WorkflowPlanError)
-        return _radish_plan_payload(
+        return _rattish_plan_payload(
             registered,
             base,
             trigger_context=trigger_context,
@@ -1776,6 +1806,88 @@ def workflow_plan_payload(
         raise WorkflowPlanError(str(exc)) from exc
 
 
+async def _start_rattish_background_run(
+    workflow_id: str,
+    source: Path,
+    base: Path,
+    supplied_inputs: dict[str, Any],
+    trigger_context: dict[str, Any] | None,
+    expected_revision: str | None,
+) -> dict[str, Any]:
+    run_id = uuid.uuid4().hex
+    cancel_event = threading.Event()
+    acknowledged = threading.Event()
+    result: dict[str, Any] = {}
+    active_key = (*_run_key(base, workflow_id), run_id)
+    with _active_run_lock:
+        if len(_active_rattish_runs) >= 32:
+            raise WorkflowRunError("Too many active workflow runs. Wait for a run to finish.")
+        _active_rattish_runs[active_key] = cancel_event
+
+    def started(run: RattishRunResult) -> None:
+        result["run"] = _rattish_run_payload(run)
+        acknowledged.set()
+
+    async def execute() -> None:
+        try:
+            run = await run_rattish_file(
+                source,
+                workflow_inputs=supplied_inputs,
+                trigger_events=([trigger_context] if trigger_context else None),
+                data_dir=base,
+                run_id=run_id,
+                cancel_event=cancel_event,
+                on_started=started,
+                expected_revision=expected_revision,
+            )
+            result["run"] = _rattish_run_payload(run)
+        except Exception as exc:
+            result["error"] = str(exc)
+        finally:
+            with _active_run_lock:
+                _active_rattish_runs.pop(active_key, None)
+            acknowledged.set()
+
+    thread = threading.Thread(
+        target=lambda: anyio.run(execute), name=f"rattish-{run_id}", daemon=True
+    )
+    try:
+        thread.start()
+        with anyio.move_on_after(30) as timeout:
+            while not acknowledged.is_set():
+                await anyio.sleep(0.01)
+        if timeout.cancel_called:
+            cancel_event.set()
+            raise WorkflowRunError(
+                "The runner did not acknowledge the workflow in time. "
+                "Its pending start was cancelled."
+            )
+        if "error" in result:
+            raise WorkflowRunError(result["error"])
+        return cast(dict[str, Any], result["run"])
+    except BaseException:
+        cancel_event.set()
+        if not thread.is_alive():
+            with _active_run_lock:
+                _active_rattish_runs.pop(active_key, None)
+        raise
+
+
+def stop_rattish_runs_for_shutdown(data_dir: Path | None = None) -> None:
+    """Allow cooperative task and process cleanup before the UI server exits."""
+    base = str(_data_dir(data_dir).resolve())
+    with _active_run_lock:
+        active = {key: event for key, event in _active_rattish_runs.items() if key[0] == base}
+    for event in active.values():
+        event.set()
+    deadline = time.monotonic() + 5
+    while active and time.monotonic() < deadline:
+        with _active_run_lock:
+            active = {key: event for key, event in active.items() if key in _active_rattish_runs}
+        if active:
+            time.sleep(0.01)
+
+
 def stop_workflow_run_payload(
     workflow_id: str,
     data_dir: Path | None = None,
@@ -1783,6 +1895,24 @@ def stop_workflow_run_payload(
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
     _validate_storage_workflow_id(workflow_id, WorkflowUpdateError)
+    if run_id:
+        with _active_run_lock:
+            rattish_cancel = _active_rattish_runs.get((*_run_key(base, workflow_id), run_id))
+        if rattish_cancel is not None:
+            rattish_cancel.set()
+            return {
+                "workflowId": workflow_id,
+                "runId": run_id,
+                "stopped": True,
+                "message": "Stop requested",
+            }
+        if _registered_rattish_workflow(workflow_id, base) is not None:
+            return {
+                "workflowId": workflow_id,
+                "runId": run_id,
+                "stopped": False,
+                "message": "This run is no longer active in the connected runner.",
+            }
     if run_id is None:
         _disable_run_continuously(workflow_id, base)
     if run_id:
@@ -2325,10 +2455,10 @@ def workflow_run_events_payload(
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
-    radish_directory = _radish_run_directory(base, workflow_id)
-    if radish_directory.exists():
-        path = _radish_run_artifact_path(base, workflow_id, run_id)
-        payload = _radish_artifact_ui_payload(_read_radish_run_artifact(path), path)
+    rattish_directory = _rattish_run_directory(base, workflow_id)
+    if rattish_directory.exists():
+        path = _rattish_run_artifact_path(base, workflow_id, run_id)
+        payload = _rattish_artifact_ui_payload(_read_rattish_run_artifact(path), path)
         return {
             "workflowId": workflow_id,
             "runId": run_id,
@@ -2581,7 +2711,7 @@ def _node_output_data_payload(value: Any, limits: ResourceLimits, label: str) ->
     return value
 
 
-def _radish_run_directory(base: Path, workflow_id: str) -> Path:
+def _rattish_run_directory(base: Path, workflow_id: str) -> Path:
     safe_id = _validate_storage_workflow_id(workflow_id, WorkflowLogError)
     legacy_directory = base / "radish" / "runs" / safe_id
     directory = workflow_owned_directory(safe_id, base, "logs")
@@ -2591,8 +2721,8 @@ def _radish_run_directory(base: Path, workflow_id: str) -> Path:
     return directory
 
 
-def _radish_run_artifact_paths(base: Path, workflow_id: str) -> list[Path]:
-    directory = _radish_run_directory(base, workflow_id)
+def _rattish_run_artifact_paths(base: Path, workflow_id: str) -> list[Path]:
+    directory = _rattish_run_directory(base, workflow_id)
     if not directory.exists():
         return []
     return sorted(
@@ -2602,32 +2732,57 @@ def _radish_run_artifact_paths(base: Path, workflow_id: str) -> list[Path]:
     )
 
 
-def _read_radish_run_artifact(path: Path) -> dict[str, Any]:
+def _read_rattish_run_artifact(path: Path) -> dict[str, Any]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise WorkflowLogError(f"Could not read Radish run artifact {path.name}: {exc}") from exc
+        raise WorkflowLogError(f"Could not read Rattish run artifact {path.name}: {exc}") from exc
     if not isinstance(document, dict) or document.get("run_artifact_version") != 1:
-        raise WorkflowLogError(f"Invalid Radish run artifact {path.name}.")
+        raise WorkflowLogError(f"Invalid Rattish run artifact {path.name}.")
+    if document.get("status") == "running":
+        pid = document.get("runner_pid")
+        try:
+            if not isinstance(pid, int) or pid <= 0:
+                raise ProcessLookupError
+            if pid == os.getpid():
+                if not is_rattish_run_active(str(document.get("run_id", ""))):
+                    document["status"] = "interrupted"
+            elif os.name == "nt":
+                # Windows os.kill(pid, 0) terminates a process. A foreign owner
+                # cannot be reconciled by this runner; report unknown instead.
+                document["status"] = "interrupted"
+            else:
+                os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            document["status"] = "interrupted"
     return document
 
 
-def _radish_run_artifact_path(base: Path, workflow_id: str, run_id: str) -> Path:
+def _rattish_run_artifact_path(base: Path, workflow_id: str, run_id: str) -> Path:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id) is None:
         raise WorkflowLogError(f"Invalid run ID {run_id!r}.")
-    candidate = _radish_run_directory(base, workflow_id) / f"{run_id.removesuffix('.json')}.json"
+    candidate = _rattish_run_directory(base, workflow_id) / f"{run_id.removesuffix('.json')}.json"
     if not candidate.exists() or not candidate.is_file():
         raise WorkflowLogError(f"Run log {run_id!r} not found")
     return candidate
 
 
-def _radish_run_summary(document: Mapping[str, Any], path: Path) -> dict[str, Any]:
+def _rattish_ui_run_status(document: Mapping[str, Any]) -> str:
+    status = document["status"]
+    if status == "passed":
+        return "success"
+    if status == "interrupted":
+        return "disconnected"
+    return str(status) if status in {"running", "stopped"} else "error"
+
+
+def _rattish_run_summary(document: Mapping[str, Any], path: Path) -> dict[str, Any]:
     return {
         "id": str(document["run_id"]),
         "logPath": str(path),
-        "status": "success" if document["status"] == "passed" else "error",
+        "status": _rattish_ui_run_status(document),
         "startedAt": document.get("started_at"),
-        "finishedAt": document.get("finished_at"),
+        "finishedAt": None if document["status"] == "running" else document.get("finished_at"),
         "durationSeconds": float(document.get("duration_ms", 0)) / 1000,
         "triggerType": "manual",
         "hasTriggerReplay": False,
@@ -2637,10 +2792,10 @@ def _radish_run_summary(document: Mapping[str, Any], path: Path) -> dict[str, An
 def latest_workflow_log_payload(workflow_id: str, data_dir: Path | None = None) -> dict[str, Any]:
     base = _data_dir(data_dir)
     _validate_storage_workflow_id(workflow_id, WorkflowLogError)
-    radish_paths = _radish_run_artifact_paths(base, workflow_id)
-    if radish_paths:
-        path = radish_paths[0]
-        return _radish_artifact_ui_payload(_read_radish_run_artifact(path), path)
+    rattish_paths = _rattish_run_artifact_paths(base, workflow_id)
+    if rattish_paths:
+        path = rattish_paths[0]
+        return _rattish_artifact_ui_payload(_read_rattish_run_artifact(path), path)
     limits = _workflow_resource_limits(workflow_id, base)
     log_dir = _workflow_storage_dir(base, "logs", workflow_id, error_cls=WorkflowLogError)
     if not log_dir.exists():
@@ -2998,9 +3153,11 @@ def list_workflow_run_logs_payload(
     started_before: datetime | None = None,
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
-    radish_paths = _radish_run_artifact_paths(base, workflow_id)
-    if radish_paths:
-        runs = [_radish_run_summary(_read_radish_run_artifact(path), path) for path in radish_paths]
+    rattish_paths = _rattish_run_artifact_paths(base, workflow_id)
+    if rattish_paths:
+        runs = [
+            _rattish_run_summary(_read_rattish_run_artifact(path), path) for path in rattish_paths
+        ]
         if status:
             runs = [run for run in runs if run["status"] == status]
         if trigger_type:
@@ -3150,11 +3307,11 @@ def workflow_run_log_payload(
     include_details: bool = True,
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
-    radish_directory = _radish_run_directory(base, workflow_id)
-    if radish_directory.exists():
-        path = _radish_run_artifact_path(base, workflow_id, run_id)
-        document = _read_radish_run_artifact(path)
-        payload = _radish_artifact_ui_payload(document, path)
+    rattish_directory = _rattish_run_directory(base, workflow_id)
+    if rattish_directory.exists():
+        path = _rattish_run_artifact_path(base, workflow_id, run_id)
+        document = _read_rattish_run_artifact(path)
+        payload = _rattish_artifact_ui_payload(document, path)
         if not include_details:
             return {
                 "workflowId": workflow_id,
@@ -3221,12 +3378,14 @@ def prune_workflow_run_logs_payload(
         keep_last = saved_settings.get("keepLast")
         keep_days = saved_settings.get("keepDays")
         keep_failed_days = saved_settings.get("keepFailedDays")
-    radish_paths = _radish_run_artifact_paths(base, workflow_id)
-    if radish_paths:
-        runs = [_radish_run_summary(_read_radish_run_artifact(path), path) for path in radish_paths]
+    rattish_paths = _rattish_run_artifact_paths(base, workflow_id)
+    if rattish_paths:
+        runs = [
+            _rattish_run_summary(_read_rattish_run_artifact(path), path) for path in rattish_paths
+        ]
         retained_ids = {str(run["id"]) for run in runs[: max(0, keep_last or 0)]}
         now = datetime.now(UTC)
-        radish_candidates: list[dict[str, Any]] = []
+        rattish_candidates: list[dict[str, Any]] = []
         for run in runs:
             if str(run["id"]) in retained_ids:
                 continue
@@ -3236,21 +3395,21 @@ def prune_workflow_run_logs_payload(
                 continue
             if started is not None and started >= now - timedelta(days=max(0, threshold)):
                 continue
-            radish_candidates.append(run)
-        radish_deleted: list[str] = []
+            rattish_candidates.append(run)
+        rattish_deleted: list[str] = []
         if not dry_run:
-            paths_by_id = {path.stem: path for path in radish_paths}
-            for run in radish_candidates:
+            paths_by_id = {path.stem: path for path in rattish_paths}
+            for run in rattish_candidates:
                 run_id = str(run["id"])
                 path = paths_by_id.get(run_id)
                 if path is not None:
                     path.unlink(missing_ok=True)
-                    radish_deleted.append(run_id)
+                    rattish_deleted.append(run_id)
         return {
             "workflowId": workflow_id,
             "dryRun": dry_run,
-            "runs": radish_candidates,
-            "deleted": radish_deleted,
+            "runs": rattish_candidates,
+            "deleted": rattish_deleted,
         }
     log_dir = _workflow_storage_dir(base, "logs", workflow_id, error_cls=WorkflowLogError)
     if not log_dir.exists():
@@ -4177,8 +4336,11 @@ def _workflow_project_identity(
         return root, root.name or str(root)
     resolved = path.resolve()
     parts = resolved.parts
-    if ".taskurotta" in parts:
-        marker = parts.index(".taskurotta")
+    workspace_marker = next(
+        (part for part in parts if part in {".raticode", *LEGACY_WORKSPACE_DIRECTORIES}), None
+    )
+    if workspace_marker is not None:
+        marker = parts.index(workspace_marker)
         root = Path(*parts[:marker])
     elif source_base is not None:
         root = source_base.resolve()
@@ -4562,7 +4724,7 @@ def _slugify(value: str) -> str:
     return slug or "workflow"
 
 
-def _registered_radish_workflow(
+def _registered_rattish_workflow(
     workflow_id: str,
     data_dir: Path,
 ) -> RegisteredWorkflow | None:
@@ -4579,7 +4741,7 @@ def _registered_radish_workflow(
             for workflow in list_registered_workflows(registry_dir=data_dir)
             if workflow.workflow_id.lower() == canonical
         ]
-    except RadishWorkspaceError:
+    except RattishWorkspaceError:
         return None
     return matches[0] if len(matches) == 1 else None
 
@@ -4596,7 +4758,7 @@ def _merged_run_inputs(
     return {**(parameters or {}), **(inputs or {})}
 
 
-def _radish_workflow_inputs(items: list[dict[str, Any]]) -> dict[str, Any]:
+def _rattish_workflow_inputs(items: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for item in items:
         schema = item["schema"]
@@ -4614,7 +4776,7 @@ def _radish_workflow_inputs(items: list[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _radish_plan_payload(
+def _rattish_plan_payload(
     workflow: RegisteredWorkflow,
     data_dir: Path,
     *,
@@ -4622,14 +4784,14 @@ def _radish_plan_payload(
     error_cls: type[ValueError],
 ) -> dict[str, Any]:
     try:
-        compiled = compile_radish_file(
+        compiled = compile_rattish_file(
             workflow.entrypoint,
             data_dir=data_dir,
             workflow_id=workflow.workflow_id,
             project_root=workflow.project_root,
         )
         deployment = run_preflight(compiled.ir, data_dir=data_dir)
-    except (RadishArtifactError, RadishError, OSError) as exc:
+    except (RattishArtifactError, RattishError, OSError) as exc:
         raise error_cls(str(exc)) from exc
 
     diagnostics = [
@@ -4688,7 +4850,7 @@ def _radish_plan_payload(
         }
     )
     return {
-        "kind": "radish",
+        "kind": "rattish",
         "runnable": bool(nodes) and deployment.ready,
         "blockingDiagnostics": [item["message"] for item in error_diagnostics],
         "warnings": [item["message"] for item in warning_diagnostics],
@@ -4705,7 +4867,7 @@ def _radish_plan_payload(
                         "id": node["id"],
                         "label": node["id"],
                         "type": node["type"],
-                        "detail": _radish_node_detail(node),
+                        "detail": _rattish_node_detail(node),
                         "sideEffects": [effect.replace("_", " ") for effect in node["effects"]],
                         "workingDir": node["configuration"].get("working_dir"),
                         "bindings": [],
@@ -4715,12 +4877,12 @@ def _radish_plan_payload(
             }
         ],
         "diagnostics": diagnostics,
-        "inputs": _radish_workflow_inputs(compiled.ir["workflow"]["inputs"]),
+        "inputs": _rattish_workflow_inputs(compiled.ir["workflow"]["inputs"]),
         "compilationFingerprint": compiled.ir["source"]["compilation_fingerprint"],
     }
 
 
-def _radish_node_detail(node: dict[str, Any]) -> str:
+def _rattish_node_detail(node: dict[str, Any]) -> str:
     configuration = node["configuration"]
     for field in (
         "command",
@@ -4739,11 +4901,104 @@ def _radish_node_detail(node: dict[str, Any]) -> str:
     return str(node["runtime_handler"])
 
 
-def _radish_run_payload(result: RadishRunResult) -> dict[str, Any]:
-    return _radish_artifact_ui_payload(result.document, result.path)
+def _rattish_run_payload(result: RattishRunResult) -> dict[str, Any]:
+    return _rattish_artifact_ui_payload(result.document, result.path)
 
 
-def _radish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dict[str, Any]:
+def _rattish_run_graph_snapshot(document: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project the executed IR without consulting today's source or contracts."""
+    ir = document.get("compiled_snapshot")
+    if not isinstance(ir, Mapping) or ir.get("ir_version") != 1:
+        return None
+    projected_nodes: list[dict[str, Any]] = []
+    projected_edges: list[dict[str, Any]] = []
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    for index, node in enumerate(ir["nodes"]):
+        node_id = node["id"]
+        execution = node["execution"]
+        projection = {
+            "projectionId": node_id,
+            "id": node_id,
+            "label": node_id,
+            "type": node["type"],
+            "status": "valid",
+            "contractAvailable": False,
+            "contract": node["contract"],
+            "configuration": node["configuration"],
+            "execution": execution,
+            "needs": node["readiness"]["needs"],
+            "bindings": node["bindings"],
+            "sourceSpan": node["source_span"],
+            "diagnostics": [],
+            "declarationIndex": index,
+        }
+        projected_nodes.append(projection)
+        node_type = node["type"].replace("-", "_")
+        nodes.append(
+            {
+                "id": node_id,
+                "label": node_id,
+                "type": node_type,
+                "operation": {"type": node_type, **node["configuration"]},
+                "settings": {
+                    "allowFailure": execution["allow_fail"],
+                    "awaitAllInputs": True,
+                    "failFast": False,
+                    "forEach": "",
+                    "maxConcurrency": execution["max_concurrency"],
+                    "pipeOutput": False,
+                    "retryCount": execution["retry_count"],
+                    "retryDelaySeconds": execution["retry_delay_ms"] / 1000,
+                    "timeoutSeconds": (
+                        execution["timeout_ms"] / 1000
+                        if execution["timeout_ms"] is not None
+                        else ""
+                    ),
+                },
+                "x": (index % 4) * 280,
+                "y": (index // 4) * 160,
+                "rattishStatus": "valid",
+                "rattish": projection,
+            }
+        )
+        for route_index, route in enumerate(node["routes"]):
+            mode = "when" if route["mode"] == "conditional" else route["mode"]
+            projected_edge = {
+                "id": f"{node_id}:route:{route_index}",
+                "from": node_id,
+                "to": route["target"],
+                "mode": mode,
+                "predicate": route["predicate"],
+                "predicateSource": None,
+                "status": "valid",
+            }
+            projected_edges.append(projected_edge)
+            edges.append(
+                {
+                    **projected_edge,
+                    "condition": "output_field" if mode == "when" else "always",
+                    "displayLabel": "always" if mode == "unconditional" else mode,
+                }
+            )
+    return {
+        "id": ir["workflow"]["id"],
+        "workflowId": ir["workflow"]["id"],
+        "name": ir["workflow"]["name"],
+        "sourceFormat": "rattish",
+        "readOnly": True,
+        "sourcePath": document["source"]["path"],
+        "projectRoot": ir["source"]["project_root"],
+        "runId": document["run_id"],
+        "sourceFingerprint": document["source"]["source_fingerprint"],
+        "compilationFingerprint": document["source"]["compilation_fingerprint"],
+        "nodes": nodes,
+        "edges": edges,
+        "graph": {"nodes": projected_nodes, "edges": projected_edges},
+    }
+
+
+def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dict[str, Any]:
     node_outputs = {
         node_id: {
             "success": True,
@@ -4801,21 +5056,24 @@ def _radish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dict
     return {
         "workflowId": document["workflow"]["id"],
         "runId": document["run_id"],
-        "success": document["status"] == "passed",
-        "status": "success" if document["status"] == "passed" else "error",
+        "success": None
+        if document["status"] in {"running", "interrupted"}
+        else document["status"] == "passed",
+        "status": _rattish_ui_run_status(document),
         "logPath": str(path),
         "logText": json.dumps(document, ensure_ascii=False, indent=2, default=str),
         "nodeOutputs": node_outputs,
         "runNodes": run_nodes,
-        "runEvents": _radish_ui_events(document),
+        "runEvents": _rattish_ui_events(document),
         "outputs": document["outputs"],
         "diagnostics": document["diagnostics"],
         "error": document["error"],
-        "radishRun": document,
+        "rattishRun": document,
+        "graphSnapshot": _rattish_run_graph_snapshot(document),
     }
 
 
-def _radish_event_message(event: Mapping[str, Any]) -> str:
+def _rattish_event_message(event: Mapping[str, Any]) -> str:
     event_type = str(event.get("type") or "event")
     if event_type == "node_completed":
         return f"Activation {event.get('run_number')} {event.get('outcome')}."
@@ -4824,7 +5082,7 @@ def _radish_event_message(event: Mapping[str, Any]) -> str:
     return "Workflow started."
 
 
-def _radish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     runs = {
         (record["node_id"], record["run_number"]): record for record in document.get("runs", [])
     }
@@ -4850,7 +5108,7 @@ def _radish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
                     if event.get("status")
                     else "started"
                 ),
-                "message": _radish_event_message(event),
+                "message": _rattish_event_message(event),
                 "activationLineageId": record.get("activation_lineage_id") if record else None,
                 "activationGroupId": record.get("activation_group_id") if record else None,
                 "durationMs": record.get("duration_ms") if record else None,

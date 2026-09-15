@@ -1,6 +1,6 @@
 export function installRemActions(editor, getContext) {
   const actions = ["ask", "explain"].map(mode => editor.addAction?.({
-    id: `taskurotta.rem.${mode}`,
+    id: `raticode.rem.${mode}`,
     label: mode === "ask" ? "Ask Rem" : "Explain with Rem",
     contextMenuGroupId: "9_rem",
     contextMenuOrder: mode === "ask" ? 1 : 2,

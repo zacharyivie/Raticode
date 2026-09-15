@@ -2,6 +2,18 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Keep matched text legible on both the indigo user bubble and neutral replies. */
+::highlight(rem-thread-match) {
+  background-color: var(--thread-match-bg);
+  color: var(--thread-match-fg);
+  text-decoration: underline currentColor 2px;
+}
+
+[data-thread-search-match]:focus-visible {
+  outline: 2px solid rgb(var(--color-brand));
+  outline-offset: 3px;
+}
+
 /*
 THESIS: A quiet, local workflow cockpit replaces the old stacked-panel dashboard.
 OWN-WORLD: Deep indigo navigation, warm stone workspace and editor, sage assistant pane, and saturated indigo actions. Compact controls and flat pane boundaries.
@@ -23,6 +35,8 @@ FORM: Operate-mode desktop studio, translated directly from wireframes/studio.ht
   color-scheme: light;
   --model-picker-active-bg: #c4ccf4;
   --model-picker-active-fg: #4338ca;
+  --thread-match-bg: #2563eb;
+  --thread-match-fg: #ffffff;
   color: rgb(var(--color-ink));
   background: rgb(var(--color-canvas));
   font-family:
@@ -41,6 +55,8 @@ FORM: Operate-mode desktop studio, translated directly from wireframes/studio.ht
   --color-signal: 245 158 11;
   --model-picker-active-bg: #2a2a2a;
   --model-picker-active-fg: #f2f2f2;
+  --thread-match-bg: #ffe600;
+  --thread-match-fg: #18181b;
   color-scheme: dark;
 }
 
@@ -482,18 +498,76 @@ select:focus-visible,
   box-shadow: 0 16px 40px rgba(24, 24, 27, 0.16), 0 4px 10px rgba(24, 24, 27, 0.06);
 }
 
+/* The editor pane can be narrow even in a wide window with docked sidebars. */
+.empty-workspace {
+  container: empty-workspace / inline-size;
+  padding: clamp(12px, 3%, 40px);
+}
+
 .empty-workspace-panel {
+  min-width: 0;
+  padding: clamp(16px, 4cqi, 40px);
+  overflow-wrap: anywhere;
   border: 1px solid rgb(var(--color-line));
   background: rgb(var(--color-surface) / 0.94);
   box-shadow: 0 18px 52px rgba(17, 24, 39, 0.08), 0 2px 8px rgba(17, 24, 39, 0.04);
 }
 
 .empty-import-zone {
+  grid-template-columns: auto minmax(0, 1fr);
   border-color: #c7d2fe;
   background: rgb(var(--color-canvas));
   transition: border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
     background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
     box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.empty-import-button {
+  grid-column: 1 / -1;
+  justify-self: start;
+  max-width: 100%;
+}
+
+.empty-workspace-features {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.empty-workspace-actions > button {
+  min-height: 2.25rem;
+  height: auto;
+  max-width: 100%;
+  padding-block: 0.5rem;
+}
+
+.empty-workspace-panel button svg {
+  flex-shrink: 0;
+}
+
+@container empty-workspace (min-width: 640px) {
+  .empty-import-zone {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .empty-import-button {
+    grid-column: auto;
+  }
+}
+
+@container empty-workspace (min-width: 860px) {
+  .empty-workspace-features {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .empty-workspace-features > :not(:first-child) {
+    border-left: 1px solid rgb(var(--color-line));
+    padding-left: 20px;
+  }
+}
+
+@container empty-workspace (min-width: 1200px) {
+  .empty-workspace-decoration {
+    display: block;
+  }
 }
 
 .empty-import-zone--active {
@@ -693,3 +767,13 @@ select:focus-visible,
 .monaco-editor .merge-current-change { background: rgb(22 163 74 / 14%); }
 .monaco-editor .merge-incoming-change { background: rgb(37 99 235 / 14%); }
 .monaco-editor .merge-conflict-glyph::after { content: "!"; color: rgb(var(--color-signal)); font-weight: 700; }
+
+/* Search unfolds within Rem's pane; history stays anchored while rows arrive. */
+.rem-thread-search { animation: rem-search-open 180ms cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes rem-search-open {
+  from { clip-path: inset(0 0 100% 0); }
+  to { clip-path: inset(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rem-thread-search { animation: none; }
+}

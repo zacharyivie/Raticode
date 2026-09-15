@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import runpy
+from pathlib import Path
 
 from importlib.util import find_spec
 
@@ -9,17 +11,20 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 block_cipher = None
 
-datas = []
+# Generate from this build environment before freezing. Fail on missing notices.
+license_collector = runpy.run_path(str(Path(SPECPATH) / "scripts/collect-licenses.py"))
+license_collector["collect"](Path(SPECPATH) / "dist/third-party-licenses")
+datas = [("dist/third-party-licenses", "third-party-licenses")]
 datas += collect_data_files("openpyxl")
 datas += collect_data_files("tzdata")
 if find_spec("vosk") is not None:
     datas += collect_data_files("vosk")
 datas += [
-    ("radish/contracts", "gofer/radish/assets/contracts"),
-    ("radish/providers", "gofer/radish/assets/providers"),
-    ("radish/schemas", "gofer/radish/assets/schemas"),
-    ("radish/spec", "gofer/radish/assets/docs"),
-    ("skills/gofer-flow-workflow-builder", "gofer/radish/assets/assistant-skill"),
+    ("rattish/contracts", "gofer/rattish/assets/contracts"),
+    ("rattish/providers", "gofer/rattish/assets/providers"),
+    ("rattish/schemas", "gofer/rattish/assets/schemas"),
+    ("rattish/spec", "gofer/rattish/assets/docs"),
+    ("skills/gofer-flow-workflow-builder", "gofer/rattish/assets/assistant-skill"),
 ]
 
 hiddenimports = []
@@ -51,6 +56,19 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Preserve the concrete native payload for each platform's release review.
+import hashlib
+import json
+native_inventory = [
+    {"destination": destination, "source": source,
+     "sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest()}
+    for destination, source, kind in a.binaries if Path(source).is_file()
+]
+(Path(SPECPATH) / "dist/third-party-licenses/native-inventory.json").write_text(
+    json.dumps(native_inventory, indent=2) + "\n", encoding="utf-8"
+)
+a.datas.append(("third-party-licenses/native-inventory.json",
+                str(Path(SPECPATH) / "dist/third-party-licenses/native-inventory.json"), "DATA"))
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

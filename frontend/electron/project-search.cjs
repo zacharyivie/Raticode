@@ -51,23 +51,44 @@ async function scanProject(root, options = {}) {
     await walk(root);
     candidates.sort();
   }
-  let visited = 0;
-  for (const relativePath of candidates) {
-    if (result.count >= 1000 || Date.now() > deadline || visited++ >= 20000) { result.truncated = true; break; }
-    if (relativePath.split(/[\\/]/).some((part) => excluded.has(part))) continue;
-    if (includes.length && !includes.some((pattern) => pattern.test(relativePath.replace(/\\/g, "/")))) continue;
-    if (ignores.some((pattern) => pattern.test(relativePath.replace(/\\/g, "/")))) continue;
+  // Opt in for native filesystem benchmarks; default remains serial until measured.
+  const requestedConcurrency = Number(options.readConcurrency ?? process.env.TASKUROTTA_SEARCH_READ_CONCURRENCY ?? 1);
+  const concurrency = Number.isInteger(requestedConcurrency) ? Math.max(1, Math.min(4, requestedConcurrency)) : 1;
+  async function loadCandidate(relativePath) {
+    if (Date.now() > deadline) return {};
+    if (relativePath.split(/[\\/]/).some((part) => excluded.has(part))) return {};
+    if (includes.length && !includes.some((pattern) => pattern.test(relativePath.replace(/\\/g, "/")))) return {};
+    if (ignores.some((pattern) => pattern.test(relativePath.replace(/\\/g, "/")))) return {};
     const target = path.resolve(root, relativePath);
     const relative = path.relative(root, target);
-    if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) continue;
+    if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) return {};
     try {
       // Do not follow symlinks, including links in parent directories.
-      if (await fs.realpath(target) !== target) continue;
+      if (await fs.realpath(target) !== target) return {};
       const stat = await fs.stat(target);
-      if (!stat.isFile()) continue;
-      if (stat.size > 2 * 1024 * 1024) { result.skipped++; continue; }
+      if (!stat.isFile()) return {};
+      if (stat.size > 2 * 1024 * 1024) { return { skipped: true }; }
       const buffer = await fs.readFile(target);
-      if (buffer.includes(0) || !Buffer.from(buffer.toString("utf8")).equals(buffer)) continue;
+      if (buffer.includes(0) || !Buffer.from(buffer.toString("utf8")).equals(buffer)) return {};
+      if (buffer.length > 2 * 1024 * 1024) return { skipped: true };
+      return { buffer, target };
+    } catch { return { skipped: true }; }
+  }
+  async function* readCandidates() {
+    for (let offset = 0; offset < Math.min(candidates.length, 20000); offset += concurrency) {
+      if (Date.now() > deadline) return;
+      const batch = candidates.slice(offset, Math.min(offset + concurrency, 20000));
+      const loaded = await Promise.all(batch.map(loadCandidate));
+      for (let index = 0; index < batch.length; index++) yield { ...loaded[index], relativePath: batch[index] };
+    }
+  }
+  let visited = 0;
+  for await (const { relativePath, buffer, target, skipped } of readCandidates()) {
+    if (result.count >= 1000 || Date.now() > deadline) { result.truncated = true; break; }
+    visited++;
+    if (skipped) result.skipped++;
+    if (!buffer) continue;
+    try {
       const matches = [];
       const lines = buffer.toString("utf8").split(/\r?\n/);
       for (let index = 0; index < lines.length; index++) {
@@ -89,6 +110,7 @@ async function scanProject(root, options = {}) {
       }
     } catch { result.skipped++; }
   }
+  if (visited < candidates.length) result.truncated = true;
   return result;
 }
 // Regex runs off the Electron main thread so pathological expressions can be stopped.
@@ -130,4 +152,4 @@ async function replaceProject(root, options = {}) {
   return { count, changed };
 }
 if (!isMainThread) scanProject(workerData.root, workerData.options).then((result) => parentPort.postMessage({ result }), (error) => parentPort.postMessage({ error: error.message }));
-module.exports = { searchProject, replaceProject };
+module.exports = { searchProject, replaceProject, scanProject };

@@ -1,0 +1,12 @@
+Rattish: 1
+Workflow:
+  name: HTTP request contract
+Node example:
+  type: http-request
+  method: POST
+  url: https://example.com/analyze
+  json: {"subject": "patch"}
+  expected-statuses:
+    - 200
+    - 201
+  response-mode: json

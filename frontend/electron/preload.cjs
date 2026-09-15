@@ -177,6 +177,8 @@ contextBridge.exposeInMainWorld("goferDesktop", {
       openPath(targetPath),
     revealPath: (targetPath) =>
       revealPath(targetPath),
+    missingThreadRoots: (paths) => invokeDesktop("gofer:missing-thread-roots", { paths }),
+    missingRecentFiles: (paths) => invokeDesktop("gofer:missing-recent-files", { paths }),
     getPathInfo: (targetPath) =>
       getPathInfo(targetPath),
     gitRepoAction: (projectRoot, action, value) => invokeDesktop("gofer:git-repo-action", { projectRoot, action, value, grantId: grantForPath(projectRoot) }),

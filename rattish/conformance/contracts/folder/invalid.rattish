@@ -1,0 +1,5 @@
+Rattish: 1
+Workflow:
+  name: Invalid folder contract
+Node example:
+  type: folder

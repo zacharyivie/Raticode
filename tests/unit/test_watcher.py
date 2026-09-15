@@ -897,3 +897,178 @@ def test_workflow_watcher_start_shutdown_and_is_running() -> None:
     while watcher.is_running() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert watcher.is_running() is False
+
+
+def test_snapshot_stats_each_candidate_once_and_handles_disappearing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = tmp_path / "input.txt"
+    file.write_text("content")
+    missing = tmp_path / "missing.txt"
+    watcher = WorkflowWatcher()
+    monkeypatch.setattr(watcher, "_watched_paths", lambda *_: iter([file, missing, tmp_path]))
+    original = Path.stat
+    calls: list[Path] = []
+
+    def counted(path: Path, **kwargs: object) -> object:
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "stat", counted)
+    snapshot = watcher._snapshot(
+        tmp_path / "workflow.rad", WatchConfig(path=file), ResourceLimits()
+    )
+    assert list(snapshot) == [str(file)]
+    assert calls == [file, missing, tmp_path]
+
+
+def test_native_watcher_skips_clean_scans_and_reconciles_missed_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = tmp_path / "input.txt"
+    file.write_text("old")
+    watcher = WorkflowWatcher(reconciliation_seconds=30)
+    workflow = AgenticWorkflow(
+        WorkflowConfig(id="native", name="Native", watch=WatchConfig(path=file))
+    )
+    watcher.add_workflow(workflow, tmp_path / "workflow.rad")
+    watched = watcher._workflows["native"]
+    fake = SimpleNamespace(is_alive=lambda: True)
+    watched.observer = fake  # type: ignore[assignment]
+    monkeypatch.setattr(watcher, "_ensure_observer", lambda _: None)
+    scans = 0
+    original = watcher._snapshot
+
+    def counted(*args: object) -> watcher_module.Snapshot:
+        nonlocal scans
+        scans += 1
+        return original(watched.workflow_path, watched.config, watched.resource_limits)
+
+    monkeypatch.setattr(watcher, "_snapshot", counted)
+    events: list[WatchEvent] = []
+    monkeypatch.setattr(watcher, "_trigger", lambda _, batch: events.extend(batch))
+    watcher.poll_once(force=False)
+    watcher.poll_once(force=False)
+    assert scans == 1
+    file.write_text("changed")
+    watcher.poll_once(force=False)
+    assert scans == 1
+    watched.reconciled_at -= 31
+    watcher.poll_once(force=False)
+    assert scans == 2
+    assert [event.kind for event in events] == ["modified"]
+    watched.dirty.set()
+    watcher.poll_once(force=False)
+    assert scans == 3
+
+
+def test_native_events_during_scan_survive_and_clean_polls_drain_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = tmp_path / "input.txt"
+    file.write_text("old")
+    watcher = WorkflowWatcher()
+    workflow = AgenticWorkflow(
+        WorkflowConfig(id="native", name="Native", watch=WatchConfig(path=file))
+    )
+    watcher.add_workflow(workflow, tmp_path / "workflow.rad")
+    watched = watcher._workflows["native"]
+    watched.observer = SimpleNamespace(is_alive=lambda: True)  # type: ignore[assignment]
+    monkeypatch.setattr(watcher, "_ensure_observer", lambda _: None)
+    original = watcher._snapshot
+
+    def during_scan(*args: object) -> watcher_module.Snapshot:
+        watched.dirty.set()
+        return original(watched.workflow_path, watched.config, watched.resource_limits)
+
+    monkeypatch.setattr(watcher, "_snapshot", during_scan)
+    watcher.poll_once(force=False)
+    assert watched.dirty.is_set()
+    watched.dirty.clear()
+    drained = []
+    monkeypatch.setattr(
+        watcher, "_start_queued_runs", lambda item: drained.append(item.workflow_id)
+    )
+    watcher.poll_once(force=False)
+    assert drained == ["native"]
+
+
+def test_observer_failure_keeps_polling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    file = tmp_path / "input.txt"
+    file.write_text("old")
+    watcher = WorkflowWatcher()
+    workflow = AgenticWorkflow(
+        WorkflowConfig(id="fallback", name="Fallback", watch=WatchConfig(path=file))
+    )
+    watcher.add_workflow(workflow, tmp_path / "workflow.rad")
+
+    def unavailable() -> None:
+        raise OSError("native watches unavailable")
+
+    monkeypatch.setattr(watcher_module, "Observer", unavailable)
+    events: list[WatchEvent] = []
+    monkeypatch.setattr(watcher, "_trigger", lambda _, batch: events.extend(batch))
+    watcher.poll_once(force=False)
+    file.write_text("changed")
+    watcher.poll_once(force=False)
+    assert [event.kind for event in events] == ["modified"]
+    assert watcher._workflows["fallback"].observer is None
+
+
+def test_native_observer_detects_directory_replacement_and_stops(tmp_path: Path) -> None:
+    directory = tmp_path / "inputs"
+    directory.mkdir()
+    (directory / "old.txt").write_text("old")
+    watcher = WorkflowWatcher()
+    workflow = AgenticWorkflow(
+        WorkflowConfig(id="native", name="Native", watch=WatchConfig(path=directory, glob="*.txt"))
+    )
+    watcher.add_workflow(workflow, tmp_path / "workflow.rad")
+    events: list[WatchEvent] = []
+    watcher._trigger = lambda watched, events_batch: events.extend(events_batch)  # type: ignore[method-assign, assignment]
+    try:
+        watcher.poll_once(force=False)
+        first = watcher._workflows["native"].observer
+        assert first is not None
+        directory.rename(tmp_path / "moved")
+        directory.mkdir()
+        (directory / "new.txt").write_text("new")
+        watcher.poll_once(force=False)
+        assert [(event.kind, event.name) for event in events] == [
+            ("created", "new.txt"),
+            ("deleted", "old.txt"),
+        ]
+        assert watcher._workflows["native"].observer is not first
+        assert not first.is_alive()
+        watcher.remove_workflow("native")
+        assert not watcher.list_workflows()
+    finally:
+        watcher.shutdown()
+
+
+def test_native_events_mark_nested_globs_dirty(tmp_path: Path) -> None:
+    directory = tmp_path / "inputs"
+    nested = directory / "nested"
+    nested.mkdir(parents=True)
+    file = nested / "input.txt"
+    file.write_text("old")
+    watcher = WorkflowWatcher()
+    workflow = AgenticWorkflow(
+        WorkflowConfig(
+            id="nested",
+            name="Nested",
+            watch=WatchConfig(path=directory, glob="nested/*.txt", recursive=False),
+        )
+    )
+    watcher.add_workflow(workflow, tmp_path / "workflow.rad")
+    try:
+        watcher.poll_once(force=False)
+        watched = watcher._workflows["nested"]
+        assert watched.observer is not None
+        watched.dirty.clear()
+        file.write_text("changed")
+        assert watched.dirty.wait(timeout=3)
+        watcher.remove_workflow("nested")
+        assert watched.observer is None
+    finally:
+        watcher.shutdown()

@@ -31,7 +31,7 @@ done
 # The standalone CLI needs its own ticket, separate from the enclosing app.
 for cli in frontend/release/gof-macos-*; do
   codesign --verify --strict --verbose=2 "$cli"
-  archive="$RUNNER_TEMP/taskurotta-cli-notarization.zip"
+  archive="$RUNNER_TEMP/raticode-cli-notarization.zip"
   ditto -c -k --keepParent "$cli" "$archive"
   notarize "$archive" frontend/release/notarization-macos-cli.json
   spctl --assess --type execute --verbose=2 "$cli"

@@ -1,0 +1,9 @@
+Rattish: 1
+Workflow:
+  name: Approval gate contract
+Node example:
+  type: approval-gate
+  message: Deploy this release?
+  decision-timeout: 30m
+  approvers:
+    - release-owner

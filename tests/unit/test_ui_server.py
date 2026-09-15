@@ -9,13 +9,14 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from urllib.parse import quote
 
 import pytest
 
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
 from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.watcher import WorkflowWatcher
-from gofer.radish.workspaces import create_registered_workflow
+from gofer.rattish.workspaces import create_registered_workflow
 from gofer.ui import server as server_module
 from gofer.ui.chat import workflow_chat_prompt_path
 from gofer.ui.server import (
@@ -153,6 +154,194 @@ def _fake_handler(server: GoferUiServer) -> GoferUiRequestHandler:
     handler = GoferUiRequestHandler.__new__(GoferUiRequestHandler)
     handler.server = server
     return handler
+
+
+def test_swarm_routes_require_authentication(tmp_path: Path) -> None:
+    result = _request(tmp_path, "GET", "/api/swarms", authenticated=False)
+    assert result.status == 401
+
+
+def test_swarm_start_rejects_ungranted_project(tmp_path: Path) -> None:
+    project = tmp_path.parent / f"{tmp_path.name}-swarm-project"
+    project.mkdir()
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/swarms/team/start",
+        body={"projectRoot": str(project), "task": "Implement a feature"},
+    )
+    assert result.status == 403
+    assert "approved" in result.text()
+
+
+@pytest.mark.parametrize("project", ["", "relative/project", 42])
+def test_swarm_routes_reject_invalid_project(tmp_path: Path, project: object) -> None:
+    result = _request(tmp_path, "POST", "/api/swarms", body={"projectRoot": project})
+    assert result.status == 400
+
+
+@pytest.mark.parametrize("action", ["messages", "deliveries"])
+def test_swarm_routes_forward_project_scoped_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def message(project: str, swarm_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((project, swarm_id, payload))
+        return {"id": swarm_id, "run": {"messages": [payload]}}
+
+    original = _fake_server
+
+    def fake_with_swarms(*args: Any, **kwargs: Any) -> GoferUiServer:
+        server = original(*args, **kwargs)
+        server.swarms = cast(Any, SimpleNamespace(message=message, resolve_delivery=message))
+        return server
+
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=["_fake_server"]), "_fake_server", fake_with_swarms
+    )
+    payload = {"projectRoot": str(tmp_path), "text": "Prioritize tests", "recipient": "worker"}
+    result = _request(tmp_path, "POST", f"/api/swarms/team/{action}", body=payload)
+    assert result.status == 200
+    assert calls == [(str(tmp_path.resolve()), "team", payload)]
+    assert cast(dict[str, Any], result.json())["swarm"]["id"] == "team"
+
+
+def test_swarm_resume_requires_project_access(tmp_path: Path) -> None:
+    project = tmp_path.parent / f"{tmp_path.name}-resume-project"
+    project.mkdir()
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/swarms/team/control",
+        body={"projectRoot": str(project), "action": "resume"},
+    )
+    assert result.status == 403
+
+
+def test_swarm_api_round_trip_and_weighted_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gofer.ui.swarms import SwarmManager
+
+    manager = SwarmManager(tmp_path, start_runtime=False)
+    original = _fake_server
+
+    def fake_with_swarms(*args: Any, **kwargs: Any) -> GoferUiServer:
+        server = original(*args, **kwargs)
+        server.swarms = manager
+        return server
+
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=["_fake_server"]), "_fake_server", fake_with_swarms
+    )
+    try:
+        created = _request(
+            tmp_path,
+            "POST",
+            "/api/swarms",
+            body={
+                "projectRoot": str(tmp_path),
+                "name": "Release team",
+                "agents": [
+                    {
+                        "id": "lead",
+                        "name": "Lead",
+                        "role": "Coordinate and review",
+                        "isOrchestrator": True,
+                    }
+                ],
+            },
+        )
+        assert created.status == 200
+        swarm = cast(dict[str, Any], created.json())["swarm"]
+        assert swarm["agents"][0]["allowSteering"] is False
+        endpoint = f"/api/swarms/{swarm['id']}"
+        started = _request(
+            tmp_path,
+            "POST",
+            f"{endpoint}/start",
+            body={
+                "projectRoot": str(tmp_path),
+                "task": "Ship the feature",
+            },
+        )
+        assert started.status == 200
+        saved = _request(
+            tmp_path,
+            "POST",
+            f"{endpoint}/objectives",
+            body={
+                "projectRoot": str(tmp_path),
+                "revision": 0,
+                "reason": "Estimate implementation effort",
+                "objectives": [
+                    {
+                        "id": "feature",
+                        "title": "Ship feature",
+                        "milestones": [
+                            {
+                                "id": "design",
+                                "title": "Design",
+                                "weight": 1,
+                                "status": "accepted",
+                                "evidence": "Design approved",
+                                "waiverReason": "User reviewed the design",
+                            },
+                            {
+                                "id": "build",
+                                "title": "Build",
+                                "weight": 3,
+                                "status": "accepted",
+                                "evidence": "Implementation reviewed",
+                                "waiverReason": "User reviewed implementation",
+                            },
+                            {"id": "verify", "title": "Verify", "weight": 1, "status": "planned"},
+                        ],
+                    }
+                ],
+            },
+        )
+        assert saved.status == 200
+        progress = cast(dict[str, Any], saved.json())["swarm"]["run"]["progress"]
+        assert progress["percent"] == 80
+        assert progress["acceptedWeight"] == 4
+        assert progress["totalWeight"] == 5
+        loaded = _request(tmp_path, "GET", f"{endpoint}?projectRoot={tmp_path}")
+        assert loaded.status == 200
+        assert cast(dict[str, Any], loaded.json())["swarm"]["run"]["revision"] == 1
+        listed = _request(tmp_path, "GET", f"/api/swarms?projectRoot={tmp_path}")
+        assert len(cast(dict[str, Any], listed.json())["swarms"]) == 1
+        live = manager.get(tmp_path, swarm["id"], include_history=False)
+        live["history"] = [{"id": str(i), "task": f"Task {i}"} for i in range(25)]
+        manager._save(live)
+        for history_flag in ("0", "false"):
+            result = _request(
+                tmp_path, "GET", f"{endpoint}?projectRoot={tmp_path}&history={history_flag}"
+            )
+            current = cast(dict[str, Any], result.json())["swarm"]
+            assert "history" not in current
+            unchanged = _request(
+                tmp_path,
+                "GET",
+                f"{endpoint}?projectRoot={tmp_path}&since={quote(current['updatedAt'])}",
+            )
+            assert cast(dict[str, Any], unchanged.json())["swarm"] is None
+        page = _request(tmp_path, "GET", f"{endpoint}/history?projectRoot={tmp_path}&offset=20")
+        assert [run["id"] for run in cast(dict[str, Any], page.json())["history"]] == [
+            "4",
+            "3",
+            "2",
+            "1",
+            "0",
+        ]
+        archived = _request(tmp_path, "GET", f"{endpoint}/history?projectRoot={tmp_path}&runId=24")
+        assert cast(dict[str, Any], archived.json())["run"] == live["history"][24]
+    finally:
+        manager.close()
 
 
 def _sockets_available() -> bool:
@@ -305,7 +494,8 @@ command = "echo hello"
     assert watcher.list_workflows() == []
 
 
-def test_ui_server_dynamic_port_reports_bound_port(tmp_path) -> None:
+def test_ui_server_dynamic_port_reports_bound_port(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("GOFER_UI_EMIT_READY_TOKEN", raising=False)
     if not _sockets_available():
         pytest.skip("local sockets are unavailable in this environment")
     server = create_server(host="127.0.0.1", port=0, data_dir=tmp_path)
@@ -489,7 +679,7 @@ def test_ui_server_state_change_requires_ui_api_token(tmp_path) -> None:
     assert response.json() == {"error": "UI API authentication required"}
 
 
-def test_ui_server_exposes_revisioned_radish_document_routes(tmp_path: Path) -> None:
+def test_ui_server_exposes_revisioned_rattish_document_routes(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     create_registered_workflow(project, "Route Editor", registry_dir=tmp_path)
@@ -531,7 +721,7 @@ def test_ui_server_exposes_revisioned_radish_document_routes(tmp_path: Path) -> 
         body={"source": source, "expectedRevision": opened["sourceRevision"]},
     )
     assert conflict.status == 409
-    assert cast(dict[str, Any], conflict.json())["code"] == ("RADISH_EDITOR_REVISION_CONFLICT")
+    assert cast(dict[str, Any], conflict.json())["code"] == ("RATTISH_EDITOR_REVISION_CONFLICT")
 
     metadata = saved["metadata"]
     metadata["canvas"]["nodes"]["prepare"] = {"x": 10, "y": 20}
@@ -570,15 +760,15 @@ def test_ui_server_exposes_revisioned_radish_document_routes(tmp_path: Path) -> 
     assert 'command: "echo changed"' in mutated["source"]
 
 
-def test_ui_server_plans_and_runs_registered_radish_workflows(tmp_path: Path) -> None:
+def test_ui_server_plans_and_runs_registered_rattish_workflows(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    registered = create_registered_workflow(project, "Runnable Radish", registry_dir=tmp_path)
+    registered = create_registered_workflow(project, "Runnable Rattish", registry_dir=tmp_path)
     registered.entrypoint.write_text(
-        """Radish: 1
+        """Rattish: 1
 
 Workflow:
-  name: Runnable Radish
+  name: Runnable Rattish
 
 Node prepare:
   type: bash-command
@@ -590,25 +780,25 @@ Node prepare:
     planned = _request(
         tmp_path,
         "POST",
-        "/api/workflows/runnable-radish/plan",
+        "/api/workflows/runnable-rattish/plan",
         body={"triggerContext": {}},
     )
     assert planned.status == 200
     plan = cast(dict[str, Any], planned.json())["plan"]
-    assert plan["kind"] == "radish"
+    assert plan["kind"] == "rattish"
     assert plan["runnable"] is True
     assert plan["generations"][0]["nodes"][0]["id"] == "prepare"
 
     executed = _request(
         tmp_path,
         "POST",
-        "/api/workflows/runnable-radish/run",
+        "/api/workflows/runnable-rattish/run",
         body={"inputs": {}},
     )
     assert executed.status == 200
     run = cast(dict[str, Any], executed.json())["run"]
     assert run["success"] is True
-    assert run["workflowId"] == "runnable-radish"
+    assert run["workflowId"] == "runnable-rattish"
     assert run["nodeOutputs"]["prepare"]["data"]["stdout"] == "ready"
     assert Path(run["logPath"]).is_file()
 
@@ -2088,7 +2278,12 @@ def test_commit_message_endpoint_uses_restricted_generator(
     assert response.status == 200
     assert response.json() == {"message": "fix: expose resolved edits"}
     generate.assert_awaited_once_with(
-        provider="codex", model="cli-default", effort=None, diff="+staged"
+        provider="codex",
+        model="cli-default",
+        effort=None,
+        diff="+staged",
+        project_root=None,
+        inspect_staged=False,
     )
     generate.side_effect = ValueError("Stage changes first.")
     failed = _request(tmp_path, "POST", "/api/chat/commit-message", body={"diff": ""})
@@ -2411,3 +2606,191 @@ def test_async_request_deadline_cancels_work_and_preserves_stream_framing(tmp_pa
     assert response.status == 200
     assert response.header("Content-Type") == "application/x-ndjson; charset=utf-8"
     assert response.json() == {"type": "error", "error": "Request exceeded its execution deadline"}
+
+
+def test_commit_message_inspection_endpoint_checks_project_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from gofer.ui import commit_message
+
+    generate = AsyncMock(return_value={"message": "fix: summarize large changes"})
+    monkeypatch.setattr(commit_message, "generate_commit_message", generate)
+    project = tmp_path / "repo"
+    project.mkdir()
+    response = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/commit-message",
+        body={"projectRoot": str(project), "inspectStaged": True},
+    )
+    assert response.status == 200
+    generate.assert_awaited_once_with(
+        provider="codex",
+        model="cli-default",
+        effort=None,
+        diff="",
+        project_root=project,
+        inspect_staged=True,
+    )
+    generate.reset_mock()
+    response = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/commit-message",
+        body={"projectRoot": str(tmp_path.parent), "inspectStaged": True},
+    )
+    assert response.status == 400
+    assert "approved" in response.text()
+    generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_rem_swarm_grant_is_private_and_revoked_after_chat(
+    monkeypatch, tmp_path: Path, endpoint: str, fail: bool
+) -> None:
+    import urllib.error
+    import urllib.request
+
+    from gofer.ui.rem_swarms import SWARM_HELP
+    from gofer.ui.swarms import SwarmManager
+
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    original = _fake_server
+    urls: list[str] = []
+
+    def fake_with_swarms(*args: Any, **kwargs: Any) -> GoferUiServer:
+        server = original(*args, **kwargs)
+        server.swarms = manager
+        return server
+
+    def rpc(url: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": method,
+                    "params": params or {},
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            return dict(json.load(response))
+
+    def inspect(kwargs: dict[str, Any]) -> None:
+        url = kwargs["trusted_swarm_url"]
+        urls.append(url)
+        resources = kwargs["workflow"]["remResources"]
+        assert resources["shell"] is False
+        assert resources["mcpServers"] == [{"name": "swarm", "type": "http", "url": url}]
+        assert rpc(url, "initialize")["result"]["instructions"] == ""
+        assert SWARM_HELP not in json.dumps(rpc(url, "tools/list"))
+        help_result = rpc(
+            url, "tools/call", {"name": "swarm_action", "arguments": {"action": "help"}}
+        )
+        help_data = json.loads(help_result["result"]["content"][0]["text"])
+        assert help_data["projectRoot"] == str(tmp_path)
+        assert help_data["readOnly"] is True
+        assert help_data["instructions"] == SWARM_HELP
+        denied = rpc(url, "tools/call", {"name": "swarm_action", "arguments": {"action": "create"}})
+        assert denied["result"]["isError"] is True
+        if fail:
+            raise server_module.ChatProviderError("Provider failed")
+
+    async def chat(**kwargs: Any) -> dict[str, Any]:
+        inspect(kwargs)
+        return {"message": "Ready"}
+
+    async def stream(**kwargs: Any):
+        inspect(kwargs)
+        yield {"type": "done"}
+
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=["_fake_server"]), "_fake_server", fake_with_swarms
+    )
+    monkeypatch.setattr(server_module, "run_workflow_chat", chat)
+    monkeypatch.setattr(server_module, "stream_workflow_chat", stream)
+    try:
+        result = _request(
+            tmp_path,
+            "POST",
+            endpoint,
+            body={
+                "permissionMode": "read-only",
+                "workflow": {
+                    "projectRoot": str(tmp_path),
+                    "remSwarmAccess": {"enabled": True},
+                    "remResources": {
+                        "shell": False,
+                        "mcpServers": [
+                            {"name": "swarm", "type": "http", "url": "http://untrusted.invalid"}
+                        ],
+                    },
+                },
+            },
+        )
+        assert result.status == (400 if fail and endpoint == "/api/chat" else 200)
+        assert len(urls) == 1
+        with pytest.raises(urllib.error.HTTPError) as error:
+            rpc(urls[0], "tools/list")
+        assert error.value.code == 401
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream"])
+def test_rem_swarm_access_requires_project_grant(
+    monkeypatch, tmp_path: Path, endpoint: str
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    monkeypatch.setattr(
+        server_module, "run_workflow_chat", lambda **kwargs: pytest.fail("Must not start")
+    )
+    monkeypatch.setattr(
+        server_module, "stream_workflow_chat", lambda **kwargs: pytest.fail("Must not start")
+    )
+    result = _request(
+        tmp_path,
+        "POST",
+        endpoint,
+        body={
+            "workflow": {
+                "projectRoot": str(outside),
+                "remSwarmAccess": {"enabled": True},
+            }
+        },
+    )
+    assert result.status == 400
+    assert "outside the approved" in result.text()
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        {"projectRoot": "/untrusted", "remSwarmAccess": {"enabled": False}},
+        {"projectRoot": "", "remSwarmAccess": {"enabled": True}},
+        {},
+    ],
+)
+@pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream"])
+def test_disabled_or_projectless_rem_chat_has_no_swarm_grant(
+    monkeypatch, tmp_path, workflow, endpoint
+):
+    async def chat(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["trusted_swarm_url"] is None
+        assert kwargs["workflow"] == workflow
+        return {}
+
+    async def stream(**kwargs):
+        await chat(**kwargs)
+        yield {"type": "done"}
+
+    monkeypatch.setattr(server_module, "run_workflow_chat", chat)
+    monkeypatch.setattr(server_module, "stream_workflow_chat", stream)
+    assert _request(tmp_path, "POST", endpoint, body={"workflow": workflow}).status == 200

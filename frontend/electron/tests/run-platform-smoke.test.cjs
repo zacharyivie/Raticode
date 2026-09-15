@@ -45,7 +45,7 @@ for (const platform of ["linux", "win32", "darwin"]) {
       assert.deepEqual(launchArgs, platform === "linux" ? ["-a", "/fixture/electron", "--no-sandbox"] : []);
       assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined);
       assert.equal(options.env.CI, "true");
-      assert.equal(options.env.TASKUROTTA_SMOKE_ASAR, path.join(unpacked, "app.asar"));
+      assert.equal(options.env.RATICODE_SMOKE_ASAR, path.join(unpacked, "app.asar"));
     }
     assert.deepEqual(fixtures, ["native-runtime.browser.cjs", "studio-policy.browser.cjs", "legacy-project-migration.browser.cjs", "conversation-storage.browser.cjs"]);
     assert.equal(env.ELECTRON_RUN_AS_NODE, "1");

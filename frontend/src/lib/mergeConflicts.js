@@ -23,9 +23,16 @@ export function resolvedConflict(block, choice) {
 export function installConflictControls(monaco, editor, model) {
   if (!monaco.languages.registerCodeLensProvider || !editor.addCommand) return { dispose() {} };
   let decorations = [];
+  let blocks = [];
+  let hasOpeningMarker = true;
+  const scan = () => {
+    hasOpeningMarker = !model.findMatches || model.findMatches("^<{7}(?: |$)", true, true, false, null, false, 1).length > 0;
+    blocks = hasOpeningMarker ? conflictBlocks(model.getValue()) : [];
+  };
+  scan();
   const commands = Object.fromEntries(['current', 'incoming', 'both'].map(choice => [choice, editor.addCommand(0, (_accessor, start, version) => {
     if (editor.getOption?.(monaco.editor.EditorOption.readOnly) || model.getVersionId() !== version) return;
-    const block = conflictBlocks(model.getValue()).find(item => item.start === start);
+    const block = blocks.find(item => item.start === start);
     if (!block) return;
     const hasNextLine = block.end < model.getLineCount();
     const value = resolvedConflict(block, choice);
@@ -36,19 +43,34 @@ export function installConflictControls(monaco, editor, model) {
   const provider = monaco.languages.registerCodeLensProvider('*', {
     provideCodeLenses(candidate) {
       if (candidate !== model) return { lenses: [], dispose() {} };
-      return { lenses: conflictBlocks(model.getValue()).flatMap(block => ['current', 'incoming', 'both'].map(choice => ({
+      return { lenses: blocks.flatMap(block => ['current', 'incoming', 'both'].map(choice => ({
         range: new monaco.Range(block.start, 1, block.start, 1),
         command: { id: commands[choice], title: `Accept ${choice === 'both' ? 'both changes' : `${choice} change`}`, arguments: [block.start, model.getVersionId()] },
       }))), dispose() {} };
     },
   });
   const decorate = () => {
-    decorations = editor.deltaDecorations(decorations, conflictBlocks(model.getValue()).flatMap(block => [
+    decorations = editor.deltaDecorations(decorations, blocks.flatMap(block => [
       { range: new monaco.Range(block.start, 1, block.divider - 1, 1), options: { isWholeLine: true, className: 'merge-current-change', glyphMarginClassName: 'merge-conflict-glyph', hoverMessage: { value: 'Current change' } } },
       { range: new monaco.Range(block.divider, 1, block.end, 1), options: { isWholeLine: true, className: 'merge-incoming-change', hoverMessage: { value: 'Incoming change' } } },
     ]));
   };
   decorate();
-  const listener = model.onDidChangeContent(decorate);
+  const listener = model.onDidChangeContent((event) => {
+    // With no existing blocks, ordinary typing cannot create a conflict unless
+    // an affected line contains an opening marker. Avoid scanning the document.
+    if (!hasOpeningMarker && event?.changes && model.getLineContent) {
+      const possibleMarker = event.changes.some(change => {
+        const end = Math.min(model.getLineCount(), change.range.startLineNumber + change.text.split("\n").length);
+        for (let line = change.range.startLineNumber; line <= end; line++) {
+          if (/^<{7}(?: |$)/.test(model.getLineContent(line))) return true;
+        }
+        return false;
+      });
+      if (!possibleMarker) return;
+    }
+    scan();
+    decorate();
+  });
   return { dispose() { listener.dispose(); provider.dispose(); } };
 }

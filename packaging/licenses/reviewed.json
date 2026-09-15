@@ -1,0 +1,878 @@
+{
+  "npm": {
+    "@types/debug@4.1.13": {
+      "license": "MIT",
+      "version": "4.1.13"
+    },
+    "@types/estree-jsx@1.0.5": {
+      "license": "MIT",
+      "version": "1.0.5"
+    },
+    "@types/estree@1.0.9": {
+      "license": "MIT",
+      "version": "1.0.9"
+    },
+    "@types/hast@3.0.5": {
+      "license": "MIT",
+      "version": "3.0.5"
+    },
+    "@types/mdast@4.0.4": {
+      "license": "MIT",
+      "version": "4.0.4"
+    },
+    "@types/ms@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "@types/unist@2.0.11": {
+      "license": "MIT",
+      "version": "2.0.11"
+    },
+    "@types/unist@3.0.3": {
+      "license": "MIT",
+      "version": "3.0.3"
+    },
+    "@ungap/structured-clone@1.4.0": {
+      "license": "ISC",
+      "version": "1.4.0"
+    },
+    "@xterm/addon-fit@0.11.0": {
+      "license": "MIT",
+      "version": "0.11.0"
+    },
+    "@xterm/xterm@6.0.0": {
+      "license": "MIT",
+      "version": "6.0.0"
+    },
+    "argparse@2.0.1": {
+      "license": "Python-2.0",
+      "version": "2.0.1"
+    },
+    "bail@2.0.2": {
+      "license": "MIT",
+      "version": "2.0.2"
+    },
+    "builder-util-runtime@9.7.0": {
+      "license": "MIT",
+      "version": "9.7.0"
+    },
+    "ccount@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "character-entities-html4@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "character-entities-legacy@3.0.0": {
+      "license": "MIT",
+      "version": "3.0.0"
+    },
+    "character-entities@2.0.2": {
+      "license": "MIT",
+      "version": "2.0.2"
+    },
+    "character-reference-invalid@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "comma-separated-tokens@2.0.3": {
+      "license": "MIT",
+      "version": "2.0.3"
+    },
+    "cookie@1.1.1": {
+      "license": "MIT",
+      "version": "1.1.1"
+    },
+    "debug@4.4.3": {
+      "license": "MIT",
+      "version": "4.4.3"
+    },
+    "decode-named-character-reference@1.3.0": {
+      "license": "MIT",
+      "version": "1.3.0"
+    },
+    "dequal@2.0.3": {
+      "license": "MIT",
+      "version": "2.0.3"
+    },
+    "devlop@1.1.0": {
+      "license": "MIT",
+      "version": "1.1.0"
+    },
+    "electron-updater@6.8.9": {
+      "license": "MIT",
+      "version": "6.8.9"
+    },
+    "electron@41.10.7": {
+      "license": "MIT",
+      "version": "41.10.7"
+    },
+    "escape-string-regexp@5.0.0": {
+      "license": "MIT",
+      "version": "5.0.0"
+    },
+    "estree-util-is-identifier-name@3.0.0": {
+      "license": "MIT",
+      "version": "3.0.0"
+    },
+    "extend@3.0.2": {
+      "license": "MIT",
+      "version": "3.0.2"
+    },
+    "fs-extra@10.1.0": {
+      "license": "MIT",
+      "version": "10.1.0"
+    },
+    "github-slugger@2.0.0": {
+      "license": "ISC",
+      "version": "2.0.0"
+    },
+    "graceful-fs@4.2.11": {
+      "license": "ISC",
+      "version": "4.2.11"
+    },
+    "hast-util-heading-rank@3.0.0": {
+      "license": "MIT",
+      "version": "3.0.0"
+    },
+    "hast-util-to-jsx-runtime@2.3.6": {
+      "license": "MIT",
+      "version": "2.3.6"
+    },
+    "hast-util-to-string@3.0.1": {
+      "license": "MIT",
+      "version": "3.0.1"
+    },
+    "hast-util-whitespace@3.0.0": {
+      "license": "MIT",
+      "version": "3.0.0"
+    },
+    "html-url-attributes@3.0.1": {
+      "license": "MIT",
+      "version": "3.0.1"
+    },
+    "inline-style-parser@0.2.7": {
+      "license": "MIT",
+      "version": "0.2.7"
+    },
+    "is-alphabetical@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "is-alphanumerical@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "is-decimal@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "is-hexadecimal@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "is-plain-obj@4.1.0": {
+      "license": "MIT",
+      "version": "4.1.0"
+    },
+    "js-tokens@4.0.0": {
+      "license": "MIT",
+      "version": "4.0.0"
+    },
+    "js-yaml@4.3.2": {
+      "license": "MIT",
+      "version": "4.3.2"
+    },
+    "jsonfile@6.2.1": {
+      "license": "MIT",
+      "version": "6.2.1"
+    },
+    "lazy-val@1.0.5": {
+      "license": "MIT",
+      "version": "1.0.5"
+    },
+    "lodash.escaperegexp@4.1.2": {
+      "license": "MIT",
+      "version": "4.1.2"
+    },
+    "lodash.isequal@4.5.0": {
+      "license": "AGPL-3.0-only",
+      "version": "4.5.0"
+    },
+    "lodash@4.18.1": {
+      "license": "MIT",
+      "version": "4.18.1"
+    },
+    "longest-streak@3.1.0": {
+      "license": "MIT",
+      "version": "3.1.0"
+    },
+    "loose-envify@1.4.0": {
+      "license": "MIT",
+      "version": "1.4.0"
+    },
+    "lucide-react@0.468.0": {
+      "license": "ISC",
+      "version": "0.468.0"
+    },
+    "markdown-table@3.0.4": {
+      "license": "MIT",
+      "version": "3.0.4"
+    },
+    "mdast-util-find-and-replace@3.0.2": {
+      "license": "MIT",
+      "version": "3.0.2"
+    },
+    "mdast-util-from-markdown@2.0.3": {
+      "license": "MIT",
+      "version": "2.0.3"
+    },
+    "mdast-util-gfm-autolink-literal@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "mdast-util-gfm-footnote@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "mdast-util-gfm-strikethrough@2.0.0": {
+      "license": "MIT",
+      "version": "2.0.0"
+    },
+    "mdast-util-gfm-table@2.0.0": {
+      "license": "MIT",
+      "version": "2.0.0"
+    },
+    "mdast-util-gfm-task-list-item@2.0.0": {
+      "license": "MIT",
+      "version": "2.0.0"
+    },
+    "mdast-util-gfm@3.1.0": {
+      "license": "MIT",
+      "version": "3.1.0"
+    },
+    "mdast-util-mdx-expression@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "mdast-util-mdx-jsx@3.2.0": {
+      "license": "MIT",
+      "version": "3.2.0"
+    },
+    "mdast-util-mdxjs-esm@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "mdast-util-phrasing@4.1.0": {
+      "license": "MIT",
+      "version": "4.1.0"
+    },
+    "mdast-util-to-hast@13.2.1": {
+      "license": "MIT",
+      "version": "13.2.1"
+    },
+    "mdast-util-to-markdown@2.1.2": {
+      "license": "MIT",
+      "version": "2.1.2"
+    },
+    "mdast-util-to-string@4.0.0": {
+      "license": "MIT",
+      "version": "4.0.0"
+    },
+    "micromark-core-commonmark@2.0.3": {
+      "license": "MIT",
+      "version": "2.0.3"
+    },
+    "micromark-extension-gfm-autolink-literal@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "micromark-extension-gfm-footnote@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "micromark-extension-gfm-strikethrough@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "micromark-extension-gfm-table@2.1.1": {
+      "license": "MIT",
+      "version": "2.1.1"
+    },
+    "micromark-extension-gfm-tagfilter@2.0.0": {
+      "license": "MIT",
+      "version": "2.0.0"
+    },
+    "micromark-extension-gfm-task-list-item@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "micromark-extension-gfm@3.0.0": {
+      "license": "MIT",
+      "version": "3.0.0"
+    },
+    "micromark-factory-destination@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-factory-label@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-factory-space@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-factory-title@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-factory-whitespace@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-character@2.1.1": {
+      "license": "MIT",
+      "version": "2.1.1"
+    },
+    "micromark-util-chunked@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-classify-character@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-combine-extensions@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-decode-numeric-character-reference@2.0.2": {
+      "license": "MIT",
+      "version": "2.0.2"
+    },
+    "micromark-util-decode-string@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-encode@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-html-tag-name@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-normalize-identifier@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-resolve-all@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-sanitize-uri@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-subtokenize@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "micromark-util-symbol@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "micromark-util-types@2.0.2": {
+      "license": "MIT",
+      "version": "2.0.2"
+    },
+    "micromark@4.0.2": {
+      "license": "MIT",
+      "version": "4.0.2"
+    },
+    "monaco-editor@0.52.2": {
+      "license": "MIT",
+      "version": "0.52.2"
+    },
+    "ms@2.1.3": {
+      "license": "MIT",
+      "version": "2.1.3"
+    },
+    "node-addon-api@7.1.1": {
+      "license": "MIT",
+      "version": "7.1.1"
+    },
+    "node-pty@1.1.0": {
+      "license": "MIT",
+      "version": "1.1.0"
+    },
+    "parse-entities@4.0.2": {
+      "license": "MIT",
+      "version": "4.0.2"
+    },
+    "property-information@7.2.0": {
+      "license": "MIT",
+      "version": "7.2.0"
+    },
+    "react-dom@18.3.1": {
+      "license": "MIT",
+      "version": "18.3.1"
+    },
+    "react-markdown@10.1.0": {
+      "license": "MIT",
+      "version": "10.1.0"
+    },
+    "react-router-dom@7.18.3": {
+      "license": "MIT",
+      "version": "7.18.3"
+    },
+    "react-router@7.18.3": {
+      "license": "MIT",
+      "version": "7.18.3"
+    },
+    "react@18.3.1": {
+      "license": "MIT",
+      "version": "18.3.1"
+    },
+    "rehype-slug@6.0.0": {
+      "license": "MIT",
+      "version": "6.0.0"
+    },
+    "remark-gfm@4.0.1": {
+      "license": "MIT",
+      "version": "4.0.1"
+    },
+    "remark-parse@11.0.0": {
+      "license": "MIT",
+      "version": "11.0.0"
+    },
+    "remark-rehype@11.1.2": {
+      "license": "MIT",
+      "version": "11.1.2"
+    },
+    "remark-stringify@11.0.0": {
+      "license": "MIT",
+      "version": "11.0.0"
+    },
+    "sax@1.6.0": {
+      "license": "BlueOak-1.0.0",
+      "version": "1.6.0"
+    },
+    "scheduler@0.23.2": {
+      "license": "MIT",
+      "version": "0.23.2"
+    },
+    "semver@7.7.4": {
+      "license": "ISC",
+      "version": "7.7.4"
+    },
+    "set-cookie-parser@2.7.2": {
+      "license": "MIT",
+      "version": "2.7.2"
+    },
+    "space-separated-tokens@2.0.2": {
+      "license": "MIT",
+      "version": "2.0.2"
+    },
+    "stringify-entities@4.0.4": {
+      "license": "MIT",
+      "version": "4.0.4"
+    },
+    "style-to-js@1.1.21": {
+      "license": "MIT",
+      "version": "1.1.21"
+    },
+    "style-to-object@1.0.14": {
+      "license": "MIT",
+      "version": "1.0.14"
+    },
+    "tiny-typed-emitter@2.1.0": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "trim-lines@3.0.1": {
+      "license": "MIT",
+      "version": "3.0.1"
+    },
+    "trough@2.2.0": {
+      "license": "MIT",
+      "version": "2.2.0"
+    },
+    "unified@11.0.5": {
+      "license": "MIT",
+      "version": "11.0.5"
+    },
+    "unist-util-is@6.0.1": {
+      "license": "MIT",
+      "version": "6.0.1"
+    },
+    "unist-util-position@5.0.0": {
+      "license": "MIT",
+      "version": "5.0.0"
+    },
+    "unist-util-stringify-position@4.0.0": {
+      "license": "MIT",
+      "version": "4.0.0"
+    },
+    "unist-util-visit-parents@6.0.2": {
+      "license": "MIT",
+      "version": "6.0.2"
+    },
+    "unist-util-visit@5.1.0": {
+      "license": "MIT",
+      "version": "5.1.0"
+    },
+    "universalify@2.0.1": {
+      "license": "MIT",
+      "version": "2.0.1"
+    },
+    "vfile-message@4.0.3": {
+      "license": "MIT",
+      "version": "4.0.3"
+    },
+    "vfile@6.0.3": {
+      "license": "MIT",
+      "version": "6.0.3"
+    },
+    "zwitch@2.0.4": {
+      "license": "MIT",
+      "version": "2.0.4"
+    }
+  },
+  "python": {
+    "altgraph": {
+      "license": "MIT",
+      "version": "0.17.5"
+    },
+    "annotated-doc": {
+      "license": "MIT",
+      "version": "0.0.4"
+    },
+    "annotated-types": {
+      "license": "License :: OSI Approved :: MIT License",
+      "version": "0.7.0"
+    },
+    "anyio": {
+      "license": "MIT",
+      "version": "4.13.0"
+    },
+    "apscheduler": {
+      "license": "MIT",
+      "version": "3.11.2"
+    },
+    "ast-serialize": {
+      "license": "MIT",
+      "version": "0.5.0"
+    },
+    "attrs": {
+      "license": "MIT",
+      "version": "26.1.0"
+    },
+    "boolean-py": {
+      "license": "BSD-2-Clause",
+      "version": "5.0"
+    },
+    "cachecontrol": {
+      "license": "Apache-2.0",
+      "version": "0.14.4"
+    },
+    "certifi": {
+      "license": "MPL-2.0",
+      "version": "2026.7.22"
+    },
+    "cffi": {
+      "license": "MIT-0",
+      "version": "2.1.1"
+    },
+    "charset-normalizer": {
+      "license": "MIT",
+      "version": "3.5.1"
+    },
+    "colorama": {
+      "license": "License :: OSI Approved :: BSD License",
+      "version": "0.4.6"
+    },
+    "coverage": {
+      "license": "Apache-2.0",
+      "version": "7.14.1"
+    },
+    "cyclonedx-python-lib": {
+      "license": "Apache-2.0",
+      "version": "11.12.0"
+    },
+    "defusedxml": {
+      "license": "PSFL",
+      "version": "0.7.1"
+    },
+    "et-xmlfile": {
+      "license": "MIT",
+      "version": "2.0.0"
+    },
+    "filelock": {
+      "license": "MIT",
+      "version": "3.32.6"
+    },
+    "greenlet": {
+      "license": "MIT AND PSF-2.0",
+      "version": "3.5.1"
+    },
+    "idna": {
+      "license": "BSD-3-Clause",
+      "version": "3.18"
+    },
+    "iniconfig": {
+      "license": "MIT",
+      "version": "2.3.0"
+    },
+    "jsonschema": {
+      "license": "MIT",
+      "version": "4.26.0"
+    },
+    "jsonschema-specifications": {
+      "license": "MIT",
+      "version": "2025.9.1"
+    },
+    "librt": {
+      "license": "MIT",
+      "version": "0.11.0"
+    },
+    "license-expression": {
+      "license": "Apache-2.0",
+      "version": "30.4.4"
+    },
+    "macholib": {
+      "license": "MIT",
+      "version": "1.16.4"
+    },
+    "markdown-it-py": {
+      "license": "License :: OSI Approved :: MIT License",
+      "version": "4.2.0"
+    },
+    "mdurl": {
+      "license": "License :: OSI Approved :: MIT License",
+      "version": "0.1.2"
+    },
+    "msgpack": {
+      "license": "Apache-2.0",
+      "version": "1.2.2"
+    },
+    "mypy": {
+      "license": "MIT",
+      "version": "2.1.0"
+    },
+    "mypy-extensions": {
+      "license": "MIT",
+      "version": "1.1.0"
+    },
+    "networkx": {
+      "license": "BSD-3-Clause",
+      "version": "3.6.1"
+    },
+    "openpyxl": {
+      "license": "MIT",
+      "version": "3.1.5"
+    },
+    "packageurl-python": {
+      "license": "MIT",
+      "version": "0.17.6"
+    },
+    "packaging": {
+      "license": "Apache-2.0 OR BSD-2-Clause",
+      "version": "26.2"
+    },
+    "pathspec": {
+      "license": "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+      "version": "1.1.1"
+    },
+    "pefile": {
+      "license": "MIT",
+      "version": "2024.8.26"
+    },
+    "pip": {
+      "license": "MIT",
+      "version": "26.2.1"
+    },
+    "pip-api": {
+      "license": "Apache License\n                        Version 2.0, January 2004\n                     https://www.apache.org/licenses/\n\nTERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n\n1. Definitions.\n\n   \"License\" shall mean the terms and conditions for use, reproduction,\n   and distribution as defined by Sections 1 through 9 of this document.\n\n   \"Licensor\" shall mean the copyright owner or entity authorized by\n   the copyright owner that is granting the License.\n\n   \"Legal Entity\" shall mean the union of the acting entity and all\n   other entities that control, are controlled by, or are under common\n   control with that entity. For the purposes of this definition,\n   \"control\" means (i) the power, direct or indirect, to cause the\n   direction or management of such entity, whether by contract or\n   otherwise, or (ii) ownership of fifty percent (50%) or more of the\n   outstanding shares, or (iii) beneficial ownership of such entity.\n\n   \"You\" (or \"Your\") shall mean an individual or Legal Entity\n   exercising permissions granted by this License.\n\n   \"Source\" form shall mean the preferred form for making modifications,\n   including but not limited to software source code, documentation\n   source, and configuration files.\n\n   \"Object\" form shall mean any form resulting from mechanical\n   transformation or translation of a Source form, including but\n   not limited to compiled object code, generated documentation,\n   and conversions to other media types.\n\n   \"Work\" shall mean the work of authorship, whether in Source or\n   Object form, made available under the License, as indicated by a\n   copyright notice that is included in or attached to the work\n   (an example is provided in the Appendix below).\n\n   \"Derivative Works\" shall mean any work, whether in Source or Object\n   form, that is based on (or derived from) the Work and for which the\n   editorial revisions, annotations, elaborations, or other modifications\n   represent, as a whole, an original work of authorship. For the purposes\n   of this License, Derivative Works shall not include works that remain\n   separable from, or merely link (or bind by name) to the interfaces of,\n   the Work and Derivative Works thereof.\n\n   \"Contribution\" shall mean any work of authorship, including\n   the original version of the Work and any modifications or additions\n   to that Work or Derivative Works thereof, that is intentionally\n   submitted to Licensor for inclusion in the Work by the copyright owner\n   or by an individual or Legal Entity authorized to submit on behalf of\n   the copyright owner. For the purposes of this definition, \"submitted\"\n   means any form of electronic, verbal, or written communication sent\n   to the Licensor or its representatives, including but not limited to\n   communication on electronic mailing lists, source code control systems,\n   and issue tracking systems that are managed by, or on behalf of, the\n   Licensor for the purpose of discussing and improving the Work, but\n   excluding communication that is conspicuously marked or otherwise\n   designated in writing by the copyright owner as \"Not a Contribution.\"\n\n   \"Contributor\" shall mean Licensor and any individual or Legal Entity\n   on behalf of whom a Contribution has been received by Licensor and\n   subsequently incorporated within the Work.\n\n2. Grant of Copyright License. Subject to the terms and conditions of\n   this License, each Contributor hereby grants to You a perpetual,\n   worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n   copyright license to reproduce, prepare Derivative Works of,\n   publicly display, publicly perform, sublicense, and distribute the\n   Work and such Derivative Works in Source or Object form.\n\n3. Grant of Patent License. Subject to the terms and conditions of\n   this License, each Contributor hereby grants to You a perpetual,\n   worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n   (except as stated in this section) patent license to make, have made,\n   use, offer to sell, sell, import, and otherwise transfer the Work,\n   where such license applies only to those patent claims licensable\n   by such Contributor that are necessarily infringed by their\n   Contribution(s) alone or by combination of their Contribution(s)\n   with the Work to which such Contribution(s) was submitted. If You\n   institute patent litigation against any entity (including a\n   cross-claim or counterclaim in a lawsuit) alleging that the Work\n   or a Contribution incorporated within the Work constitutes direct\n   or contributory patent infringement, then any patent licenses\n   granted to You under this License for that Work shall terminate\n   as of the date such litigation is filed.\n\n4. Redistribution. You may reproduce and distribute copies of the\n   Work or Derivative Works thereof in any medium, with or without\n   modifications, and in Source or Object form, provided that You\n   meet the following conditions:\n\n   (a) You must give any other recipients of the Work or\n       Derivative Works a copy of this License; and\n\n   (b) You must cause any modified files to carry prominent notices\n       stating that You changed the files; and\n\n   (c) You must retain, in the Source form of any Derivative Works\n       that You distribute, all copyright, patent, trademark, and\n       attribution notices from the Source form of the Work,\n       excluding those notices that do not pertain to any part of\n       the Derivative Works; and\n\n   (d) If the Work includes a \"NOTICE\" text file as part of its\n       distribution, then any Derivative Works that You distribute must\n       include a readable copy of the attribution notices contained\n       within such NOTICE file, excluding those notices that do not\n       pertain to any part of the Derivative Works, in at least one\n       of the following places: within a NOTICE text file distributed\n       as part of the Derivative Works; within the Source form or\n       documentation, if provided along with the Derivative Works; or,\n       within a display generated by the Derivative Works, if and\n       wherever such third-party notices normally appear. The contents\n       of the NOTICE file are for informational purposes only and\n       do not modify the License. You may add Your own attribution\n       notices within Derivative Works that You distribute, alongside\n       or as an addendum to the NOTICE text from the Work, provided\n       that such additional attribution notices cannot be construed\n       as modifying the License.\n\n   You may add Your own copyright statement to Your modifications and\n   may provide additional or different license terms and conditions\n   for use, reproduction, or distribution of Your modifications, or\n   for any such Derivative Works as a whole, provided Your use,\n   reproduction, and distribution of the Work otherwise complies with\n   the conditions stated in this License.\n\n5. Submission of Contributions. Unless You explicitly state otherwise,\n   any Contribution intentionally submitted for inclusion in the Work\n   by You to the Licensor shall be under the terms and conditions of\n   this License, without any additional terms or conditions.\n   Notwithstanding the above, nothing herein shall supersede or modify\n   the terms of any separate license agreement you may have executed\n   with Licensor regarding such Contributions.\n\n6. Trademarks. This License does not grant permission to use the trade\n   names, trademarks, service marks, or product names of the Licensor,\n   except as required for reasonable and customary use in describing the\n   origin of the Work and reproducing the content of the NOTICE file.\n\n7. Disclaimer of Warranty. Unless required by applicable law or\n   agreed to in writing, Licensor provides the Work (and each\n   Contributor provides its Contributions) on an \"AS IS\" BASIS,\n   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or\n   implied, including, without limitation, any warranties or conditions\n   of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A\n   PARTICULAR PURPOSE. You are solely responsible for determining the\n   appropriateness of using or redistributing the Work and assume any\n   risks associated with Your exercise of permissions under this License.\n\n8. Limitation of Liability. In no event and under no legal theory,\n   whether in tort (including negligence), contract, or otherwise,\n   unless required by applicable law (such as deliberate and grossly\n   negligent acts) or agreed to in writing, shall any Contributor be\n   liable to You for damages, including any direct, indirect, special,\n   incidental, or consequential damages of any character arising as a\n   result of this License or out of the use or inability to use the\n   Work (including but not limited to damages for loss of goodwill,\n   work stoppage, computer failure or malfunction, or any and all\n   other commercial damages or losses), even if such Contributor\n   has been advised of the possibility of such damages.\n\n9. Accepting Warranty or Additional Liability. While redistributing\n   the Work or Derivative Works thereof, You may choose to offer,\n   and charge a fee for, acceptance of support, warranty, indemnity,\n   or other liability obligations and/or rights consistent with this\n   License. However, in accepting such obligations, You may act only\n   on Your own behalf and on Your sole responsibility, not on behalf\n   of any other Contributor, and only if You agree to indemnify,\n   defend, and hold each Contributor harmless for any liability\n   incurred by, or claims asserted against, such Contributor by reason\n   of your accepting any such warranty or additional liability.",
+      "version": "0.0.35"
+    },
+    "pip-audit": {
+      "license": "License :: OSI Approved :: Apache Software License",
+      "version": "2.10.1"
+    },
+    "pip-requirements-parser": {
+      "license": "MIT",
+      "version": "32.0.1"
+    },
+    "platformdirs": {
+      "license": "MIT",
+      "version": "4.11.8"
+    },
+    "pluggy": {
+      "license": "MIT",
+      "version": "1.6.0"
+    },
+    "prompt-toolkit": {
+      "license": "License :: OSI Approved :: BSD License",
+      "version": "3.0.52"
+    },
+    "py-serializable": {
+      "license": "Apache-2.0",
+      "version": "2.1.0"
+    },
+    "pycparser": {
+      "license": "BSD-3-Clause",
+      "version": "3.0"
+    },
+    "pydantic": {
+      "license": "MIT",
+      "version": "2.13.4"
+    },
+    "pydantic-core": {
+      "license": "MIT",
+      "version": "2.46.4"
+    },
+    "pydantic-settings": {
+      "license": "MIT",
+      "version": "2.15.0"
+    },
+    "pygments": {
+      "license": "BSD-2-Clause",
+      "version": "2.20.0"
+    },
+    "pyinstaller": {
+      "license": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)",
+      "version": "6.21.0"
+    },
+    "pyinstaller-hooks-contrib": {
+      "license": "License :: OSI Approved :: Apache Software License; License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+      "version": "2026.6"
+    },
+    "pyparsing": {
+      "license": "MIT",
+      "version": "3.3.2"
+    },
+    "pytest": {
+      "license": "MIT",
+      "version": "9.0.3"
+    },
+    "pytest-asyncio": {
+      "license": "Apache-2.0",
+      "version": "1.4.0"
+    },
+    "pytest-cov": {
+      "license": "MIT",
+      "version": "7.1.0"
+    },
+    "pytest-mock": {
+      "license": "MIT",
+      "version": "3.15.1"
+    },
+    "python-dotenv": {
+      "license": "BSD-3-Clause",
+      "version": "1.2.2"
+    },
+    "pywin32-ctypes": {
+      "license": "BSD-3-Clause",
+      "version": "0.2.3"
+    },
+    "questionary": {
+      "license": "MIT",
+      "version": "2.1.1"
+    },
+    "referencing": {
+      "license": "MIT",
+      "version": "0.37.0"
+    },
+    "requests": {
+      "license": "Apache-2.0",
+      "version": "2.34.2"
+    },
+    "rich": {
+      "license": "MIT",
+      "version": "15.0.0"
+    },
+    "rpds-py": {
+      "license": "MIT",
+      "version": "2026.6.3"
+    },
+    "ruff": {
+      "license": "MIT",
+      "version": "0.15.17"
+    },
+    "setuptools": {
+      "license": "MIT",
+      "version": "84.0.0"
+    },
+    "shellingham": {
+      "license": "ISC License",
+      "version": "1.5.4"
+    },
+    "sortedcontainers": {
+      "license": "Apache 2.0",
+      "version": "2.4.0"
+    },
+    "sqlalchemy": {
+      "license": "MIT",
+      "version": "2.0.50"
+    },
+    "srt": {
+      "license": "MIT",
+      "version": "3.5.3"
+    },
+    "tomli": {
+      "license": "MIT",
+      "version": "2.4.1"
+    },
+    "tomli-w": {
+      "license": "License :: OSI Approved :: MIT License",
+      "version": "1.2.0"
+    },
+    "tqdm": {
+      "license": "MPL-2.0 AND MIT",
+      "version": "4.70.0"
+    },
+    "typer": {
+      "license": "MIT",
+      "version": "0.26.7"
+    },
+    "typing-extensions": {
+      "license": "PSF-2.0",
+      "version": "4.15.0"
+    },
+    "typing-inspection": {
+      "license": "MIT",
+      "version": "0.4.2"
+    },
+    "tzdata": {
+      "license": "Apache-2.0",
+      "version": "2026.2"
+    },
+    "tzlocal": {
+      "license": "MIT",
+      "version": "5.3.1"
+    },
+    "urllib3": {
+      "license": "MIT",
+      "version": "2.7.0"
+    },
+    "vosk": {
+      "license": "UNKNOWN",
+      "version": "0.3.45"
+    },
+    "watchdog": {
+      "license": "Apache-2.0",
+      "version": "6.0.0"
+    },
+    "wcwidth": {
+      "license": "MIT",
+      "version": "0.8.1"
+    },
+    "websockets": {
+      "license": "BSD-3-Clause",
+      "version": "17.1"
+    }
+  }
+}

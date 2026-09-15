@@ -1,6 +1,6 @@
 # Arch Packaging
 
-This directory contains the AUR packaging files for the Taskurotta desktop app.
+This directory contains the AUR packaging files for the Raticode desktop app.
 
 ## Install
 
@@ -18,7 +18,7 @@ adds a `/usr/bin/gofer-flow` launcher, and installs desktop/icon metadata.
 The `PKGBUILD` expects a GitHub release asset named:
 
 ```text
-Taskurotta-0.1.0-x86_64.AppImage
+Raticode-0.1.0-x86_64.AppImage
 ```
 
 For a local pre-release test, place that file beside the `PKGBUILD`, then run:
@@ -36,7 +36,7 @@ sudo pacman -U gofer-flow-0.1.0-1-x86_64.pkg.tar.zst
 ## Release Checksums
 
 ```text
-4b25cea0265aeb1d7508ed3597c0955e51a0e77ddda40278834b75456d2f1696  Taskurotta-0.1.0-x86_64.AppImage
+4b25cea0265aeb1d7508ed3597c0955e51a0e77ddda40278834b75456d2f1696  Raticode-0.1.0-x86_64.AppImage
 ```
 
 Update `sha256sums_x86_64` in `PKGBUILD` and regenerate `.SRCINFO` whenever the

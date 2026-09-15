@@ -127,7 +127,7 @@ def main():
     tracked = subprocess.check_output(["git", "-C", str(source), "ls-files", "-z"]).split(b"\0")
     results = []
     for mode in ("full", "incremental"):
-        with tempfile.TemporaryDirectory(prefix="taskurotta-preview-benchmark-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="raticode-preview-benchmark-") as temporary:
             project = Path(temporary)
             for raw in tracked:
                 if not raw:

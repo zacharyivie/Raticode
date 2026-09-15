@@ -261,7 +261,7 @@ def _new_vosk_recognizer(data_dir: Path) -> Any:
         from vosk import KaldiRecognizer, SetLogLevel
     except ImportError as exc:
         raise ChatMediaError(
-            "Local transcription support is not installed. Reinstall Taskurotta with Vosk support."
+            "Local transcription support is not installed. Reinstall Raticode with Vosk support."
         ) from exc
     SetLogLevel(-1)
     return KaldiRecognizer(_load_vosk_model(data_dir), 16_000)
@@ -279,7 +279,7 @@ def _load_vosk_model(data_dir: Path) -> Any:
         except ImportError as exc:
             raise ChatMediaError(
                 "Local transcription support is not installed. "
-                "Reinstall Taskurotta with Vosk support."
+                "Reinstall Raticode with Vosk support."
             ) from exc
         _vosk_model = Model(str(model_path))
         _vosk_model_path = model_path
@@ -341,7 +341,7 @@ def _ensure_vosk_model(model_path: Path) -> None:
         with tempfile.TemporaryDirectory(prefix=".vosk-", dir=model_root) as staging:
             stage = Path(staging)
             archive_path = stage / "model.zip"
-            request = Request(VOSK_MODEL_URL, headers={"User-Agent": "Taskurotta local speech/1"})
+            request = Request(VOSK_MODEL_URL, headers={"User-Agent": "Raticode local speech/1"})
             with urlopen(request, timeout=60) as response, archive_path.open("xb") as target:
                 _copy_limited(response, target, VOSK_MODEL_DOWNLOAD_MAX_BYTES)
             with archive_path.open("rb") as downloaded:

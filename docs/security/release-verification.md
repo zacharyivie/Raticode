@@ -18,9 +18,9 @@ exception must name one advisory and its affected package/version, explain the
 unreachable code path, identify an owner, and expire on a date. Do not add a
 blanket severity downgrade or `continue-on-error` to the audit steps.
 
-Validation and every platform build check out the caller event's immutable
-`github.sha`. The release ref is used only to check its version, so moving a tag
-between jobs cannot substitute unvalidated source. Desktop packages exclude the
+Validation and every platform build check out the main event's immutable
+`github.sha`. Publication checks the tag against the attested candidate commit
+and rechecks the remote tag before making the draft public. Desktop packages exclude the
 Electron test directory and test modules.
 
 Actions use commit hashes. Dependabot proposes weekly action and dependency
@@ -95,28 +95,26 @@ under the test host. Windows/macOS verification remains separate.
 
 ## Release signing setup
 
-Tagged releases require these repository or organization secrets:
+Main preparation defaults to unsigned releases and needs no signing credentials.
+Set the repository variable `RELEASE_SIGNING=true` to opt into signed candidates,
+which require five secrets and three variables in the `release-signing` environment. See [the release guide](../releasing.md) for every setting, its purpose,
+how to obtain it, and the Windows hardware/cloud signing limitation. Both the early
+credential check and native build jobs select that environment only for signed
+preparation. Unsigned jobs use `release-unsigned` with no secrets required. Restrict
+the signing environment to main.
 
-| Secret | Value |
-| --- | --- |
-| `WINDOWS_CERTIFICATE` | Base64 PKCS#12 code-signing certificate with private key |
-| `WINDOWS_CERTIFICATE_PASSWORD` | Certificate password |
-| `MACOS_CERTIFICATE` | Base64 Developer ID Application PKCS#12 certificate with private key |
-| `MACOS_CERTIFICATE_PASSWORD` | Certificate password |
-| `MACOS_SIGNING_IDENTITY` | Full Developer ID Application identity from that certificate |
-| `APPLE_ID` | Apple account authorized for notarization |
-| `APPLE_APP_SPECIFIC_PASSWORD` | Its app-specific password |
-| `APPLE_TEAM_ID` | Developer team identifier |
+Main builds the candidate and verifies it before uploading a draft. Its manifest
+records `signed: true` or `signed: false`, and release notes disclose the mode. Tag pushes
+only publish a matching successful candidate. Signing values are passed to scoped
+signing/packaging steps, after dependency installation. Source validation on pull
+requests needs no signing credentials.
 
-Missing credentials fail tagged Windows/macOS builds. Main-branch dry runs build
-unsigned packages and cannot publish them. Signing secrets are supplied only to
-signing/packaging steps, after dependency installation.
-
-The Windows backend is timestamped and signed before it enters the installer.
+When signing is enabled, the Windows backend is timestamped and signed before it
+enters the installer.
 Electron Builder signs the application and NSIS installer with signing required.
 Verification rejects an invalid or untimestamped installer or standalone CLI.
 
-On macOS, a temporary keychain supplies the PyInstaller and Electron signing
+For signed macOS releases, a temporary keychain supplies the PyInstaller and Electron signing
 identity. Electron Builder signs and notarizes the app. Verification checks its
 signature, stapled ticket, and Gatekeeper assessment. The outer DMG and standalone
 CLI receive their own notarization submissions and Gatekeeper checks. The DMG is
@@ -124,12 +122,19 @@ not modified after its update hashes/blockmaps are generated; its enclosed app
 has a stapled ticket and the outer DMG has an online ticket. Accepted notarization
 receipts are release artifacts. The temporary certificate and keychain are removed.
 
-The publish job attests every downloaded artifact, including Linux and standalone
+Unsigned preparation skips signature/notarization checks and omits their receipts.
+macOS uses ad-hoc signing for local execution and manual update downloads. This
+does not establish publisher identity or notarization. Tests, dependency audits,
+checksums and provenance remain mandatory in either mode.
+
+The staging job attests every candidate artifact, including Linux and standalone
 CLI binaries, checksum files and dependency evidence, using GitHub's OIDC build
-provenance. Verification of a downloaded artifact is:
+provenance, plus a manifest binding the source SHA, run/attempt, artifact IDs and
+file hashes. Publication verifies that manifest, the successful main run and every
+remote asset before changing draft visibility. Verification of a downloaded artifact is:
 
 ```sh
-gh attestation verify ./ARTIFACT --repo zacharyivie/Taskurotta
+gh attestation verify ./ARTIFACT --repo zacharyivie/gofer-flow
 ```
 
 Repository administrators must restrict `v*` tag creation and protect release

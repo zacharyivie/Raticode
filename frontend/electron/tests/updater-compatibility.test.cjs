@@ -24,7 +24,7 @@ test("updater adapter retains Lodash equality semantics", () => {
 
 test("real updater accepts matching metadata and rejects changed cached updates", async () => {
   const { DownloadedUpdateHelper } = updaterRequire("electron-updater/out/DownloadedUpdateHelper.js");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-updater-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-updater-"));
   try {
     const file = path.join(root, "update.bin");
     fs.writeFileSync(file, "fixture");

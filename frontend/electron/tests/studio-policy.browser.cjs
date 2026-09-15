@@ -22,7 +22,7 @@ async function finish(error) {
   app.exit(error ? 1 : 0);
 }
 app.whenReady().then(async () => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-policy-"));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-policy-"));
   server = http.createServer((_req, res) => { res.setHeader("Content-Type", "text/html"); res.end("<!doctype html><title>Remote</title>"); });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const apiBaseUrl = `http://127.0.0.1:${server.address().port}`;

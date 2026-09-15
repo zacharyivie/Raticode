@@ -19,7 +19,18 @@ const {
   webContents,
 } = require("electron");
 const { autoUpdater } = require("electron-updater");
+const { raticodeReleaseSigning } = require("../package.json");
 const pty = require("node-pty");
+const { previousBrands: LEGACY_BRANDS } = require("./brand-compat.json");
+// Keep existing packaged profiles, including trusted folders and browser state.
+// An explicit --user-data-dir always takes precedence.
+const currentProfile = app.getPath("userData");
+const previousProfile = LEGACY_BRANDS.map((item) => path.join(app.getPath("appData"), item.productName))
+  .find((profile) => fs.existsSync(profile));
+if (!app.commandLine.hasSwitch("user-data-dir") && !fs.existsSync(currentProfile)
+    && previousProfile) {
+  app.setPath("userData", previousProfile);
+}
 const {
   gitRepositoryAction,
   changeGitFile,
@@ -32,7 +43,7 @@ const {
   removeGitWorktree,
 } = require("./git-status.cjs");
 const {
-  TASKUROTTA_HOME_URL,
+  RATICODE_HOME_URL,
   browserCommandRequiresOwnerFocus,
   browserContentZoomFactor,
   browserLoadUrl,
@@ -44,11 +55,14 @@ const { createAppLog } = require("./app-log.cjs");
 const { createArchiveQueue } = require("./archive-queue.cjs");
 const conversationArchives = createArchiveQueue();
 let archivesDrained = false;
+let logsDrained = false;
+let logsClosing = false;
 const REPORT_THEMES = ["auto", "light", "dark", "sepia", "vaporwave", "steam", "carbon", "botanical", "blueprint", "arcade", "sakura", "deep-sea", "solarpunk", "noir", "candy-lab", "cosmic"];
 let applicationLog;
 const { registerIpcHandlers } = require("./ipc-handlers.cjs");
-const { inspectPath } = require("./path-info.cjs");
+const { inspectPath, missingRecentFiles, missingThreadRoots } = require("./path-info.cjs");
 const safeFiles = require("./safe-files.cjs");
+const { migrateSource } = require("./rattish-migration.cjs");
 const { installPermissionPolicy, isStudioDocument, studioCsp } = require("./studio-policy.cjs");
 const { createIpcSecurity, isSafeExternalUrl } = require("./security.cjs");
 const { createTrustedProjectStore } = require("./trusted-projects.cjs");
@@ -82,7 +96,7 @@ const BACKEND_START_TIMEOUT_MS = 15000;
 const ELECTRON_READY_MESSAGE = "GOFER_ELECTRON_READY";
 const BACKEND_EXECUTABLE_NAME = process.platform === "win32" ? "gof.exe" : "gof";
 const LATEST_RELEASE_URL =
-  "https://api.github.com/repos/zacharyivie/Taskurotta/releases/latest";
+  "https://api.github.com/repos/zacharyivie/gofer-flow/releases/latest";
 const isProduction =
   app.isPackaged || process.env.GOFER_ELECTRON_MODE === "production";
 const isSmokeTest = process.env.GOFER_ELECTRON_SMOKE_TEST === "1";
@@ -132,7 +146,7 @@ function createWindow(apiBaseUrl, apiToken = "") {
     height: 960,
     minWidth: 980,
     minHeight: 640,
-    title: "Taskurotta",
+    title: "Raticode",
     icon: path.join(__dirname, app.isPackaged ? "../dist/icon.png" : "../public/icon.png"),
     backgroundColor: "#1f1f1f",
     webPreferences: {
@@ -151,7 +165,7 @@ function createWindow(apiBaseUrl, apiToken = "") {
   });
   const terminalOwnerId = mainWindow.webContents.id;
   const studioOptions = { indexPath: distIndexPath, devServerUrl: VITE_DEV_SERVER_URL, isProduction };
-  installPermissionPolicy(session.fromPartition("persist:taskurotta-browser"), mainWindow.webContents.session,
+  installPermissionPolicy(session.fromPartition("persist:raticode-browser"), mainWindow.webContents.session,
     () => mainWindow?.webContents, studioOptions);
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (!isStudioDocument(url, studioOptions)) event.preventDefault();
@@ -171,7 +185,7 @@ function createWindow(apiBaseUrl, apiToken = "") {
 
   mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
     if (
-      params.partition !== "persist:taskurotta-browser"
+      params.partition !== "persist:raticode-browser"
       || !isPendingBrowserSessionSrc(terminalOwnerId, params.src)
     ) {
       event.preventDefault();
@@ -275,7 +289,7 @@ function startBackend() {
     let stdoutBuffer = "";
     let stderrBuffer = "";
     const timeoutId = setTimeout(() => {
-      fail(new Error("Timed out waiting for the Taskurotta backend to start."));
+      fail(new Error("Timed out waiting for the Raticode backend to start."));
     }, BACKEND_START_TIMEOUT_MS);
 
     function succeed(apiBaseUrl, apiToken = "") {
@@ -470,10 +484,10 @@ function showBackendCrash(error) {
     return;
   }
 
-  createBackendErrorWindow(error, { title: "Taskurotta backend stopped" });
+  createBackendErrorWindow(error, { title: "Raticode backend stopped" });
 }
 
-function createBackendErrorWindow(error, { title = "Taskurotta backend did not start" } = {}) {
+function createBackendErrorWindow(error, { title = "Raticode backend did not start" } = {}) {
   const message = error instanceof Error ? error.message : String(error);
   if (backendErrorWindow && !backendErrorWindow.isDestroyed()) {
     backendErrorWindow.focus();
@@ -483,7 +497,7 @@ function createBackendErrorWindow(error, { title = "Taskurotta backend did not s
   const errorWindow = new BrowserWindow({
     width: 720,
     height: 420,
-    title: "Taskurotta Backend Error",
+    title: "Raticode Backend Error",
     backgroundColor: "#1f1f1f",
     webPreferences: {
       preload: path.join(__dirname, "error-preload.cjs"),
@@ -508,8 +522,8 @@ function createBackendErrorWindow(error, { title = "Taskurotta backend did not s
 
 app.whenReady().then(async () => {
   applicationLog = createAppLog(app.getPath("logs"));
-  applicationLog.write("info", "desktop", `Starting Taskurotta ${app.getVersion()} on ${process.platform} ${process.arch}`);
-  process.on("uncaughtExceptionMonitor", (error) => applicationLog.write("error", "desktop", error.stack || error.message));
+  applicationLog.write("info", "desktop", `Starting Raticode ${app.getVersion()} on ${process.platform} ${process.arch}`);
+  process.on("uncaughtExceptionMonitor", (error) => applicationLog.emergency(error.stack || error.message));
   process.on("unhandledRejection", (error) => applicationLog.write("error", "desktop", error?.stack || error));
   app.on("web-contents-created", (_event, contents) => {
     contents.on("console-message", (details) => {
@@ -569,6 +583,13 @@ app.on("before-quit", (event) => {
   closeTerminalEditorServer();
   closeAllTerminals();
   stopBackend();
+  if (!logsDrained && applicationLog) {
+    event.preventDefault();
+    if (!logsClosing) {
+      logsClosing = true;
+      void applicationLog.close().finally(() => { logsDrained = true; app.quit(); });
+    }
+  }
 });
 
 app.on("window-all-closed", () => {
@@ -639,6 +660,8 @@ function setupIpcHandlers() {
     openPath,
     openUpdateRelease,
     pathInfo,
+    missingRecentFiles: (_event, options = {}) => missingRecentFiles(options.paths),
+    missingThreadRoots: (_event, options = {}) => missingThreadRoots(options.paths),
     readBinaryPreview,
     readTextFile,
     resizeTerminal,
@@ -792,7 +815,7 @@ function browserAction(event, options = {}) {
       {
         const normalizedUrl = normalizeBrowserUrl(options.url);
         const loadUrl = browserLoadUrl(normalizedUrl);
-        session.internalHomeUrl = normalizedUrl === TASKUROTTA_HOME_URL ? loadUrl : "";
+        session.internalHomeUrl = normalizedUrl === RATICODE_HOME_URL ? loadUrl : "";
         void contents.loadURL(loadUrl).catch((error) => {
           session.error = error instanceof Error ? error.message : String(error);
           emitBrowserState(session);
@@ -1034,7 +1057,7 @@ function browserSessionState(session, fallbackUrl = "") {
       id: session.id,
       loading: !session.error,
       title: "",
-      url: session.internalHomeUrl ? TASKUROTTA_HOME_URL : fallback,
+      url: session.internalHomeUrl ? RATICODE_HOME_URL : fallback,
     };
   }
   const currentUrl = contents.getURL() || fallback;
@@ -1049,7 +1072,7 @@ function browserSessionState(session, fallbackUrl = "") {
     loading: contents.isLoading(),
     title: contents.getTitle(),
     url: session.internalHomeUrl && currentUrl === session.internalHomeUrl
-      ? TASKUROTTA_HOME_URL
+      ? RATICODE_HOME_URL
       : currentUrl,
   };
 }
@@ -1157,12 +1180,12 @@ function createTerminal(event, options = {}) {
       COLORTERM: "truecolor",
       GIT_EDITOR: terminalEditorCommand(),
       TERM: "xterm-256color",
-      TASKUROTTA_EDITOR_CWD: cwd,
-      TASKUROTTA_EDITOR_ENDPOINT: terminalEditorEndpoint,
-      TASKUROTTA_EDITOR_RUNTIME: process.execPath,
-      TASKUROTTA_EDITOR_SCRIPT: path.join(__dirname, "terminal-editor.cjs"),
-      TASKUROTTA_EDITOR_TOKEN: editorToken,
-      TASKUROTTA_TERMINAL_ID: id,
+      RATICODE_EDITOR_CWD: cwd,
+      RATICODE_EDITOR_ENDPOINT: terminalEditorEndpoint,
+      RATICODE_EDITOR_RUNTIME: process.execPath,
+      RATICODE_EDITOR_SCRIPT: path.join(__dirname, "terminal-editor.cjs"),
+      RATICODE_EDITOR_TOKEN: editorToken,
+      RATICODE_TERMINAL_ID: id,
       VISUAL: terminalEditorCommand(),
     },
     name: "xterm-256color",
@@ -1241,20 +1264,20 @@ function terminalEditorLauncherPath() {
   const directory = path.join(app.getPath("userData"), "terminal-editor");
   fs.mkdirSync(directory, { recursive: true });
   if (process.platform === "win32") {
-    const launcherPath = path.join(directory, "taskurotta-editor.cmd");
+    const launcherPath = path.join(directory, "raticode-editor.cmd");
     fs.writeFileSync(launcherPath, [
       "@echo off",
       "set ELECTRON_RUN_AS_NODE=1",
-      '"%TASKUROTTA_EDITOR_RUNTIME%" "%TASKUROTTA_EDITOR_SCRIPT%" %*',
+      '"%RATICODE_EDITOR_RUNTIME%" "%RATICODE_EDITOR_SCRIPT%" %*',
       "",
     ].join("\r\n"), "utf8");
     return launcherPath;
   }
-  const launcherPath = path.join(directory, "taskurotta-editor");
+  const launcherPath = path.join(directory, "raticode-editor");
   fs.writeFileSync(launcherPath, [
     "#!/bin/sh",
     "export ELECTRON_RUN_AS_NODE=1",
-    'exec "$TASKUROTTA_EDITOR_RUNTIME" "$TASKUROTTA_EDITOR_SCRIPT" "$@"',
+    'exec "$RATICODE_EDITOR_RUNTIME" "$RATICODE_EDITOR_SCRIPT" "$@"',
     "",
   ].join("\n"), { encoding: "utf8", mode: 0o700 });
   fs.chmodSync(launcherPath, 0o700);
@@ -1268,8 +1291,8 @@ function shellQuote(value) {
 function startTerminalEditorServer() {
   if (terminalEditorServer) return Promise.resolve();
   terminalEditorEndpoint = process.platform === "win32"
-    ? `\\\\.\\pipe\\taskurotta-editor-${process.pid}-${crypto.randomUUID()}`
-    : path.join(os.tmpdir(), `taskurotta-editor-${process.pid}-${crypto.randomUUID()}.sock`);
+    ? `\\\\.\\pipe\\raticode-editor-${process.pid}-${crypto.randomUUID()}`
+    : path.join(os.tmpdir(), `raticode-editor-${process.pid}-${crypto.randomUUID()}.sock`);
   terminalEditorServer = net.createServer(handleTerminalEditorConnection);
   return new Promise((resolve, reject) => {
     terminalEditorServer.once("error", reject);
@@ -1314,7 +1337,7 @@ function handleTerminalEditorConnection(socket) {
         return;
       }
       const handle = pathHandle(targetPath);
-      await registerBackendPathGrant(handle);
+      if (!getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
       const request = {
         id: crypto.randomUUID(),
         ownerId: session.ownerId,
@@ -1325,7 +1348,7 @@ function handleTerminalEditorConnection(socket) {
       terminalEditorRequests.set(request.id, request);
       const owner = mainWindow?.webContents;
       if (!owner || owner.isDestroyed() || owner.id !== session.ownerId) {
-        finishTerminalEditorRequest(request, { error: "Taskurotta's editor is unavailable.", ok: false });
+        finishTerminalEditorRequest(request, { error: "Raticode's editor is unavailable.", ok: false });
         return;
       }
       owner.send("gofer:terminal-open-editor", { path: handle.path, requestId: request.id });
@@ -1350,7 +1373,7 @@ function cancelTerminalEditorRequests(terminalId, error) {
 
 function closeTerminalEditorServer() {
   for (const request of [...terminalEditorRequests.values()]) {
-    finishTerminalEditorRequest(request, { error: "Taskurotta was closed.", ok: false });
+    finishTerminalEditorRequest(request, { error: "Raticode was closed.", ok: false });
   }
   terminalEditorServer?.close();
   terminalEditorServer = undefined;
@@ -1413,15 +1436,15 @@ function bashIntegrationPath() {
       'if [ -f "$HOME/.bashrc" ]; then',
       '  . "$HOME/.bashrc"',
       "fi",
-      "__taskurotta_report_cwd() {",
+      "__raticode_report_cwd() {",
       "  printf '\\033]633;P;Cwd=%s\\007' \"$PWD\"",
       "}",
       'case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in',
-      '  "declare -a"*) PROMPT_COMMAND[${#PROMPT_COMMAND[@]}]=__taskurotta_report_cwd ;;',
+      '  "declare -a"*) PROMPT_COMMAND[${#PROMPT_COMMAND[@]}]=__raticode_report_cwd ;;',
       '  *) if [ -n "$PROMPT_COMMAND" ]; then',
-      '       PROMPT_COMMAND="__taskurotta_report_cwd;$PROMPT_COMMAND"',
+      '       PROMPT_COMMAND="__raticode_report_cwd;$PROMPT_COMMAND"',
       "     else",
-      '       PROMPT_COMMAND="__taskurotta_report_cwd"',
+      '       PROMPT_COMMAND="__raticode_report_cwd"',
       "     fi ;;",
       "esac",
       "",
@@ -1436,8 +1459,8 @@ function bashIntegrationPath() {
 
 function powershellIntegrationCommand() {
   return [
-    "$global:__TaskurottaOriginalPrompt = $function:prompt",
-    'function global:prompt { $cwdPath = $executionContext.SessionState.Path.CurrentLocation.Path; [Console]::Write("$([char]27)]633;P;Cwd=$cwdPath$([char]7)"); if ($global:__TaskurottaOriginalPrompt) { & $global:__TaskurottaOriginalPrompt } else { "PS $cwdPath> " } }',
+    "$global:__RaticodeOriginalPrompt = $function:prompt",
+    'function global:prompt { $cwdPath = $executionContext.SessionState.Path.CurrentLocation.Path; [Console]::Write("$([char]27)]633;P;Cwd=$cwdPath$([char]7)"); if ($global:__RaticodeOriginalPrompt) { & $global:__RaticodeOriginalPrompt } else { "PS $cwdPath> " } }',
   ].join("; ");
 }
 
@@ -1462,6 +1485,11 @@ function closeAllTerminals() {
     cancelTerminalEditorRequests(id, "The terminal was closed.");
     session.terminal.kill();
   }
+}
+
+function supportsAutoUpdates() {
+  return app.isPackaged && !isSmokeTest
+    && (process.platform !== "darwin" || raticodeReleaseSigning === "signed");
 }
 
 function setupAutoUpdater() {
@@ -1542,7 +1570,7 @@ function setupAutoUpdater() {
 async function checkForUpdates() {
   try {
     setUpdateState({ checking: true, error: "" });
-    if (!app.isPackaged || isSmokeTest) {
+    if (!supportsAutoUpdates()) {
       setUpdateState(await checkLatestReleaseFallback());
     } else {
       await autoUpdater.checkForUpdates();
@@ -1562,7 +1590,7 @@ async function checkForUpdates() {
 }
 
 async function downloadAndInstallUpdate() {
-  if (!app.isPackaged || isSmokeTest) {
+  if (!supportsAutoUpdates()) {
     await openUpdateRelease();
     return getUpdateState();
   }
@@ -1574,7 +1602,7 @@ async function downloadAndInstallUpdate() {
 }
 
 function installDownloadedUpdate() {
-  if (!app.isPackaged || isSmokeTest) {
+  if (!supportsAutoUpdates()) {
     return getUpdateState();
   }
   isQuitting = true;
@@ -1584,7 +1612,7 @@ function installDownloadedUpdate() {
 }
 
 async function openUpdateRelease() {
-  await shell.openExternal("https://github.com/zacharyivie/Taskurotta/releases/latest");
+  await shell.openExternal("https://github.com/zacharyivie/gofer-flow/releases/latest");
   return { opened: true };
 }
 
@@ -1594,7 +1622,7 @@ function getUpdateState() {
     currentVersion: app.getVersion(),
     platform: process.platform,
     arch: process.arch,
-    supported: app.isPackaged && !isSmokeTest,
+    supported: supportsAutoUpdates(),
   };
 }
 
@@ -1647,7 +1675,7 @@ async function checkLatestReleaseFallback() {
   const response = await fetch(LATEST_RELEASE_URL, {
     headers: {
       Accept: "application/vnd.github+json",
-      "User-Agent": `Taskurotta/${app.getVersion()}`,
+      "User-Agent": `Raticode/${app.getVersion()}`,
     },
   });
   if (response.status === 404) {
@@ -1777,7 +1805,7 @@ async function resolveProjectFile(_event, options = {}) {
   const discoveredRoot = nearestProjectRoot(selectedDirectory);
   const projectRoot = getIpcSecurity().grantForPath(discoveredRoot) ? discoveredRoot : selectedDirectory;
   const handle = pathHandle(projectRoot);
-  await registerBackendPathGrant(handle);
+  if (!getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
   return {
     directory: projectRoot,
     grantId: handle.grantId,
@@ -1790,7 +1818,8 @@ function nearestProjectRoot(startDirectory) {
   const fallback = current;
   while (true) {
     if (
-      fs.existsSync(path.join(current, ".taskurotta"))
+      fs.existsSync(path.join(current, ".raticode"))
+      || LEGACY_BRANDS.some((item) => fs.existsSync(path.join(current, item.workspaceDirectory)))
       || fs.existsSync(path.join(current, ".git"))
     ) {
       return current;
@@ -1921,16 +1950,13 @@ async function readTextFile(_event, options = {}) {
     throw new Error("A path is required.");
   }
 
-  const targetPath = resolveExactPath(options.targetPath, {
-    grantId: options.grantId,
-    mustExist: true,
-  });
+  const targetPath = resolveWorkflowSource(options.targetPath, options.grantId);
   const stat = await fs.promises.stat(targetPath);
   if (!stat.isFile()) {
     throw new Error(`Path is not a file: ${targetPath}`);
   }
   if (stat.size > 2 * 1024 * 1024) {
-    throw new Error("File is too large to edit in Taskurotta.");
+    throw new Error("File is too large to edit in Raticode.");
   }
   const content = await fs.promises.readFile(targetPath);
   if (content.includes(0)) {
@@ -1953,7 +1979,7 @@ async function readBinaryPreview(_event, options = {}) {
   const stat = await fs.promises.stat(targetPath);
   if (!stat.isFile()) throw new Error(`Path is not a file: ${targetPath}`);
   if (stat.size > 25 * 1024 * 1024) {
-    throw new Error("File is too large to preview in Taskurotta.");
+    throw new Error("File is too large to preview in Raticode.");
   }
   const mimeType = imageMimeType(targetPath);
   if (!mimeType) throw new Error("This file type does not have an image preview.");
@@ -1981,15 +2007,13 @@ async function writeTextFile(_event, options = {}) {
     throw new Error("File content is required.");
   }
 
-  const targetPath = resolveExactPath(options.targetPath, {
-    grantId: options.grantId,
-  });
+  const targetPath = resolveWorkflowSource(options.targetPath, options.grantId);
   await safeFiles.writeFile(targetPath, options.content, { authorize: (target) => resolveExactPath(target, { grantId: options.grantId }) });
   return pathHandle(targetPath);
 }
 
 function resolveNewChildPath(directory, name, grantId = "") {
-  return getIpcSecurity().resolveAllowedChildPath(directory, name, { grantId });
+  return getIpcSecurity().resolveAllowedChildPath(directory, name, { grantId, desktop: true });
 }
 
 async function setDataDir(_event, options = {}) {
@@ -2015,7 +2039,13 @@ async function listDirectory(_event, options = {}) {
       grantId: options.grantId,
       mustExist: true,
     });
-    const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    let entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && path.extname(entry.name).toLowerCase() === ".rad") {
+        resolveWorkflowSource(path.join(directory, entry.name), options.grantId);
+      }
+    }
+    entries = await fs.promises.readdir(directory, { withFileTypes: true });
 
     return {
       ...pathHandle(directory),
@@ -2077,7 +2107,7 @@ async function configureRem(_event, options = {}) {
   const config = remSettings();
   if (options.key === "reset") Object.assign(config, { archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" });
   else if (["archiveFolder", "secondBrainRoot"].includes(options.key)) {
-    const folder = options.value ? resolveExactPath(options.value, { grantId: options.grantId, mustExist: true }) : "";
+    const folder = options.value ? getIpcSecurity().resolveAllowedPath(options.value, { grantId: options.grantId, mustExist: true }) : "";
     if (folder && !(await fs.promises.stat(folder)).isDirectory()) throw new Error("Choose a folder.");
     config[options.key] = folder;
   } else if (options.key === "secondBrainEnabled") {
@@ -2159,7 +2189,7 @@ async function gitWorktrees(_event, options = {}) {
     const worktrees = await Promise.all(result.worktrees.map(async (worktree) => {
       if (worktree.missing) return worktree;
       const handle = entryPathHandle(worktree.path);
-      if (handle.grantId) await registerBackendPathGrant(handle);
+      if (handle.grantId && !getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
       return { ...worktree, grantId: handle.grantId, path: handle.path };
     }));
     return { ...result, worktrees };
@@ -2180,7 +2210,7 @@ async function gitWorktreeAdd(_event, options = {}) {
   if (!targetStat.isDirectory()) throw new Error("The worktree target must be a folder.");
   const result = await addGitWorktree(projectRoot, targetPath, options.branch.trim(), { createBranch: options.createBranch === true, startPoint: options.startPoint });
   const handle = pathHandle(targetPath);
-  await registerBackendPathGrant(handle);
+  if (!getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
   return { ...result, createdPath: targetPath, grantId: handle.grantId };
 }
 
@@ -2208,8 +2238,13 @@ async function resolveGitProjectDirectory(options = {}) {
   return projectRoot;
 }
 
+function resolveWorkflowSource(currentPath, grantId) {
+  const authorize = (target) => resolveExactPath(target, { grantId });
+  return migrateSource(authorize(currentPath), authorize);
+}
+
 function resolveExactPath(currentPath, options = {}) {
-  return getIpcSecurity().resolveAllowedPath(currentPath, options);
+  return getIpcSecurity().resolveDesktopPath(currentPath, options);
 }
 
 async function selectPath(_event, options = {}) {
@@ -2253,7 +2288,7 @@ function pathHandle(targetPath) {
   if (existingGrantId) {
     return { grantId: existingGrantId, path: targetPath };
   }
-  return security.renewPath(targetPath);
+  return security.grantUserPath(targetPath);
 }
 
 function entryPathHandle(targetPath) {
@@ -2362,7 +2397,7 @@ async function registerBackendPathGrant(handle) {
       : reason === "http-error" ? `The backend rejected registration with HTTP ${status}.`
         : reason === "backend-unavailable" ? "The backend is not ready."
           : "The backend could not confirm folder access.";
-    throw new Error(`Could not renew Taskurotta folder access for ${JSON.stringify(handle?.path || "the selected folder")}. ${detail} Retry the action. If it keeps failing, restart Taskurotta.`, { cause: error });
+    throw new Error(`Could not renew Raticode folder access for ${JSON.stringify(handle?.path || "the selected folder")}. ${detail} Retry the action. If it keeps failing, restart Raticode.`, { cause: error });
   }
 }
 

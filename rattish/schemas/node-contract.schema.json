@@ -1,0 +1,344 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:raticode:rattish:schema:node-contract-1.json",
+  "title": "Rattish node contract",
+  "description": "Machine-readable compile-time and preflight contract for one Rattish node type.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "contract_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "node_type": {
+      "$ref": "#/$defs/identifier"
+    },
+    "runtime_handler": {
+      "type": "string",
+      "minLength": 1
+    },
+    "configuration_schema": {
+      "$ref": "#/$defs/schema_document"
+    },
+    "defaults": {
+      "type": "object"
+    },
+    "computed_defaults": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/computed_default"
+      }
+    },
+    "input_ports": {
+      "$ref": "#/$defs/input_ports"
+    },
+    "success_output": {
+      "$ref": "#/$defs/success_output"
+    },
+    "error_kinds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/error_kind"
+      },
+      "uniqueItems": true
+    },
+    "effects": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "approval",
+          "command",
+          "filesystem_read",
+          "filesystem_write",
+          "network",
+          "provider",
+          "state_write",
+          "workflow_call",
+          "workflow_control"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "preflight_checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/preflight_check"
+      }
+    },
+    "static_diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/static_diagnostic"
+      },
+      "default": []
+    },
+    "runtime_environment": {
+      "$ref": "#/$defs/runtime_environment"
+    }
+  },
+  "required": [
+    "$schema",
+    "contract_version",
+    "node_type",
+    "runtime_handler",
+    "configuration_schema",
+    "defaults",
+    "computed_defaults",
+    "input_ports",
+    "success_output",
+    "error_kinds",
+    "effects",
+    "preflight_checks",
+    "static_diagnostics"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "schema_document": {
+      "type": "object",
+      "description": "A JSON Schema Draft 2020-12 document. Contract tooling performs a second meta-schema validation pass.",
+      "properties": {
+        "$schema": {
+          "const": "https://json-schema.org/draft/2020-12/schema"
+        }
+      },
+      "required": ["$schema"]
+    },
+    "computed_default": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "enum": [
+            "authored_schema",
+            "provider_contract",
+            "referenced_workflow"
+          ]
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["source", "description"],
+      "additionalProperties": false
+    },
+    "input_port": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "$ref": "#/$defs/schema_document"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "delivery": {
+          "enum": ["local_binding", "stdin", "workflow_input"]
+        },
+        "encoding": {
+          "enum": ["identity", "utf8", "canonical_json"]
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": ["schema", "required", "delivery", "encoding"],
+      "additionalProperties": false
+    },
+    "additional_port_delivery": {
+      "type": "object",
+      "properties": {
+        "delivery": {
+          "enum": ["environment", "local_binding", "workflow_input"]
+        },
+        "name_transform": {
+          "enum": ["identity", "kebab_to_upper_snake"]
+        },
+        "encoding": {
+          "enum": ["identity", "string_or_canonical_json"]
+        }
+      },
+      "required": ["delivery", "name_transform", "encoding"],
+      "additionalProperties": false
+    },
+    "input_ports": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": ["closed", "open", "referenced_workflow"]
+        },
+        "ports": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/input_port"
+          }
+        },
+        "additional_port_schema": {
+          "$ref": "#/$defs/schema_document"
+        },
+        "additional_port_delivery": {
+          "$ref": "#/$defs/additional_port_delivery"
+        },
+        "interface_source": {
+          "enum": ["referenced_workflow"]
+        }
+      },
+      "required": ["mode", "ports"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {"const": "open"}
+            }
+          },
+          "then": {
+            "required": ["additional_port_schema", "additional_port_delivery"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {"const": "referenced_workflow"}
+            }
+          },
+          "then": {
+            "required": ["interface_source"]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "success_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "fixed"},
+            "schema": {"$ref": "#/$defs/schema_document"}
+          },
+          "required": ["kind", "schema"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "configuration_selected"},
+            "schema_fields": {
+              "type": "array",
+              "items": {"type": "string"},
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "default_schema": {"$ref": "#/$defs/schema_document"}
+          },
+          "required": ["kind", "schema_fields", "default_schema"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "referenced_workflow"},
+            "interface_source": {"const": "referenced_workflow"}
+          },
+          "required": ["kind", "interface_source"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "error_kind": {
+      "enum": [
+        "budget",
+        "cancelled",
+        "child_workflow",
+        "command",
+        "configuration",
+        "filesystem",
+        "internal",
+        "network",
+        "output_validation",
+        "provider",
+        "timeout"
+      ]
+    },
+    "preflight_check": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "severity": {
+          "enum": ["error", "warning"]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["id", "severity", "description"],
+      "additionalProperties": false
+    },
+    "static_diagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^RATTISH_[A-Z0-9_]+$"
+        },
+        "severity": {
+          "enum": ["error", "warning"]
+        },
+        "rule": {
+          "enum": [
+            "blank_prompt",
+            "mutually_exclusive_fields",
+            "suspected_plaintext_secret"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["code", "severity", "rule", "fields", "description"],
+      "additionalProperties": false
+    },
+    "runtime_environment": {
+      "type": "object",
+      "properties": {
+        "sources_low_to_high_precedence": {
+          "type": "array",
+          "items": {
+            "enum": ["inherited_process", "node_configuration", "input_bindings"]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "ambient_values_affect_compilation": {
+          "const": false
+        }
+      },
+      "required": [
+        "sources_low_to_high_precedence",
+        "ambient_values_affect_compilation"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

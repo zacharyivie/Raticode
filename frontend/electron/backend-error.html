@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Taskurotta Backend Error</title>
+    <title>Raticode Backend Error</title>
     <style>
       body {
         margin: 0;
@@ -62,8 +62,8 @@
   </head>
   <body>
     <main>
-      <h1 id="title">Taskurotta backend did not start</h1>
-      <p>Electron could not keep the local Taskurotta backend running. Restart it, or open the logs folder for troubleshooting details.</p>
+      <h1 id="title">Raticode backend did not start</h1>
+      <p>Electron could not keep the local Raticode backend running. Restart it, or open the logs folder for troubleshooting details.</p>
       <div class="actions">
         <button id="restart" type="button">Restart backend</button>
         <button id="logs" type="button">Open logs</button>
@@ -73,7 +73,7 @@
     <script>
       const params = new URLSearchParams(window.location.search);
       document.getElementById("title").textContent =
-        params.get("title") || "Taskurotta backend did not start";
+        params.get("title") || "Raticode backend did not start";
       document.getElementById("message").textContent = params.get("message") || "";
       document.getElementById("restart").addEventListener("click", () => {
         window.goferBackend.restart();

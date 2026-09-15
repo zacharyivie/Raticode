@@ -1,0 +1,7 @@
+Rattish: 1
+Workflow:
+  name: Copy contract
+Node example:
+  type: copy-file
+  source-path: source.txt
+  destination-path: destination.txt

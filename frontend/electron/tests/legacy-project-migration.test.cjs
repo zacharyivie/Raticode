@@ -9,7 +9,7 @@ const { createTrustedProjectStore } = require("../trusted-projects.cjs");
 const { createIpcSecurity } = require("../security.cjs");
 
 function fixture(t) {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-migration-"));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-migration-"));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   const project = path.join(base, "project");
   const other = path.join(base, "other");

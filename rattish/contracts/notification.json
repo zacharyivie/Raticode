@@ -1,0 +1,111 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "notification",
+  "runtime_handler": "raticode.notification",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "title": {"type": "string"},
+      "body": {"type": "string"},
+      "channel": {"type": "string", "enum": ["desktop", "slack", "teams", "webhook", "email"], "x-rattish-case-insensitive": true},
+      "urgency": {"type": "string", "enum": ["low", "normal", "critical"], "x-rattish-case-insensitive": true},
+      "webhook_url": {"type": ["string", "null"], "minLength": 1},
+      "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+      "payload": {},
+      "email_from": {"type": ["string", "null"], "minLength": 1},
+      "email_to": {"type": "array", "items": {"type": "string", "minLength": 1}},
+      "smtp_host": {"type": ["string", "null"], "minLength": 1},
+      "smtp_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+      "smtp_username": {"type": ["string", "null"]},
+      "smtp_password": {"type": ["string", "null"]},
+      "smtp_starttls": {"type": "boolean"},
+      "request_timeout": {"type": "string", "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d)$"},
+      "retry": {
+        "type": "object",
+        "x-rattish-apply-property-defaults": true,
+        "properties": {
+          "attempts": {"type": "integer", "minimum": 1, "default": 1},
+          "backoff": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:ms|s|m|h|d)$", "default": "0s"},
+          "retry_on_statuses": {"type": "array", "items": {"type": "integer", "minimum": 100, "maximum": 599}, "uniqueItems": true, "default": []}
+        },
+        "additionalProperties": false
+      },
+      "expected_statuses": {"type": "array", "items": {"type": "integer", "minimum": 100, "maximum": 599}, "minItems": 1, "uniqueItems": true},
+      "network_allowlist": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+    },
+    "additionalProperties": false
+  },
+  "defaults": {
+    "title": "Raticode notification",
+    "body": "",
+    "channel": "desktop",
+    "urgency": "normal",
+    "webhook_url": null,
+    "headers": {},
+    "payload": null,
+    "email_from": null,
+    "email_to": [],
+    "smtp_host": null,
+    "smtp_port": 587,
+    "smtp_username": null,
+    "smtp_password": null,
+    "smtp_starttls": true,
+    "request_timeout": "30s",
+    "retry": {"attempts": 1, "backoff": "0s", "retry_on_statuses": []},
+    "expected_statuses": [200, 201, 202, 204],
+    "network_allowlist": []
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "closed",
+    "ports": {
+      "title": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "body": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "channel": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "enum": ["desktop", "slack", "teams", "webhook", "email"]}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "urgency": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "enum": ["low", "normal", "critical"]}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "webhook-url": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "minLength": 1}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "headers": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "additionalProperties": {"type": "string"}}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "payload": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "email-from": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "minLength": 1}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "email-to": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "array", "items": {"type": "string", "minLength": 1}}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "smtp-host": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string", "minLength": 1}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "smtp-port": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "integer", "minimum": 1, "maximum": 65535}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "smtp-username": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "smtp-password": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"}, "required": false, "delivery": "local_binding", "encoding": "identity"},
+      "smtp-starttls": {"schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "boolean"}, "required": false, "delivery": "local_binding", "encoding": "identity"}
+    }
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "sent": {"const": true},
+        "title": {"type": "string"},
+        "body": {"type": "string"},
+        "channel": {"type": "string", "enum": ["desktop", "slack", "teams", "webhook", "email"]},
+        "urgency": {"type": "string", "enum": ["low", "normal", "critical"]}
+      },
+      "required": ["sent", "title", "body", "channel", "urgency"],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": ["cancelled", "configuration", "internal", "network", "output_validation", "timeout"],
+  "effects": ["command", "network"],
+  "preflight_checks": [
+    {"id": "channel-configured", "severity": "error", "description": "The selected channel must have all required destination settings."},
+    {"id": "channel-available", "severity": "error", "description": "The selected notification channel must be available in this runtime environment."}
+  ],
+  "static_diagnostics": [
+    {
+      "code": "RATTISH_SUSPECTED_PLAINTEXT_SECRET",
+      "severity": "warning",
+      "rule": "suspected_plaintext_secret",
+      "fields": ["webhook_url", "headers", "payload", "smtp_username", "smtp_password"],
+      "description": "Warn about credential-shaped plaintext notification settings without rejecting the source."
+    }
+  ]
+}

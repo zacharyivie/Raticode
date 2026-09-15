@@ -1,5 +1,0 @@
-Radish: 1
-Workflow:
-  name: Invalid HTTP request contract
-Node example:
-  type: http-request

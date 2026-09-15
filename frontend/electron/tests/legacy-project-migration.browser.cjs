@@ -24,7 +24,7 @@ function finish(error) {
 }
 
 app.whenReady().then(async () => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-migration-browser-"));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-migration-browser-"));
   const project = path.join(root, "project");
   const injected = path.join(root, "injected");
   fs.mkdirSync(project);

@@ -1,4 +1,4 @@
 interface:
-  display_name: "Taskurotta Workflow Builder"
-  short_description: "Create and validate Taskurotta workflows in Radish."
-  default_prompt: "Create a Radish workflow from this request:"
+  display_name: "Raticode Workflow Builder"
+  short_description: "Create and validate Raticode workflows in Rattish."
+  default_prompt: "Create a Rattish workflow from this request:"

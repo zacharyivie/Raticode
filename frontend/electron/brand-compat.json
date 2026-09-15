@@ -1,0 +1,17 @@
+{
+  "brand": "taskurotta",
+  "productName": "Taskurotta",
+  "workspaceDirectory": ".taskurotta",
+  "previousBrands": [
+    {
+      "brand": "murina-code",
+      "productName": "Murina Code",
+      "workspaceDirectory": ".murina-code"
+    },
+    {
+      "brand": "taskurotta",
+      "productName": "Taskurotta",
+      "workspaceDirectory": ".taskurotta"
+    }
+  ]
+}

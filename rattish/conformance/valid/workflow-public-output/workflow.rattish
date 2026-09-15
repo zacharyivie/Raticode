@@ -1,0 +1,13 @@
+Rattish: 1
+
+Workflow:
+  name: Public build result
+  interface-version: 1
+  outputs:
+    build-log:
+      from: node.build.output.stdout
+      schema: {"type": "string"}
+
+Node build:
+  type: bash-command
+  command: echo ready

@@ -1,0 +1,9 @@
+Rattish: 1
+
+Workflow:
+  name: Child source conflict
+
+Node child:
+  type: workflow
+  workflow-id: publish
+  workflow-path: workflows/publish/workflow.rattish

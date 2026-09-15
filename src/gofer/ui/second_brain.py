@@ -104,7 +104,7 @@ def second_brain_rules(root: Path, report_format: str, report_theme: str = "auto
             "<style> block or inline styles. Include responsive layout, accessible contrast, "
             "semantic structure, and readable print styles. Keep essential assets embedded and "
             "do not depend on a shared stylesheet or remote fonts/scripts. Do not invent data "
-            "for decoration. Taskurotta saves and displays your authored styling unchanged. "
+            "for decoration. Raticode saves and displays your authored styling unchanged. "
         )
     return (
         f"Second Brain is enabled. Knowledge root: {root}. "
@@ -127,7 +127,7 @@ def with_second_brain(
     if config.get("enabled") is not True:
         return workflow
     if cli_path is None:
-        raise ValueError("The Taskurotta CLI is unavailable for Second Brain tools.")
+        raise ValueError("The Raticode CLI is unavailable for Second Brain tools.")
     root = Path(str(config.get("root", ""))).expanduser()
     if not root.is_absolute() or not root.is_dir():
         raise ValueError("Choose an existing absolute Second Brain folder in Settings > Memory.")
@@ -175,7 +175,7 @@ class SecondBrain:
         return target
 
     def search(self, query: str) -> list[dict[str, Any]]:
-        database = self.resolve(".taskurotta/second-brain.sqlite3")
+        database = self.resolve(".raticode/second-brain.sqlite3")
         database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         index = note_index(self.root)
         if not database.exists():
@@ -304,7 +304,7 @@ def serve_second_brain(
                 result = {
                     "protocolVersion": "2025-03-26",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "taskurotta-second-brain", "version": "1.0.0"},
+                    "serverInfo": {"name": "raticode-second-brain", "version": "1.0.0"},
                     "instructions": second_brain_rules(brain.root, report_format, report_theme),
                 }
             elif method == "ping":

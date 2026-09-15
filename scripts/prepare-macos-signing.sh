@@ -6,15 +6,15 @@ set -euo pipefail
 : "${APPLE_ID:?Missing notarization Apple ID}"
 : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing notarization password}"
 : "${APPLE_TEAM_ID:?Missing Apple team ID}"
-keychain="$RUNNER_TEMP/taskurotta-signing.keychain-db"
-certificate="$RUNNER_TEMP/taskurotta-signing.p12"
+keychain="$RUNNER_TEMP/raticode-signing.keychain-db"
+certificate="$RUNNER_TEMP/raticode-signing.p12"
 keychain_password="$(openssl rand -hex 32)"
-export TASKUROTTA_SIGNING_CERTIFICATE="$certificate"
+export RATICODE_SIGNING_CERTIFICATE="$certificate"
 python - <<'PY'
 import base64
 import os
 from pathlib import Path
-path = Path(os.environ["TASKUROTTA_SIGNING_CERTIFICATE"])
+path = Path(os.environ["RATICODE_SIGNING_CERTIFICATE"])
 path.write_bytes(base64.b64decode(os.environ["CSC_LINK"], validate=True))
 path.chmod(0o600)
 PY

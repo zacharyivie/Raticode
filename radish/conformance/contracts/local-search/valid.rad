@@ -1,7 +1,0 @@
-Radish: 1
-Workflow:
-  name: Local search contract
-Node example:
-  type: local-search
-  index-path: cache/index.json
-  query: release process

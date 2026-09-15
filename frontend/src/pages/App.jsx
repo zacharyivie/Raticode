@@ -1,5 +1,11 @@
+import { threadIsArchived, inspectThreadScopes } from "../lib/threadActivity.js";
+import { loadEditorSession, saveEditorSession, loadWorkflowDraft, saveWorkflowDraft } from "../lib/editorSession.js";
+import brandCompat from "../lib/brandCompat.js";
 import { createConversationCache } from "../lib/conversationCache.js";
-import { loadConversationMessages, saveConversationMessages, removeConversationMessages } from "../lib/conversationStorage.js";
+import { loadConversationMessages } from "../lib/conversationStorage.js";
+import { CONVERSATION_PAGE_SIZE, conversationRepository } from "../lib/conversationRepository.js";
+import ThreadSearch from "../components/ThreadSearch.jsx";
+import ThreadHistoryMatch from "../components/ThreadHistoryMatch.jsx";
 import { createConversationArchiveScheduler } from "../lib/conversationArchive.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { createRecentProjectValidator, startWorkspacePolling } from "../lib/projectRefresh.js";
@@ -8,7 +14,7 @@ import { defaultPermissionMode } from "../lib/providerPermissions.js";
 import { generateConventionalCommit } from "../lib/commit-message.js";
 import RemResources, { DEFAULT_REM_RESOURCES, remResourceError } from "../components/RemResources.jsx";
 import RemAvatar from "../components/RemAvatar.jsx";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -34,6 +40,7 @@ import {
   Play,
   RefreshCw,
   Redo2,
+  Search,
   Settings as SettingsIcon,
   Sun,
   Trash2,
@@ -42,8 +49,10 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import DagCanvas, { autoLayoutWorkflow } from "../components/DagCanvas.jsx";
+import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
+const DagCanvas = lazy(() => import("../components/DagCanvas.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
+const SwarmWorkspace = lazy(() => import("../components/SwarmWorkspace.jsx"));
 import CodeFileExplorer from "../components/CodeFileExplorer.jsx";
 import CodeWorkspace, {
   applyCodeFilesystemChange,
@@ -53,8 +62,11 @@ import CodeWorkspace, {
 import MarkdownContent from "../components/MarkdownContent.jsx";
 import ChatComposer, { MessageAttachments } from "../components/ChatComposer.jsx";
 import SettingsPopover, { defaultSettingsSnapshot } from "../components/SettingsPopover.jsx";
-import TaskurottaMark from "../components/TaskurottaMark.jsx";
+import RaticodeMark from "../components/RaticodeMark.jsx";
 import UnifiedBottomPanel from "../components/UnifiedBottomPanel.jsx";
+import RunSummary from "../components/RunSummary.jsx";
+import { useWorkflowRunRegistry } from "../lib/useWorkflowRunRegistry.js";
+import { exactWorkflowRunStopPath, workflowRunSummary } from "../lib/workflowRuns.js";
 import {
   ProviderModelEffortFields,
   useProviderCapabilities,
@@ -86,8 +98,8 @@ const PROJECT_LABELS_STORAGE_KEY = "gofer.projectLabels";
 const RECENT_PROJECTS_STORAGE_KEY = "gofer.recentProjects";
 export const RECENT_FILES_STORAGE_KEY = "gofer.recentFiles";
 const LAST_WORKTREE_STORAGE_KEY = "gofer.lastWorktreeByProject";
-export const STUDIO_SESSION_STORAGE_KEY = "taskurotta.studioSession.v1";
-export const TEXT_ZOOM_STORAGE_KEY = "taskurotta.textZoom.v1";
+export const STUDIO_SESSION_STORAGE_KEY = "raticode.studioSession.v1";
+export const TEXT_ZOOM_STORAGE_KEY = "raticode.textZoom.v1";
 export const TEXT_ZOOM_MIN = 80;
 export const TEXT_ZOOM_MAX = 150;
 export const TEXT_ZOOM_STEP = 10;
@@ -97,12 +109,12 @@ const DEFAULT_RETENTION_SETTINGS = {
   keepLast: 100,
 };
 const RUN_LOG_TAIL_BYTES = 64 * 1024;
-const RADISH_ANALYSIS_DELAY_MS = 300;
+const RATTISH_ANALYSIS_DELAY_MS = 300;
 let browserTabSequence = 0;
 
 export function prefersReducedMotion() {
-  if (typeof document !== "undefined" && document.documentElement.dataset.reducedMotion) {
-    return document.documentElement.dataset.reducedMotion === "true";
+  if (typeof document !== "undefined" && document.documentElement?.dataset?.reducedMotion) {
+    return document.documentElement?.dataset?.reducedMotion === "true";
   }
   return typeof window !== "undefined" &&
     (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
@@ -136,8 +148,8 @@ function isBundleFile(file) {
   return name.endsWith(".zip") || name.endsWith(".gof");
 }
 
-function isTaskurottaFile(file) {
-  return file?.name?.toLowerCase?.().endsWith(".taskurotta") ?? false;
+function isRaticodeFile(file) {
+  return brandCompat.isWorkflowBundle(file);
 }
 
 async function fileToBase64(file) {
@@ -223,7 +235,7 @@ function previewTriggerLines(items = []) {
 }
 
 export function workflowBundleFilename(workflow) {
-  const extension = workflow?.sourceFormat === "radish" ? ".taskurotta" : ".gof.zip";
+  const extension = workflow?.sourceFormat === "rattish" ? ".raticode" : ".gof.zip";
   return `${workflow?.id || "workflow"}${extension}`;
 }
 
@@ -236,8 +248,8 @@ export function workflowBundlePath(directory, workflow) {
 }
 
 export function workflowExportEndpoint(workflow) {
-  return workflow?.sourceFormat === "radish"
-    ? `/radish/workflows/${encodeURIComponent(workflow.id)}/export`
+  return workflow?.sourceFormat === "rattish"
+    ? `/rattish/workflows/${encodeURIComponent(workflow.id)}/export`
     : `/workflows/${encodeURIComponent(workflow.id)}/export`;
 }
 
@@ -282,6 +294,7 @@ export async function discoverProjectWorkflows(projectRoot, { signal } = {}) {
 export default function App() {
   const [settings, setSettings] = useState(loadAppSettings);
   const [initialStudioSession] = useState(loadStudioSession);
+  const [initialEditorSession] = useState(loadEditorSession);
   const [textZoom, setTextZoom] = useState(loadTextZoom);
   useEffect(() => {
     const bridge = window.goferDesktop?.rem;
@@ -311,31 +324,68 @@ export default function App() {
   const [workflows, setWorkflows] = useState([]);
   const [promptAgentIds, setPromptAgentIds] = useState([]);
   const [activeWorkflowId, setActiveWorkflowId] = useState(initialStudioSession.workflowId || undefined);
+  const activeWorkflowIdRef = useRef(activeWorkflowId);
+  activeWorkflowIdRef.current = activeWorkflowId;
   const [openingProjectRoot, setOpeningProjectRoot] = useState("");
+  const [projectError, setProjectError] = useState("");
   const [activeProjectRoot, setActiveProjectRoot] = useState(initialStudioSession.projectRoot);
+  const [selectedSwarm, setSelectedSwarm] = useState(null);
   const [studioView, setStudioView] = useState(initialStudioSession.view || settings.general.defaultView);
-  const [codeEditorOpened, setCodeEditorOpened] = useState(
+  const [, setCodeEditorOpened] = useState(
     (initialStudioSession.view || settings.general.defaultView) === "code",
   );
-  const [codeOpenPaths, setCodeOpenPaths] = useState([]);
-  const [activeCodePath, setActiveCodePath] = useState("");
+  const [codeOpenPaths, setCodeOpenPaths] = useState(initialEditorSession?.paths || []);
+  const [activeCodePath, setActiveCodePath] = useState(initialEditorSession?.activePath || "");
   const [previewCodePath, setPreviewCodePath] = useState("");
   const [codeNavigationRequest, setCodeNavigationRequest] = useState(null);
-  const [browserTabs, setBrowserTabs] = useState({});
+  const [browserTabs, setBrowserTabs] = useState(initialEditorSession?.browserTabs || {});
   const [newCodeFileRequest, setNewCodeFileRequest] = useState(0);
   const [recentCodePaths, setRecentCodePaths] = useState(loadRecentCodePaths);
   const [recentProjectRoots, setRecentProjectRoots] = useState(loadRecentProjectRoots);
   const [lastWorktreeByProject, setLastWorktreeByProject] = useState(loadLastWorktreeByProject);
-  const [radishEditorState, setRadishEditorState] = useState(null);
+  const [rattishSessions, setRattishSessions] = useState({});
+  const documentSessionsRef = useRef(new Map());
+  const documentSession = useCallback((workflowId) => {
+    if (!documentSessionsRef.current.has(workflowId)) documentSessionsRef.current.set(workflowId, {
+      state: { current: null }, metadataTimer: { current: null }, metadataPending: { current: false },
+      analysisTimer: { current: null }, analysisRequest: { current: 0 },
+      writes: { current: Promise.resolve() }, metadataSaving: { current: null },
+    });
+    const session = documentSessionsRef.current.get(workflowId);
+    return {
+      documentWritesRef: session.writes,
+      rattishMetadataSavingRef: session.metadataSaving,
+      rattishEditorStateRef: session.state,
+      rattishMetadataSaveTimerRef: session.metadataTimer,
+      rattishMetadataPendingRef: session.metadataPending,
+      rattishAnalysisTimerRef: session.analysisTimer,
+      rattishAnalysisRequestRef: session.analysisRequest,
+      setRattishEditorState(update) {
+        const next = typeof update === "function" ? update(session.state.current) : update;
+        const draftSaved = saveWorkflowDraft(next?.document?.sourcePath || workflows.find(item => item.id === workflowId)?.sourcePath, next?.document);
+        const recoveryWarning = draftSaved ? "" : next?.document?.dirty
+          ? "Recovery storage is unavailable. Keep this tab open and save workflow.rattish before restarting the app."
+          : "Recovery storage could not be cleared. An older draft may appear after restarting the app.";
+        const state = next ? { ...next, recoveryWarning } : next;
+        session.state.current = state;
+        setRattishSessions(current => ({ ...current, [workflowId]: state }));
+      },
+    };
+  }, [workflows]);
+  const { rattishEditorStateRef, setRattishEditorState } = documentSession(activeWorkflowId);
+  const rattishEditorState = rattishSessions[activeWorkflowId] ?? null;
+  const [workflowTabs, setWorkflowTabs] = useState(initialEditorSession?.workflowTabs || {});
+  const [sidebarActivity, setSidebarActivity] = useState(initialEditorSession?.activity || (initialStudioSession.view === "code" ? "files" : settings.general.initialActivity || "workflows"));
+
+  const [workflowClosePrompt, setWorkflowClosePrompt] = useState(null);
   const [activeCodeDocumentState, setActiveCodeDocumentState] = useState(null);
-  const [projectPaneVisible, setProjectPaneVisible] = useState(true);
-  const [assistantPaneVisible, setAssistantPaneVisible] = useState(true);
+  const { projectPaneVisible, setProjectPaneVisible, assistantPaneVisible, setAssistantPaneVisible, closeCompactPane } = useResponsivePanes();
   const [assistantFocusRequest, setAssistantFocusRequest] = useState(0);
   useEffect(() => {
     const openRem = () => { setAssistantPaneVisible(true); setAssistantFocusRequest(current => current + 1); };
     window.addEventListener("gofer:rem-context", openRem);
     return () => window.removeEventListener("gofer:rem-context", openRem);
-  }, []);
+  }, [setAssistantPaneVisible]);
   const [dataDir, setDataDir] = useState("");
   const [loadState, setLoadState] = useState({ loading: true, error: "" });
   const [doctorState, setDoctorState] = useState({
@@ -372,7 +422,36 @@ export default function App() {
     error: "",
     info: null,
   });
-  const [runState, setRunState] = useState({ running: false, error: "", result: null });
+  const [runState, setLatestRunState] = useState({ running: false, error: "", result: null });
+  const [runStatesById, setRunStatesById] = useState({});
+  const runStatesRef = useRef({});
+  const latestRunStateRef = useRef(runState);
+  const runRegistry = useWorkflowRunRegistry(workflows);
+  const recordWorkflowRun = runRegistry.record;
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [pinnedRun, setPinnedRun] = useState(initialEditorSession?.pinnedRun || null);
+  useEffect(() => {
+    saveEditorSession({ paths: codeOpenPaths, activePath: activeCodePath, workflowTabs, browserTabs, activity: sidebarActivity, pinnedRun });
+  }, [codeOpenPaths, activeCodePath, workflowTabs, browserTabs, sidebarActivity, pinnedRun]);
+  const pinnedRunRef = useRef(pinnedRun);
+  pinnedRunRef.current = pinnedRun;
+  const setRunState = useCallback((update) => {
+    const next = typeof update === "function" ? update(latestRunStateRef.current) : update;
+    latestRunStateRef.current = next;
+    if (next.workflowId) {
+      runStatesRef.current = { ...runStatesRef.current, [next.workflowId]: next };
+      setRunStatesById(runStatesRef.current);
+    }
+    setLatestRunState(next);
+  }, []);
+  useEffect(() => {
+    for (const [id, state] of Object.entries(runStatesById)) {
+      if (state.result) {
+        const workflow = workflows.find(item => item.id === id);
+        if (workflow) recordWorkflowRun(workflow, state.result);
+      }
+    }
+  }, [runStatesById, workflows, recordWorkflowRun]);
   const [logState, setLogState] = useState({
     loading: false,
     error: "",
@@ -392,19 +471,15 @@ export default function App() {
     error: "",
     loading: false,
   });
-  const [graphToolbarTarget, setGraphToolbarTarget] = useState(null);
   const workflowRevisionsRef = useRef(new Map());
   const dirtyWorkflowsRef = useRef(new Map());
   const saveTimersRef = useRef(new Map());
   const inFlightSavesRef = useRef(new Map());
   const deletedWorkflowIdsRef = useRef(new Set());
   const logRequestRef = useRef(0);
-  const radishEditorRef = useRef(null);
-  const radishEditorStateRef = useRef(null);
-  const radishMetadataSaveTimerRef = useRef(null);
-  const radishMetadataPendingRef = useRef(false);
-  const radishAnalysisTimerRef = useRef(null);
-  const radishAnalysisRequestRef = useRef(0);
+  const logListRequestRef = useRef(0);
+  const approvalRequestRef = useRef(0);
+  const rattishEditorRef = useRef(null);
   const previewCodePathRef = useRef("");
   const codeNavigationSequenceRef = useRef(0);
   const pendingProjectFileRef = useRef(null);
@@ -426,21 +501,11 @@ export default function App() {
   const workflowPaneWidth = settings.layout.workflowPaneWidth;
   const chatPaneWidth = settings.layout.assistantPaneWidth;
   const executionMode = settings.general.executionMode;
-  const activeWorkflow = activeWorkspaceForView(
-    workflows,
-    activeWorkflowId,
-    activeProjectRoot,
-    studioView,
-  );
-  const codeWorkspaceWorkflow = activeWorkspaceForProject(
-    workflows,
-    activeWorkflowId,
-    activeProjectRoot,
-  ) ?? projectWorkspace("");
-  const graphWorkflow = useMemo(
-    () => radishGraphWorkflow(activeWorkflow, radishEditorState?.document),
-    [activeWorkflow, radishEditorState?.document],
-  );
+  const activeWorkflow = workflows.find(item => item.id === activeWorkflowId);
+  const browsingWorkspace = activeWorkspaceForProject(workflows, undefined, activeProjectRoot) ?? projectWorkspace(activeProjectRoot);
+  const swarmProjectRoot = browsingWorkspace?.projectRoot || activeProjectRoot || "";
+  const codeWorkspaceWorkflow = workflows.find(item => item.sourcePath === activeCodePath) ?? activeWorkflow ?? browsingWorkspace;
+
 
   const changeSetting = useCallback((path, value) => {
     setSettings((current) => updateSetting(current, path, value));
@@ -449,8 +514,8 @@ export default function App() {
   runWorkflowNowRef.current = runWorkflowNow;
 
   useEffect(() => {
-    radishEditorStateRef.current = radishEditorState;
-  }, [radishEditorState]);
+    rattishEditorStateRef.current = rattishEditorState;
+  }, [rattishEditorState, rattishEditorStateRef]);
 
   useEffect(() => {
     previewCodePathRef.current = previewCodePath;
@@ -556,7 +621,20 @@ export default function App() {
   }, [recentCodePaths]);
 
   useEffect(() => {
-    if (!activeCodePath || browserTabs[activeCodePath]) return;
+    const inspect = window.goferDesktop?.workspace?.missingRecentFiles;
+    if (activeCodePath || !recentCodePaths.length || !inspect) return undefined;
+    let cancelled = false;
+    const stop = startPolling(async () => {
+      const missing = new Set(await inspect(recentCodePaths));
+      if (!cancelled && missing.size) {
+        setRecentCodePaths(current => current.filter(path => !missing.has(path)));
+      }
+    }, { immediate: true, interval: 5000 });
+    return () => { cancelled = true; stop(); };
+  }, [activeCodePath, recentCodePaths]);
+
+  useEffect(() => {
+    if (!activeCodePath || activeCodePath.startsWith("workflow-graph:") || activeCodePath.startsWith("browser:") || browserTabs[activeCodePath]) return;
     setRecentCodePaths((current) => rememberRecentFile(current, activeCodePath));
   }, [activeCodePath, browserTabs]);
 
@@ -604,7 +682,8 @@ export default function App() {
           const replacementIndex = roots.findIndex((root) => lastWorktreeByProject[root] === activeProjectRoot);
           const replacement = projects[replacementIndex]?.selectedProjectRoot || "";
           setActiveProjectRoot(replacement === activeProjectRoot ? "" : replacement);
-          setActiveWorkflowId(undefined);
+          // Open documents keep their original project context.
+
         }
       }
       const nextRoots = mergeRecentProjects(
@@ -644,7 +723,8 @@ export default function App() {
       if (action === "view.toggleProjectPane") setProjectPaneVisible((current) => !current);
       if (action === "view.toggleAssistantPane") setAssistantPaneVisible((current) => !current);
       if (action === "panel.toggle") window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel"));
-      if (action === "workflow.run" && activeWorkflow && !runState.running) {
+      if (action === "workflow.run" && activeWorkflow && !runState.running
+        && (workflowTabs[activeCodePath]?.workflowId === activeWorkflow.id || activeCodePath === activeWorkflow.sourcePath)) {
         void runWorkflowNowRef.current?.(activeWorkflow);
       }
     }
@@ -742,18 +822,15 @@ export default function App() {
       unsubscribeTerminalEditor?.();
       window.removeEventListener("keydown", handleApplicationShortcut, true);
     };
-  }, [activeWorkflow, runState.running, settings, settingsOpen]);
+  }, [activeWorkflow, activeCodePath, workflowTabs, runState.running, settings, settingsOpen, setAssistantPaneVisible, setProjectPaneVisible]);
 
-  useEffect(() => {
-    radishMetadataPendingRef.current = false;
-    window.clearTimeout(radishMetadataSaveTimerRef.current);
-    window.clearTimeout(radishAnalysisTimerRef.current);
-    radishAnalysisRequestRef.current += 1;
-    return () => {
-      window.clearTimeout(radishAnalysisTimerRef.current);
-      radishAnalysisRequestRef.current += 1;
-    };
-  }, [activeWorkflow?.id]);
+  useEffect(() => () => {
+    for (const session of documentSessionsRef.current.values()) {
+      window.clearTimeout(session.analysisTimer.current);
+      window.clearTimeout(session.metadataTimer.current);
+      session.analysisRequest.current += 1;
+    }
+  }, []);
 
   useEffect(() => {
     const pending = pendingProjectFileRef.current;
@@ -764,42 +841,85 @@ export default function App() {
     pendingProjectFileRef.current = null;
   }, [activeWorkflow?.id]);
 
+  const scheduleRattishAnalysisRef = useRef(null);
+  scheduleRattishAnalysisRef.current = scheduleRattishAnalysis;
   useEffect(() => {
-    if (activeWorkflow?.sourceFormat !== "radish") return undefined;
-    const controller = new AbortController();
-    setRadishEditorState({ document: null, error: "", loading: true, saving: false });
-    fetch(apiUrl(`/workflows/${encodeURIComponent(activeWorkflow.id)}/document`), {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || `Editor API returned ${response.status}`);
-        setRadishEditorState({
-          document: payload.document,
-          error: "",
-          loading: false,
-          saving: false,
-        });
-      })
-      .catch((error) => {
-        if (error?.name === "AbortError") return;
-        setRadishEditorState({
-          document: null,
-          error: error instanceof Error ? error.message : "Unable to load the Radish graph",
-          loading: false,
-          saving: false,
-        });
-      });
-    return () => controller.abort();
-  }, [activeWorkflow?.id, activeWorkflow?.sourceFormat]);
+    const targets = workflows.filter(item => item.sourceFormat === "rattish" &&
+      (item.id === activeWorkflowId || codeOpenPaths.includes(item.sourcePath) || Object.values(workflowTabs).some(tab => tab.workflowId === item.id)));
+    for (const target of targets) {
+      const session = documentSession(target.id);
+      if (session.rattishEditorStateRef.current) continue;
+      session.setRattishEditorState({ document: null, loading: true, error: "", saving: false });
+      fetch(apiUrl(`/workflows/${encodeURIComponent(target.id)}/document`))
+        .then(async response => {
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || `Editor API returned ${response.status}`);
+          const draft = loadWorkflowDraft(target.sourcePath);
+          const document = draft && draft.source !== payload.document.source
+            ? { ...payload.document, source: draft.source, savedSource: payload.document.source, savedRevision: draft.savedRevision, dirty: true, runnable: false }
+            : payload.document;
+          session.setRattishEditorState({ document, error: "", loading: false, saving: false });
+          if (document.dirty) scheduleRattishAnalysisRef.current(document.source, target.sourcePath);
+        }).catch(error => session.setRattishEditorState({ document: null, error: error.message, loading: false, saving: false }));
+    }
+  }, [activeWorkflowId, workflows, codeOpenPaths, workflowTabs, documentSession]);
+
+  function openWorkflowGraph(target) {
+    if (!target?.id) return;
+    setSelectedSwarm(null);
+    const path = `workflow-graph:${encodeURIComponent(target.id)}`;
+    setWorkflowTabs(current => ({ ...current, [path]: { kind: "workflow", workflowId: target.id,
+      name: target.name, sourcePath: target.sourcePath, projectRoot: target.projectRoot, contextLabel: target.projectRoot } }));
+    setCodeOpenPaths(current => mergeCodeOpenPaths(current, [path]));
+    setActiveCodePath(path);
+    setActiveWorkflowId(target.id);
+    setCodeEditorOpened(true);
+    setStudioView("graph");
+  }
+
+  const workflowViewCounterRef = useRef(0);
+  function duplicateWorkflowTab(path) {
+    const tab = workflowTabs[path];
+    if (!tab) return "";
+    const viewPath = `workflow-graph:${encodeURIComponent(tab.workflowId)}:view:${Date.now()}-${++workflowViewCounterRef.current}`;
+    setWorkflowTabs(current => ({ ...current, [viewPath]: { ...tab } }));
+    setCodeOpenPaths(current => mergeCodeOpenPaths(current, [viewPath]));
+    return viewPath;
+  }
+
+  const initializedGraphRef = useRef(Boolean(initialEditorSession));
+  useEffect(() => {
+    if (initializedGraphRef.current || loadState.loading) return;
+    initializedGraphRef.current = true;
+    if ((initialStudioSession.view || settings.general.defaultView) === "graph" && activeWorkflow) openWorkflowGraph(activeWorkflow);
+  }, [loadState.loading, activeWorkflow, initialStudioSession.view, settings.general.defaultView]);
+
+  useEffect(() => {
+    const tab = workflowTabs[activeCodePath];
+    const target = tab ? workflows.find(item => item.id === tab.workflowId) : workflows.find(item => item.sourcePath === activeCodePath);
+    if (target && target.id !== activeWorkflowId) setActiveWorkflowId(target.id);
+    if (activeCodePath) setStudioView(tab ? "graph" : "code");
+  }, [activeCodePath, activeWorkflowId, workflowTabs, workflows]);
+
+  function activateEditorPath(path) {
+    setSelectedSwarm(null);
+    setActiveCodePath(path);
+    const target = workflowTabs[path] ? workflows.find(item => item.id === workflowTabs[path].workflowId)
+      : workflows.find(item => item.sourcePath === path);
+    if (target) setActiveWorkflowId(target.id);
+    setStudioView(workflowTabs[path] ? "graph" : "code");
+  }
 
   function changeStudioView(nextView) {
-    setStudioView(nextView);
-    if (nextView === "code") setCodeEditorOpened(true);
+    if (nextView === "graph") { openWorkflowGraph(activeWorkflow); return; }
+    setStudioView("code");
+    setCodeEditorOpened(true);
+    if (workflowTabs[activeCodePath] && activeWorkflow?.sourcePath) openCodeFile(activeWorkflow.sourcePath);
   }
 
   function openCodeFile(path, options = {}) {
-    if (!path || !activeWorkflow?.projectRoot) return;
+    if (!path) return;
+    setSelectedSwarm(null);
     const currentPreview = previewCodePathRef.current;
     const next = nextCodeFileOpenState(
       codeOpenPaths,
@@ -891,6 +1011,16 @@ export default function App() {
       if (info && !info.isFile) throw new Error(`The link does not point to a file: ${path}`);
       openCodeFile(info?.path || path, options);
     } catch (error) {
+      if (options.recent) {
+        try {
+          const missing = await window.goferDesktop?.workspace?.missingRecentFiles?.([path]);
+          if (missing?.includes(path)) {
+            setRecentCodePaths(current => current.filter(candidate => candidate !== path));
+            setTopBarNotice({ type: "error", message: `File no longer exists. Removed from recent files: ${path}` });
+            return;
+          }
+        } catch { /* Keep history when existence cannot be checked. */ }
+      }
       setTopBarNotice({
         type: "error",
         message: error instanceof Error ? error.message : "Could not open the linked file",
@@ -901,7 +1031,7 @@ export default function App() {
   openLinkedCodeFileRef.current = openLinkedCodeFile;
 
   async function openRecentCodeFile(path) {
-    await openLinkedCodeFile(path, { preview: false });
+    await openLinkedCodeFile(path, { preview: false, recent: true });
   }
 
   async function openAssistantFile(path, projectRoot) {
@@ -955,14 +1085,15 @@ export default function App() {
     setBrowserTabs((current) => Object.fromEntries(
       Object.entries(current).filter(([path]) => !closing.has(path)),
     ));
+    setWorkflowTabs(current => Object.fromEntries(Object.entries(current).filter(([path]) => !closing.has(path))));
   }
 
   function closeActiveCodeFile() {
-    radishEditorRef.current?.closeActive?.();
+    rattishEditorRef.current?.closeActive?.();
   }
 
   function editWorkflowFile(workflow) {
-    if (!workflow?.sourcePath || workflow.sourceFormat !== "radish") return;
+    if (!workflow?.sourcePath || workflow.sourceFormat !== "rattish") return;
     if (workflow.id === activeWorkflow?.id) {
       openCodeFile(workflow.sourcePath);
       return;
@@ -973,8 +1104,10 @@ export default function App() {
     setStudioView("code");
   }
 
-  async function reloadActiveRadishDocument() {
-    if (activeWorkflow?.sourceFormat !== "radish") return;
+  async function reloadActiveRattishDocument(sourcePath, targetWorkflow = workflows.find(item => item.sourcePath === sourcePath) ?? activeWorkflow) {
+    const activeWorkflow = targetWorkflow;
+    const { rattishEditorStateRef, setRattishEditorState } = documentSession(activeWorkflow?.id);
+    if (activeWorkflow?.sourceFormat !== "rattish") return;
     try {
       const response = await fetch(
         apiUrl(`/workflows/${encodeURIComponent(activeWorkflow.id)}/document`),
@@ -982,22 +1115,24 @@ export default function App() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || `Editor API returned ${response.status}`);
       const nextState = { document: payload.document, error: "", loading: false, saving: false };
-      radishEditorStateRef.current = nextState;
-      setRadishEditorState(nextState);
+      rattishEditorStateRef.current = nextState;
+      setRattishEditorState(nextState);
     } catch (error) {
       setTopBarNotice({
         type: "error",
-        message: error instanceof Error ? error.message : "Unable to reload workflow.rad",
+        message: error instanceof Error ? error.message : "Unable to reload workflow.rattish",
       });
     }
   }
 
-  function scheduleRadishAnalysis(source) {
-    if (activeWorkflow?.sourceFormat !== "radish") return;
+  function scheduleRattishAnalysis(source, sourcePath) {
+    const activeWorkflow = workflows.find(item => item.sourcePath === sourcePath) ?? workflows.find(item => item.id === activeWorkflowId);
+    const { rattishEditorStateRef, rattishAnalysisTimerRef, rattishAnalysisRequestRef, setRattishEditorState } = documentSession(activeWorkflow?.id);
+    if (activeWorkflow?.sourceFormat !== "rattish") return;
     const workflowId = activeWorkflow.id;
-    const requestId = ++radishAnalysisRequestRef.current;
-    window.clearTimeout(radishAnalysisTimerRef.current);
-    radishAnalysisTimerRef.current = window.setTimeout(async () => {
+    const requestId = ++rattishAnalysisRequestRef.current;
+    window.clearTimeout(rattishAnalysisTimerRef.current);
+    rattishAnalysisTimerRef.current = window.setTimeout(async () => {
       try {
         const response = await fetch(
           apiUrl(`/workflows/${encodeURIComponent(workflowId)}/document/analyze`),
@@ -1009,42 +1144,44 @@ export default function App() {
         );
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || `Analysis returned ${response.status}`);
-        if (requestId !== radishAnalysisRequestRef.current) return;
-        const nextState = mergeRadishAnalysisState(
-          radishEditorStateRef.current,
+        if (requestId !== rattishAnalysisRequestRef.current) return;
+        const nextState = mergeRattishAnalysisState(
+          rattishEditorStateRef.current,
           payload.document,
           source,
         );
-        if (nextState === radishEditorStateRef.current) return;
-        radishEditorStateRef.current = nextState;
-        setRadishEditorState(nextState);
+        if (nextState === rattishEditorStateRef.current) return;
+        rattishEditorStateRef.current = nextState;
+        setRattishEditorState(nextState);
       } catch (error) {
-        if (requestId !== radishAnalysisRequestRef.current) return;
-        const currentState = radishEditorStateRef.current;
+        if (requestId !== rattishAnalysisRequestRef.current) return;
+        const currentState = rattishEditorStateRef.current;
         if (currentState?.document?.source !== source) return;
         const nextState = {
           ...currentState,
-          error: error instanceof Error ? error.message : "Unable to analyze Radish source",
+          error: error instanceof Error ? error.message : "Unable to analyze Rattish source",
           loading: false,
         };
-        radishEditorStateRef.current = nextState;
-        setRadishEditorState(nextState);
+        rattishEditorStateRef.current = nextState;
+        setRattishEditorState(nextState);
       }
-    }, RADISH_ANALYSIS_DELAY_MS);
+    }, RATTISH_ANALYSIS_DELAY_MS);
   }
 
-  async function refreshRadishAfterFileSave(savedSource) {
-    if (activeWorkflow?.sourceFormat !== "radish") return null;
+  async function refreshRattishAfterFileSave(savedSource, sourcePath) {
+    const activeWorkflow = workflows.find(item => item.sourcePath === sourcePath) ?? workflows.find(item => item.id === activeWorkflowId);
+    const { rattishEditorStateRef, setRattishEditorState } = documentSession(activeWorkflow?.id);
+    if (activeWorkflow?.sourceFormat !== "rattish") return null;
     const response = await fetch(
       apiUrl(`/workflows/${encodeURIComponent(activeWorkflow.id)}/document`),
     );
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `Editor API returned ${response.status}`);
-    const currentState = radishEditorStateRef.current;
+    const currentState = rattishEditorStateRef.current;
     if (currentState?.document?.source === savedSource) {
       const nextState = { document: payload.document, error: "", loading: false, saving: false };
-      radishEditorStateRef.current = nextState;
-      setRadishEditorState(nextState);
+      rattishEditorStateRef.current = nextState;
+      setRattishEditorState(nextState);
     }
     void loadWorkflows({ silent: true });
     return payload.document;
@@ -1057,6 +1194,7 @@ export default function App() {
     const controller = new AbortController();
     projectOpenAbortRef.current = controller;
     setOpeningProjectRoot(projectRoot);
+    setProjectError("");
     try {
       const discoveredPayloads = await withProjectOpenTimeout(discoverProjectWorkflows(projectRoot, { signal: controller.signal }));
       if (projectOpenRequestRef.current !== requestId) return null;
@@ -1077,13 +1215,12 @@ export default function App() {
       }
       setActiveProjectRoot(projectRoot);
       if (!discovered.length) {
-        setActiveWorkflowId(undefined);
         if (focusPath) {
           setCodeOpenPaths((current) => mergeCodeOpenPaths(current, [focusPath]));
           setActiveCodePath(focusPath);
         }
         setCodeEditorOpened(true);
-        setStudioView("code");
+        if (focusPath) setStudioView("code");
         return { discovered, projectRoot };
       }
       for (const workflow of discovered) deletedWorkflowIdsRef.current.delete(workflow.id);
@@ -1101,7 +1238,7 @@ export default function App() {
         setActiveCodePath(focusPath);
         pinCodeFile(focusPath);
       }
-      if (activeWorkflow?.id !== selectedWorkflow.id) {
+      if (focusPath && activeWorkflow?.id !== selectedWorkflow.id) {
         pendingProjectFileRef.current = focusPath ? {
           path: focusPath,
           workflowId: selectedWorkflow.id,
@@ -1109,10 +1246,11 @@ export default function App() {
         setActiveWorkflowId(selectedWorkflow.id);
       }
       setCodeEditorOpened(true);
-      setStudioView("code");
+      if (focusPath) setStudioView("code");
       return { discovered, projectRoot };
     } catch (error) {
       if (projectOpenRequestRef.current !== requestId) return null;
+      setProjectError(error instanceof Error ? error.message : "Unable to open project");
       throw error;
     } finally {
       controller.abort();
@@ -1131,7 +1269,7 @@ export default function App() {
         fileOnly: true,
       });
       if (!selectedPath) return;
-      if (activeWorkflow?.sourceFormat === "radish") {
+      if (activeWorkflow?.sourceFormat === "rattish") {
         openCodeFile(selectedPath);
         return;
       }
@@ -1218,6 +1356,9 @@ export default function App() {
     void loadWorkflows({ discoverProject: true, silent: true });
     if (!change?.path) return;
     if (change.kind === "rename" && change.sourcePath) {
+      setRecentCodePaths(current => [...new Set(current.map(path =>
+        replacePathPrefix(path, change.sourcePath, change.path, change.isDirectory),
+      ))]);
       setCodeOpenPaths((current) => current.map((path) =>
         replacePathPrefix(path, change.sourcePath, change.path, change.isDirectory),
       ));
@@ -1235,6 +1376,7 @@ export default function App() {
       });
     }
     if (change.kind === "delete") {
+      setRecentCodePaths(current => current.filter(path => !pathMatchesChange(path, change.path, change.isDirectory)));
       setCodeOpenPaths((current) => {
         const next = current.filter((path) => !pathMatchesChange(path, change.path, change.isDirectory));
         if (pathMatchesChange(activeCodePath, change.path, change.isDirectory)) {
@@ -1253,69 +1395,108 @@ export default function App() {
     }
   }
 
-  async function mutateActiveRadish(mutations) {
-    if (activeWorkflow?.sourceFormat !== "radish" || !mutations?.length) return null;
-    if (radishMetadataPendingRef.current) {
-      const metadataSaved = await saveRadishMetadataNow(activeWorkflow.id);
-      if (!metadataSaved) return null;
-    }
-    let currentDocument = radishEditorStateRef.current?.document;
-    if (!currentDocument) return null;
-    if (currentDocument.dirty) {
-      currentDocument = await radishEditorRef.current?.save?.();
-      if (!currentDocument) {
-        setTopBarNotice({
-          type: "error",
-          message: "Save the current code changes before editing the graph.",
-        });
-        return null;
-      }
-    }
-    try {
-      const response = await fetch(
-        apiUrl(`/workflows/${encodeURIComponent(activeWorkflow.id)}/document/mutate`),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            mutations,
-            expectedRevision: currentDocument.savedRevision,
-          }),
-        },
-      );
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          response.status === 409
-            ? "workflow.rad changed on disk. Reload it before editing the graph."
-            : payload.error || `Graph edit returned ${response.status}`,
-        );
-      }
-      const nextState = {
-        document: payload.document,
-        error: "",
-        loading: false,
-        saving: false,
-      };
-      radishEditorStateRef.current = nextState;
-      setRadishEditorState(nextState);
-      radishEditorRef.current?.acceptDocument?.(payload.document);
-      setTopBarNotice({ type: "success", message: "Updated workflow.rad" });
-      void loadWorkflows({ silent: true });
-      return payload.document;
-    } catch (error) {
-      setTopBarNotice({
-        type: "error",
-        message: error instanceof Error ? error.message : "Unable to edit workflow.rad",
-      });
-      return null;
-    }
+  function queueWorkflowDocumentWrite(target, action) {
+    const session = documentSession(target?.id);
+    const write = session.documentWritesRef.current.catch(() => {}).then(action);
+    session.documentWritesRef.current = write;
+    return write;
   }
 
-  function updateRadishGraphMetadata(nextWorkflow) {
-    const currentState = radishEditorStateRef.current;
+  function acceptWorkflowWrite(target, submittedDocument, savedDocument) {
+    const session = documentSession(target.id);
+    const currentState = session.rattishEditorStateRef.current;
+    const newerDraft = currentState?.document?.source !== submittedDocument.source;
+    if (currentState?.document?.metadata !== submittedDocument.metadata) {
+      savedDocument = { ...savedDocument, metadata: currentState.document.metadata, metadataRevision: currentState.document.metadataRevision };
+    }
+    window.clearTimeout(session.rattishAnalysisTimerRef.current);
+    session.rattishAnalysisRequestRef.current += 1;
+    if (newerDraft) {
+      session.setRattishEditorState({
+        ...currentState,
+        document: {
+          ...currentState.document,
+          savedRevision: savedDocument.savedRevision,
+          savedSource: savedDocument.source,
+          dirty: true,
+        },
+        error: "Workflow changed while saving. Your latest edits are still unsaved.",
+        saving: false,
+      });
+      scheduleRattishAnalysis(currentState.document.source, target.sourcePath);
+      return null;
+    }
+    session.setRattishEditorState({ document: savedDocument, error: "", loading: false, saving: false });
+    rattishEditorRef.current?.acceptDocument?.(savedDocument, target.sourcePath);
+    return savedDocument;
+  }
+
+  function saveWorkflowDocument(target) {
+    return queueWorkflowDocumentWrite(target, () => saveWorkflowDocumentNow(target));
+  }
+
+  async function saveWorkflowDocumentNow(target) {
+    const session = documentSession(target?.id);
+    const document = session.rattishEditorStateRef.current?.document;
+    if (!document) return null;
+    if (!document.dirty) return document;
+    const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(target.id)}/document/save`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: document.source, expectedRevision: document.savedRevision }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Unable to save workflow.rattish");
+    const savedDocument = acceptWorkflowWrite(target, document, payload.document);
+    if (!savedDocument) throw new Error("Workflow changed during save. Save the latest edits before continuing.");
+    return savedDocument;
+  }
+
+  async function mutateActiveRattish(mutations, targetWorkflow = activeWorkflow) {
+    if (targetWorkflow?.sourceFormat !== "rattish" || !mutations?.length) return null;
+    return queueWorkflowDocumentWrite(targetWorkflow, async () => {
+      const session = documentSession(targetWorkflow.id);
+      try {
+        if (session.rattishMetadataPendingRef.current || session.rattishMetadataSavingRef.current) {
+          const metadataSaved = await saveRattishMetadataNow(targetWorkflow.id);
+          if (!metadataSaved) return null;
+        }
+        const currentDocument = await saveWorkflowDocumentNow(targetWorkflow);
+        if (!currentDocument) return null;
+        const response = await fetch(
+          apiUrl(`/workflows/${encodeURIComponent(targetWorkflow.id)}/document/mutate`),
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mutations, expectedRevision: currentDocument.savedRevision }),
+          },
+        );
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(response.status === 409
+            ? "workflow.rattish changed on disk. Reload it before editing the graph."
+            : payload.error || `Graph edit returned ${response.status}`);
+        }
+        const savedDocument = acceptWorkflowWrite(targetWorkflow, currentDocument, payload.document);
+        if (!savedDocument) {
+          setTopBarNotice({ type: "error", message: "Graph changes were saved. Your newer source edits are still unsaved." });
+          return null;
+        }
+        setTopBarNotice({ type: "success", message: "Updated workflow.rattish" });
+        void loadWorkflows({ silent: true });
+        return savedDocument;
+      } catch (error) {
+        setTopBarNotice({ type: "error", message: error instanceof Error ? error.message : "Unable to edit workflow.rattish" });
+        return null;
+      }
+    });
+  }
+
+  function updateRattishGraphMetadata(nextWorkflow, targetWorkflow = activeWorkflow) {
+    const activeWorkflow = targetWorkflow;
+    const { rattishEditorStateRef, rattishMetadataSaveTimerRef, rattishMetadataPendingRef, setRattishEditorState } = documentSession(activeWorkflow?.id);
+    const currentState = rattishEditorStateRef.current;
     const document = currentState?.document;
-    if (!document || activeWorkflow?.sourceFormat !== "radish") return;
+    if (!document || activeWorkflow?.sourceFormat !== "rattish") return;
     const nodes = Object.fromEntries(
       (nextWorkflow.nodes ?? []).map((node) => [node.id, { x: node.x ?? 0, y: node.y ?? 0 }]),
     );
@@ -1330,57 +1511,54 @@ export default function App() {
       ...currentState,
       document: { ...document, metadata },
     };
-    radishEditorStateRef.current = nextState;
-    setRadishEditorState(nextState);
-    radishMetadataPendingRef.current = true;
-    window.clearTimeout(radishMetadataSaveTimerRef.current);
-    radishMetadataSaveTimerRef.current = window.setTimeout(
-      () => void saveRadishMetadataNow(activeWorkflow.id),
+    rattishEditorStateRef.current = nextState;
+    setRattishEditorState(nextState);
+    rattishMetadataPendingRef.current = true;
+    window.clearTimeout(rattishMetadataSaveTimerRef.current);
+    rattishMetadataSaveTimerRef.current = window.setTimeout(
+      () => void saveRattishMetadataNow(activeWorkflow.id),
       250,
     );
   }
 
-  async function saveRadishMetadataNow(workflowId) {
-    window.clearTimeout(radishMetadataSaveTimerRef.current);
-    const latestState = radishEditorStateRef.current;
-    const latest = latestState?.document;
-    if (!latest || !radishMetadataPendingRef.current) return true;
-    try {
-      const response = await fetch(
-        apiUrl(`/workflows/${encodeURIComponent(workflowId)}/metadata`),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            metadata: latest.metadata,
-            expectedRevision: latest.metadataRevision,
-          }),
-        },
-      );
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || `Metadata save returned ${response.status}`);
-      radishMetadataPendingRef.current = false;
-      setRadishEditorState((state) => {
-        if (!state?.document) return state;
-        const saved = {
-          ...state,
-          document: {
-            ...state.document,
-            metadata: payload.metadata,
-            metadataRevision: payload.metadataRevision,
-          },
-        };
-        radishEditorStateRef.current = saved;
-        return saved;
-      });
-      return true;
-    } catch (error) {
-      setTopBarNotice({
-        type: "error",
-        message: error instanceof Error ? error.message : "Unable to save graph layout",
-      });
-      return false;
-    }
+  async function saveRattishMetadataNow(workflowId) {
+    const session = documentSession(workflowId);
+    const { rattishEditorStateRef, rattishMetadataSaveTimerRef, rattishMetadataPendingRef, rattishMetadataSavingRef, setRattishEditorState } = session;
+    window.clearTimeout(rattishMetadataSaveTimerRef.current);
+    if (rattishMetadataSavingRef.current) return rattishMetadataSavingRef.current;
+    if (!rattishEditorStateRef.current?.document || !rattishMetadataPendingRef.current) return true;
+    rattishMetadataSavingRef.current = (async () => {
+      try {
+        while (rattishMetadataPendingRef.current) {
+          const latest = rattishEditorStateRef.current?.document;
+          if (!latest) return false;
+          rattishMetadataPendingRef.current = false;
+          const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflowId)}/metadata`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ metadata: latest.metadata, expectedRevision: latest.metadataRevision }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || `Metadata save returned ${response.status}`);
+          setRattishEditorState(state => !state?.document ? state : {
+            ...state,
+            document: {
+              ...state.document,
+              metadata: rattishMetadataPendingRef.current ? state.document.metadata : payload.metadata,
+              metadataRevision: payload.metadataRevision,
+            },
+          });
+        }
+        return true;
+      } catch (error) {
+        rattishMetadataPendingRef.current = true;
+        setTopBarNotice({ type: "error", message: error instanceof Error ? error.message : "Unable to save graph layout" });
+        return false;
+      } finally {
+        rattishMetadataSavingRef.current = null;
+      }
+    })();
+    return rattishMetadataSavingRef.current;
   }
 
   const loadWorkflows = useCallback(async ({
@@ -1408,7 +1586,7 @@ export default function App() {
       const nextWorkflows = listedWorkflows
         .filter(
           (workflow) =>
-            payload.authoringLanguage !== "radish" || workflow.sourceFormat === "radish",
+            payload.authoringLanguage !== "rattish" || workflow.sourceFormat === "rattish",
         )
         .filter((workflow) => !deletedWorkflowIdsRef.current.has(workflow.id))
         .map((workflow) => summarizeWorkflow(workflow, payloadDataDir));
@@ -1606,10 +1784,10 @@ export default function App() {
         setTopBarNotice({
           type: info?.available ? "success" : "success",
           message: info?.available
-            ? `Taskurotta ${info.info?.version ?? "update"} is available`
+            ? `Raticode ${info.info?.version ?? "update"} is available`
             : info?.info?.noReleases
-              ? "No published Taskurotta releases yet"
-            : "Taskurotta is up to date",
+              ? "No published Raticode releases yet"
+            : "Raticode is up to date",
         });
       }
     } catch (error) {
@@ -1668,6 +1846,7 @@ export default function App() {
   }, [topBarNotice?.message]);
 
   const loadLatestLog = useCallback(async (workflowId, { silent = false } = {}) => {
+    if (pinnedRunRef.current) return;
     const requestId = logRequestRef.current + 1;
     logRequestRef.current = requestId;
     if (!silent) {
@@ -1710,6 +1889,8 @@ export default function App() {
           revision,
           text: nextText,
           path: nextPath,
+          workflowId,
+          graphSnapshot: payload.log?.graphSnapshot ?? null,
           nodeOutputs: nextNodeOutputs,
           nodeOutputsTruncated: Boolean(payload.log?.nodeOutputsTruncated),
           nodeOutputsMaxBytes: payload.log?.nodeOutputsMaxBytes ?? null,
@@ -1733,6 +1914,8 @@ export default function App() {
   }, []);
 
   const loadRunLogs = useCallback(async (workflowId, { silent = false } = {}) => {
+    if (pinnedRunRef.current && pinnedRunRef.current.workflowId !== workflowId) return;
+    const requestId = ++logListRequestRef.current;
     try {
       const response = await fetch(
         apiUrl(`/workflows/${encodeURIComponent(workflowId)}/logs?limit=100`),
@@ -1741,6 +1924,7 @@ export default function App() {
       if (!response.ok) {
         throw new Error(payload.error || `Workflow API returned ${response.status}`);
       }
+      if (requestId !== logListRequestRef.current) return;
       setLogState((current) => {
         const nextRuns = payload.runs ?? [];
         if (silent && equalJson(current.runs, nextRuns)) {
@@ -1749,6 +1933,7 @@ export default function App() {
         return { ...current, runs: nextRuns };
       });
     } catch (error) {
+      if (requestId !== logListRequestRef.current) return;
       if (!silent) {
         setLogState((current) => ({
           ...current,
@@ -1801,7 +1986,10 @@ export default function App() {
         runEvents: silent ? current.runEvents : (payload.log?.runEvents ?? []),
         runNodes: silent ? current.runNodes : (payload.log?.runNodes ?? {}),
         selectedRunId: runId,
+        workflowId,
+        graphSnapshot: silent ? current.graphSnapshot : payload.log?.graphSnapshot ?? null,
       }));
+      return true;
     } catch (error) {
       if (requestId !== logRequestRef.current) return;
       if (!silent) {
@@ -1811,10 +1999,12 @@ export default function App() {
           error: error instanceof Error ? error.message : "Unable to load workflow run",
         }));
       }
+      return false;
     }
   }, []);
 
   const loadApprovals = useCallback(async (workflowId, { silent = false } = {}) => {
+    const requestId = ++approvalRequestRef.current;
     if (!silent) {
       setApprovalState((current) => ({ ...current, loading: true, error: "" }));
     }
@@ -1826,12 +2016,14 @@ export default function App() {
       if (!response.ok) {
         throw new Error(payload.error || `Workflow API returned ${response.status}`);
       }
+      if (requestId !== approvalRequestRef.current) return;
       setApprovalState({
         approvals: payload.approvals ?? [],
         error: "",
         loading: false,
       });
     } catch (error) {
+      if (requestId !== approvalRequestRef.current) return;
       if (!silent) {
         setApprovalState((current) => ({
           ...current,
@@ -1843,7 +2035,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!activeWorkflow?.id) {
+    if (!activeWorkflow?.id && !pinnedRun) {
       setLogState({
         loading: false,
         error: "",
@@ -1862,12 +2054,19 @@ export default function App() {
       return;
     }
 
+    if (pinnedRun) {
+      loadRunLog(pinnedRun.workflowId, pinnedRun.runId);
+      loadRunLogs(pinnedRun.workflowId);
+      return;
+    }
     loadLatestLog(activeWorkflow.id, { silent: true });
     loadRunLogs(activeWorkflow.id);
     loadApprovals(activeWorkflow.id);
     loadRetentionSettingsForWorkflow(activeWorkflow.id);
   }, [
     activeWorkflow?.id,
+    pinnedRun,
+    loadRunLog,
     loadApprovals,
     loadLatestLog,
     loadRetentionSettingsForWorkflow,
@@ -1875,16 +2074,14 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!activeWorkflow?.id) {
-      return undefined;
-    }
-
+    if (!activeWorkflow?.id && !pinnedRun) return undefined;
+    const monitoredWorkflowId = pinnedRun?.workflowId || activeWorkflow.id;
     return startPolling(() => Promise.allSettled([
-      logState.selectedRunId
-        ? loadRunLog(activeWorkflow.id, logState.selectedRunId, { silent: true })
-        : loadLatestLog(activeWorkflow.id, { silent: true }),
-      loadRunLogs(activeWorkflow.id, { silent: true }),
-      loadApprovals(activeWorkflow.id, { silent: true }),
+      (pinnedRun?.runId || logState.selectedRunId)
+        ? loadRunLog(monitoredWorkflowId, pinnedRun?.runId || logState.selectedRunId, { silent: true })
+        : loadLatestLog(monitoredWorkflowId, { silent: true }),
+      loadRunLogs(monitoredWorkflowId, { silent: true }),
+      ...(activeWorkflow?.id ? [loadApprovals(activeWorkflow.id, { silent: true })] : []),
     ]));
   }, [
     activeWorkflow?.id,
@@ -1893,6 +2090,7 @@ export default function App() {
     loadRunLog,
     loadRunLogs,
     logState.selectedRunId,
+    pinnedRun,
   ]);
 
   useEffect(() => {
@@ -2056,6 +2254,7 @@ export default function App() {
   }
 
   async function runWorkflowNow(workflow) {
+    if (runStatesRef.current[workflow.id]?.running) return;
     const workflowToRun = summarizeWorkflow(workflow, dataDir);
     const dirtyWorkflow = dirtyWorkflowsRef.current.get(workflowToRun.id);
     const pendingTimerId = saveTimersRef.current.get(workflowToRun.id);
@@ -2064,7 +2263,7 @@ export default function App() {
       saveTimersRef.current.delete(workflowToRun.id);
     }
     setRunState({ running: true, workflowId: workflowToRun.id, error: "", result: null });
-    setLogState((current) => ({
+    if (!pinnedRun && activeWorkflowIdRef.current === workflowToRun.id) setLogState((current) => ({
       ...current,
       loading: true,
       error: "",
@@ -2079,14 +2278,21 @@ export default function App() {
 
     try {
       let savedWorkflow;
-      if (workflowToRun.sourceFormat === "radish") {
-        if (radishEditorState?.document?.dirty) {
-          const savedDocument = await radishEditorRef.current?.save?.();
+      if (workflowToRun.sourceFormat === "rattish") {
+        const session = documentSession(workflowToRun.id);
+        if (!session.rattishEditorStateRef.current?.document) {
+          const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflowToRun.id)}/document`));
+          const payload = await response.json();
+          if (!response.ok || !payload.document) throw new Error(payload.error || "Unable to load workflow.rattish before running.");
+          session.setRattishEditorState({ document: payload.document, error: "", loading: false, saving: false });
+        }
+        if (session.rattishEditorStateRef.current?.document?.dirty) {
+          const savedDocument = await saveWorkflowDocument(workflowToRun);
           if (!savedDocument) {
-            throw new Error("Save workflow.rad before running the workflow.");
+            throw new Error("Save workflow.rattish before running the workflow.");
           }
         }
-        savedWorkflow = workflowToRun;
+        savedWorkflow = { ...workflowToRun, expectedSourceRevision: documentSession(workflowToRun.id).rattishEditorStateRef.current?.document?.savedRevision };
       } else {
         savedWorkflow = dirtyWorkflow
           ? await saveWorkflow(dirtyWorkflow.workflow, dirtyWorkflow.revision)
@@ -2096,7 +2302,7 @@ export default function App() {
         throw new Error("Unable to save workflow before running");
       }
       if (
-        workflowToRun.sourceFormat !== "radish" &&
+        workflowToRun.sourceFormat !== "rattish" &&
         (!dirtyWorkflow ||
           dirtyWorkflowsRef.current.get(workflowToRun.id)?.revision === dirtyWorkflow.revision)
       ) {
@@ -2167,6 +2373,7 @@ export default function App() {
   }
 
   async function executeWorkflowRun(workflow, triggerContext = {}, parameters = {}) {
+    if (runStatesRef.current[workflow.id]?.running) return;
     setRunPreview(null);
     setRunState({ running: true, workflowId: workflow.id, error: "", result: null });
     setLogState((current) => ({
@@ -2204,6 +2411,7 @@ export default function App() {
         return;
       }
       const runRequest = workflowRunRequest(workflow.id, {
+        ...(workflow.sourceFormat === "rattish" ? { background: true, expectedRevision: workflow.expectedSourceRevision } : {}),
         dryRun: false,
         triggerContext,
         parameters,
@@ -2214,6 +2422,13 @@ export default function App() {
         throw new Error(payload.error || `Workflow API returned ${response.status}`);
       }
       setRunState({ running: false, workflowId: workflow.id, error: "", result: payload.run });
+      if (["running", "queued"].includes(payload.run?.status)) {
+        recordWorkflowRun(workflow, payload.run);
+        void runRegistry.refresh();
+        void loadRunLogs(workflow.id);
+        setLogState(current => ({ ...current, loading: false }));
+        return;
+      }
       const nextRunStatus =
         payload.run?.status === "stopped"
           ? "Stopped"
@@ -2233,7 +2448,7 @@ export default function App() {
             : candidate,
         ),
       );
-      setLogState({
+      if (!pinnedRunRef.current && activeWorkflowIdRef.current === workflow.id) setLogState({
         loading: false,
         error: "",
         text: payload.run?.logText ?? "",
@@ -2303,38 +2518,6 @@ export default function App() {
       setTopBarNotice({
         type: "error",
         message: error instanceof Error ? error.message : "Unable to record approval",
-      });
-    }
-  }
-
-  async function stopWorkflowRun(workflow) {
-    if (!workflow?.id) return;
-
-    setRunState((current) => ({ ...current, stopping: true }));
-    try {
-      const response = await fetch(
-        apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/stop`),
-        { method: "POST" },
-      );
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `Workflow API returned ${response.status}`);
-      }
-      setTopBarNotice({
-        type: payload.stopped ? "success" : "error",
-        message: payload.stopped ? "Stopping workflow runs..." : payload.message || "No active run",
-      });
-      setRunState((current) => ({
-        ...current,
-        stopping: false,
-      }));
-      loadWorkflows({ silent: true });
-      loadRunLogs(workflow.id, { silent: true });
-    } catch (error) {
-      setRunState((current) => ({ ...current, stopping: false }));
-      setTopBarNotice({
-        type: "error",
-        message: error instanceof Error ? error.message : "Unable to stop workflow run",
       });
     }
   }
@@ -2504,7 +2687,7 @@ export default function App() {
       const nextWorkflow = summarizeWorkflow(payload.workflow, dataDir);
       deletedWorkflowIdsRef.current.delete(nextWorkflow.id);
       setWorkflows((current) => [...current, nextWorkflow]);
-      setActiveWorkflowId(nextWorkflow.id);
+      openWorkflowGraph(nextWorkflow);
       setCreateDialogOpen(false);
       setCreateState({ saving: false, error: "" });
     } catch (error) {
@@ -2517,6 +2700,44 @@ export default function App() {
 
   async function validateWorkflow(workflow) {
     try {
+      if (workflow?.sourceFormat === "rattish") {
+        const session = documentSession(workflow.id);
+        let document = session.rattishEditorStateRef.current?.document;
+        if (!document) {
+          const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/document`));
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || `Editor API returned ${response.status}`);
+          document = session.rattishEditorStateRef.current?.document;
+          if (!document) {
+            const draft = loadWorkflowDraft(workflow.sourcePath);
+            document = draft ? { ...payload.document, source: draft.source, savedRevision: draft.savedRevision, savedSource: draft.savedSource, dirty: true } : payload.document;
+            session.setRattishEditorState({ document, error: "", loading: false, saving: false });
+          }
+        }
+        const source = document.source;
+        const requestId = ++session.rattishAnalysisRequestRef.current;
+        window.clearTimeout(session.rattishAnalysisTimerRef.current);
+        const response = await fetch(apiUrl(`/workflows/${encodeURIComponent(workflow.id)}/document/analyze`), {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }),
+        });
+        const payload = await response.json();
+        if (requestId !== session.rattishAnalysisRequestRef.current || session.rattishEditorStateRef.current?.document?.source !== source) return;
+        if (!response.ok) throw new Error(payload.error || `Analysis returned ${response.status}`);
+        session.setRattishEditorState(mergeRattishAnalysisState(session.rattishEditorStateRef.current, payload.document, source));
+        const diagnostics = [...(payload.document.diagnostics ?? []), ...(payload.document.preflight?.diagnostics ?? [])];
+        const errors = diagnostics.filter(item => item.severity === "error");
+        const warnings = diagnostics.filter(item => item.severity === "warning");
+        if (errors.length) {
+          setTopBarNotice({ type: "error", message: `${errors.length} validation error${errors.length === 1 ? "" : "s"}: ${errors[0].message}` });
+        } else if (!payload.document.runnable) {
+          setTopBarNotice({ type: "error", message: "Workflow is not runnable. Review Problems and add a runnable node if the graph is empty." });
+        } else if (warnings.length) {
+          setTopBarNotice({ type: "warning", message: `Workflow is valid with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}. Review Problems.` });
+        } else {
+          setTopBarNotice({ type: "success", message: "Workflow is valid" });
+        }
+        return;
+      }
       await persistWorkflow(summarizeWorkflow(workflow, dataDir));
       setTopBarNotice({ type: "success", message: "Workflow is valid" });
     } catch (error) {
@@ -2608,7 +2829,7 @@ export default function App() {
         const withoutRestored = current.filter((candidate) => candidate.id !== restored.id);
         return [...withoutRestored, restored];
       });
-      setActiveWorkflowId(restored.id);
+      openWorkflowGraph(restored);
       setHistoryState((current) => ({ ...current, loading: false, open: false }));
       setTopBarNotice({
         type: "success",
@@ -2627,7 +2848,7 @@ export default function App() {
   async function importWorkflow(file, options = {}) {
     if (!file) return false;
     try {
-      if (isTaskurottaFile(file)) {
+      if (isRaticodeFile(file)) {
         let projectRoot = options.projectRoot?.trim()
           || activeWorkflow?.projectRoot
           || activeProjectRoot;
@@ -2646,7 +2867,7 @@ export default function App() {
             grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(bundlePath) || undefined,
           }
           : { bundleContent: await fileToBase64(file), filename: file.name };
-        const previewResponse = await fetch(apiUrl("/radish/workflows/import/preview"), {
+        const previewResponse = await fetch(apiUrl("/rattish/workflows/import/preview"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(bundleRequest),
@@ -2658,10 +2879,10 @@ export default function App() {
         const preview = previewPayload.bundle;
         if (!window.confirm(
           `Import "${preview.workflowName}" into ${projectNameFromPath(projectRoot)}?\n\n`
-          + `${preview.files.length} workflow file${preview.files.length === 1 ? "" : "s"} will be added under .taskurotta.`,
+          + `${preview.files.length} workflow file${preview.files.length === 1 ? "" : "s"} will be added under .raticode.`,
         )) return false;
         const projectGrantId = window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined;
-        const importResponse = await fetch(apiUrl("/radish/workflows/import"), {
+        const importResponse = await fetch(apiUrl("/rattish/workflows/import"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...bundleRequest, projectRoot, projectGrantId }),
@@ -2678,7 +2899,7 @@ export default function App() {
         ]);
         setActiveProjectRoot(projectRoot);
         setRecentProjectRoots((current) => rememberRecentProject(current, projectRoot));
-        setActiveWorkflowId(imported.id);
+        openWorkflowGraph(imported);
         setStudioView("graph");
         setTopBarNotice({ type: "success", message: `Imported ${imported.name}` });
         return true;
@@ -2735,7 +2956,7 @@ export default function App() {
       const nextWorkflow = summarizeWorkflow(payload.workflow, dataDir);
       deletedWorkflowIdsRef.current.delete(nextWorkflow.id);
       setWorkflows((current) => [...current, nextWorkflow]);
-      setActiveWorkflowId(nextWorkflow.id);
+      openWorkflowGraph(nextWorkflow);
       setTopBarNotice({ type: "success", message: `Imported ${nextWorkflow.name}` });
       return true;
     } catch (error) {
@@ -2767,7 +2988,7 @@ export default function App() {
 
   async function exportWorkflow(workflow) {
     if (!workflow) return;
-    const defaultDirectory = workflow.sourceFormat === "radish" ? workflow.projectRoot : dataDir;
+    const defaultDirectory = workflow.sourceFormat === "rattish" ? workflow.projectRoot : dataDir;
     setExportDialog({
       directory: defaultDirectory || "",
       error: "",
@@ -2808,7 +3029,7 @@ export default function App() {
     if (!workflow || !directory.trim()) return;
     setExportDialog((current) => ({ ...current, error: "", saving: true }));
     try {
-      if (workflow.sourceFormat === "radish" && workflow.projectRoot) {
+      if (workflow.sourceFormat === "rattish" && workflow.projectRoot) {
         await discoverProjectWorkflows(workflow.projectRoot);
       }
       const outputPath = workflowBundlePath(directory, workflow);
@@ -2903,7 +3124,12 @@ export default function App() {
       }
 
       const remainingWorkflows = workflows.filter((candidate) => candidate.id !== workflow.id);
-      closeCodeFiles([workflow.sourcePath]);
+      closeCodeFiles([workflow.sourcePath, ...Object.entries(workflowTabs).filter(([, tab]) => tab.workflowId === workflow.id).map(([path]) => path)]);
+      saveWorkflowDraft(workflow.sourcePath, { dirty: false });
+      const deletedSession = documentSessionsRef.current.get(workflow.id);
+      if (deletedSession) { window.clearTimeout(deletedSession.analysisTimer.current); window.clearTimeout(deletedSession.metadataTimer.current); deletedSession.analysisRequest.current += 1; }
+      documentSessionsRef.current.delete(workflow.id);
+      setRattishSessions(current => withoutKey(current, workflow.id));
       setRecentCodePaths((current) => removeCodePath(current, workflow.sourcePath));
       setCodeNavigationRequest((current) =>
         current?.path === workflow.sourcePath ? null : current,
@@ -2915,8 +3141,8 @@ export default function App() {
         pendingProjectFileRef.current = null;
       }
       if (activeWorkflow?.id === workflow.id) {
-        radishEditorStateRef.current = null;
-        setRadishEditorState(null);
+        rattishEditorStateRef.current = null;
+        setRattishEditorState(null);
       }
       setWorkflows((current) => current.filter((candidate) => candidate.id !== workflow.id));
       setActiveWorkflowId((currentId) =>
@@ -3005,7 +3231,7 @@ export default function App() {
       const duplicated = summarizeWorkflow(payload.workflow, dataDir);
       deletedWorkflowIdsRef.current.delete(duplicated.id);
       setWorkflows((current) => [...current, duplicated]);
-      setActiveWorkflowId(duplicated.id);
+      openWorkflowGraph(duplicated);
       setTopBarNotice({ type: "success", message: `Duplicated ${workflow.name}` });
     } catch (error) {
       setTopBarNotice({
@@ -3032,7 +3258,7 @@ export default function App() {
     }
   }
 
-  const panelDocument = radishEditorState?.document;
+  const panelDocument = rattishEditorState?.document;
   const panelDiagnostics = [
     ...(panelDocument?.diagnostics ?? []),
     ...(panelDocument?.preflight?.diagnostics ?? []),
@@ -3043,13 +3269,150 @@ export default function App() {
   const panelRunEvents = logState.runEvents?.length
     ? logState.runEvents
     : panelRunResult?.runEvents ?? [];
-  const panelWorkflowId = activeWorkflow?.sourceFormat === "project"
+  const panelWorkflowId = pinnedRun?.workflowId || (activeWorkflow?.sourceFormat === "project"
     ? ""
-    : activeWorkflow?.id ?? "";
+    : activeWorkflow?.id ?? "");
   const panelProjectRoot = activeWorkflow?.projectRoot || activeProjectRoot || "";
+  const visibleRunRecords = [...runRegistry.records, ...Object.entries(runStatesById)
+    .filter(([id, state]) => state.running && !workflowRunSummary(runRegistry.records, id).active.length)
+    .map(([id]) => {
+      const workflow = workflows.find(item => item.id === id);
+      return { key: `submitting:${id}`, workflowId: id, workflowName: workflow?.name || id,
+        projectPath: workflow?.projectRoot || "", runId: "Awaiting runner acknowledgement", status: "submitting", unread: false };
+    })];
+
+  const editorWorkflowTabs = Object.fromEntries(Object.entries(workflowTabs).map(([path, tab]) => {
+    const target = workflows.find(item => item.id === tab.workflowId);
+    const dirty = Boolean(rattishSessions[tab.workflowId]?.document?.dirty);
+    const summary = workflowRunSummary(runRegistry.records, tab.workflowId);
+    const submitting = Boolean(runStatesById[tab.workflowId]?.running) && !summary.active.length;
+    const single = summary.active.length === 1 ? summary.active[0] : null;
+    const status = submitting ? "submitting" : summary.active[0]?.status || summary.latest?.status || "ready";
+    const action = submitting ? null : single && exactWorkflowRunStopPath(single) ? "stop" : summary.active.length || summary.unread.length ? "review" : "run";
+    return [path, { ...tab, name: target?.name ?? tab.name, dirty, status,
+      unread: summary.unread.length > 0, unreadFailure: summary.unreadFailures.length > 0,
+      statusLabel: `${status}${summary.active.length > 1 ? ` · ${summary.active.length} runs` : ""}${summary.unreadFailures.length ? " · Unread failure" : ""}`,
+      action, actionLabel: action === "stop" ? `Stop run ${single.runId}` : action === "review" ? "Review workflow runs" : dirty ? "Save and run" : "Run workflow" }];
+  }));
+
+  async function reviewWorkflowRun(record) {
+    let target = workflows.find(item => item.id === record.workflowId);
+    if (!target && record.projectPath) {
+      const payload = await openProjectAtPath(record.projectPath);
+      target = payload?.discovered?.find(item => item.id === record.workflowId);
+    }
+    if (!target) { setTopBarNotice({ type: "error", message: "This workflow is unavailable. Reopen its project to review the run." }); return; }
+    openWorkflowGraph(target);
+    if (record.status === "submitting") return;
+    if (record.queueRun) { runRegistry.review(record.key); return; }
+    setPinnedRun(record);
+    if (await loadRunLog(record.workflowId, record.runId)) runRegistry.review(record.key);
+    window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel", { detail: { tab: "timeline" } }));
+  }
+
+  async function stopExactWorkflowRun(workflow) {
+    const active = workflowRunSummary(runRegistry.records, workflow.id).active;
+    if (active.length !== 1 || !exactWorkflowRunStopPath(active[0])) { setRunsOpen(true); return; }
+    try { await runRegistry.stop(active[0]); }
+    catch (error) { setTopBarNotice({ type: "error", message: error.message }); }
+  }
+
+  async function handleWorkflowTabAction(tab, action) {
+    const target = workflows.find(item => item.id === tab.workflowId);
+    if (!target) return;
+    try {
+      if (action === "save") await saveWorkflowDocument(target);
+      if (action === "run") await runWorkflowNow(target);
+      if (action === "stop") await stopExactWorkflowRun(target);
+      if (action === "review") setRunsOpen(true);
+    } catch (error) { setTopBarNotice({ type: "error", message: error.message }); }
+  }
+
+  async function beforeCloseWorkflowViews(paths) {
+    for (const target of workflows) {
+      const views = codeOpenPaths.filter(path => path === target.sourcePath || workflowTabs[path]?.workflowId === target.id);
+      if (!views.some(path => paths.includes(path)) || views.some(path => !paths.includes(path))) continue;
+      if (documentSession(target.id).rattishEditorStateRef.current?.document?.dirty) {
+        const accepted = await new Promise(resolve => setWorkflowClosePrompt({ resolve, workflow: target, busy: false, error: "" }));
+        if (!accepted) return false;
+      }
+      const session = documentSession(target.id);
+      if ((session.rattishMetadataPendingRef.current || session.rattishMetadataSavingRef.current) && !await saveRattishMetadataNow(target.id)) return false;
+    }
+    return true;
+  }
+
+  function renderWorkflowGraph(tab, { visible, active }) {
+    const target = workflows.find(item => item.id === tab.workflowId);
+    const state = rattishSessions[tab.workflowId];
+    if (!target) return <div className="p-6" role="status">This workflow is unavailable. Open its project or refresh workflow discovery.<button type="button" onClick={() => loadWorkflows({ discoverProject: true, projectRoot: tab.projectRoot })}>Retry</button></div>;
+    const document = state?.document;
+    const reviewingRun = pinnedRun?.workflowId === target.id;
+    const snapshot = reviewingRun && logState.workflowId === target.id && logState.selectedRunId === pinnedRun.runId ? logState.graphSnapshot : null;
+    const currentSourceMatchesRun = target.sourceFormat !== "rattish" || Boolean(
+      document && !document.dirty && logState.workflowId === target.id
+      && logState.graphSnapshot?.sourceFingerprint === document.sourceRevision,
+    );
+    const graphRunState = runStatesById[target.id] || { running: false, error: "", result: null };
+    return <WorkflowGraphPane
+      active={active} visible={visible} workflow={target}
+      saveState={saveStatesByWorkflowId[target.id] || (dirtyWorkflowsById[target.id] ? { status: "saving", error: "" } : undefined)}
+      onRetrySave={() => retryWorkflowSave(target.id)}
+      onSource={() => editWorkflowFile(target)}
+      onReveal={() => selectRecentProject(target.projectRoot)}
+    >{toolbarTarget => <>
+      {reviewingRun ? <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-xs" role="status">
+        <span>{snapshot ? `Run snapshot · ${pinnedRun.runId}` : "This run has no saved graph snapshot. The current graph is shown without historical node status."}</span>
+        <button type="button" className="ml-auto rounded px-2 py-1 text-brand hover:bg-slate-100" onClick={() => setPinnedRun(null)}>Current graph</button>
+      </div> : <WorkflowHealthPanel doctorState={doctorState} workflow={target} />}
+      {state?.loading ? <div className="p-4" role="status">Loading workflow…</div> : null}
+      {state?.error ? <div className="p-3 text-red-700" role="alert">{state.error}<button type="button" onClick={() => reloadActiveRattishDocument(target.sourcePath, target)}>Retry</button></div> : null}
+      <Suspense fallback={<p role="status" className="p-4 text-sm">Loading graph...</p>}><DagCanvas
+        dataDir={dataDir} settings={settings} usedAgentIds={usedAgentIds}
+        workflow={snapshot ? autoLayoutWorkflow({ ...target, ...snapshot }) : rattishGraphWorkflow(target, document)} rattishDocument={snapshot ? null : document}
+        active={active}
+        readOnly={reviewingRun || (target.sourceFormat === "rattish" && !rattishGraphIsValid(document))}
+        toolbarTarget={toolbarTarget}
+        canvasOverlay={document && !rattishGraphIsValid(document) && !reviewingRun ? (
+          <div className="w-full max-w-md rounded-xl bg-white p-6 text-center text-ink shadow-panel" role="alert">
+            <AlertCircle size={24} className="mx-auto mb-3 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+            <p className="text-base font-semibold">Unable to render the graph</p>
+            <p className="mt-2 text-sm text-muted">The workflow definition is invalid. Open the workflow to correct it, or ask Rem to help.</p>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              <button type="button" className="rounded-md bg-brand px-4 py-2 text-sm font-medium text-white hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => editWorkflowFile(target)}>Open workflow</button>
+              <button type="button" className="rounded-md border border-line px-4 py-2 text-sm font-medium hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand" onClick={() => window.dispatchEvent(new CustomEvent("gofer:rem-context", { detail: {
+                mode: "ask", autoSend: true, projectRoot: target.projectRoot, path: target.sourcePath,
+                version: "Current workflow source, including unsaved edits",
+                endLine: (document.source || "").split("\n").length,
+                text: `${document.source || ""}\n\nValidation diagnostics:\n${JSON.stringify(document.diagnostics || [], null, 2)}`,
+                draft: `Fix the invalid workflow definition in ${target.sourcePath} so the graph can render. Use the attached current source and validation diagnostics, preserve the workflow's intent, and validate the changes. Do not execute the workflow.`,
+              } }))}>Ask Rem to fix</button>
+            </div>
+          </div>
+        ) : null}
+        logState={(reviewingRun ? snapshot : currentSourceMatchesRun) && target.id === (pinnedRun?.workflowId || activeWorkflow?.id) ? logState : { runs: logState.workflowId === target.id ? logState.runs : [], runEvents: [], runNodes: {} }}
+        approvalState={target.id === activeWorkflow?.id ? approvalState : { approvals: [] }}
+        notice={target.id === activeWorkflow?.id ? (runState.error ? { type: "error", message: runState.error } : topBarNotice) : {}}
+        runState={reviewingRun ? { running: false, error: "", result: null } : currentSourceMatchesRun ? graphRunState : { ...graphRunState, result: null }}
+        stopDisabled={workflowRunSummary(runRegistry.records, target.id).active.length !== 1 || !exactWorkflowRunStopPath(workflowRunSummary(runRegistry.records, target.id).active[0])}
+        stopTitle="Stop this run"
+        onLoadLatestLog={() => loadLatestLog(target.id)}
+        onSelectRunLog={(runId) => { setPinnedRun({ workflowId: target.id, runId }); void loadRunLog(target.id, runId); }}
+        onStopRunLog={(runId) => stopWorkflowRunLog(target.id, runId)}
+        onResumeRunLog={(runId, options) => resumeWorkflowRunLog(target.id, runId, options)}
+        onReplayRunLog={(runId, triggerId) => replayWorkflowTriggerLog(target.id, runId, triggerId)}
+        onSettingChange={changeSetting} onImportWorkflow={importWorkflow}
+        onExportWorkflow={() => exportWorkflow(target)} onRunWorkflow={() => runWorkflowNow(target)}
+        onValidateWorkflow={() => validateWorkflow(target)} onStopWorkflow={() => stopExactWorkflowRun(target)}
+        onDecideApproval={(approval, decision, notes, by) => decideApproval(target, approval, decision, notes, by)}
+        onRattishMutation={(mutations) => mutateActiveRattish(mutations, target)}
+        onWorkflowChange={(next) => target.sourceFormat === "rattish" ? updateRattishGraphMetadata(next, target) : updateActiveWorkflow(next)}
+      /></Suspense>
+    </>}</WorkflowGraphPane>;
+  }
 
   function revealPanelDiagnostic(diagnostic) {
-    if (!activeWorkflow || activeWorkflow.sourceFormat !== "radish") return;
+    if (!activeWorkflow || activeWorkflow.sourceFormat !== "rattish") return;
     setCodeOpenPaths((current) => current.includes(activeWorkflow.sourcePath)
       ? current
       : [...current, activeWorkflow.sourcePath]);
@@ -3057,13 +3420,13 @@ export default function App() {
     setCodeEditorOpened(true);
     setStudioView("code");
     window.requestAnimationFrame(() => {
-      radishEditorRef.current?.revealDiagnostic?.(diagnostic);
+      rattishEditorRef.current?.revealDiagnostic?.(diagnostic);
     });
   }
 
   function runGlobalMenuAction(action) {
     if (action.startsWith("edit.") || action.startsWith("selection.")) {
-      radishEditorRef.current?.runCommand?.(action);
+      rattishEditorRef.current?.runCommand?.(action);
       return;
     }
     if (action === "file.new") {
@@ -3072,7 +3435,7 @@ export default function App() {
     }
     if (action === "file.open") void openFile();
     if (action === "file.openFolder") void openProjectFolder();
-    if (action === "file.save") void radishEditorRef.current?.saveActive?.();
+    if (action === "file.save") void rattishEditorRef.current?.saveActive?.();
     if (action === "file.close") closeActiveCodeFile();
     if (action === "view.graph") changeStudioView("graph");
     if (action === "view.code") changeStudioView("code");
@@ -3108,7 +3471,41 @@ export default function App() {
       <div aria-atomic="true" aria-live="assertive" className="sr-only" role="alert">
         {runState.error}
       </div>
+      {workflowClosePrompt ? <Dialog title="Save workflow changes?" onClose={() => {
+        if (workflowClosePrompt.busy) return;
+        workflowClosePrompt.resolve(false); setWorkflowClosePrompt(null);
+      }}>
+        <p>{workflowClosePrompt.workflow.name} has unsaved source changes.</p>
+        {workflowClosePrompt.error ? <p role="alert" className="mt-2 text-sm text-red-700">{workflowClosePrompt.error}</p> : null}
+        <div className="mt-4 flex gap-3">
+          <button type="button" disabled={workflowClosePrompt.busy} onClick={() => { workflowClosePrompt.resolve(false); setWorkflowClosePrompt(null); }}>Cancel</button>
+          <button type="button" disabled={workflowClosePrompt.busy} onClick={async () => {
+            const prompt = workflowClosePrompt;
+            setWorkflowClosePrompt(current => ({ ...current, busy: true, error: "" }));
+            await reloadActiveRattishDocument(prompt.workflow.sourcePath, prompt.workflow);
+            if (documentSession(prompt.workflow.id).rattishEditorStateRef.current?.document?.dirty !== false) {
+              setWorkflowClosePrompt(current => ({ ...current, busy: false, error: "Unable to reload workflow.rattish. Your changes are still open." }));
+              return;
+            }
+            setWorkflowClosePrompt(null);
+            prompt.resolve(true);
+          }}>Discard</button>
+          <button type="button" disabled={workflowClosePrompt.busy} onClick={async () => {
+            const prompt = workflowClosePrompt;
+            setWorkflowClosePrompt(current => ({ ...current, busy: true, error: "" }));
+            try {
+              const saved = await saveWorkflowDocument(prompt.workflow);
+              if (!saved) throw new Error("Unable to save workflow.rattish. Your changes are still open.");
+              setWorkflowClosePrompt(null); prompt.resolve(true);
+            } catch (error) { setWorkflowClosePrompt(current => ({ ...current, busy: false, error: error.message })); }
+          }}>Save</button>
+        </div>
+      </Dialog> : null}
       <GlobalToolbar
+        projectError={projectError}
+        onOpenRuns={() => setRunsOpen(current => !current)}
+        runSummary={workflowRunSummary(visibleRunRecords)}
+        projectRoot={activeProjectRoot}
         activeCodeDocument={activeCodeDocumentState}
         activeCodePath={activeCodePath}
         assistantPaneVisible={assistantPaneVisible}
@@ -3129,8 +3526,10 @@ export default function App() {
         onMenuAction={runGlobalMenuAction}
       />
       <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-      {projectPaneVisible ? <WorkflowSidebar
-        activeWorkflow={activeWorkflow}
+      {<WorkflowSidebar
+        activity={sidebarActivity}
+        paneVisible={projectPaneVisible}
+        activeWorkflow={browsingWorkspace}
         activeWorkflowId={activeWorkflow?.id}
         loading={loadState.loading}
         openingProjectRoot={openingProjectRoot}
@@ -3141,13 +3540,16 @@ export default function App() {
         width={workflowPaneWidth}
         newFileRequest={newCodeFileRequest}
         recentProjectRoots={recentProjectRoots}
+        onOpenProject={() => runGlobalMenuAction("file.openFolder")}
         onCreate={() => {
           setCreateState({ saving: false, error: "" });
           setCreateDialogOpen(true);
         }}
         onDeleteWorkflow={deleteWorkflow}
         onDuplicateWorkflow={duplicateWorkflow}
-        onCodeFileOpen={openCodeFile}
+        onCodeFileOpen={(...args) => { openCodeFile(...args); closeCompactPane(); }}
+        selectedSwarmId={selectedSwarm?.projectRoot === swarmProjectRoot ? selectedSwarm.id : null}
+        onOpenSwarm={(id, agentId) => { setSelectedSwarm({ id, agentId, projectRoot: swarmProjectRoot }); closeCompactPane(); }}
         activeCodePath={activeCodePath}
         onCloseCodeFile={closeActiveCodeFile}
         onCodeFilesystemChange={handleCodeFilesystemChange}
@@ -3175,135 +3577,63 @@ export default function App() {
             width: workflowPaneWidth,
           })
         }
-        onSelect={setActiveWorkflowId}
+        onSelect={(id) => { openWorkflowGraph(workflows.find(item => item.id === id)); closeCompactPane(); }}
+        onActivityChange={(next) => { setSidebarActivity(next); setProjectPaneVisible(true); }}
         onViewChange={changeStudioView}
-      /> : null}
+      />}
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-x border-line bg-[#f9fbfd]">
-        {activeWorkflow ? (
-          <>
-            {studioView === "graph" ? <TopBar
-              saveState={
-                saveStatesByWorkflowId[activeWorkflow.id] ??
-                (dirtyWorkflowsById[activeWorkflow.id]
-                  ? { status: "saving", error: "" }
-                  : undefined)
-              }
-              workflow={activeWorkflow}
-              view={studioView}
-              onGraphToolbarTargetChange={setGraphToolbarTarget}
-              onRetrySave={() => retryWorkflowSave(activeWorkflow.id)}
-            /> : null}
-            {studioView === "graph" ? (
-              <WorkflowHealthPanel doctorState={doctorState} workflow={activeWorkflow} />
+            {(workflowTabs[activeCodePath] || activeCodePath === activeWorkflow?.sourcePath) && rattishEditorState?.recoveryWarning ? (
+              <div role="status" className="shrink-0 border-b border-line bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-100">
+                <strong>Draft recovery: </strong>{rattishEditorState.recoveryWarning}
+              </div>
             ) : null}
-            <div className={`${studioView === "graph" ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
-              <DagCanvas
-              dataDir={dataDir}
-              logState={logState}
-              approvalState={approvalState}
-              notice={runState.error ? { type: "error", message: runState.error } : topBarNotice}
-              runState={runState}
-              workflow={graphWorkflow}
-              toolbarTarget={graphToolbarTarget}
-              radishDocument={radishEditorState?.document}
-              settings={settings}
-              usedAgentIds={usedAgentIds}
-              onLoadLatestLog={() => loadLatestLog(activeWorkflow.id)}
-              onSelectRunLog={(runId) => loadRunLog(activeWorkflow.id, runId)}
-              onStopRunLog={(runId) => stopWorkflowRunLog(activeWorkflow.id, runId)}
-              onResumeRunLog={(runId, options) =>
-                resumeWorkflowRunLog(activeWorkflow.id, runId, options)
-              }
-              onReplayRunLog={(runId, triggerId) =>
-                replayWorkflowTriggerLog(activeWorkflow.id, runId, triggerId)
-              }
-              onSettingChange={changeSetting}
-              onImportWorkflow={importWorkflow}
-              onExportWorkflow={() => exportWorkflow(activeWorkflow)}
-              onRunWorkflow={runWorkflowNow}
-              onValidateWorkflow={() => {
-                if (activeWorkflow.sourceFormat !== "radish") {
-                  validateWorkflow(activeWorkflow);
-                  return;
-                }
-                const document = radishEditorStateRef.current?.document;
-                const errors = [
-                  ...(document?.diagnostics ?? []),
-                  ...(document?.preflight?.diagnostics ?? []),
-                ].filter((item) => item.severity === "error");
-                setTopBarNotice(
-                  errors.length
-                    ? { type: "error", message: errors[0].message }
-                    : document?.runnable
-                      ? { type: "success", message: "Radish compiles and preflight is ready" }
-                      : { type: "error", message: "Add at least one runnable node" },
-                );
-              }}
-              onStopWorkflow={stopWorkflowRun}
-              onDecideApproval={(approval, decision, notes, by) =>
-                decideApproval(activeWorkflow, approval, decision, notes, by)
-              }
-                onRadishMutation={mutateActiveRadish}
-                onWorkflowChange={
-                  activeWorkflow.sourceFormat === "radish"
-                    ? updateRadishGraphMetadata
-                    : updateActiveWorkflow
-                }
-              />
-            </div>
-          </>
-        ) : (
-          <>
-            {studioView === "graph" ? (
-              <TopBar view="graph" />
+        {selectedSwarm?.projectRoot === swarmProjectRoot ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
+        <div className={`${selectedSwarm?.projectRoot === swarmProjectRoot ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
+            {!workflowTabs[activeCodePath] && (activeCodePath || sidebarActivity !== "workflows") && topBarNotice?.message ? (
+              <div role={topBarNotice.type === "error" ? "alert" : "status"} className="shrink-0 border-b border-line bg-surface px-3 py-2 text-xs text-ink break-words">
+                {topBarNotice.message}
+              </div>
             ) : null}
-            <EmptyWorkspace
-              error={loadState.error}
-              loading={loadState.loading}
-              notice={topBarNotice}
-              projectRoot={panelProjectRoot}
-              onCreate={() => {
-                setCreateState({ saving: false, error: "" });
-                setCreateDialogOpen(true);
-              }}
-              onImport={importWorkflow}
-              onOpenAssistant={() => {
-                setAssistantPaneVisible(true);
-                setAssistantFocusRequest((current) => current + 1);
-              }}
-              onOpenProject={() => void openProjectFolder()}
-              onOpenSettings={() => setSettingsOpen(true)}
-              onRefresh={() => loadWorkflows({ discoverProject: true })}
-            />
-          </>
-        )}
-        {codeEditorOpened ? (
-          <div className={`${studioView === "code" ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
             <CodeWorkspace
-              active={studioView === "code"}
+              active={selectedSwarm?.projectRoot !== swarmProjectRoot}
               activePath={activeCodePath}
               browserTabs={browserTabs}
               navigationRequest={codeNavigationRequest}
-              ref={radishEditorRef}
+              ref={rattishEditorRef}
               openPaths={codeOpenPaths}
               previewPath={previewCodePath}
               recentPaths={recentCodePaths}
-              radishDocument={radishEditorState?.document}
-              radishDirty={Boolean(radishEditorState?.document?.dirty)}
+              emptyContent={sidebarActivity === "workflows" ? <EmptyWorkspace
+                error={loadState.error} loading={loadState.loading} notice={topBarNotice} projectRoot={activeProjectRoot}
+                onCreate={() => { setCreateState({ saving: false, error: "" }); setCreateDialogOpen(true); }}
+                onImport={importWorkflow} onOpenAssistant={() => { setAssistantPaneVisible(true); setAssistantFocusRequest(value => value + 1); }}
+                onOpenProject={() => void openProjectFolder()} onOpenSettings={() => setSettingsOpen(true)}
+                onRefresh={() => loadWorkflows({ discoverProject: true })}
+              /> : undefined}
+              onOpenGraph={(path) => openWorkflowGraph(workflows.find(item => item.sourcePath === path))}
+              workflowTabs={editorWorkflowTabs}
+              renderWorkflowTab={renderWorkflowGraph}
+              onWorkflowTabAction={handleWorkflowTabAction}
+              onDuplicateWorkflowTab={duplicateWorkflowTab}
+              onBeforeCloseWorkflowTabs={beforeCloseWorkflowViews}
+              rattishDocuments={Object.fromEntries(workflows.filter(item => item.sourcePath && rattishSessions[item.id]).map(item => [item.sourcePath, rattishSessions[item.id]]))}
+              onSaveRattishDocument={(path) => saveWorkflowDocument(workflows.find(item => item.sourcePath === path))}
+              rattishDocument={rattishEditorState?.document}
+              rattishDirty={Boolean(rattishEditorState?.document?.dirty)}
               theme={theme}
               settings={settings}
               workflow={codeWorkspaceWorkflow}
-              onActivePathChange={setActiveCodePath}
+              onActivePathChange={activateEditorPath}
               onActiveDocumentStateChange={setActiveCodeDocumentState}
               onBrowserStateChange={updateBrowserTab}
               onClosePath={closeCodeFile}
               onClosePaths={closeCodeFiles}
               saveBeforeClosePaths={[...terminalEditorRequestsRef.current.keys()]}
-              onDocumentStateChange={(nextState) => {
-                radishEditorStateRef.current = nextState;
-                setRadishEditorState(nextState);
-                if (nextState?.document?.dirty) pinCodeFile(codeWorkspaceWorkflow.sourcePath);
+              onDocumentStateChange={(nextState, path) => {
+                const target = workflows.find(item => item.sourcePath === path) ?? codeWorkspaceWorkflow;
+                documentSession(target.id).setRattishEditorState(nextState);
+                if (nextState?.document?.dirty) pinCodeFile(target.sourcePath);
               }}
               onNewFile={() => setNewCodeFileRequest((current) => current + 1)}
               onOpenBrowser={(options) => openIntegratedBrowser(undefined, options)}
@@ -3313,13 +3643,14 @@ export default function App() {
               onOpenPath={(path) => void openRecentCodeFile(path)}
               onOpenPathsChange={setCodeOpenPaths}
               onPinPath={pinCodeFile}
-              onRadishContentChange={scheduleRadishAnalysis}
-              onRadishDiscard={reloadActiveRadishDocument}
-              onRadishSaved={refreshRadishAfterFileSave}
+              onRattishContentChange={scheduleRattishAnalysis}
+              onRattishDiscard={reloadActiveRattishDocument}
+              onRattishSaved={refreshRattishAfterFileSave}
               onSettingChange={changeSetting}
             />
-          </div>
-        ) : null}
+        </div>
+        {runsOpen ? <RunSummary records={visibleRunRecords} projectPath={activeProjectRoot} onReview={reviewWorkflowRun} onStop={runRegistry.stop} onClose={() => setRunsOpen(false)} onRefresh={runRegistry.refresh} loading={runRegistry.loading} connectionError={runRegistry.error} /> : null}
+        {pinnedRun ? <div className="flex items-center justify-between border-t border-line px-3 py-1 text-[11px] text-muted"><span className="truncate">Run logs · {pinnedRun.workflowName} · {pinnedRun.runId}</span><button type="button" onClick={() => setPinnedRun(null)}>Unpin logs</button></div> : null}
         <UnifiedBottomPanel
           diagnostics={panelDiagnostics}
           onSettingChange={changeSetting}
@@ -3389,6 +3720,7 @@ export default function App() {
           recentProjectRoots={recentProjectRoots}
           width={chatPaneWidth}
           activeWorkflowId={activeWorkflow?.id}
+          activeProjectRoot={activeProjectRoot}
           workflow={activeWorkflow}
           workflows={workflows}
           onOpenMarkdownLink={(href, projectRoot) => openMarkdownFileLink(
@@ -3488,7 +3820,7 @@ export default function App() {
 
 export function loadTextZoom(storage = globalThis.window?.localStorage) {
   try {
-    const stored = Number(storage?.getItem(TEXT_ZOOM_STORAGE_KEY));
+    const stored = Number(brandCompat.readBrandedStorage(storage, TEXT_ZOOM_STORAGE_KEY));
     return Number.isFinite(stored) && stored
       ? clampNumber(stored, TEXT_ZOOM_MIN, TEXT_ZOOM_MAX)
       : 100;
@@ -3635,7 +3967,7 @@ export function summarizeWorkflow(workflow, dataDir = "") {
       agents: workflow.agents ?? {},
       nodes: workflow.nodes ?? [],
       edges: workflow.edges ?? [],
-      description: workflow.description || `Invalid ${workflow.sourceFormat === "radish" ? "Radish" : "workflow TOML"}: ${workflow.validationError}`,
+      description: workflow.description || `Invalid ${workflow.sourceFormat === "rattish" ? "Rattish" : "workflow TOML"}: ${workflow.validationError}`,
       status: "Error",
       tags: ["error", "invalid"],
     };
@@ -3658,10 +3990,10 @@ export function summarizeWorkflow(workflow, dataDir = "") {
   };
 }
 
-export function radishGraphWorkflow(workflow, document) {
+export function rattishGraphWorkflow(workflow, document) {
   if (
     !workflow ||
-    workflow.sourceFormat !== "radish" ||
+    workflow.sourceFormat !== "rattish" ||
     !document?.graph ||
     document.workflowId !== workflow.id
   ) {
@@ -3692,8 +4024,8 @@ export function radishGraphWorkflow(workflow, document) {
       },
       x: positions[node.id]?.x ?? 0,
       y: positions[node.id]?.y ?? 0,
-      radishStatus: node.status,
-      radish: node,
+      rattishStatus: node.status,
+      rattish: node,
     };
   });
   const edges = (document.graph.edges ?? []).map((edge) => ({
@@ -3734,7 +4066,7 @@ export function radishGraphWorkflow(workflow, document) {
     ...(document.graph.edges ?? [])
       .filter((edge) => edge.status !== "valid")
       .map((edge) => ({
-        id: "RADISH_ROUTE_UNRESOLVED",
+        id: "RATTISH_ROUTE_UNRESOLVED",
         message: `Route target ${edge.to} is unresolved.`,
         severity: "error",
         subject: `edge:${edge.id}`,
@@ -3859,9 +4191,11 @@ export function workflowPlanRequest(workflowId, triggerContext = {}, parameters 
 
 export function workflowRunRequest(
   workflowId,
-  { dryRun = false, triggerContext = {}, parameters = {} } = {},
+  { dryRun = false, triggerContext = {}, parameters = {}, background = false, expectedRevision } = {},
 ) {
   const body = { dryRun, triggerContext };
+  if (background) body.background = true;
+  if (expectedRevision) body.expectedRevision = expectedRevision;
   if (Object.keys(parameters ?? {}).length > 0) {
     body.inputs = parameters;
   }
@@ -4005,8 +4339,60 @@ function pathMatchesChange(path, changedPath, isDirectory) {
   return normalizedPath === normalizedChanged || normalizedPath.startsWith(`${normalizedChanged}/`);
 }
 
+export function useResponsivePanes() {
+  const [compact, setCompact] = useState(() => (globalThis.window?.innerWidth ?? 1280) < 1000);
+  const compactRef = useRef(compact);
+  compactRef.current = compact;
+  const [desktopProjectVisible, setDesktopProjectVisible] = useState(true);
+  const [desktopAssistantVisible, setDesktopAssistantVisible] = useState(true);
+  const [compactPane, setCompactPane] = useState("");
+  useEffect(() => {
+    const resize = () => setCompact(window.innerWidth < 1000);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+  useEffect(() => setCompactPane(""), [compact]);
+  const setProjectPaneVisible = useCallback((next) => {
+    if (!compactRef.current) { setDesktopProjectVisible(next); return; }
+    setCompactPane((current) => {
+      const visible = typeof next === "function" ? next(current === "project") : next;
+      return visible ? "project" : current === "project" ? "" : current;
+    });
+  }, []);
+  const setAssistantPaneVisible = useCallback((next) => {
+    if (!compactRef.current) { setDesktopAssistantVisible(next); return; }
+    setCompactPane((current) => {
+      const visible = typeof next === "function" ? next(current === "assistant") : next;
+      return visible ? "assistant" : current === "assistant" ? "" : current;
+    });
+  }, []);
+  return {
+    projectPaneVisible: compact ? compactPane === "project" : desktopProjectVisible,
+    assistantPaneVisible: compact ? compactPane === "assistant" : desktopAssistantVisible,
+    setProjectPaneVisible,
+    setAssistantPaneVisible,
+    closeCompactPane: () => setCompactPane(""),
+  };
+}
+
+export function WorkflowGraphPane({ workflow, active, visible, saveState, onRetrySave, onSource, onReveal, children }) {
+  const [toolbarTarget, setToolbarTarget] = useState(null);
+  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden" aria-label={`${workflow.name} graph`} data-graph-active={active} data-graph-visible={visible}>
+    <TopBar workflow={workflow} view="graph" saveState={saveState} onGraphToolbarTargetChange={setToolbarTarget} onRetrySave={onRetrySave} />
+    <div className="flex min-w-0 shrink-0 items-center gap-3 border-b border-line px-3 py-1.5 text-xs [&>button]:shrink-0 [&>button]:whitespace-nowrap">
+      <span className="min-w-0 flex-1 truncate" title={workflow.sourcePath}>{workflow.sourcePath}</span>
+      <button type="button" onClick={onSource}>Source</button>
+      <button type="button" onClick={onReveal}>Reveal in project</button>
+    </div>
+    {children(toolbarTarget)}
+  </section>;
+}
+
 export function WorkflowSidebar({
   openingProjectRoot = "",
+  paneVisible = true,
+  activity,
+  onActivityChange,
   activeCodePath,
   activeWorkflow,
   activeWorkflowId,
@@ -4018,9 +4404,12 @@ export function WorkflowSidebar({
   newFileRequest,
   recentProjectRoots,
   onCodeFileOpen,
+  onOpenSwarm,
+  selectedSwarmId,
   onCloseCodeFile,
   onCodeFilesystemChange,
   onCreate,
+  onOpenProject,
   onDeleteWorkflow,
   onDuplicateWorkflow,
   onEditWorkflowFile,
@@ -4032,7 +4421,6 @@ export function WorkflowSidebar({
   onResizeStart,
   onRunWorkflow,
   onSelect,
-  onViewChange,
   width,
 }) {
   const [collapsedGroups, setCollapsedGroups] = useState({});
@@ -4042,8 +4430,8 @@ export function WorkflowSidebar({
   const [renamingProjectRoot, setRenamingProjectRoot] = useState("");
   const [projectLabelDraft, setProjectLabelDraft] = useState("");
   const workflowGroups = useMemo(
-    () => groupWorkflowsByProject(workflows, projectLabels),
-    [projectLabels, workflows],
+    () => groupWorkflowsByProject((workflows ?? []).filter((item) => !activeWorkflow?.projectRoot || item.projectRoot === activeWorkflow.projectRoot), projectLabels),
+    [activeWorkflow?.projectRoot, projectLabels, workflows],
   );
   const recentProjects = useMemo(
     () => mergeRecentProjects([], recentProjectRoots ?? []).map((root) => ({
@@ -4052,7 +4440,9 @@ export function WorkflowSidebar({
     })),
     [projectLabels, recentProjectRoots],
   );
-  const canOpenCode = true;
+  const [localActivity, setLocalActivity] = useState(() => settings?.general?.initialActivity || (view === "code" ? "files" : "workflows"));
+  const selectedActivity = activity || localActivity;
+  const selectActivity = (next) => { setLocalActivity(next); onActivityChange?.(next); };
 
   useEffect(() => {
     try {
@@ -4130,9 +4520,10 @@ export function WorkflowSidebar({
   return (
     <aside
       className="studio-sidebar relative flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-line bg-white"
-      style={{ width }}
+      style={{ width: paneVisible ? width : 41 }}
     >
       <div
+        hidden={!paneVisible}
         aria-label="Resize workflows pane"
         aria-orientation="vertical"
         aria-valuemax={420}
@@ -4141,19 +4532,19 @@ export function WorkflowSidebar({
         aria-valuetext={`${width} pixels wide`}
         className="absolute right-[-3px] top-0 z-20 h-full w-1.5 cursor-col-resize transition hover:bg-brand/40"
         role="separator"
-        tabIndex={0}
+        tabIndex={paneVisible ? 0 : -1}
         title="Resize workflows pane"
         onKeyDown={onResizeKeyDown}
         onPointerDown={onResizeStart}
       />
-      <div className="px-3.5 pb-2 pt-3.5">
+      <div className={`px-3.5 pb-2 pt-3.5 ${paneVisible ? "" : "hidden"}`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <TaskurottaMark className="h-10 w-10" />
+            <RaticodeMark className="h-10 w-10" />
             <div>
-              <h1 className="text-[13px] font-semibold leading-tight">Taskurotta</h1>
+              <h1 className="text-[13px] font-semibold leading-tight">Raticode</h1>
               <p className="text-[11px] leading-tight text-muted">
-                {view === "code" ? "Project files" : "Workflow studio"}
+                Project workspace
               </p>
             </div>
           </div>
@@ -4167,84 +4558,56 @@ export function WorkflowSidebar({
           </button>
         </div>
 
-        <div
-          aria-label="Studio view"
-          className="mt-3 flex h-8 items-center gap-0.5 rounded-lg bg-slate-100 p-0.5"
-          role="tablist"
-        >
-          <button
-            aria-selected={view === "graph"}
-            className={`flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition ${
-              view === "graph"
-                ? "bg-white text-ink shadow-sm"
-                : "text-muted hover:text-ink"
-            }`}
-            role="tab"
-            type="button"
-            onClick={() => onViewChange?.("graph")}
-          >
-            <Waypoints aria-hidden="true" className={view === "graph" ? "text-brand" : ""} size={13} />
-            Graph
-          </button>
-          <button
-            aria-disabled={!canOpenCode}
-            aria-selected={view === "code"}
-            className={`flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition ${
-              view === "code"
-                ? "bg-white text-ink shadow-sm"
-                : canOpenCode
-                  ? "text-muted hover:text-ink"
-                  : "cursor-not-allowed text-muted opacity-45"
-            }`}
-            disabled={!canOpenCode}
-            role="tab"
-            title={canOpenCode ? "Open code view" : "Code view is available for Radish workflows"}
-            type="button"
-            onClick={() => onViewChange?.("code")}
-          >
-            <Code2 aria-hidden="true" className={view === "code" ? "text-brand" : ""} size={13} />
-            Code
-          </button>
-        </div>
+
       </div>
 
-      {view === "graph" ? <div className="px-3.5 pb-2">
-        <button
-          className="flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-brand px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700"
-          title="New Workflow"
-          type="button"
-          onClick={onCreate}
-        >
-          <Plus size={15} />
-          New Workflow
-        </button>
+      {paneVisible ? <div className="relative z-30 px-3.5 pb-2">
+        <RecentProjectSelector
+          projectRoot={activeWorkflow?.projectRoot || ""}
+          openingProjectRoot={openingProjectRoot}
+          recentProjectRoots={recentProjectRoots}
+          onSelectProject={onSelectProject}
+          onRemoveRecentProject={onRemoveRecentProject}
+          onOpenProject={onOpenProject}
+        />
       </div> : null}
 
-      {openingProjectRoot ? (
+      {paneVisible && openingProjectRoot ? (
         <div role="status" className="flex items-center gap-2 px-3.5 py-2 text-xs text-muted">
           <Loader2 aria-hidden="true" className="shrink-0 animate-spin motion-reduce:animate-none" size={14} />
           <span className="truncate" title={openingProjectRoot}>Opening {projectNameFromPath(openingProjectRoot)}...</span>
         </div>
       ) : null}
-      <div aria-busy={Boolean(openingProjectRoot)} className={`workflow-scrollbar relative flex-1 px-2.5 pb-3 pt-1 ${view === "code" ? "min-h-0 overflow-hidden" : "overflow-y-auto"}`}>
-        {view === "code" && activeWorkflow?.projectRoot ? (
-          <CodeFileExplorer
+      <div aria-busy={Boolean(openingProjectRoot)} className="workflow-scrollbar relative min-h-0 flex-1 overflow-hidden pb-3 pt-1">
+        <CodeFileExplorer
             activeFilePath={activeCodePath}
             newFileRequest={newFileRequest}
             recentProjects={recentProjects}
             settings={settings}
             workflow={activeWorkflow}
+            sidebarView={selectedActivity}
+            onSidebarViewChange={selectActivity}
+            paneVisible={paneVisible}
+            hideProjectSelector
             onFilesystemChange={onCodeFilesystemChange}
             onCloseActiveFile={onCloseCodeFile}
             onOpenFile={onCodeFileOpen}
+            onOpenSwarm={onOpenSwarm}
+            selectedSwarmId={selectedSwarmId}
             onSelectProject={onSelectProject}
             onRemoveRecentProject={onRemoveRecentProject}
-          />
-        ) : view === "code" ? (
-          <div className="px-3 py-4 text-xs leading-5 text-muted">
-            No project open. Use the IDE actions to open a project or file.
-          </div>
-        ) : workflowGroups.length ? (
+            workflowsHeader={
+              <button
+                className="flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-brand px-3 text-xs font-semibold text-white transition hover:bg-indigo-700"
+                title="New Workflow"
+                type="button"
+                onClick={onCreate}
+              >
+                <Plus size={15} />
+                New Workflow
+              </button>
+            }
+            workflowsContent={workflowGroups.length ? (
           workflowGroups.map(({ id, name, items, root }) => {
             const collapsed = Boolean(collapsedGroups[id]);
             return (
@@ -4349,6 +4712,7 @@ export function WorkflowSidebar({
             {loading ? "Loading workflows..." : "No workflows found."}
           </div>
         )}
+          />
         {projectMenu ? (
           <div
             aria-label={`${projectMenu.name} project actions`}
@@ -4449,7 +4813,7 @@ export function nextCodeFileOpenState(openPaths, previewPath, path, preview) {
 
 export function createBrowserTabPath() {
   browserTabSequence += 1;
-  return `taskurotta-browser:${Date.now().toString(36)}:${browserTabSequence.toString(36)}`;
+  return `raticode-browser:${Date.now().toString(36)}:${browserTabSequence.toString(36)}`;
 }
 
 export function mergeCodeOpenPaths(current = [], additions = []) {
@@ -4485,7 +4849,7 @@ export function loadRecentCodePaths(storage = globalThis.window?.localStorage) {
 
 export function rememberRecentFile(current = [], path = "") {
   const nextPath = typeof path === "string" ? path.trim() : "";
-  if (!nextPath || nextPath.startsWith("taskurotta-browser:")) return current;
+  if (!nextPath || nextPath.startsWith("raticode-browser:")) return current;
   return [nextPath, ...current.filter((candidate) => candidate !== nextPath)].slice(0, 8);
 }
 
@@ -4521,7 +4885,7 @@ export function mainWorktreeRoot(payload, fallback = "") {
 
 export function loadStudioSession(storage = globalThis.window?.localStorage) {
   try {
-    const parsed = JSON.parse(storage?.getItem(STUDIO_SESSION_STORAGE_KEY) ?? "{}");
+    const parsed = JSON.parse(brandCompat.readBrandedStorage(storage, STUDIO_SESSION_STORAGE_KEY) ?? "{}");
     return {
       projectRoot: typeof parsed.projectRoot === "string" ? parsed.projectRoot.trim() : "",
       view: ["graph", "code"].includes(parsed.view) ? parsed.view : "",
@@ -4619,6 +4983,7 @@ export function scopeChatThreadToProject(
   return {
     ...thread,
     projectRoot: root,
+    ...(thread.projectRoot !== root ? { projectBranch: undefined } : {}),
     projectName: String(projectName || (root ? projectNameFromPath(root) : "No project")),
     selectedWorkflowId,
   };
@@ -4644,17 +5009,32 @@ export function chatWorkflowContextForThread(thread, workflows = []) {
   };
 }
 
-export function mergeRadishAnalysisState(currentState, analyzedDocument, source) {
+export function rattishGraphIsValid(document) {
+  return document?.compilation?.state === "valid";
+}
+
+export function mergeRattishAnalysisState(currentState, analyzedDocument, source) {
   if (!currentState?.document || currentState.document.source !== source) return currentState;
+  const currentDocument = currentState.document;
+  const graph = rattishGraphIsValid(analyzedDocument)
+    ? analyzedDocument.graph
+    : currentDocument.lastValidGraph || currentDocument.graph || analyzedDocument.graph;
   return {
     ...currentState,
     document: {
       ...analyzedDocument,
-      dirty: currentState.document.dirty,
+      source,
+      dirty: currentDocument.dirty,
+      savedRevision: currentDocument.savedRevision ?? analyzedDocument.savedRevision,
+      savedSource: currentDocument.savedSource,
+      metadata: currentDocument.metadata ?? analyzedDocument.metadata,
+      metadataRevision: currentDocument.metadataRevision ?? analyzedDocument.metadataRevision,
+      graph,
+      lastValidGraph: graph,
     },
     error: "",
     loading: false,
-    saving: false,
+    saving: currentState.saving,
   };
 }
 
@@ -4682,7 +5062,7 @@ export function assistantMarkdownSourcePath(projectRoot) {
   const root = String(projectRoot ?? "").replace(/[\\/]+$/, "");
   if (!root) return "";
   const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
-  return `${root}${separator}.taskurotta-assistant.md`;
+  return `${root}${separator}.raticode-assistant.md`;
 }
 
 function WorkflowListItem({
@@ -4897,6 +5277,19 @@ export function TopBar({
   const label = !workflow || (view === "code" && !activeCodePath)
     ? null
     : topBarLabelParts(workflow, view, activeCodePath);
+  if (view === "graph" && workflow) {
+    return <header className="studio-topbar min-w-0 shrink-0 border-b border-line bg-white px-3 py-2">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-ink" title={label?.fullPath}>{workflow.name}</h2>
+        <WorkflowSaveStatus saveState={saveState} onRetry={onRetrySave} />
+      </div>
+      <div
+        className="mt-1.5 flex min-w-0 items-center [&>[data-toolbar]]:min-w-0 [&>[data-toolbar]]:max-w-full [&>[data-toolbar]]:flex-wrap [&_[data-toolbar-row=secondary]]:flex-wrap"
+        data-graph-toolbar-target="true"
+        ref={onGraphToolbarTargetChange}
+      />
+    </header>;
+  }
   return (
     <header className="studio-topbar flex h-[54px] shrink-0 items-center justify-between gap-3 border-b border-line bg-white px-4">
       <div
@@ -4948,7 +5341,41 @@ export function TopBar({
   );
 }
 
+export function RecentProjectSelector({ projectRoot = "", openingProjectRoot = "", recentProjectRoots = [], onSelectProject, onRemoveRecentProject, onOpenProject }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const projects = mergeRecentProjects(projectRoot ? [projectRoot] : [], recentProjectRoots);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (event) => { if (!rootRef.current?.contains(event.target)) setOpen(false); };
+    const escape = (event) => { if (event.key === "Escape") { setOpen(false); triggerRef.current?.focus(); } };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", escape);
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("keydown", escape); };
+  }, [open]);
+  return <div ref={rootRef} className="relative w-full" aria-busy={Boolean(openingProjectRoot)}>
+    <button ref={triggerRef} type="button" aria-label="Recent projects" aria-expanded={open} aria-haspopup="menu" title={projectRoot || "Open a project"} className="flex h-9 w-full min-w-0 items-center gap-2 rounded-lg border border-line px-3 text-xs text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={() => setOpen(value => !value)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setOpen(true); requestAnimationFrame(() => rootRef.current?.querySelector('[role="menuitem"]')?.focus()); } }}>
+      {openingProjectRoot ? <Loader2 aria-hidden="true" size={14} className="shrink-0 animate-spin motion-reduce:animate-none" /> : <FolderOpen aria-hidden="true" size={14} className="shrink-0 text-muted" />}
+      <span className="min-w-0 flex-1 truncate text-left">{openingProjectRoot ? `Opening ${projectNameFromPath(openingProjectRoot)}...` : projectNameFromPath(projectRoot) || "Open a project"}</span><ChevronDown aria-hidden="true" size={12} />
+    </button>
+    {open ? <div role="menu" aria-label="Recent projects" className="absolute left-0 top-full z-[90] mt-1 max-h-[min(20rem,calc(100vh-160px))] w-full overflow-y-auto rounded-lg border border-line bg-white p-1 shadow-panel" onKeyDown={event => { if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return; event.preventDefault(); const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]')]; const index = items.indexOf(document.activeElement); items[event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus(); }}>
+      <p className="px-2 py-1.5 text-[10px] font-semibold text-muted">Recent projects</p>
+      {projects.map(root => <div className="group flex items-center rounded-md hover:bg-slate-50" key={root}>
+        <button type="button" role="menuitem" title={root} className="min-w-0 flex-1 rounded-md px-2 py-2 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={() => { setOpen(false); onSelectProject?.(root); }}><span className="flex items-center gap-2 font-medium text-ink"><span className="truncate">{projectNameFromPath(root)}</span>{root === projectRoot ? <Check aria-hidden="true" size={12} /> : null}</span><span className="block truncate pt-0.5 text-[10px] text-muted">{root}</span></button>
+        {onRemoveRecentProject ? <button type="button" role="menuitem" aria-label={`Remove ${projectNameFromPath(root)} from recent projects`} className="m-1 grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 focus-visible:outline" onClick={() => onRemoveRecentProject(root)}><X aria-hidden="true" size={13} /></button> : null}
+      </div>)}
+      {!projects.length ? <p className="px-2 py-2 text-xs text-muted">No recent projects</p> : null}
+      {onOpenProject ? <button type="button" role="menuitem" className="mt-1 w-full rounded-md border-t border-line px-2 py-2 text-left text-xs text-ink hover:bg-slate-50 focus-visible:outline" onClick={() => { setOpen(false); onOpenProject(); }}>Open project...</button> : null}
+    </div> : null}
+  </div>;
+}
+
 export function GlobalToolbar({
+  onOpenRuns,
+  runSummary,
+  projectRoot = "",
+  projectError = "",
   activeCodeDocument,
   activeCodePath = "",
   assistantPaneVisible = true,
@@ -4968,6 +5395,15 @@ export function GlobalToolbar({
   onToggleTheme,
   onMenuAction,
 }) {
+  const [projectWorktrees, setProjectWorktrees] = useState({ root: "", items: [], error: "" });
+  useEffect(() => {
+    let cancelled = false;
+    if (!projectRoot || !window.goferDesktop?.workspace?.gitWorktrees) return undefined;
+    Promise.resolve(window.goferDesktop.workspace.gitWorktrees(projectRoot)).then(payload => {
+      if (!cancelled) setProjectWorktrees({ root: projectRoot, items: (payload?.worktrees ?? []).filter(item => !item.missing && !item.prunable), error: payload?.error || "" });
+    }).catch(error => { if (!cancelled) setProjectWorktrees({ root: projectRoot, items: [], error: error.message || "Unable to load worktrees" }); });
+    return () => { cancelled = true; };
+  }, [projectRoot]);
   const hasUpdateBridge = Boolean(window.goferUpdates?.check);
   const buttonClass = "studio-icon-button grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-slate-100 hover:text-ink";
   return (
@@ -4983,7 +5419,12 @@ export function GlobalToolbar({
         onAction={onMenuAction}
         onSelectProject={onSelectProject}
       />
+      <div className="flex min-w-0 flex-1 items-center gap-2 px-3">
+        {projectError ? <div role="alert" className="flex min-w-0 items-center gap-2 text-xs text-red-700 dark:text-red-300"><span className="truncate" title={projectError}>{projectError}</span><button type="button" className="shrink-0 underline" onClick={() => onMenuAction?.("file.openFolder")}>Open project</button></div> : null}
+        {projectWorktrees.root === projectRoot && projectWorktrees.items.length > 1 ? <label className="flex min-w-0 max-w-48 items-center gap-1 text-muted" title="Browsing worktree"><GitBranch aria-hidden="true" size={13} /><select aria-label="Browsing worktree" className="h-7 min-w-0 rounded bg-white text-xs text-ink focus-visible:outline" value={projectRoot} onChange={event => onSelectProject?.(event.target.value, { mainProjectRoot: projectWorktrees.items[0]?.path || projectRoot })}>{projectWorktrees.items.map(item => <option key={item.path} value={item.path}>{item.branch || "Detached HEAD"}</option>)}</select></label> : null}
+      </div>
       <div className="flex items-center gap-1">
+        {onOpenRuns ? <button type="button" onClick={onOpenRuns} aria-label={`Open runs, ${runSummary?.active.length || 0} active, ${runSummary?.unread.length || 0} unread`} className="flex h-7 items-center gap-1.5 rounded px-2 text-xs text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"><History aria-hidden="true" size={14} />Runs{runSummary?.active.length ? <span>{runSummary.active.length} active</span> : null}{runSummary?.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}{runSummary?.disconnected.length ? <span title="Some run status is out of date">!</span> : null}</button> : null}
         {hasUpdateBridge ? updateState?.available ? (
           <button className="inline-flex h-8 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-70" disabled={Boolean(updateState.downloading)} title={updateButtonTitle(updateState)} type="button" onClick={onApplyUpdate}>
             {updateState.downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
@@ -5045,8 +5486,8 @@ const APPLICATION_MENUS = [
     ["selection.addCursorBelow", "Add Cursor Below", "Ctrl+Alt+Down", "code-document"],
   ] },
   { label: "View", items: [
-    ["view.graph", "Workflow Graph", "", "graph-check"],
-    ["view.code", "Code Editor", "", "code-check"],
+    ["view.graph", "Workflows", ""],
+    ["view.code", "Files", ""],
     null,
     ["view.projectPane", "Project Files", "Ctrl+B", "project-check"],
     ["view.assistantPane", "Rem", "", "assistant-check"],
@@ -5210,6 +5651,7 @@ function RecentProjectsMenuItem({ recentProjectRoots, onSelect }) {
             <button className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-xs hover:bg-slate-100" key={project.root} role="menuitem" title={project.root} type="button" onClick={() => onSelect(project.root)}>
               <FolderOpen aria-hidden="true" className="shrink-0 text-muted" size={13} />
               <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                    {project.branch ? <span className="max-w-24 truncate text-[10px] text-muted">{project.branch}</span> : null}
             </button>
           )) : <p className="px-2 py-2 text-xs text-muted">No recent projects</p>}
         </div>
@@ -5322,9 +5764,9 @@ function updateButtonLabel(updateState) {
 }
 
 function updateButtonTitle(updateState) {
-  if (updateState?.downloaded) return "Restart Taskurotta and apply the downloaded update";
+  if (updateState?.downloaded) return "Restart Raticode and apply the downloaded update";
   if (updateState?.downloading) return "Downloading update";
-  return "Download, install, and restart Taskurotta";
+  return "Download, install, and restart Raticode";
 }
 
 export function WorkflowHistoryDialog({
@@ -5463,6 +5905,7 @@ export function ChatPane({
   visible = true,
   reducedMotion = "system",
   activeWorkflowId,
+  activeProjectRoot,
   assistantDefaults = {},
   memorySettings = DEFAULT_APP_SETTINGS.memory,
   audioInputDeviceId = "default",
@@ -5477,7 +5920,7 @@ export function ChatPane({
   workflow,
   workflows = [],
 }) {
-  const prospectiveProjectRoot = String(workflow?.projectRoot ?? "").trim();
+  const prospectiveProjectRoot = String(activeProjectRoot ?? workflow?.projectRoot ?? "").trim();
   const chatScrollRef = useRef(null);
   const chatPinnedToBottomRef = useRef(true);
   const renderedConversationRef = useRef({ threadId: null, textKey: "" });
@@ -5502,26 +5945,39 @@ export function ChatPane({
     loading: providersLoading,
     refresh: refreshProviders,
   } = useProviderCapabilities();
-  const [threads, setThreads] = useState(loadChatThreads);
+  const [threads, setThreads] = useState([]);
   const [activeThreadId, setActiveThreadId] = useState(null);
   const [messagesByThread, setMessagesByThread] = useState({});
   const conversationCacheRef = useRef(null);
+  const repository = conversationRepository();
   const chatStorageErrorsRef = useRef({});
+  const [historyState, setHistoryState] = useState({ threadId: null, loading: false, hasMore: false, before: Infinity, error: "" });
+  const historyRequestRef = useRef(0);
+  const historyLoadingRef = useRef(false);
+  const prependScrollRef = useRef(null);
+  const [threadSearchOpen, setThreadSearchOpen] = useState(false);
+  const [searchTarget, setSearchTarget] = useState(null);
+  const activeSearchTarget = searchTarget?.threadId === activeThreadId ? searchTarget : null;
+  const threadSearchButtonRef = useRef(null);
+  const reportStorageFailure = (id, error) => {
+    const message = `Conversation could not be saved: ${error instanceof Error ? error.message : String(error)}`;
+    chatStorageErrorsRef.current[id] = message;
+    setChatStateByThread((current) => ({ ...current, [id]: { ...current[id], error: message } }));
+    return false;
+  };
   if (!conversationCacheRef.current) conversationCacheRef.current = createConversationCache({
-    load: (id) => loadChatMessages(chatStorageKeyFor(id)),
-    save: (id, history) => {
-      try {
-        saveConversationMessages(chatStorageKeyFor(id), history);
+    load: (id) => repository.durable ? [] : loadChatMessages(chatStorageKeyFor(id)),
+    save: (id, history, previous, persisted) => {
+      const saved = () => {
         delete chatStorageErrorsRef.current[id];
-      } catch (error) {
-        const message = `Conversation could not be saved: ${error instanceof Error ? error.message : String(error)}`;
-        chatStorageErrorsRef.current[id] = message;
-        setChatStateByThread((current) => ({ ...current, [id]: { ...current[id], error: message } }));
-        return false;
-      }
-      setThreads((current) => bumpChatThread(current, id));
-      archiveThreadFromStorage(id, history);
-      return true;
+        setThreads((current) => bumpChatThread(current, id));
+        archiveThreadFromStorage(id, () => repository.all(id));
+        return true;
+      };
+      try {
+        const result = repository.save(id, history, previous, persisted);
+        return result?.then ? result.then(saved).catch(error => reportStorageFailure(id, error)) : saved();
+      } catch (error) { return reportStorageFailure(id, error); }
     },
     changed: setMessagesByThread,
   });
@@ -5546,16 +6002,63 @@ export function ChatPane({
   const scopedProjectName = projectLabels[scopedProjectRoot]?.trim()
     || activeThread?.projectName
     || (scopedProjectRoot ? projectNameFromPath(scopedProjectRoot) : "No project");
-  const scopeProjects = mergeRecentProjects(
+  const [scopeWorktrees, setScopeWorktrees] = useState([]);
+  const [scopeAvailableRoots, setScopeAvailableRoots] = useState([]);
+  const [scopeLoading, setScopeLoading] = useState(false);
+  const scopeRoots = mergeRecentProjects(
     scopedProjectRoot ? [scopedProjectRoot] : [],
     mergeRecentProjects(
       recentProjectRoots,
       workflows.map((item) => item.projectRoot).filter(Boolean),
     ),
-  ).map((root) => ({
-    name: projectLabels[root]?.trim() || projectNameFromPath(root),
-    root,
-  }));
+  );
+  const scopeRootsKey = JSON.stringify(scopeRoots);
+  useEffect(() => {
+    if (!scopeMenuOpen) return;
+    let cancelled = false;
+    setScopeWorktrees([]);
+    setScopeAvailableRoots([]);
+    setScopeLoading(true);
+    const roots = JSON.parse(scopeRootsKey);
+    const workspace = window.goferDesktop?.workspace;
+    const folderChecks = new Map();
+    const isAvailableFolder = root => {
+      if (!folderChecks.has(root)) {
+        folderChecks.set(root, workspace?.getPathInfo
+          ? Promise.resolve().then(() => workspace.getPathInfo(root))
+            .then(info => Boolean(info?.isDirectory)).catch(() => false)
+          : Promise.resolve(true));
+      }
+      return folderChecks.get(root);
+    };
+    Promise.allSettled(roots.map(async root => {
+      if (!(await isAvailableFolder(root))) return { missing: true };
+      return workspace?.gitWorktrees?.(root);
+    }))
+      .then(async results => {
+        const worktrees = results.flatMap(result => result.status === "fulfilled"
+          ? (result.value?.worktrees || []).filter(item => item.path && !item.missing && !item.prunable)
+          : []);
+        const available = await Promise.all(worktrees.map(item => isAvailableFolder(item.path)));
+        if (cancelled) return;
+        // Saved roots and Git worktree records can outlive their folders.
+        setScopeAvailableRoots(roots.filter((_, index) => {
+          const result = results[index];
+          return result.status === "fulfilled" && !result.value?.missing && !result.value?.error;
+        }));
+        setScopeWorktrees(worktrees.filter((_, index) => available[index]));
+        setScopeLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [scopeMenuOpen, scopeRootsKey]);
+  const scopeProjects = mergeRecentProjects(scopeAvailableRoots, scopeWorktrees.map(item => item.path)).map(root => {
+    const worktree = scopeWorktrees.find(item => item.path === root);
+    return {
+      root,
+      name: projectLabels[root]?.trim() || projectNameFromPath(root),
+      branch: worktree?.branch,
+    };
+  });
   const messages = useMemo(
     () =>
       activeThreadId
@@ -5570,7 +6073,13 @@ export function ChatPane({
     ? chatAnnouncementByThread[activeThreadId] ?? ""
     : "";
   const liveTurn = activeThreadId ? liveTurnByThread[activeThreadId] : null;
-  const chatItems = useMemo(() => buildChatItems(messages), [messages]);
+  const visibleMessages = useMemo(() => {
+    const start = historyState.threadId === activeThreadId && historyState.firstMessageId
+      ? messages.findIndex(message => message.id === historyState.firstMessageId) : -1;
+    const emptyThreadOpened = historyState.threadId === activeThreadId && !historyState.loading && !historyState.firstMessageId;
+    return repository.durable ? messages.slice(start >= 0 ? start : emptyThreadOpened ? 0 : -CONVERSATION_PAGE_SIZE) : messages;
+  }, [messages, historyState.threadId, historyState.firstMessageId, historyState.loading, activeThreadId, repository.durable]);
+  const chatItems = useMemo(() => buildChatItems(visibleMessages), [visibleMessages]);
   const conversationItems = useMemo(() => {
     if (!liveTurn || chatItems.some((item) => item.message?.id === liveTurn.id)) return chatItems;
     return [...chatItems, { type: "message", message: liveTurn }];
@@ -5583,11 +6092,34 @@ export function ChatPane({
   const conversationTextKey = useMemo(() => ({ messages, changes: liveTurn?.changes, id: liveTurn?.id }),
     [messages, liveTurn?.changes, liveTurn?.id]);
 
+  const loadHistoryPage = useCallback(async (threadId, before) => {
+    if (historyLoadingRef.current) return;
+    historyLoadingRef.current = true;
+    const generation = ++historyRequestRef.current;
+    setHistoryState(current => ({ ...current, threadId, loading: true, error: "" }));
+    try {
+      const page = await repository.page(threadId, before);
+      if (generation !== historyRequestRef.current || deletedChatThreadIdsRef.current.has(threadId)) return;
+      if (before !== Infinity && chatScrollRef.current) {
+        const scroll = chatScrollRef.current;
+        const viewportTop = scroll.getBoundingClientRect().top;
+        const element = [...scroll.querySelectorAll("[data-history-anchor]")].find(node => node.getBoundingClientRect().bottom > viewportTop);
+        prependScrollRef.current = { threadId, top: scroll.scrollTop, height: scroll.scrollHeight, id: element?.dataset.historyAnchor, offset: element?.getBoundingClientRect().top };
+        chatPinnedToBottomRef.current = false;
+      }
+      conversationCacheRef.current.hydrate(threadId, page.messages, { recent: before === Infinity });
+      setHistoryState({ threadId, loading: false, hasMore: page.hasMore, before: page.before, firstMessageId: page.messages[0]?.id, error: "" });
+    } catch (error) {
+      if (generation === historyRequestRef.current) setHistoryState(current => ({ ...current, loading: false, error: error.message || "History could not be loaded." }));
+    } finally { if (generation === historyRequestRef.current) historyLoadingRef.current = false; }
+  }, [repository]);
+
   useEffect(() => {
     activeThreadIdRef.current = activeThreadId;
   }, [activeThreadId]);
 
   useLayoutEffect(() => {
+    if (activeSearchTarget) { chatPinnedToBottomRef.current = false; return; }
     const previous = renderedConversationRef.current;
     const threadChanged = previous.threadId !== activeThreadId;
     const textChanged = previous.textKey !== conversationTextKey;
@@ -5600,11 +6132,20 @@ export function ChatPane({
       if (threadChanged && chatScrollRef.current) chatScrollRef.current.scrollTop = 0;
       return;
     }
+    if (prependScrollRef.current?.threadId === activeThreadId && chatScrollRef.current) {
+      const anchor = prependScrollRef.current;
+      const element = [...chatScrollRef.current.querySelectorAll("[data-history-anchor]")].find(node => node.dataset.historyAnchor === anchor.id);
+      chatScrollRef.current.scrollTop = element
+        ? chatScrollRef.current.scrollTop + element.getBoundingClientRect().top - anchor.offset
+        : anchor.top + chatScrollRef.current.scrollHeight - anchor.height;
+      prependScrollRef.current = null;
+      return;
+    }
     if (threadChanged) chatPinnedToBottomRef.current = true;
     if (threadChanged || (textChanged && chatPinnedToBottomRef.current)) {
       scrollConversationToBottom(chatScrollRef.current);
     }
-  }, [activeThreadId, conversationTextKey]);
+  }, [activeThreadId, conversationTextKey, activeSearchTarget]);
 
   useEffect(() => {
     if (!activeThreadId) setHomeProjectRoot(prospectiveProjectRoot);
@@ -5629,6 +6170,8 @@ export function ChatPane({
 
   useEffect(() => {
     if (!activeThreadId) {
+      historyRequestRef.current += 1;
+      historyLoadingRef.current = false;
       setDraft("");
       setAttachments([]);
       setAttachmentError("");
@@ -5639,6 +6182,12 @@ export function ChatPane({
       return;
     }
 
+    historyRequestRef.current += 1;
+    historyLoadingRef.current = false;
+    prependScrollRef.current = null;
+    setHistoryState({ threadId: activeThreadId, loading: repository.durable, hasMore: false, before: Infinity, error: "" });
+    if (repository.durable) void loadHistoryPage(activeThreadId, Infinity);
+    if (repository.durable && !chatAbortControllersRef.current[activeThreadId]) conversationCacheRef.current.trim(activeThreadId, CONVERSATION_PAGE_SIZE);
     conversationCacheRef.current.get(activeThreadId);
     conversationCacheRef.current.activate([activeThreadId, ...Object.keys(chatAbortControllersRef.current)]);
     setDraft("");
@@ -5649,7 +6198,7 @@ export function ChatPane({
     setExpandedThoughtGroups({});
     setConversationMenuOpen(false);
     setScopeMenuOpen(false);
-  }, [activeThreadId]);
+  }, [activeThreadId, loadHistoryPage, repository.durable]);
 
   useEffect(() => {
     conversationCacheRef.current.activate([
@@ -5657,6 +6206,12 @@ export function ChatPane({
       ...Object.keys(chatStateByThread).filter((id) => chatStateByThread[id]?.sending),
     ]);
   }, [activeThreadId, chatStateByThread]);
+
+
+  function closeThreadSearch() {
+    setThreadSearchOpen(false);
+    threadSearchButtonRef.current?.focus();
+  }
 
   function addAttachments(files) {
     const result = readChatAttachments(files, attachments);
@@ -5753,9 +6308,10 @@ export function ChatPane({
     const hasMessageAttachments = Boolean(
       originalMessage?.attachments?.length || selectedAttachments.length,
     );
-    if ((!text && !hasMessageAttachments) || chatState.sending) return;
+    if ((!text && !hasMessageAttachments) || chatState.sending || historyLoadingRef.current || historyState.error) return;
     const resourceError = remResourceError(activeThread?.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES);
     if (resourceError) { setAttachmentError(resourceError); return; }
+    returnToLatestMessages();
     const clientTurnStartedAt = Date.now();
     const turnSummaryId = uniqueClientId();
     const targetThread = activeThread ?? createThread();
@@ -5854,7 +6410,11 @@ export function ChatPane({
     const abortController = new AbortController();
     chatAbortControllersRef.current[targetThreadId] = abortController;
     try {
+      if (assistantDefaults.swarmAccessEnabled !== false && workflowContext.projectRoot) {
+        await window.goferDesktop?.workspace?.trustProjectRoot?.(workflowContext.projectRoot);
+      }
       if (memorySettings.secondBrainEnabled) await window.goferDesktop?.workspace?.trustProjectRoot?.(memorySettings.secondBrainRoot);
+      const requestMessages = await repository.context(targetThreadId, nextMessages, Boolean(originalMessage));
       const response = await fetch(apiUrl("/chat/stream"), {
         method: "POST",
         headers: {
@@ -5866,11 +6426,15 @@ export function ChatPane({
           provider: providerId,
           model,
           effort: effort || undefined,
-          messages: nextMessages
+          messages: requestMessages
             .filter((message) => message.kind !== "turn-summary")
             .map(chatMessageForRequest),
           workflow: {
             ...workflowContext,
+            remSwarmAccess: {
+              enabled: assistantDefaults.swarmAccessEnabled !== false,
+              grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(workflowContext.projectRoot),
+            },
             remSecondBrain: { enabled: memorySettings.secondBrainEnabled, root: memorySettings.secondBrainRoot, format: memorySettings.secondBrainFormat, theme: memorySettings.secondBrainTheme, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(memorySettings.secondBrainRoot) },
             remResources: targetThread.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES,
             id: `workflow-assistant:${targetThreadId}`,
@@ -5914,7 +6478,9 @@ export function ChatPane({
                 ? event.messages
                 : null;
               if (compactedMessages) {
-                updateThreadMessages(targetThreadId, compactedMessages);
+                void repository.checkpoint(targetThreadId, compactedMessages, userMessage.id)
+                  .catch(error => reportStorageFailure(targetThreadId, error));
+                appendAssistantMessage(event.message || "Rem context compacted. Earlier messages are saved.", "system", { role: "system" });
               } else {
                 appendAssistantMessage(
                   event.message || "Compacting Rem context",
@@ -6132,6 +6698,10 @@ export function ChatPane({
     return thread;
   }
 
+  // Context events and deferred sends use the current thread settings and draft.
+  const remContextActionsRef = useRef(null);
+  remContextActionsRef.current = { createThread, sendMessage };
+
   useEffect(() => {
     let active = true;
     const receive = async (event) => {
@@ -6145,25 +6715,25 @@ export function ChatPane({
         }
       }
       if (!active) return;
-      const thread = createThread(root || "");
+      const thread = remContextActionsRef.current.createThread(root || "");
       const body = context.mode === "conflicts"
         ? `Resolve the Git conflicts in this project. Inspect the current and incoming changes, preserve the intended behavior, and edit the conflicted files. Leave the results for me to review before staging or continuing the merge or rebase.\n\nConflicted files:\n${context.text}`
-        : `File: ${context.path || "workflow.rad"}\nProject: ${root || "No project"}\nLines: ${context.startLine || 1}-${context.endLine || context.startLine || 1}\n${context.version || "Editor selection"}\n\n${context.text || ""}`;
+        : `File: ${context.path || "workflow.rattish"}\nProject: ${root || "No project"}\nLines: ${context.startLine || 1}-${context.endLine || context.startLine || 1}\n${context.version || "Editor selection"}\n\n${context.text || ""}`;
       const file = new File([body], context.mode === "conflicts" ? "merge-conflicts.txt" : "editor-selection.txt", { type: "text/plain" });
       const result = readChatAttachments([file], []);
       setPendingRemContext({ threadId: thread.id, attachments: result.attachments, error: result.error,
-        draft: context.mode === "ask" ? "" : context.mode === "conflicts" ? body : "Explain the highlighted text in the attached file selection, using its file and project context.",
-        send: context.mode !== "ask" });
+        draft: context.mode === "ask" ? (context.draft || "") : context.mode === "conflicts" ? body : "Explain the highlighted text in the attached file selection, using its file and project context.",
+        send: context.autoSend === true || context.mode !== "ask" });
     };
     window.addEventListener("gofer:rem-context", receive);
     return () => { active = false; window.removeEventListener("gofer:rem-context", receive); };
-  }, [threads, providerId, model, effort, workflows, recentProjectRoots, activeWorkflowId]);
+  }, [workflows, recentProjectRoots]);
 
   useEffect(() => {
     const receive = event => {
       const request = event.detail;
       if (!request || request.signal?.aborted) return;
-      generateConventionalCommit({ provider: providerId, model, effort, diff: request.diff, signal: request.signal }).then(request.resolve, request.reject);
+      generateConventionalCommit({ provider: providerId, model, effort, diff: request.diff, projectRoot: request.projectRoot, inspectStaged: request.inspectStaged, signal: request.signal }).then(request.resolve, request.reject);
     };
     window.addEventListener("gofer:rem-commit-message", receive);
     return () => window.removeEventListener("gofer:rem-commit-message", receive);
@@ -6180,13 +6750,17 @@ export function ChatPane({
   }, [pendingRemContext, activeThreadId]);
 
   useEffect(() => {
-    if (!contextSendThread || activeThreadId !== contextSendThread || !draft || !attachments.length) return;
+    if (!contextSendThread || activeThreadId !== contextSendThread || !draft || !attachments.length
+      || historyState.loading || historyState.error || chatState.sending) return;
     setContextSendThread(null);
-    void sendMessage();
-  }, [contextSendThread, activeThreadId, draft, attachments]);
+    void remContextActionsRef.current.sendMessage();
+  }, [contextSendThread, activeThreadId, draft, attachments, historyState.loading, historyState.error, chatState.sending]);
 
-  function openThread(threadId) {
-    const thread = threads.find((candidate) => candidate.id === threadId);
+  function openThread(threadId, match) {
+    setSearchTarget(match?.messageId != null ? { threadId, ...match, requestId: uniqueClientId() } : null);
+    if (match?.messageId != null) setExpandedThoughtGroups({});
+    const thread = threads.find((candidate) => candidate.id === threadId) || loadChatThread(threadId);
+    setThreadSearchOpen(false);
     if (thread && !thread.projectRoot) {
       const scopedThread = scopeChatThreadToProject(
         thread,
@@ -6196,10 +6770,9 @@ export function ChatPane({
         projectLabels[scopedProjectRoot]?.trim()
           || (scopedProjectRoot ? projectNameFromPath(scopedProjectRoot) : "No project"),
       );
-      const nextThreads = threads.map((candidate) =>
-        candidate.id === threadId ? scopedThread : candidate,
-      );
-      setThreads(nextThreads);
+      setThreads(current => [scopedThread, ...current.filter(candidate => candidate.id !== threadId)]);
+    } else if (thread && !threads.some(candidate => candidate.id === threadId)) {
+      setThreads(current => [...current, thread]);
     }
     if (thread) {
       setProviderId(thread.provider || assistantDefaults.provider || "codex");
@@ -6216,6 +6789,43 @@ export function ChatPane({
         [threadId]: { ...threadState, hasNewResponse: false },
       };
     });
+  }
+
+  function renderSearchMessages(history, matchId, showSource) {
+    // A query can match Markdown source, hidden metadata, or a deduplicated
+    // thought. Reveal that saved body in place when its rendered form omits it.
+    const displayHistory = showSource ? history.map(message => String(message.id) === String(matchId)
+      ? { ...message, kind: "search-source" } : message) : history;
+    return buildChatItems(displayHistory).map(item => {
+      if (item.type === "thought-group") {
+        return <ThoughtGroup
+          key={item.id}
+          expanded={expandedThoughtGroups[item.id] !== false}
+          onToggle={() => setExpandedThoughtGroups(current => ({ ...current, [item.id]: current[item.id] === false }))}
+          searchMessageId={matchId}
+          thoughts={item.thoughts}
+          onOpenLink={openScopedMarkdownLink}
+          sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
+          onOpenFile={openScopedFile}
+        />;
+      }
+      const isMatch = String(item.message.id) === String(matchId);
+      return <div key={item.message.id} data-thread-search-match={isMatch || undefined} tabIndex={isMatch ? -1 : undefined}>
+        <ChatMessageBubble
+          message={item.message}
+          onOpenLink={openScopedMarkdownLink}
+          sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
+          onUndoChanges={undoMessageAction}
+        />
+      </div>;
+    });
+  }
+
+  function returnToLatestMessages() {
+    setSearchTarget(null);
+    prependScrollRef.current = null;
+    chatPinnedToBottomRef.current = true;
+    renderedConversationRef.current = { threadId: null, textKey: null };
   }
 
   function changeThreadProjectScope(projectRoot) {
@@ -6247,11 +6857,17 @@ export function ChatPane({
     setScopeMenuOpen(false);
   }
 
-  function loadOlderThreads(count) {
-    setThreads((current) => [...new Map(
-      [...loadChatThreads(count), ...current].map((thread) => [thread.id, thread]),
-    ).values()]);
-  }
+  useEffect(() => {
+    if (!activeThread?.projectRoot || activeThread.projectBranch !== undefined) return;
+    let cancelled = false;
+    const { id, projectRoot } = activeThread;
+    window.goferDesktop?.workspace?.gitStatus?.(projectRoot)?.then(snapshot => {
+      if (cancelled || !snapshot || snapshot.error) return;
+      setThreads(current => current.map(thread => thread.id === id && thread.projectRoot === projectRoot
+        ? { ...thread, projectBranch: snapshot.active ? snapshot.branch || "" : "" } : thread));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeThread]);
 
   function updateThreadConfig(patch) {
     if (!activeThreadId) return;
@@ -6288,16 +6904,20 @@ export function ChatPane({
     chatAbortControllersRef.current[threadId]?.abort();
     delete chatAbortControllersRef.current[threadId];
     const nextThreads = threads.filter((thread) => thread.id !== threadId);
-    const archived = await archiveThreadFromStorage(threadId, conversationCacheRef.current.get(threadId), true);
+    const archived = await archiveThreadFromStorage(threadId, () => repository.all(threadId), true);
     if (!archived) {
       deletedChatThreadIdsRef.current.delete(threadId);
       setChatStateByThread((current) => ({ ...current, [threadId]: { sending: false, error: "The archive could not be saved. Reconnect the archive folder, or stop archiving in Settings > Memory before deleting this thread." } }));
       return;
     }
+    try { await repository.remove(threadId); } catch (error) {
+      deletedChatThreadIdsRef.current.delete(threadId);
+      reportStorageFailure(threadId, error);
+      return;
+    }
     deleteStoredChatThread(threadId);
     persistChatThreads(nextThreads);
     setThreads(nextThreads);
-    removeConversationMessages(chatStorageKeyFor(threadId));
     conversationCacheRef.current.remove(threadId);
     delete chatStorageErrorsRef.current[threadId];
     setChatStateByThread((current) => {
@@ -6389,9 +7009,9 @@ export function ChatPane({
         <div className="flex min-w-0 items-center gap-1 text-xs font-semibold text-muted">
           {activeThread ? (
             <button
-              aria-label="Back to recent threads"
+              aria-label="Back to active threads"
               className="studio-icon-button -ml-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-              title="Back to recent threads"
+              title="Back to active threads"
               type="button"
               onClick={showThreadList}
             >
@@ -6404,11 +7024,14 @@ export function ChatPane({
               aria-haspopup="menu"
               aria-label={`Scoped to ${scopedProjectName}. Change project scope`}
               className="flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-muted transition hover:bg-slate-100 hover:text-ink disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={chatState.sending || !scopeProjects.length}
+              disabled={chatState.sending || !scopeRoots.length}
               title={chatState.sending ? "Project scope cannot change while Rem is running" : scopedProjectRoot}
               type="button"
               onClick={() => {
                 setConversationMenuOpen(false);
+                setScopeAvailableRoots([]);
+                setScopeWorktrees([]);
+                setScopeLoading(true);
                 setScopeMenuOpen((current) => !current);
               }}
             >
@@ -6426,7 +7049,9 @@ export function ChatPane({
                 className="absolute left-0 top-9 z-50 max-h-72 w-72 overflow-y-auto rounded-[14px] border border-line bg-white p-1.5 shadow-panel"
                 role="menu"
               >
-                <p className="px-2 py-1 text-[10px] font-semibold text-muted">Recent projects</p>
+                <p className="px-2 py-1 text-[10px] font-semibold text-muted">Projects and worktrees</p>
+                {scopeLoading ? <p role="status" className="px-2 py-1 text-xs text-muted">Checking workspace folders...</p> : null}
+                {!scopeLoading && !scopeProjects.length ? <p role="status" className="px-2 py-1 text-xs text-muted">No workspace folders available.</p> : null}
                 {scopeProjects.map((project) => (
                   <button
                     key={project.root}
@@ -6461,11 +7086,16 @@ export function ChatPane({
           >
             <Plus aria-hidden="true" size={17} />
           </button>
+          <button ref={threadSearchButtonRef} aria-label="Search threads" aria-expanded={threadSearchOpen}
+            className="studio-icon-button grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
+            title="Search threads" type="button" onClick={() => { setThreadSearchOpen(current => !current); setConversationMenuOpen(false); setScopeMenuOpen(false); }}>
+            <Search aria-hidden="true" size={16} />
+          </button>
           <button
             aria-expanded={conversationMenuOpen}
-            aria-label="Recent threads"
+            aria-label="Active threads"
             className="studio-icon-button grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-            title="Recent threads"
+            title="Active threads"
             type="button"
             onClick={() => {
               setScopeMenuOpen(false);
@@ -6476,12 +7106,10 @@ export function ChatPane({
           </button>
           {conversationMenuOpen ? (
             <div className="absolute right-0 top-9 z-50 max-h-80 w-72 overflow-y-auto rounded-[14px] border border-line bg-white p-1.5 shadow-panel">
-              <p className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.06em] text-muted">Recent threads</p>
-              <ThreadList
+              <p className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.06em] text-muted">Active threads</p>
+              <ThreadSections
                 activityByThread={chatStateByThread}
                 threads={threads}
-                totalCount={chatThreadIndex().length}
-                onLoadOlder={loadOlderThreads}
                 activeThreadId={activeThreadId}
                 onDelete={deleteThread}
                 onOpen={openThread}
@@ -6491,12 +7119,22 @@ export function ChatPane({
         </div>
       </div>
 
+      {threadSearchOpen ? <ThreadSearch repository={repository} loadThreads={loadAllChatThreads} onOpen={openThread} onClose={closeThreadSearch} /> : null}
+
+      {activeSearchTarget ? <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3.5 py-2 text-xs text-muted">
+        <span className="min-w-0 truncate" role="status">Match for &quot;{activeSearchTarget.query}&quot;</span>
+        <button type="button" className="shrink-0 rounded px-2 py-1 text-brand focus-visible:outline-brand" onClick={returnToLatestMessages}>Latest messages</button>
+      </div> : null}
+
       <div
         ref={chatScrollRef}
         data-chat-scroll="true"
+        style={{ overflowAnchor: "none" }}
         className="workflow-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-3.5 py-4"
         onScroll={(event) => {
+          if (activeSearchTarget) return;
           chatPinnedToBottomRef.current = conversationIsAtBottom(event.currentTarget);
+          if (event.currentTarget.scrollTop < 80 && historyState.threadId === activeThreadId && historyState.hasMore && !historyState.error) void loadHistoryPage(activeThreadId, historyState.before);
         }}
       >
         {!activeThread ? (
@@ -6506,28 +7144,39 @@ export function ChatPane({
                 <RemAvatar visible={visible} animated={assistantDefaults.avatarAnimated !== false} reducedMotion={reducedMotion} />
               ) : null}
               <h2 className="mt-2 text-lg font-semibold tracking-[-0.02em] text-ink">I&apos;m Rem</h2>
-              <p className="mt-1 text-xs leading-5 text-muted">Your coding agent in Taskurotta.</p>
+              <p className="mt-1 text-xs leading-5 text-muted">Your coding agent in Raticode.</p>
               <p className="mt-2 text-xs leading-5 text-muted">I can build workflows, change code, and help you understand your project.</p>
               <p className="mt-2 text-xs font-medium leading-5 text-ink">What would you like to work on?</p>
             </div>
             <section aria-labelledby="assistant-home-recent" className="border-t border-line pt-3">
               <h3 id="assistant-home-recent" className="px-2 pb-2 text-xs font-semibold text-muted">
-                Recent threads
+                Active threads
               </h3>
-              <ThreadList
+              <ThreadSections
                 activityByThread={chatStateByThread}
                 threads={threads}
-                totalCount={chatThreadIndex().length}
-                onLoadOlder={loadOlderThreads}
                 activeThreadId={activeThreadId}
                 onDelete={deleteThread}
                 onOpen={openThread}
               />
             </section>
           </div>
+        ) : activeSearchTarget ? (
+          <ThreadHistoryMatch
+            key={activeSearchTarget.requestId}
+            repository={repository}
+            target={activeSearchTarget}
+            scrollRef={chatScrollRef}
+            renderMessages={renderSearchMessages}
+          />
         ) : (
           <>
-            {!messages.length ? <p className="text-sm leading-6 text-muted">I&apos;m Rem, your coding agent in Taskurotta. I can build workflows, change code, and help you understand your project. What would you like to work on?</p> : null}
+            {historyState.threadId === activeThreadId && (historyState.loading || historyState.hasMore || historyState.error) ? (
+              <div className="rem-history-loader flex min-h-8 items-center justify-center gap-2 text-[11px] text-muted" aria-live="polite">
+                {historyState.loading ? <><Loader2 aria-hidden="true" className="motion-safe:animate-spin" size={14} /><span role="status">Loading earlier messages…</span></> : historyState.error ? <><span role="alert">{historyState.error}</span><button className="rounded px-2 py-1 text-brand focus-visible:outline-brand" type="button" onClick={() => loadHistoryPage(activeThreadId, historyState.before)}>Retry</button></> : <button className="rounded px-2 py-1 hover:text-ink focus-visible:outline-brand" type="button" onClick={() => loadHistoryPage(activeThreadId, historyState.before)}>Load earlier messages</button>}
+              </div>
+            ) : null}
+            {!messages.length && !historyState.loading ? <p className="text-sm leading-6 text-muted">I&apos;m Rem, your coding agent in Raticode. I can build workflows, change code, and help you understand your project. What would you like to work on?</p> : null}
             {conversationItems.map((item) =>
               item.type === "thought-group" ? (
                 <ThoughtGroup
@@ -6599,6 +7248,7 @@ export function ChatPane({
             draft={draft}
             focusRequest={composerFocusRequest + contextFocusRequest}
             sending={chatState.sending}
+            sendDisabled={historyState.threadId === activeThreadId && Boolean(historyState.loading || historyState.error)}
             onAddAttachments={addAttachments}
             onAttachmentErrorChange={setAttachmentError}
             onAttachmentsChange={setAttachments}
@@ -6611,8 +7261,55 @@ export function ChatPane({
   );
 }
 
-export function ThreadList({ activeThreadId, activityByThread = {}, onDelete, onOpen, threads, totalCount = threads.length, onLoadOlder }) {
-  const [visibleCount, setVisibleCount] = useState(15);
+export function ThreadSections({ threads, ...props }) {
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveCount, setArchiveCount] = useState(10);
+  const [scopeState, setScopeState] = useState(null);
+  const [now, setNow] = useState(Date.now);
+  const entries = [...new Map([...chatThreadIndex(), ...threads.map(threadIndexEntry)].map(entry => [entry.id, entry])).values()];
+  const scopeKey = JSON.stringify(entries.map(({ projectRoot, projectBranch }) => ({ projectRoot, projectBranch })));
+  useEffect(() => {
+    let cancelled = false;
+    let running = false;
+    const refresh = async () => {
+      if (running) return;
+      running = true;
+      const result = await inspectThreadScopes(JSON.parse(scopeKey), window.goferDesktop?.workspace);
+      running = false;
+      if (!cancelled) { setScopeState(result); setNow(Date.now()); }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 60000);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("gofer:git-files-changed", refresh);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("gofer:git-files-changed", refresh);
+    };
+  }, [scopeKey]);
+  const active = [], archived = [];
+  for (const entry of entries) {
+    (threadIsArchived(entry, scopeState?.missingRoots, scopeState?.branches, now) ? archived : active).push(entry);
+  }
+  const load = entries => entries.map(entry => threads.find(thread => thread.id === entry.id) || loadChatThread(entry.id)).filter(Boolean);
+  const sortedArchived = archived.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  return <>
+    {scopeState ? <ThreadList {...props} threads={load(active)} /> : <p role="status" className="px-2 py-2 text-xs text-muted">Checking active threads...</p>}
+    <section className="mt-3 border-t border-line pt-2">
+      <button type="button" aria-expanded={archiveOpen} className="flex w-full items-center gap-1 px-2 py-2 text-left text-xs font-semibold text-muted"
+        onClick={() => { setArchiveOpen(open => !open); setArchiveCount(10); }}>
+        <ChevronRight aria-hidden="true" size={13} className={archiveOpen ? "rotate-90" : ""} />Archived threads
+      </button>
+      {archiveOpen && scopeState ? <ThreadList {...props} key="archive" threads={load(sortedArchived.slice(0, archiveCount))}
+        pageSize={10} totalCount={archived.length} onLoadOlder={setArchiveCount} /> : null}
+    </section>
+  </>;
+}
+
+export function ThreadList({ activeThreadId, activityByThread = {}, onDelete, onOpen, threads, totalCount = threads.length, onLoadOlder, pageSize = 15 }) {
+  const [visibleCount, setVisibleCount] = useState(pageSize);
   const sortedThreads = [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   if (threads.length) {
     return (
@@ -6648,11 +7345,11 @@ export function ThreadList({ activeThreadId, activityByThread = {}, onDelete, on
             </div>
           ))}
           {totalCount > visibleCount ? (
-            <button className="w-full rounded-md px-2 py-2 text-left text-xs text-muted hover:bg-slate-50 focus-visible:outline" type="button" onClick={() => { const nextCount = visibleCount + 15; onLoadOlder?.(nextCount); setVisibleCount(nextCount); }}>
+            <button className="w-full rounded-md px-2 py-2 text-left text-xs text-muted hover:bg-slate-50 focus-visible:outline" type="button" onClick={() => { const nextCount = visibleCount + pageSize; onLoadOlder?.(nextCount); setVisibleCount(nextCount); }}>
               Show older threads ({totalCount - visibleCount})
             </button>
           ) : null}
-          {visibleCount > 15 ? <button className="px-2 py-2 text-xs text-muted" type="button" onClick={() => setVisibleCount(15)}>Collapse older threads</button> : null}
+          {visibleCount > pageSize ? <button className="px-2 py-2 text-xs text-muted" type="button" onClick={() => setVisibleCount(pageSize)}>Collapse older threads</button> : null}
       </div>
     );
   }
@@ -6745,6 +7442,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
   return (
     <div
       data-message-id={message.id}
+      data-history-anchor={message.id}
       className={`flex ${
         isSystem ? "justify-center" : message.role === "user" ? "justify-end" : "justify-start"
       }`}
@@ -6759,7 +7457,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
         }`}
       >
         {isSystem ? (
-          <span className="whitespace-pre-wrap">{message.body}</span>
+          <span className="whitespace-pre-wrap break-words">{message.body}</span>
         ) : (
           <>
             {isUser ? (
@@ -6820,7 +7518,8 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
               </div>
             ) : message.body ? (
               <>
-                <MarkdownMessage inverse={isUser} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} />
+                {message.kind === "search-source" ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
+                  : <MarkdownMessage inverse={isUser} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} />}
                 {!isUser ? (
                   <div className="mt-1 flex justify-end border-t border-line/70 pt-1">
                     <button
@@ -6861,6 +7560,7 @@ function TurnSummaryCard({ message, onUndo }) {
         aria-label="Rem running"
         className="flex items-center gap-1.5 px-1 text-[10px] text-muted"
         data-message-id={message.id}
+      data-history-anchor={message.id}
       >
         {message.running ? <Loader2 aria-hidden="true" className="animate-spin" size={11} /> : null}
         <span>{timing}</span>
@@ -6882,8 +7582,8 @@ function TurnSummaryCard({ message, onUndo }) {
                 {message.running ? <Loader2 aria-hidden="true" className="animate-spin text-brand" size={12} /> : null}
                 {message.running ? assistantLiveChangeLabel(files) : assistantChangeLabel(files)}
               </span>
-              <span className="font-medium text-emerald-600">+{changes.additions ?? 0}</span>
-              <span className="font-medium text-red-500">-{changes.deletions ?? 0}</span>
+              {files.some(file => !file.binary) ? <><span className="font-medium text-emerald-600">+{changes.additions ?? 0}</span><span className="font-medium text-red-500">-{changes.deletions ?? 0}</span></> : null}
+              {files.some(file => file.binary) ? <span className="text-muted">{files.filter(file => file.binary).length} without line counts</span> : null}
             </div>
           </div>
           <button
@@ -6916,8 +7616,7 @@ function TurnSummaryCard({ message, onUndo }) {
             {visibleFiles.map((file) => (
               <div className="flex min-w-0 items-center gap-2 text-[11px]" key={file.path}>
                 <span className="min-w-0 flex-1 truncate text-muted" title={file.path}>{file.path}</span>
-                <span className="shrink-0 font-medium text-emerald-600">+{file.additions ?? 0}</span>
-                <span className="shrink-0 font-medium text-red-500">-{file.deletions ?? 0}</span>
+                {file.binary ? <span className="shrink-0 text-muted">{file.diff?.includes("too large") ? "Too large to count" : "Binary"}</span> : <><span className="shrink-0 font-medium text-emerald-600">+{file.additions ?? 0}</span><span className="shrink-0 font-medium text-red-500">-{file.deletions ?? 0}</span></>}
               </div>
             ))}
           </div>
@@ -7038,9 +7737,11 @@ export function MarkdownMessage({ compact = false, inverse = false, onOpenLink, 
   );
 }
 
-function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts }) {
+function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
   const trace = buildThoughtTrace(thoughts);
   const count = trace.length;
+  const match = thoughts.find(thought => String(thought.id) === String(searchMessageId));
+  const matchKey = match?.trace?.id ? `trace-${match.trace.id}` : match?.id;
 
   if (!count) return null;
 
@@ -7070,6 +7771,9 @@ function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, 
               {trace.map((entry, index) => (
                 <div
                   key={entry.key}
+                  data-history-anchor={`${thoughts[0]?.groupId || ""}:${entry.key}`}
+                  data-thread-search-match={entry.key === matchKey ? "true" : undefined}
+                  tabIndex={entry.key === matchKey ? -1 : undefined}
                   className={`relative ml-1 border-l border-line pl-5 ${
                     index === trace.length - 1 ? "pb-1" : "pb-4"
                   }`}
@@ -7085,11 +7789,11 @@ function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, 
                     }`}
                   />
                   {shellTraceDetails(entry) ? (
-                    <ShellCommandDisclosure entry={entry} />
+                    <ShellCommandDisclosure entry={entry} initiallyExpanded={entry.key === matchKey} />
                   ) : editTraceDetails(entry) ? (
-                    <EditDisclosure entry={entry} onOpenFile={onOpenFile} />
+                    <EditDisclosure entry={entry} onOpenFile={onOpenFile} initiallyExpanded={entry.key === matchKey} />
                   ) : entry.kind === "tool" && (entry.input || entry.output) ? (
-                    <ToolTraceDisclosure entry={entry} />
+                    <ToolTraceDisclosure entry={entry} initiallyExpanded={entry.key === matchKey} />
                   ) : entry.kind === "tool" || !entry.body ? (
                     <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-xs leading-5">
                       {entry.title ? (
@@ -7115,8 +7819,8 @@ function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, 
   );
 }
 
-function ToolTraceDisclosure({ entry }) {
-  const [expanded, setExpanded] = useState(false);
+function ToolTraceDisclosure({ entry, initiallyExpanded = false }) {
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const detail = toolTraceDisclosureDetail(entry);
   const isSearch = entry.category === "search"
     || String(entry.title || "").trim().toLowerCase().includes("search");
@@ -7180,8 +7884,8 @@ export function toolTraceDisclosureDetail(entry) {
   }
 }
 
-function EditDisclosure({ entry, onOpenFile }) {
-  const [expanded, setExpanded] = useState(false);
+function EditDisclosure({ entry, onOpenFile, initiallyExpanded = false }) {
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const details = editTraceDetails(entry);
   if (!details) return null;
 
@@ -7244,8 +7948,8 @@ export function editTraceDetails(entry) {
   return { input, path };
 }
 
-function ShellCommandDisclosure({ entry }) {
-  const [expanded, setExpanded] = useState(false);
+function ShellCommandDisclosure({ entry, initiallyExpanded = false }) {
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const details = shellTraceDetails(entry);
   if (!details) return null;
 
@@ -7344,8 +8048,15 @@ export function chatThreadIndex() {
       for (const entry of valid) {
         if (typeof entry.title === "string") window.localStorage.setItem(chatThreadMetadataKey(entry.id), JSON.stringify(entry));
       }
-      const migrated = valid.map(({ id, updatedAt }) => ({ id, updatedAt }));
+      const migrated = valid.map(threadIndexEntry);
       migrated.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+      window.localStorage.setItem(chatThreadsStorageKey, JSON.stringify(migrated));
+      return migrated;
+    }
+    if (valid.some(entry => entry.scopeIndexed !== true)) {
+      // Already idle entries need no scope lookup until the user opens them.
+      const migrated = valid.map(entry => entry.scopeIndexed ? entry
+        : threadIndexEntry(threadIsArchived(entry) ? entry : loadChatThread(entry.id) || entry));
       window.localStorage.setItem(chatThreadsStorageKey, JSON.stringify(migrated));
       return migrated;
     }
@@ -7353,19 +8064,28 @@ export function chatThreadIndex() {
   } catch { return []; }
 }
 
+function threadIndexEntry(thread) {
+  return { id: thread.id, updatedAt: thread.updatedAt, projectRoot: thread.projectRoot || "",
+    projectBranch: thread.projectBranch, scopeIndexed: true };
+}
+
+export function loadChatThread(id) {
+  try {
+    const thread = JSON.parse(window.localStorage.getItem(chatThreadMetadataKey(id)) || "null");
+    return thread?.id === id && typeof thread.title === "string" ? thread : null;
+  } catch { return null; }
+}
+
+function loadAllChatThreads() { return loadChatThreads(Infinity); }
+
 export function loadChatThreads(limit = 15) {
-  return chatThreadIndex().slice(0, limit).flatMap(({ id }) => {
-    try {
-      const thread = JSON.parse(window.localStorage.getItem(chatThreadMetadataKey(id)) || "null");
-      return thread?.id === id && typeof thread.title === "string" ? [thread] : [];
-    } catch { return []; }
-  });
+  return chatThreadIndex().slice(0, limit).map(({ id }) => loadChatThread(id)).filter(Boolean);
 }
 
 export function persistChatThreads(threads) {
   const loadedIds = new Set(threads.map((thread) => thread.id));
   const index = new Map([
-    ...threads.map(({ id, updatedAt }) => [id, { id, updatedAt }]),
+    ...threads.map(thread => [thread.id, threadIndexEntry(thread)]),
     ...chatThreadIndex().filter((entry) => !loadedIds.has(entry.id)).map((entry) => [entry.id, entry]),
   ]);
   for (const thread of threads) {
@@ -7373,9 +8093,9 @@ export function persistChatThreads(threads) {
     const encoded = JSON.stringify(thread);
     if (window.localStorage.getItem(key) !== encoded) {
       window.localStorage.setItem(key, encoded);
-      archiveThreadFromStorage(thread.id, () => loadChatMessages(chatStorageKeyFor(thread.id)));
+      archiveThreadFromStorage(thread.id, () => conversationRepository().all(thread.id));
     }
-    index.set(thread.id, { id: thread.id, updatedAt: thread.updatedAt });
+    index.set(thread.id, threadIndexEntry(thread));
   }
   const sorted = [...index.values()].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   window.localStorage.setItem(chatThreadsStorageKey, JSON.stringify(sorted));
@@ -7411,14 +8131,14 @@ function archiveThreadFromStorage(threadId, messages, deleted = false) {
   const bridge = window.goferDesktop?.rem;
   if (!bridge?.archive) return Promise.resolve(true);
   const storage = window.localStorage;
-  return scheduleConversationArchive(threadId, () => {
+  return scheduleConversationArchive(threadId, async () => {
     const thread = JSON.parse(storage.getItem(chatThreadMetadataKey(threadId)) || "null") || { id: threadId };
-    return bridge.archive(thread, typeof messages === "function" ? messages() : messages, deleted);
+    return bridge.archive(thread, typeof messages === "function" ? await messages() : messages, deleted);
   }, { deleted });
 }
 
 async function archiveAllConversations() {
-  for (const thread of chatThreadIndex()) await archiveThreadFromStorage(thread.id, () => loadChatMessages(chatStorageKeyFor(thread.id)));
+  for (const thread of chatThreadIndex()) await archiveThreadFromStorage(thread.id, () => conversationRepository().all(thread.id));
 }
 
 export function chatStorageKeyFor(threadId) {
@@ -7951,7 +8671,7 @@ function BindingPreviewSection({ bindings }) {
         <p className="mt-1 text-xs text-slate-600">
           Deferred values resolve automatically at the phase shown below.
           {hasShellConsumer
-            ? " Taskurotta resolves {{...}} first; the shell owns expressions such as ${FILE_NAME}."
+            ? " Raticode resolves {{...}} first; the shell owns expressions such as ${FILE_NAME}."
             : ""}
         </p>
       </div>
@@ -8128,7 +8848,7 @@ export function CreateWorkflowDialog({
     }
     if (mode === "import") {
       if (!importFile) {
-        setImportError("Choose a .taskurotta bundle to import.");
+        setImportError("Choose a .raticode bundle to import.");
         return;
       }
       onImport(importFile, selectedProject);
@@ -8142,9 +8862,9 @@ export function CreateWorkflowDialog({
 
   function chooseImportFile(file) {
     if (!file) return;
-    if (!isTaskurottaFile(file)) {
+    if (!isRaticodeFile(file)) {
       setImportFile(null);
-      setImportError("Choose a .taskurotta bundle.");
+      setImportError("Choose a .raticode bundle.");
       return;
     }
     setImportFile(file);
@@ -8249,7 +8969,7 @@ export function CreateWorkflowDialog({
               <span className="text-xs font-medium text-muted">Workflow bundle</span>
               <input
                 ref={importInputRef}
-                accept=".taskurotta"
+                accept={brandCompat.BUNDLE_ACCEPT}
                 className="hidden"
                 type="file"
                 onChange={(event) => {
@@ -8285,7 +9005,7 @@ export function CreateWorkflowDialog({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium text-ink">
-                    {importFile?.name || "Choose a .taskurotta bundle"}
+                    {importFile?.name || "Choose a .raticode bundle"}
                   </span>
                   <span className="mt-1 block text-xs text-muted">
                     {importFile ? "Ready to import" : "Browse or drop a bundle here"}
@@ -8301,7 +9021,7 @@ export function CreateWorkflowDialog({
                 </p>
               ) : (
                 <p className="mt-1 text-xs text-muted" id="workflow-import-hint">
-                  Taskurotta checks the bundle before adding it to your project.
+                  Raticode checks the bundle before adding it to your project.
                 </p>
               )}
             </div>
@@ -8337,8 +9057,8 @@ export function CreateWorkflowDialog({
             ) : (
               <p className="mt-1 text-xs text-muted" id="project-folder-hint">
                 {mode === "create"
-                  ? "Taskurotta will create .taskurotta/<workflow-id> inside this folder."
-                  : "Taskurotta will add the imported workflow under .taskurotta."}
+                  ? "Raticode will create .raticode/<workflow-id> inside this folder."
+                  : "Raticode will add the imported workflow under .raticode."}
               </p>
             )}
           </div>
@@ -8388,7 +9108,7 @@ export function ExportWorkflowDialog({
   onChooseFolder,
   onExport,
 }) {
-  const radishBundle = workflow?.sourceFormat === "radish";
+  const rattishBundle = workflow?.sourceFormat === "rattish";
 
   if (!open) return null;
 
@@ -8410,8 +9130,8 @@ export function ExportWorkflowDialog({
           <div>
             <h2 className="text-base font-semibold">Export workflow bundle</h2>
             <p className="text-xs text-muted">
-              {radishBundle
-                ? "Includes workflow files except those matched by .taskurottaignore"
+              {rattishBundle
+                ? "Includes workflow files except those matched by .raticodeignore"
                 : workflow?.name
                   ? `Create a portable bundle for ${workflow.name}`
                   : "Create a portable workflow bundle"}
@@ -8503,8 +9223,8 @@ function EmptyWorkspace({
 
   async function startImport(file) {
     if (!file) return;
-    if (!isTaskurottaFile(file)) {
-      setImportError("Choose a .taskurotta bundle.");
+    if (!isRaticodeFile(file)) {
+      setImportError("Choose a .raticode bundle.");
       return;
     }
     setImportError("");
@@ -8527,9 +9247,9 @@ function EmptyWorkspace({
     );
   }
   return (
-    <div className="relative flex flex-1 items-center overflow-auto bg-[#f9fbfd] px-[clamp(24px,6vw,88px)] py-[clamp(28px,6vh,56px)]">
+    <div className="empty-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-auto bg-[#f9fbfd]">
       <div aria-hidden="true" className="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,#dbe3ec_1px,transparent_0)] bg-[size:22px_22px] opacity-45" />
-      <div aria-hidden="true" className="absolute right-[4%] top-1/2 hidden h-64 w-80 -translate-y-1/2 2xl:block">
+      <div aria-hidden="true" className="empty-workspace-decoration absolute right-[4%] top-1/2 hidden h-64 w-80 -translate-y-1/2">
         <div className="absolute left-4 top-24 h-px w-52 -rotate-[15deg] bg-indigo-200" />
         <div className="absolute left-24 top-24 h-px w-44 rotate-[24deg] bg-indigo-200" />
         <div className="absolute left-10 top-16 h-16 w-32 rounded-[14px] bg-white shadow-panel">
@@ -8545,7 +9265,7 @@ function EmptyWorkspace({
           <span className="absolute left-4 top-8 h-2 w-16 rounded-full bg-slate-200" />
         </div>
       </div>
-      <div className="empty-workspace-panel relative z-10 w-full max-w-[800px] rounded-2xl p-[clamp(24px,4vw,40px)]">
+      <div className="empty-workspace-panel relative z-10 my-auto w-full max-w-[800px] shrink-0 rounded-2xl">
         <div className="mb-5 grid h-11 w-11 place-items-center rounded-xl bg-indigo-50 text-brand">
           <Waypoints aria-hidden="true" size={24} />
         </div>
@@ -8573,7 +9293,7 @@ function EmptyWorkspace({
         ) : null}
         <input
           ref={importInputRef}
-          accept=".taskurotta"
+          accept={brandCompat.BUNDLE_ACCEPT}
           className="hidden"
           type="file"
           onChange={(event) => {
@@ -8584,7 +9304,7 @@ function EmptyWorkspace({
         />
         <section
           aria-busy={importing || undefined}
-          className={`empty-import-zone mt-6 flex max-w-2xl items-center gap-4 rounded-xl border border-dashed p-4 ${dragActive ? "empty-import-zone--active" : ""}`}
+          className={`empty-import-zone mt-6 grid max-w-2xl items-center gap-4 rounded-xl border border-dashed p-4 ${dragActive ? "empty-import-zone--active" : ""}`}
           onDragEnter={(event) => {
             event.preventDefault();
             setDragActive(true);
@@ -8609,13 +9329,13 @@ function EmptyWorkspace({
             <h3 className="text-sm font-semibold text-ink">Bring in an existing workflow</h3>
             <p className="mt-1 text-xs leading-5 text-muted">
               {projectRoot
-                ? <>The bundle will be added to <strong className="font-semibold text-ink">{projectName}</strong> under <code className="font-mono text-[11px]">.taskurotta</code>.</>
+                ? <>The bundle will be added to <strong className="font-semibold text-ink">{projectName}</strong> under <code className="font-mono text-[11px]">.raticode</code>.</>
                 : "Choose a bundle, then select the project folder where it should live."}
             </p>
             {importError ? <p className="mt-1 text-xs font-medium text-red-700" role="alert">{importError}</p> : null}
           </div>
           <button
-            className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg bg-brand px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            className="empty-import-button inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-wait disabled:opacity-70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
             disabled={importing}
             type="button"
             onClick={() => importInputRef.current?.click()}
@@ -8624,8 +9344,8 @@ function EmptyWorkspace({
             {importing ? "Importing..." : "Import workflow"}
           </button>
         </section>
-        <p className="mt-2 max-w-2xl text-center text-[11px] leading-4 text-muted">Drop a .taskurotta bundle here</p>
-        <div className="mt-5 flex flex-wrap items-center gap-2.5">
+        <p className="mt-2 max-w-2xl text-center text-[11px] leading-4 text-muted">Drop a .raticode bundle here</p>
+        <div className="empty-workspace-actions mt-5 flex flex-wrap items-center gap-2.5">
           <span className="mr-1 text-xs font-medium text-muted">Starting fresh?</span>
           <button
             className="inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-white px-3.5 text-sm font-medium text-ink transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
@@ -8645,10 +9365,10 @@ function EmptyWorkspace({
           </button>
         </div>
         <button className="mt-3 text-xs text-muted underline-offset-2 hover:text-ink hover:underline" type="button" onClick={onOpenSettings}>Workspace settings</button>
-        <div className="mt-6 grid gap-5 border-t border-line pt-5 md:grid-cols-3 md:gap-0 md:divide-x md:divide-line">
-          <div className="flex items-start gap-3 md:pr-5">
+        <div className="empty-workspace-features mt-6 grid gap-5 border-t border-line pt-5">
+          <div className="flex items-start gap-3">
             <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-              <TaskurottaMark className="h-8 w-8" />
+              <RaticodeMark className="h-8 w-8" />
             </span>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-ink">Rem</p>
@@ -8665,7 +9385,7 @@ function EmptyWorkspace({
               </button>
             </div>
           </div>
-          <div className="flex items-start gap-3 md:px-5">
+          <div className="flex items-start gap-3">
             <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
               <Code2 aria-hidden="true" size={16} />
             </span>
@@ -8676,7 +9396,7 @@ function EmptyWorkspace({
               </p>
             </div>
           </div>
-          <div className="flex items-start gap-3 md:pl-5">
+          <div className="flex items-start gap-3">
             <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
               <Globe2 aria-hidden="true" size={16} />
             </span>

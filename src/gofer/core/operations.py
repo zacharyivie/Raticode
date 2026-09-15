@@ -333,7 +333,7 @@ class ApprovalGateOperation(BaseModel):
     ] = "timeout"
     approvers: RuntimeStringList = []
     notify: RuntimeBool = False
-    notification_title: str = "Taskurotta approval needed"
+    notification_title: str = "Raticode approval needed"
     subject: str | None = None
 
     @model_validator(mode="after")
@@ -351,7 +351,7 @@ class ApprovalGateOperation(BaseModel):
 
 class NotificationOperation(BaseModel):
     type: Literal[OperationType.NOTIFICATION]
-    title: str = "Taskurotta notification"
+    title: str = "Raticode notification"
     body: str = ""
     channel: Annotated[
         str,

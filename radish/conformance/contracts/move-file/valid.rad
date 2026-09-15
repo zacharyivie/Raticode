@@ -1,7 +1,0 @@
-Radish: 1
-Workflow:
-  name: Move contract
-Node example:
-  type: move-file
-  source-path: source.txt
-  destination-path: destination.txt

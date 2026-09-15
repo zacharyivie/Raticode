@@ -1,5 +1,0 @@
-Radish: 1
-Workflow:
-  name: Invalid file contract
-Node example:
-  type: file

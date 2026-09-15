@@ -78,8 +78,8 @@ window.goferDesktop = {
   textFiles: {
     read: async (targetPath) => {
       recordBridgeCall("textFiles.read", targetPath);
-      return { content: targetPath.endsWith("workflow.rad")
-        ? "Radish: 1\n\nWorkflow:\n  name: Radish editor\n\nNode prepare:\n  type: bash-command\n  command: echo ready\n"
+      return { content: targetPath.endsWith("workflow.rattish")
+        ? "Rattish: 1\n\nWorkflow:\n  name: Rattish editor\n\nNode prepare:\n  type: bash-command\n  command: echo ready\n"
         : "{\n  \"enabled\": true\n}" };
     },
     write: async (options) => {
@@ -100,7 +100,7 @@ window.goferTerminal = {
     recordBridgeCall("terminal.create", options);
     setTimeout(() => {
       for (const listener of terminalDataListeners) {
-        listener({ data: "Taskurotta browser terminal\r\n$ ", id });
+        listener({ data: "Raticode browser terminal\r\n$ ", id });
       }
     }, 0);
     return { cwd: options.cwd || "/workspace", id, pid: nextTerminalId, shell: "bash" };

@@ -1,0 +1,211 @@
+{
+  "$schema": "urn:raticode:rattish:schema:ir-1.json",
+  "ir_version": 1,
+  "rattish_version": 1,
+  "compiler": {
+    "name": "raticode-rattish",
+    "version": "0.1.0-test"
+  },
+  "source": {
+    "workflow_id": "build",
+    "entrypoint": "workflow.rattish",
+    "project_root": "/fixture/project",
+    "source_fingerprint": "sha256:707fe565f052452ff0cc58a97d90b404daf3885f31ab7fd6e3f0e2e6e1094a9f",
+    "compilation_fingerprint": "sha256:98034d3edc90037ed739fbbc4573ab9510f7e0b8a336f46f7fa9dff3214391e6",
+    "dependencies": [
+      {
+        "kind": "node_contract",
+        "id": "bash-command",
+        "version": 1,
+        "path": null,
+        "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ]
+  },
+  "workflow": {
+    "id": "build",
+    "name": "Build",
+    "interface_version": null,
+    "max_runs": 50,
+    "timeout_ms": 7200000,
+    "inputs": [],
+    "outputs": []
+  },
+  "execution_policy": {
+    "initial_activation": "nodes_without_needs",
+    "readiness_latch": "all_once_per_activation_lineage",
+    "locked_signal_policy": "coalesce_until_unlocked",
+    "same_group_signal_policy": "coalesce",
+    "cross_group_signal_policy": "fifo_by_arrival",
+    "output_selection": "latest_successful_at_consumer_start",
+    "input_snapshot": "consumer_start",
+    "unresolved_join": "fail_at_quiescence",
+    "missed_schedules": "skip",
+    "workflow_timeout_clock": "active_processing_time",
+    "completion_event_order": [
+      "record_completion",
+      "satisfy_readiness",
+      "emit_routes",
+      "schedule_runnable_targets"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "test",
+      "type": "bash-command",
+      "runtime_handler": "raticode.bash_command",
+      "contract": {
+        "node_type": "bash-command",
+        "version": 1,
+        "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "configuration": {
+        "working_dir": null,
+        "env": {
+          "BUILD_MODE": "local"
+        },
+        "command": "echo build"
+      },
+      "execution": {
+        "allow_fail": false,
+        "timeout_ms": null,
+        "max_runs": null,
+        "max_concurrency": 1,
+        "retry_count": 0,
+        "retry_delay_ms": 1000,
+        "start_declared": false,
+        "initial_activation": true,
+        "finish": null
+      },
+      "readiness": {
+        "needs": [],
+        "incoming_route_sources": [],
+        "latch": "all_once_per_activation_lineage",
+        "pending_signal_policy": "coalesce_until_unlocked"
+      },
+      "bindings": [
+        {
+          "name": "build-mode",
+          "source": {
+            "kind": "literal",
+            "value": "release"
+          },
+          "source_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "string"
+          },
+          "destination_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema"
+          },
+          "default": {
+            "present": false
+          },
+          "delivery": {
+            "kind": "environment",
+            "name": "BUILD_MODE",
+            "encoding": "string_or_canonical_json",
+            "precedence": "over_node_and_inherited_environment"
+          }
+        }
+      ],
+      "output": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "stdout": {
+              "type": "string"
+            },
+            "stderr": {
+              "type": "string"
+            },
+            "exit_code": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "stdout",
+            "stderr",
+            "exit_code"
+          ],
+          "additionalProperties": false
+        },
+        "error_kinds": [
+          "cancelled",
+          "command",
+          "configuration",
+          "filesystem",
+          "internal",
+          "timeout"
+        ],
+        "retention": "latest_successful_per_activation_lineage"
+      },
+      "preflight_checks": [
+        {
+          "id": "shell-available",
+          "severity": "error",
+          "description": "The configured Bash runtime must be available."
+        },
+        {
+          "id": "working-dir-available",
+          "severity": "error",
+          "description": "A selected working directory must exist and be accessible."
+        }
+      ],
+      "effects": [
+        "command",
+        "filesystem_read",
+        "filesystem_write"
+      ],
+      "routes": [],
+      "resolutions": {
+        "provider": null,
+        "workflow": null
+      },
+      "control": null,
+      "source_span": {
+        "file": "workflow.rattish",
+        "start": {
+          "offset": 66,
+          "line": 8,
+          "column": 1
+        },
+        "end": {
+          "offset": 183,
+          "line": 15,
+          "column": 1
+        }
+      }
+    }
+  ],
+  "source_map": {
+    "workflow": {
+      "file": "workflow.rattish",
+      "start": {
+        "offset": 12,
+        "line": 3,
+        "column": 1
+      },
+      "end": {
+        "offset": 65,
+        "line": 7,
+        "column": 1
+      }
+    },
+    "nodes": {
+      "test": {
+        "file": "workflow.rattish",
+        "start": {
+          "offset": 66,
+          "line": 8,
+          "column": 1
+        },
+        "end": {
+          "offset": 183,
+          "line": 15,
+          "column": 1
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,168 @@
+rattish: 1
+
+workflow:
+  name: "Daily TODO implementation"
+  max-runs: 200
+
+node check-state:
+  type: bash-command
+  start: true
+  command: |
+    if [ ! -f todos.md ]; then
+      printf 'no todos quitting.\n'
+    elif git show-ref --verify --quiet refs/heads/daily-changes || git show-ref --verify --quiet refs/remotes/origin/daily-changes; then
+      printf 'unresolved daily changes from previous day. Quitting.\n'
+    else
+      printf 'ready\n'
+    fi
+  to: create-branch when node.check-state.output.stdout contains "ready"
+
+node create-branch:
+  type: bash-command
+  command: git switch -c daily-changes
+  needs: check-state
+  to: create-tickets
+
+node create-tickets:
+  type: agent
+  provider: codex
+  model: gpt-5.6-sol
+  effort: high
+  working-dir: .
+  prompt: |
+    Read todos.md in the project root. Break every actionable item into a separate,
+    self-contained Markdown ticket under tickets/. Create tickets/ if needed. Give
+    each ticket a short kebab-case filename ending in .md. Expand the original item
+    with its goal, relevant context, implementation requirements, acceptance criteria,
+    and likely files or tests. Preserve the user's intent and do not implement any
+    ticket yet. Do not modify existing ticket files. After every todo has a ticket,
+    delete todos.md. Do not run git commit or change branches. Finish with a short
+    plain-text summary of the ticket files created.
+  needs: create-branch
+  to: count-tickets
+
+node count-tickets:
+  type: bash-command
+  command: |
+    count="$(find tickets -maxdepth 1 -type f -name '*.md' | wc -l | tr -d '[:space:]')"
+    if [ "$count" -eq 0 ]; then
+      printf 'No Markdown tickets were created.\n' >&2
+      exit 1
+    fi
+    printf '%s' "$count"
+  needs: create-tickets
+  to: ticket-loop
+
+node ticket-loop:
+  type: loop
+  source: {"fail-fast": true, "glob": "*.md", "include-content": true, "max-concurrency": 1, "path": "tickets", "type": "directory"}
+  needs: count-tickets
+  to: implement-ticket
+
+node implement-ticket:
+  type: agent
+  provider: codex
+  model: gpt-5.6-sol
+  effort: high
+  working-dir: .
+  max-runs: 10
+  repair-attempts: 2
+  output-schema: {"additionalProperties": false, "properties": {"question": {"type": "string"}, "status": {"enum": ["implemented", "needs-specification"]}, "summary": {"type": "string"}}, "required": ["status", "summary", "question"], "type": "object"}
+  prompt: |
+    Work on the ticket at {{ticket-path}}.
+
+    Ticket contents:
+    {{ticket-content}}
+
+    Findings from the prior review, if this is a revision pass:
+    {{review-findings}}
+
+    First decide whether you can implement the entire ticket without more user
+    specification. If not, make no project changes and return status
+    "needs-specification", with the exact missing information in question. If you can,
+    implement the ticket completely, run focused tests and checks appropriate to the
+    changed area, and return status "implemented" with a concise summary. Do not commit,
+    stage changes, change branches, edit other ticket files, or delete this ticket.
+    Return only JSON matching the requested output schema.
+  needs: ticket-loop
+  with:
+    ticket-path: node.ticket-loop.output.file_path
+    ticket-content: node.ticket-loop.output.file_content
+    review-findings:
+      from: node.review-ticket.output.findings
+      default: ""
+  to:
+    - review-ticket when node.implement-ticket.output.status == "implemented"
+    - report-blocked otherwise
+
+node report-blocked:
+  type: bash-command
+  command: printf 'Ticket %s needs user specification: %s\n' "$TICKET_FILE" "$QUESTION"
+  needs: implement-ticket
+  with:
+    ticket-file: node.ticket-loop.output.file_name
+    question: node.implement-ticket.output.question
+  to: stop-ticket-loop
+
+node stop-ticket-loop:
+  type: break
+  loop: ticket-loop
+  message: A ticket needs more user specification; remaining tickets were not processed.
+  needs: report-blocked
+
+node review-ticket:
+  type: agent
+  provider: codex
+  model: gpt-5.6-sol
+  effort: high
+  working-dir: .
+  max-runs: 10
+  repair-attempts: 2
+  output-schema: {"additionalProperties": false, "properties": {"approved": {"type": "boolean"}, "findings": {"type": "string"}}, "required": ["approved", "findings"], "type": "object"}
+  prompt: |
+    Review the unstaged project changes against the ticket at {{ticket-path}}.
+
+    Ticket contents:
+    {{ticket-content}}
+
+    Inspect git status, the complete unstaged diff, relevant untracked files, and test
+    results. Run focused checks when useful, but do not modify, stage, or commit files.
+    Approve only when the ticket is fully implemented and the changes are correct,
+    scoped, tested, and free of obvious regressions. If approval is false, put specific
+    actionable defects in findings so the implementation agent can fix them. Return only
+    JSON matching the requested output schema.
+  needs: implement-ticket
+  with:
+    ticket-path: node.ticket-loop.output.file_path
+    ticket-content: node.ticket-loop.output.file_content
+  to:
+    - commit-ticket when node.review-ticket.output.approved == true
+    - implement-ticket otherwise
+
+node commit-ticket:
+  type: bash-command
+  command: |
+    git add . && git commit -m "wip: $TICKET_FILE"
+    if [ "$((TICKET_INDEX + 1))" -eq "$TICKET_COUNT" ]; then
+      printf 'all-complete\n'
+    else
+      printf 'ticket-complete\n'
+    fi
+  needs: review-ticket
+  with:
+    ticket-file: node.ticket-loop.output.file_name
+    ticket-index: node.ticket-loop.output.index
+    ticket-count: node.count-tickets.output.stdout
+  to: approve-merge when node.commit-ticket.output.stdout contains "all-complete"
+
+node approve-merge:
+  type: approval-gate
+  message: All daily changes complete. Approve to merge to main.
+  needs: commit-ticket
+  to: merge-daily-changes when node.approve-merge.output.approved == true
+
+node merge-daily-changes:
+  type: bash-command
+  command: git switch daily-changes && git pull --no-rebase origin main && git switch main && git merge daily-changes
+  needs: approve-merge
+  finish: pass

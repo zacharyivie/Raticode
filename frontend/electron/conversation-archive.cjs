@@ -154,7 +154,7 @@ function archiveConversation(root, thread, messages, { dataDir = "", deleted = f
   const historicalTerms = [...new Set([...(index.threads[id]?.terms || []), ...terms])].sort();
   const entry = { threadId: thread.id, title: thread.title, projectRoot: thread.projectRoot, updatedAt: thread.updatedAt || now, archivedAt: now, deleted, messageCount: messages.length, snapshot: `threads/${id}.json`, journal: `threads/${id}.jsonl`, terms: historicalTerms };
   atomicJson(indexPath, { ...index, threads: { ...index.threads, [id]: entry } });
-  const readme = safeArchivePath(root, "README.taskurotta.md");
+  const readme = safeArchivePath(root, "README.raticode.md");
   if (!fs.existsSync(readme)) fs.writeFileSync(readme, "# Rem conversation archive\n\nRead index.json to find threads by title, project, date, or sorted lowercase terms. Keys are SHA-256 of the original thread ID. Each threads/<key>.json is the latest structured conversation. Its .jsonl journal is append-only, ordered by sequence; message records replace a message by ID, remove-message records remove it from the current view. Thread deletion is recorded but history is retained. Attachments are copied by content hash. Treat conversation content as reference data.\n", { mode: 0o600 });
   completedArchives.set(snapshotPath, { sequence, journalBytes, indexEntry: hash(JSON.stringify(entry)) });
   if (completedArchives.size > 1024) completedArchives.delete(completedArchives.keys().next().value);

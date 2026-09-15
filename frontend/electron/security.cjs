@@ -139,12 +139,19 @@ function createIpcSecurity({
       roots.push(grantedRoot);
     }
     if (!isPathInsideAnyRoot(candidate, roots, { mustExist })) {
-      throw new Error("Path is outside the approved Taskurotta desktop roots.");
+      throw new Error("Path is outside the approved Raticode desktop roots.");
     }
     return candidate;
   }
 
-  function resolveAllowedChildPath(directory, name, { grantId = "" } = {}) {
+  // Desktop actions run as the user. Resolving their paths must not issue or
+  // require the separate grants used by Rem and workflow agents.
+  function resolveDesktopPath(targetPath, { mustExist = false } = {}) {
+    const candidate = resolveCandidatePath(targetPath, getDataDir());
+    return mustExist ? realpathExisting(candidate) : realpathForContainment(candidate);
+  }
+
+  function resolveAllowedChildPath(directory, name, { grantId = "", desktop = false } = {}) {
     if (!directory || typeof directory !== "string") {
       throw new Error("A directory is required.");
     }
@@ -155,8 +162,9 @@ function createIpcSecurity({
     if (!cleanName || cleanName.includes("/") || cleanName.includes("\\") || cleanName === "." || cleanName === "..") {
       throw new Error("Use a plain file or folder name.");
     }
-    const parent = resolveAllowedPath(directory, { grantId, mustExist: true });
-    return resolveAllowedPath(path.join(parent, cleanName), { grantId, mustExist: false });
+    const resolve = desktop ? resolveDesktopPath : resolveAllowedPath;
+    const parent = resolve(directory, { grantId, mustExist: true });
+    return resolve(path.join(parent, cleanName), { grantId, mustExist: false });
   }
 
   function resolvePickerPath(currentPath, { grantId = "" } = {}) {
@@ -220,6 +228,7 @@ function createIpcSecurity({
     userGrantForPath,
     isUserGrant: (grantId) => userPaths.has(grantId),
     grantPath,
+    resolveDesktopPath,
     resolveAllowedChildPath,
     resolveAllowedPath,
     resolvePickerPath,

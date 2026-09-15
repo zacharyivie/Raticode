@@ -1,0 +1,29 @@
+[
+  {
+    "$schema": "urn:raticode:rattish:schema:diagnostic-1.json",
+    "code": "RATTISH_SUSPECTED_PLAINTEXT_SECRET",
+    "severity": "warning",
+    "phase": "semantic",
+    "message": "Environment entry 'API_TOKEN' looks like a plaintext credential.",
+    "file": "workflow.rattish",
+    "span": {
+      "start": {
+        "offset": 140,
+        "line": 10,
+        "column": 18
+      },
+      "end": {
+        "offset": 157,
+        "line": 10,
+        "column": 35
+      }
+    },
+    "related": [],
+    "details": {
+      "field": "env.API_TOKEN"
+    },
+    "suggestions": [
+      "Use a secret reference when the runtime should supply this value."
+    ]
+  }
+]

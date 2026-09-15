@@ -1,6 +1,0 @@
-Radish: 1
-Workflow:
-  name: Bash contract
-Node example:
-  type: bash-command
-  command: printf ready

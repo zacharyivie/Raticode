@@ -1,0 +1,508 @@
+{
+  "$schema": "urn:raticode:rattish:schema:ast-1.json",
+  "schema_version": 1,
+  "source_id": "workflow.rattish",
+  "span": {
+    "start": {
+      "offset": 0,
+      "line": 1,
+      "column": 1
+    },
+    "end": {
+      "offset": 183,
+      "line": 15,
+      "column": 1
+    }
+  },
+  "version_directive": {
+    "kind": "version_directive",
+    "keyword_source": "Rattish",
+    "value_source": "1",
+    "value": 1,
+    "span": {
+      "start": {
+        "offset": 0,
+        "line": 1,
+        "column": 1
+      },
+      "end": {
+        "offset": 11,
+        "line": 2,
+        "column": 1
+      }
+    }
+  },
+  "workflow": {
+    "kind": "workflow_declaration",
+    "keyword_source": "Workflow",
+    "entries": [
+      {
+        "kind": "field",
+        "name": {
+          "kind": "identifier",
+          "source": "name",
+          "canonical": "name",
+          "span": {
+            "start": {
+              "offset": 24,
+              "line": 4,
+              "column": 3
+            },
+            "end": {
+              "offset": 28,
+              "line": 4,
+              "column": 7
+            }
+          }
+        },
+        "value": {
+          "kind": "string",
+          "style": "bare",
+          "source": "Build",
+          "value": "Build",
+          "span": {
+            "start": {
+              "offset": 30,
+              "line": 4,
+              "column": 9
+            },
+            "end": {
+              "offset": 35,
+              "line": 4,
+              "column": 14
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "offset": 24,
+            "line": 4,
+            "column": 3
+          },
+          "end": {
+            "offset": 36,
+            "line": 5,
+            "column": 1
+          }
+        }
+      },
+      {
+        "kind": "field",
+        "name": {
+          "kind": "identifier",
+          "source": "timeout",
+          "canonical": "timeout",
+          "span": {
+            "start": {
+              "offset": 38,
+              "line": 5,
+              "column": 3
+            },
+            "end": {
+              "offset": 45,
+              "line": 5,
+              "column": 10
+            }
+          }
+        },
+        "value": {
+          "kind": "duration",
+          "source": "2h",
+          "amount": 2,
+          "unit_source": "h",
+          "canonical_unit": "h",
+          "span": {
+            "start": {
+              "offset": 47,
+              "line": 5,
+              "column": 12
+            },
+            "end": {
+              "offset": 49,
+              "line": 5,
+              "column": 14
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "offset": 38,
+            "line": 5,
+            "column": 3
+          },
+          "end": {
+            "offset": 50,
+            "line": 6,
+            "column": 1
+          }
+        }
+      },
+      {
+        "kind": "field",
+        "name": {
+          "kind": "identifier",
+          "source": "max-runs",
+          "canonical": "max-runs",
+          "span": {
+            "start": {
+              "offset": 52,
+              "line": 6,
+              "column": 3
+            },
+            "end": {
+              "offset": 60,
+              "line": 6,
+              "column": 11
+            }
+          }
+        },
+        "value": {
+          "kind": "integer",
+          "source": "50",
+          "value": 50,
+          "span": {
+            "start": {
+              "offset": 62,
+              "line": 6,
+              "column": 13
+            },
+            "end": {
+              "offset": 64,
+              "line": 6,
+              "column": 15
+            }
+          }
+        },
+        "span": {
+          "start": {
+            "offset": 52,
+            "line": 6,
+            "column": 3
+          },
+          "end": {
+            "offset": 65,
+            "line": 7,
+            "column": 1
+          }
+        }
+      }
+    ],
+    "span": {
+      "start": {
+        "offset": 12,
+        "line": 3,
+        "column": 1
+      },
+      "end": {
+        "offset": 65,
+        "line": 7,
+        "column": 1
+      }
+    }
+  },
+  "nodes": [
+    {
+      "kind": "node_declaration",
+      "keyword_source": "Node",
+      "name": {
+        "kind": "identifier",
+        "source": "test",
+        "canonical": "test",
+        "span": {
+          "start": {
+            "offset": 71,
+            "line": 8,
+            "column": 6
+          },
+          "end": {
+            "offset": 75,
+            "line": 8,
+            "column": 10
+          }
+        }
+      },
+      "entries": [
+        {
+          "kind": "field",
+          "name": {
+            "kind": "identifier",
+            "source": "type",
+            "canonical": "type",
+            "span": {
+              "start": {
+                "offset": 79,
+                "line": 9,
+                "column": 3
+              },
+              "end": {
+                "offset": 83,
+                "line": 9,
+                "column": 7
+              }
+            }
+          },
+          "value": {
+            "kind": "identifier_value",
+            "source": "bash-command",
+            "canonical": "bash-command",
+            "span": {
+              "start": {
+                "offset": 85,
+                "line": 9,
+                "column": 9
+              },
+              "end": {
+                "offset": 97,
+                "line": 9,
+                "column": 21
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "offset": 79,
+              "line": 9,
+              "column": 3
+            },
+            "end": {
+              "offset": 98,
+              "line": 10,
+              "column": 1
+            }
+          }
+        },
+        {
+          "kind": "field",
+          "name": {
+            "kind": "identifier",
+            "source": "command",
+            "canonical": "command",
+            "span": {
+              "start": {
+                "offset": 100,
+                "line": 10,
+                "column": 3
+              },
+              "end": {
+                "offset": 107,
+                "line": 10,
+                "column": 10
+              }
+            }
+          },
+          "value": {
+            "kind": "string",
+            "style": "bare",
+            "source": "echo build",
+            "value": "echo build",
+            "span": {
+              "start": {
+                "offset": 109,
+                "line": 10,
+                "column": 12
+              },
+              "end": {
+                "offset": 119,
+                "line": 10,
+                "column": 22
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "offset": 100,
+              "line": 10,
+              "column": 3
+            },
+            "end": {
+              "offset": 120,
+              "line": 11,
+              "column": 1
+            }
+          }
+        },
+        {
+          "kind": "field",
+          "name": {
+            "kind": "identifier",
+            "source": "env",
+            "canonical": "env",
+            "span": {
+              "start": {
+                "offset": 122,
+                "line": 11,
+                "column": 3
+              },
+              "end": {
+                "offset": 125,
+                "line": 11,
+                "column": 6
+              }
+            }
+          },
+          "value": {
+            "kind": "map",
+            "entries": [
+              {
+                "kind": "map_entry",
+                "key": {
+                  "kind": "string",
+                  "style": "quoted",
+                  "source": "\"BUILD_MODE\"",
+                  "value": "BUILD_MODE",
+                  "span": {
+                    "start": {
+                      "offset": 131,
+                      "line": 12,
+                      "column": 5
+                    },
+                    "end": {
+                      "offset": 143,
+                      "line": 12,
+                      "column": 17
+                    }
+                  }
+                },
+                "value": {
+                  "kind": "string",
+                  "style": "bare",
+                  "source": "local",
+                  "value": "local",
+                  "span": {
+                    "start": {
+                      "offset": 145,
+                      "line": 12,
+                      "column": 19
+                    },
+                    "end": {
+                      "offset": 150,
+                      "line": 12,
+                      "column": 24
+                    }
+                  }
+                },
+                "span": {
+                  "start": {
+                    "offset": 131,
+                    "line": 12,
+                    "column": 5
+                  },
+                  "end": {
+                    "offset": 151,
+                    "line": 13,
+                    "column": 1
+                  }
+                }
+              }
+            ],
+            "span": {
+              "start": {
+                "offset": 131,
+                "line": 12,
+                "column": 5
+              },
+              "end": {
+                "offset": 151,
+                "line": 13,
+                "column": 1
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "offset": 122,
+              "line": 11,
+              "column": 3
+            },
+            "end": {
+              "offset": 151,
+              "line": 13,
+              "column": 1
+            }
+          }
+        },
+        {
+          "kind": "bindings",
+          "keyword_source": "with",
+          "bindings": [
+            {
+              "kind": "binding",
+              "form": "compact",
+              "name": {
+                "kind": "identifier",
+                "source": "build-mode",
+                "canonical": "build-mode",
+                "span": {
+                  "start": {
+                    "offset": 163,
+                    "line": 14,
+                    "column": 5
+                  },
+                  "end": {
+                    "offset": 173,
+                    "line": 14,
+                    "column": 15
+                  }
+                }
+              },
+              "value": {
+                "kind": "string",
+                "style": "bare",
+                "source": "release",
+                "value": "release",
+                "span": {
+                  "start": {
+                    "offset": 175,
+                    "line": 14,
+                    "column": 17
+                  },
+                  "end": {
+                    "offset": 182,
+                    "line": 14,
+                    "column": 24
+                  }
+                }
+              },
+              "span": {
+                "start": {
+                  "offset": 163,
+                  "line": 14,
+                  "column": 5
+                },
+                "end": {
+                  "offset": 183,
+                  "line": 15,
+                  "column": 1
+                }
+              }
+            }
+          ],
+          "span": {
+            "start": {
+              "offset": 153,
+              "line": 13,
+              "column": 3
+            },
+            "end": {
+              "offset": 183,
+              "line": 15,
+              "column": 1
+            }
+          }
+        }
+      ],
+      "span": {
+        "start": {
+          "offset": 66,
+          "line": 8,
+          "column": 1
+        },
+        "end": {
+          "offset": 183,
+          "line": 15,
+          "column": 1
+        }
+      }
+    }
+  ]
+}

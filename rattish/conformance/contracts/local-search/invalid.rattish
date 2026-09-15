@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Invalid local search
+Node example:
+  type: local-search
+  query: release process

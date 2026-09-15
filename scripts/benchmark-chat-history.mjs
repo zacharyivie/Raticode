@@ -109,7 +109,7 @@ parentPort.on('message', ({ id, root, thread, messages, options }) => {
 });
 `;
 async function archiveBenchmark() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-chat-bench-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-chat-bench-"));
   const queue = createArchiveQueue({ createWorker: () => new Worker(workerSource, {
     eval: true, workerData: { module: archiveModule, delay: slowFsyncMs },
   }) });

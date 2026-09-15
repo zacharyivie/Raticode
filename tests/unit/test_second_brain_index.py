@@ -4,6 +4,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -211,11 +212,11 @@ def test_background_recovery_finishes_before_next_query(tmp_path, monkeypatch):
     brain = SecondBrain(tmp_path)
     assert brain.search("Before")
     note.write_text("After")
-    database = tmp_path / ".taskurotta/second-brain.sqlite3"
+    database = tmp_path / ".raticode/second-brain.sqlite3"
 
     def recovered():
         # Inspect SQLite directly: calling search here would itself request work.
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection, connection:
             assert (
                 connection.execute(
                     "SELECT COUNT(*) FROM notes WHERE notes MATCH 'After'"
@@ -395,7 +396,7 @@ def test_recreated_database_reindexes_with_existing_background_worker(tmp_path, 
     (tmp_path / "note.md").write_text("Knowledge")
     brain = SecondBrain(tmp_path)
     assert brain.search("Knowledge")
-    (tmp_path / ".taskurotta/second-brain.sqlite3").unlink()
+    (tmp_path / ".raticode/second-brain.sqlite3").unlink()
     assert brain.search("Knowledge")
 
 

@@ -1,10 +1,10 @@
 {
   "name": "gofer-flow-ui",
-  "version": "0.2.6",
-  "description": "Local workflow automation studio for Taskurotta.",
-  "author": "Taskurotta",
+  "version": "0.3.0",
+  "description": "Local workflow automation studio for Raticode.",
+  "author": "Raticode",
   "license": "AGPL-3.0-only",
-  "homepage": "https://github.com/zacharyivie/Taskurotta",
+  "homepage": "https://github.com/zacharyivie/gofer-flow",
   "desktopName": "gofer-flow",
   "private": true,
   "type": "module",
@@ -36,8 +36,8 @@
   },
   "build": {
     "appId": "com.goferflow.desktop",
-    "productName": "Taskurotta",
-    "copyright": "Copyright \u00a9 2026 Taskurotta",
+    "productName": "Raticode",
+    "copyright": "Copyright \u00a9 2026 Raticode",
     "directories": {
       "buildResources": "build-resources",
       "output": "release"
@@ -46,7 +46,7 @@
       {
         "provider": "github",
         "owner": "zacharyivie",
-        "repo": "Taskurotta"
+        "repo": "gofer-flow"
       }
     ],
     "files": [
@@ -67,10 +67,10 @@
         "rpm"
       ],
       "category": "Development",
-      "description": "Local workflow automation studio for Taskurotta.",
+      "description": "Local workflow automation studio for Raticode.",
       "desktop": {
         "entry": {
-          "Name": "Taskurotta",
+          "Name": "Raticode",
           "Comment": "Local workflow automation studio",
           "Keywords": "workflow;automation;dag;agents;gofer;",
           "StartupWMClass": "gofer-flow"
@@ -78,9 +78,9 @@
       },
       "executableName": "gofer-flow",
       "icon": "build-resources/icons",
-      "maintainer": "Taskurotta",
+      "maintainer": "Raticode",
       "packageCategory": "devel",
-      "artifactName": "Taskurotta-${version}-${arch}.${ext}",
+      "artifactName": "Raticode-${version}-${arch}.${ext}",
       "extraResources": [
         {
           "from": "../dist/gof",
@@ -116,7 +116,7 @@
         "nsis"
       ],
       "icon": "build-resources/icon.ico",
-      "artifactName": "Taskurotta-Setup-${version}.${ext}",
+      "artifactName": "Raticode-Setup-${version}.${ext}",
       "extraResources": [
         {
           "from": "../dist/gof.exe",
@@ -137,7 +137,7 @@
       ],
       "category": "public.app-category.developer-tools",
       "icon": "build-resources/icon.icns",
-      "artifactName": "Taskurotta-${version}-${arch}.${ext}",
+      "artifactName": "Raticode-${version}-${arch}.${ext}",
       "extraResources": [
         {
           "from": "../dist/gof",
@@ -146,8 +146,14 @@
       ]
     },
     "dmg": {
-      "artifactName": "Taskurotta-${version}-${arch}.${ext}"
-    }
+      "artifactName": "Raticode-${version}-${arch}.${ext}"
+    },
+    "extraResources": [
+      {
+        "from": "../dist/third-party-licenses",
+        "to": "third-party-licenses"
+      }
+    ]
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

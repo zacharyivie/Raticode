@@ -12,11 +12,11 @@ Developers are the primary users. The product must also be approachable for non-
 
 ## Product Purpose
 
-Taskurotta lets people define, build, validate, and run local agentic workflows. It makes local automation practical for both interactive desktop use and remote, UI-free execution.
+Raticode lets people define, build, validate, and run local agentic workflows. It makes local automation practical for both interactive desktop use and remote, UI-free execution.
 
 ## Positioning
 
-Taskurotta combines a local visual workflow studio with a CLI for remote machines and an in-product agent that can help construct workflows. It is designed to avoid relying on large agent-tool-call chains and oversized contexts, reducing operating cost while retaining local control.
+Raticode combines a local visual workflow studio with a CLI for remote machines and an in-product agent that can help construct workflows. It is designed to avoid relying on large agent-tool-call chains and oversized contexts, reducing operating cost while retaining local control.
 
 ## Operating Context
 

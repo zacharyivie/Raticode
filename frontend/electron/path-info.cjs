@@ -29,4 +29,31 @@ function pathInfoFromStat(targetPath, stat) {
   };
 }
 
-module.exports = { inspectPath, pathInfoFromStat };
+// Recent history spans projects and standalone files. Inspect metadata only;
+// this does not create path grants or read file contents.
+async function missingRecentFiles(paths, stat = fs.promises.stat) {
+  if (!Array.isArray(paths)) return [];
+  const candidates = [...new Set(paths.filter(item => typeof item === "string" && path.isAbsolute(item)))].slice(0, 8);
+  const missing = await Promise.all(candidates.map(async target => {
+    try {
+      return (await stat(target)).isFile() ? null : target;
+    } catch (error) {
+      return ["ENOENT", "ENOTDIR"].includes(error?.code) ? target : null;
+    }
+  }));
+  return missing.filter(Boolean);
+}
+
+module.exports = { inspectPath, pathInfoFromStat, missingRecentFiles };
+
+// Like recent-file cleanup, only inspect existence. No content access or grants.
+async function missingThreadRoots(paths, stat = fs.promises.stat) {
+  if (!Array.isArray(paths)) return [];
+  const roots = [...new Set(paths.filter(item => typeof item === "string" && path.isAbsolute(item)))].slice(0, 100);
+  const missing = await Promise.all(roots.map(async root => {
+    try { return (await stat(root)).isDirectory() ? null : root; }
+    catch (error) { return ["ENOENT", "ENOTDIR"].includes(error?.code) ? root : null; }
+  }));
+  return missing.filter(Boolean);
+}
+module.exports.missingThreadRoots = missingThreadRoots;

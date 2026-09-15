@@ -1,0 +1,6 @@
+Rattish: 1
+Workflow:
+  name: Folder contract
+Node example:
+  type: folder
+  path: artifacts

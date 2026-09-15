@@ -1,0 +1,755 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:raticode:rattish:schema:ir-1.json",
+  "title": "Rattish IR version 1",
+  "description": "Immutable, fully resolved execution input produced by a successful Rattish 1 compilation.",
+  "type": "object",
+  "properties": {
+    "$schema": {"type": "string"},
+    "ir_version": {"const": 1},
+    "rattish_version": {"const": 1},
+    "compiler": {"$ref": "#/$defs/compiler"},
+    "source": {"$ref": "#/$defs/source"},
+    "workflow": {"$ref": "#/$defs/workflow"},
+    "execution_policy": {"$ref": "#/$defs/execution_policy"},
+    "nodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "source_map": {"$ref": "#/$defs/source_map"}
+  },
+  "required": [
+    "$schema",
+    "ir_version",
+    "rattish_version",
+    "compiler",
+    "source",
+    "workflow",
+    "execution_policy",
+    "nodes",
+    "source_map"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "schema_document": {
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "const": "https://json-schema.org/draft/2020-12/schema"
+        }
+      },
+      "required": ["$schema"]
+    },
+    "compiler": {
+      "type": "object",
+      "properties": {
+        "name": {"const": "raticode-rattish"},
+        "version": {"type": "string", "minLength": 1}
+      },
+      "required": ["name", "version"],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "workflow_id": {"$ref": "#/$defs/identifier"},
+        "entrypoint": {"type": "string", "minLength": 1},
+        "project_root": {"type": "string", "minLength": 1},
+        "source_fingerprint": {"$ref": "#/$defs/sha256"},
+        "compilation_fingerprint": {"$ref": "#/$defs/sha256"},
+        "dependencies": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/dependency"}
+        }
+      },
+      "required": [
+        "workflow_id",
+        "entrypoint",
+        "project_root",
+        "source_fingerprint",
+        "compilation_fingerprint",
+        "dependencies"
+      ],
+      "additionalProperties": false
+    },
+    "dependency": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "node_contract",
+            "provider_contract",
+            "schema",
+            "workflow",
+            "workflow_interface"
+          ]
+        },
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": ["integer", "string", "null"]},
+        "path": {"type": ["string", "null"]},
+        "fingerprint": {"$ref": "#/$defs/sha256"}
+      },
+      "required": ["kind", "id", "version", "path", "fingerprint"],
+      "additionalProperties": false
+    },
+    "workflow": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "name": {"type": "string", "minLength": 1},
+        "interface_version": {"type": ["integer", "null"], "minimum": 1},
+        "max_runs": {"type": ["integer", "null"], "minimum": 1},
+        "timeout_ms": {"type": ["integer", "null"], "minimum": 1},
+        "inputs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/workflow_input"}
+        },
+        "outputs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/workflow_output"}
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "interface_version",
+        "max_runs",
+        "timeout_ms",
+        "inputs",
+        "outputs"
+      ],
+      "additionalProperties": false
+    },
+    "workflow_input": {
+      "type": "object",
+      "properties": {
+        "name": {"$ref": "#/$defs/identifier"},
+        "required": {"type": "boolean"},
+        "schema": {"$ref": "#/$defs/schema_document"},
+        "default": {"$ref": "#/$defs/explicit_value"}
+      },
+      "required": ["name", "required", "schema", "default"],
+      "additionalProperties": false
+    },
+    "workflow_output": {
+      "type": "object",
+      "properties": {
+        "name": {"$ref": "#/$defs/identifier"},
+        "source": {"$ref": "#/$defs/reference"},
+        "schema": {"$ref": "#/$defs/schema_document"}
+      },
+      "required": ["name", "source", "schema"],
+      "additionalProperties": false
+    },
+    "execution_policy": {
+      "type": "object",
+      "properties": {
+        "initial_activation": {"const": "nodes_without_needs"},
+        "readiness_latch": {"const": "all_once_per_activation_lineage"},
+        "locked_signal_policy": {"const": "coalesce_until_unlocked"},
+        "same_group_signal_policy": {"const": "coalesce"},
+        "cross_group_signal_policy": {"const": "fifo_by_arrival"},
+        "output_selection": {"const": "latest_successful_at_consumer_start"},
+        "input_snapshot": {"const": "consumer_start"},
+        "unresolved_join": {"const": "fail_at_quiescence"},
+        "missed_schedules": {"const": "skip"},
+        "workflow_timeout_clock": {"const": "active_processing_time"},
+        "completion_event_order": {
+          "const": [
+            "record_completion",
+            "satisfy_readiness",
+            "emit_routes",
+            "schedule_runnable_targets"
+          ]
+        }
+      },
+      "required": [
+        "initial_activation",
+        "readiness_latch",
+        "locked_signal_policy",
+        "same_group_signal_policy",
+        "cross_group_signal_policy",
+        "output_selection",
+        "input_snapshot",
+        "unresolved_join",
+        "missed_schedules",
+        "workflow_timeout_clock",
+        "completion_event_order"
+      ],
+      "additionalProperties": false
+    },
+    "node": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "type": {"$ref": "#/$defs/identifier"},
+        "runtime_handler": {"type": "string", "minLength": 1},
+        "contract": {"$ref": "#/$defs/resolved_contract"},
+        "configuration": {"type": "object"},
+        "execution": {"$ref": "#/$defs/node_execution"},
+        "readiness": {"$ref": "#/$defs/readiness"},
+        "bindings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/binding"}
+        },
+        "output": {"$ref": "#/$defs/node_output"},
+        "preflight_checks": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/resolved_preflight_check"}
+        },
+        "effects": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "approval",
+              "command",
+              "filesystem_read",
+              "filesystem_write",
+              "network",
+              "provider",
+              "state_write",
+              "workflow_call",
+              "workflow_control"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "routes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/route"}
+        },
+        "resolutions": {"$ref": "#/$defs/resolutions"},
+        "control": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/break_control"}
+          ]
+        },
+        "source_span": {"$ref": "#/$defs/file_span"}
+      },
+      "required": [
+        "id",
+        "type",
+        "runtime_handler",
+        "contract",
+        "configuration",
+        "execution",
+        "readiness",
+        "bindings",
+        "output",
+        "preflight_checks",
+        "effects",
+        "routes",
+        "resolutions",
+        "control",
+        "source_span"
+      ],
+      "additionalProperties": false
+    },
+    "resolved_preflight_check": {
+      "type": "object",
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "severity": {"enum": ["error", "warning"]},
+        "description": {"type": "string", "minLength": 1}
+      },
+      "required": ["id", "severity", "description"],
+      "additionalProperties": false
+    },
+    "resolved_contract": {
+      "type": "object",
+      "properties": {
+        "node_type": {"$ref": "#/$defs/identifier"},
+        "version": {"type": "integer", "minimum": 1},
+        "fingerprint": {"$ref": "#/$defs/sha256"}
+      },
+      "required": ["node_type", "version", "fingerprint"],
+      "additionalProperties": false
+    },
+    "node_execution": {
+      "type": "object",
+      "properties": {
+        "allow_fail": {"type": "boolean"},
+        "timeout_ms": {"type": ["integer", "null"], "minimum": 1},
+        "max_runs": {"type": ["integer", "null"], "minimum": 1},
+        "max_concurrency": {"type": "integer", "minimum": 1},
+        "retry_count": {"type": "integer", "minimum": 0},
+        "retry_delay_ms": {"type": "integer", "minimum": 0},
+        "start_declared": {"type": "boolean"},
+        "initial_activation": {"type": "boolean"},
+        "finish": {"enum": ["pass", "fail", null]}
+      },
+      "required": [
+        "allow_fail",
+        "timeout_ms",
+        "max_runs",
+        "max_concurrency",
+        "retry_count",
+        "retry_delay_ms",
+        "start_declared",
+        "initial_activation",
+        "finish"
+      ],
+      "additionalProperties": false
+    },
+    "readiness": {
+      "type": "object",
+      "properties": {
+        "needs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true
+        },
+        "incoming_route_sources": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "uniqueItems": true
+        },
+        "latch": {"const": "all_once_per_activation_lineage"},
+        "pending_signal_policy": {"const": "coalesce_until_unlocked"}
+      },
+      "required": ["needs", "incoming_route_sources", "latch", "pending_signal_policy"],
+      "additionalProperties": false
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "name": {"$ref": "#/$defs/identifier"},
+        "source": {
+          "oneOf": [
+            {"$ref": "#/$defs/reference_source"},
+            {"$ref": "#/$defs/expression_source"},
+            {"$ref": "#/$defs/literal_source"}
+          ]
+        },
+        "source_schema": {"$ref": "#/$defs/schema_document"},
+        "destination_schema": {"$ref": "#/$defs/schema_document"},
+        "default": {"$ref": "#/$defs/explicit_value"},
+        "delivery": {"$ref": "#/$defs/binding_delivery"}
+      },
+      "required": [
+        "name",
+        "source",
+        "source_schema",
+        "destination_schema",
+        "default",
+        "delivery"
+      ],
+      "additionalProperties": false
+    },
+    "reference_source": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "reference"},
+        "reference": {"$ref": "#/$defs/reference"}
+      },
+      "required": ["kind", "reference"],
+      "additionalProperties": false
+    },
+    "literal_source": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "literal"},
+        "value": {}
+      },
+      "required": ["kind", "value"],
+      "additionalProperties": false
+    },
+    "expression_source": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "expression"},
+        "expression": {"$ref": "#/$defs/predicate"}
+      },
+      "required": ["kind", "expression"],
+      "additionalProperties": false
+    },
+    "explicit_value": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {"present": {"const": false}},
+          "required": ["present"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "present": {"const": true},
+            "value": {}
+          },
+          "required": ["present", "value"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "binding_delivery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "local_binding"},
+            "name": {"$ref": "#/$defs/identifier"},
+            "encoding": {"const": "identity"}
+          },
+          "required": ["kind", "name", "encoding"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "stdin"},
+            "encoding": {"const": "utf8"}
+          },
+          "required": ["kind", "encoding"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "environment"},
+            "name": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*$"
+            },
+            "encoding": {"const": "string_or_canonical_json"},
+            "precedence": {"const": "over_node_and_inherited_environment"}
+          },
+          "required": ["kind", "name", "encoding", "precedence"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "workflow_input"},
+            "name": {"$ref": "#/$defs/identifier"},
+            "encoding": {"const": "identity"}
+          },
+          "required": ["kind", "name", "encoding"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "node_output": {
+      "type": "object",
+      "properties": {
+        "schema": {"$ref": "#/$defs/schema_document"},
+        "error_kinds": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "budget",
+              "cancelled",
+              "child_workflow",
+              "command",
+              "configuration",
+              "filesystem",
+              "internal",
+              "network",
+              "output_validation",
+              "provider",
+              "timeout"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "retention": {"const": "latest_successful_per_activation_lineage"}
+      },
+      "required": ["schema", "error_kinds", "retention"],
+      "additionalProperties": false
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "target": {"$ref": "#/$defs/identifier"},
+        "mode": {"enum": ["unconditional", "conditional", "otherwise"]},
+        "predicate": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/predicate"}
+          ]
+        },
+        "eligible_outcomes": {
+          "type": "array",
+          "items": {"enum": ["success", "allowed_failure"]},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": ["target", "mode", "predicate", "eligible_outcomes"],
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "conditional"}}},
+          "then": {"properties": {"predicate": {"$ref": "#/$defs/predicate"}}},
+          "else": {"properties": {"predicate": {"type": "null"}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "predicate": {
+      "oneOf": [
+        {"$ref": "#/$defs/logical_predicate"},
+        {"$ref": "#/$defs/not_predicate"},
+        {"$ref": "#/$defs/exists_predicate"},
+        {"$ref": "#/$defs/null_test_predicate"},
+        {"$ref": "#/$defs/comparison_predicate"},
+        {"$ref": "#/$defs/status_predicate"},
+        {"$ref": "#/$defs/reference_predicate"}
+      ]
+    },
+    "logical_predicate": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "logical"},
+        "operator": {"enum": ["and", "or"]},
+        "left": {"$ref": "#/$defs/predicate"},
+        "right": {"$ref": "#/$defs/predicate"}
+      },
+      "required": ["kind", "operator", "left", "right"],
+      "additionalProperties": false
+    },
+    "not_predicate": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "not"},
+        "operand": {"$ref": "#/$defs/predicate"}
+      },
+      "required": ["kind", "operand"],
+      "additionalProperties": false
+    },
+    "exists_predicate": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "exists"},
+        "reference": {"$ref": "#/$defs/reference"}
+      },
+      "required": ["kind", "reference"],
+      "additionalProperties": false
+    },
+    "null_test_predicate": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "null_test"},
+        "operator": {"enum": ["is_null", "is_not_null"]},
+        "reference": {"$ref": "#/$defs/reference"}
+      },
+      "required": ["kind", "operator", "reference"],
+      "additionalProperties": false
+    },
+    "comparison_predicate": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "comparison"},
+        "operator": {"enum": ["==", "!=", "<", "<=", ">", ">=", "contains", "matches"]},
+        "left": {"$ref": "#/$defs/operand"},
+        "right": {"$ref": "#/$defs/operand"}
+      },
+      "required": ["kind", "operator", "left", "right"],
+      "additionalProperties": false
+    },
+    "status_predicate": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "status"},
+        "value": {"enum": ["succeeded", "failed"]}
+      },
+      "required": ["kind", "value"],
+      "additionalProperties": false
+    },
+    "reference_predicate": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "reference"},
+        "reference": {"$ref": "#/$defs/reference"}
+      },
+      "required": ["kind", "reference"],
+      "additionalProperties": false
+    },
+    "operand": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "reference"},
+            "reference": {"$ref": "#/$defs/reference"}
+          },
+          "required": ["kind", "reference"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "literal"},
+            "value": {},
+            "schema": {"$ref": "#/$defs/schema_document"}
+          },
+          "required": ["kind", "value", "schema"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reference": {
+      "type": "object",
+      "properties": {
+        "root": {"enum": ["input", "node", "secret", "trigger"]},
+        "symbol": {"type": ["string", "null"]},
+        "channel": {"enum": ["error", "item", "output", "status", null]},
+        "path": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/path_selector"}
+        },
+        "optional": {"type": "boolean"},
+        "schema": {"$ref": "#/$defs/schema_document"}
+      },
+      "required": ["root", "symbol", "channel", "path", "optional", "schema"],
+      "additionalProperties": false
+    },
+    "path_selector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "member"},
+            "value": {"type": "string"},
+            "case_sensitive": {"const": true}
+          },
+          "required": ["kind", "value", "case_sensitive"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "index"},
+            "value": {"type": "integer", "minimum": 0}
+          },
+          "required": ["kind", "value"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "resolutions": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/provider_resolution"}
+          ]
+        },
+        "workflow": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/workflow_resolution"}
+          ]
+        }
+      },
+      "required": ["provider", "workflow"],
+      "additionalProperties": false
+    },
+    "provider_resolution": {
+      "type": "object",
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "contract_version": {"type": "integer", "minimum": 1},
+        "contract_fingerprint": {"$ref": "#/$defs/sha256"},
+        "model": {"type": "string", "minLength": 1},
+        "effort": {"type": "string", "minLength": 1},
+        "profile": {"type": ["string", "null"]}
+      },
+      "required": [
+        "provider_id",
+        "contract_version",
+        "contract_fingerprint",
+        "model",
+        "effort",
+        "profile"
+      ],
+      "additionalProperties": false
+    },
+    "workflow_resolution": {
+      "type": "object",
+      "properties": {
+        "workflow_id": {"$ref": "#/$defs/identifier"},
+        "source_kind": {"enum": ["registry", "project_path"]},
+        "source": {"type": "string", "minLength": 1},
+        "interface_version": {"type": "integer", "minimum": 1},
+        "interface_fingerprint": {"$ref": "#/$defs/sha256"},
+        "compilation_fingerprint": {"$ref": "#/$defs/sha256"},
+        "input_schema": {"$ref": "#/$defs/schema_document"},
+        "output_schema": {"$ref": "#/$defs/schema_document"}
+      },
+      "required": [
+        "workflow_id",
+        "source_kind",
+        "source",
+        "interface_version",
+        "interface_fingerprint",
+        "compilation_fingerprint",
+        "input_schema",
+        "output_schema"
+      ],
+      "additionalProperties": false
+    },
+    "break_control": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "break"},
+        "loop_node_id": {"$ref": "#/$defs/identifier"},
+        "cancel_queued": {"const": true},
+        "cancel_running": {"const": false},
+        "wait_for_running_branches": {"const": true},
+        "idempotent_per_lineage": {"const": true}
+      },
+      "required": [
+        "kind",
+        "loop_node_id",
+        "cancel_queued",
+        "cancel_running",
+        "wait_for_running_branches",
+        "idempotent_per_lineage"
+      ],
+      "additionalProperties": false
+    },
+    "position": {
+      "type": "object",
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0},
+        "line": {"type": "integer", "minimum": 1},
+        "column": {"type": "integer", "minimum": 1}
+      },
+      "required": ["offset", "line", "column"],
+      "additionalProperties": false
+    },
+    "file_span": {
+      "type": "object",
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "start": {"$ref": "#/$defs/position"},
+        "end": {"$ref": "#/$defs/position"}
+      },
+      "required": ["file", "start", "end"],
+      "additionalProperties": false
+    },
+    "source_map": {
+      "type": "object",
+      "properties": {
+        "workflow": {"$ref": "#/$defs/file_span"},
+        "nodes": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/file_span"}
+        }
+      },
+      "required": ["workflow", "nodes"],
+      "additionalProperties": false
+    }
+  }
+}

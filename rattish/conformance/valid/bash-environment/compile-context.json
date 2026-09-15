@@ -1,0 +1,15 @@
+{
+  "compiler": {
+    "name": "raticode-rattish",
+    "version": "0.1.0-test"
+  },
+  "workflow_id": "build",
+  "project_root": "/fixture/project",
+  "entrypoint": "workflow.rattish",
+  "contracts": {
+    "bash-command": {
+      "version": 1,
+      "fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  }
+}

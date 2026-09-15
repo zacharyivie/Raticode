@@ -1,0 +1,12 @@
+Rattish: 1
+Workflow:
+  name: Break contract
+Node example:
+  type: break
+  loop: loop-node
+  needs:
+    - loop-node
+Node loop-node:
+  type: loop
+  source: {"type": "count", "count": 1}
+  to: example

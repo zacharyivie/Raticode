@@ -310,7 +310,7 @@ def _document_schema() -> dict[str, Any]:
         nested.pop("$schema", None)
         nested.pop("$id", None)
     return {
-        "title": "Taskurotta TOML authoring document",
+        "title": "Raticode TOML authoring document",
         "type": "object",
         "properties": {
             "workflow": workflow,

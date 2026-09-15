@@ -82,10 +82,10 @@ async function integrationAction(root, action, value = {}, options = {}) {
 }
 
 async function preview(root, head, command, diff, run) {
-  const temp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'taskurotta-git-preview-'));
+  const temp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'raticode-git-preview-'));
   try {
     await run(['clone', '--shared', '--no-checkout', '--', root, temp]);
-    const git = (...args) => run(['-C', temp, '-c', 'user.name=Taskurotta preview', '-c', 'user.email=preview@localhost', '-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=/dev/null', ...args]);
+    const git = (...args) => run(['-C', temp, '-c', 'user.name=Raticode preview', '-c', 'user.email=preview@localhost', '-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=/dev/null', ...args]);
     await git('checkout', '--detach', String(head).trim());
     let failure = '';
     try { await git(...command); } catch (error) { failure = String(error.stderr || error.message); }

@@ -4,16 +4,16 @@ const path = require("node:path");
 const MAX_RESPONSE_BYTES = 16 * 1024;
 
 function runClient({ argv = process.argv, env = process.env, stderr = process.stderr } = {}) {
-  const endpoint = env.TASKUROTTA_EDITOR_ENDPOINT;
-  const token = env.TASKUROTTA_EDITOR_TOKEN;
-  const terminalId = env.TASKUROTTA_TERMINAL_ID;
+  const endpoint = env.RATICODE_EDITOR_ENDPOINT;
+  const token = env.RATICODE_EDITOR_TOKEN;
+  const terminalId = env.RATICODE_TERMINAL_ID;
   const targetArg = editorTargetArg(argv.slice(2));
   if (!endpoint || !token || !terminalId || !targetArg) {
-    stderr.write("Taskurotta could not open the Git editor.\n");
+    stderr.write("Raticode could not open the Git editor.\n");
     return Promise.resolve(1);
   }
 
-  const targetPath = path.resolve(env.TASKUROTTA_EDITOR_CWD || process.cwd(), targetArg);
+  const targetPath = path.resolve(env.RATICODE_EDITOR_CWD || process.cwd(), targetArg);
   return new Promise((resolve) => {
     const socket = net.createConnection(endpoint);
     let response = "";
@@ -32,7 +32,7 @@ function runClient({ argv = process.argv, env = process.env, stderr = process.st
     socket.on("data", (chunk) => {
       response += chunk;
       if (response.length > MAX_RESPONSE_BYTES) {
-        finish(1, "Taskurotta returned an invalid editor response.");
+        finish(1, "Raticode returned an invalid editor response.");
         return;
       }
       const newline = response.indexOf("\n");
@@ -41,11 +41,11 @@ function runClient({ argv = process.argv, env = process.env, stderr = process.st
         const payload = JSON.parse(response.slice(0, newline));
         finish(payload.ok === true ? 0 : 1, payload.ok === true ? "" : payload.error);
       } catch {
-        finish(1, "Taskurotta returned an invalid editor response.");
+        finish(1, "Raticode returned an invalid editor response.");
       }
     });
-    socket.on("error", (error) => finish(1, `Taskurotta could not open the Git editor: ${error.message}`));
-    socket.on("end", () => finish(1, "Taskurotta closed the Git editor before it finished."));
+    socket.on("error", (error) => finish(1, `Raticode could not open the Git editor: ${error.message}`));
+    socket.on("end", () => finish(1, "Raticode closed the Git editor before it finished."));
   });
 }
 

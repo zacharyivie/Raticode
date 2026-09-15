@@ -1,0 +1,67 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "prompt-file",
+  "runtime_handler": "raticode.prompt_file",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "output_path": {"type": "string", "minLength": 1, "x-rattish-type": "Path"},
+      "template": {"type": "string"},
+      "template_path": {"type": ["string", "null"], "minLength": 1, "x-rattish-type": "Path"},
+      "variables": {"type": "object", "additionalProperties": {"type": "string"}},
+      "encoding": {"type": "string", "minLength": 1},
+      "create_dirs": {"type": "boolean"},
+      "overwrite": {"type": "boolean"}
+    },
+    "required": ["output_path"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "template": "",
+    "template_path": null,
+    "variables": {},
+    "encoding": "utf-8",
+    "create_dirs": true,
+    "overwrite": true
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "open",
+    "ports": {},
+    "additional_port_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema"},
+    "additional_port_delivery": {"delivery": "local_binding", "name_transform": "identity", "encoding": "identity"}
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {"type": "string"},
+        "content": {"type": "string"},
+        "prompt": {"type": "string"},
+        "inputs": {"type": "object"}
+      },
+      "required": ["path", "content", "prompt", "inputs"],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": ["cancelled", "configuration", "filesystem", "internal", "output_validation", "timeout"],
+  "effects": ["filesystem_read", "filesystem_write"],
+  "preflight_checks": [
+    {"id": "template-readable", "severity": "error", "description": "A selected template file must exist and be readable."},
+    {"id": "destination-ready", "severity": "error", "description": "The output destination must be writable under the authored overwrite and directory policy."},
+    {"id": "encoding-supported", "severity": "error", "description": "The selected text encoding must be supported."}
+  ],
+  "static_diagnostics": [
+    {
+      "code": "RATTISH_MUTUALLY_EXCLUSIVE_FIELDS",
+      "severity": "error",
+      "rule": "mutually_exclusive_fields",
+      "fields": ["template", "template_path"],
+      "description": "Choose template or template-path, not both."
+    }
+  ]
+}

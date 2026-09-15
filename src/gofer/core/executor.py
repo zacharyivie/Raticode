@@ -705,7 +705,7 @@ def _turns_transcript(turns: list[dict[str, str]]) -> str:
 def _agent_memory_compaction_prompt(turns: list[dict[str, str]]) -> str:
     transcript = _turns_transcript(turns)
     return (
-        "Compact this Taskurotta agent-node conversation memory for future node runs.\n"
+        "Compact this Raticode agent-node conversation memory for future node runs.\n"
         "Preserve durable goals, decisions, file paths, commands, inputs, outputs, "
         "errors, unresolved tasks, and details required to continue the workflow. "
         "Omit chatter and redundant text.\n\n"
