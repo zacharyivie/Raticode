@@ -50,7 +50,7 @@ def test_plan_command_script_file_agent_and_conditional_edges(
     monkeypatch: MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "gofer.core.planner.shutil.which",
+        "gofer.core.provider_capabilities.shutil.which",
         lambda binary: f"/usr/bin/{binary}",
     )
     source = tmp_path / "input.txt"
@@ -582,7 +582,7 @@ def test_plan_provider_requirements_report_missing_binary(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("gofer.core.planner.shutil.which", lambda _binary: None)
+    monkeypatch.setattr("gofer.core.provider_capabilities.shutil.which", lambda _binary: None)
     workflow = AgenticWorkflow(WorkflowConfig(id="provider-plan", name="Provider Plan"))
     workflow.register_agent(
         AgentConfig(agent_id="reviewer", subscription="codex", working_dir=tmp_path)

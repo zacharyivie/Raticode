@@ -27,6 +27,7 @@ def isolated_gofer_data_dir(
     for path in (home, xdg_data, appdata, local_appdata):
         path.mkdir(parents=True, exist_ok=True)
 
+    monkeypatch.setenv("NVM_DIR", str(home / ".nvm"))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))

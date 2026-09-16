@@ -8,7 +8,7 @@ import sys
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -37,6 +37,7 @@ from gofer.core.operations import (
     TabularFanSource,
     WriteFileOperation,
 )
+from gofer.core.provider_capabilities import ProviderId, resolve_provider_executable
 from gofer.core.provider_profiles import (
     DIRECT_API_SUBSCRIPTIONS,
     load_provider_profiles,
@@ -504,7 +505,7 @@ def _configured_provider_diagnostics(data_dir: Path) -> list[HealthDiagnostic]:
             )
             continue
         binary = PROVIDER_BINARIES[provider]
-        path = shutil.which(binary)
+        path = resolve_provider_executable(cast(ProviderId, provider))
         diagnostics.append(
             HealthDiagnostic(
                 id="provider.cli",
@@ -513,7 +514,7 @@ def _configured_provider_diagnostics(data_dir: Path) -> list[HealthDiagnostic]:
                 message=(
                     f"Configured provider CLI '{binary}' is available."
                     if path
-                    else f"Configured provider CLI '{binary}' is not on PATH."
+                    else f"Configured provider CLI '{binary}' was not found on PATH or in nvm."
                 ),
                 detail={"binary": binary, "path": path},
             )
@@ -590,7 +591,7 @@ def _workflow_provider_diagnostics(workflow: AgenticWorkflow) -> list[HealthDiag
             )
             continue
         binary = PROVIDER_BINARIES[provider]
-        path = shutil.which(binary)
+        path = resolve_provider_executable(cast(ProviderId, provider))
         diagnostics.append(
             HealthDiagnostic(
                 id="workflow.provider_cli",
@@ -599,7 +600,8 @@ def _workflow_provider_diagnostics(workflow: AgenticWorkflow) -> list[HealthDiag
                 message=(
                     f"Workflow provider CLI '{binary}' is available."
                     if path
-                    else f"Workflow requires provider CLI '{binary}', but it is not on PATH."
+                    else f"Workflow requires provider CLI '{binary}', "
+                    "but it was not found on PATH or in nvm."
                 ),
                 detail={"binary": binary, "path": path},
             )

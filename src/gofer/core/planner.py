@@ -4,10 +4,9 @@ import copy
 import csv
 import json
 import re
-import shutil
 import urllib.parse
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from gofer.core.agent import configured_extra_paths
 from gofer.core.bindings import binding_contract, inspect_workflow_bindings
@@ -47,6 +46,7 @@ from gofer.core.operations import (
     WorkflowCallOperation,
     WriteFileOperation,
 )
+from gofer.core.provider_capabilities import ProviderId, resolve_provider_executable
 from gofer.core.provider_profiles import (
     DIRECT_API_SUBSCRIPTIONS,
     resolve_provider_settings,
@@ -1936,7 +1936,10 @@ def _provider_requirements(
         extra_paths = _configured_extra_paths(agent, path_base)
         binary = _provider_binary(settings.subscription)
         is_direct = settings.subscription in DIRECT_API_SUBSCRIPTIONS
-        available = True if is_direct else shutil.which(binary) is not None if binary else False
+        available = is_direct or (
+            binary is not None
+            and resolve_provider_executable(cast(ProviderId, settings.subscription)) is not None
+        )
         requirement = {
             "agentId": agent.agent_id,
             "subscription": settings.subscription,
