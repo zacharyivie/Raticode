@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib.metadata import version
 from pathlib import Path
 
 import typer
@@ -33,6 +34,25 @@ app.command("schema")(schema.schema_command)
 
 ui_app = typer.Typer(help="Run the workflow studio API", no_args_is_help=True)
 app.add_typer(ui_app, name="ui")
+
+
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(f"gof {version('gofer-flow')}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    show_version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_show_version,
+        is_eager=True,
+        help="Show the installed version and exit.",
+    ),
+) -> None:
+    """Raticode command line tools."""
 
 
 @ui_app.command("second-brain", hidden=True)

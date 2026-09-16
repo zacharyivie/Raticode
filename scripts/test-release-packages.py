@@ -19,15 +19,32 @@ VERSION = json.loads((ROOT / "frontend/package.json").read_text())["version"]
 
 
 def run(*args: str | Path, cwd: Path | None = None) -> str:
-    return subprocess.run(
-        [str(arg) for arg in args],
-        cwd=cwd,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=180,
-    ).stdout
+    command = [str(arg) for arg in args]
+    print(f"Running: {command!r}", flush=True)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            check=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=180,
+            env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1", "NO_COLOR": "1"},
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"Command {command!r} exited with status {exc.returncode}:\n{exc.stdout}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Command {command!r} timed out after {exc.timeout}s:\n{exc.stdout!r}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"Could not start {command!r}: {exc}") from exc
+    return result.stdout
 
 
 def probe(binary: Path) -> None:
@@ -51,8 +68,12 @@ def probe(binary: Path) -> None:
     ):
         if required not in entries:
             raise RuntimeError(f"Packaged backend missing {required}: {binary}")
-    output = run(binary, "--version")
-    if VERSION not in output.split():
+    # Probe away from the source checkout to catch accidental source-file dependencies.
+    with tempfile.TemporaryDirectory(prefix="gof-probe-") as temporary:
+        output = run(binary.resolve(), "--version", cwd=Path(temporary))
+        run(binary.resolve(), "--help", cwd=Path(temporary))
+        run(binary.resolve(), "ui", "serve", "--help", cwd=Path(temporary))
+    if output.strip() != f"gof {VERSION}":
         raise RuntimeError(f"Wrong packaged version for {binary}: {output}")
     print(f"Verified {binary.name}: {output.strip()}")
 
@@ -65,7 +86,28 @@ def probe_tree(root: Path) -> None:
         probe(binary)
 
 
+def linux_packages() -> tuple[list[Path], list[Path]]:
+    # Require both desktop and standalone CLI packages, not merely any matching file.
+    packages = []
+    for pattern in (
+        f"Raticode-{VERSION}-amd64.deb",
+        f"gofer-flow-cli_{VERSION}_amd64.deb",
+        f"Raticode-{VERSION}-x86_64.rpm",
+        f"gofer-flow-cli-{VERSION}-1*.x86_64.rpm",
+    ):
+        matches = sorted(RELEASE.glob(pattern))
+        if len(matches) != 1 or not matches[0].is_file():
+            raise RuntimeError(
+                f"Expected exactly one release package matching {pattern}: {matches}"
+            )
+        packages.extend(matches)
+    return packages[:2], packages[2:]
+
+
 def main() -> None:
+    platform = {"win32": "windows", "darwin": "macos", "linux": "linux"}[sys.platform]
+    evidence = RELEASE / f"package-tests-{platform}.json"
+    evidence.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="raticode-package-test-") as temporary:
         root = Path(temporary)
         if sys.platform == "win32":
@@ -97,29 +139,29 @@ def main() -> None:
             finally:
                 run("hdiutil", "detach", mount)
         else:
+            debs, rpms = linux_packages()
             probe(RELEASE / "gof-linux-x64")
             appimage = RELEASE / f"Raticode-{VERSION}-x86_64.AppImage"
             appimage.chmod(appimage.stat().st_mode | 0o111)
             run(appimage, "--appimage-extract", cwd=root)
             probe_tree(root / "squashfs-root")
-            for package in sorted(RELEASE.glob("*.deb")):
+            for package in debs:
                 target = root / package.name
                 run("dpkg-deb", "-x", package, target)
                 probe_tree(target)
-            for package in sorted(RELEASE.glob("*.rpm")):
+            for package in rpms:
                 target = root / package.name
                 target.mkdir()
                 # bsdtar reads RPM payloads without invoking a shell pipeline.
                 run("bsdtar", "-xf", package, "-C", target)
                 probe_tree(target)
-    platform = {"win32": "windows", "darwin": "macos", "linux": "linux"}[sys.platform]
-    (RELEASE / f"package-tests-{platform}.json").write_text(
+    evidence.write_text(
         json.dumps(
             {
                 "status": "passed",
                 "version": VERSION,
                 "platform": platform,
-                "scope": "Final distribution extraction/installation and backend --version",
+                "scope": "Final distribution extraction/installation and backend version/help",
             },
             indent=2,
         )

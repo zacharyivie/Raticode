@@ -6,7 +6,12 @@ from pathlib import Path
 
 from importlib.util import find_spec
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+    copy_metadata,
+)
 
 
 block_cipher = None
@@ -15,6 +20,7 @@ block_cipher = None
 license_collector = runpy.run_path(str(Path(SPECPATH) / "scripts/collect-licenses.py"))
 license_collector["collect"](Path(SPECPATH) / "dist/third-party-licenses")
 datas = [("dist/third-party-licenses", "third-party-licenses")]
+datas += copy_metadata("gofer-flow")
 datas += collect_data_files("openpyxl")
 datas += collect_data_files("tzdata")
 if find_spec("vosk") is not None:
