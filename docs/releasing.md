@@ -163,8 +163,11 @@ are not prerequisites for the unsigned release pipeline.
    draft's candidate name to the version tag and publishes it. It verifies the
    public asset bytes afterward. It never replaces release assets.
 
-A draft's `candidate-<SHA>-<RUN>-<ATTEMPT>` identifier reserves an unpublished release;
-it does not push a `v*` tag. Do not click **Publish release** in the web UI, which
+A draft is created with a `candidate-<SHA>-<RUN>-<ATTEMPT>` identifier;
+it does not push a `v*` tag. Publication discovers ready drafts through their
+verification marker and verifies their attested manifests, not their editable tag
+names. A draft renamed to `untagged-*` can still be published when all checks pass.
+Do not click **Publish release** in the web UI, which
 would bypass the tag workflow and could publish the internal candidate identifier.
 Repository maintainers with release-write access can bypass workflow policy, so
 protect workflow changes and `v*` tag creation with repository rules.

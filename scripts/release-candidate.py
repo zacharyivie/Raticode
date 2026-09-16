@@ -455,11 +455,13 @@ def publish(repo: str) -> None:
     releases = pages(f"repos/{repo}/releases")
     public = [r for r in releases if r["tag_name"] == tag]
     require(len(public) <= 1, "Ambiguous version release")
+    # Draft tag names are editable metadata, including GitHub's untagged-* names.
+    # Discover ready drafts by their marker; read_candidate verifies their identity
+    # using the attested manifest and successful source run before publication.
     candidates = public or [
         r
         for r in releases
         if r["draft"]
-        and r["tag_name"].startswith(f"candidate-{sha}-")
         and READY in (r.get("body") or "")
     ]
     require(

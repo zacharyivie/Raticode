@@ -237,6 +237,22 @@ def test_upload_retry_resumes_identical_assets_then_publish_is_idempotent(
     assert not github.releases[0]["draft"]
 
 
+@pytest.mark.parametrize("draft_tag", ["untagged-b56196d48257bff84c18", "reviewed-draft"])
+def test_publication_finds_renamed_draft(
+    candidate: Any, prepared: Any, monkeypatch: pytest.MonkeyPatch, draft_tag: str
+) -> None:
+    output, _ = prepared
+    github = GitHub(candidate, monkeypatch)
+    candidate.stage(REPO, output)
+    github.releases[0]["tag_name"] = draft_tag
+    snapshot = copy.deepcopy(github.files)
+    candidate.publish(REPO)
+    candidate.publish(REPO)
+    assert github.publish_calls == 1
+    assert github.files == snapshot
+    assert github.releases[0]["tag_name"] == f"v{candidate.versions()}"
+
+
 def test_retry_after_publication_response_loss_verifies_existing_release(
     candidate: Any,
     prepared: Any,
@@ -270,6 +286,7 @@ def test_retry_after_publication_response_loss_verifies_existing_release(
         "not-ready",
         "expired",
         "ambiguous",
+        "wrong-manifest-sha",
     ],
 )
 def test_publication_fails_closed(
@@ -284,6 +301,7 @@ def test_publication_fails_closed(
         (output / candidate.MANIFEST).write_text(json.dumps(manifest))
     github = GitHub(candidate, monkeypatch)
     candidate.stage(REPO, output)
+    github.releases[0]["tag_name"] = "untagged-renamed-draft"
     if change == "wrong-tag":
         monkeypatch.setenv("GITHUB_REF_NAME", "v9.9.9")
     elif change == "moved-tag":
@@ -310,6 +328,12 @@ def test_publication_fails_closed(
         github.attestation_valid = False
     elif change == "not-ready":
         github.releases[0]["body"] = "Uploading"
+    elif change == "wrong-manifest-sha":
+        manifest["commit"] = "b" * 40
+        path = output / candidate.MANIFEST
+        path.write_text(json.dumps(manifest))
+        github.files[1][candidate.MANIFEST] = path.read_bytes()
+        github.releases[0]["body"] = f"{candidate.READY}{candidate.digest(path)} -->"
     elif change == "ambiguous":
         manifest["run_attempt"] = 2
         (output / candidate.MANIFEST).write_text(json.dumps(manifest))
