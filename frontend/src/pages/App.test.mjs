@@ -5700,7 +5700,9 @@ test("deleting a background assistant thread disposes its pending stream state",
   const chatRequest = fetchMock.calls.find((call) => call.url === "/api/chat/stream");
   const threadId = JSON.parse(chatRequest.options.body).workflow.chatThreadId;
   await dom.click(dom.byTitle("Back to active threads"));
-  await dom.click(dom.byTitle("Delete thread"));
+  await dom.click(dom.byTitle("Thread options"));
+  window.confirm = () => true;
+  await dom.click(dom.byText("Delete thread"));
   await dom.flush();
 
   controlledStream.releaseNext();
@@ -10291,11 +10293,11 @@ test("Rem pages older threads and bumps active history without loading messages"
   assert.equal(bumped[0].id, "t30");
   assert.deepEqual(bumped.slice(1).map((thread) => thread.id), threads.slice(0, 30).map((thread) => thread.id));
   const dom = await mountReact(React.createElement(appModule.ThreadList, { threads: bumped, onOpen() {}, onDelete() {} }), createFetchMock([]));
-  assert.equal(dom.allByTitle("Delete thread").length, 15);
+  assert.equal(dom.allByTitle("Archive thread").length, 15);
   await dom.click(dom.byText("Show older threads"));
-  assert.equal(dom.allByTitle("Delete thread").length, 30);
+  assert.equal(dom.allByTitle("Archive thread").length, 30);
   await dom.click(dom.byText("Collapse older threads"));
-  assert.equal(dom.allByTitle("Delete thread").length, 15);
+  assert.equal(dom.allByTitle("Archive thread").length, 15);
   await dom.unmount();
 });
 
@@ -12971,4 +12973,67 @@ test("Rem retains a thread's branch and archives it after that branch is deleted
   assert.equal(dom.allByTitle("Delete thread").length, 1);
   assert.equal(appModule.loadChatThreads()[0].projectBranch, "feature");
   await dom.unmount();
+});
+
+test("Rem archives, pins and confirms deletion with persisted organization", async () => {
+  const thread = { id: "organize", title: "Organize this conversation", updatedAt: new Date().toISOString(), projectRoot: "/repo" };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    jsonResponse("/api/chat/threads/organize", {}),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
+    storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
+  });
+  const previousConfirm = window.confirm;
+  const prompts = [];
+  window.confirm = message => { prompts.push(message); return false; };
+  try {
+    await dom.flush();
+    await dom.click(dom.byTitle("Thread options"));
+    await dom.click(dom.byText("Pin thread"));
+    assert.match(dom.text(), /Pinned threads[\s\S]*Organize this conversation[\s\S]*Active threads/);
+    assert.equal(appModule.loadChatThread(thread.id).pinned, true);
+    assert.equal(appModule.chatThreadIndex()[0].pinned, true);
+    await dom.click(dom.byTitle("Thread options"));
+    await dom.click(dom.byText("Unpin thread"));
+    assert.doesNotMatch(dom.text(), /Pinned threads/);
+    await dom.click(dom.byTitle("Thread options"));
+    await dom.click(dom.byText("Delete thread"));
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /Organize this conversation.*cannot be undone/);
+    assert.ok(appModule.loadChatThread(thread.id));
+    assert.equal(fetchMock.calls.some(call => call.options?.method === "DELETE"), false);
+    await dom.click(dom.byTitle("Archive thread"));
+    assert.doesNotMatch(dom.text(), /Organize this conversation/);
+    assert.equal(appModule.loadChatThread(thread.id).archived, true);
+    assert.equal(appModule.chatThreadIndex()[0].archived, true);
+    await dom.click(dom.byText("Archived threads"));
+    assert.match(dom.text(), /Organize this conversation/);
+    await dom.click(dom.byTitle("Delete thread"));
+    assert.equal(prompts.length, 2);
+    assert.ok(appModule.loadChatThread(thread.id));
+    window.confirm = () => true;
+    await dom.click(dom.byTitle("Delete thread"));
+    await dom.flush();
+    assert.equal(appModule.loadChatThread(thread.id), null);
+    assert.equal(appModule.chatThreadIndex().length, 0);
+    assert.equal(fetchMock.calls.some(call => call.options?.method === "DELETE"), true);
+  } finally { window.confirm = previousConfirm; await dom.unmount(); }
+});
+
+test("Rem loads old pinned threads from the index above active threads after restart", async () => {
+  const pinned = { id: "old-pin", title: "Keep this thread", pinned: true, projectRoot: "/gone", projectBranch: "deleted", updatedAt: "2020-01-01" };
+  const active = { id: "active", title: "Fresh thread", updatedAt: new Date().toISOString() };
+  const storage = {
+    "gofer-flow-chat-threads": JSON.stringify([active, pinned]),
+  };
+  const dom = await mountReact(React.createElement(appModule.ThreadSections, { threads: [], onOpen() {}, onDelete() {} }), createFetchMock([]), {
+    storage, desktop: { workspace: { missingThreadRoots: async () => ["/gone"] } },
+  });
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /Pinned threads[\s\S]*Keep this thread[\s\S]*Active threads[\s\S]*Fresh thread/);
+    await dom.click(dom.byText("Archived threads"));
+    assert.equal(dom.allByTitle("Delete thread").length, 0);
+  } finally { await dom.unmount(); }
 });

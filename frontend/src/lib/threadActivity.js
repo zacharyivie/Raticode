@@ -1,6 +1,8 @@
 export const THREAD_IDLE_MS = 10 * 24 * 60 * 60 * 1000;
 
 export function threadIsArchived(thread, missingRoots = new Set(), branches = new Map(), now = Date.now()) {
+  if (thread.archived) return true;
+  if (thread.pinned) return false;
   const timestamp = Date.parse(thread.updatedAt);
   return !Number.isFinite(timestamp) || now - timestamp >= THREAD_IDLE_MS
     || missingRoots.has(thread.projectRoot)

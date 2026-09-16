@@ -17,6 +17,7 @@ import RemAvatar from "../components/RemAvatar.jsx";
 import { lazy, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  Archive,
   ArrowLeft,
   Check,
   ChevronDown,
@@ -6899,7 +6900,25 @@ export function ChatPane({
     });
   }
 
+  function updateThreadOrganization(threadId, patch) {
+    setThreads(current => {
+      const thread = current.find(item => item.id === threadId) || loadChatThread(threadId);
+      if (!thread) return current;
+      return [...current.filter(item => item.id !== threadId), { ...thread, ...patch }];
+    });
+  }
+
+  function archiveThread(threadId) {
+    updateThreadOrganization(threadId, { archived: true, pinned: false });
+  }
+
+  function pinThread(threadId, pinned) {
+    updateThreadOrganization(threadId, { pinned, archived: false });
+  }
+
   async function deleteThread(threadId) {
+    const thread = threads.find(item => item.id === threadId) || loadChatThread(threadId);
+    if (!window.confirm(`Delete thread "${thread?.title || "Untitled"}"? This cannot be undone.`)) return;
     deletedChatThreadIdsRef.current.add(threadId);
     chatAbortControllersRef.current[threadId]?.abort();
     delete chatAbortControllersRef.current[threadId];
@@ -7106,11 +7125,12 @@ export function ChatPane({
           </button>
           {conversationMenuOpen ? (
             <div className="absolute right-0 top-9 z-50 max-h-80 w-72 overflow-y-auto rounded-[14px] border border-line bg-white p-1.5 shadow-panel">
-              <p className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.06em] text-muted">Active threads</p>
               <ThreadSections
                 activityByThread={chatStateByThread}
                 threads={threads}
                 activeThreadId={activeThreadId}
+                onArchive={archiveThread}
+                onPin={pinThread}
                 onDelete={deleteThread}
                 onOpen={openThread}
               />
@@ -7148,14 +7168,13 @@ export function ChatPane({
               <p className="mt-2 text-xs leading-5 text-muted">I can build workflows, change code, and help you understand your project.</p>
               <p className="mt-2 text-xs font-medium leading-5 text-ink">What would you like to work on?</p>
             </div>
-            <section aria-labelledby="assistant-home-recent" className="border-t border-line pt-3">
-              <h3 id="assistant-home-recent" className="px-2 pb-2 text-xs font-semibold text-muted">
-                Active threads
-              </h3>
+            <section aria-label="Threads" className="border-t border-line pt-3">
               <ThreadSections
                 activityByThread={chatStateByThread}
                 threads={threads}
                 activeThreadId={activeThreadId}
+                onArchive={archiveThread}
+                onPin={pinThread}
                 onDelete={deleteThread}
                 onOpen={openThread}
               />
@@ -7289,26 +7308,58 @@ export function ThreadSections({ threads, ...props }) {
       window.removeEventListener("gofer:git-files-changed", refresh);
     };
   }, [scopeKey]);
-  const active = [], archived = [];
+  const active = [], archived = [], pinned = [];
   for (const entry of entries) {
-    (threadIsArchived(entry, scopeState?.missingRoots, scopeState?.branches, now) ? archived : active).push(entry);
+    (threadIsArchived(entry, scopeState?.missingRoots, scopeState?.branches, now) ? archived : entry.pinned ? pinned : active).push(entry);
   }
   const load = entries => entries.map(entry => threads.find(thread => thread.id === entry.id) || loadChatThread(entry.id)).filter(Boolean);
   const sortedArchived = archived.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   return <>
+    {pinned.length ? <section aria-label="Pinned threads">
+      <h3 className="px-2 pb-2 text-xs font-semibold text-muted">Pinned threads</h3>
+      <ThreadList {...props} threads={load(pinned)} />
+    </section> : null}
+    <h3 className="px-2 py-2 text-xs font-semibold text-muted">Active threads</h3>
     {scopeState ? <ThreadList {...props} threads={load(active)} /> : <p role="status" className="px-2 py-2 text-xs text-muted">Checking active threads...</p>}
     <section className="mt-3 border-t border-line pt-2">
       <button type="button" aria-expanded={archiveOpen} className="flex w-full items-center gap-1 px-2 py-2 text-left text-xs font-semibold text-muted"
         onClick={() => { setArchiveOpen(open => !open); setArchiveCount(10); }}>
         <ChevronRight aria-hidden="true" size={13} className={archiveOpen ? "rotate-90" : ""} />Archived threads
       </button>
-      {archiveOpen && scopeState ? <ThreadList {...props} key="archive" threads={load(sortedArchived.slice(0, archiveCount))}
+      {archiveOpen && scopeState ? <ThreadList {...props} archived key="archive" threads={load(sortedArchived.slice(0, archiveCount))}
         pageSize={10} totalCount={archived.length} onLoadOlder={setArchiveCount} /> : null}
     </section>
   </>;
 }
 
-export function ThreadList({ activeThreadId, activityByThread = {}, onDelete, onOpen, threads, totalCount = threads.length, onLoadOlder, pageSize = 15 }) {
+function ThreadActions({ thread, onPin, onDelete }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef(null);
+  const trigger = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = event => { if (!root.current?.contains(event.target)) setOpen(false); };
+    const escape = event => { if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); } };
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("keydown", escape);
+    return () => { window.removeEventListener("pointerdown", dismiss); window.removeEventListener("keydown", escape); };
+  }, [open]);
+  return <div ref={root} className="relative" onBlur={event => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+  }}>
+    <button ref={trigger} title="Thread options" aria-label={`Thread options for ${thread.title}`} aria-expanded={open}
+      className="grid h-8 w-8 place-items-center rounded-md text-muted hover:bg-slate-100 hover:text-ink"
+      type="button" onClick={() => setOpen(value => !value)}><MoreVertical aria-hidden="true" size={15} /></button>
+    {open ? <div aria-label={`Actions for ${thread.title}`} className="absolute right-0 top-8 z-50 w-36 rounded-lg border border-line bg-white p-1 shadow-panel">
+      <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-ink hover:bg-slate-50"
+        onClick={() => { setOpen(false); trigger.current?.focus(); onPin?.(thread.id, !thread.pinned); }}>{thread.pinned ? "Unpin thread" : "Pin thread"}</button>
+      <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-red-600 hover:bg-red-50"
+        onClick={() => { setOpen(false); trigger.current?.focus(); onDelete(thread.id); }}>Delete thread</button>
+    </div> : null}
+  </div>;
+}
+
+export function ThreadList({ activeThreadId, activityByThread = {}, onArchive, onPin, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15 }) {
   const [visibleCount, setVisibleCount] = useState(pageSize);
   const sortedThreads = [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   if (threads.length) {
@@ -7334,14 +7385,18 @@ export function ThreadList({ activeThreadId, activityByThread = {}, onDelete, on
                 </div>
                 <div className="mt-0.5 text-[10px] text-muted">{formatThreadDate(thread.updatedAt)}</div>
               </button>
-              <button
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted opacity-70 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
-                title="Delete thread"
-                type="button"
-                onClick={() => onDelete(thread.id)}
-              >
-                <Trash2 size={15} />
-              </button>
+              {archived ? <button
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-red-50 hover:text-red-600"
+                title="Delete thread" aria-label={`Delete thread ${thread.title}`} type="button"
+                onClick={() => onDelete(thread.id)}>
+                <Trash2 aria-hidden="true" size={15} />
+              </button> : <button
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-slate-100 hover:text-ink"
+                title="Archive thread" aria-label={`Archive thread ${thread.title}`} type="button"
+                onClick={() => onArchive?.(thread.id)}>
+                <Archive aria-hidden="true" size={15} />
+              </button>}
+              <ThreadActions thread={thread} onPin={onPin} onDelete={onDelete} />
             </div>
           ))}
           {totalCount > visibleCount ? (
@@ -8066,7 +8121,7 @@ export function chatThreadIndex() {
 
 function threadIndexEntry(thread) {
   return { id: thread.id, updatedAt: thread.updatedAt, projectRoot: thread.projectRoot || "",
-    projectBranch: thread.projectBranch, scopeIndexed: true };
+    projectBranch: thread.projectBranch, archived: Boolean(thread.archived), pinned: Boolean(thread.pinned), scopeIndexed: true };
 }
 
 export function loadChatThread(id) {

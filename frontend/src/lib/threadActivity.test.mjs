@@ -32,3 +32,13 @@ test("unborn current branches and failed branch listings are not treated as dele
     assert.equal(threadIsArchived(entries[0], result.missingRoots, result.branches, now), false);
   }
 });
+
+test("pins bypass age, missing roots and deleted branches; explicit archives take precedence", () => {
+  const thread = { pinned: true, updatedAt: "2020-01-01", projectRoot: "/gone", projectBranch: "deleted" };
+  const missing = new Set(["/gone"]);
+  const branches = new Map([["/gone", ["main"]]]);
+  assert.equal(threadIsArchived(thread, missing, branches), false);
+  assert.equal(threadIsArchived({ ...thread, pinned: false }, missing, branches), true);
+  assert.equal(threadIsArchived({ ...thread, archived: true }, missing, branches), true);
+  assert.equal(threadIsArchived({ updatedAt: new Date().toISOString(), archived: true }), true);
+});
