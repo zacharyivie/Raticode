@@ -879,7 +879,7 @@ async def test_retry_backoff_caps_and_manual_stop_does_not_retry(manager, tmp_pa
     assert manager.get(tmp_path, sid)["run"]["state"] == "stopped"
 
 
-async def test_retry_now_bypasses_backoff_and_runtime_continues(manager, tmp_path):
+async def test_retry_now_bypasses_backoff_and_runtime_continues(manager, tmp_path, monkeypatch):
     swarm = manager.create(tmp_path, config())
     sid = swarm["id"]
     manager.start(tmp_path, sid, "Build")
@@ -890,6 +890,8 @@ async def test_retry_now_bypasses_backoff_and_runtime_continues(manager, tmp_pat
     manager._stream = failure
     await manager._turn(str(tmp_path), sid, "lead", threading.Event())
     run = manager.get(tmp_path, sid)["run"]
+    attempt_id = run["attempts"][0]["id"]
+    assert run["agentStates"]["lead"]["retryAt"] > time.time()
     message = run["messages"][0]
     manager.resolve_delivery(
         tmp_path,
@@ -900,20 +902,33 @@ async def test_retry_now_bypasses_backoff_and_runtime_continues(manager, tmp_pat
             "action": "retry",
         },
     )
-    continued = asyncio.Event()
 
     async def success(**kwargs):
         yield {"type": "final", "message": {"body": "Recovered"}}
-        continued.set()
+
+    original_turn = manager._turn
+
+    async def retry_turn(*args, **kwargs):
+        try:
+            await original_turn(*args, **kwargs)
+        finally:
+            # Observe the completed retry before the loop can schedule idle diagnosis.
+            manager._closed.set()
+            manager._wake.set()
 
     manager._stream = success
+    monkeypatch.setattr(manager, "_turn", retry_turn)
     loop = asyncio.create_task(manager._loop())
     try:
-        await asyncio.wait_for(continued.wait(), 2)
+        await asyncio.wait_for(asyncio.shield(loop), 2)
         run = manager.get(tmp_path, sid)["run"]
         assert run["turnCount"] == 2
         assert len(run["attempts"]) == 1
+        assert run["attempts"][0]["id"] == attempt_id
+        assert run["attempts"][0]["state"] == "succeeded"
         assert run["agentStates"]["lead"]["state"] == "idle"
+        assert "retryAt" not in run["agentStates"]["lead"]
+        assert run["messages"][0]["deliveries"][0]["state"] == "completed"
     finally:
         manager._closed.set()
         manager._wake.set()
