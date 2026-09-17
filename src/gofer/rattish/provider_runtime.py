@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from gofer.core.provider_profiles import ProfileSubscription
+from gofer.subscriptions.acp_providers import AcpSubscription
+from gofer.subscriptions.antigravity import AntigravitySubscription
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription
+from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
 
@@ -17,6 +20,11 @@ def runtime_subscription_id(provider_id: str) -> ProfileSubscription:
         "anthropic-api": "anthropic_api",
         "claude-code": "claude_code",
         "codex": "codex",
+        "cursor": "cursor",
+        "copilot": "copilot",
+        "opencode": "opencode",
+        "antigravity": "antigravity",
+        "grok": "grok",
         "openai-api": "openai_api",
     }
     try:
@@ -31,5 +39,8 @@ def default_provider_subscriptions() -> Mapping[str, Subscription]:
         "anthropic_api": AnthropicApiSubscription(),
         "claude_code": ClaudeCodeSubscription(),
         "codex": CodexSubscription(),
+        **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
+        "antigravity": AntigravitySubscription(),
+        "grok": AcpSubscription("grok"),
         "openai_api": OpenAiApiSubscription(),
     }

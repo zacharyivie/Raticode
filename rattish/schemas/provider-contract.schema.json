@@ -4,17 +4,37 @@
   "title": "Rattish provider contract version 1",
   "type": "object",
   "properties": {
-    "$schema": {"type": "string"},
-    "contract_version": {"const": 1},
+    "$schema": {
+      "type": "string"
+    },
+    "contract_version": {
+      "const": 1
+    },
     "provider_id": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
     },
     "runtime_subscription": {
-      "enum": ["anthropic_api", "claude_code", "codex", "openai_api"]
+      "enum": [
+        "anthropic_api",
+        "claude_code",
+        "codex",
+        "openai_api",
+        "cursor",
+        "copilot",
+        "opencode",
+        "antigravity",
+        "grok"
+      ]
     },
-    "default_model": {"type": "string", "minLength": 1},
-    "default_effort": {"type": "string", "minLength": 1}
+    "default_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "default_effort": {
+      "type": "string",
+      "minLength": 1
+    }
   },
   "required": [
     "$schema",

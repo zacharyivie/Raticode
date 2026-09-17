@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { milestoneProgress, positiveDraft, swarmRequest } from "./swarms.js";
+import { milestoneProgress, objectiveProgressChange, positiveDraft, swarmRequest } from "./swarms.js";
 
 test("weighted progress counts accepted effort across objectives and excludes cancelled work", () => {
   const progress = milestoneProgress([
@@ -31,4 +31,23 @@ test("swarm mutations scope requests to their project and include the desktop gr
     assert.equal(captured.url, "/api/swarms/team/start?projectRoot=%2Fproject+with+spaces");
     assert.deepEqual(JSON.parse(captured.init.body), { task: "Build it", projectRoot: "/project with spaces", grantId: "project-grant" });
   } finally { globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
+
+test("progress history distinguishes objective edits from delivery resolution snapshots", () => {
+  assert.equal(objectiveProgressChange({ kind: "delivery_resolved", payload: {
+    before: { agentId: "builder", state: "uncertain" },
+    after: { agentId: "builder", state: "dismissed" },
+  } }), null);
+  for (const payload of [undefined, {}, { before: {}, after: {} }, { before: [], after: null }]) {
+    assert.equal(objectiveProgressChange({ kind: "objectives_updated", payload }), null);
+  }
+  assert.equal(objectiveProgressChange({ kind: "delivery_resolved", payload: { before: [], after: [] } }), null);
+  const change = objectiveProgressChange({ kind: "objectives_updated", payload: {
+    before: [], after: [{ milestones: [{ weight: 4, status: "accepted" }, { weight: 1, status: "planned" }] }],
+  } });
+  assert.equal(change.before.percent, null);
+  assert.equal(change.before.totalWeight, 0);
+  assert.equal(change.after.percent, 80);
+  assert.equal(change.after.totalWeight, 5);
 });

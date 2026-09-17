@@ -159,10 +159,6 @@ export default function IntegratedBrowser({
         addressRef.current?.select();
         return;
       }
-      if (action === "new-tab") {
-        onNewTabRef.current?.();
-        return;
-      }
       const id = sessionIdRef.current;
       if (!id || !state.ready || !bridge?.[action]) return;
       void bridge[action](id).catch(() => {});
@@ -348,7 +344,8 @@ export function browserAddress(value, searchUrl) {
 }
 
 function browserInputLooksLikeUrl(input) {
-  return /^[a-z][a-z\d+.-]*:/i.test(input)
+  return /^(?:file\/\/|\/|\\\\)/i.test(input)
+    || /^[a-z][a-z\d+.-]*:/i.test(input)
     || /^(?:localhost|127\.0\.0\.1|\[?::1\]?)(?::\d+)?(?:[/?#]|$)/i.test(input)
     || /^[\w.-]+\.[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i.test(input);
 }
@@ -361,7 +358,6 @@ export function browserChromeShortcutAction(event, platform = "") {
     return "focus-location";
   }
   const primary = platform === "darwin" ? event.metaKey : event.ctrlKey;
-  if (primary && !event.altKey && !event.shiftKey && key === "t") return "new-tab";
   if (primary && !event.altKey && !event.shiftKey && key === "r") return "reload";
   if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && key === "arrowleft") {
     return "back";

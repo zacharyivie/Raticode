@@ -2257,6 +2257,10 @@ def _subflow_component_for_plan(
 
 
 def _provider_binary(subscription: str) -> str | None:
+    if subscription == "antigravity":
+        return "agy"
+    if subscription in {"cursor", "copilot", "opencode", "antigravity", "grok"}:
+        return "cursor-agent" if subscription == "cursor" else subscription
     if subscription == "codex":
         return "codex"
     if subscription == "claude_code":

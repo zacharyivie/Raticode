@@ -45,6 +45,7 @@ def test_rem_swarm_lifecycle_context_and_archives(access: RemSwarmAccess) -> Non
     invoke(access, "update", sid, charter="Ship a reviewed change")
     configuration = invoke(access, "read", sid, section="configuration")
     assert configuration["charter"] == "Ship a reviewed change"
+    assert configuration["gitPermissions"] == {"local": True, "remote": False}
     run = invoke(
         access,
         "start",

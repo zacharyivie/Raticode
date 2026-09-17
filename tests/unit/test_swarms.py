@@ -201,6 +201,7 @@ def test_runtime_uses_scoped_mcp_tools_and_bounds_turns(tmp_path):
             },
         )
         assert "error" not in result
+        manager.control(tmp_path, swarm["id"], "pause")
         yield {"type": "final", "message": {"body": "Assigned the work"}}
 
     manager = SwarmManager(tmp_path / "data", stream=stream)
@@ -212,7 +213,7 @@ def test_runtime_uses_scoped_mcp_tools_and_bounds_turns(tmp_path):
     state = manager.get(tmp_path, swarm["id"])
     assert len(calls) == 1
     assert any(m["body"] == "Worker task" for m in state["run"]["messages"])
-    assert not manager._tokens
+    wait_for(lambda: not manager._tokens)
     assert "swarm MCP tools" in calls[0]["agent_instructions"]
     manager.close()
 
@@ -470,41 +471,33 @@ async def test_pending_steering_does_not_block_other_agent_launches(manager, tmp
         manager._active.clear()
 
 
-async def test_periodic_checks_skip_idle_board_and_coalesce_at_turn_limit(manager, tmp_path):
-    settings = config()
-    settings["maxTurns"] = 1
-    swarm = manager.create(tmp_path, settings)
-    sid = swarm["id"]
+async def test_idle_board_fails_and_requests_one_coordinator_explanation(manager, tmp_path):
+    sid = manager.create(tmp_path, config())["id"]
     manager.start(tmp_path, sid, "Build")
-    with manager._lock:
-        state = manager._get(tmp_path, sid)
-        state["run"]["messages"][0]["deliveries"][0]["state"] = "completed"
-        state["run"]["lastCheckedAt"] = state["run"]["messages"][0]["createdAt"]
-        state["run"]["nextCheckAt"] = 0
-        manager._save(state)
+    state = manager._get(tmp_path, sid)
+    state["run"]["messages"][0]["deliveries"][0]["state"] = "completed"
+    state["run"]["nextCheckAt"] = 0
+    manager._save(state)
     calls = []
-    started = asyncio.Event()
 
     async def stream(**kwargs):
         calls.append(kwargs)
-        started.set()
-        yield {"type": "final", "message": {"body": "Reviewed board"}}
+        yield {"type": "final", "message": {"body": "No next assignment was queued."}}
 
     manager._stream = stream
     loop = asyncio.create_task(manager._loop())
     try:
-        await asyncio.sleep(0.3)
-        assert not calls
-        with manager._lock:
-            state = manager._get(tmp_path, sid)
-            manager._post(state, "worker", {"body": "Found a blocker", "actionable": False})
-            state["run"]["nextCheckAt"] = 0
-            manager._save(state)
-        await asyncio.wait_for(started.wait(), 2)
-        await asyncio.sleep(0.3)
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            run = manager.get(tmp_path, sid)["run"]
+            if run.get("cleanup", {}).get("passed"):
+                break
+        assert run["state"] == "failed"
+        assert run["idleDiagnosis"]["body"] == "No next assignment was queued."
         assert len(calls) == 1
-        assert manager.get(tmp_path, sid)["run"]["state"] == "paused"
-        assert manager.get(tmp_path, sid)["run"]["pauseReason"] == "Turn limit reached"
+        assert "Only diagnose" in calls[0]["agent_instructions"]
+        assert calls[0]["workflow"]["remResources"]["shell"] is False
+        assert not manager._runnable
     finally:
         manager._closed.set()
         manager._wake.set()
@@ -539,6 +532,82 @@ def test_delivery_review_retries_only_selected_recipient_and_audits(manager, tmp
         tmp_path, sid, {**payload, "agentId": "worker", "action": "dismiss"}
     )
     assert state["run"]["messages"][-1]["deliveries"][-1]["state"] == "dismissed"
+
+
+@pytest.mark.parametrize("status", ["in_review", "accepted"])
+def test_dismiss_old_delivery_preserves_verified_work(manager, tmp_path, status):
+    sid = manager.create(tmp_path, config())["id"]
+    manager.start(tmp_path, sid, "Build")
+    manager.objectives(tmp_path, sid, {"objectives": objectives()})
+    with manager._lock:
+        swarm = manager._get(tmp_path, sid)
+        run = swarm["run"]
+        milestone = manager._milestone(run, "c")
+        milestone["status"] = status
+        attempt = manager._attempt(run, milestone["attemptId"])
+        attempt["state"] = "verified"
+        attempt["result"] = {"passed": True, "revision": "verified-revision"}
+        message = next(m for m in run["messages"] if m.get("attemptId") == attempt["id"])
+        message["deliveries"][0]["state"] = "uncertain"
+        run["agentStates"]["worker"].update(state="interrupted", error="Old timeout")
+        manager._save(swarm)
+    payload = {"messageId": message["id"], "agentId": "worker", "action": "dismiss"}
+    if status == "accepted":
+        with pytest.raises(SwarmError, match="finished assignment"):
+            manager.resolve_delivery(tmp_path, sid, {**payload, "action": "retry"})
+    run = manager.resolve_delivery(tmp_path, sid, payload)["run"]
+    kept = next(a for a in run["attempts"] if a["id"] == attempt["id"])
+    assert kept["state"] == "verified"
+    assert kept["result"] == {"passed": True, "revision": "verified-revision"}
+    assert run["agentStates"]["worker"]["state"] == "idle"
+    assert run["agentStates"]["worker"]["error"] is None
+
+
+@pytest.mark.parametrize("action", ["retry", "dismiss"])
+@pytest.mark.parametrize("check_state", ["verifying", "integrating"])
+def test_delivery_review_cannot_mutate_active_check(manager, tmp_path, action, check_state):
+    sid = manager.create(tmp_path, config())["id"]
+    manager.start(tmp_path, sid, "Build")
+    manager.objectives(tmp_path, sid, {"objectives": objectives()})
+    with manager._lock:
+        swarm = manager._get(tmp_path, sid)
+        run = swarm["run"]
+        milestone = manager._milestone(run, "c")
+        attempt = manager._attempt(run, milestone["attemptId"])
+        attempt["state"] = check_state
+        message = next(m for m in run["messages"] if m.get("attemptId") == attempt["id"])
+        message["deliveries"][0]["state"] = "uncertain"
+        run["agentStates"]["worker"].update(state="interrupted", error="Old timeout")
+        manager._checks["check"] = {"swarmId": sid, "cancel": threading.Event()}
+        manager._save(swarm)
+        before = copy.deepcopy(run)
+    try:
+        with pytest.raises(SwarmError, match="active checks"):
+            manager.resolve_delivery(
+                tmp_path, sid, {"messageId": message["id"], "agentId": "worker", "action": action}
+            )
+        with manager._lock:
+            assert manager._get(tmp_path, sid)["run"] == before
+    finally:
+        manager._checks.pop("check")
+
+
+def test_dismiss_one_delivery_does_not_hide_other_uncertain_work(manager, tmp_path):
+    sid = manager.create(tmp_path, config())["id"]
+    manager.start(tmp_path, sid, "Build")
+    manager.message(tmp_path, sid, {"body": "Follow-up", "recipientId": "lead"})
+    with manager._lock:
+        swarm = manager._get(tmp_path, sid)
+        for message in swarm["run"]["messages"]:
+            message["deliveries"][0]["state"] = "uncertain"
+        swarm["run"]["agentStates"]["lead"].update(state="interrupted", error="Old timeout")
+        message_id = swarm["run"]["messages"][0]["id"]
+        manager._save(swarm)
+    run = manager.resolve_delivery(
+        tmp_path, sid, {"messageId": message_id, "agentId": "lead", "action": "dismiss"}
+    )["run"]
+    assert run["agentStates"]["lead"]["state"] == "interrupted"
+    assert run["agentStates"]["lead"]["error"] == "Old timeout"
 
 
 def test_sidebar_summaries_omit_conversation_history(manager, tmp_path):
@@ -732,3 +801,153 @@ def test_history_summaries_fetch_only_the_selected_archive(manager, tmp_path):
     other.mkdir()
     with pytest.raises(SwarmError, match="not found"):
         manager.history_run(other, swarm["id"], "2")
+
+
+async def test_failed_lead_retries_existing_attempt_with_backoff_and_preserves_files(
+    manager, tmp_path
+):
+    swarm = manager.create(tmp_path, config())
+    sid = swarm["id"]
+    manager.start(tmp_path, sid, "Build")
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        path = kwargs["working_dir"] / "partial.txt"
+        if len(calls) == 1:
+            path.write_text("keep this work")
+            yield {
+                "type": "error",
+                "error": "Provider disconnected",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            }
+        else:
+            assert path.read_text() == "keep this work"
+            context = json.loads(kwargs["messages"][0]["body"])
+            assert "Do not blindly repeat" in context["recovery"]["instruction"]
+            yield {
+                "type": "final",
+                "message": {"body": "Recovered"},
+                "usage": {"input_tokens": 20, "output_tokens": 3},
+            }
+
+    manager._stream = stream
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    run = manager.get(tmp_path, sid)["run"]
+    attempt_id = run["attempts"][0]["id"]
+    assert run["state"] == "running"
+    assert run["agentStates"]["lead"]["state"] == "retry_wait"
+    assert 8 <= run["agentStates"]["lead"]["retryAt"] - time.time() <= 10
+    assert not manager._dispatchable(run, run["messages"][0], "lead")
+    assert not manager._active
+    assert calls[0]["unlimited_output"] is True
+    with manager._lock:
+        state = manager._get(tmp_path, sid)
+        state["run"]["agentStates"]["lead"]["retryAt"] = 0
+        manager._save(state)
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    run = manager.get(tmp_path, sid)["run"]
+    assert len(run["attempts"]) == 1
+    assert run["attempts"][0]["id"] == attempt_id
+    assert run["attempts"][0]["state"] == "succeeded"
+    assert "retryAt" not in run["agentStates"]["lead"]
+    assert calls[0]["working_dir"] == calls[1]["working_dir"]
+    assert run["usage"]["input_tokens"] == 30
+    assert run["usage"]["output_tokens"] == 5
+
+
+async def test_retry_backoff_caps_and_manual_stop_does_not_retry(manager, tmp_path):
+    swarm = manager.create(tmp_path, config())
+    sid = swarm["id"]
+    manager.start(tmp_path, sid, "Build")
+
+    async def stream(**kwargs):
+        yield {"type": "error", "error": "Rate limited"}
+
+    manager._stream = stream
+    for delay in (10, 20, 40, 80, 160, 300, 300):
+        with manager._lock:
+            state = manager._get(tmp_path, sid)
+            state["run"]["agentStates"]["lead"]["retryAt"] = 0
+            manager._save(state)
+        await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+        run = manager.get(tmp_path, sid)["run"]
+        assert delay - 2 <= run["agentStates"]["lead"]["retryAt"] - time.time() <= delay
+    manager.control(tmp_path, sid, "stop")
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    assert manager.get(tmp_path, sid)["run"]["turnCount"] == 7
+    assert manager.get(tmp_path, sid)["run"]["state"] == "stopped"
+
+
+async def test_retry_now_bypasses_backoff_and_runtime_continues(manager, tmp_path):
+    swarm = manager.create(tmp_path, config())
+    sid = swarm["id"]
+    manager.start(tmp_path, sid, "Build")
+
+    async def failure(**kwargs):
+        yield {"type": "error", "error": "Disconnected"}
+
+    manager._stream = failure
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    run = manager.get(tmp_path, sid)["run"]
+    message = run["messages"][0]
+    manager.resolve_delivery(
+        tmp_path,
+        sid,
+        {
+            "messageId": message["id"],
+            "agentId": "lead",
+            "action": "retry",
+        },
+    )
+    continued = asyncio.Event()
+
+    async def success(**kwargs):
+        yield {"type": "final", "message": {"body": "Recovered"}}
+        continued.set()
+
+    manager._stream = success
+    loop = asyncio.create_task(manager._loop())
+    try:
+        await asyncio.wait_for(continued.wait(), 2)
+        run = manager.get(tmp_path, sid)["run"]
+        assert run["turnCount"] == 2
+        assert len(run["attempts"]) == 1
+        assert run["agentStates"]["lead"]["state"] == "idle"
+    finally:
+        manager._closed.set()
+        manager._wake.set()
+        await loop
+
+
+async def test_retry_backoff_releases_capacity_for_other_agents(manager, tmp_path):
+    settings = config()
+    settings["maxConcurrency"] = 1
+    sid = manager.create(tmp_path, settings)["id"]
+    manager.start(tmp_path, sid, "Build")
+    calls = []
+    worker_finished = asyncio.Event()
+
+    async def stream(**kwargs):
+        actor = json.loads(kwargs["messages"][0]["body"])["inbox"][0]["recipientIds"][0]
+        calls.append(actor)
+        if actor == "lead":
+            yield {"type": "error", "error": "Provider unavailable"}
+        else:
+            yield {"type": "final", "message": {"body": "Worker finished"}}
+            worker_finished.set()
+
+    manager._stream = stream
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    manager.message(tmp_path, sid, {"recipientId": "worker", "body": "Independent task"})
+    loop = asyncio.create_task(manager._loop())
+    try:
+        await asyncio.wait_for(worker_finished.wait(), 2)
+        assert calls == ["lead", "worker"]
+        run = manager.get(tmp_path, sid)["run"]
+        assert run["state"] == "running"
+        assert run["agentStates"]["lead"]["state"] == "retry_wait"
+    finally:
+        manager._closed.set()
+        manager._wake.set()
+        await loop

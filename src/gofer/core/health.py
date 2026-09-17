@@ -54,6 +54,9 @@ HealthSeverity = Literal["ok", "warning", "error"]
 PROVIDER_BINARIES = {
     "claude_code": "claude",
     "codex": "codex",
+    "cursor": "cursor-agent",
+    "copilot": "copilot",
+    "opencode": "opencode",
 }
 MIN_PYTHON_VERSION = (3, 11)
 

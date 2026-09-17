@@ -21,7 +21,15 @@ profile_app = typer.Typer(help="Manage named provider profiles", no_args_is_help
 app.add_typer(profile_app, name="profile")
 console = Console()
 
-_SUBSCRIPTIONS = ["codex", "claude_code", "openai_api", "anthropic_api"]
+_SUBSCRIPTIONS = [
+    "codex",
+    "claude_code",
+    "openai_api",
+    "anthropic_api",
+    "cursor",
+    "copilot",
+    "opencode",
+]
 
 
 @profile_app.command("list")
@@ -49,7 +57,7 @@ def create_profile(
     subscription: str = typer.Option(
         "codex",
         "--subscription",
-        help="codex, claude_code, openai_api, or anthropic_api",
+        help="CLI or API subscription, such as codex, antigravity, grok, or openai_api",
     ),
     model: str | None = typer.Option(None, "--model", help="Provider model"),
     timeout: float | None = typer.Option(None, "--timeout", help="Default timeout in seconds"),

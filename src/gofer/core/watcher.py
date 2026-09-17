@@ -18,7 +18,10 @@ from gofer.core.executor import WorkflowExecutor
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimitError, ResourceLimits
 from gofer.core.run_outputs import write_run_node_outputs_payload
 from gofer.core.workflow import AgenticWorkflow, WatchConfig
+from gofer.subscriptions.acp_providers import AcpSubscription
+from gofer.subscriptions.antigravity import AntigravitySubscription
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription
+from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.utils.logging import get_logger
 from gofer.utils.run_state import workflow_stop_path
@@ -28,6 +31,9 @@ log = get_logger(__name__)
 _subscriptions = {
     "claude_code": ClaudeCodeSubscription(),
     "codex": CodexSubscription(),
+    **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
+    "antigravity": AntigravitySubscription(),
+    "grok": AcpSubscription("grok"),
 }
 
 Snapshot = dict[str, tuple[int, int]]

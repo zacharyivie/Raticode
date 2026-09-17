@@ -629,3 +629,42 @@ async def test_anthropic_direct_provider_normalizes_rate_limit_error() -> None:
 
     assert result.success is False
     assert "rate limit" in result.output.lower()
+
+
+@pytest.mark.parametrize("provider", ["grok"])
+def test_acp_provider_profile_round_trip_preserves_custom_model(provider, tmp_path):
+    profile = ProviderProfile.model_validate(
+        {"name": "custom", "subscription": provider, "model": "vendor/custom-model", "timeout": 45}
+    )
+    save_provider_profiles({"custom": profile}, tmp_path)
+    restored = load_provider_profiles(tmp_path)["custom"]
+    assert restored.subscription == provider
+    assert restored.model == "vendor/custom-model"
+    assert restored.timeout == 45
+    validate_provider_settings(
+        ResolvedProviderSettings(subscription=provider, model=restored.model, timeout=45)
+    )
+
+
+@pytest.mark.parametrize("provider", ["grok"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("effort", "high"),
+        ("extra_args", ["--unrestricted"]),
+        ("tools", ["shell"]),
+        ("mcp_servers", ["ambient"]),
+        ("provider_options", {"unsafe": True}),
+        ("approval_mode", "auto"),
+        ("sandbox_mode", "danger-full-access"),
+    ],
+)
+def test_acp_profiles_reject_unsupported_options(provider, field, value):
+    settings = ResolvedProviderSettings.model_validate(
+        {"subscription": provider, field: value}
+    )
+    if provider == "grok" and field == "effort":
+        validate_provider_settings(settings)
+    else:
+        with pytest.raises(ValueError, match=field):
+            validate_provider_settings(settings)

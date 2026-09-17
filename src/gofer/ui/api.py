@@ -127,7 +127,10 @@ from gofer.rattish.workspaces import (
     discover_registered_workflows,
     list_registered_workflows,
 )
+from gofer.subscriptions.acp_providers import AcpSubscription
+from gofer.subscriptions.antigravity import AntigravitySubscription
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription
+from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
 from gofer.ui.chat import delete_workflow_chat_prompt, workflow_chat_prompt_path
@@ -193,6 +196,9 @@ _operation_adapter: TypeAdapter[Operation] = TypeAdapter(Operation)
 _subscriptions = {
     "claude_code": ClaudeCodeSubscription(),
     "codex": CodexSubscription(),
+    **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
+    "antigravity": AntigravitySubscription(),
+    "grok": AcpSubscription("grok"),
     "openai_api": OpenAiApiSubscription(),
     "anthropic_api": AnthropicApiSubscription(),
 }
@@ -232,7 +238,14 @@ def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
     workflow_index = _read_workflow_index(base)
     index_entries = _workflow_index_entries(workflow_index)
     index_changed = False
-    workflow_paths = sorted(base.rglob("*.toml"))
+    # Managed worktrees and dependencies are not legacy workflow registries.
+    # os.walk also tolerates directories disappearing during enumeration.
+    excluded = {"workspaces", "node_modules", ".git", ".venv", "venv", ".agents", "__pycache__"}
+    workflow_paths: list[Path] = []
+    for directory, children, files in os.walk(base, followlinks=False):
+        children[:] = [name for name in children if name not in excluded]
+        workflow_paths.extend(Path(directory) / name for name in files if name.endswith(".toml"))
+    workflow_paths.sort()
     for path in workflow_paths:
         index_key = _workflow_index_key(base, path)
         cached = _workflow_index_payload(base, index_entries.get(index_key), path)

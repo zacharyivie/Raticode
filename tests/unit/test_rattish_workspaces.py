@@ -94,7 +94,7 @@ def test_create_registered_workflow_requires_an_existing_project_folder(tmp_path
         )
 
 
-def test_discover_registered_workflows_only_checks_raticode_directories(
+def test_discover_registered_workflows_only_in_managed_workspaces(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -123,14 +123,14 @@ def test_discover_registered_workflows_only_checks_raticode_directories(
     assert (raticode_workflow / "workflow.rattish").read_text(encoding="utf-8") == source
 
 
-def test_discovery_removes_previous_project_registrations_outside_raticode(
+def test_discovery_hides_previous_project_file_registrations(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
     workflow_root = project / ".raticode" / "kept"
     stray_root = project / "fixtures" / "mistaken-workflow"
     other_project = tmp_path / "other-project"
-    other_root = other_project / "fixtures" / "existing-workflow"
+    other_root = other_project / ".raticode" / "existing-workflow"
     for directory in (workflow_root, stray_root, other_root):
         directory.mkdir(parents=True)
     source = 'Rattish: 1\n\nWorkflow:\n  name: "Existing"\n'
@@ -175,9 +175,9 @@ def test_discovery_removes_previous_project_registrations_outside_raticode(
     assert [
         (workflow.workflow_id, workflow.workflow_root)
         for workflow in list_registered_workflows(registry_dir=registry)
-    ] == [("kept", workflow_root)]
+    ] == [("other", other_root), ("kept", workflow_root)]
     persisted = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert [item["id"] for item in persisted["workflows"]] == ["other", "kept"]
+    assert [item["id"] for item in persisted["workflows"]] == ["other", "kept", "stray"]
     assert (stray_root / "workflow.rattish").read_text(encoding="utf-8") == source
 
 
@@ -203,3 +203,49 @@ def test_workspace_operations_reject_linked_workspace_roots(tmp_path: Path, acti
         else:
             discover_registered_workflows(project, registry_dir=tmp_path / "data")
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("relative_path", [
+    "first.rattish", "workflow.rattish", "automations/workflow.rattish",
+    ".raticode/first.rattish", ".raticode/workflow.rattish",
+    ".raticode/custom/first.rattish", ".raticode/custom/child/workflow.rattish",
+    ".taskurotta/custom/workflow.rattish", ".raticode/custom/workflow.rad",
+])
+def test_project_open_ignores_unmanaged_sources(tmp_path: Path, relative_path: str):
+    from gofer.ui.api import open_project_payload
+
+    project = tmp_path / "project"
+    source = project / relative_path
+    source.parent.mkdir(parents=True)
+    content = 'Rattish: 1\nWorkflow:\n  name: Unrelated\n'
+    source.write_text(content)
+    registry = tmp_path / "data"
+    assert open_project_payload(project, registry_dir=registry)["workflows"] == []
+    assert list_registered_workflows(registry_dir=registry) == ()
+    assert source.read_text() == content
+
+
+def test_managed_workflow_opens_without_metadata(tmp_path: Path):
+    from gofer.ui.api import open_project_payload, open_rattish_document_payload
+
+    project = tmp_path / "project"
+    source = project / ".raticode" / "rem-created" / "workflow.rattish"
+    source.parent.mkdir(parents=True)
+    source.write_text('Rattish: 1\nWorkflow:\n  name: Created by Rem\n')
+    registry = tmp_path / "data"
+    payload = open_project_payload(project, registry_dir=registry)
+    assert len(payload["workflows"]) == 1
+    workflow = list_registered_workflows(registry_dir=registry)[0]
+    open_rattish_document_payload(workflow.workflow_id, registry)
+
+
+def test_discovery_does_not_follow_project_directory_or_file_links(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = outside / "workflow.rattish"
+    source.write_text("Rattish: 1\nWorkflow:\n  name: Outside\n")
+    (project / "linked").symlink_to(outside, target_is_directory=True)
+    (project / "linked.rattish").symlink_to(source)
+    assert discover_registered_workflows(project, registry_dir=tmp_path / "data") == ()

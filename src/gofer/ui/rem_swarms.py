@@ -48,12 +48,20 @@ Actions and params:
 - history: swarmId; offset=0. Returns up to 20 previous run summaries; use read
   with runId to inspect one. The current run is in read, not history.
 - create: params contains name, optional charter, and agents. Each agent needs
-  name, role, provider (codex or claude_code), model (default cli-default), optional
-  effort, id, resources, allowSteering (default false), isOrchestrator (boolean).
+  name, role, provider (codex, claude_code, cursor, copilot, opencode, antigravity or grok),
+  model (default cli-default), optional effort, id, resources,
+  allowSteering (default false), isOrchestrator (boolean).
   Exactly one orchestrator and 1-16 agents. Optional wakeIntervalSeconds=60
-  (10-3600), maxTurns=100 (1-1000), maxConcurrency=3 (1-8), maxRunSeconds=14400,
+  (10-3600), maxConcurrency=3 (1-8),
   maxRepairAttempts=2, stallTurnLimit=6, contextCharLimit=48000,
-  integrationChecks (command argument arrays). Non-Git projects serialize turns.
+  integrationChecks (command argument arrays), gitPermissions={local:true,remote:false}.
+  Local Git allows managed staging/commits in assignment worktrees. Remote Git adds
+  branch push and GitHub PR creation; it requires local Git. These settings govern
+  managed tools and agent instructions, not arbitrary shell/network confinement.
+  Provider usage limits apply; no cumulative output, turn-count or elapsed-time cap.
+  Failed agents continue in their preserved workspace after non-blocking exponential
+  backoff, starting at 10 seconds and capped at 300 seconds. Stop cancels retries.
+  Non-Git projects serialize turns.
   Git projects snapshot local edits using a private index and isolate worktrees.
   Capacity covers app-managed turns, not provider-native children. Usage is unknown
   when the provider does not report it. read section=attempts exposes attempt records.
@@ -67,7 +75,9 @@ Actions and params:
   Task plus serialized context must fit 32000 characters. For more data, supply
   project file paths and a concise summary. Returns immediately; use read later.
 - control: swarmId; action is pause, resume, or stop. Pause prevents new turns;
-  stop requests cancellation. Read state to confirm agents have stopped.
+  stop requests cancellation and child workspace cleanup. Read state to confirm agents have stopped.
+  cleanup retries a failed cleanup. Completed/stopped Git runs retain only the parent
+  branch/worktree; unmerged commits and dirty files are archived outside it.
 - message: swarmId; body required, optional context as for start, recipientId
   (agent ID or all; defaults to orchestrator), actionable (default true), requestId
   (reuse on retry to avoid duplicate posts). Messages are shared on the board.
@@ -267,6 +277,7 @@ class RemSwarmAccess:
                     "stallTurnLimit",
                     "contextCharLimit",
                     "integrationChecks",
+                    "gitPermissions",
                 )
             }
         run = swarm.get("run")

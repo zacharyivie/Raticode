@@ -339,7 +339,7 @@ function startBackend() {
     child.stdout.on("data", handleOutput);
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
-      stderrBuffer += text;
+      stderrBuffer = (stderrBuffer + text).slice(-65536);
       writeBackendLog(text);
       process.stderr.write(`[gofer-backend] ${text}`);
     });
@@ -347,6 +347,7 @@ function startBackend() {
       fail(error);
     });
     child.on("exit", (code, signal) => {
+      writeBackendLog(`BACKEND_EXIT ${JSON.stringify({ code, signal, expected: isQuitting || expectedBackendStops.has(child) })}\n`);
       if (backendProcess === child) {
         backendProcess = undefined;
         closeBackendLogStream();
@@ -725,6 +726,7 @@ function createBrowser(event, options = {}) {
     grantId,
     id,
     initialUrl: url,
+    localNavigation: url.startsWith("file:"),
     internalHomeUrl: url.startsWith("data:text/html") ? url : "",
     owner: event.sender,
     ownerId: event.sender.id,
@@ -816,15 +818,13 @@ function browserAction(event, options = {}) {
         const normalizedUrl = normalizeBrowserUrl(options.url);
         const loadUrl = browserLoadUrl(normalizedUrl);
         session.internalHomeUrl = normalizedUrl === RATICODE_HOME_URL ? loadUrl : "";
-        void contents.loadURL(loadUrl).catch((error) => {
-          session.error = error instanceof Error ? error.message : String(error);
-          emitBrowserState(session);
-        });
+        session.localNavigation = loadUrl.startsWith("file:");
+        void runBrowserOperation(session, () => contents.loadURL(loadUrl));
       }
       break;
     case "open-external": {
       const url = contents.getURL();
-      if (isSafeExternalUrl(url)) void shell.openExternal(url);
+      if (isSafeExternalUrl(url)) void runBrowserOperation(session, () => shell.openExternal(url));
       break;
     }
     case "reload":
@@ -837,6 +837,16 @@ function browserAction(event, options = {}) {
       throw new Error(`Unknown browser action: ${options.action || "missing"}`);
   }
   return browserSessionState(session);
+}
+
+async function runBrowserOperation(session, operation) {
+  try {
+    await operation();
+  } catch (error) {
+    session.error = error instanceof Error ? error.message : String(error);
+    // The view or its owner may have closed while navigation was pending.
+    try { emitBrowserState(session); } catch { /* No live view to notify. */ }
+  }
 }
 
 function configureBrowserSession(session) {
@@ -946,16 +956,13 @@ function configureBrowserSession(session) {
     });
   }
   contents.setWindowOpenHandler(({ url }) => {
-    if (session.grantId && /^file:/i.test(contents.getURL())) {
+    if ((session.grantId || session.localNavigation) && /^file:/i.test(contents.getURL())) {
       openBrowserLink(session, url);
       return { action: "deny" };
     }
     if (isAllowedBrowserNavigation(session, url)) {
       session.error = "";
-      void contents.loadURL(url).catch((error) => {
-        session.error = error instanceof Error ? error.message : String(error);
-        emitBrowserState(session);
-      });
+      void runBrowserOperation(session, () => contents.loadURL(url));
     }
     return { action: "deny" };
   });
@@ -969,7 +976,7 @@ function openBrowserLink(session, value) {
   if (url.protocol === "file:") {
     // Local previews hand links to the studio, which checks the destination's
     // own path grant and reports missing files. Never grant remote pages this route.
-    if (!session.grantId || !/^file:/i.test(browserSessionContents(session)?.getURL() || "")) return;
+    if (!(session.grantId || session.localNavigation) || !/^file:/i.test(browserSessionContents(session)?.getURL() || "")) return;
     session.owner.send("gofer:browser-open-file", { href: url.toString() });
     return;
   }
@@ -1078,12 +1085,17 @@ function browserSessionState(session, fallbackUrl = "") {
 }
 
 function emitBrowserState(session) {
-  if (
-    browserSessions.get(session.id) === session
-    && browserSessionContents(session)
-    && !session.owner.isDestroyed()
-  ) {
-    session.owner.send("gofer:browser-state", browserSessionState(session));
+  try {
+    if (
+      browserSessions.get(session.id) === session
+      && browserSessionContents(session)
+      && !session.owner.isDestroyed()
+    ) {
+      session.owner.send("gofer:browser-state", browserSessionState(session));
+    }
+  } catch (error) {
+    // Electron can destroy either contents between the checks and the send.
+    session.error = error instanceof Error ? error.message : String(error);
   }
 }
 
@@ -1151,7 +1163,7 @@ function isAllowedBrowserNavigation(session, value) {
   try {
     const url = new URL(value);
     if (["http:", "https:", "about:", "blob:", "data:"].includes(url.protocol)) return true;
-    if (url.protocol !== "file:" || !session.grantId) return false;
+    if (url.protocol !== "file:" || !(session.grantId || session.localNavigation)) return false;
     resolveExactPath(fileURLToPath(url), { grantId: session.grantId, mustExist: true });
     return true;
   } catch {
@@ -2186,12 +2198,13 @@ async function gitWorktrees(_event, options = {}) {
   try {
     const projectRoot = await resolveGitProjectDirectory(options);
     const result = await readGitWorktrees(projectRoot);
-    const worktrees = await Promise.all(result.worktrees.map(async (worktree) => {
+    // Enumeration is desktop navigation. Register backend access only when a
+    // project is selected, through trustProjectRoot, not for every listed tree.
+    const worktrees = result.worktrees.map((worktree) => {
       if (worktree.missing) return worktree;
       const handle = entryPathHandle(worktree.path);
-      if (handle.grantId && !getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
       return { ...worktree, grantId: handle.grantId, path: handle.path };
-    }));
+    });
     return { ...result, worktrees };
   } catch (error) {
     if (["ENOENT", "ENOTDIR"].includes(error.code || error.cause?.code)) {

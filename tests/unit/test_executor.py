@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import shlex
 import sys
 import threading
 import time
@@ -1469,7 +1470,9 @@ async def test_successor_nodes_from_same_parent_run_concurrently(tmp_path: Path)
             operation=StartOperation(type=OperationType.START),
         )
     )
-    sleep_command = f"{sys.executable} -c \"import time; time.sleep(0.4); print('done')\""
+    sleep_command = shlex.join(
+        [sys.executable, "-c", "import time; time.sleep(0.4); print('done')"]
+    )
     for node_id in ["b", "c", "d"]:
         wf.add_operation(_bash_node(node_id, sleep_command))
         wf.then("start", node_id)
@@ -1489,7 +1492,7 @@ async def test_bash_successor_nodes_from_same_parent_overlap(tmp_path: Path) -> 
     wf.add_operation(_bash_node("a", "echo ready"))
     for node_id in ["b", "c", "d"]:
         command = (
-            f"{sys.executable} -c "
+            f"{shlex.quote(sys.executable)} -c "
             f'"import pathlib,time; '
             f"p=pathlib.Path({str(stamp_file)!r}); "
             f"p.open('a').write('{node_id}:' + str(time.monotonic()) + '\\n'); "

@@ -184,6 +184,27 @@ their assigned milestones. The orchestrator can change scope, assign owners, acc
 and complete a run. Tool connections are scoped to one agent and run and expire when the
 turn ends.
 
+Swarm settings include **Local Git operations**, enabled by default, and **Remote
+branches and pull requests**, disabled by default. The saved configuration uses
+`gitPermissions: {"local": true, "remote": false}`. Changes apply to the next run;
+resuming retains the current run's permissions. Remote permission requires local
+permission.
+
+Members use `swarm_action` with `action=git` to inspect status/diffs, stage paths,
+and commit in their assigned worktree. Raticode performs these operations, so a
+provider sandbox does not need write access to the repository's shared Git metadata.
+The tool preserves the user's index and branch and disables commit hooks. When
+remote permission is enabled, `push` publishes only the assignment branch without
+force or submodule publication, and `create_pr` creates a GitHub pull request through
+the installed `gh` CLI. Managed PR creation requires one matching fetch/push URL;
+split fork URLs and multiple push destinations are rejected rather than guessing a head.
+Remote operations use existing credentials; these settings do not install tools or
+authenticate accounts. Local verification and swarm integration remain separate.
+
+These permissions are enforced by the managed Git tool and included in each member's
+instructions. They are not an OS-level restriction on arbitrary shell commands or
+network requests; provider sandbox and resource settings continue to govern those.
+
 Milestone weights are positive relative effort estimates and default to 1. Progress is
 accepted weight divided by active milestone weight. Accepted weights of 1 and 3, with
 another milestone of weight 1 remaining, show 80 percent. Cancelled milestones are excluded.

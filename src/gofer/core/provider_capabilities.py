@@ -23,9 +23,37 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
+from gofer.core.antigravity_models import split_antigravity_model
+from gofer.core.cursor_models import split_cursor_model
+from gofer.core.provider_permissions import CLAUDE_PERMISSION_MODES, CODEX_PERMISSION_MODES
+from gofer.core.provider_preferences import provider_preference
 from gofer.utils.process import env_with_executable_on_path, run_subprocess
 
-ProviderId = Literal["codex", "claude_code"]
+ProviderId = Literal["codex", "claude_code", "cursor", "copilot", "opencode", "antigravity", "grok"]
+CLI_PROVIDERS: tuple[ProviderId, ...] = (
+    "codex",
+    "claude_code",
+    "cursor",
+    "copilot",
+    "opencode",
+    "antigravity",
+    "grok",
+)
+PROVIDER_BINARIES = {
+    "codex": "codex",
+    "claude_code": "claude",
+    "cursor": "cursor-agent",
+    "copilot": "copilot",
+    "opencode": "opencode",
+    "antigravity": "agy",
+    "grok": "grok",
+}
+BROWSER_LOGIN_COMMANDS = {
+    "cursor": ("login",),
+    "codex": ("login",),
+    "claude_code": ("auth", "login"),
+    "copilot": ("login", "--web-flow"),
+}
 DISCOVERY_TIMEOUT_SECONDS = 10
 DISCOVERY_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 CAPABILITY_CACHE_SECONDS = 300
@@ -54,11 +82,13 @@ class ProviderCapability(BaseModel):
         "ready",
         "missing",
         "unauthenticated",
+        "access_denied",
         "unsupported_cli_version",
         "timeout",
         "invalid_response",
         "error",
     ]
+    supports_custom_model: bool = False
     version: str | None = None
     default_model: str | None = None
     models: list[ModelCapability] = Field(default_factory=list)
@@ -66,12 +96,51 @@ class ProviderCapability(BaseModel):
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def to_ui_payload(self) -> dict[str, Any]:
+        preference = provider_preference(self.id)
+        executable = resolve_provider_executable(self.id)
         return {
+            "enabled": preference.get("enabled", executable is not None),
+            "executable": executable,
+            "executableOverride": preference.get("executable", ""),
+            "detected": executable is not None,
             "id": self.id,
             "displayName": self.display_name,
             "available": self.available,
             "discoveryStatus": self.discovery_status,
+            "supportsBrowserLogin": self.id in BROWSER_LOGIN_COMMANDS,
             "version": self.version,
+            "supportsCustomModel": self.supports_custom_model
+            or self.id in {"cursor", "copilot", "opencode", "antigravity", "grok"},
+            "permissionModes": [
+                {
+                    "id": mode,
+                    "displayName": (
+                        "CLI-managed permissions"
+                        if mode == "cli-managed"
+                        else "Strict resources, unavailable"
+                        if mode == "default" and self.id in {"antigravity", "grok"}
+                        else "CLI default"
+                        if mode == "default"
+                        else mode
+                    ),
+                }
+                for mode in (
+                    CODEX_PERMISSION_MODES
+                    if self.id == "codex"
+                    else CLAUDE_PERMISSION_MODES
+                    if self.id == "claude_code"
+                    else ("default", "cli-managed")
+                    if self.id in {"antigravity", "grok"}
+                    else ("default",)
+                )
+            ],
+            "defaultPermissionMode": "workspace-write"
+            if self.id == "codex"
+            else "dontAsk"
+            if self.id == "claude_code"
+            else "cli-managed"
+            if self.id == "grok"
+            else "default",
             "defaultModel": self.default_model,
             "models": [
                 {
@@ -128,7 +197,9 @@ class ProviderCapabilityProbe:
                 discovery_status="missing",
             )
 
-        version = await _cli_version(binary)
+        version = await _cli_version(
+            binary, "version" if self.provider_id == "grok" else "--version"
+        )
         try:
             return await self._discover_available(binary, version)
         except TimeoutError:
@@ -149,14 +220,23 @@ class ProviderCapabilityProbe:
                 version=version,
                 error="This CLI version does not expose a model catalog.",
             )
-        except _UnauthenticatedError:
+        except _AccessDeniedError as exc:
+            return ProviderCapability(
+                id=self.provider_id,
+                display_name=self.display_name,
+                available=True,
+                discovery_status="access_denied",
+                version=version,
+                error=str(exc),
+            )
+        except _UnauthenticatedError as exc:
             return ProviderCapability(
                 id=self.provider_id,
                 display_name=self.display_name,
                 available=True,
                 discovery_status="unauthenticated",
                 version=version,
-                error="Sign in to this provider CLI to discover available models.",
+                error=str(exc) or "Sign in to this provider CLI to discover available models.",
             )
         except _InvalidCatalogError:
             return ProviderCapability(
@@ -328,6 +408,10 @@ class ProviderCapabilityService:
         self._probes: dict[ProviderId, ProviderCapabilityProbe] = {
             "codex": CodexCapabilityProbe(),
             "claude_code": ClaudeCodeCapabilityProbe(),
+            **{
+                cast(ProviderId, provider): AdditionalCliCapabilityProbe(cast(ProviderId, provider))
+                for provider in ("cursor", "copilot", "opencode", "antigravity", "grok")
+            },
         }
         self._cache: dict[_CacheKey, _CacheEntry] = {}
         self._inflight: dict[_CacheKey, threading.Event] = {}
@@ -335,12 +419,7 @@ class ProviderCapabilityService:
 
     def payload(self, *, refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
         _require_sync_context("ProviderCapabilityService.payload", "payload_async")
-        return {
-            "providers": [
-                self.provider(provider_id, refresh=refresh).to_ui_payload()
-                for provider_id in self._probes
-            ]
-        }
+        return asyncio.run(self.payload_async(refresh=refresh))
 
     def provider(
         self,
@@ -390,12 +469,12 @@ class ProviderCapabilityService:
         refresh: bool = False,
     ) -> dict[str, list[dict[str, Any]]]:
         """Return UI capabilities without blocking or nesting an event loop."""
-        return {
-            "providers": [
-                (await self.provider_async(provider_id, refresh=refresh)).to_ui_payload()
-                for provider_id in self._probes
-            ]
-        }
+        # Each CLI has its own discovery deadline. Start them together so a
+        # slow provider does not delay the start of every provider after it.
+        capabilities = await asyncio.gather(
+            *(self.provider_async(provider_id, refresh=refresh) for provider_id in self._probes)
+        )
+        return {"providers": [capability.to_ui_payload() for capability in capabilities]}
 
     async def provider_async(
         self,
@@ -447,12 +526,29 @@ def _validate_capability_selection(
     model: str | None,
     effort: str | None,
 ) -> None:
+    if capability.id in {"cursor", "copilot", "antigravity", "grok"} and effort == "cli-default":
+        effort = None
+    if capability.id in {"cursor", "copilot", "antigravity", "grok"} and model == "cli-default":
+        model = None
     if not capability.available:
         raise ProviderCapabilityError(f"{capability.display_name} CLI is not available on PATH")
     if capability.discovery_status != "ready":
         return
     selected_model = model or capability.default_model
     selected = next((item for item in capability.models if item.id == selected_model), None)
+    if selected is None and capability.id == "antigravity" and selected_model:
+        base, native_effort = split_antigravity_model(selected_model)
+        selected = next(
+            (
+                item
+                for item in capability.models
+                if split_antigravity_model(item.id)[0] == base
+                and native_effort in {entry.id for entry in item.efforts}
+            ),
+            None,
+        )
+    if selected is None and capability.supports_custom_model and not effort:
+        return
     if selected is None:
         raise ProviderCapabilityError(
             f"Model '{selected_model}' is not available in {capability.display_name} on this host"
@@ -477,10 +573,10 @@ def validate_provider_selection(
     to be portable to other hosts.
     """
 
-    if provider_id not in {"codex", "claude_code"}:
+    if provider_id not in CLI_PROVIDERS:
         raise ProviderCapabilityError(f"Unknown provider '{provider_id}'")
     _require_sync_context("validate_provider_selection", "validate_provider_selection_async")
-    capability = (service or provider_capability_service()).provider(cast(ProviderId, provider_id))
+    capability = (service or provider_capability_service()).provider(provider_id)
     _validate_capability_selection(capability, model, effort)
 
 
@@ -492,10 +588,10 @@ async def validate_provider_selection_async(
     service: ProviderCapabilityService | None = None,
 ) -> None:
     """Validate a provider selection from within an active event loop."""
-    if provider_id not in {"codex", "claude_code"}:
+    if provider_id not in CLI_PROVIDERS:
         raise ProviderCapabilityError(f"Unknown provider '{provider_id}'")
     capability = await (service or provider_capability_service()).provider_async(
-        cast(ProviderId, provider_id)
+        provider_id
     )
     _validate_capability_selection(capability, model, effort)
 
@@ -545,9 +641,19 @@ def resolve_provider_executable(provider_id: ProviderId) -> str | None:
     installed as npm-global packages (Claude Code, Codex).
     """
 
-    binary_name = "codex" if provider_id == "codex" else "claude"
+    override = provider_preference(provider_id).get("executable")
+    if override:
+        path = Path(override)
+        return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+
+    binary_name = PROVIDER_BINARIES[provider_id]
     if executable := shutil.which(binary_name):
         return executable
+
+    if provider_id == "cursor":
+        agent_executable = shutil.which("agent")
+        if agent_executable and _is_cursor_agent(agent_executable):
+            return agent_executable
 
     nvm_dir = Path(os.environ.get("NVM_DIR", Path.home() / ".nvm"))
     versions_dir = nvm_dir / "versions" / "node"
@@ -569,9 +675,9 @@ def resolve_provider_executable(provider_id: ProviderId) -> str | None:
     return None
 
 
-async def _cli_version(executable: str) -> str | None:
+async def _cli_version(executable: str, version_arg: str = "--version") -> str | None:
     try:
-        returncode, stdout, _stderr = await _run_probe([executable, "--version"])
+        returncode, stdout, _stderr = await _run_probe([executable, version_arg])
     except (OSError, TimeoutError):
         return None
     if returncode != 0:
@@ -693,6 +799,7 @@ def _looks_unauthenticated(stdout: str, stderr: str) -> bool:
     return (
         "not logged" in text
         or "not authenticated" in text
+        or "authentication required" in text
         or ("login" in text and "required" in text)
     )
 
@@ -722,5 +829,381 @@ class _UnauthenticatedError(Exception):
     pass
 
 
+class _AccessDeniedError(Exception):
+    pass
+
+
 class _InvalidCatalogError(Exception):
     pass
+
+
+def _is_cursor_agent(executable: str) -> bool:
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [executable, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=DISCOVERY_TIMEOUT_SECONDS,
+            env={**os.environ, **env_with_executable_on_path(executable)},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "Start the Cursor Agent" in result.stdout
+
+
+def _cursor_models_from_listing(stdout: str) -> list[ModelCapability]:
+    """Parse Cursor's human catalog, preserving native variant suffixes."""
+    groups: dict[str, ModelCapability] = {}
+    seen: set[str] = set()
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", stdout)
+    for line in text.splitlines():
+        match = re.fullmatch(r"\s*([\w][\w.-]*)\s+-\s+(\S.*?)\s*", line)
+        if not match:
+            continue
+        native_id, label = match.groups()
+        marker = re.search(r"\s+\((?:current|default)(?:,\s*(?:current|default))*\)$", label)
+        is_default = bool(marker and "default" in marker[0])
+        if marker:
+            label = label[: marker.start()]
+        base, suffix = split_cursor_model(native_id)
+        effort = suffix or "cli-default"
+        display_name = label
+        if suffix:
+            for word in suffix.replace("extra-high", "Extra High").split("-"):
+                word = "Extra High" if word == "xhigh" else word
+                display_name = re.sub(rf"\b{re.escape(word)}\b", "", display_name, flags=re.I)
+            display_name = " ".join(display_name.split())
+        model = groups.setdefault(base, ModelCapability(id=base, display_name=display_name or base))
+        if native_id not in seen:
+            model.efforts.append(
+                EffortCapability(
+                    id=effort,
+                    display_name="CLI default" if not suffix else suffix.replace("-", " ").title(),
+                    description=label,
+                )
+            )
+            seen.add(native_id)
+        # Prefer a real unsuffixed entry; otherwise use the first advertised
+        # variant. An explicit default marker takes precedence over both.
+        if model.default_effort is None or (not suffix and not model.is_default) or is_default:
+            model.default_effort = effort
+        if not suffix:
+            model.display_name = label
+        model.is_default |= is_default
+    for model in groups.values():
+        if [effort.id for effort in model.efforts] == ["cli-default"]:
+            model.efforts = []
+            model.default_effort = None
+    return list(groups.values())
+
+
+def _acp_models_from_catalog(payload: dict[str, Any]) -> list[ModelCapability]:
+    state = payload.get("models")
+    if not isinstance(state, dict) or not isinstance(state.get("availableModels"), list):
+        raise _InvalidCatalogError
+    current = _nonempty_string(state.get("currentModelId"))
+    models: dict[str, ModelCapability] = {}
+    for raw in state["availableModels"]:
+        if not isinstance(raw, dict) or not (model_id := _nonempty_string(raw.get("modelId"))):
+            continue
+        models.setdefault(
+            model_id,
+            ModelCapability(
+                id=model_id,
+                display_name=_nonempty_string(raw.get("name")) or model_id,
+                is_default=model_id == current,
+            ),
+        )
+    if not models:
+        raise _InvalidCatalogError
+    return list(models.values())
+
+
+async def _copilot_model_catalog(executable: str) -> dict[str, Any]:
+    """Use the CLI's SDK catalog RPC without creating a chat or sending a prompt."""
+    import tempfile
+
+    from gofer.subscriptions.acp_transport import (
+        AcpRpcError,
+        AcpTransportError,
+        open_acp_transport,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="raticode-copilot-catalog-") as directory:
+        async with open_acp_transport(
+            [
+                executable,
+                "--headless",
+                "--stdio",
+                "--no-auto-update",
+                "--log-level",
+                "none",
+                "--add-dir",
+                directory,
+            ],
+            cwd=Path(directory),
+            timeout=DISCOVERY_TIMEOUT_SECONDS,
+            max_output_bytes=DISCOVERY_MAX_OUTPUT_BYTES,
+            content_length_framing=True,
+        ) as rpc:
+            try:
+                return await rpc.request("models.list", {}, timeout=DISCOVERY_TIMEOUT_SECONDS)
+            except AcpRpcError as exc:
+                message = str(exc).lower()
+                if "not authorized to use this copilot feature" in message:
+                    raise _AccessDeniedError(
+                        "GitHub denied access to Copilot's model catalog. Open Copilot CLI in "
+                        "your project and complete its directory trust and account setup, then "
+                        "refresh providers. If access is still denied, check your GitHub "
+                        "Copilot settings or organization policy."
+                    ) from exc
+                if _looks_unauthenticated(message, "") or any(
+                    word in message
+                    for word in (
+                        "unauthorized",
+                        "not authorized",
+                        "not signed in",
+                        "no authentication",
+                    )
+                ):
+                    raise _UnauthenticatedError from exc
+                if exc.code == -32601:
+                    raise _UnsupportedCliError from exc
+                raise _InvalidCatalogError from exc
+            except AcpTransportError as exc:
+                if any(word in str(exc).lower() for word in ("timed out", "time limit")):
+                    raise TimeoutError from exc
+                if _looks_unsupported("", rpc.stderr):
+                    raise _UnsupportedCliError from exc
+                raise _InvalidCatalogError from exc
+
+
+def _copilot_models_from_catalog(payload: dict[str, Any]) -> list[ModelCapability]:
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        raise _InvalidCatalogError
+    models: dict[str, ModelCapability] = {}
+    for raw in raw_models:
+        if not isinstance(raw, dict):
+            continue
+        model_id = _nonempty_string(raw.get("id"))
+        policy = raw.get("policy")
+        if not model_id or (isinstance(policy, dict) and policy.get("state") == "disabled"):
+            continue
+        raw_efforts = raw.get("supportedReasoningEfforts")
+        efforts = list(
+            dict.fromkeys(
+                effort
+                for value in (raw_efforts if isinstance(raw_efforts, list) else [])
+                if (effort := _nonempty_string(value)) is not None
+            )
+        )
+        default = _nonempty_string(raw.get("defaultReasoningEffort"))
+        models.setdefault(
+            model_id,
+            ModelCapability(
+                id=model_id,
+                display_name=_nonempty_string(raw.get("name")) or model_id,
+                default_effort=default if default in efforts else None,
+                efforts=[
+                    EffortCapability(id=value, display_name=_display_name(value))
+                    for value in efforts
+                ],
+            ),
+        )
+    if not models:
+        raise _InvalidCatalogError
+    return list(models.values())
+
+
+class AdditionalCliCapabilityProbe(ProviderCapabilityProbe):
+    """Read documented text catalogs without inventing JSON discovery options."""
+
+    def __init__(self, provider_id: ProviderId) -> None:
+        self.provider_id = provider_id
+        self.display_name = {
+            "cursor": "Cursor",
+            "copilot": "GitHub Copilot",
+            "opencode": "OpenCode",
+            "antigravity": "Antigravity",
+            "grok": "xAI Grok",
+        }[provider_id]
+        self.binary_name = PROVIDER_BINARIES[provider_id]
+
+    async def _discover_available(self, executable: str, version: str | None) -> ProviderCapability:
+        capability = ProviderCapability(
+            id=self.provider_id,
+            display_name=self.display_name,
+            available=True,
+            discovery_status="unsupported_cli_version",
+            supports_custom_model=True,
+            version=version,
+            error=(
+                "This CLI does not expose a model catalog. Refresh after updating the provider CLI."
+            ),
+        )
+        if self.provider_id == "antigravity":
+            code, stdout, stderr = await _run_probe([executable, "models"])
+            if code != 0:
+                if "sign in" in (stdout + stderr).lower() or _looks_unauthenticated(stdout, stderr):
+                    raise _UnauthenticatedError(
+                        "Run agy in a terminal to sign in to Antigravity, then refresh providers."
+                    )
+                if _looks_unsupported(stdout, stderr):
+                    raise _UnsupportedCliError
+                raise _InvalidCatalogError
+            capability.models = _antigravity_models_from_listing(stdout)
+            capability.discovery_status = "ready"
+            capability.error = None
+            return capability
+        if self.provider_id == "copilot":
+            capability.models = _copilot_models_from_catalog(
+                await _copilot_model_catalog(executable)
+            )
+            capability.discovery_status = "ready"
+            capability.error = None
+            return capability
+        code, stdout, stderr = await _run_probe([executable, "models"])
+        if code != 0:
+            if _looks_unauthenticated(stdout, stderr):
+                raise _UnauthenticatedError
+            if _looks_unsupported(stdout, stderr):
+                return capability
+            raise _InvalidCatalogError
+        models = _cursor_models_from_listing(stdout) if self.provider_id == "cursor" else []
+        if self.provider_id == "grok":
+            models = _grok_models_from_listing(stdout)
+            if not models:
+                raise _InvalidCatalogError
+            try:
+                models = _grok_models_from_catalog(await _grok_model_catalog(executable))
+            except (OSError, TimeoutError, _InvalidCatalogError, _UnsupportedCliError):
+                # Older CLIs still provide a usable list, without invented efforts.
+                pass
+        for line in stdout.splitlines():
+            value = line.strip()
+            if self.provider_id == "opencode" and re.fullmatch(r"[\w.-]+/[^\s]+", value):
+                models.append(ModelCapability(id=value, display_name=value))
+        if models:
+            capability.models = models
+            capability.default_model = next(
+                (model.id for model in models if model.is_default), None
+            )
+            capability.discovery_status = "ready"
+            capability.error = None
+        return capability
+
+
+def _antigravity_models_from_listing(stdout: str) -> list[ModelCapability]:
+    """Group advertised effort variants, retaining a native ID as the default."""
+    models: dict[str, ModelCapability] = {}
+    clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", stdout)
+    for line in clean.splitlines():
+        match = re.fullmatch(r"\s*([a-z0-9][a-z0-9._/-]*)\s+(\S.*?)\s*", line)
+        if not match:
+            continue
+        slug, label = match.groups()
+        base, effort = split_antigravity_model(slug)
+        display = re.sub(r"\s*\((?:High|Medium|Low)\)$", "", label) if effort else label
+        model = models.setdefault(
+            base, ModelCapability(id=slug, display_name=display, default_effort=effort)
+        )
+        if effort and effort not in {item.id for item in model.efforts}:
+            model.efforts.append(EffortCapability(id=effort, display_name=effort.title()))
+    if not models:
+        raise _InvalidCatalogError
+    for model in models.values():
+        model.efforts.sort(key=lambda item: ["low", "medium", "high"].index(item.id))
+    return list(models.values())
+
+
+async def _grok_model_catalog(executable: str) -> dict[str, Any]:
+    """Read the metadata behind grok models without creating a session or prompt."""
+    import tempfile
+
+    from gofer.subscriptions.acp_transport import AcpTransportError, open_acp_transport
+
+    with tempfile.TemporaryDirectory(prefix="raticode-grok-catalog-") as directory:
+        try:
+            async with open_acp_transport(
+                [executable, "agent", "--no-leader", "stdio"],
+                cwd=Path(directory),
+                timeout=DISCOVERY_TIMEOUT_SECONDS,
+                max_output_bytes=DISCOVERY_MAX_OUTPUT_BYTES,
+            ) as rpc:
+                hello = await rpc.request(
+                    "initialize",
+                    {"protocolVersion": 1, "clientCapabilities": {}},
+                    timeout=DISCOVERY_TIMEOUT_SECONDS,
+                )
+                if hello.get("protocolVersion") != 1:
+                    raise _UnsupportedCliError
+                return await rpc.request("_x.ai/models/list", {}, timeout=DISCOVERY_TIMEOUT_SECONDS)
+        except AcpTransportError as exc:
+            raise _InvalidCatalogError from exc
+
+
+def _grok_models_from_listing(stdout: str) -> list[ModelCapability]:
+    clean = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", stdout)
+    default = re.search(r"^Default model: (\S+)\s*$", clean, re.MULTILINE)
+    models: dict[str, ModelCapability] = {}
+    in_models = False
+    for line in clean.splitlines():
+        if line.strip() == "Available models:":
+            in_models = True
+            continue
+        match = re.fullmatch(r"\s*[*-]\s+(\S+?)(?:\s+\(default\))?\s*", line)
+        if in_models and match:
+            model_id = match[1]
+            models.setdefault(
+                model_id,
+                ModelCapability(
+                    id=model_id,
+                    display_name=model_id,
+                    is_default=model_id == (default[1] if default else None)
+                    or line.rstrip().endswith("(default)"),
+                ),
+            )
+    return list(models.values())
+
+
+def _grok_models_from_catalog(payload: dict[str, Any]) -> list[ModelCapability]:
+    state = payload.get("result")
+    if payload.get("error") or not isinstance(state, dict):
+        raise _InvalidCatalogError
+    models = _acp_models_from_catalog({"models": state})
+    by_id = {model.id: model for model in models}
+    for raw in state["availableModels"]:
+        if not isinstance(raw, dict):
+            continue
+        model_id = _nonempty_string(raw.get("modelId"))
+        if model_id not in by_id:
+            continue
+        model = by_id[model_id]
+        meta = raw.get("_meta")
+        if not isinstance(meta, dict) or meta.get("supportsReasoningEffort") is not True:
+            continue
+        options = meta.get("reasoningEfforts")
+        if not isinstance(options, list):
+            continue
+        for option in options:
+            if isinstance(option, str):
+                option = {"value": option}
+            if not isinstance(option, dict) or not (value := _nonempty_string(option.get("value"))):
+                continue
+            if value not in {item.id for item in model.efforts}:
+                model.efforts.append(
+                    EffortCapability(
+                        id=value,
+                        display_name=_nonempty_string(option.get("label")) or _display_name(value),
+                        description=_nonempty_string(option.get("description")),
+                    )
+                )
+            if option.get("default") is True:
+                model.default_effort = value
+        current = _nonempty_string(meta.get("reasoningEffort"))
+        if current in {item.id for item in model.efforts}:
+            model.default_effort = current
+    return models

@@ -39,6 +39,14 @@ and tqdm in sources/, downloaded using the URLs in uv.lock and verified against
 its SHA-256 hashes. source-inventory.json records the other Python source archive
 locations. Preserve their MPL terms even when distributing the application under AGPL.
 
+For offline builds, set `GOFER_LICENSE_SOURCE_CACHE` to a directory containing
+the source archives named exactly `name-version.tar.gz`, such as
+`certifi-2026.7.22.tar.gz`. Keep this cache outside the generated notices output,
+which the collector clears before each build. Cached archives must match the
+SHA-256 hashes in `uv.lock`; a mismatch fails the build. Missing archives are
+downloaded from the locked HTTPS URLs and checked against the same hashes.
+Using the cache does not skip source inclusion or license review checks.
+
 The generated package inventory does not prove the provenance of every native
 library. Before publishing a candidate, inspect the PyInstaller native inventory
 and record the actual platform libraries, licenses and source locations. In

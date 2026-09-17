@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, Sparkles } from "lucide-react";
+import { Check, ChevronDown, LoaderCircle, Sparkles } from "lucide-react";
 
 import { apiUrl } from "../lib/api";
 
@@ -32,6 +32,9 @@ export function useProviderCapabilities() {
 
   useEffect(() => {
     load();
+    const reload = (event) => load(event.detail?.refresh === true);
+    window.addEventListener("raticode:providers-changed", reload);
+    return () => window.removeEventListener("raticode:providers-changed", reload);
   }, [load]);
 
   return { capabilities, error, loading, refresh: () => load(true) };
@@ -43,6 +46,7 @@ export function ProviderModelEffortFields({
   className = "",
   disabled = false,
   effort,
+  loading = false,
   model,
   onChange,
   onRefresh,
@@ -50,7 +54,7 @@ export function ProviderModelEffortFields({
   showProvider = true,
 }) {
   const selectedProvider = useMemo(
-    () => capabilities.find((item) => item.id === provider) ?? capabilities[0] ?? null,
+    () => capabilities.find((item) => item.id === provider) ?? (provider ? { id: provider, models: [], error: `Provider ${provider} is not in the current catalog. Refresh or choose another provider.` } : capabilities[0] ?? null),
     [capabilities, provider],
   );
   const concreteDefaultModel = useMemo(
@@ -60,8 +64,12 @@ export function ProviderModelEffortFields({
       ) ?? null,
     [selectedProvider],
   );
-  const configuredModelValue =
-    model?.toLowerCase() === "default" && concreteDefaultModel ? concreteDefaultModel.id : model;
+  const antigravityFamily = provider === "antigravity" && model
+    ? selectedProvider?.models?.find(item => item.id.replace(/-(low|medium|high)$/, "") === model.replace(/-(low|medium|high)$/, "")) : null;
+  const nativeEffort = antigravityFamily && model !== antigravityFamily.id
+    ? model.match(/-(low|medium|high)$/)?.[1] : "";
+  const configuredModelValue = antigravityFamily?.id ||
+    (model?.toLowerCase() === "default" && concreteDefaultModel ? concreteDefaultModel.id : model);
   const selectedModel = useMemo(
     () =>
       selectedProvider?.models?.find((item) => item.id === configuredModelValue) ??
@@ -78,16 +86,22 @@ export function ProviderModelEffortFields({
   const effortOptions = selectableEfforts(selectedModel, effort);
   const selectedModelValue =
     configuredModelValue || (allowInheritedModel ? "" : selectedModel?.id ?? "");
-  const selectedEffortValue = effort || selectedModel?.defaultEffort || "";
-  const discoveryMessage = selectedProvider?.error;
+  const selectedEffortValue = effort || nativeEffort || selectedModel?.defaultEffort || "";
+  const discoveryMessage = ["unauthenticated", "access_denied"].includes(selectedProvider?.discoveryStatus)
+    ? null : selectedProvider?.error || (!selectedProvider?.models?.length ? "No models available. Refresh to try discovery again." : "");
 
   useEffect(() => {
-    if (model?.toLowerCase() !== "default" || !concreteDefaultModel) return;
+    if (disabled || model?.toLowerCase() !== "default" || !concreteDefaultModel) return;
     onChange({
       model: concreteDefaultModel.id,
       effort: effort || concreteDefaultModel.defaultEffort || "",
     });
-  }, [concreteDefaultModel, effort, model, onChange]);
+  }, [concreteDefaultModel, disabled, effort, model, onChange]);
+
+  useEffect(() => {
+    if (disabled || !antigravityFamily || model === antigravityFamily.id) return;
+    onChange({ model: antigravityFamily.id, effort: effort || nativeEffort || antigravityFamily.defaultEffort || "" });
+  }, [antigravityFamily, disabled, effort, model, nativeEffort, onChange]);
 
   function updateProvider(nextProviderId, requestedModelId = "") {
     const nextProvider = capabilities.find((item) => item.id === nextProviderId);
@@ -116,12 +130,14 @@ export function ProviderModelEffortFields({
     });
   }
 
+  if (loading) return <ProviderDiscoveryLoading className={className} />;
+
   return (
     <div className={`space-y-2 ${className}`.trim()}>
       <ModelPicker
         allowInheritedModel={allowInheritedModel}
         capabilities={capabilities}
-        disabled={disabled || capabilities.length === 0}
+        disabled={disabled}
         effortOptions={effortOptions}
         modelOptions={modelOptions}
         selectedEffortValue={selectedEffortValue}
@@ -133,6 +149,7 @@ export function ProviderModelEffortFields({
         onModelChange={updateModel}
         onProviderChange={updateProvider}
       />
+      <ProviderAuthentication key={selectedProvider?.id} provider={selectedProvider} disabled={disabled} />
       {discoveryMessage ? (
         <div className="flex items-center justify-between gap-3 rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
           <span className="min-w-0">{discoveryMessage}</span>
@@ -151,6 +168,15 @@ export function ProviderModelEffortFields({
     </div>
   );
 }
+
+export function ProviderDiscoveryLoading({ className = "" }) {
+  return <div role="status" aria-live="polite" aria-busy="true"
+    className={`flex min-h-10 items-center gap-3 rounded-xl border border-line bg-white px-3 py-2 text-xs text-muted ${className}`}>
+    <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 text-brand motion-safe:animate-spin" />
+    <span>Loading providers and models…</span>
+  </div>;
+}
+
 
 function ModelPicker({
   allowInheritedModel,
@@ -194,7 +220,7 @@ function ModelPicker({
     modelOptions.find((item) => item.id === selectedModelValue)?.label ??
     selectedModel?.displayName ??
     selectedModel?.id ??
-    (allowInheritedModel ? "Inherit agent" : "Select model");
+    (allowInheritedModel ? "Inherit agent" : "Models unavailable");
 
   function triggerRefFor(menu) {
     if (menu === "provider") return providerTriggerRef;
@@ -269,7 +295,7 @@ function ModelPicker({
           className={`grid min-w-0 grid-cols-[0.625rem_minmax(0,1fr)_0.625rem] items-center gap-0.5 border-l border-line px-1.5 text-center text-xs font-semibold text-ink transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 ${openMenu === "model" ? "model-picker-option--active" : ""}`}
           data-model-picker-part="model"
           data-picker-trigger="model"
-          disabled={disabled}
+          disabled={disabled || !modelOptions.some(option => !option.disabled)}
           style={openMenu === "model" ? activePickerStyle : undefined}
           type="button"
           onClick={() => toggleMenu("model")}
@@ -298,7 +324,7 @@ function ModelPicker({
 
       {openMenu === "provider" ? (
         <PickerMenu label="Provider" menu="provider">
-          {capabilities.map((providerOption) => (
+          {capabilities.filter((item) => item.enabled !== false).map((providerOption) => (
             <PickerOption
               key={providerOption.id}
               active={providerOption.id === selectedProvider?.id}
@@ -308,6 +334,10 @@ function ModelPicker({
               onSelect={() => selectValue(onProviderChange, providerOption.id)}
             />
           ))}
+          <button type="button" role="option" aria-selected={false} className="w-full border-t border-line px-3 py-2 text-left text-xs font-semibold text-brand" onClick={() => {
+            closePicker({ restoreFocus: false });
+            window.dispatchEvent(new CustomEvent("raticode:open-provider-settings"));
+          }}>Add a provider</button>
         </PickerMenu>
       ) : null}
 
@@ -438,4 +468,78 @@ function selectableEfforts(model, configuredEffort) {
     });
   }
   return options;
+}
+
+export function ProviderAuthentication({ provider, disabled = false, alwaysShow = false }) {
+  const [pending, setPending] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState("");
+  const generation = useRef(0);
+  useEffect(() => () => { generation.current += 1; }, []);
+  useEffect(() => {
+    if (!pending) return undefined;
+    let active = true;
+    let timer;
+    async function poll() {
+      try {
+        const response = await fetch(apiUrl(`/provider/auth?provider=${encodeURIComponent(provider.id)}`));
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not check sign-in status.");
+        if (!active) return;
+        if (result.status === "complete") {
+          setPending(false);
+          // Every picker shares this event, including settings, Rem and agent editors.
+          window.dispatchEvent(new CustomEvent("raticode:providers-changed", { detail: { refresh: true } }));
+          return;
+        }
+        if (result.status === "error" || result.status === "idle") {
+          setPending(false);
+          setError(result.error || "Sign-in was cancelled.");
+          return;
+        }
+        timer = window.setTimeout(poll, 1000);
+      } catch (failure) {
+        if (active) { setPending(false); setError(failure.message || "Could not check sign-in status."); }
+      }
+    }
+    void poll();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [pending, provider?.id]);
+  async function authenticate(action = "start") {
+    const current = ++generation.current;
+    setError("");
+    setStarting(true);
+
+    try {
+      const response = await fetch(apiUrl("/provider/auth"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: provider.id, action }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not start sign-in.");
+      if (generation.current === current) setPending(action === "start");
+    } catch (failure) {
+      if (generation.current === current) { setPending(false); setError(failure.message || "Could not start sign-in."); }
+    } finally { if (generation.current === current) setStarting(false); }
+  }
+  if (provider?.discoveryStatus === "access_denied") return <div className="space-y-2 rounded-xl border border-line bg-white px-3 py-2 text-xs">
+    <p className="text-muted">{provider.error || "This account does not have access to the provider's model catalog."}</p>
+    <div className="flex flex-wrap items-center gap-3">
+      {provider.id === "copilot" ? <a className="font-semibold text-brand" href="https://github.com/settings/copilot" target="_blank" rel="noopener noreferrer">Open Copilot settings</a> : null}
+      <button type="button" disabled={disabled} className="font-semibold text-brand disabled:opacity-60" onClick={() => window.dispatchEvent(new CustomEvent("raticode:providers-changed", { detail: { refresh: true } }))}>Refresh providers</button>
+    </div>
+  </div>;
+  if (!provider || (!alwaysShow && provider.discoveryStatus !== "unauthenticated")) return null;
+  if (!provider.supportsBrowserLogin) return provider.discoveryStatus === "unauthenticated"
+    ? <div className="space-y-2 text-xs text-muted"><p>{provider.id === "antigravity" ? "Run agy in a terminal to sign in to Antigravity, then refresh providers." : <>Sign in through {provider.displayName || provider.id}&apos;s CLI setup, then refresh providers.</>}</p>
+      <button type="button" disabled={disabled} className="font-semibold text-brand" onClick={() => window.dispatchEvent(new CustomEvent("raticode:providers-changed", { detail: { refresh: true } }))}>Refresh providers</button></div> : null;
+  return <div className="space-y-2 rounded-xl border border-line bg-white px-3 py-2 text-xs">
+    {!pending && !starting && provider.discoveryStatus === "unauthenticated" && provider.error ? <p className="text-muted">{provider.error}</p> : null}
+    {pending || starting ? <div role="status" className="flex items-center gap-2"><LoaderCircle aria-hidden="true" className="h-4 w-4 motion-safe:animate-spin" />{starting ? "Opening sign-in…" : "Complete sign-in in your browser."}</div> : null}
+    <button type="button" disabled={disabled || starting} className="font-semibold text-brand disabled:opacity-60"
+      onClick={() => authenticate(pending ? "cancel" : "start")}>
+      {pending ? "Cancel sign-in" : `Sign in to ${provider.displayName || provider.id}`}
+    </button>
+    {error ? <p role="alert" className="text-red-600 dark:text-red-300">{error}</p> : null}
+  </div>;
 }

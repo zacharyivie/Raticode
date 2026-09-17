@@ -5,9 +5,13 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
+from gofer.core import provider_capabilities
 from gofer.core.runner import (
     RunnerQueueStore,
     capabilities_match,
+    default_runner_capabilities,
     run_worker_once,
     workflow_required_capabilities,
 )
@@ -162,3 +166,61 @@ def test_queue_connections_close_after_commit_and_rollback(tmp_path: Path) -> No
         assert [row[0] for row in reopened.execute("SELECT value FROM cleanup_probe")] == [
             "committed"
         ]
+
+
+@pytest.mark.parametrize("provider,binary", [("antigravity", "agy"), ("grok", "grok")])
+@pytest.mark.parametrize("location", ["path", "configured", "nvm", "missing"])
+def test_default_runner_discovers_and_claims_supported_provider(
+    provider, binary, location, tmp_path, monkeypatch
+):
+    executable = tmp_path / "nvm" / "versions" / "node" / "v22.12.0" / "bin" / binary
+    if location != "missing":
+        executable.parent.mkdir(parents=True)
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+    monkeypatch.setenv(
+        "NVM_DIR", str(tmp_path / "nvm" if location == "nvm" else tmp_path / "empty")
+    )
+    monkeypatch.setattr(
+        provider_capabilities.shutil,
+        "which",
+        lambda name: str(executable) if location == "path" and name == binary else None,
+    )
+    monkeypatch.setattr(
+        provider_capabilities,
+        "provider_preference",
+        lambda name: (
+            {"executable": str(executable)} if location == "configured" and name == provider else {}
+        ),
+    )
+    capabilities = default_runner_capabilities([str(tmp_path)])
+    assert capabilities["provider_clis"] == ([] if location == "missing" else [provider])
+    assert capabilities["workspace_roots"] == [str(tmp_path)]
+    assert capabilities["direct_providers"] == ["anthropic_api", "openai_api"]
+    store = RunnerQueueStore(tmp_path / "data")
+    store.register_runner("test", "Test runner", [], capabilities)
+    queued = store.enqueue(
+        "provider-workflow",
+        tmp_path / "workflow.rattish",
+        required_capabilities={"provider_clis": [provider]},
+    )
+    claimed = store.claim_next("test")
+    if location == "missing":
+        assert claimed is None
+    else:
+        assert claimed is not None and claimed.id == queued.id
+
+
+def test_default_runner_never_advertises_gemini_cli(monkeypatch):
+    monkeypatch.setattr(
+        "gofer.core.runner.resolve_provider_executable", lambda provider: "/fake/cli"
+    )
+    assert default_runner_capabilities()["provider_clis"] == [
+        "codex",
+        "claude_code",
+        "cursor",
+        "copilot",
+        "opencode",
+        "antigravity",
+        "grok",
+    ]

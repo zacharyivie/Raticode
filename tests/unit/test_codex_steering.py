@@ -265,3 +265,43 @@ def test_only_registered_swarm_tool_receives_approval(
     assert (approval in command) == (registered == "http://127.0.0.1:1234/turn")
     if registered == "http://127.0.0.1:1234/turn":
         assert f'mcp_servers.{actual_name}.enabled_tools=["swarm_action"]' in command
+
+
+@pytest.mark.asyncio
+async def test_unlimited_swarm_transport_survives_large_stdout_and_stderr(monkeypatch, tmp_path):
+    script = tmp_path / "large.py"
+    script.write_text("""import json, sys
+for line in sys.stdin:
+ m=json.loads(line)
+ method=m['method']
+ if method == 'initialized': continue
+ result={}
+ if method == 'thread/start': result={'thread': {'id': 'thread'}}
+ if method == 'turn/start': result={'turn': {'id': 'turn'}}
+ print(json.dumps({'id': m['id'], 'result': result}), flush=True)
+ if method == 'turn/start':
+  sys.stderr.write('x' * 2100000); sys.stderr.flush()
+  for i in range(600):
+   print(json.dumps({'method':'item/completed', 'params':{'item':{
+    'type':'commandExecution','id':str(i),'aggregatedOutput':'x'*4096}}}), flush=True)
+  print(json.dumps({'method':'turn/completed',
+   'params':{'turn':{'status':'completed'}}}), flush=True)
+""")
+    spawn = asyncio.create_subprocess_exec
+
+    async def fake_spawn(*args, **kwargs):
+        return await spawn(sys.executable, str(script), **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    events = [
+        event
+        async for event in stream_codex_turn(
+            [sys.executable, "exec", "--sandbox", "workspace-write", "prompt"],
+            control=CodexTurnControl(),
+            cwd=tmp_path,
+            cancel_event=None,
+            max_output_bytes=None,
+        )
+    ]
+    assert events[-1] == {"type": "exit", "returncode": 0}
+    assert len(events) == 601

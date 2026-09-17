@@ -1,9 +1,10 @@
+import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
 import { useEffect, useId, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, Crown, History, MessagesSquare, MoreHorizontal, Pause, Play, Plus, Send, Settings2, Square, Trash2, X } from "lucide-react";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import RemResources, { DEFAULT_REM_RESOURCES, remResourceError } from "./RemResources.jsx";
 import { startPolling } from "../lib/refresh.js";
-import { milestoneProgress, newSwarmAgent, positiveDraft, swarmRequest } from "../lib/swarms.js";
+import { milestoneProgress, objectiveProgressChange, newSwarmAgent, positiveDraft, swarmRequest } from "../lib/swarms.js";
 
 import "./SwarmWorkspace.css";
 
@@ -57,8 +58,9 @@ export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, d
     finally { setBusy(false); }
   }
   const currentRun = swarm?.run;
-  const active = ["running", "paused", "stopping"].includes(currentRun?.state);
-  const stopping = currentRun?.state === "stopping";
+  const diagnosing = currentRun?.idleDiagnosis?.state === "working";
+  const active = ["running", "paused", "stopping", "completing"].includes(currentRun?.state) || diagnosing;
+  const stopping = ["stopping", "completing"].includes(currentRun?.state);
   const history = swarm?.history || EMPTY_HISTORY;
   const run = archiveId ? archive : currentRun;
   const runAgents = run?.configuration?.agents || swarm?.agents || [];
@@ -78,10 +80,12 @@ export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, d
         <div className="swarm-dashboard">
           <section className="swarm-run-heading" aria-label="Run overview">
             <div className="swarm-run-topline"><span className="swarm-run-label">{archiveId ? "Previous run" : run ? "Current run" : "New run"}</span><RunStatus state={run?.state || "ready"} />
-              <div className="ml-auto flex flex-wrap gap-2">{archiveId ? <button className={buttonClass} onClick={() => setArchiveId("")}>Return to current run</button> : active ? <><button type="button" disabled={busy || stopping} className={buttonClass} onClick={() => void mutate("/control", { action: currentRun.state === "paused" ? "resume" : "pause" })}>{currentRun.state === "paused" ? <Play size={13} /> : <Pause size={13} />}{currentRun.state === "paused" ? "Resume" : "Pause"}</button><button type="button" disabled={busy || stopping} className={buttonClass} onClick={() => void mutate("/control", { action: "stop" })}><Square size={12} />Stop</button></> : null}</div>
+              <div className="ml-auto flex flex-wrap gap-2">{archiveId ? <button className={buttonClass} onClick={() => setArchiveId("")}>Return to current run</button> : active ? <><button type="button" disabled={busy || stopping || diagnosing} className={buttonClass} onClick={() => void mutate("/control", { action: currentRun.state === "paused" ? "resume" : "pause" })}>{currentRun.state === "paused" ? <Play size={13} /> : <Pause size={13} />}{currentRun.state === "paused" ? "Resume" : "Pause"}</button><button type="button" disabled={busy || stopping} className={buttonClass} onClick={() => void mutate("/control", { action: "stop" })}><Square size={12} />Stop</button></> : null}</div>
             </div>
             {run || archiveId ? <ExpandableText as="h1" text={run?.task || "Loading previous run..."} label="task" limit={180} lines={2} /> : null}
             {run ? <div className="swarm-run-meta"><span>{runAgents.length} agents</span>{run.createdAt ? <time dateTime={run.createdAt}>{new Date(run.createdAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</time> : null}<span>{run.turnCount || 0} turns</span></div> : null}
+            {run?.failureReason ? <p role="alert" className="mt-3 text-xs leading-5 text-red-600 dark:text-red-300">{run.failureReason}</p> : null}
+            {run?.cleanup?.error ? <p className="text-xs text-muted">Retained work is still available. Cleanup error: {run.cleanup.error} {!archiveId ? <button type="button" className={buttonClass} disabled={busy} onClick={() => void mutate("/control", { action: "cleanup" })}>Retry cleanup</button> : null}</p> : null}
             {run?.pauseReason ? <p role="status" className="mt-3 text-xs leading-5 text-muted">Paused: {run.pauseReason}</p> : null}
             {!archiveId && !active ? <details className="swarm-new-run" open={!run || undefined}><summary>Start a new run</summary><form className="swarm-start-form" onSubmit={async event => { event.preventDefault(); if (await mutate("/start", { task })) setTask(""); }}><div className="flex items-center justify-between gap-3"><label className="text-xs font-semibold" htmlFor="swarm-task">Task</label>{run ? <button type="button" className="text-xs text-muted hover:text-ink" onClick={event => { event.currentTarget.closest("details").open = false; }}>Cancel</button> : null}</div><textarea id="swarm-task" required rows={2} value={task} onChange={event => setTask(event.target.value)} placeholder="Describe the task…" className={fieldClass} /><div className="flex justify-end"><button type="submit" disabled={busy || !task.trim()} className={primaryClass}><Play size={13} />Start run</button></div></form></details> : null}
           </section>
@@ -97,6 +101,7 @@ export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, d
                 <SwarmRoster key={run?.id || "ready"} run={run} agents={runAgents} readOnly={Boolean(archiveId)} selectedAgentId={selectedAgentId} configurableAgents={swarm.agents} onConfigure={setEditor} />
               </section>
               <section aria-label="Message board" className="swarm-board-panel">
+                <SwarmDigest run={run} agents={runAgents} />
                 <div className="swarm-section-heading"><h2>Message board</h2><span className="swarm-count">{run?.messages?.length || 0}</span></div>
                 <SwarmBoard key={run?.id || "ready"} readOnly={Boolean(archiveId) || Boolean(run && !active)} swarm={{ ...swarm, run }} busy={busy} onResolve={payload => mutate("/deliveries", payload)} onSend={payload => mutate("/messages", payload)} />
               </section>
@@ -130,8 +135,9 @@ export function SwarmExecution({ run, agents, readOnly, busy, onAction }) {
     {run.workspace?.path ? <p className="break-all text-muted">{run.workspace.mode === "git" ? "Integration workspace" : "Project"}: {run.workspace.path}</p> : null}
     {run.integration ? <p role="status">Combined checks: {run.integration.passed ? "Passed" : "Incomplete"}{run.integration.error ? ` · ${run.integration.error}` : ""}</p> : null}
     {run.replanRequired && !readOnly ? <form className="space-y-2" onSubmit={async event => { event.preventDefault(); if (await onAction({ action: "replan", reason })) setReason(""); }}><label className="block space-y-1">Changed plan<textarea className={fieldClass} required value={reason} onChange={event => setReason(event.target.value)} /></label><button type="submit" className={buttonClass} disabled={busy || !reason.trim()}>Record plan</button><p className="text-muted">Record the changed approach, then resume the run.</p></form> : null}
+    {run.workspace?.branch ? <p className="break-all text-muted">Parent branch: <code>{run.workspace.branch}</code></p> : null}
     <details open={open} onToggle={event => setOpen(event.currentTarget.open)}><summary className="cursor-pointer font-semibold">Assignment attempts and checks ({attempts.length})</summary>{open ? <div className="mt-3 space-y-4">
-      <p className="text-muted">{run.capacityScope || "Limits count app-managed turns."} Provider session recovery and child discovery are unavailable.</p>
+      <p className="text-muted">{run.capacityScope || "Provider usage limits apply. Failed agents retry after 10 seconds, doubling up to 5 minutes."} Provider session recovery and child discovery are unavailable.</p>
       {attempts.slice(-20).reverse().map(attempt => <article key={attempt.id} className="space-y-2 border-t border-line pt-3">
         <p className="font-medium">{attempt.milestoneId || "Coordination"} · {agents.find(agent => agent.id === attempt.ownerId)?.name || attempt.ownerId} · {attempt.state}</p>
         <p className="break-all text-muted">Attempt {attempt.id}{attempt.sessionId ? ` · Session ${attempt.sessionId}` : ""}</p>
@@ -168,6 +174,7 @@ function SwarmRoster({ run, agents, readOnly, selectedAgentId, configurableAgent
       <div className="swarm-agent-identity"><div className="swarm-agent-portrait" aria-hidden="true">{agent.name.trim().slice(0, 2).toUpperCase()}{agent.isOrchestrator ? <Crown size={12} /> : null}</div><div className="min-w-0 flex-1"><h3>{agent.name}</h3><span className="swarm-agent-class">{agent.isOrchestrator ? "Orchestrator" : "Worker"}</span><ExpandableText className="swarm-agent-role" text={agent.role} label={`${agent.name} role`} limit={140} lines={3} /></div>{!readOnly && configurableAgents.some(item => item.id === agent.id) ? <AgentMenu agent={agent} onConfigure={onConfigure} /> : null}</div>
       <div className="swarm-agent-update"><RunStatus state={state?.state || "idle"} /><p title={state?.activity || latestMessage || ""}>{state?.activity || latestMessage || (run ? "No activity yet" : "Not started")}</p></div>
       {state?.attemptId ? <p className="mt-2 break-words text-xs text-muted">Task: {state.milestoneId || "Coordination"} · Attempt {state.attemptId.slice(0, 8)}{state.lastActivityAt ? ` · Last activity ${new Date(state.lastActivityAt).toLocaleTimeString()}` : ""}</p> : null}
+      {state?.retryAt && state.state === "retry_wait" ? <p role="status" className="mt-1 text-xs text-muted">Retry {state.consecutiveFailures} scheduled for {new Date(state.retryAt * 1000).toLocaleTimeString()}{run?.state === "paused" ? " · Waiting for swarm resume" : ""}</p> : null}
       {state?.workspace ? <p className="mt-1 break-all text-xs text-muted">{state.workspace}</p> : null}
       {state?.error ? <p role="alert" className="mt-2 break-words text-xs text-red-600 dark:text-red-300">{state.error}</p> : null}
       {progress.totalCount ? <div className="swarm-agent-progress"><progress aria-label={`${agent.name} progress`} max={100} value={progress.percent || 0} /><span>{progress.acceptedCount}/{progress.totalCount} accepted</span></div> : null}
@@ -200,7 +207,7 @@ export function PositiveNumberField({ label, value, onChange, min = 1, disabled 
 
 function SwarmSettings({ swarm, active, busy, onSave, defaults, selectedAgentId }) {
   const createAgent = (orchestrator = false) => ({ ...newSwarmAgent(orchestrator), provider: defaults.provider || "codex", model: defaults.model || "", effort: defaults.effort || "", resources: structuredClone(defaults.resources || DEFAULT_REM_RESOURCES) });
-  const [draft, setDraft] = useState(() => swarm ? structuredClone({ name: swarm.name, charter: swarm.charter, agents: swarm.agents, wakeIntervalSeconds: swarm.wakeIntervalSeconds, maxTurns: swarm.maxTurns, maxConcurrency: swarm.maxConcurrency, maxRunSeconds: swarm.maxRunSeconds ?? 14400, maxRepairAttempts: swarm.maxRepairAttempts ?? 2, stallTurnLimit: swarm.stallTurnLimit ?? 6 }) : { name: "", charter: "", agents: [createAgent(true)], wakeIntervalSeconds: 60, maxTurns: 100, maxConcurrency: 3, maxRunSeconds: 14400, maxRepairAttempts: 2, stallTurnLimit: 6 });
+  const [draft, setDraft] = useState(() => swarm ? structuredClone({ name: swarm.name, charter: swarm.charter, agents: swarm.agents, wakeIntervalSeconds: swarm.wakeIntervalSeconds, maxConcurrency: swarm.maxConcurrency, maxRepairAttempts: swarm.maxRepairAttempts ?? 2, stallTurnLimit: swarm.stallTurnLimit ?? 6, gitPermissions: swarm.gitPermissions ?? { local: true, remote: false } }) : { name: "", charter: "", agents: [createAgent(true)], wakeIntervalSeconds: 60, maxConcurrency: 3, maxRepairAttempts: 2, stallTurnLimit: 6, gitPermissions: { local: true, remote: false } });
   const [expandedAgentId, setExpandedAgentId] = useState(selectedAgentId || draft.agents[0]?.id);
   const { capabilities, error, loading, refresh } = useProviderCapabilities();
   const disabled = busy || active;
@@ -224,7 +231,7 @@ function SwarmSettings({ swarm, active, busy, onSave, defaults, selectedAgentId 
       const provider = capabilities.find((item) => item.id === agent.provider);
       const model = provider?.models?.find((item) => item.id === (agent.model || provider.defaultModel));
       return { ...agent, model: agent.model || model?.id || "", effort: agent.effort || model?.defaultEffort || "" };
-    }), wakeIntervalSeconds: draft.wakeIntervalSeconds, maxTurns: draft.maxTurns, maxConcurrency: draft.maxConcurrency || 3, maxRunSeconds: draft.maxRunSeconds, maxRepairAttempts: draft.maxRepairAttempts, stallTurnLimit: draft.stallTurnLimit });
+    }), wakeIntervalSeconds: draft.wakeIntervalSeconds, maxConcurrency: draft.maxConcurrency || 3, maxRepairAttempts: draft.maxRepairAttempts, stallTurnLimit: draft.stallTurnLimit, gitPermissions: draft.gitPermissions });
   }}>
     <div className="swarm-setup-scroll workflow-scrollbar">
       <div className={`swarm-setup-layout ${selectedAgentId ? "swarm-setup-single" : ""}`}>
@@ -234,16 +241,21 @@ function SwarmSettings({ swarm, active, busy, onSave, defaults, selectedAgentId 
           <label className="swarm-setup-field"><span>Description <span className="swarm-setup-optional">Optional</span></span><textarea disabled={disabled} rows={3} className={fieldClass} value={draft.charter} onChange={event => patch({ charter: event.target.value })} /></label>
           <label className="swarm-setup-field">Orchestrator<select disabled={disabled} className={fieldClass} value={draft.agents.find(agent => agent.isOrchestrator)?.id || ""} onChange={event => setOrchestrator(event.target.value)}>{draft.agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name || "Unnamed agent"}</option>)}</select></label>
           <p className="swarm-setup-hint">Coordinates the team and tracks progress.</p>
+          <fieldset className="swarm-setup-advanced-body" disabled={disabled}>
+            <legend className="swarm-setup-field-label">Git permissions</legend>
+            <label className="swarm-setup-check"><input type="checkbox" aria-label="Local Git operations" checked={draft.gitPermissions.local} onChange={event => patch({ gitPermissions: { local: event.target.checked, remote: event.target.checked && draft.gitPermissions.remote } })} />Local Git operations</label>
+            <p className="swarm-setup-hint">Allow agents to stage and commit in their own worktrees through the managed Git tool.</p>
+            <label className="swarm-setup-check"><input type="checkbox" disabled={!draft.gitPermissions.local} aria-label="Remote branches and pull requests" checked={draft.gitPermissions.remote} onChange={event => patch({ gitPermissions: { ...draft.gitPermissions, remote: event.target.checked } })} />Remote branches and pull requests</label>
+            <p className="swarm-setup-hint">Allow publishing assignment branches and creating pull requests. Off by default. Changes apply to the next run.</p>
+          </fieldset>
           <details className="swarm-setup-advanced swarm-setup-run-options">
-            <summary><Settings2 size={14} />Run limits<ChevronRight size={14} /></summary>
+            <summary><Settings2 size={14} />Run settings<ChevronRight size={14} /></summary>
             <div className="swarm-setup-advanced-body">
               <PositiveNumberField label="Concurrent agents" value={draft.maxConcurrency || 3} disabled={disabled} onChange={maxConcurrency => patch({ maxConcurrency })} />
-              <PositiveNumberField label="Maximum turns per run" value={draft.maxTurns} disabled={disabled} onChange={maxTurns => patch({ maxTurns })} />
               <PositiveNumberField label="Check interval (seconds)" value={draft.wakeIntervalSeconds} min={10} disabled={disabled} onChange={wakeIntervalSeconds => patch({ wakeIntervalSeconds })} />
-              <PositiveNumberField label="Maximum run duration (seconds)" value={draft.maxRunSeconds} disabled={disabled} onChange={maxRunSeconds => patch({ maxRunSeconds })} />
               <PositiveNumberField label="Repair attempts per milestone" value={draft.maxRepairAttempts} disabled={disabled} onChange={maxRepairAttempts => patch({ maxRepairAttempts })} />
               <PositiveNumberField label="Turns without progress before replanning" value={draft.stallTurnLimit} disabled={disabled} onChange={stallTurnLimit => patch({ stallTurnLimit })} />
-              <p className="swarm-setup-hint">Git assignments use separate worktrees. Non-Git projects run one agent at a time. Limits count app-managed turns.</p>
+              <p className="swarm-setup-hint">Git assignments use separate worktrees. Non-Git projects run one agent at a time. Provider usage limits apply. Failed agents retry after 10 seconds, doubling up to 5 minutes.</p>
             </div>
           </details>
         </section> : null}
@@ -260,13 +272,15 @@ function SwarmSettings({ swarm, active, busy, onSave, defaults, selectedAgentId 
               <legend className="sr-only">{agent.name || "New agent"} settings</legend>
               <label className="swarm-setup-field">Name<input required className={fieldClass} value={agent.name} onChange={event => patchAgent(agent.id, { name: event.target.value })} /></label>
               <label className="swarm-setup-field">Role and instructions<textarea required rows={3} className={fieldClass} value={agent.role} onChange={event => patchAgent(agent.id, { role: event.target.value })} /></label>
-              <div className="swarm-setup-model"><span className="swarm-setup-field-label">Model</span><ProviderModelEffortFields capabilities={capabilities} provider={agent.provider} model={agent.model} effort={agent.effort} disabled={disabled} onRefresh={refresh} onChange={values => patchAgent(agent.id, values)} /></div>
+              <div className="swarm-setup-model"><span className="swarm-setup-field-label">Model</span><ProviderModelEffortFields loading={loading} capabilities={capabilities} provider={agent.provider} model={agent.model} effort={agent.effort} disabled={disabled} onRefresh={refresh} onChange={values => patchAgent(agent.id, { ...values, ...(values.provider && values.provider !== agent.provider ? { permissionMode: providerPermissionDefault(values.provider) } : {}) })} /></div>
               <details className="swarm-setup-advanced">
                 <summary>Advanced<ChevronRight size={14} /></summary>
                 <div className="swarm-setup-advanced-body">
                   {selectedAgentId ? <label className="swarm-setup-check"><input type="radio" name="orchestrator" checked={agent.isOrchestrator} onChange={() => setOrchestrator(agent.id)} />Team orchestrator</label> : null}
                   <label className="swarm-setup-check"><input type="checkbox" checked={agent.allowSteering} onChange={event => patchAgent(agent.id, { allowSteering: event.target.checked })} />Allow steering</label>
                   <p className="swarm-setup-hint">Deliver new messages while this agent works, when supported.</p>
+                  <label className="swarm-setup-field">Permissions<select className={fieldClass} value={agent.permissionMode || providerPermissionDefault(agent.provider)} onChange={event => patchAgent(agent.id, { permissionMode: event.target.value })}>{providerPermissionOptions(agent.provider).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
+                  {agent.permissionMode === "cli-managed" ? <p className="swarm-setup-hint">The CLI controls permissions. Raticode shell and web switches do not restrict its native tools. Configured CLI tools and MCP servers may also be available.</p> : null}
                   <details className="swarm-setup-resources"><summary>Tools and resources</summary><div className="pt-3"><RemResources value={agent.resources || DEFAULT_REM_RESOURCES} onChange={resources => patchAgent(agent.id, { resources })} /></div></details>
                 </div>
               </details>
@@ -289,7 +303,7 @@ function SwarmBoard({ swarm, busy, onSend, onResolve, readOnly = false }) {
   const run = swarm?.run;
   return <div className="flex min-h-0 flex-1 flex-col">
     <div aria-label="Shared message board" className="workflow-scrollbar min-h-0 flex-1 overflow-y-auto px-4" role="log" aria-live="polite">
-      {!run?.messages?.length ? <div className="swarm-board-empty"><MessagesSquare size={28} strokeWidth={1} aria-hidden="true" /><p>No messages yet</p></div> : run.messages.map((message) => <article key={message.id} className="swarm-message"><div className="swarm-message-avatar" aria-hidden="true">{agentName(message.senderId).trim().slice(0, 2).toUpperCase()}</div><div className="swarm-message-content"><header className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"><span className="font-semibold">{agentName(message.senderId)}</span><span className="text-muted">to {message.recipientIds?.length ? message.recipientIds.map(agentName).join(", ") : "Everyone"}</span><time className="ml-auto text-muted" dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></header><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.body}</p>{message.deliveries?.length ? <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">{message.deliveries.map((delivery) => <span key={delivery.agentId} title={delivery.reason || ""}>{agentName(delivery.agentId)}: {delivery.state}{delivery.reason ? ` · ${delivery.reason}` : ""}{delivery.state === "uncertain" && !readOnly ? <span className="ml-2 inline-flex flex-wrap gap-2"><button type="button" className="font-semibold underline underline-offset-2" disabled={busy || !["running", "paused"].includes(run.state)} onClick={() => void onResolve({ messageId: message.id, agentId: delivery.agentId, action: "retry" })}>Retry message</button><button type="button" className="underline underline-offset-2" disabled={busy} onClick={() => void onResolve({ messageId: message.id, agentId: delivery.agentId, action: "dismiss" })}>Dismiss delivery</button></span> : null}</span>)}</div> : null}</div></article>)}
+      {!run?.messages?.length ? <div className="swarm-board-empty"><MessagesSquare size={28} strokeWidth={1} aria-hidden="true" /><p>No messages yet</p></div> : run.messages.map((message) => <article key={message.id} className="swarm-message"><div className="swarm-message-avatar" aria-hidden="true">{agentName(message.senderId).trim().slice(0, 2).toUpperCase()}</div><div className="swarm-message-content"><header className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs"><span className="font-semibold">{agentName(message.senderId)}</span><span className="text-muted">to {message.recipientIds?.length ? message.recipientIds.map(agentName).join(", ") : "Everyone"}</span><time className="ml-auto text-muted" dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></header><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.body}</p>{message.deliveries?.length ? <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">{message.deliveries.map((delivery) => <span key={delivery.agentId} title={delivery.reason || ""}>{agentName(delivery.agentId)}: {delivery.state}{delivery.reason ? ` · ${delivery.reason}` : ""}{(delivery.state === "uncertain" || (delivery.state === "queued" && run.agentStates?.[delivery.agentId]?.state === "retry_wait" && delivery.executionAttemptId === run.agentStates[delivery.agentId].retryAttemptId)) && !readOnly ? <span className="ml-2 inline-flex flex-wrap gap-2"><button type="button" className="font-semibold underline underline-offset-2" disabled={busy || !["running", "paused"].includes(run.state)} onClick={() => void onResolve({ messageId: message.id, agentId: delivery.agentId, action: "retry" })}>{delivery.state === "uncertain" ? "Retry message" : "Retry now"}</button>{delivery.state === "uncertain" ? <button type="button" className="underline underline-offset-2" disabled={busy} onClick={() => void onResolve({ messageId: message.id, agentId: delivery.agentId, action: "dismiss" })}>Dismiss delivery</button> : null}</span> : null}</span>)}</div> : null}</div></article>)}
     </div>
     {run && !readOnly ? <form className="shrink-0 space-y-2 border-t border-line p-4" onSubmit={async (event) => { event.preventDefault(); if (await onSend({ body, ...(recipientId ? { recipientId } : {}) })) setBody(""); }}><label className="flex items-center gap-2 text-xs text-muted">Send to<select aria-label="Message recipient" className="min-w-0 rounded border border-line bg-white px-2 py-1 text-ink" value={recipientId} onChange={(event) => setRecipientId(event.target.value)}><option value="">Orchestrator</option><option value="all">Everyone</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><textarea aria-label="Message to swarm" required rows={2} className={fieldClass} placeholder="Message…" value={body} onChange={(event) => setBody(event.target.value)} /><div className="flex justify-end"><button type="submit" disabled={busy || !body.trim() || !["running", "paused"].includes(run.state)} className={primaryClass}><Send size={13} />Send message</button></div></form> : null}
   </div>;
@@ -321,7 +335,7 @@ function SwarmProgress({ run, agents, busy, onSave, readOnly = false }) {
     </section>)}
     {draft ? <div className="space-y-3"><label className="block space-y-1.5 text-xs text-muted">Reason for changes<input className={fieldClass} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Explain scope or estimate changes for the history." /></label><div className="flex gap-2"><button type="button" className={primaryClass} disabled={busy || objectives.some((item) => !item.title.trim() || item.milestones.some((milestone) => !milestone.title.trim()))} onClick={async () => { if (await onSave({ objectives: draft, ...(revision != null ? { revision } : {}), reason })) { setDraft(null); setReason(""); } }}>Save progress</button><button type="button" className={buttonClass} disabled={busy} onClick={() => setDraft(null)}>Cancel</button></div></div> : null}
     <p className="text-xs leading-5 text-muted">Progress counts accepted milestones, weighted by effort.</p>
-    <details className="border-t border-line pt-3"><summary className="cursor-pointer text-xs font-semibold">Activity and estimate history</summary><ol className="mt-3 space-y-3">{(run.events || []).slice().reverse().map((event) => <li key={event.id} className="text-xs leading-5"><time className="text-muted">{new Date(event.createdAt).toLocaleString()}</time><p>{event.kind.replaceAll("_", " ")} · {agents.find((agent) => agent.id === event.actorId)?.name || event.actorId}</p>{event.payload?.before && event.payload?.after ? <p className="tabular-nums text-muted">Progress {Math.round(milestoneProgress(event.payload.before).percent || 0)}% → {Math.round(milestoneProgress(event.payload.after).percent || 0)}% · {milestoneProgress(event.payload.before).totalWeight} → {milestoneProgress(event.payload.after).totalWeight} effort points</p> : null}{event.payload?.reason ? <p className="text-muted">{event.payload.reason}</p> : null}</li>)}</ol></details></div></details>
+    <details className="border-t border-line pt-3"><summary className="cursor-pointer text-xs font-semibold">Activity and estimate history</summary><ol className="mt-3 space-y-3">{(run.events || []).slice().reverse().map((event) => { const change = objectiveProgressChange(event); return <li key={event.id} className="text-xs leading-5"><time className="text-muted">{new Date(event.createdAt).toLocaleString()}</time><p>{event.kind.replaceAll("_", " ")} · {agents.find((agent) => agent.id === event.actorId)?.name || event.actorId}</p>{change ? <p className="tabular-nums text-muted">Progress {Math.round(change.before.percent || 0)}% → {Math.round(change.after.percent || 0)}% · {change.before.totalWeight} → {change.after.totalWeight} effort points</p> : null}{event.payload?.reason ? <p className="text-muted">{event.payload.reason}</p> : null}</li>; })}</ol></details></div></details>
   </div></div>;
 }
 
@@ -337,4 +351,23 @@ function SwarmAgentActivity({ run, agents, selectedAgentId, compact = false }) {
     <section className="space-y-3"><h3 className="text-sm font-semibold">Recent tool activity</h3>{!state?.traces?.length ? <p className="text-xs text-muted">Tool activity appears here as the agent works.</p> : state.traces.slice().reverse().map((trace, index) => <details key={index} className="border-b border-line pb-3"><summary className="cursor-pointer text-xs">{trace.title || trace.trace?.title || trace.text || "Provider activity"}</summary><pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded bg-slate-50 p-3 text-xs leading-5">{trace.body || trace.trace?.body || JSON.stringify(trace, null, 2)}</pre></details>)}</section>
     <section className="space-y-3"><h3 className="text-sm font-semibold">Conversation</h3>{!state?.messages?.length ? <p className="text-xs text-muted">This agent has not started a turn.</p> : state.messages.map((message, index) => <details key={index} open={message.role === "assistant"} className="border-b border-line pb-3"><summary className="cursor-pointer text-xs font-semibold">{message.role === "assistant" ? agent?.name : "Task and shared context"}</summary><p className="mt-2 whitespace-pre-wrap break-words text-xs leading-6">{message.body}</p></details>)}</section>
   </div></div>;
+}
+
+
+export function SwarmDigest({ run, agents }) {
+  if (!run) return null;
+  const summaries = new Map((run.digest?.agents || []).map(item => [item.agentId, item.summary]));
+  const milestones = (run.objectives || []).flatMap(objective => objective.milestones || []);
+  return <aside aria-label="Team status" className="swarm-digest">
+    <div className="swarm-section-heading"><h2>Team status</h2>{run.digest?.updatedAt ? <time dateTime={run.digest.updatedAt} title={new Date(run.digest.updatedAt).toLocaleString()}>Coordinator update · {new Date(run.digest.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time> : <span>Current assignments</span>}</div>
+    <ul>{agents.map(agent => {
+      const state = run.agentStates?.[agent.id] || {};
+      const assigned = milestones.find(item => item.id === state.milestoneId && !["accepted", "cancelled"].includes(item.status));
+      const pending = (run.messages || []).some(message => message.deliveries?.some(item => item.agentId === agent.id && item.state === "queued"));
+      const status = state.state === "idle" && pending && run.state === "running" ? "queued" : state.state || "idle";
+      const summary = summaries.get(agent.id) || assigned?.title || (status === "working" ? "Reviewing the task and board" : status === "retry_wait" ? "Waiting to retry after a provider error" : "No active assignment");
+      return <li key={agent.id}><strong>{agent.name}</strong><span title={summary}>{summary.length > 160 ? `${summary.slice(0, 157)}...` : summary}</span><small>{status.replaceAll("_", " ")}</small></li>;
+    })}</ul>
+    {run.idleDiagnosis?.body ? <p className="swarm-digest-diagnosis">{run.idleDiagnosis.body}</p> : run.idleDiagnosis?.state === "working" ? <p role="status">Coordinator is explaining why the run became idle.</p> : null}
+  </aside>;
 }

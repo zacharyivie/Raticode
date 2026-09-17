@@ -1,4 +1,4 @@
-/* global structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
+/* global DataTransfer, File, structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -114,6 +114,14 @@ async function run() {
     await cleanup(0);
     return;
   }
+  if (process.env.GOFER_STEERING_ONLY === "1") {
+    await exerciseRemSteering();
+    clearTimeout(timeout);
+    assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
+    console.log("Browser Rem steering regressions passed.");
+    await cleanup(0);
+    return;
+  }
   if (process.env.GOFER_REM_ONLY === "1") {
     await exerciseRemAvatar();
     clearTimeout(timeout);
@@ -129,11 +137,114 @@ async function run() {
   await exercisePackagedMonacoWorker(baseUrl);
   await exerciseSourceControl();
   await exerciseConversationEfficiency();
+  await exerciseRemSteering();
 
   clearTimeout(timeout);
   assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
   console.log("Browser studio accessibility smoke test passed.");
   await cleanup(0);
+}
+
+async function exerciseRemSteering() {
+  await windowRef.reload();
+  windowRef.focus();
+  windowRef.webContents.focus();
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
+  await evaluate(() => {
+    const original = window.fetch;
+    window.__steeringRequests = [];
+    window.__steeringKeys = [];
+    document.addEventListener("keydown", event => window.__steeringKeys.push({ key: event.key, target: event.target.tagName, composing: event.isComposing }));
+    window.__steeringReceipts = [];
+    window.fetch = async (url, options = {}) => {
+      const endpoint = String(url);
+      const json = value => new Response(JSON.stringify(value), { headers: { "Content-Type": "application/json" } });
+      if (endpoint.includes("/provider/capabilities")) return json({ providers: ["cursor", "copilot", "opencode", "antigravity", "grok"].map(id => ({ id, displayName: id, available: true, discoveryStatus: "ready", defaultModel: "cli-default", models: [{ id: "cli-default" }], supportsCustomModel: true, permissionModes: [{ id: "default", displayName: "CLI default" }], defaultPermissionMode: "default" })) });
+      if (endpoint.includes("/chat/steering?")) return json({ receipts: window.__steeringReceipts });
+      if (endpoint.endsWith("/chat/stream")) {
+        window.__steeringTurn = JSON.parse(options.body);
+        return new Response(new ReadableStream({ start(controller) {
+          window.__steeringStream = controller;
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: "turn", turnId: window.__steeringTurn.turnId, generation: 0 }) + "\n"));
+        } }));
+      }
+      if (endpoint.endsWith("/chat/attachments")) {
+        window.__steeringUpload = JSON.parse(options.body);
+        return json({ attachments: [{ id: "evidence", name: "evidence.txt", size: 8, type: "text/plain", storageName: "stored-evidence.txt" }] });
+      }
+      if (endpoint.endsWith("/chat/steer")) {
+        const request = JSON.parse(options.body);
+        window.__steeringRequests.push(request);
+        if (request.text === "Reject this draft") return new Response(JSON.stringify({ error: "Turn already completed" }), { status: 409 });
+        const receipt = { ...request, status: "interrupting", provider: window.__steeringTurn.provider, model: window.__steeringTurn.model };
+        window.__steeringReceipts.push(receipt);
+        return json({ receipt });
+      }
+      if (endpoint.endsWith("/chat/stop")) {
+        window.__steeringStop = JSON.parse(options.body);
+        window.__steeringStream.enqueue(new TextEncoder().encode(JSON.stringify({ type: "stopped", turnId: window.__steeringTurn.turnId }) + "\n"));
+        window.__steeringStream.close();
+        return json({ stopped: true });
+      }
+      return original(url, options);
+    };
+    document.querySelector("button[title='New thread']")?.click();
+  });
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-chat-composer] textarea"))));
+  // Use the current provider if this pane was already mounted. Catalog selection is
+  // exercised separately by React tests; this rendered flow exercises steering.
+  await evaluate(() => {
+    const textarea = document.querySelector("[data-chat-composer] textarea");
+    textarea.focus();
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(textarea, "Build the feature");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await waitFor(() => evaluate(() => !document.querySelector("button[title='Send message']").disabled), 25, "Rem draft ready to send");
+  await evaluate(() => document.querySelector("button[title='Send message']").click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("button[aria-label='Steer Rem']"))));
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").disabled), false);
+  assert.equal(await evaluate(() => [...document.querySelectorAll("[data-chat-pane] [data-picker-trigger]")].every(button => button.disabled)), true);
+  const typeDraft = text => evaluate(text => {
+    const textarea = document.querySelector("[data-chat-composer] textarea");
+    textarea.focus();
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(textarea, text);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.blur();
+  }, text);
+  await typeDraft("temporary"); await typeDraft(""); await typeDraft("Reject this draft");
+  await waitFor(() => evaluate(() => !document.querySelector("button[aria-label='Steer Rem']").disabled), 25, "steering draft ready");
+  await evaluate(() => document.querySelector("button[aria-label='Steer Rem']").click());
+  await waitFor(() => evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("Turn already completed")));
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").value), "Reject this draft");
+  await typeDraft("Preserve the API");
+  await waitFor(() => evaluate(() => !document.querySelector("button[aria-label='Steer Rem']").disabled));
+  await evaluate(() => {
+    const textarea = document.querySelector("[data-chat-composer] textarea");
+    textarea.focus();
+    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+  await waitFor(() => evaluate(() => window.__steeringRequests.some(request => request.text === "Preserve the API")));
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").value), "");
+  assert.equal(await evaluate(() => document.querySelector("button[aria-label='Attach files']").disabled), false);
+  await evaluate(() => {
+    const files = new DataTransfer();
+    files.items.add(new File(["evidence"], "evidence.txt", { type: "text/plain" }));
+    const input = document.querySelector("[data-chat-composer] input[type='file']");
+    input.files = files.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await waitFor(() => evaluate(() => !document.querySelector("button[aria-label='Steer Rem']").disabled));
+  await evaluate(() => document.querySelector("button[aria-label='Steer Rem']").click());
+  await waitFor(() => evaluate(() => window.__steeringRequests.some(request => request.attachments?.length)));
+  assert.equal(await evaluate(() => window.__steeringRequests.at(-1).text), "");
+  assert.equal(await evaluate(() => window.__steeringRequests.at(-1).attachments[0].name), "evidence.txt");
+  assert.equal(await evaluate(() => window.__steeringUpload.threadId === window.__steeringTurn.conversationId), true);
+  await typeDraft("Keep this unsent draft");
+  fs.writeFileSync("/tmp/raticode-rem-steering.png", (await windowRef.webContents.capturePage()).toPNG());
+  await evaluate(() => document.querySelector("button[title='Stop Rem']").click());
+  await waitFor(() => evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("Rem stopped.")));
+  assert.equal(await evaluate(() => window.__steeringStop.turnId === window.__steeringTurn.turnId), true);
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").value), "Keep this unsent draft");
 }
 
 async function exerciseConversationEfficiency() {
@@ -399,33 +510,26 @@ async function exerciseRemAvatar() {
 }
 
 async function exerciseBottomPanelTerminal() {
+  // The preload seeds the selected worktree before React mounts.
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Bottom panel']"))));
-  await evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", {
-    bubbles: true,
-    ctrlKey: true,
-    key: "`",
+  const newTerminal = () => evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", {
+    bubbles: true, cancelable: true, ctrlKey: true, key: "t", code: "KeyT",
   })));
+  const creations = () => evaluate(() => window.__goferBridgeCalls.filter(call => call.method === "terminal.create").map(call => call.payload.cwd));
+  await newTerminal();
   await waitFor(() => evaluate(() => Boolean(document.querySelector(".terminal-host .xterm-screen"))));
-  assert.equal(
-    await evaluate(() => document.querySelector("[aria-label='Bottom panel'] button[role='tab'][aria-selected='true']")?.textContent.trim()),
-    "Terminal",
-  );
-  await waitFor(() => evaluate(() => {
-    const panel = document.querySelector("[aria-label='Bottom panel']");
-    const expected = Number(panel.querySelector("[aria-label='Resize bottom panel']")?.getAttribute("aria-valuenow"));
-    return expected > 36 && panel.getBoundingClientRect().height === expected;
-  }));
+  await waitFor(async () => (await creations()).length === 1);
+  assert.deepEqual(await creations(), ["/workspace/current-worktree"]);
   await evaluate(() => document.querySelector("button[aria-label='New terminal']").click());
-  await waitFor(() => evaluate(() => document.querySelectorAll("button[title^='Close terminal']").length === 2));
-  assert.equal(await evaluate(() => window.__goferBridgeCalls
-    .filter((call) => call.method === "terminal.create").length), 2);
-
-  await evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", {
-    bubbles: true,
-    ctrlKey: true,
-    key: "`",
-  })));
-  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Bottom panel']").getBoundingClientRect().height === 36));
+  await waitFor(async () => (await creations()).length === 2);
+  await newTerminal();
+  await waitFor(async () => (await creations()).length === 3);
+  await evaluate(() => document.querySelector("button[aria-label='Collapse bottom panel']").click());
+  await newTerminal();
+  await waitFor(async () => (await creations()).length === 4);
+  assert.deepEqual(await creations(), Array(4).fill("/workspace/current-worktree"));
+  assert.equal(await evaluate(() => document.querySelectorAll("button[title^='Close terminal']").length), 4);
+  assert.deepEqual(rendererErrors, [], "Terminal creation must not log renderer errors");
 }
 
 async function openRattishWorkflowFile() {
@@ -670,14 +774,13 @@ async function exerciseDesignRegressions() {
     /Your coding agent in Raticode\./,
   );
   assert.equal(
-    await evaluate(() => document.querySelector("[data-assistant-home] #assistant-home-recent")?.textContent.trim()),
+    await evaluate(() => document.querySelector("[data-assistant-home] section[aria-label='Active threads'] h3")?.textContent.trim()),
     "Active threads",
   );
   assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='New thread']"))), true);
   assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='Back to active threads']"))), false);
   await evaluate(() => document.querySelector("button[title='Active threads']").click());
-  await waitFor(() => evaluate(() => Boolean([...document.querySelectorAll("p")]
-    .find((item) => item.textContent.trim() === "Active threads"))));
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("section[aria-label='Active threads'] h3"))));
   await evaluate(() => document.querySelector("button[title='Active threads']").click());
 
   const composerLayout = await evaluate(() => {
@@ -998,10 +1101,21 @@ let swarmFixture = {
   wakeIntervalSeconds: 60, maxTurns: 100,
   run: { id: "run-1", state: "paused", createdAt: "2026-09-14T12:00:00Z", turnCount: 8, task: "Prepare the release", revision: 1, agentStates: {}, messages: [{ id: "msg1", senderId: "lead", recipientIds: ["builder"], body: "Build the editor and report validation results.", createdAt: "2026-09-12T12:00:00Z", deliveries: [{ agentId: "builder", state: "uncertain", reason: "Restarted before delivery was confirmed" }] }], events: [], objectives: [{ id: "objective1", title: "Release editor", milestones: [{ id: "m1", title: "Plan", weight: 1, ownerId: "lead", status: "accepted", evidence: "Plan reviewed" }, { id: "m2", title: "Build editor", weight: 3, ownerId: "builder", status: "accepted", evidence: "Tests pass" }, { id: "m3", title: "Review", weight: 1, ownerId: "builder", status: "planned" }] }] },
 };
-swarmFixture.run.agentStates = { builder: { state: "idle", messages: [{ role: "assistant", body: "Editor implementation passes validation." }], traces: [{ title: "Run tests", text: "npm test passed" }] } };
+swarmFixture.run.agentStates = { lead: { state: "retry_wait", retryAt: 1789574400, retryAttemptId: "lead-retry", consecutiveFailures: 2, error: "Provider unavailable" }, builder: { state: "idle", messages: [{ role: "assistant", body: "Editor implementation passes validation." }], traces: [{ title: "Run tests", text: "npm test passed" }] } };
+swarmFixture.run.messages.push({ id: "lead-message", senderId: "user", recipientIds: ["lead"], body: "Continue coordinating the release.", createdAt: "2026-09-14T12:00:00Z", deliveries: [{ agentId: "lead", state: "queued", executionAttemptId: "lead-retry", reason: "Continuing after 20s backoff" }] });
+swarmFixture.run.digest = { updatedAt: "2026-09-16T16:00:00Z", authorId: "lead", agents: [
+  { agentId: "lead", summary: "Reviewing the release changes" },
+  { agentId: "builder", summary: "Waiting for the final review" },
+] };
 swarmFixture.run.usage = { input_tokens: null, output_tokens: 42 };
 swarmFixture.run.workspace = { mode: "git", path: "/workspace/swarm/integration" };
 swarmFixture.run.attempts = [{ id: "attempt-1", milestoneId: "m3", ownerId: "builder", state: "uncertain", workspace: { path: "/workspace/swarm/attempt-1" }, result: { passed: false, checks: [{ command: ["python", "-m", "pytest"], exitCode: 1, logPath: "/workspace/swarm/check.log" }] } }];
+// Delivery resolution snapshots are objects, unlike objective estimate snapshots.
+swarmFixture.run.events = [
+  { id: "delivery-event", kind: "delivery_resolved", actorId: "user", createdAt: "2026-09-14T12:01:00Z", payload: { before: { agentId: "builder", state: "uncertain" }, after: { agentId: "builder", state: "dismissed" } } },
+  { id: "estimate-event", kind: "objectives_updated", actorId: "lead", createdAt: "2026-09-14T12:02:00Z", payload: { before: [], after: structuredClone(swarmFixture.run.objectives) } },
+  { id: "invalid-estimate-event", kind: "objectives_updated", actorId: "lead", createdAt: "2026-09-14T12:03:00Z", payload: { before: {}, after: {} } },
+];
 swarmFixture.run.configuration = { agents: structuredClone(swarmFixture.agents) };
 swarmFixture.history = [{ ...structuredClone(swarmFixture.run), id: "prior-run", task: "Previous release", state: "completed" }];
 let swarmMutations = [];
@@ -1074,7 +1188,12 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find((button) => button.textContent.includes("Release team")).click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Message to swarm']"))));
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent.includes("Builder")), true);
+  assert.match(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent), /Retry 2 scheduled for.*Waiting for swarm resume/);
   assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Swarm sections']"))), false, "Dashboard replaces section tabs");
+  const historyRows = await evaluate(() => [...document.querySelectorAll(".swarm-workspace ol li")].map(item => item.textContent));
+  assert.ok(historyRows.some(text => text.includes("delivery resolved") && !text.includes("Progress")), "Delivery audit records must render without interpreting their objects as objectives");
+  assert.ok(historyRows.some(text => text.includes("Progress 0% → 80%") && text.includes("0 → 5 effort points")), "Objective updates retain weighted estimate history");
+
   assert.match(await evaluate(() => document.querySelector("[aria-label='Execution and verification']").textContent), /Input tokens: Unknown.*Output tokens: 42/);
   await evaluate(() => document.querySelector("[aria-label='Execution and verification'] summary").click());
   await waitFor(() => evaluate(() => document.querySelector("[aria-label='Execution and verification']").textContent.includes("Exit 1: python -m pytest")));
@@ -1112,6 +1231,10 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Retry message").click());
   await waitFor(() => swarmMutations.some((item) => item.path.endsWith("/deliveries")));
   assert.deepEqual(swarmMutations.at(-1).body, { messageId: "msg1", agentId: "builder", action: "retry", projectRoot: "/workspace/gofer-flow" });
+
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find(button => button.textContent === "Retry now").click());
+  await waitFor(() => swarmMutations.some(item => item.body.messageId === "lead-message"));
+  assert.deepEqual(swarmMutations.at(-1).body, { messageId: "lead-message", agentId: "lead", action: "retry", projectRoot: "/workspace/gofer-flow" });
 
   await evaluate(() => { document.querySelector(".swarm-objectives").open = true; });
   assert.equal(await evaluate(() => document.querySelector("progress[aria-label='Overall progress']").value), 80);
@@ -1152,6 +1275,12 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Send message").click());
   await waitFor(() => swarmMutations.some((item) => item.path.endsWith("/messages")));
   assert.equal(swarmMutations.at(-1).body.body, "Please prioritize review.");
+  assert.equal(await evaluate(() => document.querySelector("[aria-label='Team status']").textContent.includes("Reviewing the release changes")), true);
+  assert.equal(await evaluate(() => {
+    const digest = document.querySelector("[aria-label='Team status']");
+    const boardHeading = document.querySelector(".swarm-board-panel > .swarm-section-heading");
+    return Boolean(digest.compareDocumentPosition(boardHeading) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+  }), true, "Coordinator digest appears above the message board");
   await evaluate(() => document.querySelector("button[aria-label='Swarm settings']").click());
   assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").disabled), true, "An active run locks team edits");
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Team details'] input").disabled), true);
@@ -1161,6 +1290,14 @@ async function exerciseSwarms() {
   await waitFor(() => swarmMutations.some((item) => item.body.action === "stop"));
   await evaluate(() => document.querySelector("button[aria-label='Swarm settings']").click());
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Team details'] select").value), "lead");
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="Local Git operations"]').checked), true);
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="Remote branches and pull requests"]').checked), false);
+  await evaluate(() => document.querySelector('[aria-label="Remote branches and pull requests"]').click());
+  await evaluate(() => document.querySelector('[aria-label="Local Git operations"]').click());
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="Remote branches and pull requests"]').checked), false);
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="Remote branches and pull requests"]').disabled), true);
+  await evaluate(() => document.querySelector('[aria-label="Local Git operations"]').click());
+  await evaluate(() => document.querySelector('[aria-label="Remote branches and pull requests"]').click());
   assert.equal(await evaluate(() => document.querySelector(".swarm-setup-run-options").open), false, "Run limits start collapsed");
   assert.equal(await evaluate(() => [...document.querySelectorAll(".swarm-setup-agent .swarm-setup-advanced")].every(el => !el.open)), true, "Agent advanced settings start collapsed");
   assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent[open]").length), 1, "Only one agent is expanded");
@@ -1194,7 +1331,7 @@ async function exerciseSwarms() {
   windowRef.setSize(1440, 900);
   await evaluate(() => document.documentElement.classList.add("dark"));
   await evaluate(() => document.querySelector(".swarm-setup-run-options summary").click());
-  for (const [label, value] of [["Concurrent agents", "2"], ["Maximum turns per run", "120"], ["Check interval (seconds)", "90"], ["Maximum run duration (seconds)", "7200"], ["Repair attempts per milestone", "3"], ["Turns without progress before replanning", "8"]]) {
+  for (const [label, value] of [["Concurrent agents", "2"], ["Check interval (seconds)", "90"], ["Repair attempts per milestone", "3"], ["Turns without progress before replanning", "8"]]) {
     await evaluate((label) => {
       const input = document.querySelector(`[aria-label="${label}"]`);
       input.focus();
@@ -1235,9 +1372,11 @@ async function exerciseSwarms() {
     select.dispatchEvent(new Event("change", { bubbles: true }));
   });
   await evaluate(() => document.querySelector(".swarm-setup-footer button").click());
-  await waitFor(() => swarmMutations.some(item => item.body.maxTurns === 120));
+  await waitFor(() => swarmMutations.some(item => item.body.maxConcurrency === 2));
   assert.equal(swarmMutations.at(-1).body.maxConcurrency, 2);
-  assert.equal(swarmMutations.at(-1).body.maxRunSeconds, 7200);
+  assert.deepEqual(swarmMutations.at(-1).body.gitPermissions, { local: true, remote: true });
+  assert.equal(swarmMutations.at(-1).body.maxRunSeconds, undefined);
+  assert.equal(swarmMutations.at(-1).body.maxTurns, undefined);
   assert.equal(swarmMutations.at(-1).body.maxRepairAttempts, 3);
   assert.equal(swarmMutations.at(-1).body.stallTurnLimit, 8);
   assert.equal(swarmMutations.at(-1).body.wakeIntervalSeconds, 90);
@@ -1680,6 +1819,9 @@ async function waitFor(predicate, delay = 25, description = "browser condition")
       text: editor.textContent,
     })),
     bridgeCalls: window.__goferBridgeCalls,
+    steering: window.__steeringRequests ? { requests: window.__steeringRequests, receipts: window.__steeringReceipts,
+      keys: window.__steeringKeys, draft: document.querySelector("[data-chat-composer] textarea")?.value,
+      disabled: document.querySelector("button[aria-label='Steer Rem']")?.disabled } : undefined,
   }));
   throw new Error(`Timed out waiting for ${description}.\nPredicate: ${predicate}\nPage: ${JSON.stringify(pageState, null, 2)}`);
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata as metadata
 import json
+import os
 import re
 import shutil
 import sys
@@ -39,6 +40,22 @@ def verify_review(policy: dict, ecosystem: str, name: str, version: str, license
     expected = policy.get(ecosystem, {}).get(f"{name}@{version}" if ecosystem == "npm" else name)
     if expected != {"version": version, "license": license}:
         raise ValueError(f"License review required: {ecosystem} {name} {version}: {license}")
+
+
+def source_bytes(package: dict, cache: Path | None = None) -> bytes:
+    """Read an optional cached sdist, always checking the locked source hash."""
+    source = package["sdist"]
+    if not source["url"].startswith("https://"):
+        raise ValueError("Dependency source URL must use HTTPS")
+    cached = cache / f"{package['name']}-{package['version']}.tar.gz" if cache else None
+    if cached is not None and cached.is_file():
+        content = cached.read_bytes()
+    else:
+        with urllib.request.urlopen(source["url"], timeout=60) as response:
+            content = response.read()
+    if "sha256:" + hashlib.sha256(content).hexdigest() != source["hash"]:
+        raise ValueError(f"Source hash mismatch: {package['name']}")
+    return content
 
 
 def collect(output: Path) -> None:
@@ -120,16 +137,12 @@ def collect(output: Path) -> None:
             {"ecosystem": "python", "name": name, "version": version, "license": declaration}
         )
     # Ship exact MPL source distributions with the notices, using lockfile hashes.
+    cache_setting = os.environ.get("GOFER_LICENSE_SOURCE_CACHE")
+    source_cache = Path(cache_setting).expanduser() if cache_setting else None
     for package in lock_packages:
         if package["name"] not in {"certifi", "tqdm"} or package["name"] not in required:
             continue
-        source = package["sdist"]
-        if not source["url"].startswith("https://"):
-            raise ValueError("Dependency source URL must use HTTPS")
-        with urllib.request.urlopen(source["url"], timeout=60) as response:
-            content = response.read()
-        if "sha256:" + hashlib.sha256(content).hexdigest() != source["hash"]:
-            raise ValueError(f"Source hash mismatch: {package['name']}")
+        content = source_bytes(package, source_cache)
         directory = output / "sources"
         directory.mkdir(exist_ok=True)
         (directory / f"{package['name']}-{package['version']}.tar.gz").write_bytes(content)

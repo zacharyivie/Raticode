@@ -37,7 +37,6 @@ import { diagnosticsToMarkers, diagnosticToMarker } from "../lib/rattishRanges.j
 import {
   DEFAULT_APP_SETTINGS,
   matchesCommand,
-  matchesKeybinding,
   settingBinding,
 } from "../lib/settings.js";
 import raticodeIcon from "../assets/roundel.png";
@@ -452,10 +451,6 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         action === "previous-tab" ? -1 : 1,
       );
       if (nextPath) onActivePathChange?.(nextPath);
-      return;
-    }
-    if (action === "new-browser-tab") {
-      onOpenBrowser?.({ newTab: true });
       return;
     }
     closeWorkspacePath(currentPath);
@@ -1823,10 +1818,6 @@ export function codeWorkspaceShortcutAction(event, options = {}) {
     && String(event.key ?? "").toLowerCase() === "tab"
     && options.currentPath
   ) return event.shiftKey ? "previous-tab" : "next-tab";
-  if (
-    options.browserActive
-    && matchesKeybinding(event, "Mod+KeyT")
-  ) return "new-browser-tab";
   if (matchesCommand(event, options.settings, "file.new")) return "new";
   if (matchesCommand(event, options.settings, "file.save") && options.currentPath) return "save";
   if (matchesCommand(event, options.settings, "file.close") && options.currentPath) return "close";

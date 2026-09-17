@@ -85,7 +85,7 @@ export const KEYBINDING_COMMANDS = [
   { id: "file.close", label: "Close active file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyW" },
   { id: "editor.toggleWordWrap", label: "Toggle word wrap", group: "Code editor", scope: "code", defaultBinding: "Alt+KeyZ" },
   { id: "panel.toggle", label: "Toggle bottom panel", group: "Panel", scope: "global", defaultBinding: "Mod+Backquote" },
-  { id: "terminal.new", label: "New terminal", group: "Terminal", scope: "terminal", defaultBinding: "Ctrl+KeyT" },
+  { id: "terminal.new", label: "New terminal", group: "Terminal", scope: "global", defaultBinding: "Ctrl+KeyT" },
   { id: "terminal.close", label: "Close terminal", group: "Terminal", scope: "terminal", defaultBinding: "Ctrl+KeyW" },
   { id: "graph.selectAll", label: "Select all nodes", group: "Graph editor", scope: "graph", defaultBinding: "Mod+KeyA" },
   { id: "graph.deleteSelection", label: "Delete selection", group: "Graph editor", scope: "graph", defaultBinding: "Delete" },

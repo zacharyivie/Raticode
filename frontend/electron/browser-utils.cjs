@@ -1,8 +1,20 @@
+const { pathToFileURL } = require("node:url");
 const legacyBrand = require("./brand-compat.json");
 const RATICODE_HOME_URL = "raticode://home";
 
 function normalizeBrowserUrl(value) {
-  const input = String(value ?? "").trim();
+  let input = String(value ?? "").trim();
+  if (/^file\/\//i.test(input)) input = input.replace(/^file/i, "file:");
+  if (/^[a-z]:[\\/]/i.test(input)) {
+    const pathname = input.replace(/\\/g, "/");
+    return `file:///${pathname.split("/").map((part, index) => index ? encodeURIComponent(part) : part).join("/")}`;
+  }
+  if (/^\\\\/.test(input)) {
+    const [host, ...parts] = input.slice(2).split(/\\/);
+    return new URL(`file://${host}/${parts.map(encodeURIComponent).join("/")}`).toString();
+  }
+  if (input.startsWith("/")) return pathToFileURL(input).toString();
+  if (/^file:/i.test(input)) return new URL(input).toString();
   if (!input || input === "about:blank") return "about:blank";
   if (input === RATICODE_HOME_URL || legacyBrand.previousBrands.some((item) => input === `${item.brand}://home`)) return RATICODE_HOME_URL;
   if (/^https?:\/\//i.test(input)) return new URL(input).toString();
@@ -13,7 +25,7 @@ function normalizeBrowserUrl(value) {
     return new URL(`https://${input}`).toString();
   }
   if (/^[a-z][a-z\d+.-]*:/i.test(input)) {
-    throw new Error("Enter an http:// or https:// address.");
+    throw new Error("Enter an http:// or https:// address, or a local file path or file:// URL.");
   }
   return `https://www.google.com/search?q=${encodeURIComponent(input)}`;
 }
@@ -34,7 +46,6 @@ function browserShortcutAction(input = {}, platform = process.platform, openBrow
   if (input.control && !input.alt && !input.meta && key === "tab") {
     return input.shift ? "previous-tab" : "next-tab";
   }
-  if (primary && !input.alt && !input.shift && key === "t") return "new-tab";
   if (input.alt && key === "left") return "back";
   if (input.alt && key === "right") return "forward";
   if (primary && (key === "+" || key === "=")) return "zoom-in";
@@ -94,6 +105,10 @@ function browserSessionShortcutAction(
   platform = process.platform,
 ) {
   const browserAction = browserShortcutAction(input, platform, session.openBrowserBinding);
+  if (input.type === "keyDown" && !input.isAutoRepeat
+      && matchesBrowserBinding(input, session.applicationKeybindings?.["terminal.new"] || "Ctrl+KeyT", platform)) {
+    return "command:terminal.new";
+  }
   if (["close", "new-tab"].includes(browserAction)) return browserAction;
   return browserApplicationShortcutAction(
     session,

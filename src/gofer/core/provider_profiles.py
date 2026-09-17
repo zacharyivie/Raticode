@@ -8,9 +8,20 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
+from gofer.core.cursor_models import cursor_model_id
 from gofer.utils.paths import get_data_dir
 
-ProfileSubscription = Literal["claude_code", "codex", "openai_api", "anthropic_api"]
+ProfileSubscription = Literal[
+    "claude_code",
+    "codex",
+    "openai_api",
+    "anthropic_api",
+    "cursor",
+    "copilot",
+    "opencode",
+    "antigravity",
+    "grok",
+]
 DIRECT_API_SUBSCRIPTIONS = {"openai_api", "anthropic_api"}
 DEFAULT_DIRECT_API_BASE_URLS = {
     "openai_api": "https://api.openai.com/v1",
@@ -21,6 +32,7 @@ DEFAULT_DIRECT_API_KEY_ENVS = {
     "anthropic_api": "ANTHROPIC_API_KEY",
 }
 ApprovalMode = Literal[
+    "cli-managed",
     "default",
     "auto",
     "manual",
@@ -286,6 +298,43 @@ def resolve_provider_settings(
 
 
 def validate_provider_settings(settings: ResolvedProviderSettings) -> None:
+    if settings.subscription == "antigravity" and settings.effort not in (
+        None,
+        "cli-default",
+        "low",
+        "medium",
+        "high",
+    ):
+        raise ValueError(f"Unsupported Antigravity effort {settings.effort!r}")
+    if settings.subscription == "cursor":
+        cursor_model_id(settings.model, settings.effort)
+    if settings.subscription in {"cursor", "copilot", "opencode", "antigravity", "grok"}:
+        unsupported = [
+            name
+            for name in ("effort", "extra_args", "tools", "mcp_servers", "provider_options")
+            if getattr(settings, name)
+            and getattr(settings, name) != "cli-default"
+            and not (
+                settings.subscription in {"cursor", "copilot", "antigravity", "grok"}
+                and name == "effort"
+            )
+        ]
+        unsupported += [
+            name
+            for name in ("approval_mode", "sandbox_mode")
+            if getattr(settings, name)
+            not in (
+                (None, "default", "cli-managed")
+                if name == "approval_mode"
+                and settings.subscription in {"antigravity", "grok"}
+                else (None, "default")
+            )
+        ]
+        if unsupported:
+            raise ValueError(
+                f"{settings.subscription} profiles do not support {', '.join(unsupported)}"
+            )
+        return
     if settings.subscription == "codex":
         if settings.tools:
             raise ValueError(

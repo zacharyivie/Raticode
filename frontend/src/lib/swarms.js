@@ -21,6 +21,12 @@ export function milestoneProgress(objectives = []) {
   return { percent: totalWeight ? acceptedWeight / totalWeight * 100 : null, totalWeight, acceptedWeight, acceptedCount: accepted.length, totalCount: milestones.length };
 }
 
+export function objectiveProgressChange(event) {
+  // Delivery resolution also has before/after snapshots, but those are objects.
+  if (event.kind !== "objectives_updated" || !Array.isArray(event.payload?.before) || !Array.isArray(event.payload?.after)) return null;
+  return { before: milestoneProgress(event.payload.before), after: milestoneProgress(event.payload.after) };
+}
+
 export function positiveDraft(value, fallback, minimum = 1) {
   const number = Number(value);
   return value.trim() && Number.isFinite(number) && number >= minimum ? number : fallback;

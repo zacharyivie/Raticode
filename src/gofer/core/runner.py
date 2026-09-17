@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import platform
-import shutil
 import socket
 import sqlite3
 import threading
@@ -18,8 +17,12 @@ from typing import Any, Literal
 
 from gofer.core.executor import WorkflowExecutor
 from gofer.core.operations import AgentOperation, CommonLlmTaskOperation
+from gofer.core.provider_capabilities import CLI_PROVIDERS, resolve_provider_executable
 from gofer.core.workflow import AgenticWorkflow
+from gofer.subscriptions.acp_providers import AcpSubscription
+from gofer.subscriptions.antigravity import AntigravitySubscription
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription
+from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
 from gofer.utils.paths import get_data_dir
@@ -40,6 +43,9 @@ RUNNER_STALE_AFTER_SECONDS = 60
 _SUBSCRIPTIONS = {
     "claude_code": ClaudeCodeSubscription(),
     "codex": CodexSubscription(),
+    **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
+    "antigravity": AntigravitySubscription(),
+    "grok": AcpSubscription("grok"),
     "openai_api": OpenAiApiSubscription(),
     "anthropic_api": AnthropicApiSubscription(),
 }
@@ -109,9 +115,7 @@ class RunnerRecord:
 
 def default_runner_capabilities(workspace_roots: list[str] | None = None) -> dict[str, Any]:
     provider_clis = [
-        name
-        for name, executable in (("codex", "codex"), ("claude_code", "claude"))
-        if shutil.which(executable)
+        provider for provider in CLI_PROVIDERS if resolve_provider_executable(provider)
     ]
     return {
         "os": platform.system().lower(),

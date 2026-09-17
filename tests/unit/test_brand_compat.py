@@ -16,7 +16,6 @@ from gofer.rattish.bundles import (
 from gofer.rattish.workspaces import (
     WORKFLOW_IGNORE,
     WORKSPACE_DIRECTORY,
-    RattishWorkspaceError,
     create_registered_workflow,
     delete_registered_workflow,
     discover_registered_workflows,
@@ -34,7 +33,7 @@ from gofer.utils.brand_compat import (
     "workspace_directory,workflow_ignore",
     zip(LEGACY_WORKSPACE_DIRECTORIES, LEGACY_WORKFLOW_IGNORES),
 )
-def test_previous_workspace_remains_discoverable_and_exports_with_current_names(
+def test_previous_workspace_requires_rename_and_exports_with_current_names(
     tmp_path: Path, workspace_directory: str, workflow_ignore: str
 ):
     project = tmp_path / "project"
@@ -44,6 +43,11 @@ def test_previous_workspace_remains_discoverable_and_exports_with_current_names(
     (root / workflow_ignore).write_text(".env\n")
     (root / ".env").write_text("PRIVATE_FIXTURE=excluded\n")
     registry = tmp_path / "registry"
+    assert discover_registered_workflows(project, registry_dir=registry) == ()
+    current_root = project / WORKSPACE_DIRECTORY / "review"
+    current_root.parent.mkdir()
+    root.rename(current_root)
+    root = current_root
     (workflow,) = discover_registered_workflows(project, registry_dir=registry)
     assert list_registered_workflows(registry_dir=registry) == (workflow,)
     bundle = tmp_path / "review.raticode"
@@ -110,11 +114,10 @@ def test_previous_bundle_imports_with_current_ignore_file(
 
 
 @pytest.mark.parametrize("workspace_directory", LEGACY_WORKSPACE_DIRECTORIES)
-def test_previous_workspace_symlink_is_rejected(tmp_path: Path, workspace_directory: str):
+def test_previous_workspace_symlink_is_ignored(tmp_path: Path, workspace_directory: str):
     outside = tmp_path / "outside"
     outside.mkdir()
     project = tmp_path / "project"
     project.mkdir()
     (project / workspace_directory).symlink_to(outside, target_is_directory=True)
-    with pytest.raises(RattishWorkspaceError, match="symbolic link"):
-        discover_registered_workflows(project, registry_dir=tmp_path / "registry")
+    assert discover_registered_workflows(project, registry_dir=tmp_path / "registry") == ()

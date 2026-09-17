@@ -70,7 +70,7 @@ class CodexTurnControl:
 
 
 class _Transport:
-    def __init__(self, process: asyncio.subprocess.Process, limit: int) -> None:
+    def __init__(self, process: asyncio.subprocess.Process, limit: int | None) -> None:
         self.process = process
         self.limit = limit
         self.size = 0
@@ -101,7 +101,7 @@ class _Transport:
         try:
             while line := await self.process.stdout.readline():
                 self.size += len(line)
-                if self.size > self.limit:
+                if self.limit is not None and self.size > self.limit:
                     raise RuntimeError("Codex output exceeded the configured output limit")
                 message = json.loads(line)
                 if not isinstance(message, dict):
@@ -171,7 +171,7 @@ async def stream_codex_turn(
     control: CodexTurnControl,
     cwd: Path,
     cancel_event: threading.Event | None,
-    max_output_bytes: int,
+    max_output_bytes: int | None,
 ) -> AsyncIterator[dict[str, Any]]:
     process = await asyncio.create_subprocess_exec(
         *_app_server_command(command),
@@ -181,7 +181,7 @@ async def stream_codex_turn(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
-        limit=max_output_bytes + 1,
+        limit=(max_output_bytes or 16 * 1024 * 1024) + 1,
     )
     transport = _Transport(process, max_output_bytes)
     reader = asyncio.create_task(transport.read())
@@ -190,7 +190,7 @@ async def stream_codex_turn(
         assert process.stderr is not None
         while chunk := await process.stderr.read(4096):
             transport.size += len(chunk)
-            if transport.size > max_output_bytes:
+            if max_output_bytes is not None and transport.size > max_output_bytes:
                 await transport.events.put(
                     {
                         "method": "transport/error",

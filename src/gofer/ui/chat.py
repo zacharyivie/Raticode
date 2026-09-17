@@ -49,11 +49,23 @@ from gofer.core.provider_capabilities import (
     validate_provider_selection_async,
 )
 from gofer.core.provider_permissions import provider_permission_args
+from gofer.core.provider_preferences import provider_preference
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits, byte_len
 from gofer.rattish.artifacts import (
     RattishArtifactError,
     rattish_assistant_skill_path,
     rattish_docs_root,
+)
+from gofer.subscriptions.acp_providers import ACP_PROVIDERS, acp_command, stream_acp
+from gofer.subscriptions.acp_transport import AcpTransportError
+from gofer.subscriptions.antigravity import antigravity_command, stream_antigravity
+from gofer.subscriptions.cli_providers import (
+    ADDITIONAL_PROVIDERS,
+    CliOutput,
+    check_cursor_plugins,
+    cli_command,
+    cli_invocation,
+    stream_cli,
 )
 from gofer.ui.chat_media import ChatMediaError, resolve_chat_attachment
 from gofer.ui.codex_steering import CodexTurnControl, stream_codex_turn
@@ -63,7 +75,10 @@ from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
 
-ProviderName = Literal["codex", "claude_code"]
+ProviderName = Literal[
+    "codex", "claude_code", "cursor", "copilot", "opencode", "antigravity", "grok"
+]
+
 CHAT_COMPACT_CHAR_LIMIT = 32_000
 CHAT_COMPACT_RECENT_MESSAGES = 8
 CHAT_CHANGE_MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -852,8 +867,42 @@ async def run_workflow_chat(
     permission_mode: str | None = None,
     trusted_swarm_url: str | None = None,
 ) -> dict[str, Any]:
-    if provider not in {"codex", "claude_code"}:
+    if provider in ADDITIONAL_PROVIDERS | ACP_PROVIDERS | {"antigravity"}:
+        source = stream_workflow_chat(
+            provider,
+            model,
+            messages,
+            workflow,
+            effort=effort,
+            working_dir=working_dir,
+            data_dir=data_dir,
+            resource_limits=resource_limits,
+            permission_mode=permission_mode,
+            trusted_swarm_url=trusted_swarm_url,
+        )
+        try:
+            async for event in source:
+                if event["type"] == "error":
+                    raise ChatProviderError(event["error"])
+                if event["type"] == "final":
+                    return event
+            raise ChatProviderError("Provider ended without a result")
+        finally:
+            close = getattr(source, "aclose", None)
+            if close is not None:
+                await close()
+    if provider not in {
+        "codex",
+        "claude_code",
+        "antigravity",
+        *ADDITIONAL_PROVIDERS,
+        *ACP_PROVIDERS,
+    }:
         raise ChatProviderError(f"Unknown provider '{provider}'")
+    if provider_preference(provider).get("enabled") is False:
+        raise ChatProviderError(
+            f"Provider '{provider}' is disabled. Enable it in Settings > Providers."
+        )
     # ``cli-default`` deliberately leaves model selection to the local CLI.
     # It remains supported for existing API clients and cannot be catalog
     # validated because the CLI may choose dynamically.
@@ -871,7 +920,15 @@ async def run_workflow_chat(
         except ProviderCapabilityError as exc:
             raise ChatProviderError(str(exc)) from exc
 
-    binary = "codex" if provider == "codex" else "claude"
+    binary = {
+        "codex": "codex",
+        "claude_code": "claude",
+        "cursor": "cursor-agent",
+        "copilot": "copilot",
+        "opencode": "opencode",
+        "antigravity": "agy",
+        "grok": "grok",
+    }[provider]
     binary_path = resolve_provider_executable(cast(ProviderName, provider))
     if binary_path is None:
         raise ChatProviderError(f"'{binary}' CLI is not available on PATH")
@@ -976,10 +1033,23 @@ async def stream_workflow_chat(
     steering: CodexTurnControl | None = None,
     agent_instructions: str | None = None,
     trusted_swarm_url: str | None = None,
+    unlimited_output: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     turn_started_at = monotonic()
-    if provider not in {"codex", "claude_code"}:
+    if cancel_event is not None and cancel_event.is_set():
+        return
+    if provider not in {
+        "codex",
+        "claude_code",
+        "antigravity",
+        *ADDITIONAL_PROVIDERS,
+        *ACP_PROVIDERS,
+    }:
         raise ChatProviderError(f"Unknown provider '{provider}'")
+    if provider_preference(provider).get("enabled") is False:
+        raise ChatProviderError(
+            f"Provider '{provider}' is disabled. Enable it in Settings > Providers."
+        )
     try:
         provider_permission_args(provider, permission_mode)
     except ValueError as exc:
@@ -994,7 +1064,17 @@ async def stream_workflow_chat(
         except ProviderCapabilityError as exc:
             raise ChatProviderError(str(exc)) from exc
 
-    binary = "codex" if provider == "codex" else "claude"
+    if cancel_event is not None and cancel_event.is_set():
+        return
+    binary = {
+        "codex": "codex",
+        "claude_code": "claude",
+        "cursor": "cursor-agent",
+        "copilot": "copilot",
+        "opencode": "opencode",
+        "antigravity": "agy",
+        "grok": "grok",
+    }[provider]
     binary_path = resolve_provider_executable(cast(ProviderName, provider))
     if binary_path is None:
         raise ChatProviderError(f"'{binary}' CLI is not available on PATH")
@@ -1014,7 +1094,10 @@ async def stream_workflow_chat(
         data_dir=resolved_data_dir,
         working_dir=resolved_working_dir,
         limits=limits,
+        cancel_event=cancel_event,
     )
+    if cancel_event is not None and cancel_event.is_set():
+        return
     if compacted:
         yield {
             "type": "compaction",
@@ -1046,6 +1129,8 @@ async def stream_workflow_chat(
         prompt=prompt,
         workflow=workflow,
     )
+    if cancel_event is not None and cancel_event.is_set():
+        return
     extra_paths = _trusted_workflow_paths(workflow, resolved_working_dir)
     command = _build_chat_command(
         provider=provider,
@@ -1103,11 +1188,138 @@ async def stream_workflow_chat(
             ),
         }
 
+    def remember_payload(payload: dict[str, Any]) -> None:
+        if not unlimited_output:
+            provider_payloads.append(payload)
+            return
+        # Stream traces immediately; retain only terminal text and usage metadata.
+        # Long swarm turns must not accumulate every command and protocol event.
+        from gofer.subscriptions.base import _usage_metadata_from_payloads
+
+        previous = provider_payloads[0] if provider_payloads else {}
+        usage = dict(previous.get("usage") or {})
+        usage.update(_usage_metadata_from_payloads([payload]))
+        provider_payloads[:] = [
+            {
+                "usage": usage,
+                "session_id": payload.get("session_id")
+                or payload.get("thread_id")
+                or previous.get("session_id"),
+                "result": _provider_final_message(provider, [payload]) or previous.get("result"),
+                "error": _provider_error_message([payload]) or previous.get("error"),
+            }
+        ]
+
+    def remember_output(chunks: list[str], text: str) -> None:
+        if unlimited_output:
+            chunks[:] = [("".join(chunks) + text)[-65536:]]
+        else:
+            chunks.append(text)
+
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
     stream_buffers = {"stdout": ""}
     provider_payloads: list[dict[str, Any]] = []
     claude_trace_state = _ClaudeTraceState() if provider == "claude_code" else None
+    if provider == "antigravity":
+        agy_source = stream_antigravity(
+            prompt,
+            cwd=resolved_working_dir,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            executable=binary_path,
+            resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
+            cancel_event=cancel_event,
+            max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
+            trusted_swarm_url=trusted_swarm_url,
+            second_brain_cli_path=gofer_cli_path
+            if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+            else None,
+        )
+        try:
+            async for event in agy_source:
+                metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
+                yield {**metadata, **event, "provider": provider, "model": model, "effort": effort}
+        except (ValueError, OSError) as exc:
+            raise ChatProviderError(str(exc)) from exc
+        finally:
+            await agy_source.aclose()
+            project_tracker.close()
+        return
+    if provider in ACP_PROVIDERS:
+        acp_source = stream_acp(
+            provider,
+            prompt,
+            cwd=resolved_working_dir,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            executable=binary_path,
+            resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
+            cancel_event=cancel_event,
+            max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
+            trusted_swarm_url=trusted_swarm_url,
+            second_brain_cli_path=gofer_cli_path
+            if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+            else None,
+        )
+        try:
+            async for event in acp_source:
+                metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
+                yield {**metadata, **event, "provider": provider, "model": model, "effort": effort}
+        except (ValueError, OSError, AcpTransportError) as exc:
+            raise ChatProviderError(str(exc)) from exc
+        finally:
+            await acp_source.aclose()
+            project_tracker.close()
+        return
+    if provider in ADDITIONAL_PROVIDERS:
+        resources = AgentResources.model_validate((workflow or {}).get("remResources") or {})
+        try:
+            if provider == "cursor":
+                await check_cursor_plugins(binary_path, cancel_event)
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            with cli_invocation(
+                provider,
+                command,
+                resources,
+                trusted_swarm_url=trusted_swarm_url,
+                extra_paths=_unique_existing_directories([resolved_data_dir, *extra_paths]),
+                second_brain_cli_path=gofer_cli_path
+                if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+                else None,
+            ) as (new_command, child_env):
+                source = stream_cli(
+                    new_command,
+                    provider,
+                    cwd=resolved_working_dir,
+                    env=child_env,
+                    cancel_event=cancel_event,
+                    max_output_bytes=None
+                    if unlimited_output
+                    else limits.max_subprocess_output_bytes,
+                )
+                try:
+                    async for event in source:
+                        metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
+                        yield {
+                            **metadata,
+                            **event,
+                            "provider": provider,
+                            "model": model,
+                            "effort": effort,
+                        }
+                finally:
+                    close = getattr(source, "aclose", None)
+                    if close is not None:
+                        await close()
+        except (ValueError, OSError) as exc:
+            raise ChatProviderError(str(exc)) from exc
+        finally:
+            project_tracker.close()
+        return
     try:
         provider_stream: AsyncIterator[Any] = stream_subprocess(
             command,
@@ -1115,7 +1327,7 @@ async def stream_workflow_chat(
             cwd=resolved_working_dir,
             env=env_with_executable_on_path(binary_path),
             timeout=None,
-            max_output_bytes=limits.max_subprocess_output_bytes,
+            max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
         )
         if steering is not None and provider == "codex":
             provider_stream = stream_codex_turn(
@@ -1123,7 +1335,7 @@ async def stream_workflow_chat(
                 control=steering,
                 cwd=resolved_working_dir,
                 cancel_event=cancel_event,
-                max_output_bytes=limits.max_subprocess_output_bytes,
+                max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
             )
         async for event in provider_stream:
             if event["type"] == "chunk":
@@ -1132,9 +1344,9 @@ async def stream_workflow_chat(
                     continue
                 chunk_stream = event["stream"]
                 if chunk_stream == "stdout":
-                    stdout_chunks.append(text)
+                    remember_output(stdout_chunks, text)
                 elif chunk_stream == "stderr":
-                    stderr_chunks.append(text)
+                    remember_output(stderr_chunks, text)
                     continue
                 else:
                     continue
@@ -1144,7 +1356,7 @@ async def stream_workflow_chat(
                 for line in complete_lines:
                     payload = _json_object(line)
                     if payload is not None:
-                        provider_payloads.append(payload)
+                        remember_payload(payload)
                         for trace in _provider_trace_entries(provider, payload, claude_trace_state):
                             yield {
                                 "type": "thought",
@@ -1176,7 +1388,7 @@ async def stream_workflow_chat(
                     continue
                 payload = _json_object(pending)
                 if payload is not None:
-                    provider_payloads.append(payload)
+                    remember_payload(payload)
                     for trace in _provider_trace_entries(provider, payload, claude_trace_state):
                         yield {
                             "type": "thought",
@@ -1227,6 +1439,9 @@ async def stream_workflow_chat(
     except OSError as exc:
         raise ChatProviderError(f"Could not start '{binary}' CLI: {exc}") from exc
     finally:
+        close_stream = getattr(provider_stream, "aclose", None)
+        if close_stream is not None:
+            await close_stream()
         project_tracker.close()
 
 
@@ -1934,6 +2149,46 @@ def _build_chat_command(
     permission_mode: str | None = None,
     trusted_swarm_url: str | None = None,
 ) -> list[str]:
+    if provider == "antigravity":
+        if image_paths:
+            raise ChatProviderError(
+                "Antigravity image attachments are not supported by this adapter"
+            )
+        return antigravity_command(
+            binary_path,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+        )
+    if provider in ACP_PROVIDERS:
+        provider_permission_args(provider, permission_mode)
+        # Grok receives effort through ACP session metadata, not argv.
+        if provider != "grok" and effort and effort != "cli-default":
+            raise ChatProviderError(f"{provider} does not support a separate effort option")
+        if image_paths:
+            raise ChatProviderError(
+                f"{provider} image attachments are not supported by this adapter"
+            )
+        return acp_command(provider, binary_path)
+    if provider in ADDITIONAL_PROVIDERS:
+        provider_permission_args(provider, permission_mode)
+        if provider not in {"cursor", "copilot"} and effort and effort != "cli-default":
+            raise ChatProviderError(
+                f"{provider} does not support a separate effort option; "
+                "use a provider-native model ID"
+            )
+        if image_paths:
+            raise ChatProviderError(
+                f"{provider} image attachments are not supported by this adapter"
+            )
+        return cli_command(
+            provider,
+            prompt,
+            model=model,
+            effort=effort,
+            executable=binary_path,
+            extra_paths=extra_paths,
+        )
     if provider == "codex":
         data_dir = data_dir or get_data_dir()
         working_dir = working_dir or Path.cwd()
@@ -2196,6 +2451,7 @@ async def _compact_chat_messages_if_needed(
     data_dir: Path,
     working_dir: Path,
     limits: ResourceLimits,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, str]], bool]:
     if _messages_size(messages) <= CHAT_COMPACT_CHAR_LIMIT:
         return messages, False
@@ -2211,6 +2467,7 @@ async def _compact_chat_messages_if_needed(
         data_dir=data_dir,
         working_dir=working_dir,
         limits=limits,
+        cancel_event=cancel_event,
     )
     compacted_messages = [
         {
@@ -2240,7 +2497,10 @@ async def _summarize_chat_messages(
     data_dir: Path,
     working_dir: Path,
     limits: ResourceLimits,
+    cancel_event: threading.Event | None = None,
 ) -> str:
+    if provider in ACP_PROVIDERS | {"antigravity"}:
+        return _fallback_chat_summary(messages)
     transcript = _messages_transcript(messages)
     prompt = (
         "Compact this Raticode Rem conversation for future turns.\n"
@@ -2265,12 +2525,18 @@ async def _summarize_chat_messages(
             cwd=working_dir,
             env=env_with_executable_on_path(binary_path),
             timeout=180,
+            cancel_event=cancel_event,
             max_output_bytes=limits.max_subprocess_output_bytes,
         )
     except OSError:
         return _fallback_chat_summary(messages)
     if returncode != 0:
         return _fallback_chat_summary(messages)
+    if provider in ADDITIONAL_PROVIDERS:
+        output = CliOutput(provider)
+        output.feed(stdout)
+        output.finish(returncode, stderr, cancelled=bool(cancel_event and cancel_event.is_set()))
+        return output.text if output.completed and output.text else _fallback_chat_summary(messages)
     summary = (stdout or stderr).strip()
     return summary or _fallback_chat_summary(messages)
 
@@ -2437,106 +2703,30 @@ def _rattish_docs_prompt_context() -> str:
 
 
 def _compact_workflow_context(workflow: dict[str, Any] | None) -> str:
-    if not workflow:
-        return "No workflows are currently available."
-
-    if isinstance(workflow.get("workflows"), list):
-        return _compact_all_workflows_context(workflow)
-
-    nodes = workflow.get("nodes") or []
-    edges = workflow.get("edges") or []
-    agents = workflow.get("agents") or {}
-    node_lines = [
-        f"- {node.get('id')} ({node.get('type')}): {node.get('meta', '')}" for node in nodes
-    ]
-    edge_lines = [
-        f"- {edge.get('from')} -> {edge.get('to')} [{edge.get('condition', 'always')}]"
-        for edge in edges
-    ]
-    agent_lines = [
-        f"- {agent_id}: {config.get('subscription', 'unknown')}"
-        for agent_id, config in agents.items()
-        if isinstance(config, dict)
-    ]
-    return "\n".join(
-        [
-            f"Workflow: {workflow.get('id')} / {workflow.get('name')}",
-            f"Project root: {workflow.get('projectRoot')}",
-            f"Source path: {workflow.get('sourcePath')}",
-            f"Description: {workflow.get('description')}",
-            "Nodes:",
-            *(node_lines or ["- none"]),
-            "Edges:",
-            *(edge_lines or ["- none"]),
-            "Agents:",
-            *(agent_lines or ["- none"]),
-        ]
-    )
+    context = dict(workflow or {})
+    if not isinstance(context.get("workflows"), list):
+        context["workflows"] = [workflow] if workflow and workflow.get("sourcePath") else []
+    return _compact_all_workflows_context(context)
 
 
 def _compact_all_workflows_context(context: dict[str, Any]) -> str:
-    workflows = [
-        workflow for workflow in context.get("workflows", []) if isinstance(workflow, dict)
-    ]
-    selected_workflow_id = context.get("selectedWorkflowId")
-    project_root = context.get("projectRoot")
-    if not workflows:
-        return "\n".join(
-            [
-                f"Project root: {project_root or 'none'}",
-                "Selected workflow: none",
-                "Existing workflows: none",
-                "The user can still ask you to create new Raticode workflows.",
-            ]
-        )
-
     lines = [
-        f"Project root: {project_root or 'none'}",
-        f"Selected workflow: {selected_workflow_id or 'none'}",
-        f"Existing workflows: {len(workflows)}",
+        f"Project root: {context.get('projectRoot') or 'none'}",
+        "Editor file references only. File contents are not included.",
+        "Open files do not imply the subject of the user's request. "
+        "Read a referenced file with filesystem tools when the request calls for it. "
+        "This editor snapshot supersedes earlier open-file or selected-workflow context.",
+        "Open files:",
     ]
-
-    for workflow in workflows:
-        workflow_id = workflow.get("id")
-        selected_marker = " [selected]" if workflow_id == selected_workflow_id else ""
-        lines.extend(
-            [
-                "",
-                f"Workflow: {workflow_id} / {workflow.get('name')}{selected_marker}",
-                f"Project root: {workflow.get('projectRoot')}",
-                f"Source path: {workflow.get('sourcePath')}",
-                f"Status: {workflow.get('status')}",
-                f"Description: {workflow.get('description')}",
-            ]
-        )
-        if workflow.get("invalid"):
-            lines.append(f"Validation error: {workflow.get('validationError')}")
-            continue
-
-        if workflow_id != selected_workflow_id:
-            continue
-        nodes = workflow.get("nodes") or []
-        edges = workflow.get("edges") or []
-        agents = workflow.get("agents") or {}
-        lines.append("Nodes:")
-        lines.extend(
-            f"- {node.get('id')} ({node.get('type')}): {node.get('meta', '')}" for node in nodes
-        )
-        if not nodes:
-            lines.append("- none")
-        lines.append("Edges:")
-        lines.extend(
-            f"- {edge.get('from')} -> {edge.get('to')} [{edge.get('condition', 'always')}]"
-            for edge in edges
-        )
-        if not edges:
-            lines.append("- none")
-        lines.append("Agents:")
-        agent_lines = [
-            f"- {agent_id}: {config.get('subscription', 'unknown')}"
-            for agent_id, config in agents.items()
-            if isinstance(config, dict)
-        ]
-        lines.extend(agent_lines or ["- none"])
-
+    open_files = context.get("openFiles") or []
+    paths = [path for path in open_files if isinstance(path, str) and path]
+    lines.extend((f"- {path}" for path in paths) if paths else ["- none"])
+    lines.append("Available workflow file references:")
+    workflows = context.get("workflows") or []
+    references = [
+        f"- {item.get('name') or item.get('id')}: {item['sourcePath']}"
+        for item in workflows
+        if isinstance(item, dict) and item.get("sourcePath")
+    ]
+    lines.extend(references or ["- none"])
     return "\n".join(lines)

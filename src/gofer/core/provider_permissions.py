@@ -24,4 +24,12 @@ def provider_permission_args(provider: str, mode: str | None) -> list[str]:
         if mode not in CLAUDE_PERMISSION_MODES:
             raise ValueError(f"Unknown Claude Code permission mode '{mode}'")
         return ["--permission-mode", mode]
+    if provider in {"antigravity", "grok"}:
+        if mode in (None, "default", "cli-managed"):
+            return []
+        raise ValueError(f"{provider} does not support permission mode '{mode}'")
+    if provider in {"cursor", "copilot", "opencode"}:
+        if mode in (None, "default"):
+            return []
+        raise ValueError(f"{provider} does not support permission mode '{mode}'")
     raise ValueError(f"Unknown provider '{provider}'")

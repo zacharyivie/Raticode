@@ -25,10 +25,13 @@ export default function ChatComposer({
   onDraftChange,
   onSend,
   onStop,
+  onSteer,
+  steeringPending = false,
   sending = false,
   sendDisabled = false,
   provider = "codex",
   permissionMode = defaultPermissionMode(provider),
+  permissionOptions = PROVIDER_PERMISSIONS[provider] || [["default", "CLI default"]],
   onPermissionModeChange = () => {},
 }) {
   const fileInputRef = useRef(null);
@@ -183,16 +186,17 @@ export default function ChatComposer({
           ref={textareaRef}
           aria-describedby={error ? "chat-composer-error" : undefined}
           className="block min-h-14 max-h-32 w-full resize-none bg-transparent px-3 pb-1 pt-3 text-sm leading-5 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-muted"
-          disabled={sending}
           readOnly={transcribing || transcriptionPending}
-          placeholder={attachments.length ? "Add a note about the attached file" : "Message this workflow"}
+          placeholder={sending ? "Steer Rem while it works" : attachments.length ? "Add a note about the attached file" : "Message this workflow"}
           rows={2}
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !transcribing && !transcriptionPending) {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent?.isComposing && !event.isComposing && !transcribing && !transcriptionPending) {
               event.preventDefault();
-              if (draft.trim() || attachments.length) onSend();
+              if (sending) {
+                if ((draft.trim() || attachments.length) && !steeringPending) onSteer?.();
+              } else if (!sendDisabled && (draft.trim() || attachments.length)) onSend();
             }
           }}
         />
@@ -232,23 +236,23 @@ export default function ChatComposer({
             <button
               aria-label="Attach files"
               className="grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={sending || transcribing || transcriptionPending}
+              disabled={steeringPending || transcribing || transcriptionPending}
               title="Attach files"
               type="button"
               onClick={() => fileInputRef.current?.click()}
             >
               <Paperclip aria-hidden="true" size={16} />
             </button>
-            {PROVIDER_PERMISSIONS[provider] ? (
+            {permissionOptions.length ? (
               <select
                 aria-label="Rem permissions"
                 className="ml-1 h-8 min-w-0 max-w-40 rounded-md border border-line bg-transparent px-1.5 text-xs text-ink outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={sending}
                 value={permissionMode}
-                title={PROVIDER_PERMISSIONS[provider].find(([id]) => id === permissionMode)?.[2]}
+                title={permissionOptions.find(([id]) => id === permissionMode)?.[2]}
                 onChange={(event) => onPermissionModeChange(event.target.value)}
               >
-                {PROVIDER_PERMISSIONS[provider].map(([id, label]) => (
+                {permissionOptions.map(([id, label]) => (
                   <option key={id} value={id}>{label}</option>
                 ))}
               </select>
@@ -262,6 +266,13 @@ export default function ChatComposer({
               onChange={attachFiles}
             />
           </div>
+          {sending ? <button
+            aria-label="Steer Rem"
+            className="mr-2 rounded-lg bg-brand px-3 py-2 text-xs text-white disabled:opacity-50"
+            disabled={(!draft.trim() && !attachments.length) || steeringPending || transcribing || transcriptionPending}
+            type="button"
+            onClick={onSteer}
+          >{steeringPending ? "Submitting…" : "Steer"}</button> : null}
           <button
             aria-label={sending ? "Stop Rem" : "Send message"}
             className={`grid h-9 w-9 place-items-center rounded-[10px] transition disabled:cursor-not-allowed disabled:opacity-60 ${
@@ -287,7 +298,7 @@ export default function ChatComposer({
         </div>
       </div>
       {error ? <p id="chat-composer-error" className="mt-1.5 px-1 text-[10px] text-red-600">{error}</p> : null}
-      <p className="mt-1.5 px-1 text-[10px] text-muted">Enter to send · Shift+Enter for a new line</p>
+      <p className="mt-1.5 px-1 text-[10px] text-muted">{sending ? "Enter to steer · Stop cancels the response" : "Enter to send · Shift+Enter for a new line"}</p>
     </>
   );
 }

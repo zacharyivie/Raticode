@@ -10,7 +10,7 @@ import { createConversationArchiveScheduler } from "../lib/conversationArchive.j
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { createRecentProjectValidator, startWorkspacePolling } from "../lib/projectRefresh.js";
 import { equalJson } from "../lib/jsonValue.js";
-import { defaultPermissionMode } from "../lib/providerPermissions.js";
+import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
 import { generateConventionalCommit } from "../lib/commit-message.js";
 import RemResources, { DEFAULT_REM_RESOURCES, remResourceError } from "../components/RemResources.jsx";
 import RemAvatar from "../components/RemAvatar.jsx";
@@ -319,6 +319,12 @@ export default function App() {
     }
   }, [settings.memory.secondBrainEnabled, settings.memory.secondBrainRoot]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsCategory, setSettingsCategory] = useState("general");
+  useEffect(() => {
+    const openProviders = () => { setSettingsCategory("providers"); setSettingsOpen(true); };
+    window.addEventListener("raticode:open-provider-settings", openProviders);
+    return () => window.removeEventListener("raticode:open-provider-settings", openProviders);
+  }, []);
   const [systemDark, setSystemDark] = useState(
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
   );
@@ -718,11 +724,12 @@ export default function App() {
       if (action === "settings.open") setSettingsOpen(true);
       if (action === "file.open") void openFileRef.current?.();
       if (action === "project.open") void openProjectFolderRef.current?.();
-      if (action === "browser.open") openIntegratedBrowserRef.current?.();
+      if (action === "browser.open") openIntegratedBrowserRef.current?.(undefined, { newTab: true });
       if (action === "view.graph") changeStudioViewRef.current?.("graph");
       if (action === "view.code") changeStudioViewRef.current?.("code");
       if (action === "view.toggleProjectPane") setProjectPaneVisible((current) => !current);
       if (action === "view.toggleAssistantPane") setAssistantPaneVisible((current) => !current);
+      if (action === "terminal.new") window.dispatchEvent(new CustomEvent("gofer:new-terminal"));
       if (action === "panel.toggle") window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel"));
       if (action === "workflow.run" && activeWorkflow && !runState.running
         && (workflowTabs[activeCodePath]?.workflowId === activeWorkflow.id || activeCodePath === activeWorkflow.sourcePath)) {
@@ -792,7 +799,7 @@ export default function App() {
       if (command?.action === "text-zoom" && command.reset === true) {
         setTextZoom(100);
       }
-      if (command?.action === "open-browser") openIntegratedBrowserRef.current?.();
+      if (command?.action === "open-browser") runShortcutAction("browser.open");
       if (command?.action === "settings-open") runShortcutAction("settings.open");
       if (command?.action === "file-open") runShortcutAction("file.open");
       if (command?.action === "project-open") runShortcutAction("project.open");
@@ -3273,7 +3280,7 @@ export default function App() {
   const panelWorkflowId = pinnedRun?.workflowId || (activeWorkflow?.sourceFormat === "project"
     ? ""
     : activeWorkflow?.id ?? "");
-  const panelProjectRoot = activeWorkflow?.projectRoot || activeProjectRoot || "";
+  const panelProjectRoot = activeProjectRoot || "";
   const visibleRunRecords = [...runRegistry.records, ...Object.entries(runStatesById)
     .filter(([id, state]) => state.running && !workflowRunSummary(runRegistry.records, id).active.length)
     .map(([id]) => {
@@ -3697,12 +3704,13 @@ export default function App() {
 
       {settingsOpen ? (
         <SettingsPopover
+          initialCategory={settingsCategory}
           dataDir={dataDir}
           open
           settings={settings}
           onChange={changeSetting}
           onChooseDataDirectory={chooseApplicationDataDirectory}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => { setSettingsOpen(false); setSettingsCategory("general"); }}
           onResetAll={async () => {
             try { await window.goferDesktop?.rem?.configure?.("reset", true); setSettings(defaultSettingsSnapshot()); }
             catch (error) { reportArchiveError(error); }
@@ -3724,6 +3732,7 @@ export default function App() {
           activeProjectRoot={activeProjectRoot}
           workflow={activeWorkflow}
           workflows={workflows}
+          openFiles={editorFileReferences(codeOpenPaths, workflowTabs)}
           onOpenMarkdownLink={(href, projectRoot) => openMarkdownFileLink(
             href,
             assistantMarkdownSourcePath(projectRoot),
@@ -4265,10 +4274,11 @@ export function workflowLogUrls(workflowId, runId = null) {
   };
 }
 
-export function chatStreamRequestBody({ effort, provider, model, messages, workflow, permissionMode }) {
+export function chatStreamRequestBody({ effort, provider, model, messages, workflow, permissionMode, conversationId, turnId }) {
   return {
     provider,
     model,
+    ...(conversationId && turnId ? { conversationId, turnId } : {}),
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
     messages,
@@ -4970,43 +4980,37 @@ export function codeWorkspaceAvailable(workflow) {
 export function scopeChatThreadToProject(
   thread,
   projectRoot,
-  workflows = [],
-  preferredWorkflowId = null,
+  _workflows = [],
+  _preferredWorkflowId = null,
   projectName = "",
 ) {
+  // Retain the call signature while ignoring historical workflow selection.
+  void _workflows;
+  void _preferredWorkflowId;
   const root = String(projectRoot ?? "").trim();
-  const scopedWorkflows = workflows.filter((workflow) => workflow?.projectRoot === root);
-  const selectedWorkflowId = scopedWorkflows.some(
-    (workflow) => workflow.id === preferredWorkflowId,
-  )
-    ? preferredWorkflowId
-    : scopedWorkflows[0]?.id ?? null;
   return {
     ...thread,
     projectRoot: root,
     ...(thread.projectRoot !== root ? { projectBranch: undefined } : {}),
     projectName: String(projectName || (root ? projectNameFromPath(root) : "No project")),
-    selectedWorkflowId,
+    selectedWorkflowId: null,
   };
 }
 
-export function chatWorkflowContextForThread(thread, workflows = []) {
+export function editorFileReferences(paths = [], workflowTabs = {}) {
+  return [...new Set(paths.map((path) => workflowTabs[path]?.sourcePath || path)
+    .filter((path) => path && !/^(workflow-graph:|raticode-browser:|browser:)/.test(path)))];
+}
+
+export function chatWorkflowContextForThread(thread, workflows = [], openFiles = []) {
   const projectRoot = String(thread?.projectRoot ?? "").trim();
-  const scopedWorkflows = projectRoot
-    ? workflows.filter((workflow) => workflow?.projectRoot === projectRoot)
-    : [];
-  const selectedWorkflowId = scopedWorkflows.some(
-    (workflow) => workflow.id === thread?.selectedWorkflowId,
-  )
-    ? thread.selectedWorkflowId
-    : scopedWorkflows[0]?.id ?? null;
   return {
-    projectName: String(
-      thread?.projectName || (projectRoot ? projectNameFromPath(projectRoot) : "No project"),
-    ),
+    projectName: String(thread?.projectName || (projectRoot ? projectNameFromPath(projectRoot) : "No project")),
     projectRoot,
-    selectedWorkflowId,
-    workflows: scopedWorkflows,
+    selectedWorkflowId: null,
+    openFiles: [...new Set(openFiles)],
+    workflows: workflows.filter((workflow) => projectRoot && workflow?.projectRoot === projectRoot)
+      .map(({ id, name, sourcePath }) => ({ id, name, sourcePath })),
   };
 }
 
@@ -5920,6 +5924,7 @@ export function ChatPane({
   width,
   workflow,
   workflows = [],
+  openFiles = [],
 }) {
   const prospectiveProjectRoot = String(activeProjectRoot ?? workflow?.projectRoot ?? "").trim();
   const chatScrollRef = useRef(null);
@@ -5929,6 +5934,7 @@ export function ChatPane({
   const dragDepthRef = useRef(0);
   const scopeMenuRef = useRef(null);
   const [draft, setDraft] = useState("");
+  const draftsByThreadRef = useRef({});
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState("");
   const [contextSendThread, setContextSendThread] = useState(null);
@@ -5937,7 +5943,6 @@ export function ChatPane({
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [providerId, setProviderId] = useState(assistantDefaults.provider || "codex");
   const [permissionsByProvider, setPermissionsByProvider] = useState({});
-  const permissionMode = permissionsByProvider[providerId] || defaultPermissionMode(providerId);
   const [model, setModel] = useState(assistantDefaults.model || "");
   const [effort, setEffort] = useState(assistantDefaults.effort || "");
   const {
@@ -5946,6 +5951,8 @@ export function ChatPane({
     loading: providersLoading,
     refresh: refreshProviders,
   } = useProviderCapabilities();
+  const providerCapability = providers.find(item => item.id === providerId);
+  const permissionOptions = providerPermissionOptions(providerId, providerCapability);
   const [threads, setThreads] = useState([]);
   const [activeThreadId, setActiveThreadId] = useState(null);
   const [messagesByThread, setMessagesByThread] = useState({});
@@ -5993,9 +6000,52 @@ export function ChatPane({
   const [resourcesOpen, setResourcesOpen] = useState(false);
   const [homeProjectRoot, setHomeProjectRoot] = useState(prospectiveProjectRoot);
   const chatAbortControllersRef = useRef({});
+  const activeChatTurnsRef = useRef({});
+  const steeringRequestsRef = useRef({});
+  const [, setSteeringByThread] = useState({});
+  const [steeringBusy, setSteeringBusy] = useState({});
+  const [steeringErrors, setSteeringErrors] = useState({});
+
+  function recordSteering(threadId, receipt) {
+    if (!receipt?.requestId || receipt.conversationId !== threadId) return;
+    setSteeringByThread(current => {
+      const receipts = current[threadId] || [];
+      const previous = receipts.find(item => item.requestId === receipt.requestId);
+      // A slow HTTP acceptance response must not overwrite a terminal stream receipt.
+      if (previous && previous.status !== "interrupting" && receipt.status === "interrupting") return current;
+      return { ...current, [threadId]: previous ? receipts.map(item => item.requestId === receipt.requestId ? receipt : item) : [...receipts, receipt] };
+    });
+  }
+
+  async function recoverSteering(threadId) {
+    try {
+      const response = await fetch(apiUrl(`/chat/steering?conversationId=${encodeURIComponent(threadId)}`));
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not recover steering receipts");
+      for (const receipt of payload.receipts || []) recordSteering(threadId, receipt);
+    } catch (error) {
+      setSteeringErrors(current => ({ ...current, [threadId]: error.message }));
+    }
+  }
+
+  useEffect(() => {
+    if (activeThreadId) void recoverSteering(activeThreadId);
+    // Recovery is scoped to the selected conversation, never an automatic replay.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadId]);
   const deletedChatThreadIdsRef = useRef(new Set());
   const activeThreadIdRef = useRef(null);
   const activeThread = threads.find((thread) => thread.id === activeThreadId);
+  const savedPermission = (activeThread ? activeThread.permissionsByProvider || {} : permissionsByProvider)[providerId];
+  const permissionMode = permissionOptions.some(([id]) => id === savedPermission)
+    ? savedPermission : providerPermissionDefault(providerId, providerCapability);
+  const requiresPermissionChoice = ["grok", "antigravity"].includes(providerId) && permissionMode !== "cli-managed";
+  function selectPermission(value) {
+    const next = { ...(activeThread ? activeThread.permissionsByProvider || {} : permissionsByProvider), [providerId]: value };
+    if (activeThread) updateThreadConfig({ permissionsByProvider: next });
+    else setPermissionsByProvider(next);
+  }
+
   const projectLabels = loadProjectLabels();
   const scopedProjectRoot = String(
     activeThread?.projectRoot ?? homeProjectRoot ?? prospectiveProjectRoot,
@@ -6154,26 +6204,24 @@ export function ChatPane({
 
   useEffect(() => {
     const current = providers.find((provider) => provider.id === providerId);
-    const nextProvider =
-      (current?.available && current.discoveryStatus === "ready" && current) ??
-      providers.find((provider) => provider.available && provider.discoveryStatus === "ready");
-    if (!nextProvider) return;
+    const nextProvider = current;
+    if (!nextProvider?.available || nextProvider.discoveryStatus !== "ready" || chatState.sending) return;
     const nextModel =
+      nextProvider.models?.find((item) => item.id === model) ??
       nextProvider.models?.find((item) => item.id === nextProvider.defaultModel) ??
       nextProvider.models?.[0];
     if (!nextModel) return;
-    if (providerId !== nextProvider.id) setProviderId(nextProvider.id);
-    if (!nextProvider.models?.some((item) => item.id === model)) setModel(nextModel.id);
+    if (!model) setModel(nextModel.id);
     if (effort && !nextModel.efforts?.some((item) => item.id === effort)) {
       setEffort(nextModel.defaultEffort ?? "");
     }
-  }, [effort, model, providerId, providers]);
+  }, [effort, model, providerId, providers, chatState.sending]);
 
   useEffect(() => {
     if (!activeThreadId) {
       historyRequestRef.current += 1;
       historyLoadingRef.current = false;
-      setDraft("");
+      setDraft(draftsByThreadRef.current[activeThreadId || "new-thread"] || "");
       setAttachments([]);
       setAttachmentError("");
       dragDepthRef.current = 0;
@@ -6191,7 +6239,7 @@ export function ChatPane({
     if (repository.durable && !chatAbortControllersRef.current[activeThreadId]) conversationCacheRef.current.trim(activeThreadId, CONVERSATION_PAGE_SIZE);
     conversationCacheRef.current.get(activeThreadId);
     conversationCacheRef.current.activate([activeThreadId, ...Object.keys(chatAbortControllersRef.current)]);
-    setDraft("");
+    setDraft(draftsByThreadRef.current[activeThreadId || "new-thread"] || "");
     setAttachments([]);
     setAttachmentError("");
     dragDepthRef.current = 0;
@@ -6250,6 +6298,7 @@ export function ChatPane({
 
   function handleClipboardPaste(event) {
     const files = clipboardAttachmentFiles(event.clipboardData);
+    if (chatState.sending && !files.length) return;
     const pastedText = event.clipboardData?.getData?.("text/plain") || "";
     const textFile = largePasteFile(pastedText);
     if (!files.length && !textFile) return;
@@ -6310,6 +6359,7 @@ export function ChatPane({
       originalMessage?.attachments?.length || selectedAttachments.length,
     );
     if ((!text && !hasMessageAttachments) || chatState.sending || historyLoadingRef.current || historyState.error) return;
+    if (requiresPermissionChoice) return;
     const resourceError = remResourceError(activeThread?.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES);
     if (resourceError) { setAttachmentError(resourceError); return; }
     returnToLatestMessages();
@@ -6317,7 +6367,7 @@ export function ChatPane({
     const turnSummaryId = uniqueClientId();
     const targetThread = activeThread ?? createThread();
     const targetThreadId = targetThread.id;
-    const workflowContext = chatWorkflowContextForThread(targetThread, workflows);
+    const workflowContext = chatWorkflowContextForThread(targetThread, workflows, openFiles);
     setChatStateByThread((current) => ({
       ...current,
       [targetThreadId]: { sending: true, error: "", hasNewResponse: false },
@@ -6371,10 +6421,12 @@ export function ChatPane({
     updateThreadMessages(targetThreadId, nextMessages);
     updateThreadTitleFromMessage(targetThreadId, titleSource);
     setDraft("");
+    delete draftsByThreadRef.current[activeThreadId || "new-thread"];
     setAttachments([]);
     if (originalMessage) setExpandedThoughtGroups({});
     setBackgroundChatAnnouncement("");
     setChatAnnouncementByThread((current) => ({ ...current, [targetThreadId]: "" }));
+    let contextBoundaryId = userMessage.id;
     const thoughtGroupId = uniqueClientId();
     let turnSummaryReceived = false;
     function appendAssistantMessage(body, kind = "final", extra = {}) {
@@ -6409,6 +6461,8 @@ export function ChatPane({
     }
 
     const abortController = new AbortController();
+    const activeTurn = { turnId: uniqueClientId(), generation: 0, ready: false };
+    activeChatTurnsRef.current[targetThreadId] = activeTurn;
     chatAbortControllersRef.current[targetThreadId] = abortController;
     try {
       if (assistantDefaults.swarmAccessEnabled !== false && workflowContext.projectRoot) {
@@ -6423,6 +6477,8 @@ export function ChatPane({
         },
         signal: abortController.signal,
         body: JSON.stringify(chatStreamRequestBody({
+          conversationId: targetThreadId,
+          turnId: activeTurn.turnId,
           permissionMode,
           provider: providerId,
           model,
@@ -6458,14 +6514,45 @@ export function ChatPane({
 
       while (true) {
         const { done, value } = await reader.read();
-        if (value) {
-          buffer += decoder.decode(value, { stream: !done });
+        if (value || done) {
+          buffer += value ? decoder.decode(value, { stream: !done }) : decoder.decode();
+          if (done && buffer && !buffer.endsWith("\n")) buffer += "\n";
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
           conversationCacheRef.current.batch(() => {
             for (const line of lines) {
               const event = parseChatStreamEvent(line);
               if (!event) continue;
+              if (event.turnId && event.turnId !== activeTurn.turnId) continue;
+              if (event.type === "turn") {
+                if (event.generation < activeTurn.generation) continue;
+                activeTurn.generation = event.generation;
+                activeTurn.ready = true;
+                continue;
+              }
+              if (event.type === "steering") {
+                recordSteering(targetThreadId, event.receipt);
+                continue;
+              }
+              if (event.generation != null && event.generation !== activeTurn.generation) continue;
+              if (event.type === "interrupted") {
+                activeTurn.generation += 1;
+                const transcript = Array.isArray(event.messages) ? event.messages : [];
+                const start = transcript.findLastIndex(message => message.role === "system");
+                const additions = transcript.slice(start < 0 ? transcript.length : start)
+                  .map(message => ({ ...message, id: uniqueClientId(), kind: message.role === "system" ? "continuation-context" : undefined }));
+                if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
+                  changes: event.partial.changes, completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
+                });
+                if (additions.length) {
+                  updateThreadMessages(targetThreadId, current => [...current, ...additions]);
+                  contextBoundaryId = additions.at(-1).id;
+                  void repository.checkpoint(targetThreadId, transcript, contextBoundaryId)
+                    .catch(error => reportStorageFailure(targetThreadId, error));
+                }
+                continue;
+              }
+              if (event.type === "stopped") throw new DOMException("Rem stopped", "AbortError");
 
               if (event.type === "thought") {
                 const thought = String(event.text ?? "").trim();
@@ -6479,7 +6566,7 @@ export function ChatPane({
                 ? event.messages
                 : null;
               if (compactedMessages) {
-                void repository.checkpoint(targetThreadId, compactedMessages, userMessage.id)
+                void repository.checkpoint(targetThreadId, compactedMessages, contextBoundaryId)
                   .catch(error => reportStorageFailure(targetThreadId, error));
                 appendAssistantMessage(event.message || "Rem context compacted. Earlier messages are saved.", "system", { role: "system" });
               } else {
@@ -6519,33 +6606,6 @@ export function ChatPane({
           });
         }
         if (done) break;
-      }
-
-      if (buffer.trim()) {
-        const event = parseChatStreamEvent(buffer);
-        if (event?.type === "final") {
-          finalReceived = true;
-          const body = event.message?.body ?? "";
-          if (body.trim()) appendAssistantMessage(body, "final");
-          appendTurnSummary(event);
-        } else if (event?.type === "error") {
-          appendTurnSummary(event);
-          setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
-          throw new Error(event.error || "Rem failed");
-        } else if (event?.type === "changes") {
-          setLiveTurnByThread((current) => ({
-            ...current,
-            [targetThreadId]: {
-              ...(current[targetThreadId] ?? {}),
-              id: turnSummaryId,
-              role: "assistant",
-              kind: "turn-summary",
-              running: true,
-              startedAt: current[targetThreadId]?.startedAt ?? clientTurnStartedAt,
-              changes: event.changes,
-            },
-          }));
-        }
       }
 
       if (!finalReceived) {
@@ -6608,12 +6668,63 @@ export function ChatPane({
     } finally {
       if (chatAbortControllersRef.current[targetThreadId] === abortController) {
         delete chatAbortControllersRef.current[targetThreadId];
+        delete activeChatTurnsRef.current[targetThreadId];
+        void recoverSteering(targetThreadId);
       }
     }
   }
 
-  function stopAssistant(threadId) {
-    chatAbortControllersRef.current[threadId]?.abort();
+  async function steerAssistant() {
+    const threadId = activeThreadId;
+    const turn = activeChatTurnsRef.current[threadId];
+    if (!turn || (!draft.trim() && !attachments.length) || steeringRequestsRef.current[threadId]?.pending) return;
+    const text = draft;
+    const selectedAttachments = attachments;
+    const attachmentKey = JSON.stringify(selectedAttachments.map(item => item.id));
+    const previous = steeringRequestsRef.current[threadId];
+    const request = previous?.text === text && previous.turnId === turn.turnId && previous.attachmentKey === attachmentKey
+      ? { ...previous }
+      : { conversationId: threadId, turnId: turn.turnId, requestId: uniqueClientId(), text, attachmentKey };
+    steeringRequestsRef.current[threadId] = { ...request, pending: true };
+    setSteeringBusy(current => ({ ...current, [threadId]: true }));
+    setSteeringErrors(current => ({ ...current, [threadId]: "" }));
+    try {
+      if (!request.attachments) request.attachments = await uploadChatAttachments(selectedAttachments, threadId);
+      steeringRequestsRef.current[threadId] = { ...request, pending: true };
+      const response = await fetch(apiUrl("/chat/steer"), {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.receipt) throw new Error(payload.error || "Steering was not confirmed. Retry to check the same instruction.");
+      recordSteering(threadId, payload.receipt);
+      if (draftsByThreadRef.current[threadId] === text) delete draftsByThreadRef.current[threadId];
+      if (activeThreadIdRef.current === threadId) setDraft(current => current === text ? "" : current);
+      if (activeThreadIdRef.current === threadId) {
+        const submitted = new Set(selectedAttachments.map(item => item.id));
+        setAttachments(current => current.filter(item => !submitted.has(item.id)));
+      }
+      delete steeringRequestsRef.current[threadId];
+    } catch (error) {
+      setSteeringErrors(current => ({ ...current, [threadId]: error.message }));
+    } finally {
+      if (steeringRequestsRef.current[threadId]) steeringRequestsRef.current[threadId].pending = false;
+      setSteeringBusy(current => ({ ...current, [threadId]: false }));
+    }
+  }
+
+  async function stopAssistant(threadId) {
+    const turn = activeChatTurnsRef.current[threadId];
+    if (!turn?.ready) { chatAbortControllersRef.current[threadId]?.abort(); return; }
+    try {
+      const response = await fetch(apiUrl("/chat/stop"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: threadId, turnId: turn.turnId }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not stop Rem");
+    } catch (error) {
+      setSteeringErrors(current => ({ ...current, [threadId]: error.message }));
+    }
   }
 
   async function toggleAssistantChanges(threadId, messageId, changeSetId, redo) {
@@ -6681,6 +6792,7 @@ export function ChatPane({
         title: "New thread",
         provider: providerId, model, effort,
         resources: structuredClone(assistantDefaults.resources || DEFAULT_REM_RESOURCES),
+        permissionsByProvider: { ...permissionsByProvider, [providerId]: permissionMode },
         createdAt: now,
         updatedAt: now,
       },
@@ -7240,8 +7352,9 @@ export function ChatPane({
           </div> : null}
           <ProviderModelEffortFields
             capabilities={providers}
+            loading={providersLoading}
             className="mb-2"
-            disabled={providersLoading}
+            disabled={providersLoading || chatState.sending}
             effort={effort}
             model={model}
             provider={providerId}
@@ -7256,10 +7369,18 @@ export function ChatPane({
           {providerDiscoveryError ? (
             <p className="mb-2 text-xs text-red-600">{providerDiscoveryError}</p>
           ) : null}
+          {steeringErrors[activeThreadId] ? <p role="alert" className="mb-2 text-xs text-red-600">{steeringErrors[activeThreadId]}</p> : null}
+          {requiresPermissionChoice ? <div role="alert" className="mb-2 rounded-lg border border-line p-3 text-xs">
+            <p>{providerCapability?.displayName || providerId} needs CLI-managed permissions to send messages. Raticode&apos;s tool restrictions are unsupported.</p>
+            <button type="button" className="mt-2 font-semibold underline" disabled={chatState.sending} onClick={() => selectPermission("cli-managed")}>Use CLI-managed permissions</button>
+          </div> : null}
           <ChatComposer
+            onSteer={steerAssistant}
+            steeringPending={Boolean(steeringBusy[activeThreadId])}
             provider={providerId}
             permissionMode={permissionMode}
-            onPermissionModeChange={(value) => setPermissionsByProvider((current) => ({ ...current, [providerId]: value }))}
+            permissionOptions={permissionOptions}
+            onPermissionModeChange={selectPermission}
             attachments={attachments}
             attachmentError={attachmentError}
             audioInputDeviceId={audioInputDeviceId}
@@ -7267,11 +7388,14 @@ export function ChatPane({
             draft={draft}
             focusRequest={composerFocusRequest + contextFocusRequest}
             sending={chatState.sending}
-            sendDisabled={historyState.threadId === activeThreadId && Boolean(historyState.loading || historyState.error)}
+            sendDisabled={requiresPermissionChoice || (historyState.threadId === activeThreadId && Boolean(historyState.loading || historyState.error))}
             onAddAttachments={addAttachments}
             onAttachmentErrorChange={setAttachmentError}
             onAttachmentsChange={setAttachments}
-            onDraftChange={setDraft}
+            onDraftChange={value => {
+              draftsByThreadRef.current[activeThreadId || "new-thread"] = value;
+              setDraft(value);
+            }}
             onSend={sendMessage}
             onStop={() => activeThreadId && stopAssistant(activeThreadId)}
           />
@@ -7314,15 +7438,18 @@ export function ThreadSections({ threads, ...props }) {
   }
   const load = entries => entries.map(entry => threads.find(thread => thread.id === entry.id) || loadChatThread(entry.id)).filter(Boolean);
   const sortedArchived = archived.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  const sectionHeadingClass = "mb-2 px-3 py-1 text-xs font-semibold text-muted";
   return <>
     {pinned.length ? <section aria-label="Pinned threads">
-      <h3 className="px-2 pb-2 text-xs font-semibold text-muted">Pinned threads</h3>
+      <h3 className={sectionHeadingClass}>Pinned threads</h3>
       <ThreadList {...props} threads={load(pinned)} />
     </section> : null}
-    <h3 className="px-2 py-2 text-xs font-semibold text-muted">Active threads</h3>
-    {scopeState ? <ThreadList {...props} threads={load(active)} /> : <p role="status" className="px-2 py-2 text-xs text-muted">Checking active threads...</p>}
-    <section className="mt-3 border-t border-line pt-2">
-      <button type="button" aria-expanded={archiveOpen} className="flex w-full items-center gap-1 px-2 py-2 text-left text-xs font-semibold text-muted"
+    <section aria-label="Active threads" className={pinned.length ? "mt-4 border-t border-line pt-3" : undefined}>
+      <h3 className={sectionHeadingClass}>Active threads</h3>
+      {scopeState ? <ThreadList {...props} threads={load(active)} /> : <p role="status" className="px-2 py-2 text-xs text-muted">Checking active threads...</p>}
+    </section>
+    <section className="mt-4 border-t border-line pt-3">
+      <button type="button" aria-expanded={archiveOpen} className={`${sectionHeadingClass} flex w-full items-center gap-2 text-left`}
         onClick={() => { setArchiveOpen(open => !open); setArchiveCount(10); }}>
         <ChevronRight aria-hidden="true" size={13} className={archiveOpen ? "rotate-90" : ""} />Archived threads
       </button>
@@ -8210,7 +8337,8 @@ export function buildChatItems(messages) {
 
   while (index < messages.length) {
     const message = messages[index];
-    if (message.kind === "memory") {
+    if (message.kind === "memory" || message.kind === "continuation-context" ||
+      (message.role === "system" && String(message.body || "").startsWith("The previous process was interrupted."))) {
       index += 1;
       continue;
     }
@@ -8222,6 +8350,7 @@ export function buildChatItems(messages) {
 
     const groupId = message.groupId || `legacy-${message.id}`;
     const thoughts = [];
+    const segmentId = `thought-group-${groupId}-${message.id}`;
     while (
       index < messages.length &&
       messages[index].kind === "thought" &&
@@ -8229,7 +8358,7 @@ export function buildChatItems(messages) {
     ) {
       thoughts.push({
         ...messages[index],
-        groupAnchorId: `thought-group-${groupId}`,
+        groupAnchorId: segmentId,
       });
       index += 1;
     }
@@ -8237,7 +8366,7 @@ export function buildChatItems(messages) {
     while (isDuplicateOutputThought(thoughts.at(-1), nextMessage)) thoughts.pop();
     if (thoughts.length) {
       items.push({
-        id: `thought-group-${groupId}`,
+        id: segmentId,
         type: "thought-group",
         thoughts,
       });

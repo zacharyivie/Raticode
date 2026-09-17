@@ -58,6 +58,16 @@ from gofer.ui.chat import workflow_chat_prompt_path
 from gofer.utils.run_state import workflow_run_stop_path
 
 
+def test_workflow_discovery_prunes_worktrees_and_dependencies(tmp_path: Path) -> None:
+    for folder in ("workspaces/run/attempt", "node_modules/package", ".venv/lib", ".git"):
+        directory = tmp_path / folder
+        directory.mkdir(parents=True)
+        (directory / "pyproject.toml").write_text("not a workflow")
+    payload = list_workflow_payloads(tmp_path)
+    assert payload["workflows"] == []
+    assert payload["errors"] == []
+
+
 def test_list_workflow_payloads_serializes_real_nodes_and_edges(tmp_path: Path) -> None:
     (tmp_path / "daily.toml").write_text(
         """

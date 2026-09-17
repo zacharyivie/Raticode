@@ -17,7 +17,17 @@ def test_bundled_provider_contracts_validate_and_have_portable_defaults() -> Non
         sorted((RATTISH_ROOT / "providers").glob("*.json")),
     )
 
-    assert set(contracts) == {"anthropic-api", "claude-code", "codex", "openai-api"}
+    assert set(contracts) == {
+        "anthropic-api",
+        "claude-code",
+        "codex",
+        "openai-api",
+        "cursor",
+        "copilot",
+        "opencode",
+        "antigravity",
+        "grok",
+    }
     assert contracts["codex"].default_model == "gpt-5.6-sol"
     assert contracts["codex"].default_effort == "high"
     assert contracts["codex"].runtime_subscription == "codex"

@@ -25,7 +25,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from gofer.core.provider_auth import ProviderAuthSessions
 from gofer.core.provider_capabilities import provider_capabilities_payload
+from gofer.core.provider_preferences import save_provider_preference
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
 from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.usage import summarize_node_outputs
@@ -122,6 +124,7 @@ from gofer.ui.chat_media import (
     stream_chat_transcription,
     transcribe_chat_audio,
 )
+from gofer.ui.chat_steering import ChatSteering, ChatSteeringConflict, ChatTurn
 from gofer.ui.swarms import SwarmManager
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
@@ -276,6 +279,8 @@ class GoferUiServer(ThreadingHTTPServer):
         data_dir.mkdir(parents=True, exist_ok=True)
         super().__init__(server_address, GoferUiRequestHandler)
         self.data_dir = data_dir
+        self.chat_steering = ChatSteering(data_dir)
+        self.provider_auth = ProviderAuthSessions()
         self.resource_limits = resource_limits or bundle_resource_limits_from_env()
         self.api_token = api_token or os.environ.get("GOFER_UI_API_TOKEN") or _new_ui_api_token()
         self.emit_ready_token = os.environ.get("GOFER_UI_EMIT_READY_TOKEN") == "1"
@@ -315,6 +320,12 @@ class GoferUiServer(ThreadingHTTPServer):
         )
 
     def server_close(self) -> None:
+        auth = getattr(self, "provider_auth", None)
+        if auth is not None:
+            auth.close()
+        steering = getattr(self, "chat_steering", None)
+        if steering is not None:
+            steering.close()
         swarms = getattr(self, "swarms", None)
         if swarms is not None:
             swarms.close()
@@ -445,6 +456,7 @@ class GoferUiServer(ThreadingHTTPServer):
 
 
 class GoferUiRequestHandler(BaseHTTPRequestHandler):
+    server: GoferUiServer
     server_version = "GoferUi/0.1"
 
     def handle(self) -> None:
@@ -525,6 +537,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             parsed.path.startswith("/api/chat")
             or parsed.path.endswith(("/run", "/resume", "/trigger", "/replay"))
         )
+        if parsed.path in {"/api/chat/steer", "/api/chat/stop"}:
+            expensive = False
         acquired = False
         if expensive and slots is not None:
             acquired = slots.acquire(blocking=False)
@@ -728,6 +742,23 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(provider_payload())
             return
 
+        if parsed.path == "/api/chat/steering":
+            try:
+                conversation_id = parse_qs(parsed.query).get("conversationId", [""])[0]
+                self._send_json({"receipts": self.server.chat_steering.receipts(conversation_id)})
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            except OSError:
+                self._send_json(
+                    {"error": "Could not read or persist steering receipts"}, status=500
+                )
+            return
+
+        if parsed.path == "/api/provider/auth":
+            provider = parse_qs(parsed.query).get("provider", [""])[0]
+            self._send_json(self.server.provider_auth.status(provider))
+            return
+
         if parsed.path == "/api/provider/capabilities":
             query = parse_qs(parsed.query)
             refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
@@ -919,6 +950,34 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/provider/auth":
+            try:
+                body = self._read_json()
+                provider = str(body.get("provider", ""))
+                action = body.get("action", "start")
+                if action not in ("start", "cancel"):
+                    raise ValueError("Unknown authentication action")
+                auth_payload = (
+                    self.server.provider_auth.cancel(provider)
+                    if action == "cancel"
+                    else self.server.provider_auth.start(provider)
+                )
+                self._send_json(auth_payload)
+            except (ValueError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/provider/settings":
+            try:
+                body = self._read_json()
+                provider = body.pop("provider", "")
+                save_provider_preference(provider, body)
+            except (ValueError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"saved": True})
+            return
+
         if parsed.path == "/api/projects/open":
             query = parse_qs(parsed.query)
             try:
@@ -1416,6 +1475,24 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 TimeoutError,
             ) as exc:
                 self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path in {"/api/chat/steer", "/api/chat/stop"}:
+            try:
+                body = self._read_json()
+                if parsed.path == "/api/chat/steer":
+                    self._send_json({"receipt": self.server.chat_steering.steer(body)})
+                else:
+                    self.server.chat_steering.stop(
+                        body.get("conversationId", ""), body.get("turnId", "")
+                    )
+                    self._send_json({"stopped": True})
+            except ChatSteeringConflict as exc:
+                self._send_json({"error": str(exc)}, status=409)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            except OSError:
+                self._send_json({"error": "Could not persist steering receipt"}, status=500)
             return
 
         if parsed.path == "/api/chat/stream":
@@ -2044,8 +2121,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         self, body: dict[str, Any], data_dir: Path, trusted_swarm_url: str | None = None
     ) -> None:
         cancel_event = threading.Event()
+        turn: ChatTurn | None = None
+        source = None
         try:
-            async for event in stream_workflow_chat(
+            kwargs: dict[str, Any] = dict(
                 provider=str(body.get("provider", "codex")),
                 model=str(body.get("model", "cli-default")),
                 effort=_optional_body_str(body, "effort"),
@@ -2053,10 +2132,21 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 messages=body.get("messages") or [],
                 workflow=body.get("workflow"),
                 trusted_swarm_url=trusted_swarm_url,
-                cancel_event=cancel_event,
                 data_dir=data_dir,
                 resource_limits=self._resource_limits(),
-            ):
+            )
+            if "conversationId" in body or "turnId" in body:
+                turn = self.server.chat_steering.begin(
+                    body.get("conversationId", ""),
+                    body.get("turnId", ""),
+                    str(body.get("provider", "codex")),
+                    str(body.get("model", "cli-default")),
+                    data_dir=data_dir,
+                )
+                source = self.server.chat_steering.stream(turn, stream_workflow_chat, **kwargs)
+            else:
+                source = stream_workflow_chat(cancel_event=cancel_event, **kwargs)
+            async for event in source:
                 self._write_stream_event(event)
         except (BrokenPipeError, ConnectionResetError):
             cancel_event.set()
@@ -2073,6 +2163,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             )
         finally:
             cancel_event.set()
+            if turn is not None:
+                turn.stopped = True
+                turn.cancel.set()
+            close_stream = getattr(source, "aclose", None)
+            if close_stream is not None:
+                await close_stream()
 
     def _default_data_dir(self) -> Path:
         server = self.server

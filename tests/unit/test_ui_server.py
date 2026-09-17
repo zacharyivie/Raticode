@@ -19,6 +19,7 @@ from gofer.core.watcher import WorkflowWatcher
 from gofer.rattish.workspaces import create_registered_workflow
 from gofer.ui import server as server_module
 from gofer.ui.chat import workflow_chat_prompt_path
+from gofer.ui.chat_steering import ChatSteering
 from gofer.ui.server import (
     DesktopPathGrantStore,
     GoferUiRequestHandler,
@@ -70,6 +71,8 @@ def _fake_server(
 ) -> GoferUiServer:
     server = GoferUiServer.__new__(GoferUiServer)
     server.data_dir = tmp_path
+    server.chat_steering = ChatSteering(tmp_path)
+    server.provider_auth = server_module.ProviderAuthSessions()
     server.resource_limits = resource_limits or DEFAULT_RESOURCE_LIMITS
     server.api_token = "test-ui-token"
     server.allowed_origins = {"http://127.0.0.1:5173"}
@@ -2794,3 +2797,210 @@ def test_disabled_or_projectless_rem_chat_has_no_swarm_grant(
     monkeypatch.setattr(server_module, "run_workflow_chat", chat)
     monkeypatch.setattr(server_module, "stream_workflow_chat", stream)
     assert _request(tmp_path, "POST", endpoint, body={"workflow": workflow}).status == 200
+
+
+def test_steering_http_receipts_conflict_stop_and_capacity(monkeypatch, tmp_path):
+    server = _fake_server(tmp_path)
+    server._expensive_slots = threading.BoundedSemaphore(1)
+    assert server._expensive_slots.acquire(False)
+    monkeypatch.setattr("tests.unit.test_ui_server._fake_server", lambda *a, **kw: server)
+    server.chat_steering.begin("conversation", "turn", "claude_code", "custom")
+    body = {
+        "conversationId": "conversation",
+        "turnId": "turn",
+        "requestId": "request",
+        "text": "redirect",
+    }
+    accepted = _request(tmp_path, "POST", "/api/chat/steer", body=body)
+    assert accepted.status == 200
+    assert cast(dict[str, Any], accepted.json())["receipt"]["status"] == "interrupting"
+    assert _request(tmp_path, "POST", "/api/chat/steer", body=body).json() == accepted.json()
+    conflict = _request(tmp_path, "POST", "/api/chat/steer", body={**body, "text": "different"})
+    assert conflict.status == 409
+    unauthenticated = _request(tmp_path, "POST", "/api/chat/steer", body=body, authenticated=False)
+    assert unauthenticated.status == 401
+    stopped = _request(tmp_path, "POST", "/api/chat/stop", body=body)
+    assert stopped.status == 200
+    assert (
+        _request(tmp_path, "POST", "/api/chat/steer", body={**body, "requestId": "later"}).status
+        == 409
+    )
+    receipts = _request(tmp_path, "GET", "/api/chat/steering?conversationId=conversation")
+    assert cast(dict[str, Any], receipts.json())["receipts"][0]["status"] == "cancelled"
+
+
+def test_identified_chat_stream_reports_turn_and_generation(monkeypatch, tmp_path):
+    async def stream(**kwargs):
+        assert kwargs["provider"] == "claude_code"
+        yield {"type": "final", "message": {"body": "reply"}}
+
+    monkeypatch.setattr(server_module, "stream_workflow_chat", stream)
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/stream",
+        body={
+            "conversationId": "conversation",
+            "turnId": "turn",
+            "provider": "claude_code",
+            "model": "custom",
+        },
+    )
+    events = [json.loads(line) for line in result.text().splitlines()]
+    assert events[0] == {
+        "type": "turn",
+        "conversationId": "conversation",
+        "turnId": "turn",
+        "generation": 0,
+        "provider": "claude_code",
+        "model": "custom",
+    }
+    assert events[-1]["type"] == "final"
+    assert events[-1]["generation"] == 0
+
+
+def test_steering_http_persistence_failure_and_recovery(monkeypatch, tmp_path):
+    server = _fake_server(tmp_path)
+    monkeypatch.setattr("tests.unit.test_ui_server._fake_server", lambda *a, **kw: server)
+    turn = server.chat_steering.begin("conversation", "turn", "codex", "cli-default")
+    body = {
+        "conversationId": "conversation",
+        "turnId": "turn",
+        "requestId": "request",
+        "text": "keep this instruction",
+    }
+    save = server.chat_steering._save
+
+    def fail(*args):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(server.chat_steering, "_save", fail)
+    assert _request(tmp_path, "POST", "/api/chat/steer", body=body).status == 500
+    assert not turn.cancel.is_set()
+    monkeypatch.setattr(server.chat_steering, "_save", save)
+    assert _request(tmp_path, "POST", "/api/chat/steer", body=body).status == 200
+    monkeypatch.setattr(server.chat_steering, "_save", fail)
+    assert _request(tmp_path, "POST", "/api/chat/stop", body=body).status == 500
+    assert turn.cancel.is_set()
+    assert turn.stopped
+    assert _request(tmp_path, "GET", "/api/chat/steering?conversationId=conversation").status == 500
+    monkeypatch.setattr(server.chat_steering, "_save", save)
+    recovered = _request(tmp_path, "GET", "/api/chat/steering?conversationId=conversation")
+    receipt = cast(dict[str, Any], recovered.json())["receipts"][0]
+    assert receipt["text"] == body["text"]
+    assert receipt["status"] == "cancelled"
+    assert ChatSteering(tmp_path).receipts("conversation") == [receipt]
+    assert _request(tmp_path, "POST", "/api/chat/steer", body=body).json() == {"receipt": receipt}
+
+
+def test_identified_stream_disconnect_cancels_and_closes_provider(monkeypatch, tmp_path):
+    server = _fake_server(tmp_path)
+    monkeypatch.setattr("tests.unit.test_ui_server._fake_server", lambda *a, **kw: server)
+    closed = []
+    cancellations = []
+    original_write = GoferUiRequestHandler._write_stream_event
+
+    def disconnect(self, event):
+        if event["type"] == "thought":
+            server.chat_steering.steer(
+                {
+                    "conversationId": "conversation",
+                    "turnId": "turn",
+                    "requestId": "request",
+                    "text": "recover this text",
+                }
+            )
+            raise BrokenPipeError("disconnected")
+        original_write(self, event)
+
+    async def stream(**kwargs):
+        cancellations.append(kwargs["cancel_event"])
+        try:
+            yield {"type": "thought", "text": "partial"}
+            pytest.fail("Disconnect must not continue the provider")
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(GoferUiRequestHandler, "_write_stream_event", disconnect)
+    monkeypatch.setattr(server_module, "stream_workflow_chat", stream)
+    _request(
+        tmp_path,
+        "POST",
+        "/api/chat/stream",
+        body={"conversationId": "conversation", "turnId": "turn"},
+    )
+    assert closed == [True]
+    assert len(cancellations) == 1 and cancellations[0].is_set()
+    receipt = server.chat_steering.receipts("conversation")[0]
+    assert receipt["status"] == "cancelled"
+    assert receipt["text"] == "recover this text"
+
+
+def test_provider_settings_persist_and_reject_invalid_updates(monkeypatch, tmp_path) -> None:
+    from gofer.core import provider_preferences
+
+    monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
+    result = _request(
+        tmp_path, "POST", "/api/provider/settings", body={"provider": "codex", "enabled": False}
+    )
+    assert result.status == 200
+    assert provider_preferences.provider_preference("codex") == {"enabled": False}
+    invalid = _request(
+        tmp_path,
+        "POST",
+        "/api/provider/settings",
+        body={"provider": "codex", "executable": "/missing"},
+    )
+    assert invalid.status == 400
+    assert provider_preferences.provider_preference("codex") == {"enabled": False}
+    denied = _request(
+        tmp_path,
+        "POST",
+        "/api/provider/settings",
+        body={"provider": "codex", "enabled": True},
+        authenticated=False,
+    )
+    assert denied.status == 401
+
+
+def test_provider_auth_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def start(self: object, provider: str) -> dict[str, str]:
+        calls.append(provider)
+        return {"status": "pending"}
+
+    monkeypatch.setattr(server_module.ProviderAuthSessions, "start", start)
+    result = _request(tmp_path, "POST", "/api/provider/auth", body={"provider": "cursor"})
+    assert result.status == 200
+    assert result.json() == {"status": "pending"}
+    assert calls == ["cursor"]
+    status = _request(tmp_path, "GET", "/api/provider/auth?provider=cursor")
+    assert status.json() == {"status": "idle"}
+    cancel = _request(
+        tmp_path,
+        "POST",
+        "/api/provider/auth",
+        body={"provider": "cursor", "action": "cancel"},
+    )
+    assert cancel.json() == {"status": "idle"}
+    invalid = _request(
+        tmp_path,
+        "POST",
+        "/api/provider/auth",
+        body={"provider": "cursor", "action": "execute"},
+    )
+    assert invalid.status == 400
+
+
+def test_provider_auth_start_failure_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(self: object, provider: str) -> dict[str, str]:
+        raise OSError("Could not launch login")
+
+    monkeypatch.setattr(server_module.ProviderAuthSessions, "start", fail)
+    result = _request(tmp_path, "POST", "/api/provider/auth", body={"provider": "cursor"})
+    assert result.status == 400
+    assert result.json() == {"error": "Could not launch login"}

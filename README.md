@@ -72,15 +72,22 @@ npm run dev
 For Electron development, run this from `frontend` after installing dependencies:
 
 ```bash
-XDG_CONFIG_HOME="$HOME/.local/state/raticode-dev/config" \
-XDG_DATA_HOME="$HOME/.local/state/raticode-dev/data" \
-npm run electron:dev
+GOFER_DATA_DIR="$HOME/.local/state/raticode-dev/data/gofer" npm run electron:dev
 ```
 
 If startup reports `concurrently: command not found`, run `nvm use` and
 `npm ci --include=dev` in `frontend`. The launcher needs the local development
-dependencies, including `concurrently`, `wait-on`, Vite, and Electron. XDG paths
-select app storage and do not install npm dependencies.
+dependencies, including `concurrently`, `wait-on`, Vite, and Electron.
+
+The dev launcher uses a separate Electron profile at
+`~/.config/raticode-dev` on Linux, so an installed app cannot intercept its launch.
+`GOFER_DATA_DIR` isolates Raticode data without changing provider CLI settings.
+To retain the older dev data directory, use
+`GOFER_DATA_DIR="$HOME/.local/state/taskurotta-dev/data/gofer"`.
+Avoid overriding `XDG_CONFIG_HOME` just to isolate the app: provider CLIs inherit it
+and may lose access to their normal login. Cursor then reports authentication
+required and cannot supply its model catalog. If you intentionally use a separate
+XDG config, sign in to the provider within that same environment.
 
 For browser development, set `GOFER_UI_API_TOKEN` to a fresh random secret in the
 backend shell before starting the server. Open the frontend with the same secret

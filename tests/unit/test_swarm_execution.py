@@ -5,13 +5,21 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from gofer.ui.swarm_workspaces import git
+from gofer.ui.swarm_workspaces import (
+    cleanup_accepted_attempt,
+    cleanup_completed_turn,
+    git,
+    prepare_attempt,
+    prepare_run,
+    run_checks,
+)
 from gofer.ui.swarms import SwarmError, SwarmManager
 
 
@@ -20,6 +28,120 @@ def manager(tmp_path):
     manager = SwarmManager(tmp_path / "data", start_runtime=False)
     yield manager
     manager.close()
+
+
+@pytest.mark.parametrize(
+    "preserve", ["none", "dirty", "commit", "milestone", "uncertain", "ignored"]
+)
+def test_completed_turn_cleanup_preserves_work(tmp_path, preserve):
+    root = tmp_path / "project"
+    root.mkdir()
+    git(root, "init")
+    (root / ".gitignore").write_text("ignored.txt\n")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "Initial")
+    workspace = prepare_run(root, tmp_path / "workspaces" / "run")
+    checkout = prepare_attempt(workspace, "attempt")
+    path = Path(checkout["path"])
+    attempt = {"id": "attempt", "state": "succeeded", "workspace": checkout}
+    if preserve in {"dirty", "commit"}:
+        (path / "work.txt").write_text("preserve")
+    if preserve == "commit":
+        git(path, "add", ".")
+        git(path, "commit", "-m", "Work")
+    if preserve == "ignored":
+        (path / "ignored.txt").write_text("preserve")
+    if preserve == "milestone":
+        attempt["milestoneId"] = "review-needed"
+    if preserve == "uncertain":
+        attempt["state"] = "uncertain"
+    assert cleanup_completed_turn(workspace, attempt) is (preserve == "none")
+    assert path.exists() is (preserve != "none")
+
+
+@pytest.mark.parametrize(
+    "preserve",
+    [
+        "none",
+        "dirty",
+        "untracked",
+        "ignored",
+        "commit",
+        "unmerged",
+        "active",
+        "failed",
+        "outside",
+        "remove_error",
+    ],
+)
+def test_accepted_attempt_cleanup_preserves_unintegrated_work(tmp_path, preserve):
+    root = tmp_path / "project"
+    root.mkdir()
+    git(root, "init")
+    (root / ".gitignore").write_text("ignored.txt\n")
+    git(root, "add", ".")
+    git(root, "commit", "-m", "Initial")
+    workspace = prepare_run(root, tmp_path / "workspaces" / "run")
+    checkout = prepare_attempt(workspace, "attempt")
+    path = Path(checkout["path"])
+    (path / "work.txt").write_text("implemented")
+    git(path, "add", ".")
+    git(path, "commit", "-m", "Work")
+    revision = git(path, "rev-parse", "HEAD")
+    attempt: dict[str, Any] = {
+        "id": "attempt",
+        "state": "verified",
+        "workspace": checkout,
+        "result": {"passed": True, "revision": revision},
+        "integration": {"passed": True, "submittedRevision": revision},
+    }
+    if preserve != "unmerged":
+        git(Path(workspace["path"]), "merge", "--ff-only", revision)
+    if preserve in {"dirty", "commit"}:
+        (path / "work.txt").write_text("additional work")
+    if preserve == "commit":
+        git(path, "add", ".")
+        git(path, "commit", "-m", "Unsubmitted work")
+    if preserve in {"untracked", "ignored"}:
+        (path / f"{preserve}.txt").write_text("preserve")
+    if preserve == "active":
+        attempt["state"] = "running"
+    if preserve == "failed":
+        attempt["integration"]["passed"] = False
+    if preserve == "outside":
+        workspace["directory"] = str(tmp_path / "different")
+    if preserve == "remove_error":
+
+        def fail_remove(root, *args, **kwargs):
+            if args[:2] == ("worktree", "remove"):
+                raise OSError("read-only metadata")
+            return git(root, *args, **kwargs)
+
+        with patch("gofer.ui.swarm_workspaces.git", side_effect=fail_remove):
+            assert not cleanup_accepted_attempt(workspace, attempt)
+    else:
+        assert cleanup_accepted_attempt(workspace, attempt) is (preserve == "none")
+    assert path.exists() is (preserve != "none")
+    if preserve == "none":
+        with pytest.raises(ValueError):
+            git(root, "rev-parse", "--verify", checkout["branch"])
+    else:
+        assert git(root, "rev-parse", checkout["branch"]) == git(
+            Path(workspace["path"]), "rev-parse", checkout["branch"]
+        )
+
+
+@pytest.mark.parametrize("original", ["", "/usr/local/lib"])
+def test_checks_do_not_inherit_packaged_app_libraries(tmp_path, monkeypatch, original):
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIexample")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", original)
+    script = (
+        "import os, ssl; "
+        f"assert os.environ.get('LD_LIBRARY_PATH', '') == {original!r}; "
+        "assert 'LD_LIBRARY_PATH_ORIG' not in os.environ"
+    )
+    results = run_checks(tmp_path, [[sys.executable, "-c", script]], tmp_path / "logs")
+    assert results[0]["exitCode"] == 0
 
 
 def team(manager: SwarmManager, root: Path, **settings: Any) -> str:
@@ -167,23 +289,12 @@ async def test_worker_failure_preserves_successful_sibling_and_blocks_replay(man
     assert state["run"]["state"] == "running"
     assert assignment(manager, root, sid, "b")[1] == successful
     failed = assignment(manager, root, sid)[1]
-    assert failed["state"] == "uncertain"
-    with pytest.raises(SwarmError, match="Reconcile"):
-        plan(manager, root, sid, [milestone(owner="two"), milestone("b", "two")])
+    assert failed["state"] == "pending"
+    assert state["run"]["agentStates"]["one"]["state"] == "retry_wait"
     manager.message(root, sid, {"recipientId": "one", "body": "Try again"})
     run = manager.get(root, sid)["run"]
     assert not manager._dispatchable(run, run["messages"][-1], "one")
-    manager.execution(
-        root,
-        sid,
-        {
-            "action": "resolve_attempt",
-            "attemptId": failed["id"],
-            "resolution": "review",
-            "reason": "Confirmed prior worker exited; inspect its saved output",
-        },
-    )
-    assert assignment(manager, root, sid)[1]["state"] == "succeeded"
+    assert failed["recovery"]["retryNumber"] == 1
 
 
 async def test_artifact_verification_rejects_claims_failures_and_changed_files(manager, tmp_path):
@@ -253,6 +364,10 @@ async def test_worktrees_keep_both_conflicting_edits_and_dirty_user_index(manage
     sid = team(manager, root)
     check = [sys.executable, "-c", "assert open('code.txt').read().strip() in ('one', 'two')"]
     plan(manager, root, sid, [milestone(checks=[check]), milestone("b", "two", checks=[check])])
+    pending = manager.get(root, sid)["run"]["objectives"]
+    pending[0]["milestones"][0].update(status="accepted", evidence="No work yet")
+    with pytest.raises(SwarmError, match="current application-recorded"):
+        manager.objectives(root, sid, {"objectives": pending})
 
     async def edit(**kwargs):
         cwd = kwargs["working_dir"]
@@ -285,6 +400,10 @@ async def test_worktrees_keep_both_conflicting_edits_and_dirty_user_index(manage
             "lead", {"action": "integrate", "milestoneId": mid, "attemptId": attempt["id"]}
         )["result"]
         assert integrated["passed"] is (mid == "a")
+        if mid == "a":
+            assert integrated["cleanedUp"]
+            assert not Path(integrated["path"]).exists()
+            assert integrated["path"] not in git(root, "worktree", "list", "--porcelain")
         if mid == "b":
             assert integrated["conflicts"] == ["code.txt"]
             assert Path(integrated["path"]).is_dir()
@@ -296,7 +415,68 @@ async def test_worktrees_keep_both_conflicting_edits_and_dirty_user_index(manage
     )
     data = manager.get(root, sid)["run"]["objectives"]
     data[0]["milestones"][0].update(status="accepted", evidence="Combined checks passed")
+    entered = threading.Event()
+    release = threading.Event()
+    from gofer.ui.swarm_workspaces import cleanup_accepted_attempt
+
+    def blocked_cleanup(workspace, attempt):
+        entered.set()
+        assert release.wait(5)
+        return cleanup_accepted_attempt(workspace, attempt)
+
+    with (
+        patch("gofer.ui.swarms.workspaces.cleanup_accepted_attempt", side_effect=blocked_cleanup),
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        update = executor.submit(manager.objectives, root, sid, {"objectives": data})
+        try:
+            assert entered.wait(5)
+            acquired = manager._lock.acquire(timeout=1)
+            assert acquired, "Cleanup must leave the manager available for status and pause"
+            try:
+                current = manager.get(root, sid)
+                assert current["run"]["objectives"][0]["milestones"][0]["status"] == "accepted"
+                _, cleaning = assignment(manager, root, sid)
+                with pytest.raises(SwarmError, match="cleanup is in progress"):
+                    manager.tool(
+                        "one", {"action": "verify", "milestoneId": "a", "attemptId": cleaning["id"]}
+                    )
+            finally:
+                manager._lock.release()
+        finally:
+            release.set()
+        update.result(timeout=5)
+    assert not manager._cleaning_attempts
+    # Removing an accepted checkout must not prevent unrelated tracker edits.
+    accepted, accepted_attempt = assignment(manager, root, sid)
+    assert not Path(accepted_attempt["workspace"]["path"]).exists()
+    data[0]["milestones"][1]["evidence"] = "Conflict requires repair"
     manager.objectives(root, sid, {"objectives": data})
+    run = manager.get(root, sid)["run"]
+    manager._require_verified(run, accepted)
+    run["objectives"][0]["milestones"][0]["status"] = "in_review"
+    with pytest.raises(SwarmError, match="current application-recorded"):
+        manager._require_verified(run, accepted)
+    run["objectives"][0]["milestones"][0]["status"] = "accepted"
+    # Historical acceptance cannot be reused after the verified scope changes.
+    for field, value in (
+        ("acceptanceCriteria", "Additional requirements"),
+        ("checks", [[sys.executable, "-c", "assert False"]]),
+        ("dependsOn", ["b"]),
+    ):
+        changed = manager.get(root, sid)["run"]["objectives"]
+        changed[0]["milestones"][0][field] = value
+        with pytest.raises(SwarmError, match="current application-recorded"):
+            manager.objectives(root, sid, {"objectives": changed})
+    recorded = next(a for a in run["attempts"] if a["id"] == accepted["attemptId"])
+    recorded["integration"]["passed"] = False
+    with pytest.raises(SwarmError, match="Integrate"):
+        manager._require_verified(run, accepted)
+    recorded["integration"]["passed"] = True
+    git(Path(run["workspace"]["path"]), "reset", "--hard", recorded["workspace"]["baseRevision"])
+    with pytest.raises(SwarmError, match="missing from the integration"):
+        manager._require_verified(run, accepted)
+    git(Path(run["workspace"]["path"]), "reset", "--hard", recorded["integration"]["revision"])
     data[0]["milestones"][1].update(status="accepted", evidence="Tests passed separately")
     with pytest.raises(SwarmError, match="Integrate"):
         manager.objectives(root, sid, {"objectives": data})
@@ -348,6 +528,7 @@ async def test_context_cursors_usage_and_stall_replanning(manager, tmp_path):
 
     async def stream(**kwargs):
         prompts.append(kwargs["messages"])
+        manager.message(root, sid, {"body": "Inspect next result", "recipientId": "lead"})
         yield {
             "type": "final",
             "message": {"body": "No change"},
@@ -412,12 +593,23 @@ async def test_completion_blocks_queued_requests(manager, tmp_path):
     )
     with pytest.raises(SwarmError, match="outstanding actionable"):
         manager.tool("lead", {"action": "complete"})
-    manager._stream = finish
+
+    async def complete_in_turn(**kwargs):
+        token = next(
+            token
+            for token, identity in manager._tokens.items()
+            if token != "lead" and identity[2] == "lead"
+        )
+        manager._active[f"{sid}:lead"] = {"swarmId": sid, "agentId": "lead"}
+        assert manager.tool(token, {"action": "complete"})["state"] == "completed"
+        yield {"type": "final", "message": {"body": "Done"}}
+
+    manager._stream = complete_in_turn
     await manager._turn(str(root), sid, "lead", threading.Event())
-    assert manager.tool("lead", {"action": "complete"})["state"] == "completed"
+    assert manager.get(root, sid)["run"]["state"] == "completed"
 
 
-async def test_non_git_writers_are_serial_and_elapsed_limit_cancels(manager, tmp_path):
+async def test_non_git_writers_are_serial_without_legacy_elapsed_limit(manager, tmp_path):
     root = tmp_path / "project"
     sid = team(manager, root, maxRunSeconds=1)
     manager.message(root, sid, {"body": "Write", "recipientId": "one"})
@@ -432,11 +624,10 @@ async def test_non_git_writers_are_serial_and_elapsed_limit_cancels(manager, tmp
     manager._stream = stream
     loop = asyncio.create_task(manager._loop())
     try:
-        async with asyncio.timeout(3):
-            while manager.get(root, sid)["run"]["state"] == "running":
-                await asyncio.sleep(0.02)
+        await asyncio.sleep(1.2)
         assert len(entered) == 1
-        assert manager.get(root, sid)["run"]["state"] == "paused"
+        assert manager.get(root, sid)["run"]["state"] == "running"
+        manager.control(root, sid, "stop")
     finally:
         manager._closed.set()
         manager._wake.set()
@@ -613,7 +804,9 @@ def test_final_verification_must_include_every_accepted_milestone_check(manager,
     with pytest.raises(SwarmError, match="combined integration"):
         manager.tool("lead", {"action": "complete"})
     assert manager.tool("lead", {"action": "integrate"})["result"]["passed"]
-    assert manager.tool("lead", {"action": "complete"})["state"] == "completed"
+    assert manager.tool("lead", {"action": "complete"})["state"] == "completing"
+    asyncio.run(manager._finish_run(str(root), sid))
+    assert manager.get(root, sid)["run"]["state"] == "completed"
 
 
 def test_new_git_project_can_start_without_creating_a_user_commit(manager, tmp_path):

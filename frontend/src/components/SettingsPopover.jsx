@@ -23,6 +23,7 @@ import {
 
 import DeveloperSettings, { RemMemorySettings } from "./DeveloperSettings.jsx";
 import RemResources from "./RemResources.jsx";
+import ProviderSettings from "./ProviderSettings.jsx";
 import { useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevices.js";
 import {
@@ -40,6 +41,7 @@ const CATEGORIES = [
   { id: "editor", label: "Editor", icon: Code2 },
   { id: "browser", label: "Browser", icon: Globe2 },
   { id: "terminal", label: "Terminal", icon: Terminal },
+  { id: "providers", label: "Providers", icon: Bot },
   { id: "assistant", label: "Rem", icon: Bot },
   { id: "memory", label: "Memory", icon: Bot },
   { id: "developer", label: "Developer", icon: Code2 },
@@ -48,6 +50,7 @@ const CATEGORIES = [
 ];
 
 export default function SettingsPopover({
+  initialCategory = "general",
   dataDir = "",
   onChange,
   onChooseDataDirectory,
@@ -59,7 +62,7 @@ export default function SettingsPopover({
   const panelRef = useRef(null);
   const searchRef = useRef(null);
   const onCloseRef = useRef(onClose);
-  const [category, setCategory] = useState("general");
+  const [category, setCategory] = useState(initialCategory);
   const [query, setQuery] = useState("");
   const providerState = useProviderCapabilities();
   onCloseRef.current = onClose;
@@ -210,6 +213,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     element: <SettingRow key={key} label={label} description={description}>{element}</SettingRow>,
     searchText: `${label} ${description}`,
   });
+  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps", element: <ProviderSettings key="providers" providerState={providerState} /> }];
   if (category === "developer") return [{ searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> }];
   if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown", element: <RemMemorySettings key="memory" value={settings.memory} onChange={onChange} /> }];
   if (category === "general") return [
@@ -278,7 +282,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
 
 function assistantRows(settings, onChange, row, providerState) {
   const { capabilities, loading } = providerState;
-  const availableProviders = capabilities.filter((provider) => provider.available);
+  const availableProviders = capabilities.filter((provider) => provider.available && provider.enabled !== false);
   const provider = availableProviders.find((item) => item.id === settings.assistant.provider)
     ?? availableProviders[0];
   const models = provider?.models ?? [];
@@ -733,6 +737,7 @@ function categoryKeywords(category) {
     editor: "font line tab wrap minimap autosave markdown html preview code",
     browser: "homepage new tab search engine url web",
     terminal: "font line cursor blink scrollback shell",
+    providers: "providers enabled disabled executable coding harness path apps",
     assistant: "rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
     developer: "developer diagnostics logs logging app data storage version backend restart tools",

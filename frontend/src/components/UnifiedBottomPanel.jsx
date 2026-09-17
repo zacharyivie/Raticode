@@ -24,6 +24,7 @@ export default function UnifiedBottomPanel({
   const [activeTab, setActiveTab] = useState("timeline");
   const [collapsed, setCollapsed] = useState(true);
   const [height, setHeight] = useState(settings.layout.bottomPanelHeight);
+  const [newTerminalRequest, setNewTerminalRequest] = useState(0);
   const [terminalMounted, setTerminalMounted] = useState(false);
   const [timelineMounted, setTimelineMounted] = useState(false);
   useEffect(() => { if (activeTab === "timeline" && !collapsed) setTimelineMounted(true); }, [activeTab, collapsed]);
@@ -56,7 +57,18 @@ export default function UnifiedBottomPanel({
       setCollapsed((current) => !current);
     }
 
+    function newTerminal() {
+      selectTab("terminal");
+      setNewTerminalRequest((current) => current + 1);
+    }
+
     function handleKeyDown(event) {
+      if (matchesCommand(event, settings, "terminal.new") && !event.repeat) {
+        event.preventDefault();
+        event.stopPropagation();
+        newTerminal();
+        return;
+      }
       if (!matchesCommand(event, settings, "panel.toggle") || event.repeat) return;
       event.preventDefault();
       event.stopPropagation();
@@ -75,9 +87,11 @@ export default function UnifiedBottomPanel({
       togglePanel();
     }
 
+    window.addEventListener("gofer:new-terminal", newTerminal);
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("gofer:toggle-bottom-panel", handleExternalToggle);
     return () => {
+      window.removeEventListener("gofer:new-terminal", newTerminal);
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("gofer:toggle-bottom-panel", handleExternalToggle);
     };
@@ -225,6 +239,7 @@ export default function UnifiedBottomPanel({
             <Suspense fallback={<p role="status" className="p-3 text-xs text-muted">Loading terminal...</p>}><TerminalWorkspace
               active={!collapsed && activeTab === "terminal"}
               projectRoot={projectRoot}
+              newTerminalRequest={newTerminalRequest}
               settings={settings}
               theme={theme}
             /></Suspense>

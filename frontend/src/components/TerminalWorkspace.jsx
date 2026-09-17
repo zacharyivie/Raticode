@@ -9,9 +9,10 @@ const { FitAddon } = fitAddonPackage;
 const { Terminal: XTerm } = xtermPackage;
 
 import { projectFolderName, terminalDirectoryFromOsc, terminalProjectGroupId, terminalGroupName, terminalTabGroupId, moveTerminalTabToGroup, terminalTabsAfterDeletingGroup, upsertTerminalGroupDefinition, groupTerminalTabsByProject, shouldCreateInitialTerminal, handleTerminalClipboardShortcut, terminalWordEraseInput, createDisposableTerminalSession, terminalWorkspaceShortcutAction } from "../lib/terminalWorkspace.js";
-export default function TerminalWorkspace({ active, projectRoot, settings, theme }) {
+export default function TerminalWorkspace({ active, projectRoot, settings, theme, newTerminalRequest = 0 }) {
   const nextTabRef = useRef(1);
   const nextGroupRef = useRef(1);
+  const handledNewTerminalRequestRef = useRef(0);
   const initialTerminalCreatedRef = useRef(false);
   const layoutElementsRef = useRef(new Map());
   const layoutRectsRef = useRef(new Map());
@@ -104,6 +105,14 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
     }
     layoutRectsRef.current = nextRects;
   }, [collapsedGroups, groupDefinitions, tabs]);
+
+  useEffect(() => {
+    const pending = newTerminalRequest - handledNewTerminalRequestRef.current;
+    handledNewTerminalRequestRef.current = newTerminalRequest;
+    if (pending <= 0) return;
+    initialTerminalCreatedRef.current = true;
+    for (let index = 0; index < pending; index += 1) addTerminal();
+  }, [newTerminalRequest, addTerminal]);
 
   useEffect(() => {
     if (!shouldCreateInitialTerminal(active, tabs.length, initialTerminalCreatedRef.current)) return;

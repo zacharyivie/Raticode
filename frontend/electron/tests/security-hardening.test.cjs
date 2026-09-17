@@ -36,6 +36,22 @@ async function fixture(t) {
   return { base, inside, outside, security: createIpcSecurity({ getDataDir: () => inside }) };
 }
 
+test("listing 100 worktrees never registers backend grants", async () => {
+  const worktrees = Array.from({ length: 100 }, (_, i) => ({ path: `/project/tree-${i}` }));
+  const list = mainFunction("gitWorktrees", {
+    resolveGitProjectDirectory: async () => "/project",
+    readGitWorktrees: async () => ({ active: true, worktrees }),
+    entryPathHandle: target => ({ path: target, grantId: "existing-agent-grant" }),
+    getIpcSecurity: () => ({ isUserGrant: () => false }),
+    registerBackendPathGrant: () => assert.fail("Enumeration must not contact the backend"),
+  });
+  for (let i = 0; i < 3; i++) {
+    const result = await list(null, { projectRoot: "/project" });
+    assert.equal(result.worktrees.length, 100);
+    assert.equal(result.worktrees[99].grantId, "existing-agent-grant");
+  }
+});
+
 for (const entry of corpus.cases) {
   test(`shared containment: ${entry.name}`, async (t) => {
     const { base, security } = await fixture(t);

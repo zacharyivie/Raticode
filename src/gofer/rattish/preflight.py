@@ -256,6 +256,10 @@ def _agent_profile_compatible(
             data_dir=context.data_dir,
         )
         validate_provider_settings(settings)
+        if subscription_id in {"antigravity", "grok"}:
+            from gofer.subscriptions.acp_providers import require_acp_permissions
+
+            require_acp_permissions(subscription_id, settings.approval_mode)
     except ValueError as exc:
         return PreflightFailure(
             "RATTISH_PREFLIGHT_PROFILE_UNAVAILABLE",

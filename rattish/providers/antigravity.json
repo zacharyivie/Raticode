@@ -1,0 +1,8 @@
+{
+  "$schema": "../schemas/provider-contract.schema.json",
+  "contract_version": 1,
+  "provider_id": "antigravity",
+  "runtime_subscription": "antigravity",
+  "default_model": "cli-default",
+  "default_effort": "cli-default"
+}

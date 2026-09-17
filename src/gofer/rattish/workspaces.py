@@ -31,17 +31,6 @@ WORKSPACE_DIRECTORY = ".raticode"
 WORKFLOW_ENTRYPOINT = "workflow.rattish"
 WORKFLOW_METADATA = "workflow.metadata.json"
 WORKFLOW_IGNORE = ".raticodeignore"
-DISCOVERY_IGNORED_DIRECTORIES = {
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-    "venv",
-}
-
 DEFAULT_RATICODE_IGNORE = """# Sensitive local configuration
 .env
 .env.*
@@ -240,65 +229,37 @@ def discover_registered_workflows(
     *,
     registry_dir: Path | None = None,
 ) -> tuple[RegisteredWorkflow, ...]:
-    """Register Rattish workflows found below the project's .raticode directory."""
+    """Register only .raticode/<workflow-name>/workflow.rattish entrypoints."""
     project_root = project_root.expanduser().resolve()
     if not project_root.is_dir():
         raise RattishWorkspaceError(f"Project folder does not exist: {project_root}")
 
-    workspace_roots = [
-        project_root / directory
-        for directory in (WORKSPACE_DIRECTORY, *LEGACY_WORKSPACE_DIRECTORIES)
-    ]
-    candidates: dict[Path, list[Path]] = {}
-    for workspace_root in workspace_roots:
-        if workspace_root.is_symlink():
-            raise RattishWorkspaceError("The workflow workspace must not be a symbolic link")
-        for directory, child_directories, files in os.walk(workspace_root):
-            child_directories[:] = sorted(
-                child
-                for child in child_directories
-                if child not in DISCOVERY_IGNORED_DIRECTORIES
-                and not child.startswith(".")
-                and not (Path(directory) / child).is_symlink()
-            )
-            rattish_files = sorted(
-                migrate_source(Path(directory, filename)).resolve()
-                for filename in files
-                if filename.lower().endswith((".rattish", ".rad"))
-                and not Path(directory, filename).is_symlink()
-            )
-            if rattish_files:
-                candidates[Path(directory).resolve()] = rattish_files
+    workspace_root = project_root / WORKSPACE_DIRECTORY
+    if workspace_root.is_symlink():
+        raise RattishWorkspaceError("The workflow workspace must not be a symbolic link")
+    candidates: set[Path] = set()
+    if workspace_root.is_dir():
+        for workflow_root in workspace_root.iterdir():
+            if workflow_root.is_symlink() or not workflow_root.is_dir():
+                continue
+            entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
+            if entrypoint.is_file() and not entrypoint.is_symlink():
+                candidates.add(entrypoint)
 
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
     document = _read_registry(registry_root)
-    registered_before = len(document["workflows"])
-    document["workflows"] = [
-        item
-        for item in document["workflows"]
-        if not (
-            Path(item["project_root"]).expanduser().resolve() == project_root
-            and not any(
-                _path_is_within(Path(item["workflow_root"]).expanduser().resolve(), root)
-                for root in workspace_roots
-            )
-        )
-    ]
     existing = [_registered_workflow(item) for item in document["workflows"]]
-    existing_by_root = {workflow.workflow_root.resolve(): workflow for workflow in existing}
+    existing_by_source = {workflow.entrypoint.resolve(): workflow for workflow in existing}
     discovered: list[RegisteredWorkflow] = []
-    changed = len(document["workflows"]) != registered_before
+    changed = False
 
-    for workflow_root, rattish_files in sorted(candidates.items(), key=lambda item: str(item[0])):
-        registered = existing_by_root.get(workflow_root)
+    for entrypoint in sorted(candidates):
+        workflow_root = entrypoint.parent
+        registered = existing_by_source.get(entrypoint)
         if registered is not None:
             discovered.append(registered)
             continue
-        entrypoint = next(
-            (path for path in rattish_files if path.name.lower() == WORKFLOW_ENTRYPOINT),
-            rattish_files[0],
-        )
-        workflow_name = workflow_root.name or entrypoint.stem
+        workflow_name = workflow_root.name
         workflow_id = _allocate_workflow_id(
             _slugify(workflow_name),
             document,
@@ -314,17 +275,13 @@ def discover_registered_workflows(
             created_at=datetime.now(UTC).isoformat(),
         )
         _register(document, registered)
-        existing_by_root[workflow_root] = registered
+        existing_by_source[entrypoint] = registered
         discovered.append(registered)
         changed = True
 
     if changed:
         _write_registry(registry_root, document)
     return tuple(discovered)
-
-
-def _path_is_within(path: Path, directory: Path) -> bool:
-    return path == directory or directory in path.parents
 
 
 def list_registered_workflows(
@@ -362,7 +319,7 @@ def delete_registered_workflow(
     *,
     registry_dir: Path | None = None,
 ) -> RegisteredWorkflow:
-    """Delete one registered workflow workspace and remove its registry entry."""
+    """Delete a managed workspace or standalone source and remove its registration."""
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
     document = _read_registry(registry_root)
     matches = [
@@ -374,13 +331,16 @@ def delete_registered_workflow(
         raise RattishWorkspaceError(f"Registered workflow not found: {workflow_id}")
     index, item = matches[0]
     workflow = _registered_workflow(item)
-    workspace_root = workflow.project_root / WORKSPACE_DIRECTORY
     if not _registered_workflow_is_in_workspace(workflow):
         raise RattishWorkspaceError(
-            f"Refusing to delete workflow outside {workspace_root}: {workflow.workflow_root}"
+            f"Refusing to delete workflow outside its project: {workflow.entrypoint}"
         )
-    if workflow.workflow_root.exists():
-        remove_tree_without_links(workflow.workflow_root, onerror=_remove_readonly_file)
+    if _is_managed_workspace(workflow):
+        if workflow.workflow_root.exists():
+            remove_tree_without_links(workflow.workflow_root, onerror=_remove_readonly_file)
+    else:
+        workflow.entrypoint.unlink(missing_ok=True)
+        _workflow_metadata_path(workflow).unlink(missing_ok=True)
     document["workflows"].pop(index)
     _write_registry(registry_root, document)
     return workflow
@@ -394,7 +354,9 @@ def _remove_readonly_file(function: Any, target_path: str, _error: Any) -> None:
 
 def read_workflow_metadata(workflow: RegisteredWorkflow) -> dict[str, Any]:
     """Read and validate editor metadata for a registered workflow."""
-    path = workflow.workflow_root / WORKFLOW_METADATA
+    path = _workflow_metadata_path(workflow)
+    if not path.exists():
+        return _initial_metadata()
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         Draft202012Validator(_metadata_schema()).validate(document)
@@ -411,7 +373,7 @@ def write_workflow_metadata(workflow: RegisteredWorkflow, document: dict[str, An
         raise RattishWorkspaceError(
             f"Refusing to write invalid workflow metadata: {exc.message}"
         ) from exc
-    _write_json_atomic(workflow.workflow_root / WORKFLOW_METADATA, document)
+    _write_json_atomic(_workflow_metadata_path(workflow), document)
 
 
 def write_workflow_source(workflow: RegisteredWorkflow, source: str) -> None:
@@ -490,7 +452,12 @@ def _read_registry(registry_dir: Path) -> dict[str, Any]:
                     if entrypoint.is_relative_to(source_root):
                         item["workflow_root"] = str(new_root)
                         item["entrypoint"] = str(new_root / entrypoint.relative_to(source_root))
-        item["entrypoint"] = str(migrate_source(Path(item["entrypoint"])))
+        entrypoint = Path(item["entrypoint"])
+        if (
+            Path(item["workflow_root"]).parent == project / WORKSPACE_DIRECTORY
+            and entrypoint == Path(item["workflow_root"]) / "workflow.rad"
+        ):
+            item["entrypoint"] = str(migrate_source(entrypoint))
     if canonical_json_bytes(document) != previous:
         _write_registry(registry_dir, document)
     return cast(dict[str, Any], document)
@@ -560,8 +527,28 @@ def _registered_workflow(item: dict[str, Any]) -> RegisteredWorkflow:
 def _registered_workflow_is_in_workspace(workflow: RegisteredWorkflow) -> bool:
     project_root = workflow.project_root.expanduser().resolve()
     workflow_root = workflow.workflow_root.expanduser().resolve()
-    return any(
-        _path_is_within(workflow_root, project_root / directory)
+    entrypoint = workflow.entrypoint.expanduser().resolve()
+    return (
+        workflow_root.parent == project_root / WORKSPACE_DIRECTORY
+        and entrypoint == workflow_root / WORKFLOW_ENTRYPOINT
+        and not workflow.workflow_root.is_symlink()
+        and not workflow.entrypoint.is_symlink()
+        and not (project_root / WORKSPACE_DIRECTORY).is_symlink()
+    )
+
+
+def _workflow_metadata_path(workflow: RegisteredWorkflow) -> Path:
+    if _is_managed_workspace(workflow):
+        return workflow.workflow_root / WORKFLOW_METADATA
+    return workflow.entrypoint.with_suffix(".metadata.json")
+
+
+def _is_managed_workspace(workflow: RegisteredWorkflow) -> bool:
+    project_root = workflow.project_root.expanduser().resolve()
+    workflow_root = workflow.workflow_root.expanduser().resolve()
+    return workflow.entrypoint.name.lower() == WORKFLOW_ENTRYPOINT and any(
+        workflow_root.is_relative_to(project_root / directory)
+        and workflow_root != project_root / directory
         for directory in (WORKSPACE_DIRECTORY, *LEGACY_WORKSPACE_DIRECTORIES)
     )
 

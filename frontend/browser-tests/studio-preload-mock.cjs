@@ -1,5 +1,13 @@
 /* global process */
 
+// Seed before React mounts: writing this in an active page can race with
+// session persistence and lose the selected project just before reload.
+if (process.env.GOFER_TERMINAL_ONLY === "1") {
+  window.localStorage.setItem("raticode.studioSession.v1", JSON.stringify({
+    projectRoot: "/workspace/current-worktree", view: "code", workflowId: "rattish-editor",
+  }));
+}
+
 const bridgeCalls = [];
 
 function recordBridgeCall(method, payload) {

@@ -24,6 +24,10 @@
       "license": "MIT",
       "version": "2.1.0"
     },
+    "@types/react@19.2.18": {
+      "license": "MIT",
+      "version": "19.2.18"
+    },
     "@types/unist@2.0.11": {
       "license": "MIT",
       "version": "2.0.11"
@@ -83,6 +87,10 @@
     "cookie@1.1.1": {
       "license": "MIT",
       "version": "1.1.1"
+    },
+    "csstype@3.2.3": {
+      "license": "MIT",
+      "version": "3.2.3"
     },
     "debug@4.4.3": {
       "license": "MIT",

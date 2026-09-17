@@ -12,12 +12,14 @@ LEGACY_SOURCE = (
 )
 
 
-def test_discovery_migrates_legacy_source_and_preserves_identity(tmp_path: Path) -> None:
+def test_explicit_migration_allows_discovery_and_preserves_identity(tmp_path: Path) -> None:
     folder = tmp_path / "project" / ".raticode" / "demo"
     folder.mkdir(parents=True)
     source = folder / "workflow.rad"
     source.write_text(LEGACY_SOURCE)
     data = tmp_path / "data"
+    assert discover_registered_workflows(tmp_path / "project", registry_dir=data) == ()
+    migrate_source(source)
     first = discover_registered_workflows(tmp_path / "project", registry_dir=data)[0]
     assert first.entrypoint == source.with_suffix(".rattish")
     assert first.entrypoint.read_text() == LEGACY_SOURCE
@@ -56,6 +58,10 @@ def test_existing_registry_keeps_id_and_creation_time(tmp_path: Path) -> None:
             }
         )
     )
+    renamed_root = project / ".raticode" / "old"
+    renamed_root.parent.mkdir()
+    root.rename(renamed_root)
+    old = renamed_root / "workflow.rad"
     workflow = list_registered_workflows(registry_dir=tmp_path / "data")[0]
     assert workflow.workflow_id == "existing-id"
     assert workflow.created_at == "2026-01-01T00:00:00Z"

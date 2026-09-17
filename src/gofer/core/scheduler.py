@@ -27,12 +27,18 @@ def _run_workflow(workflow_id: str, workflow_path: str, subscriptions: dict[str,
     for warning in wf.resource_warnings(path.parent):
         log.warning("%s", warning)
     from gofer.core.executor import WorkflowExecutor
+    from gofer.subscriptions.acp_providers import AcpSubscription
+    from gofer.subscriptions.antigravity import AntigravitySubscription
     from gofer.subscriptions.claude_code import ClaudeCodeSubscription
+    from gofer.subscriptions.cli_providers import CliSubscription
     from gofer.subscriptions.codex import CodexSubscription
 
     runtime_subscriptions = subscriptions or {
         "claude_code": ClaudeCodeSubscription(),
         "codex": CodexSubscription(),
+        **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
+        "antigravity": AntigravitySubscription(),
+        "grok": AcpSubscription("grok"),
     }
 
     async def _exec() -> None:

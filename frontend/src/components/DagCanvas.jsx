@@ -1022,6 +1022,7 @@ export default function DagCanvas({
   const [providerProfiles, setProviderProfiles] = useState([]);
   const {
     capabilities: providerCapabilities,
+    loading: providerCapabilitiesLoading,
     refresh: refreshProviderCapabilities,
   } = useProviderCapabilities();
 
@@ -3041,6 +3042,7 @@ export default function DagCanvas({
             nodes={workflowNodes}
             providerProfiles={providerProfiles}
             providerCapabilities={providerCapabilities}
+            providerCapabilitiesLoading={providerCapabilitiesLoading}
             workflow={workflow}
             dataDir={dataDir}
             width={inspectorWidth}
@@ -5531,6 +5533,7 @@ function Inspector({
   nodeOutput,
   nodes,
   providerCapabilities = [],
+  providerCapabilitiesLoading = false,
   providerProfiles = [],
   workflow,
   onAddEdge,
@@ -7070,6 +7073,7 @@ function Inspector({
                 <ProviderModelEffortFields
                   allowInheritedModel
                   capabilities={providerCapabilities}
+                  loading={providerCapabilitiesLoading}
                   effort={operation.effort ?? ""}
                   model={operation.model ?? ""}
                   provider={agentConfig?.subscription}
@@ -7113,6 +7117,7 @@ function Inspector({
                 pathBasePath={dataDir}
                 providerProfiles={providerProfiles}
                 providerCapabilities={providerCapabilities}
+                providerCapabilitiesLoading={providerCapabilitiesLoading}
                 onProviderProfilesChange={onProviderProfilesChange}
                 onProviderCapabilitiesRefresh={onProviderCapabilitiesRefresh}
                 onAgentChange={onAgentChange}
@@ -7616,6 +7621,7 @@ function Inspector({
                 <ProviderModelEffortFields
                   allowInheritedModel
                   capabilities={providerCapabilities}
+                  loading={providerCapabilitiesLoading}
                   effort={operation.effort ?? ""}
                   model={operation.model ?? ""}
                   provider={agentConfig?.subscription}
@@ -7672,6 +7678,7 @@ function Inspector({
                   pathBasePath={dataDir}
                   providerProfiles={providerProfiles}
                   providerCapabilities={providerCapabilities}
+                  providerCapabilitiesLoading={providerCapabilitiesLoading}
                   onProviderProfilesChange={onProviderProfilesChange}
                   onProviderCapabilitiesRefresh={onProviderCapabilitiesRefresh}
                   onAgentChange={onAgentChange}
@@ -7978,6 +7985,7 @@ function AgentConfigSection({
   onProviderProfilesChange,
   pathBasePath,
   providerCapabilities = [],
+  providerCapabilitiesLoading = false,
   providerProfiles = [],
 }) {
   if (!agentConfig) return null;
@@ -7992,6 +8000,7 @@ function AgentConfigSection({
         onProviderProfilesChange={onProviderProfilesChange}
         pathBasePath={pathBasePath}
         providerCapabilities={providerCapabilities}
+        providerCapabilitiesLoading={providerCapabilitiesLoading}
         providerProfiles={providerProfiles}
       />
     </InspectorSection>
@@ -8007,6 +8016,7 @@ function AgentConfigFields({
   onProviderProfilesChange,
   pathBasePath,
   providerCapabilities = [],
+  providerCapabilitiesLoading = false,
   providerProfiles = [],
 }) {
   const agentFieldDiagnostics = (...fields) => diagnosticsForField(diagnostics, ...fields);
@@ -8014,6 +8024,7 @@ function AgentConfigFields({
     <>
       <ProviderModelEffortFields
         capabilities={providerCapabilities}
+        loading={providerCapabilitiesLoading}
         effort={agentConfig.effort ?? ""}
         model={agentConfig.model ?? ""}
         provider={agentConfig.subscription}
@@ -8037,6 +8048,7 @@ function AgentConfigFields({
       <ProviderProfileEditor
         agentSubscription={agentConfig.subscription}
         providerCapabilities={providerCapabilities}
+        providerCapabilitiesLoading={providerCapabilitiesLoading}
         providerProfiles={providerProfiles}
         selectedProfileName={agentConfig.profile ?? ""}
         onAgentChange={(patch) => onAgentChange(agentId, patch)}
@@ -8084,6 +8096,7 @@ function AgentConfigFields({
 function ProviderProfileEditor({
   agentSubscription,
   providerCapabilities = [],
+  providerCapabilitiesLoading = false,
   providerProfiles = [],
   selectedProfileName = "",
   onAgentChange,
@@ -8183,6 +8196,7 @@ function ProviderProfileEditor({
           />
           <ProviderModelEffortFields
             capabilities={providerCapabilities}
+            loading={providerCapabilitiesLoading}
             effort={draft.effort}
             model={draft.model}
             provider={draft.subscription}
@@ -8207,14 +8221,15 @@ function ProviderProfileEditor({
             onChange={(value) => setDraft({ ...draft, timeout: value })}
             placeholder="Seconds"
           />
-          {draft.subscription === "claude_code" ? (
+          {["claude_code", "antigravity", "grok"].includes(draft.subscription) ? (
             <SelectField
               label="Permissions"
               value={draft.approval_mode || "default"}
-              options={PROVIDER_PERMISSIONS.claude_code}
+              options={PROVIDER_PERMISSIONS[draft.subscription]}
               onChange={(value) => setDraft({ ...draft, approval_mode: value })}
             />
           ) : null}
+          {draft.approval_mode === "cli-managed" ? <p className="text-xs text-muted">The CLI controls permissions, including configured native tools and MCP servers. Raticode resource switches do not restrict them.</p> : null}
           {draft.subscription === "codex" ? (
             <SelectField
               label="Permissions"

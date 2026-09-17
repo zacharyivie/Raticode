@@ -3,6 +3,85 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
+## 0.3.1 - 2026-09-17
+
+Changes since the `v0.3.0` tag.
+
+### Compatibility
+
+- Removed Gemini CLI support. Select Antigravity (`agy`) and review its model,
+  authentication, executable, and permission settings for existing Gemini CLI
+  workflows, profiles, Rem threads, and swarm members. Gemini models remain
+  available through Antigravity; provider settings are not migrated automatically.
+
+- Workflow discovery now lists only managed workflows at
+  `.raticode/<name>/workflow.rattish`. Move standalone and legacy workflows into
+  this layout and explicitly migrate unregistered `.rad` sources. Existing files
+  are not deleted, but workflows outside the managed layout no longer appear in
+  the project list.
+- Grok defaults to CLI-managed permissions. Strict Raticode tool restrictions
+  remain unsupported for Grok and block sending when selected. Existing explicit
+  thread permission choices are preserved.
+
+### Added
+
+- Added Cursor, GitHub Copilot, OpenCode, Grok, and Antigravity CLI
+  provider adapters and their Rattish provider contracts.
+- Added provider settings, browser sign-in, and model refresh after authentication.
+  Cursor, Copilot, Grok, and Antigravity expose their native model and reasoning
+  effort choices.
+- Added steering for active Rem turns, including attachments, persistent delivery
+  receipts, cancellation, and recovery after interruption. Conversation context
+  survives provider changes.
+- Added thread pinning, manual archiving, and confirmation before deletion.
+- Added swarm Git permission settings for local operations and remote publishing,
+  automatic task retries, lifecycle controls, and progress reporting.
+- Added local file paths and `file://` navigation in the integrated browser, with
+  local links routed through the editor's path authorization.
+
+### Changed
+
+- Removed fixed swarm run and output caps and the fixed terminal session ceiling.
+- Reduced worktree discovery overhead and cleaned up unused worktrees. Backend
+  access registration now happens when selecting a worktree rather than while
+  enumerating every worktree.
+- Isolated Electron development profiles from the installed application's profile.
+- Updated thread headings and spacing, provider loading states, and permission
+  feedback. Failed steering receipts no longer clutter the conversation.
+
+### Fixed
+
+- Default runners now detect Antigravity and Grok using the shared provider
+  executable resolver, including configured paths and nvm installations.
+
+- Ctrl+J creates a new browser tab on every press, including when a browser is
+  already open or has page focus. Ctrl+T consistently creates a terminal in the
+  selected project instead of sometimes creating a browser tab.
+- Fixed terminal creation on first use and while the bottom panel is collapsed.
+  Removed stale workflow context from project chat and kept terminal working
+  directories tied to the selected project.
+- Fixed Grok MCP startup injection and readiness checks, including the ACP
+  `_x.ai/mcp/list` method and session-only transport placeholders.
+- Fixed Cursor compatibility with verified September CLI builds and enabled MCP
+  discovery. Provider health checks and planning now detect nvm-installed CLIs.
+- Fixed Copilot invocation-directory trust and final-answer delivery. Model
+  catalog policy denials are distinguished from authentication failures.
+- Added an owned ACP subprocess transport with bounded lifetime, cancellation-safe
+  teardown, deep-JSON rejection, and draining of buffered updates before final
+  results or terminal errors.
+- Fixed portable steering cancellation races and receipt recovery, and persisted
+  per-thread permission selections across remounts.
+- Protected verified swarm work when dismissing stale deliveries, prevented
+  delivery recovery during active verification, and reused integration retries.
+  Accepted worktrees are cleaned safely and progress history includes only valid
+  objective snapshots.
+- Confined swarm publishing to the intended repository and sanitized the packaged
+  environment used for verification commands.
+- Handled browser navigation failures and views closing during pending operations.
+  Bounded backend startup stderr buffering and logged backend exits.
+- Fixed release-candidate discovery so ready draft releases can be found
+  independently of their tag names. Updated bundled dependency license notices.
+
 ## 0.2.6 - 2026-09-11
 
 ### Branding

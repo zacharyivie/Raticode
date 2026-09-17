@@ -374,7 +374,15 @@ class WorkflowBuilder:
 
                 subscription = questionary.select(
                     "Subscription:",
-                    choices=["claude_code", "codex", "openai_api", "anthropic_api"],
+                    choices=[
+                        "claude_code",
+                        "codex",
+                        "openai_api",
+                        "anthropic_api",
+                        "cursor",
+                        "copilot",
+                        "opencode",
+                    ],
                 ).ask()
                 if subscription is None:
                     return
