@@ -184,6 +184,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     gitRepoAction: (projectRoot, action, value) => invokeDesktop("gofer:git-repo-action", { projectRoot, action, value, grantId: grantForPath(projectRoot) }),
     gitFileAction: (projectRoot, relativePath, action) => invokeDesktop("gofer:git-file-action", { projectRoot, relativePath, action, grantId: grantForPath(projectRoot) }),
     gitSwitchBranch: (projectRoot, branch) => invokeDesktop("gofer:git-switch-branch", { projectRoot, branch, grantId: grantForPath(projectRoot) }),
+    gitBranches: (projectRoot, force = false) => invokeDesktop("gofer:git-branches", { projectRoot, force, grantId: grantForPath(projectRoot) }),
     gitStatus: (projectRoot) =>
       gitStatus(projectRoot),
     gitFileBaseline: (targetPath, group) =>

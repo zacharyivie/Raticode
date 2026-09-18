@@ -471,37 +471,27 @@ async def test_pending_steering_does_not_block_other_agent_launches(manager, tmp
         manager._active.clear()
 
 
-async def test_idle_board_fails_and_requests_one_coordinator_explanation(manager, tmp_path):
+async def test_idle_board_dispatches_coordinator_recovery(manager, tmp_path):
     sid = manager.create(tmp_path, config())["id"]
     manager.start(tmp_path, sid, "Build")
     state = manager._get(tmp_path, sid)
     state["run"]["messages"][0]["deliveries"][0]["state"] = "completed"
-    state["run"]["nextCheckAt"] = 0
-    manager._save(state)
+    manager._recover_idle(state)
     calls = []
 
     async def stream(**kwargs):
         calls.append(kwargs)
-        yield {"type": "final", "message": {"body": "No next assignment was queued."}}
+        manager.control(tmp_path, sid, "pause")
+        yield {"type": "final", "message": {"body": "Reviewing the next assignment."}}
 
     manager._stream = stream
-    loop = asyncio.create_task(manager._loop())
-    try:
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            run = manager.get(tmp_path, sid)["run"]
-            if run.get("cleanup", {}).get("passed"):
-                break
-        assert run["state"] == "failed"
-        assert run["idleDiagnosis"]["body"] == "No next assignment was queued."
-        assert len(calls) == 1
-        assert "Only diagnose" in calls[0]["agent_instructions"]
-        assert calls[0]["workflow"]["remResources"]["shell"] is False
-        assert not manager._runnable
-    finally:
-        manager._closed.set()
-        manager._wake.set()
-        await loop
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    run = manager.get(tmp_path, sid)["run"]
+    assert run["state"] == "paused"
+    assert not run.get("cleanup")
+    assert len(calls) == 1
+    assert "No assignment is running" in calls[0]["messages"][0]["body"]
+
 
 
 def test_delivery_review_retries_only_selected_recipient_and_audits(manager, tmp_path):
@@ -926,7 +916,7 @@ async def test_retry_now_bypasses_backoff_and_runtime_continues(manager, tmp_pat
         assert len(run["attempts"]) == 1
         assert run["attempts"][0]["id"] == attempt_id
         assert run["attempts"][0]["state"] == "succeeded"
-        assert run["agentStates"]["lead"]["state"] == "idle"
+        assert run["agentStates"]["lead"]["state"] == "queued"
         assert "retryAt" not in run["agentStates"]["lead"]
         assert run["messages"][0]["deliveries"][0]["state"] == "completed"
     finally:

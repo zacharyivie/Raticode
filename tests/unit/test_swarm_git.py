@@ -299,7 +299,7 @@ async def test_member_tool_is_bound_to_live_assignment(assignment, tmp_path):
             for event in run["events"]
             if event["kind"] == "git_operation"
         ] == ["stage", "commit"]
-        with pytest.raises(ValueError, match="no longer accepts"):
+        with pytest.raises(ValueError, match="active assignment"):
             manager.tool("test", {"action": "git", "operation": "stage", "paths": ["."]})
     finally:
         manager.close()

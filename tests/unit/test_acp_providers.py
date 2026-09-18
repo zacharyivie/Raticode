@@ -281,3 +281,52 @@ async def test_grok_process_receives_temporary_plugin(protocol, tmp_path, monkey
     assert events[-1]["type"] == "final"
     assert len(paths) == 1
     assert not paths[0].exists()
+
+
+@pytest.mark.parametrize("identity", ["granted", "foreign-session", "unknown-server", "native"])
+async def test_grok_stream_wires_session_scoped_mcp_permissions(protocol, tmp_path, identity):
+    from gofer.core.prompt_envelope import AgentResources
+
+    script = tmp_path / "provider.py"
+    source = script.read_text()
+    source = source.replace(
+        "elif method=='session/new': result={'sessionId':'fresh'}",
+        "elif method=='session/new':\n"
+        "  plugin=request['params']['_meta']['pluginDirs'][0]\n"
+        "  alias=next(iter(json.load(open(plugin+'/.mcp.json'))['mcpServers']))\n"
+        "  result={'sessionId':'fresh'}",
+    )
+    source = source.replace(
+        "elif method=='session/prompt':\n",
+        "elif method=='session/prompt':\n"
+        f"  identity={identity!r}\n"
+        "  params={'sessionId':'foreign' if identity=='foreign-session' else 'fresh',\n"
+        "   'toolCall':{'_meta':{'x.ai/tool':{'version':1,\n"
+        "    'namespace':'native' if identity=='native' else 'mcp',\n"
+        "    'name':('unknown' if identity=='unknown-server' else alias)+'__read_note'}}},\n"
+        "   'options':[{'kind':'allow_once','optionId':'one-time'}]}\n"
+        "  print(json.dumps({'jsonrpc':'2.0','id':'permission-1',\n"
+        "   'method':'session/request_permission','params':params}),flush=True)\n"
+        "  answer=json.loads(sys.stdin.readline())\n"
+        "  log.write(json.dumps(answer)+'\\n'); log.flush()\n",
+    )
+    script.write_text(source)
+    resources = AgentResources.model_validate(
+        {"mcpServers": [{"name": "notes", "type": "stdio", "command": "fake-notes"}]}
+    )
+    events = [
+        event
+        async for event in stream_acp(
+            "grok", "Read the note", cwd=tmp_path,
+            permission_mode="cli-managed", resources=resources,
+        )
+    ]
+    assert events[-1]["type"] == "final"
+    answer = next(
+        json.loads(line) for line in protocol.read_text().splitlines()
+        if json.loads(line).get("id") == "permission-1"
+    )
+    assert answer["result"] == {
+        "outcome": {"outcome": "selected", "optionId": "one-time"}
+        if identity == "granted" else {"outcome": "cancelled"}
+    }

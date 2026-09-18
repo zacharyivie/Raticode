@@ -1,4 +1,4 @@
-/* global DataTransfer, File, structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
+/* global requestAnimationFrame, DataTransfer, File, structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -1188,7 +1188,50 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find((button) => button.textContent.includes("Release team")).click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Message to swarm']"))));
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent.includes("Builder")), true);
-  assert.match(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent), /Retry 2 scheduled for.*Waiting for swarm resume/);
+  assert.match(await evaluate(() => document.querySelector("[aria-label='Live overview']").textContent), /Needs attention/);
+  assert.equal(await evaluate(() => document.querySelector(".swarm-board-panel").open), false);
+  assert.equal(await evaluate(() => document.querySelector(".swarm-diagnostics").open), false);
+  const dashboardFixture = structuredClone(swarmFixture.run);
+  async function captureDashboard(name, width = 0) {
+    await evaluate(width => {
+      const pane = document.querySelector(".swarm-workspace");
+      pane.style.flex = width ? "none" : "";
+      pane.style.width = width ? `${width}px` : "";
+      document.querySelector(".swarm-scroll").scrollTop = 0;
+    }, width);
+    await wait(120);
+    const rect = await evaluate(() => {
+      const bounds = document.querySelector(".swarm-workspace").getBoundingClientRect();
+      return { x: Math.round(bounds.x), y: Math.round(bounds.y), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+    });
+    fs.writeFileSync(`/tmp/raticode-dashboard-${name}.png`, (await windowRef.webContents.capturePage(rect)).toPNG());
+  }
+  await captureDashboard("attention");
+  await captureDashboard("attention-narrow", 320);
+  swarmFixture.run.state = "running";
+  swarmFixture.run.agentStates = { lead: { state: "idle" }, builder: { state: "working", milestoneId: "m3" } };
+  swarmFixture.run.attempts = [];
+  swarmFixture.run.objectives[0].milestones[2].status = "working";
+  await evaluate(() => window.dispatchEvent(new Event("gofer:swarms-changed")));
+  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Live overview'] h2").textContent === "Work in progress"));
+  await captureDashboard("running");
+  await captureDashboard("running-narrow", 320);
+  swarmFixture.run.state = "completed";
+  swarmFixture.run.agentStates.builder.state = "idle";
+  swarmFixture.run.objectives[0].milestones[2].status = "accepted";
+  swarmFixture.run.messages.push({ id: "final-summary", senderId: "lead", recipientIds: [], deliveries: [], body: "Release review passed. All milestones are accepted. Next: review the combined changes and publish when ready.", createdAt: "2026-09-17T12:00:00Z" });
+  await evaluate(() => window.dispatchEvent(new Event("gofer:swarms-changed")));
+  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Live overview'] h2").textContent.includes("All milestones resolved")));
+  await captureDashboard("completed");
+  await captureDashboard("completed-narrow", 320);
+  swarmFixture.run = dashboardFixture;
+  await evaluate(() => {
+    const pane = document.querySelector(".swarm-workspace"); pane.style.flex = ""; pane.style.width = "";
+    window.dispatchEvent(new Event("gofer:swarms-changed"));
+  });
+  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Live overview'] h2").textContent === "Needs attention"));
+
+  await evaluate(() => { document.querySelector(".swarm-board-panel").open = true; document.querySelector(".swarm-diagnostics").open = true; });
   assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Swarm sections']"))), false, "Dashboard replaces section tabs");
   const historyRows = await evaluate(() => [...document.querySelectorAll(".swarm-workspace ol li")].map(item => item.textContent));
   assert.ok(historyRows.some(text => text.includes("delivery resolved") && !text.includes("Progress")), "Delivery audit records must render without interpreting their objects as objectives");
@@ -1226,6 +1269,7 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find((button) => button.textContent.includes("Release team")).click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Message to swarm']"))));
 
+  await evaluate(() => { document.querySelector(".swarm-board-panel").open = true; });
   await wait(150);
   fs.writeFileSync("/tmp/raticode-swarm-active.png", (await windowRef.webContents.capturePage()).toPNG());
   await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Retry message").click());
@@ -1275,12 +1319,9 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Send message").click());
   await waitFor(() => swarmMutations.some((item) => item.path.endsWith("/messages")));
   assert.equal(swarmMutations.at(-1).body.body, "Please prioritize review.");
-  assert.equal(await evaluate(() => document.querySelector("[aria-label='Team status']").textContent.includes("Reviewing the release changes")), true);
-  assert.equal(await evaluate(() => {
-    const digest = document.querySelector("[aria-label='Team status']");
-    const boardHeading = document.querySelector(".swarm-board-panel > .swarm-section-heading");
-    return Boolean(digest.compareDocumentPosition(boardHeading) & window.Node.DOCUMENT_POSITION_FOLLOWING);
-  }), true, "Coordinator digest appears above the message board");
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Team status']"))), false, "Roster replaces duplicate team digest");
+  await evaluate(() => { document.querySelector("[aria-label='Lead agent'] .swarm-agent-details").open = true; });
+  await waitFor(() => evaluate(() => document.querySelector("[aria-label='Lead agent']").textContent.includes("Reviewing the release changes")));
   await evaluate(() => document.querySelector("button[aria-label='Swarm settings']").click());
   assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").disabled), true, "An active run locks team edits");
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Team details'] input").disabled), true);
@@ -1331,7 +1372,7 @@ async function exerciseSwarms() {
   windowRef.setSize(1440, 900);
   await evaluate(() => document.documentElement.classList.add("dark"));
   await evaluate(() => document.querySelector(".swarm-setup-run-options summary").click());
-  for (const [label, value] of [["Concurrent agents", "2"], ["Check interval (seconds)", "90"], ["Repair attempts per milestone", "3"], ["Turns without progress before replanning", "8"]]) {
+  for (const [label, value] of [["Concurrent agents", "2"], ["Check interval (seconds)", "90"]]) {
     await evaluate((label) => {
       const input = document.querySelector(`[aria-label="${label}"]`);
       input.focus();
@@ -1339,10 +1380,12 @@ async function exerciseSwarms() {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }, label);
     assert.equal(await evaluate(label => document.querySelector(`[aria-label="${label}"]`).value, label), "", "Numeric drafts can be cleared");
-    await evaluate(({ label, value }) => {
+    await evaluate(async ({ label, value }) => {
       const input = document.querySelector(`[aria-label="${label}"]`);
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
       input.dispatchEvent(new Event("input", { bubbles: true }));
+      // Let React commit the draft before the separate synthetic blur event.
+      await new Promise(resolve => requestAnimationFrame(resolve));
     }, { label, value });
     await evaluate(label => document.querySelector(`[aria-label="${label}"]`).blur(), label);
     assert.equal(await evaluate(label => document.querySelector(`[aria-label="${label}"]`).value, label), value);
@@ -1377,8 +1420,8 @@ async function exerciseSwarms() {
   assert.deepEqual(swarmMutations.at(-1).body.gitPermissions, { local: true, remote: true });
   assert.equal(swarmMutations.at(-1).body.maxRunSeconds, undefined);
   assert.equal(swarmMutations.at(-1).body.maxTurns, undefined);
-  assert.equal(swarmMutations.at(-1).body.maxRepairAttempts, 3);
-  assert.equal(swarmMutations.at(-1).body.stallTurnLimit, 8);
+  assert.equal(swarmMutations.at(-1).body.maxRepairAttempts, undefined);
+  assert.equal(swarmMutations.at(-1).body.stallTurnLimit, undefined);
   assert.equal(swarmMutations.at(-1).body.wakeIntervalSeconds, 90);
   assert.equal(swarmMutations.at(-1).body.agents.find(agent => agent.id === "builder").allowSteering, true);
   await waitFor(() => evaluate(() => !document.querySelector(".swarm-setup")));
@@ -1436,7 +1479,7 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Show full task").click());
   assert.equal(await evaluate(() => document.querySelector(".swarm-run-heading h1").classList.contains("swarm-clamped-text")), false);
   await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Show less task").click());
-  assert.equal(await evaluate(() => document.querySelector("[aria-label='Lead agent'] .swarm-agent-role").classList.contains("swarm-clamped-text")), true);
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Lead agent'] .swarm-agent-role"))), false, "Role details stay out of compact rows");
   await evaluate(() => { document.querySelector(".swarm-new-run").open = true; });
   await evaluate(() => {
     const input = document.querySelector("#swarm-task");
@@ -1474,8 +1517,8 @@ async function exerciseSwarms() {
   assert.equal(await evaluate(() => {
     const board = document.querySelector(".swarm-board-panel").getBoundingClientRect();
     const roster = document.querySelector(".swarm-roster").getBoundingClientRect();
-    return board.top < roster.top;
-  }), true, "Narrow layout places the board before the roster");
+    return roster.top < board.top;
+  }), true, "Narrow layout keeps agents ahead of message history");
   windowRef.setSize(1800, 1000);
   await evaluate(() => { document.documentElement.classList.add("dark"); document.querySelector(".swarm-scroll").scrollTop = 0; });
   await wait(150);

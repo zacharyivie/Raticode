@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -111,6 +111,7 @@ from gofer.ui.chat import (
     stream_workflow_chat,
     undo_chat_changes,
 )
+from gofer.ui.chat_jobs import ChatJobs
 from gofer.ui.chat_media import (
     CHAT_ATTACHMENT_MAX_TOTAL_BYTES,
     CHAT_AUDIO_CHUNK_MAX_BYTES,
@@ -280,6 +281,7 @@ class GoferUiServer(ThreadingHTTPServer):
         super().__init__(server_address, GoferUiRequestHandler)
         self.data_dir = data_dir
         self.chat_steering = ChatSteering(data_dir)
+        self.chat_jobs = ChatJobs(data_dir, UI_MAX_EXPENSIVE_REQUESTS)
         self.provider_auth = ProviderAuthSessions()
         self.resource_limits = resource_limits or bundle_resource_limits_from_env()
         self.api_token = api_token or os.environ.get("GOFER_UI_API_TOKEN") or _new_ui_api_token()
@@ -323,6 +325,9 @@ class GoferUiServer(ThreadingHTTPServer):
         auth = getattr(self, "provider_auth", None)
         if auth is not None:
             auth.close()
+        jobs = getattr(self, "chat_jobs", None)
+        if jobs is not None:
+            jobs.close()
         steering = getattr(self, "chat_steering", None)
         if steering is not None:
             steering.close()
@@ -736,6 +741,20 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(workflow_template_payload(template_name))
             except WorkflowCreateError as exc:
                 self._send_json({"error": str(exc)}, status=404)
+            return
+
+        if parsed.path == "/api/chat/events":
+            query = parse_qs(parsed.query)
+            try:
+                self._follow_chat_job(
+                    query.get("conversationId", [""])[0],
+                    query.get("turnId", [""])[0],
+                    int(query.get("after", ["0"])[0]),
+                )
+            except FileNotFoundError:
+                self._send_json({"error": "Rem turn was not found"}, status=404)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
             return
 
         if parsed.path == "/api/chat/providers":
@@ -1500,16 +1519,27 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 self._validate_second_brain(body)
-                with self._rem_swarm_session(body) as (chat_body, swarm_url):
-                    self._send_stream_headers()
-                    self._run_async(
-                        self._stream_chat_response(
-                            body=chat_body,
-                            data_dir=self._request_data_dir(query),
-                            trusted_swarm_url=swarm_url,
+                data_dir = self._request_data_dir(query)
+                if "conversationId" not in body and "turnId" not in body:
+                    # Legacy clients retain their request-scoped behavior.
+                    with self._rem_swarm_session(body) as (chat_body, swarm_url):
+                        self._send_stream_headers()
+                        self._run_async(self._stream_chat_response(chat_body, data_dir, swarm_url))
+                    return
+
+                def run(emit: Callable[[dict[str, Any]], None]) -> None:
+                    # Resource grants and swarm sessions live as long as the job,
+                    # independently of its HTTP subscribers.
+                    with self._rem_swarm_session(body) as (chat_body, swarm_url):
+                        asyncio.run(
+                            self._stream_chat_response(chat_body, data_dir, swarm_url, emit=emit)
                         )
-                    )
-            except (json.JSONDecodeError, WorkflowBundleError, ValueError) as exc:
+
+                conversation_id = body.get("conversationId", "")
+                turn_id = body.get("turnId", "")
+                self.server.chat_jobs.start(conversation_id, turn_id, run)
+                self._follow_chat_job(conversation_id, turn_id)
+            except (json.JSONDecodeError, WorkflowBundleError, ValueError, FileExistsError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
             return
 
@@ -2117,9 +2147,27 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 return None
             raise
 
+    def _follow_chat_job(self, conversation_id: str, turn_id: str, after: int = 0) -> None:
+        events = self.server.chat_jobs.events(conversation_id, turn_id, after)
+        try:
+            self._send_stream_headers()
+            for event in events:
+                self._write_stream_event(event)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            # Disconnecting a subscriber never stops provider work.
+            pass
+        finally:
+            events.close()
+
     async def _stream_chat_response(
-        self, body: dict[str, Any], data_dir: Path, trusted_swarm_url: str | None = None
+        self,
+        body: dict[str, Any],
+        data_dir: Path,
+        trusted_swarm_url: str | None = None,
+        *,
+        emit: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
+        write_event = emit or self._write_stream_event
         cancel_event = threading.Event()
         turn: ChatTurn | None = None
         source = None
@@ -2147,15 +2195,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             else:
                 source = stream_workflow_chat(cancel_event=cancel_event, **kwargs)
             async for event in source:
-                self._write_stream_event(event)
+                write_event(event)
         except (BrokenPipeError, ConnectionResetError):
             cancel_event.set()
         except ChatProviderError as exc:
-            self._write_stream_event({"type": "error", "error": str(exc)})
+            write_event({"type": "error", "error": str(exc)})
         except Exception as exc:  # noqa: BLE001
             cancel_event.set()
             log.exception("Unhandled Rem stream error")
-            self._write_stream_event(
+            write_event(
                 {
                     "type": "error",
                     "error": f"Rem failed: {exc}",

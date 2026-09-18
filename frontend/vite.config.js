@@ -8,6 +8,14 @@ export default defineConfig({
   base: "./",
   build: {
     chunkSizeWarningLimit: 500,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(id)) return "react";
+          if (id.includes("node_modules") && /(?:react-markdown|remark-|rehype-|micromark|mdast-|hast-|unist-|unified)/.test(id)) return "markdown";
+        },
+      },
+    },
   },
   plugins: [react(), bundleBudget(), {
     name: "development-studio-csp",

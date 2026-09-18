@@ -135,3 +135,15 @@ test("a deleted main folder is not retained by cached worktree metadata", async 
     getPathInfo: async root => ({ isDirectory: root === "/feature" }),
   }, mainRoot), { mainProjectRoot: "/feature", selectedProjectRoot: "/feature" });
 });
+
+test("equivalent Windows selections reuse remembered project metadata", async () => {
+  const validator = createRecentProjectValidator();
+  validator.remember("C:\\Repo", "C:\\Repo");
+  let gitCalls = 0;
+  const result = await validator.validate("c:/repo/", "c:/repo", {
+    getPathInfo: async () => ({ isDirectory: true }),
+    gitWorktrees: async () => { gitCalls++; return {}; },
+  }, mainRoot);
+  assert.equal(gitCalls, 0);
+  assert.equal(result.mainProjectRoot, "C:\\Repo");
+});

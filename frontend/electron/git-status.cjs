@@ -34,11 +34,14 @@ async function readSlowMetadata(projectRoot, branch, runner, options) {
       && existing.branch === branch && now - existing.at < METADATA_MAX_AGE_MS) return existing.pending;
   const generation = gitReadGeneration;
   const pending = (async () => {
-    let branches = [], remotes = [], stashCount = 0, branchesUnavailable = false;
-    try { branches = String(await runner(["-C", projectRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/"])).trim().split("\n").filter(Boolean); } catch { branchesUnavailable = true; }
-    try { remotes = String(await runner(["-C", projectRoot, "remote"])).trim().split("\n").filter(Boolean); } catch { /* Optional remote metadata. */ }
-    try { stashCount = String(await runner(["-C", projectRoot, "stash", "list", "--format=%gd"])).trim().split("\n").filter(Boolean).length; } catch { /* Unborn repository. */ }
-    return { branches, remotes, stashCount, ...(branchesUnavailable ? { branchesUnavailable } : {}) };
+    const [refs, remoteNames, stashes] = await Promise.allSettled([
+      runner(["-C", projectRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]),
+      runner(["-C", projectRoot, "remote"]),
+      runner(["-C", projectRoot, "stash", "list", "--format=%gd"]),
+    ]);
+    const lines = result => result.status === "fulfilled" ? String(result.value).trim().split("\n").filter(Boolean) : [];
+    return { branches: lines(refs), remotes: lines(remoteNames), stashCount: lines(stashes).length,
+      ...(refs.status === "rejected" ? { branchesUnavailable: true } : {}) };
   })();
   cache.delete(key);
   cache.set(key, { branch, generation, at: now, pending });
@@ -57,8 +60,10 @@ async function repositoryLocation(projectRoot, runner) {
       const revision = `${info.dev}:${info.ino}:${info.isFile() ? `${info.mtimeMs}:${info.size}` : "directory"}`;
       const existing = repositoryLocations.get(marker);
       if (existing?.revision === revision) return existing;
-      const gitDir = String(await runner(["-C", projectRoot, "rev-parse", "--absolute-git-dir"])).trim();
-      const repositoryRoot = String(await runner(["-C", projectRoot, "rev-parse", "--show-toplevel"])).trim();
+      const [gitDir, repositoryRoot] = (await Promise.all([
+        runner(["-C", projectRoot, "rev-parse", "--absolute-git-dir"]),
+        runner(["-C", projectRoot, "rev-parse", "--show-toplevel"]),
+      ])).map(value => String(value).trim());
       const location = { root: repositoryRoot, gitDir, revision };
       repositoryLocations.set(marker, location);
       if (repositoryLocations.size > 64) repositoryLocations.delete(repositoryLocations.keys().next().value);
@@ -70,6 +75,30 @@ async function repositoryLocation(projectRoot, runner) {
     if (parent === root) throw new Error("Not a Git repository");
     root = parent;
   }
+}
+
+const branchCaches = new WeakMap();
+async function readGitBranches(projectRoot, options = {}) {
+  const runner = options.runner || runGit;
+  const cache = runnerMap(branchCaches, runner);
+  const key = path.resolve(projectRoot);
+  const now = (options.now || Date.now)();
+  const existing = cache.get(key);
+  if (existing && existing.generation === gitReadGeneration && (!existing.settled || (!options.force && now - existing.at < METADATA_MAX_AGE_MS))) return existing.pending;
+  const pending = (async () => {
+    const { root } = await repositoryLocation(projectRoot, runner);
+    const [refs, current] = await Promise.all([
+      runner(["-C", root, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]),
+      runner(["-C", root, "branch", "--show-current"]),
+    ]);
+    return { active: true, root, branch: String(current).trim(), branches: String(refs).trim().split("\n").filter(Boolean) };
+  })();
+  const record = { pending, at: now, generation: gitReadGeneration };
+  cache.set(key, record);
+  if (cache.size > 64) cache.delete(cache.keys().next().value);
+  try { return await pending; }
+  catch (error) { if (cache.get(key) === record) cache.delete(key); throw error; }
+  finally { record.settled = true; }
 }
 
 function readPorcelain(projectRoot, runner, includeBranch = false) {
@@ -520,24 +549,27 @@ async function readGitFileBaseline(targetPath, options = {}) {
       try { const output = await runner(["-C", root, "show", spec], { encoding: "buffer" }); return Buffer.isBuffer(output) ? output : Buffer.from(String(output)); }
       catch { return Buffer.alloc(0); }
     };
-    const originalBytes = await readVersion(original);
-    const incomingBytes = entry?.status === "!" ? await readVersion(`:3:${relativePath}`) : null;
-    const content = originalBytes.toString("utf8");
     const deleted = !fs.existsSync(targetPath);
-    let modifiedBytes = Buffer.alloc(0);
-    if (group === "staged") {
-      modifiedBytes = await readVersion(`:${relativePath}`);
-    } else if (!deleted) {
-      const stat = await fs.promises.stat(targetPath);
-      if (stat.size > GIT_OUTPUT_LIMIT) throw new Error("File is too large to compare.");
-      modifiedBytes = await fs.promises.readFile(targetPath);
-    }
+    // These reads share the same baseline revision, but none needs another's output.
+    const [originalBytes, incomingBytes, modifiedBytes, diff] = await Promise.all([
+      readVersion(original),
+      entry?.status === "!" ? readVersion(`:3:${relativePath}`) : null,
+      (async () => {
+        if (group === "staged") return readVersion(`:${relativePath}`);
+        if (deleted) return Buffer.alloc(0);
+        const stat = await fs.promises.stat(targetPath);
+        if (stat.size > GIT_OUTPUT_LIMIT) throw new Error("File is too large to compare.");
+        return fs.promises.readFile(targetPath);
+      })(),
+      (async () => {
+        try {
+          return String(await git("diff", ...(group === "staged" ? ["--cached"] : group === "unstaged" ? [] : ["HEAD"]), "--no-color", "--no-ext-diff", "--unified=0", "--", `:(literal)${relativePath}`));
+        } catch { return ""; /* New repository. */ }
+      })(),
+    ]);
+    const content = originalBytes.toString("utf8");
     const modifiedContent = modifiedBytes.toString("utf8");
     const binary = originalBytes.includes(0) || modifiedBytes.includes(0) || /\.(avif|png|jpe?g|gif|webp|ico|bmp|pdf)$/i.test(relativePath);
-    let diff = "";
-    try {
-      diff = String(await git("diff", ...(group === "staged" ? ["--cached"] : group === "unstaged" ? [] : ["HEAD"]), "--no-color", "--no-ext-diff", "--unified=0", "--", `:(literal)${relativePath}`));
-    } catch { /* New repository. */ }
     const result = { ...(entry?.status === "!" ? { conflict: true, incomingContent: incomingBytes.toString("utf8") } : {}), changed: Boolean(entry && (group ? entry[group] : true)) || !originalBytes.equals(modifiedBytes), content: binary ? "" : content, modifiedContent: binary ? "" : modifiedContent, deleted, hunks: parseGitDiffHunks(diff), tracked: Boolean(entry) || content.length > 0,
       ...(binary ? { binary: true, originalBytes: originalBytes.length, modifiedBytes: modifiedBytes.length,
         originalData: originalBytes.toString("base64"), modifiedData: modifiedBytes.toString("base64") } : {}) };
@@ -571,6 +603,7 @@ module.exports = {
   parseGitWorktrees,
   readGitHistory,
   readGitStatus,
+  readGitBranches,
   readGitWorktrees,
   addGitWorktree,
   removeGitWorktree,

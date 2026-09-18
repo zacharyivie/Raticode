@@ -1974,6 +1974,83 @@ test("Code file explorer reveals and selects the active tab through nested folde
   await dom.unmount();
 });
 
+test("file reveal overlaps folder reads with a four-request limit and stops queued work on selection change", async () => {
+  const root = "/workspace/gofer-flow";
+  const started = [];
+  const gates = [];
+  let active = 0, peak = 0;
+  function Harness() {
+    const [file, setFile] = React.useState(`${root}/README.md`);
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { onClick: () => setFile(`${root}/a/b/c/d/e/f/file.js`) }, "Reveal deep file"),
+      React.createElement("button", { onClick: () => setFile(`${root}/README.md`) }, "Select root file"),
+      React.createElement(codeFileExplorerModule.default, {
+        activeFilePath: file, workflow: { ...workflowFixture(), projectRoot: root }, onOpenFile() {},
+      }));
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { desktop: { workspace: {
+    async trustProjectRoot() {},
+    async gitStatus() { return { active: false, entries: [] }; },
+    async listDirectory({ currentPath }) {
+      if (currentPath !== root) {
+        started.push(currentPath);
+        active += 1; peak = Math.max(peak, active);
+        await new Promise(resolve => gates.push(resolve));
+        active -= 1;
+      }
+      return { entries: [] };
+    },
+  } } });
+  try {
+    await dom.click(dom.byText("Reveal deep file"));
+    await dom.flush();
+    assert.equal(started.length, 4);
+    assert.equal(peak, 4);
+    await dom.click(dom.byText("Select root file"));
+    await React.act(async () => { gates.forEach(resolve => resolve()); });
+    await dom.flush();
+    assert.equal(started.length, 4, "cancelled reveal must not enqueue its remaining folders");
+  } finally {
+    await React.act(async () => { gates.forEach(resolve => resolve()); });
+    await dom.unmount();
+  }
+});
+
+test("run monitoring overlaps independent log reads and drains failed pairs before scheduling more", async () => {
+  const { useWorkflowRunRegistry } = await viteServer.ssrLoadModule("/src/lib/useWorkflowRunRegistry.js");
+  const workflows = Array.from({ length: 5 }, (_, index) => ({ id: `parallel-${index}`, name: `Workflow ${index}` }));
+  const pending = [];
+  let active = 0, peak = 0;
+  const fetchMock = async url => {
+    const parsed = new URL(url, "http://localhost");
+    if (parsed.pathname.endsWith("/workflows")) return { ok: true, json: async () => ({ workflows }) };
+    if (parsed.pathname.endsWith("/queue")) return { ok: true, json: async () => ({ runs: [] }) };
+    active += 1; peak = Math.max(peak, active);
+    return new Promise((resolve, reject) => pending.push({ url: String(url), finish(fail = false) {
+      active -= 1;
+      if (fail) reject(new Error("log unavailable"));
+      else resolve({ ok: true, json: async () => ({ runs: [] }) });
+    } }));
+  };
+  function Harness() { useWorkflowRunRegistry(workflows); return null; }
+  const dom = await mountReact(React.createElement(Harness), fetchMock);
+  try {
+    await dom.flush();
+    assert.equal(pending.length, 8);
+    assert.equal(pending.filter(item => item.url.includes("status=running")).length, 4);
+    await React.act(async () => { pending[0].finish(true); });
+    await dom.flush();
+    assert.equal(pending.length, 8, "a rejected read cannot free its worker while its sibling is pending");
+    await React.act(async () => { pending[1].finish(); });
+    await dom.flush();
+    assert.equal(pending.length, 10);
+    assert.equal(peak, 8);
+  } finally {
+    await React.act(async () => { pending.slice(2).forEach(item => item.finish()); });
+    await dom.unmount();
+  }
+});
+
 test("Code file explorer renders live Git file states and omits deleted files", async () => {
   const workflow = {
     ...workflowFixture({ id: "review-pr", name: "Review PR" }),
@@ -5160,6 +5237,8 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   const shellDisclosure = dom.ancestor(dom.byText("Running bash commands"), "BUTTON");
   assert.equal(shellDisclosure.getAttribute("aria-expanded"), "false");
   assert.doesNotMatch(textOf(thoughtGroup), /tests passed/);
+  assert.doesNotMatch(textOf(thoughtGroup), /pwd && npm test/);
+  assert.doesNotMatch(textOf(thoughtGroup), /\[workflow\]/);
   await dom.click(shellDisclosure);
   assert.equal(shellDisclosure.getAttribute("aria-expanded"), "true");
   assert.match(textOf(thoughtGroup), /\/usr\/bin\/bash -lc "pwd && npm test"/);
@@ -5191,6 +5270,12 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   assert.equal(editedFileLink.tagName, "BUTTON");
   assert.equal(editedFileLink.style.direction, "rtl");
   assert.equal(editedFileLink.getAttribute("title"), ".raticode/demo/workflow.rattish");
+  await dom.click(dom.ancestor(dom.byText("Hide thoughts"), "BUTTON"));
+  assert.doesNotMatch(dom.text(), /Running bash commands|Inspecting graph/);
+  await dom.change(dom.first("textarea"), "Draft while thoughts are hidden");
+  assert.equal(dom.first("textarea").value, "Draft while thoughts are hidden");
+  await dom.click(dom.ancestor(dom.byText("Show thoughts"), "BUTTON"));
+  assert.match(dom.text(), /Running bash commands/);
   assert.match(dom.text(), /Looks ready/);
   assert.equal(
     allElements(dom.container).some(
@@ -5264,6 +5349,48 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   );
 
   await dom.unmount();
+});
+
+test("ACP text deltas update one thought, preserve whitespace, and remove duplicate final output", async () => {
+  const fragments = ["A ", "son", "net", " ", "or\n", "limerick."];
+  const body = fragments.join("");
+  const controlled = controlledStreamResponse([
+    ...fragments.map(text => JSON.stringify({ type: "thought", text, deltaStreamId: "acp-turn-1" }) + "\n"),
+    JSON.stringify({ type: "final", message: { body } }) + "\n",
+  ]);
+  let threadId;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+    jsonResponse("/api/provider/capabilities", {
+      providers: [{ id: "grok", displayName: "Grok", available: true, models: [] }],
+    }),
+    (url, options) => {
+      if (url !== "/api/chat/stream") return null;
+      threadId = JSON.parse(options.body).conversationId;
+      return controlled.response(url);
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Write a poem");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    for (let index = 0; index < fragments.length; index += 1) {
+      controlled.releaseNext();
+      await dom.flush();
+      const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+      const thoughts = saved.filter(message => message.kind === "thought");
+      assert.equal(thoughts.length, 1);
+      assert.equal(thoughts[0].body, fragments.slice(0, index + 1).join(""));
+    }
+    assert.match(dom.text(), /sonnet/);
+    controlled.releaseNext();
+    await dom.flush();
+    const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+    assert.equal(saved.filter(message => message.kind === "thought").length, 0);
+    assert.equal(saved.filter(message => message.kind === "final" && message.body === body).length, 1);
+  } finally { await dom.unmount(); }
 });
 
 test("assistant threads keep streaming after navigation and report running and completed state", async () => {
@@ -5758,15 +5885,17 @@ test("assistant activity remains independent across concurrent threads", async (
   await dom.unmount();
 });
 
-test("assistant errors use one assertive live region and clear on the next request", async () => {
+test("assistant errors persist across retries and reloads but stay out of model context", async () => {
   let chatRequestCount = 0;
+  const requests = [];
   const fetchMock = createFetchMock([
     jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
     jsonResponse("/api/provider/capabilities", {
       providers: [{ id: "codex", displayName: "Codex", available: true, models: [] }],
     }),
-    (url) => {
+    (url, options) => {
       if (url !== "/api/chat/stream") return null;
+      requests.push(JSON.parse(options.body));
       chatRequestCount += 1;
       return streamResponse(
         chatRequestCount === 1
@@ -5810,7 +5939,7 @@ test("assistant errors use one assertive live region and clear on the next reque
       role: "alert",
       text: "Assistant unavailable",
     }).length,
-    0,
+    1,
   );
   assert.equal(
     matchingLiveRegions(dom.container, {
@@ -5821,7 +5950,25 @@ test("assistant errors use one assertive live region and clear on the next reque
     1,
   );
 
+  assert.ok(requests[1].messages.some(message => message.body === "First request"));
+  assert.ok(requests[1].messages.every(message => !message.body.includes("Assistant unavailable")));
+  const threadId = requests[0].conversationId;
+  const keys = ["gofer-flow-chat-threads", `gofer-flow-chat-thread-meta:${threadId}`, appModule.chatStorageKeyFor(threadId)];
+  const storage = Object.fromEntries(keys.map(key => [key, window.localStorage.getItem(key)]));
+  const saved = JSON.parse(storage[appModule.chatStorageKeyFor(threadId)]);
+  assert.equal(saved.filter(message => message.kind === "error").length, 1);
   await dom.unmount();
+  const reopened = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock, { storage });
+  try {
+    await reopened.flush();
+    await reopened.click(allElements(reopened.container).find(element => element.tagName === "BUTTON" && textOf(element).startsWith("First request")));
+    await reopened.flush();
+    assert.match(reopened.text(), /Assistant unavailable/);
+    await reopened.change(reopened.first("textarea"), "After reopening");
+    await reopened.click(reopened.byTitle("Send message"));
+    await reopened.flush();
+    assert.ok(requests[2].messages.every(message => !message.body.includes("Assistant unavailable")));
+  } finally { await reopened.unmount(); }
 });
 
 test("App shows workflow health diagnostics before running", async () => {
@@ -9072,6 +9219,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "createFolder",
     "deletePath",
     "getPathInfo",
+    "gitBranches",
     "gitFileAction",
     "gitFileBaseline",
     "gitHistory",
@@ -11856,6 +12004,7 @@ test("Electron folder registration reports failures without leaking credentials 
   let response;
   const sandbox = {
     getIpcSecurity: () => ({ isUserGrant: () => false }),
+    backendReady: Promise.resolve(),
     activeApiBaseUrl: "http://127.0.0.1:1234",
     desktopGrantSecret: "private-secret",
     activeUiApiToken: "private-token",
@@ -12929,7 +13078,7 @@ test("Rem archives are collapsed without metadata reads and load ten at a time",
   assert.match(dom.text(), /Current conversation/);
   assert.doesNotMatch(dom.text(), /Archived conversation|Deleted workspace conversation/);
   assert.equal(dom.byText("Archived threads").getAttribute("aria-expanded"), "false");
-  assert.equal(reads.some(key => key.includes("meta:archived-") || key.includes("meta:gone")), false);
+  assert.equal(reads.some(key => key.includes("meta:archived-")), false);
   await dom.click(dom.byText("Archived threads"));
   assert.match(dom.text(), /Deleted workspace conversation/);
   assert.equal((dom.text().match(/Archived conversation/g) || []).length, 9);
@@ -12953,6 +13102,7 @@ test("Rem retains a thread's branch and archives it after that branch is deleted
     jsonResponse("/api/provider/capabilities", { providers: [] }),
   ]), { desktop: { workspace: {
     gitStatus: async () => ({ active: true, branch, branches }),
+    gitBranches: async () => ({ active: true, branch, branches }),
     missingThreadRoots: async () => [],
   } } });
   await dom.click(dom.byLabel("New thread"));
@@ -13688,5 +13838,164 @@ test("Grok defaults to CLI-managed and warns when changed, persisting the thread
     await dom.click(dom.ancestor(dom.byText("Hello"), "BUTTON")); await dom.flush();
     assert.equal(reactProps(dom.selectWithOption("cli-managed")).value, "cli-managed");
     assert.doesNotMatch(dom.text(), /needs CLI-managed permissions/);
+  } finally { await dom.unmount(); }
+});
+
+test("equivalent Windows roots keep discovered workflows visible and available to Rem", () => {
+  const workflow = { id: "windows-flow", name: "Windows flow", projectRoot: "C:\\Users\\Alice\\repo", sourcePath: "C:\\Users\\Alice\\repo\\.raticode\\flow\\workflow.rattish" };
+  for (const root of ["c:/Users/Alice/repo", "C:/Users/Alice/repo/", "C:\\Users\\Alice\\repo\\"]) {
+    assert.equal(appModule.activeWorkspaceForProject([workflow], workflow.id, root), workflow);
+    assert.equal(appModule.chatWorkflowContextForThread({ projectRoot: root }, [workflow]).workflows.length, 1);
+    assert.deepEqual(appModule.mergeRecentProjects([workflow.projectRoot], [root]), [workflow.projectRoot]);
+    assert.deepEqual(appModule.rememberRecentProject([workflow.projectRoot], root), [root]);
+    assert.equal(appModule.scopeChatThreadToProject({ projectRoot: workflow.projectRoot, projectBranch: "main" }, root).projectBranch, "main");
+    const groups = appModule.groupWorkflowsByProject([workflow, { ...workflow, id: "second", projectRoot: root }], { [root]: "My project" });
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].name, "My project");
+    assert.equal(groups[0].items.length, 2);
+  }
+  assert.equal(appModule.activeWorkspaceForProject([workflow], workflow.id, "C:/Users/Alice/repository").sourceFormat, "project");
+});
+
+test("explorer ancestry preserves POSIX case and accepts Windows variants", () => {
+  assert.deepEqual(codeFileExplorerModule.workspaceAncestorPaths("/repo", "/Repo/src/file.py"), []);
+  assert.deepEqual(codeFileExplorerModule.workspaceAncestorPaths("C:\\Repo", "c:/repo/Src/file.py"), ["C:\\Repo", "C:\\Repo\\Src"]);
+  assert.deepEqual(codeFileExplorerModule.workspaceAncestorPaths("/", "/src/file.py"), ["/", "/src"]);
+});
+
+test("Git changes do not hide distinct POSIX filenames with different case", () => {
+  const entries = [{ name: "File.py", path: "/repo/File.py", isFile: true }];
+  const changes = [{ path: "file.py", status: "?" }];
+  assert.equal(codeFileExplorerModule.directoryEntriesWithGitChanges("/repo", "/repo", entries, changes).length, 2);
+  assert.equal(codeFileExplorerModule.directoryEntriesWithGitChanges("C:/repo", "C:/repo", entries, changes).length, 1);
+});
+
+test("Windows workflow sidebar renders discovered workflows for an equivalent selected root", () => {
+  const workflow = workflowFixture({ id: "windows-sidebar", name: "Windows workflow" });
+  workflow.projectRoot = "C:\\Users\\Alice\\repo";
+  const markup = renderToStaticMarkup(React.createElement(appModule.WorkflowSidebar, {
+    activeWorkflow: { ...workflow, projectRoot: "c:/Users/Alice/repo/" },
+    activeWorkflowId: workflow.id, workflows: [workflow], query: "", runState: {}, view: "graph",
+  }));
+  assert.match(markup, /Windows workflow/);
+});
+
+test("project discovery exposes the backend-resolved root even without workflows", async () => {
+  globalThis.fetch = createFetchMock([
+    jsonResponse("/api/projects/open", { projectRoot: "C:\\Repo", workflows: [] }, { method: "POST" }),
+  ]);
+  window.goferDesktop = { workspace: { trustProjectRoot: async () => {} } };
+  let resolved;
+  assert.deepEqual(await appModule.discoverProjectWorkflows("C:/alias/../Repo", { onResolvedRoot: root => { resolved = root; } }), []);
+  assert.equal(resolved, "C:\\Repo");
+});
+
+test("Git status decoration follows Windows identity and POSIX case", () => {
+  const statuses = [{ path: "Src/File.py", status: "M" }];
+  assert.equal(codeFileExplorerModule.sourceControlStatusForPath("C:/Repo", "c:\\repo\\src\\file.py", statuses), "M");
+  assert.equal(codeFileExplorerModule.sourceControlStatusForPath("/Repo", "/Repo/src/file.py", statuses), "");
+  assert.equal(codeFileExplorerModule.sourceControlStatusForPath("C:/Repo", "c:/repo/src", statuses, true), "changed");
+  const entries = codeFileExplorerModule.directoryEntriesWithGitChanges("C:/Repo", "c:\\repo\\src", [], statuses);
+  assert.equal(entries[0].name, "File.py");
+});
+
+
+test("active threads are clickable before Git resolves and metadata reads follow pagination", async () => {
+  const all = Array.from({ length: 120 }, (_, i) => ({ id: `fast-${i}`, title: `Fast thread ${i}`, updatedAt: new Date(Date.now() - i * 1000).toISOString(), projectRoot: "/repo", projectBranch: "main" }));
+  const storage = Object.fromEntries(all.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
+  storage["gofer-flow-chat-threads"] = JSON.stringify(all.map(thread => ({ ...thread, title: undefined, scopeIndexed: true })));
+  const reads = [], opened = [];
+  const git = createDeferred();
+  let wrapped = false, branchCalls = 0;
+  const workspace = { gitStatus: () => assert.fail("list scanned working tree"), gitBranches: () => { branchCalls++; return git.promise; } };
+  function Harness() {
+    if (!wrapped) {
+      wrapped = true;
+      const get = window.localStorage.getItem.bind(window.localStorage);
+      window.localStorage.getItem = key => { reads.push(key); return get(key); };
+    }
+    return React.createElement(appModule.ThreadSections, { threads: [], onOpen: id => opened.push(id), onDelete() {} });
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { storage, desktop: { workspace } });
+  try {
+    assert.equal(branchCalls, 1);
+    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 15);
+    assert.equal(reads.some(key => key.startsWith("gofer-flow-chat-thread:")), false);
+    await dom.click(allElements(dom.container).find(el => el.tagName === "BUTTON" && el.textContent.includes("Fast thread 0")));
+    assert.deepEqual(opened, ["fast-0"]);
+    await dom.click(dom.byText("Show older threads"));
+    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 30);
+    git.resolve({ active: true, branches: ["main"] }); await dom.flush();
+    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 30);
+  } finally { await dom.unmount(); }
+});
+
+test("project navigation becomes usable before discovery and Git metadata finish", async () => {
+  const discovery = createDeferred();
+  const git = createDeferred();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    (url) => url === "/api/projects/open" ? { ok: true, status: 200, json: () => discovery.promise } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: {
+      "gofer.recentProjects": JSON.stringify(["/second"]),
+      [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/workspace", view: "code" }),
+    },
+    desktop: { workspace: {
+      trustProjectRoot: async root => root,
+      gitWorktrees: () => git.promise,
+    } },
+  });
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Recent projects"));
+    await dom.click(dom.byTitle("/second"));
+    await dom.flush();
+    assert.equal(appModule.loadStudioSession().projectRoot, "/second");
+    assert.equal(dom.byLabel("Recent projects").getAttribute("title"), "/second");
+    assert.ok(dom.byText("Open File"));
+    discovery.resolve({ projectRoot: "/second", workflows: [] });
+    await dom.flush();
+    assert.doesNotMatch(dom.text(), /Opening second/);
+    assert.equal(appModule.loadStudioSession().projectRoot, "/second");
+  } finally {
+    discovery.resolve({ workflows: [] });
+    git.resolve({ worktrees: [{ path: "/second" }] });
+    await dom.flush();
+    await dom.unmount();
+  }
+});
+
+test("Stop during Rem startup waits for the turn identity and explicitly stops backend work", async () => {
+  const chunks = ["", ""];
+  const stream = controlledStreamResponse(chunks);
+  let request;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url, options) => {
+      if (url === "/api/chat/stream") {
+        request = JSON.parse(options.body);
+        chunks[0] = JSON.stringify({ type: "turn", turnId: request.turnId, generation: 0 }) + "\n";
+        chunks[1] = JSON.stringify({ type: "stopped", turnId: request.turnId }) + "\n";
+        return stream.response(url);
+      }
+      if (url === "/api/chat/stop") return { ok: true, json: async () => ({ stopped: true }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Start");
+    await dom.click(dom.byTitle("Send message")); await dom.flush();
+    await dom.click(dom.byTitle("Stop Rem")); await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stop").length, 0);
+    stream.releaseNext(); await dom.flush();
+    assert.deepEqual(JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stop").options.body), {
+      conversationId: request.conversationId, turnId: request.turnId,
+    });
+    stream.releaseNext(); await dom.flush();
+    assert.match(dom.text(), /Rem stopped/);
   } finally { await dom.unmount(); }
 });

@@ -251,6 +251,7 @@ http.server_close()
   const ready = JSON.parse((await iterator.next()).value);
   const register = mainFunction("registerBackendPathGrant", {
     getIpcSecurity: () => security,
+    backendReady: Promise.resolve(),
     Date, fetch, AbortSignal, activeApiBaseUrl: `http://127.0.0.1:${ready.port}`,
     activeUiApiToken: "fixture-token", desktopGrantSecret: "fixture-secret", writeBackendLog: () => {},
   });
@@ -330,7 +331,7 @@ test("injected agent resolver distinguishes missing folders from access violatio
   const { outside, security } = await fixture(t);
   const handle = security.trustPath(outside);
   await fsp.rm(outside, { recursive: true });
-  for (const name of ["gitStatus", "gitHistory", "gitWorktrees", "listDirectory"]) {
+  for (const name of ["gitStatus", "gitBranches", "gitHistory", "gitWorktrees", "listDirectory"]) {
     const read = mainFunction(name, {
       resolveExactPath: security.resolveAllowedPath,
       resolveGitProjectDirectory: async options => security.resolveAllowedPath(options.projectRoot, { grantId: options.grantId, mustExist: true }),
@@ -440,7 +441,7 @@ test("desktop Git and files work outside agent roots with absent or stale grants
   assert.throws(() => security.renewPath(outside), /outside/);
   assert.throws(() => security.resolveAllowedPath(outside), /outside/);
   await fsp.rm(outside, { recursive: true });
-  for (const name of ["gitStatus", "gitHistory", "gitWorktrees", "listDirectory"]) {
+  for (const name of ["gitStatus", "gitBranches", "gitHistory", "gitWorktrees", "listDirectory"]) {
     assert.equal((await mainFunction(name, context)(null, { projectRoot: outside, currentPath: outside })).missing, true);
   }
 });

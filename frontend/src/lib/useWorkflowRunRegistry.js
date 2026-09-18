@@ -49,8 +49,14 @@ export function useWorkflowRunRegistry(workflows) {
         while (remaining.length) {
           const workflow = remaining.shift();
           try {
-            const recent = await read(`/workflows/${encodeURIComponent(workflow.id)}/logs?limit=100`);
-            const active = await read(`/workflows/${encodeURIComponent(workflow.id)}/logs?status=running`);
+            // Drain both requests before reusing this worker, including on failure.
+            const results = await Promise.allSettled([
+              read(`/workflows/${encodeURIComponent(workflow.id)}/logs?limit=100`),
+              read(`/workflows/${encodeURIComponent(workflow.id)}/logs?status=running`),
+            ]);
+            const failure = results.find(result => result.status === "rejected");
+            if (failure) throw failure.reason;
+            const [recent, active] = results.map(result => result.value);
             updates.push({ workflow, runs: [...(recent.runs || []), ...(active.runs || [])] });
           } catch (error) { failedIds.push(workflow.id); failures.push(error.message); }
         }

@@ -1,3 +1,4 @@
+import { pathWithin, pathMatchesChange } from "../lib/workspacePaths.js";
 import { resolveMarkdownLinkPath } from "../lib/fileLinks.js";
 export { resolveMarkdownLinkPath, markdownFileLinkTarget, filePathFromMarkdownUrl, resolveMarkdownFileLinkTarget, resolveMarkdownFileTarget } from "../lib/fileLinks.js";
 import { reconcileEditorLifetimes, closeEditorLifetimes, acceptsEditorState, retainOpenEditorStates } from "../lib/editorStateLifetime.js";
@@ -44,52 +45,8 @@ import { Dialog } from "./Dialog.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
 
-const textEditorSessions = new Map();
-const discardedSessionPaths = new Set();
-export const FILE_AUTOSAVE_DELAY_MS = 1000;
-
-export function codeCloseProtection(dirtyPaths, autosaveEnabled) {
-  if (!dirtyPaths.length) return "close";
-  return autosaveEnabled ? "confirm-discard" : "prompt-to-save";
-}
-
-export function hasUnsavedCodeChanges(rootPath) {
-  return [...textEditorSessions].some(([path, session]) => pathMatchesChange(path, rootPath, true) && session.content !== session.savedContent);
-}
-
-export function applyCodeFilesystemChange(change) {
-  if (change?.type === "git") {
-    for (const [path, session] of textEditorSessions) {
-      if (pathMatchesChange(path, change.rootPath, true) && session.content === session.savedContent) textEditorSessions.delete(path);
-    }
-    window.dispatchEvent(new CustomEvent("gofer:git-files-changed", { detail: change }));
-    return;
-  }
-  if (!change?.path) return;
-  if (change.kind === "create") {
-    discardedSessionPaths.delete(change.path);
-    textEditorSessions.delete(change.path);
-    return;
-  }
-  if (change.kind === "delete") {
-    for (const path of textEditorSessions.keys()) {
-      if (!pathMatchesChange(path, change.path, change.isDirectory)) continue;
-      discardedSessionPaths.add(path);
-      textEditorSessions.delete(path);
-    }
-    discardedSessionPaths.add(change.path);
-    return;
-  }
-  if (change.kind !== "rename" || !change.sourcePath) return;
-  for (const [path, session] of [...textEditorSessions.entries()]) {
-    const nextPath = replacePathPrefix(path, change.sourcePath, change.path, change.isDirectory);
-    if (nextPath === path) continue;
-    discardedSessionPaths.add(path);
-    discardedSessionPaths.delete(nextPath);
-    textEditorSessions.delete(path);
-    textEditorSessions.set(nextPath, session);
-  }
-}
+import { textEditorSessions, discardedSessionPaths, codeCloseProtection } from "../lib/codeEditorSessions.js";
+export { FILE_AUTOSAVE_DELAY_MS, codeCloseProtection, hasUnsavedCodeChanges, applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
 
 const CodeWorkspace = forwardRef(function CodeWorkspace({
   active,
@@ -473,7 +430,6 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
 
   function renderTabStrip(paths, activeForGroup, isSplit, column) {
     const projectRoots = [...new Set([workflow?.projectRoot, ...Object.values(workflowTabs).map(item => item.projectRoot)].filter(Boolean))].sort((left, right) => right.length - left.length);
-    const normalizeProjectPath = (value) => String(value || "").replaceAll("\\", "/").replace(/\/$/, "");
     return (
       <div
         className={`relative flex min-w-0 border-b border-line bg-slate-50 ${column === 2 ? "border-l" : ""}`}
@@ -584,7 +540,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         entries={paths.map((path) => {
           const tab = workflowTabs[path];
           const browser = browserTabs[path];
-          const projectRoot = tab?.projectRoot || rattishDocuments[path]?.document?.projectRoot || (!browser && projectRoots.find(root => normalizeProjectPath(path).startsWith(`${normalizeProjectPath(root)}/`))) || "";
+          const projectRoot = tab?.projectRoot || rattishDocuments[path]?.document?.projectRoot || (!browser && projectRoots.find(root => pathWithin(path, root))) || "";
           return { path, tab, browser, projectRoot, label: tab?.name || codeTabLabel(path, browserViewTabMetadata(browser, browserViewStates[path])) };
         })}
         onActivate={onActivePathChange}
@@ -2105,27 +2061,6 @@ export function duplicateTabFolder(path, openPaths) {
   const name = fileName(path);
   if (openPaths.filter((candidate) => fileName(candidate) === name).length < 2) return "";
   return String(path ?? "").split(/[\\/]/).filter(Boolean).at(-2) ?? "";
-}
-
-function replacePathPrefix(path, sourcePath, destinationPath, isDirectory) {
-  if (!isDirectory) return path === sourcePath ? destinationPath : path;
-  const normalizedPath = String(path).replaceAll("\\", "/");
-  const normalizedSource = String(sourcePath).replaceAll("\\", "/").replace(/\/$/, "");
-  if (normalizedPath !== normalizedSource && !normalizedPath.startsWith(`${normalizedSource}/`)) {
-    return path;
-  }
-  const suffix = normalizedPath.slice(normalizedSource.length);
-  const separator = String(destinationPath).includes("\\") && !String(destinationPath).includes("/")
-    ? "\\"
-    : "/";
-  return `${String(destinationPath).replace(/[\\/]+$/, "")}${suffix.replaceAll("/", separator)}`;
-}
-
-function pathMatchesChange(path, changedPath, isDirectory) {
-  if (!isDirectory) return path === changedPath;
-  const normalizedPath = String(path).replaceAll("\\", "/");
-  const normalizedChanged = String(changedPath).replaceAll("\\", "/").replace(/\/$/, "");
-  return normalizedPath === normalizedChanged || normalizedPath.startsWith(`${normalizedChanged}/`);
 }
 
 function withSetValue(current, value) {

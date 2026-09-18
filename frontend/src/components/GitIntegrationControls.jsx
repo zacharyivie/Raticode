@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { integrationOperations } from "./WorktreeContextMenu.jsx";
-import { hasUnsavedCodeChanges } from "./CodeWorkspace.jsx";
+import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 
 const button = "rounded border border-line px-2 py-1.5 text-xs hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand disabled:opacity-40";
 

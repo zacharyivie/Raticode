@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import uuid4
 
 from gofer.subscriptions.acp_transport import AcpTransport, AcpTransportError
 
@@ -78,6 +79,8 @@ async def prompt_session(
 ) -> AsyncIterator[dict[str, Any]]:
     """Consume a single prompt, preserving buffered output before terminal errors."""
     text = ""
+    # ACP text updates are deltas, not independent timeline thoughts.
+    stream_id = uuid4().hex
     request = asyncio.create_task(
         rpc.request(
             "session/prompt",
@@ -95,7 +98,7 @@ async def prompt_session(
                     chunk = session_text(notification.result(), session_id)
                     if chunk:
                         text += chunk
-                        yield {"type": "thought", "text": chunk}
+                        yield {"type": "thought", "text": chunk, "deltaStreamId": stream_id}
                 else:
                     notification.cancel()
                     await asyncio.gather(notification, return_exceptions=True)
@@ -112,7 +115,7 @@ async def prompt_session(
                     continue
                 if chunk:
                     text += chunk
-                    yield {"type": "thought", "text": chunk}
+                    yield {"type": "thought", "text": chunk, "deltaStreamId": stream_id}
             if buffered_error is not None:
                 raise buffered_error
             result = await request
@@ -129,7 +132,7 @@ async def prompt_session(
                     continue
                 if chunk:
                     text += chunk
-                    yield {"type": "thought", "text": chunk}
+                    yield {"type": "thought", "text": chunk, "deltaStreamId": stream_id}
             yield {
                 "type": "error",
                 "error": str(exc),

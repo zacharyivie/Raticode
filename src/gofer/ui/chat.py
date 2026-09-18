@@ -50,7 +50,7 @@ from gofer.core.provider_capabilities import (
 )
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_preferences import provider_preference
-from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits, byte_len
+from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
 from gofer.rattish.artifacts import (
     RattishArtifactError,
     rattish_assistant_skill_path,
@@ -520,6 +520,122 @@ class _ChatProjectTracker:
         return self.current
 
 
+class _ChatTurnEdits:
+    """Attribute edits to reported edit paths or a tool's execution interval.
+
+    Shell tools do not identify their output paths. Their before/after snapshots
+    cannot distinguish another process writing during that same interval.
+    """
+
+    def __init__(self, root: Path | None, baseline: dict[str, _ChatFileState]) -> None:
+        self.root = root
+        self.baseline = baseline
+        self.current = dict(baseline)
+        self.before: dict[str, _ChatFileState] = {}
+        self.after: dict[str, _ChatFileState] = {}
+        self.starts: dict[str, dict[str, _ChatFileState]] = {}
+        self.seen: set[str] = set()
+        self.touched: set[str] = set()
+        self.tools: dict[str, dict[str, Any]] = {}
+        self.complete = getattr(baseline, "complete", True)
+
+    def observe(self, trace: dict[str, Any]) -> None:
+        if self.root is None or not self.complete or trace.get("kind") != "tool":
+            return
+        key = str(trace.get("id") or "")
+        if not key:
+            return
+        phase = trace.get("phase")
+        if phase == "result" and key in self.tools:
+            previous = self.tools[key]
+            trace = {**previous, **trace}
+            if trace.get("title") == "Tool result":
+                trace["title"] = previous.get("title")
+        # Shell and MCP commands can write files without emitting edit events.
+        title = str(trace.get("title") or "").lower()
+        edits = title in {"edit", "write", "multiedit", "apply_patch"}
+        shell = trace.get("category") == "shell"
+        if (
+            not edits
+            and not shell
+            and trace.get("category") != "mcp"
+            and not title.startswith("mcp__")
+        ):
+            return
+        paths: set[str] | None = None
+        if edits:
+            value = trace.get("input")
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    value = None
+            records = value if isinstance(value, list) else [value]
+            declared = False
+            paths = set()
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                raw = record.get("path") or record.get("file_path")
+                if not isinstance(raw, str):
+                    continue
+                declared = True
+                candidate = Path(raw)
+                if candidate.is_absolute():
+                    try:
+                        candidate = candidate.relative_to(self.root)
+                    except ValueError:
+                        continue
+                if ".." not in candidate.parts and candidate != Path("."):
+                    paths.add(candidate.as_posix())
+            if not paths:
+                if declared:
+                    return
+                paths = None
+        if phase in {"start", "update"}:
+            self.tools[key] = trace
+            if key not in self.starts and key not in self.seen:
+                self.starts[key] = _capture_chat_project(self.root, self.current, paths=paths)
+            return
+        if phase != "result" or key in self.seen:
+            return
+        self.seen.add(key)
+        self.tools.pop(key, None)
+        before = self.starts.pop(key, self.baseline)
+        after = _capture_chat_project(self.root, before, paths=paths)
+        if not getattr(before, "complete", True) or not getattr(after, "complete", True):
+            self.complete = False
+            return
+        candidates = paths if paths is not None else before.keys() | after.keys()
+        if paths is None:
+            self.current = dict(after)
+        else:
+            for path in paths:
+                if path in after:
+                    self.current[path] = after[path]
+                else:
+                    self.current.pop(path, None)
+        for path in candidates:
+            old, new = before.get(path), after.get(path)
+            if old == new and (paths is None or path not in self.touched):
+                continue
+            if path not in self.touched and old is not None:
+                self.before[path] = old
+            self.touched.add(path)
+            if new is None:
+                self.after.pop(path, None)
+            else:
+                self.after[path] = new
+
+    def finish(self) -> None:
+        for trace in list(self.tools.values()):
+            self.observe({**trace, "phase": "result"})
+
+    def snapshots(self) -> tuple[dict[str, _ChatFileState], dict[str, _ChatFileState]]:
+        # Incomplete scans must never become a misleading deletion list.
+        return (self.before, self.after) if self.complete else ({}, {})
+
+
 def _serialized_chat_file_state(
     state: _ChatFileState | None,
     data_dir: Path | None = None,
@@ -630,10 +746,15 @@ def _finalize_chat_changes(
     root: Path | None,
     before: dict[str, _ChatFileState],
     data_dir: Path,
+    *,
+    snapshots: tuple[dict[str, _ChatFileState], dict[str, _ChatFileState]] | None = None,
 ) -> dict[str, Any] | None:
     if root is None:
         return None
-    after = _capture_chat_project(root, before)
+    if snapshots is None:
+        after = _capture_chat_project(root, before)
+    else:
+        before, after = snapshots
     try:
         changes, stored_files = _chat_changes_from_snapshots(root, before, after, data_dir=data_dir)
     except OSError:
@@ -964,7 +1085,6 @@ async def run_workflow_chat(
         workflow=workflow,
         gofer_cli_path=gofer_cli_path,
     )
-    _ensure_prompt_within_limit(prompt, limits)
     prompt = _prepare_prompt_for_cli(
         provider=provider,
         binary_path=binary_path,
@@ -1120,7 +1240,6 @@ async def stream_workflow_chat(
         gofer_cli_path=gofer_cli_path,
         agent_instructions=agent_instructions,
     )
-    _ensure_prompt_within_limit(prompt, limits)
     prompt = _prepare_prompt_for_cli(
         provider=provider,
         binary_path=binary_path,
@@ -1154,7 +1273,12 @@ async def stream_workflow_chat(
 
     project_root = _chat_project_root(workflow)
     project_tracker = _ChatProjectTracker(project_root)
-    project_before = project_tracker.start()
+    project_before = (
+        _capture_chat_project(project_root)
+        if provider in {"codex", "claude_code"}
+        else project_tracker.start()
+    )
+    turn_edits = _ChatTurnEdits(project_root, project_before)
     last_preview = 0.0
 
     def preview_changes() -> dict[str, Any] | None:
@@ -1163,11 +1287,24 @@ async def stream_workflow_chat(
         if now - last_preview < CHAT_CHANGE_PREVIEW_INTERVAL:
             return None
         last_preview = now
-        return _preview_chat_changes(project_root, project_before, project_tracker)
+        if provider not in {"codex", "claude_code"}:
+            return _preview_chat_changes(project_root, project_before, project_tracker)
+        if project_root is None:
+            return None
+        before, after = turn_edits.snapshots()
+        changes, _ = _chat_changes_from_snapshots(project_root, before, after, store_files=False)
+        if changes is not None:
+            changes.update(
+                live=True,
+                undoable=False,
+                undoUnavailableReason="Undo is available when the assistant finishes",
+            )
+        return changes
 
     def turn_metadata() -> dict[str, Any]:
         from gofer.subscriptions.base import _usage_metadata_from_payloads
 
+        turn_edits.finish()
         completed_at = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         return {
             "usage": _usage_metadata_from_payloads(provider_payloads) or None,
@@ -1185,6 +1322,7 @@ async def stream_workflow_chat(
                 project_root,
                 project_before,
                 resolved_data_dir,
+                snapshots=turn_edits.snapshots() if provider in {"codex", "claude_code"} else None,
             ),
         }
 
@@ -1358,6 +1496,7 @@ async def stream_workflow_chat(
                     if payload is not None:
                         remember_payload(payload)
                         for trace in _provider_trace_entries(provider, payload, claude_trace_state):
+                            turn_edits.observe(trace)
                             yield {
                                 "type": "thought",
                                 "provider": provider,
@@ -1390,6 +1529,7 @@ async def stream_workflow_chat(
                 if payload is not None:
                     remember_payload(payload)
                     for trace in _provider_trace_entries(provider, payload, claude_trace_state):
+                        turn_edits.observe(trace)
                         yield {
                             "type": "thought",
                             "provider": provider,
@@ -1729,6 +1869,7 @@ def _codex_trace_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": item_id,
                 "kind": "tool",
                 "title": tool_name,
+                "category": "mcp",
                 "detail": _trace_text(item.get("server")),
                 "input": _trace_value(item.get("arguments") or item.get("input")),
                 "output": _trace_value(
@@ -2456,19 +2597,46 @@ async def _compact_chat_messages_if_needed(
     if _messages_size(messages) <= CHAT_COMPACT_CHAR_LIMIT:
         return messages, False
 
-    recent = messages[-CHAT_COMPACT_RECENT_MESSAGES:]
-    older = messages[:-CHAT_COMPACT_RECENT_MESSAGES]
-    summary = await _summarize_chat_messages(
-        provider=provider,
-        model=model,
-        effort=effort,
-        messages=older,
-        binary_path=binary_path,
-        data_dir=data_dir,
-        working_dir=working_dir,
-        limits=limits,
-        cancel_event=cancel_event,
-    )
+    # Preserve a complete source before summarizing, including a single huge tool
+    # result. A fixed recent-message count alone leaves those messages unbounded.
+    archive_dir = data_dir / "chat-context"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    transcript = _messages_transcript(messages)
+    archive = archive_dir / f"{sha256(transcript.encode()).hexdigest()}.txt"
+    archive.write_text(transcript, encoding="utf-8")
+    recent: list[dict[str, str]] = []
+    for message in reversed(messages[-CHAT_COMPACT_RECENT_MESSAGES:]):
+        if _messages_size([message, *recent]) > CHAT_COMPACT_CHAR_LIMIT // 2:
+            break
+        recent.insert(0, message)
+    older = messages[: len(messages) - len(recent)] if recent else messages
+    summaries = []
+    source = _messages_transcript(older)
+    # Chunking is a compaction target, never a rejection or a prompt-size limit.
+    for offset in range(0, len(source), CHAT_COMPACT_CHAR_LIMIT):
+        if cancel_event is not None and cancel_event.is_set():
+            return messages, False
+        summaries.append(
+            await _summarize_chat_messages(
+                provider=provider,
+                model=model,
+                effort=effort,
+                messages=[
+                    {"role": "user", "body": source[offset : offset + CHAT_COMPACT_CHAR_LIMIT]}
+                ],
+                binary_path=binary_path,
+                data_dir=data_dir,
+                working_dir=working_dir,
+                limits=limits,
+                cancel_event=cancel_event,
+            )
+        )
+    summary = "\n\n".join(summaries)
+    # The source stays available even when a provider cannot summarize or returns
+    # an oversized summary. Never discard the only copy of the original context.
+    if len(summary) > CHAT_COMPACT_CHAR_LIMIT:
+        summary = _fallback_chat_summary([{"role": "system", "body": summary}])
+    summary += f"\n\nFull prior context is preserved at {archive}. Read it for omitted details."
     compacted_messages = [
         {
             "id": "compaction-notice",
@@ -2508,8 +2676,14 @@ async def _summarize_chat_messages(
         "errors, unresolved tasks, and important assistant outputs. Omit chatter.\n\n"
         f"{transcript}"
     )
-    if byte_len(prompt) > limits.max_chat_prompt_bytes:
-        return _fallback_chat_summary(messages)
+    prompt = _prepare_prompt_for_cli(
+        provider=provider,
+        binary_path=binary_path,
+        data_dir=data_dir,
+        messages=messages,
+        prompt=prompt,
+        workflow=None,
+    )
     command = _build_chat_command(
         provider=provider,
         model=model,
@@ -2524,7 +2698,7 @@ async def _summarize_chat_messages(
             command,
             cwd=working_dir,
             env=env_with_executable_on_path(binary_path),
-            timeout=180,
+            timeout=None,
             cancel_event=cancel_event,
             max_output_bytes=limits.max_subprocess_output_bytes,
         )
@@ -2543,13 +2717,6 @@ async def _summarize_chat_messages(
 
 def _messages_size(messages: list[dict[str, str]]) -> int:
     return sum(len(str(message.get("body", ""))) for message in messages)
-
-
-def _ensure_prompt_within_limit(prompt: str, limits: ResourceLimits) -> None:
-    size = byte_len(prompt)
-    limit = limits.max_chat_prompt_bytes
-    if size > limit:
-        raise ChatProviderError(f"Chat prompt exceeds limit {limit} bytes (got {size} bytes)")
 
 
 def _limits_from_workflow(

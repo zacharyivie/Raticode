@@ -137,11 +137,10 @@ def test_rem_scope_and_read_only(access: RemSwarmAccess, tmp_path: Path) -> None
             invoke(reader, action, sid)
 
 
-def test_rem_rejects_oversize_handoff_before_start(access: RemSwarmAccess) -> None:
+def test_rem_accepts_large_handoff_for_compaction(access: RemSwarmAccess) -> None:
     sid = create(access)
-    with pytest.raises(ValueError, match="32000"):
-        invoke(access, "start", sid, task="Review", context="x" * 32000)
-    assert invoke(access, "read", sid)["run"] is None
+    invoke(access, "start", sid, task="Review", context="x" * 32000)
+    assert invoke(access, "read", sid)["run"] is not None
     with pytest.raises(ValueError, match="limit"):
         invoke(access, "list", limit=101)
 

@@ -73,6 +73,9 @@ async def test_prompt_drains_final_text_and_retains_eof_error(
             monkeypatch.setattr(rpc, "request", delayed_response)
         events = [event async for event in prompt_session(rpc, "s", "exact \n prompt")]
     assert "".join(e["text"] for e in events if e["type"] == "thought") == "first last"
+    stream_ids = {e["deltaStreamId"] for e in events if e["type"] == "thought"}
+    assert len(stream_ids) == 1
+    assert all(stream_ids)
     assert events[-1]["message"]["body"] == "first last"
     assert events[-1]["type"] == ("error" if exit_after_response else "final")
 

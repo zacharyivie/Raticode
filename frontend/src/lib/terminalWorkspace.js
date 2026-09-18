@@ -1,3 +1,4 @@
+import { pathKey } from "./workspacePaths.js";
 import { matchesCommand } from "./settings.js";
 export function projectFolderName(projectRoot) {
   const normalized = String(projectRoot ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
@@ -14,22 +15,26 @@ export function terminalDirectoryFromOsc(data) {
 }
 
 export function terminalProjectGroupId(projectPath) {
-  return `project:${projectPath || "Unregistered"}`;
+  return `project:${pathKey(projectPath) || "Unregistered"}`;
 }
 
 export function terminalGroupName(number) {
   return `Group ${number}`;
 }
 
+function terminalGroupId(id) {
+  return id?.startsWith("project:") ? terminalProjectGroupId(id.slice(8)) : id;
+}
+
 export function terminalTabGroupId(tab) {
   const projectPath = tab?.projectPath ?? tab?.cwd ?? "";
-  return tab?.groupId || terminalProjectGroupId(projectPath);
+  return terminalGroupId(tab?.groupId) || terminalProjectGroupId(projectPath);
 }
 
 export function moveTerminalTabToGroup(tabs = [], key, groupId) {
   let changed = false;
   const next = (tabs ?? []).map((tab) => {
-    if (tab.key !== key || terminalTabGroupId(tab) === groupId) return tab;
+    if (tab.key !== key || terminalTabGroupId(tab) === terminalGroupId(groupId)) return tab;
     changed = true;
     return { ...tab, groupId };
   });
@@ -37,22 +42,22 @@ export function moveTerminalTabToGroup(tabs = [], key, groupId) {
 }
 
 export function terminalTabsAfterDeletingGroup(tabs = [], groupId) {
-  return (tabs ?? []).filter((tab) => terminalTabGroupId(tab) !== groupId);
+  return (tabs ?? []).filter((tab) => terminalTabGroupId(tab) !== terminalGroupId(groupId));
 }
 
 export function upsertTerminalGroupDefinition(groups = [], definition) {
-  const index = groups.findIndex((group) => group.id === definition.id);
+  const index = groups.findIndex((group) => terminalGroupId(group.id) === terminalGroupId(definition.id));
   if (index < 0) return [...groups, definition];
-  return groups.map((group) => (group.id === definition.id ? { ...group, ...definition } : group));
+  return groups.map((group) => (terminalGroupId(group.id) === terminalGroupId(definition.id) ? { ...group, ...definition } : group));
 }
 
 export function groupTerminalTabsByProject(tabs = [], definitions = []) {
   const groups = new Map();
-  const definitionsById = new Map((definitions ?? []).map((group) => [group.id, group]));
+  const definitionsById = new Map((definitions ?? []).map((group) => [terminalGroupId(group.id), group]));
   for (const definition of definitions ?? []) {
     if (!definition.keepEmpty) continue;
-    groups.set(definition.id, {
-      id: definition.id,
+    groups.set(terminalGroupId(definition.id), {
+      id: terminalGroupId(definition.id),
       items: [],
       name: definition.name,
       projectPath: definition.projectPath ?? "",

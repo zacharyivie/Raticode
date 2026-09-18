@@ -23,6 +23,7 @@ const desktopIpcHandlers = [
   ["gofer:resolve-project-file", "resolveProjectFile"],
   ["gofer:git-repo-action", "gitRepoAction"],
   ["gofer:git-status", "gitStatus"],
+  ["gofer:git-branches", "gitBranches"],
   ["gofer:git-file-action", "gitFileAction"],
   ["gofer:git-switch-branch", "gitSwitchBranch"],
   ["gofer:git-file-baseline", "gitFileBaseline"],

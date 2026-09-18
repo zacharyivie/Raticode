@@ -6,9 +6,57 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <link rel="icon" type="image/png" href="./favicon.png" />
     <title>Raticode</title>
+    <style>
+      body { margin: 0; background: #1f1f1f; color: #eee; }
+      .startup-shell {
+        position: fixed; inset: 0; display: grid; place-items: center;
+        background: #1f1f1f; color: #f3f3f5;
+        font: 14px/1.6 "Segoe UI", system-ui, sans-serif;
+      }
+      /* React owns only #root. Keep this animation alive across the lazy import,
+         then hide it on the first app or error render, without delaying either. */
+      #root:not(:empty) + .startup-shell { display: none; }
+      .startup-shell__content { text-align: center; padding: 24px; }
+      .startup-shell__graph { display: block; width: 224px; max-width: 65vw; height: 112px; margin: 0 auto 22px; overflow: visible; }
+      .startup-shell__track { fill: none; stroke: #454354; stroke-width: 2; }
+      .startup-shell__signal {
+        fill: none; stroke: #a5a7ff; stroke-width: 2; stroke-linecap: round;
+        stroke-dasharray: 18 190; animation: startup-flow 2.8s linear infinite;
+      }
+      .startup-shell__node { fill: #292834; stroke: #8b8df4; stroke-width: 2; }
+      .startup-shell__core { fill: #a5a7ff; transform-box: fill-box; transform-origin: center; animation: startup-pulse 2.8s ease-in-out infinite; }
+      .startup-shell__core--next { animation-delay: .7s; }
+      .startup-shell__core--last { animation-delay: 1.4s; }
+      .startup-shell strong { display: block; font-size: 28px; font-weight: 600; letter-spacing: -.8px; }
+      .startup-shell p { margin: 6px 0 0; color: #b8b8c4; }
+      @keyframes startup-flow { from { stroke-dashoffset: 208; } to { stroke-dashoffset: 0; } }
+      @keyframes startup-pulse { 0%, 65%, 100% { opacity: .35; transform: scale(.75); } 30% { opacity: 1; transform: scale(1); } }
+      @media (prefers-reduced-motion: reduce) {
+        .startup-shell__signal, .startup-shell__core { animation: none; }
+        .startup-shell__signal { stroke-dasharray: none; opacity: .55; }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div class="startup-shell" role="status" aria-live="polite">
+      <div class="startup-shell__content">
+        <svg class="startup-shell__graph" viewBox="0 0 224 112" aria-hidden="true">
+          <path class="startup-shell__track" d="M32 56H72Q84 56 84 44V36Q84 24 96 24H128Q140 24 140 36V44Q140 56 152 56H192 M72 56Q84 56 84 68V76Q84 88 96 88H128Q140 88 140 76V68Q140 56 152 56" />
+          <path class="startup-shell__signal" d="M32 56H72Q84 56 84 44V36Q84 24 96 24H128Q140 24 140 36V44Q140 56 152 56H192" />
+          <rect class="startup-shell__node" x="20" y="44" width="24" height="24" rx="7" />
+          <rect class="startup-shell__node" x="100" y="12" width="24" height="24" rx="7" />
+          <rect class="startup-shell__node" x="100" y="76" width="24" height="24" rx="7" />
+          <rect class="startup-shell__node" x="180" y="44" width="24" height="24" rx="7" />
+          <circle class="startup-shell__core" cx="32" cy="56" r="4" />
+          <circle class="startup-shell__core startup-shell__core--next" cx="112" cy="24" r="4" />
+          <circle class="startup-shell__core startup-shell__core--next" cx="112" cy="88" r="4" />
+          <circle class="startup-shell__core startup-shell__core--last" cx="192" cy="56" r="4" />
+        </svg>
+        <strong>Raticode</strong>
+        <p>Opening your workspace…</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

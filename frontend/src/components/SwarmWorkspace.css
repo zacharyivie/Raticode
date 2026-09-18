@@ -220,3 +220,63 @@
 .swarm-digest small { color: rgb(var(--color-muted)); font-size: 10px; }
 .swarm-digest-diagnosis { border-left: 2px solid var(--swarm-accent); padding-left: 12px; font-size: 12px; line-height: 1.6; margin-top: 16px; }
 @media (max-width: 640px) { .swarm-digest li { grid-template-columns: 1fr auto; gap: 3px 8px; } .swarm-digest li > span { grid-row: 2; grid-column: 1 / -1; } }
+
+/* Dashboard reading order is stable at every pane width. */
+.swarm-health { margin-top: 18px; padding: 18px 0 0; border-top: 3px solid var(--swarm-accent); }
+.swarm-health h2 { font-size: 22px; font-weight: 600; letter-spacing: -.025em; }
+.swarm-health p { font-size: 13px; line-height: 1.65; max-width: 78ch; }
+.swarm-health-counts { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 8px 0; font-variant-numeric: tabular-nums; }
+.swarm-health[data-success] { border-color: var(--swarm-success); }
+.swarm-health[data-success] h2 { color: var(--swarm-success); }
+.swarm-attention { margin-top: 16px; padding: 14px 18px; border-left: 3px solid var(--swarm-warning); background: var(--swarm-panel); }
+.swarm-attention h3, .swarm-outcome h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.swarm-attention > div { margin-bottom: 10px; font-size: 13px; }
+.swarm-outcome { margin-top: 18px; }
+.swarm-outcome ul { font-size: 13px; margin: 10px 0; }
+.swarm-columns { display: flex; flex-direction: column; gap: 24px; }
+.swarm-columns > * { width: 100%; }
+.swarm-roster > div:last-child { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.swarm-agent, .swarm-agent[data-orchestrator] { padding: 12px 0; border: 0; border-top: 1px solid rgb(var(--color-line)); border-radius: 0; background: transparent; }
+.swarm-agent-identity { align-items: center; }
+.swarm-agent-identity h3 { font-size: 13px; margin: 0; }
+.swarm-agent-portrait { width: 28px; height: 30px; font-size: 10px; border-radius: 4px; box-shadow: none; }
+.swarm-agent-now { margin: 5px 0 4px 40px; font-size: 12px; color: rgb(var(--color-muted)); }
+.swarm-agent > .swarm-agent-details { margin-left: 40px; }
+.swarm-board-panel { display: block; }
+.swarm-board-panel > summary, .swarm-diagnostics > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.swarm-diagnostics { margin-top: 24px; padding-top: 16px; border-top: 1px solid rgb(var(--color-line)); }
+.swarm-diagnostics > section { margin-top: 16px; }
+.swarm-milestone-list { margin-top: 18px; }
+.swarm-milestone-list h3 { font-size: 12px; font-weight: 600; margin: 16px 0 8px; }
+.swarm-milestone-list section > div { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 10px; padding: 7px 0; font-size: 13px; }
+.swarm-milestone-list [data-status="accepted"] > span:first-child { color: var(--swarm-success); }
+.swarm-milestone-list [data-status="blocked"] > span:first-child { color: var(--swarm-warning); }
+@container (max-width: 420px) {
+  .swarm-dashboard { padding: 12px; }
+  .swarm-health h2 { font-size: 20px; }
+  .swarm-health-counts { gap: 4px 12px; }
+  .swarm-milestone-list section > div { grid-template-columns: 14px minmax(0, 1fr); }
+  .swarm-milestone-list .swarm-state { grid-column: 2; }
+}
+
+.swarm-attention a { font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+.swarm-health { margin-top: 12px; padding-top: 12px; }
+.swarm-run-heading { padding-bottom: 14px; }
+.swarm-attention { padding: 10px 14px; margin-top: 10px; }
+.swarm-attention h3 { display: none; }
+.swarm-attention > div { margin-bottom: 4px; }
+.swarm-progress-panel { margin-bottom: 16px; }
+@container (min-width: 680px) {
+  .swarm-dashboard { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); column-gap: 28px; }
+  .swarm-dashboard > .swarm-run-heading, .swarm-dashboard > .swarm-history, .swarm-dashboard > .swarm-diagnostics, .swarm-board-panel, .swarm-dashboard > [role] { grid-column: 1 / -1; }
+  .swarm-columns { display: contents; }
+  .swarm-roster { padding-top: 12px; border-top: 1px solid rgb(var(--color-line)); margin-bottom: 16px; }
+  .swarm-roster > .swarm-section-heading { min-height: 26px; padding-bottom: 8px; }
+}
+
+.swarm-progress-content > div > .swarm-progress-meter { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.swarm-progress-content > div > .swarm-progress-meter .swarm-progress-detail { display: none; }
+@container (max-width: 420px) {
+  .swarm-milestone-list section > div { grid-template-columns: 12px minmax(0, 1fr) auto; gap: 6px; }
+  .swarm-milestone-list .swarm-state { grid-column: auto; font-size: 10px; }
+}

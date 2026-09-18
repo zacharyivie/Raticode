@@ -258,3 +258,79 @@ test('baseline cache avoids show/diff and invalidates external writes, index and
     assert.equal((await read(file)).deleted,true);
   } finally {fs.rmSync(root,{recursive:true,force:true});}
 });
+
+
+test("thread branch reads share cached work and never enumerate changed files", async () => {
+  const { readGitBranches } = require('./git-status.cjs');
+  const calls = [];
+  const runner = async args => {
+    calls.push(args);
+    if (args.includes('rev-parse')) return '/repo';
+    if (args.includes('for-each-ref')) return '';
+    if (args.includes('branch')) return 'main\n';
+    assert.fail(`Unexpected Git command: ${args}`);
+  };
+  const options = { runner, now: () => 0 };
+  const [first, second] = await Promise.all([readGitBranches('/repo', options), readGitBranches('/repo', options)]);
+  assert.deepEqual(first, { active: true, root: '/repo', branch: 'main', branches: [] });
+  assert.deepEqual(second, first);
+  await readGitBranches('/repo', options);
+  assert.equal(calls.length, 3);
+  await readGitBranches('/repo', { runner, now: () => 15001 });
+  assert.equal(calls.length, 6);
+});
+
+test('Git metadata reads overlap and optional failures preserve successful fields', async () => {
+  const { readGitStatus } = require('./git-status.cjs');
+  const gate = Promise.withResolvers();
+  const started = [];
+  const runGit = async args => {
+    const command = args[2];
+    if (command === 'rev-parse') return args.includes('--show-toplevel') ? '/repo' : '';
+    if (command === 'status') return '# branch.head main\0';
+    started.push(command);
+    await gate.promise;
+    if (command === 'for-each-ref') throw new Error('refs unavailable');
+    return command === 'remote' ? 'origin\n' : 'stash@{0}\nstash@{1}\n';
+  };
+  const pending = readGitStatus('/repo', { runGit });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(started.sort(), ['for-each-ref', 'remote', 'stash']);
+  } finally { gate.resolve(); }
+  const result = await pending;
+  assert.equal(result.active, true);
+  assert.equal(result.branchesUnavailable, true);
+  assert.deepEqual(result.remotes, ['origin']);
+  assert.equal(result.stashCount, 2);
+});
+
+for (const conflict of [false, true]) {
+  test(`diff reads overlap and preserve ${conflict ? 'conflict sides' : 'staged content and hunks'}`, async () => {
+    const { readGitFileBaseline } = require('./git-status.cjs');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-diff-concurrency-'));
+    const gate = Promise.withResolvers();
+    const started = [];
+    const runGit = async args => {
+      if (args[2] === 'rev-parse') return root;
+      if (args[2] === 'status') return `${conflict ? 'UU' : 'M '} file.txt\0`;
+      started.push(args[2] === 'show' ? args[3] : 'diff');
+      await gate.promise;
+      if (args[2] === 'diff') return '@@ -1 +1 @@\n-old\n+new\n';
+      return args[3].startsWith(':3:') ? 'incoming\n' : args[3] === ':file.txt' ? 'new\n' : 'old\n';
+    };
+    const pending = readGitFileBaseline(path.join(root, 'file.txt'), { runGit, group: 'staged' });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(started.sort(), (conflict ? [':2:file.txt', ':3:file.txt', ':file.txt', 'diff'] : ['HEAD:file.txt', ':file.txt', 'diff']).sort());
+    } finally { gate.resolve(); }
+    try {
+      const result = await pending;
+      assert.equal(result.content, 'old\n');
+      assert.equal(result.modifiedContent, 'new\n');
+      assert.equal(result.changed, true);
+      assert.equal(result.hunks.length, 1);
+      if (conflict) assert.equal(result.incomingContent, 'incoming\n');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+}

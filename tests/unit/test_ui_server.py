@@ -72,6 +72,7 @@ def _fake_server(
     server = GoferUiServer.__new__(GoferUiServer)
     server.data_dir = tmp_path
     server.chat_steering = ChatSteering(tmp_path)
+    server.chat_jobs = server_module.ChatJobs(tmp_path)
     server.provider_auth = server_module.ProviderAuthSessions()
     server.resource_limits = resource_limits or DEFAULT_RESOURCE_LIMITS
     server.api_token = "test-ui-token"
@@ -2848,6 +2849,7 @@ def test_identified_chat_stream_reports_turn_and_generation(monkeypatch, tmp_pat
     )
     events = [json.loads(line) for line in result.text().splitlines()]
     assert events[0] == {
+        "sequence": 1,
         "type": "turn",
         "conversationId": "conversation",
         "turnId": "turn",
@@ -2893,33 +2895,25 @@ def test_steering_http_persistence_failure_and_recovery(monkeypatch, tmp_path):
     assert _request(tmp_path, "POST", "/api/chat/steer", body=body).json() == {"receipt": receipt}
 
 
-def test_identified_stream_disconnect_cancels_and_closes_provider(monkeypatch, tmp_path):
+def test_identified_stream_disconnect_preserves_provider_and_replays(monkeypatch, tmp_path):
+    import threading
+
     server = _fake_server(tmp_path)
     monkeypatch.setattr("tests.unit.test_ui_server._fake_server", lambda *a, **kw: server)
-    closed = []
-    cancellations = []
+    disconnected = threading.Event()
     original_write = GoferUiRequestHandler._write_stream_event
 
     def disconnect(self, event):
         if event["type"] == "thought":
-            server.chat_steering.steer(
-                {
-                    "conversationId": "conversation",
-                    "turnId": "turn",
-                    "requestId": "request",
-                    "text": "recover this text",
-                }
-            )
+            disconnected.set()
             raise BrokenPipeError("disconnected")
         original_write(self, event)
 
     async def stream(**kwargs):
-        cancellations.append(kwargs["cancel_event"])
-        try:
-            yield {"type": "thought", "text": "partial"}
-            pytest.fail("Disconnect must not continue the provider")
-        finally:
-            closed.append(True)
+        yield {"type": "thought", "text": "partial"}
+        assert disconnected.wait(3)
+        assert not kwargs["cancel_event"].is_set()
+        yield {"type": "final", "message": {"body": "finished after disconnect"}}
 
     monkeypatch.setattr(GoferUiRequestHandler, "_write_stream_event", disconnect)
     monkeypatch.setattr(server_module, "stream_workflow_chat", stream)
@@ -2929,11 +2923,15 @@ def test_identified_stream_disconnect_cancels_and_closes_provider(monkeypatch, t
         "/api/chat/stream",
         body={"conversationId": "conversation", "turnId": "turn"},
     )
-    assert closed == [True]
-    assert len(cancellations) == 1 and cancellations[0].is_set()
-    receipt = server.chat_steering.receipts("conversation")[0]
-    assert receipt["status"] == "cancelled"
-    assert receipt["text"] == "recover this text"
+    # ChatSteering closes a generator once its final event has arrived.
+    monkeypatch.setattr(GoferUiRequestHandler, "_write_stream_event", original_write)
+    replay = _request(
+        tmp_path, "GET", "/api/chat/events?conversationId=conversation&turnId=turn&after=2"
+    )
+    events = [json.loads(line) for line in replay.text().splitlines()]
+    assert len(events) == 1
+    assert events[0]["message"]["body"] == "finished after disconnect"
+    assert events[0]["sequence"] == 3
 
 
 def test_provider_settings_persist_and_reject_invalid_updates(monkeypatch, tmp_path) -> None:

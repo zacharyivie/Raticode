@@ -53,7 +53,7 @@ Actions and params:
   allowSteering (default false), isOrchestrator (boolean).
   Exactly one orchestrator and 1-16 agents. Optional wakeIntervalSeconds=60
   (10-3600), maxConcurrency=3 (1-8),
-  maxRepairAttempts=2, stallTurnLimit=6, contextCharLimit=48000,
+  contextCharLimit=48000,
   integrationChecks (command argument arrays), gitPermissions={local:true,remote:false}.
   Local Git allows managed staging/commits in assignment worktrees. Remote Git adds
   branch push and GitHub PR creation; it requires local Git. These settings govern
@@ -72,8 +72,8 @@ Actions and params:
 - start: swarmId; task required. Optional context is selected text or JSON from
   this conversation. Include the objective, constraints, findings, relevant file
   paths, and expected output. Share only relevant context; omit credentials.
-  Task plus serialized context must fit 32000 characters. For more data, supply
-  project file paths and a concise summary. Returns immediately; use read later.
+  Long context is compacted before provider turns. Prefer relevant file paths
+  and a concise summary. Returns immediately; use read later.
 - control: swarmId; action is pause, resume, or stop. Pause prevents new turns;
   stop requests cancellation and child workspace cleanup. Read state to confirm agents have stopped.
   cleanup retries a failed cleanup. Completed/stopped Git runs retain only the parent
@@ -99,7 +99,7 @@ Actions and params:
   workspace, runs combined checks and preserves conflicts. Omit milestoneId for
   final combined verification. The user's checkout remains unchanged.
 - repair: swarmId; milestoneId, attemptId, reason describing the changed approach.
-- replan: swarmId; reason with a changed plan. Required after a recorded stall.
+- replan: swarmId; reason with a changed plan. Use it to record a changed approach.
 - resolve_attempt: swarmId; attemptId, resolution (review or dismiss), reason.
   Only after the user reviews uncertain effects and confirms prior execution stopped.
   Review preserves output for verification; dismiss allows an explicit new repair.
@@ -169,10 +169,6 @@ def _handoff(params: dict[str, Any], field: str) -> str:
     if context is not None:
         reference = context if isinstance(context, str) else json.dumps(context, ensure_ascii=False)
         text += "\n\nReference context from Rem's conversation:\n" + reference
-    if len(text) > 32000:
-        raise ValueError(
-            "Task/message with context must be at most 32000 characters; use file paths"
-        )
     return text
 
 

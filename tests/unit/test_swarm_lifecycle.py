@@ -118,7 +118,7 @@ def test_waiting_work_is_not_an_idle_failure(tmp_path, busy):
             with_manager._checks["busy"] = {"swarmId": sid, "cancel": threading.Event()}
         elif busy == "retry":
             state["run"]["agentStates"]["worker"]["state"] = "retry_wait"
-        assert not with_manager._fail_idle(state)
+        assert not with_manager._recover_idle(state)
         assert state["run"]["state"] == "running"
     finally:
         with_manager._active.clear()
@@ -238,5 +238,105 @@ async def test_periodic_digest_is_queued_even_when_all_turn_slots_are_busy(tmp_p
         manager._closed.set()
         manager._wake.set()
         await loop
+        manager._active.clear()
+        manager.close()
+
+
+def test_idle_recovery_is_actionable_and_deduplicated(tmp_path):
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    try:
+        sid = team(manager, tmp_path)
+        swarm = manager._get(tmp_path, sid)
+        run = swarm["run"]
+        run["messages"][0]["deliveries"][0]["state"] = "completed"
+        run.setdefault("attempts", []).append(
+            {
+                "id": "uncertain",
+                "ownerId": "lead",
+                "state": "uncertain",
+            }
+        )
+        manager._recover_idle(swarm)
+        message = run["messages"][-1]
+        assert message["recovery"]
+        assert manager._dispatchable(run, message, "lead")
+        assert not manager._dispatchable(run, message, "worker") or not any(
+            d["agentId"] == "worker" for d in message["deliveries"]
+        )
+        assert run["attempts"][-1]["state"] == "uncertain"
+        count = len(run["messages"])
+        manager._recover_idle(swarm)
+        assert len(run["messages"]) == count
+        assert run["state"] == "running"
+        assert not run.get("cleanup")
+    finally:
+        manager.close()
+
+
+async def test_recovery_timeout_retries_same_attempt_without_losing_workspace(tmp_path):
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    try:
+        sid = team(manager, tmp_path)
+        swarm = manager._get(tmp_path, sid)
+        swarm["run"]["messages"][0]["deliveries"][0]["state"] = "completed"
+        manager._recover_idle(swarm)
+
+        async def timeout(**kwargs):
+            raise TimeoutError("Provider timed out")
+            yield  # pragma: no cover
+
+        manager._stream = timeout
+        await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+        swarm = manager._get(tmp_path, sid)
+        run = swarm["run"]
+        assert run["agentStates"]["lead"]["state"] == "retry_wait"
+        first = dict(run["attempts"][0])
+        run["agentStates"]["lead"]["retryAt"] = 0
+        manager._save(swarm)
+
+        async def finish(**kwargs):
+            manager.control(tmp_path, sid, "pause")
+            yield {"type": "final", "message": {"body": "Recovered"}}
+
+        manager._stream = finish
+        await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+        run = manager.get(tmp_path, sid)["run"]
+        assert len(run["attempts"]) == 1
+        assert run["attempts"][0]["id"] == first["id"]
+        assert run["attempts"][0]["workspace"] == first["workspace"]
+        assert run["attempts"][0]["state"] == "succeeded"
+    finally:
+        manager.close()
+
+
+def test_coordinator_can_review_prior_uncertain_attempt_during_recovery(tmp_path):
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    try:
+        sid = team(manager, tmp_path)
+        swarm = manager._get(tmp_path, sid)
+        swarm["run"].setdefault("attempts", []).append(
+            {
+                "id": "prior",
+                "ownerId": "lead",
+                "state": "uncertain",
+            }
+        )
+        manager._save(swarm)
+        manager._active[f"{sid}:lead"] = {
+            "swarmId": sid,
+            "agentId": "lead",
+            "attemptId": "recovery",
+        }
+        payload = {
+            "action": "resolve_attempt",
+            "attemptId": "prior",
+            "resolution": "review",
+            "reason": "Prior process stopped; inspected its saved output",
+        }
+        with pytest.raises(SwarmError, match="Only the coordinator"):
+            manager.tool("worker", payload)
+        manager.tool("lead", payload)
+        assert manager.get(tmp_path, sid)["run"]["attempts"][0]["state"] == "succeeded"
+    finally:
         manager._active.clear()
         manager.close()

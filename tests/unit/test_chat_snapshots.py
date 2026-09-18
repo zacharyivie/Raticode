@@ -416,3 +416,161 @@ def test_line_counts_include_diff_like_text_and_count_before_preview_truncation(
     assert result["deletions"] == 3
     assert result["files"][0]["binary"] is False
     assert "diff truncated" in result["files"][0]["diff"]
+
+
+def test_turn_edits_only_include_reported_paths_and_preserve_dirty_baselines(tmp_path):
+    (tmp_path / "dirty.txt").write_text("user's unsaved-to-git work\n")
+    (tmp_path / "unrelated.txt").write_text("existing change\n")
+    baseline = chat._capture_chat_project(tmp_path)
+    edits = chat._ChatTurnEdits(tmp_path, baseline)
+    (tmp_path / "dirty.txt").write_text("user's unsaved-to-git work\nRem's addition\n")
+    (tmp_path / "unrelated.txt").write_text("another process changed this\n")
+    edits.observe(
+        {
+            "id": "edit",
+            "kind": "tool",
+            "title": "Edit",
+            "phase": "result",
+            "input": json.dumps([{"path": str(tmp_path / "dirty.txt")}]),
+        }
+    )
+    changes = chat._finalize_chat_changes(
+        tmp_path, baseline, tmp_path / ".data", snapshots=edits.snapshots()
+    )
+    assert changes is not None
+    assert [file["path"] for file in changes["files"]] == ["dirty.txt"]
+    assert changes["additions"] == 1
+    assert changes["deletions"] == 0
+    chat.undo_chat_changes(changes["id"], tmp_path / ".data")
+    assert (tmp_path / "dirty.txt").read_text() == "user's unsaved-to-git work\n"
+    assert (tmp_path / "unrelated.txt").read_text() == "another process changed this\n"
+
+
+def test_shell_edits_exclude_changes_outside_tool_execution(tmp_path):
+    file = tmp_path / "script-output.txt"
+    file.write_text("original\n")
+    baseline = chat._capture_chat_project(tmp_path)
+    edits = chat._ChatTurnEdits(tmp_path, baseline)
+    (tmp_path / "outside.txt").write_text("written before command\n")
+    trace = {"id": "shell", "kind": "tool", "title": "bash", "category": "shell"}
+    edits.observe({**trace, "phase": "start"})
+    file.write_text("command output\n")
+    edits.observe({**trace, "phase": "result"})
+    (tmp_path / "after.txt").write_text("written after command\n")
+    changes = chat._finalize_chat_changes(
+        tmp_path, baseline, tmp_path / ".data", snapshots=edits.snapshots()
+    )
+    assert changes is not None
+    assert [file["path"] for file in changes["files"]] == ["script-output.txt"]
+    # The next turn never inherits the previous turn's edited-file count.
+    next_turn = chat._ChatTurnEdits(tmp_path, chat._capture_chat_project(tmp_path))
+    assert next_turn.snapshots() == ({}, {})
+
+
+def test_claude_tool_results_reuse_start_paths_and_do_not_include_other_files(tmp_path):
+    (tmp_path / "own.txt").write_text("before\n")
+    baseline = chat._capture_chat_project(tmp_path)
+    edits = chat._ChatTurnEdits(tmp_path, baseline)
+    edits.observe(
+        {
+            "id": "edit",
+            "kind": "tool",
+            "title": "Edit",
+            "phase": "start",
+            "input": json.dumps({"file_path": str(tmp_path / "own.txt")}),
+        }
+    )
+    (tmp_path / "own.txt").write_text("after\n")
+    (tmp_path / "other.txt").write_text("external\n")
+    edits.observe({"id": "edit", "kind": "tool", "title": "Tool result", "phase": "result"})
+    before, after = edits.snapshots()
+    assert set(before) == set(after) == {"own.txt"}
+
+
+def test_turn_edit_add_delete_recreate_keeps_original_absence(tmp_path):
+    edits = chat._ChatTurnEdits(tmp_path, {})
+    file = tmp_path / "new.txt"
+    for index, content in enumerate(["first", None, "second"]):
+        if content is None:
+            file.unlink()
+        else:
+            file.write_text(content)
+        edits.observe(
+            {
+                "id": str(index),
+                "kind": "tool",
+                "title": "Edit",
+                "phase": "result",
+                "input": json.dumps([{"path": "new.txt"}]),
+            }
+        )
+    before, after = edits.snapshots()
+    assert before == {}
+    assert chat._chat_file_bytes(after["new.txt"]) == b"second"
+
+
+def test_turn_edits_reject_incomplete_baseline(tmp_path):
+    baseline = chat._ChatSnapshot()
+    baseline.complete = False
+    edits = chat._ChatTurnEdits(tmp_path, baseline)
+    (tmp_path / "file.txt").write_text("changed")
+    edits.observe(
+        {
+            "id": "edit",
+            "kind": "tool",
+            "title": "Edit",
+            "phase": "result",
+            "input": json.dumps([{"path": "file.txt"}]),
+        }
+    )
+    assert edits.snapshots() == ({}, {})
+
+
+def test_later_read_only_tool_does_not_claim_external_edit_to_previously_edited_file(tmp_path):
+    file = tmp_path / "own.txt"
+    file.write_text("original\n")
+    edits = chat._ChatTurnEdits(tmp_path, chat._capture_chat_project(tmp_path))
+    file.write_text("Rem\n")
+    edits.observe(
+        {
+            "id": "edit",
+            "kind": "tool",
+            "title": "Edit",
+            "phase": "result",
+            "input": json.dumps([{"path": "own.txt"}]),
+        }
+    )
+    file.write_text("external\n")
+    trace = {"id": "read", "kind": "tool", "title": "bash", "category": "shell"}
+    edits.observe({**trace, "phase": "start"})
+    edits.observe({**trace, "phase": "result"})
+    assert chat._chat_file_bytes(edits.snapshots()[1]["own.txt"]) == b"Rem\n"
+
+
+def test_terminal_error_collects_partial_changes_from_unfinished_tool(tmp_path):
+    file = tmp_path / "own.txt"
+    file.write_text("original\n")
+    edits = chat._ChatTurnEdits(tmp_path, chat._capture_chat_project(tmp_path))
+    edits.observe(
+        {"id": "shell", "kind": "tool", "title": "bash", "category": "shell", "phase": "start"}
+    )
+    file.write_text("partial\n")
+    edits.finish()
+    assert chat._chat_file_bytes(edits.snapshots()[1]["own.txt"]) == b"partial\n"
+
+
+def test_reported_edit_outside_project_does_not_fall_back_to_whole_project(tmp_path):
+    file = tmp_path / "own.txt"
+    file.write_text("original\n")
+    edits = chat._ChatTurnEdits(tmp_path, chat._capture_chat_project(tmp_path))
+    file.write_text("external\n")
+    edits.observe(
+        {
+            "id": "edit",
+            "kind": "tool",
+            "title": "Edit",
+            "phase": "result",
+            "input": json.dumps([{"path": str(tmp_path.parent / "elsewhere.txt")}]),
+        }
+    )
+    assert edits.snapshots() == ({}, {})

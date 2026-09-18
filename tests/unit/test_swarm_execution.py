@@ -484,7 +484,7 @@ async def test_worktrees_keep_both_conflicting_edits_and_dirty_user_index(manage
         manager.tool("lead", {"action": "complete"})
 
 
-async def test_repair_is_bounded_and_old_results_are_stale(manager, tmp_path):
+async def test_repair_has_no_count_limit_and_old_results_are_stale(manager, tmp_path):
     root = tmp_path / "project"
     sid = team(manager, root, maxRepairAttempts=1)
     plan(manager, root, sid, [milestone()])
@@ -514,11 +514,11 @@ async def test_repair_is_bounded_and_old_results_are_stale(manager, tmp_path):
             },
         )
     await manager._turn(str(root), sid, "one", threading.Event())
-    with pytest.raises(SwarmError, match="Repair limit"):
-        manager.tool(
-            "lead",
-            {"action": "repair", "milestoneId": "a", "attemptId": new["id"], "reason": "Try again"},
-        )
+    manager.tool(
+        "lead",
+        {"action": "repair", "milestoneId": "a", "attemptId": new["id"], "reason": "Try again"},
+    )
+    assert assignment(manager, root, sid)[1]["repairCount"] == 2
 
 
 async def test_context_cursors_usage_and_stall_replanning(manager, tmp_path):
@@ -540,12 +540,11 @@ async def test_context_cursors_usage_and_stall_replanning(manager, tmp_path):
         manager.message(root, sid, {"body": f"Review {i}", "recipientId": "lead"})
         await manager._turn(str(root), sid, "lead", threading.Event())
     run = manager.get(root, sid)["run"]
-    assert run["state"] == "paused" and run["replanRequired"]
+    assert run["state"] == "running" and not run.get("replanRequired")
     assert run["usage"]["input_tokens"] == 30
     assert all(len(p) == 1 and len(p[0]["body"]) <= 8000 for p in prompts)
     assert "Review 0" not in prompts[1][0]["body"]
-    with pytest.raises(SwarmError, match="changed plan"):
-        manager.control(root, sid, "resume")
+    manager.control(root, sid, "pause")
     manager.execution(
         root,
         sid,
@@ -713,7 +712,7 @@ async def test_stop_cancels_checks_and_preserves_uncertain_attempt(manager, tmp_
     assert manager.get(root, sid)["run"]["state"] == "stopped"
 
 
-async def test_identical_failures_stop_repeated_checks(manager, tmp_path):
+async def test_identical_failures_do_not_impose_a_check_limit(manager, tmp_path):
     root = tmp_path / "project"
     sid = team(manager, root, maxRepairAttempts=1)
     plan(manager, root, sid, [milestone(checks=[[sys.executable, "-c", "raise SystemExit(1)"]])])
@@ -729,11 +728,8 @@ async def test_identical_failures_stop_repeated_checks(manager, tmp_path):
     }
     for _ in range(2):
         assert not manager.tool("one", args)["result"]["passed"]
-    with pytest.raises(SwarmError, match="Repeated checks failed"):
-        manager.tool("one", args)
-    assert any(
-        event["kind"] == "repair_required" for event in manager.get(root, sid)["run"]["events"]
-    )
+    assert not manager.tool("one", args)["result"]["passed"]
+    assert assignment(manager, root, sid)[1]["repeatFailures"] == 3
 
 
 def test_member_collection_reads_fetch_only_the_requested_page(manager, tmp_path):

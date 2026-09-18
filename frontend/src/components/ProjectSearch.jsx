@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, RefreshCw, X } from "lucide-react";
-import { hasUnsavedCodeChanges } from "./CodeWorkspace.jsx";
+import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 
 export default function ProjectSearch({ rootPath, active, focusRequest, onOpenFile, onReplace, onBusy, disabled = false }) {
   const inputRef = useRef(null);

@@ -195,3 +195,59 @@ test('unprintable log messages cannot throw into desktop event handlers', async 
   await log.close();
   assert.match(errors[0], /could not format/);
 });
+
+for (const platform of ['win32', 'linux']) {
+  test(`terminal setup shares asynchronous writes and retries failed setup on ${platform}`, async () => {
+    const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+    const writes = [];
+    let release, fail = true;
+    const gate = new Promise(resolve => { release = resolve; });
+    const context = vm.createContext({
+      path, process: { platform, env: {} },
+      app: { getPath: () => '/profile' },
+      fs: { promises: {
+        mkdir: async () => { await gate; if (fail) throw new Error('disk unavailable'); },
+        writeFile: async (file, contents) => { writes.push({ file, contents }); },
+        chmod: async () => {},
+      } },
+    });
+    vm.runInContext(source.slice(source.indexOf('let terminalEditorCommandPromise;'), source.indexOf('function startTerminalEditorServer')), context);
+    // The function block above ends before the server and has no Electron dependencies.
+    const first = context.terminalEditorCommand();
+    assert.equal(context.terminalEditorCommand(), first);
+    assert.equal(writes.length, 0);
+    release();
+    await assert.rejects(first, /disk unavailable/);
+    fail = false;
+    const [left, right] = await Promise.all([context.terminalEditorCommand(), context.terminalEditorCommand()]);
+    assert.equal(left, right);
+    await context.terminalEditorCommand();
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].contents, /RATICODE_EDITOR_RUNTIME/);
+    assert.match(left, platform === 'win32' ? /raticode-editor.cmd/ : /raticode-editor/);
+  });
+}
+
+test('terminal creation waits without blocking and does not spawn for a closed owner', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+  let release, started, destroyed = false, spawned = 0, shellReads = 0, editorReads = 0;
+  const setupStarted = new Promise(resolve => { started = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const context = vm.createContext({
+    resolveExactPath: value => value,
+    fs: { promises: { stat: async () => ({ isDirectory: () => true }) } },
+    terminalShell: () => { shellReads++; return gate; },
+    terminalEditorCommand: async () => { editorReads++; started(); return 'editor'; },
+    pty: { spawn: () => { spawned++; } },
+  });
+  vm.runInContext(source.slice(source.indexOf('async function createTerminal('), source.indexOf('function writeTerminal(')), context);
+  const pending = context.createTerminal({ sender: { isDestroyed: () => destroyed } }, { cwd: '/project' });
+  await setupStarted;
+  assert.equal(shellReads, 1);
+  assert.equal(editorReads, 1);
+  assert.equal(spawned, 0);
+  destroyed = true;
+  release({ command: 'shell', args: [] });
+  await assert.rejects(pending, /owner was closed/);
+  assert.equal(spawned, 0);
+});

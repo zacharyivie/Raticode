@@ -85,7 +85,7 @@ class SwarmManager:
         self.max_concurrency = (
             max_concurrency
             if max_concurrency is not None
-            else int(os.environ.get("GOFER_SWARM_MAX_CONCURRENCY", "8"))
+            else float(os.environ.get("GOFER_SWARM_MAX_CONCURRENCY", "inf"))
         )
         if self.max_concurrency < 1:
             raise ValueError("Swarm concurrency must be positive")
@@ -435,14 +435,10 @@ class SwarmManager:
             concurrency = int(payload.get("maxConcurrency", 3))
         except (TypeError, ValueError) as exc:
             raise SwarmError("Wake interval and concurrency must be integers") from exc
-        if not 10 <= interval <= 3600 or not 1 <= concurrency <= 8:
-            raise SwarmError("Wake interval must be 10–3600 seconds; concurrency must be 1–8")
+        if not 10 <= interval <= 3600 or concurrency < 1:
+            raise SwarmError("Wake interval must be 10–3600 seconds; concurrency must be positive")
         limits = {}
-        for key, default, maximum in (
-            ("maxRepairAttempts", 2, 10),
-            ("stallTurnLimit", 6, 100),
-            ("contextCharLimit", 48000, 200000),
-        ):
+        for key, default, maximum in (("contextCharLimit", 48000, 200000),):
             value = payload.get(key, default)
             minimum = 8000 if key == "contextCharLimit" else 1
             if type(value) is not int or not minimum <= value <= maximum:
@@ -496,8 +492,8 @@ class SwarmManager:
         return dict(swarm["run"])
 
     def start(self, project_root: str | Path, swarm_id: str, task: str) -> dict[str, Any]:
-        if not isinstance(task, str) or not task.strip() or len(task) > 32000:
-            raise SwarmError("A run task of 1-32000 characters is required")
+        if not isinstance(task, str) or not task.strip():
+            raise SwarmError("A nonempty run task is required")
         with self._lock:
             swarm = self._get(project_root, swarm_id)
             if any(
@@ -559,8 +555,6 @@ class SwarmManager:
                     raise SwarmError(
                         "This run has been cleaned up. Start a new run from its parent branch."
                     )
-                if run.get("replanRequired"):
-                    raise SwarmError("Record a changed plan before resuming stalled work")
                 run["state"] = "running"
                 self._dispatch_assignments(swarm)
                 run.pop("pauseReason", None)
@@ -585,8 +579,8 @@ class SwarmManager:
     def _post(self, swarm: dict[str, Any], actor: str, payload: dict[str, Any]) -> None:
         run = swarm["run"]
         body = str(payload.get("body", "")).strip()
-        if not body or len(body) > 32000:
-            raise SwarmError("Message must contain 1–32000 characters")
+        if not body:
+            raise SwarmError("Message must not be empty")
         request_id = payload.get("requestId")
         if request_id and any(
             m.get("requestId") == request_id and m["senderId"] == actor for m in run["messages"]
@@ -1022,10 +1016,14 @@ class SwarmManager:
     def _dispatchable(self, run: dict[str, Any], message: dict[str, Any], actor: str) -> bool:
         if run["agentStates"].get(actor, {}).get("retryAt", 0) > time.time():
             return False
-        if run.get("replanRequired") and not any(
-            a["id"] == actor and a["isOrchestrator"] for a in run["configuration"]["agents"]
+        if (
+            message.get("recovery")
+            and message.get("senderId") == "system"
+            and any(
+                a["id"] == actor and a["isOrchestrator"] for a in run["configuration"]["agents"]
+            )
         ):
-            return False
+            return True
         if any(
             a["ownerId"] == actor and a["state"] in {"uncertain", "verifying", "integrating"}
             for a in run.get("attempts", [])
@@ -1156,8 +1154,6 @@ class SwarmManager:
         if milestone["status"] in {"accepted", "cancelled"}:
             raise SwarmError("Reopen the milestone before repairing")
         repairs = int(attempt.get("repairCount", 0)) + 1
-        if repairs > run["configuration"].get("maxRepairAttempts", 2):
-            raise SwarmError("Repair limit reached; revise the milestone scope and plan")
         attempt["state"] = "superseded"
         milestone.update(attemptId=_id(), status="ready", evidence="")
         self._dispatch_assignments(swarm)
@@ -1250,12 +1246,6 @@ class SwarmManager:
                     raise SwarmError("Milestone dependencies must be accepted first")
                 if "workspace" not in attempt:
                     raise SwarmError("The assignment has not started")
-                if attempt.get("repeatFailures", 0) > run["configuration"].get(
-                    "maxRepairAttempts", 2
-                ):
-                    raise SwarmError(
-                        "Repeated checks failed; request a repair with a changed approach"
-                    )
             elif not integration:
                 raise SwarmError("milestoneId and attemptId are required")
             if integration and any(a["state"] == "integrating" for a in run.get("attempts", [])):
@@ -1391,12 +1381,6 @@ class SwarmManager:
                         else 1
                     )
                     attempt["failureSignature"] = signature
-                    if attempt["repeatFailures"] > run["configuration"].get("maxRepairAttempts", 2):
-                        milestone.update(
-                            status="blocked",
-                            blocker="Repeated identical check failures; change the approach",
-                        )
-                        self._event(run, "repair_required", "system", {"attemptId": attempt["id"]})
                 attempt["state"] = (
                     "uncertain"
                     if check_cancel.is_set()
@@ -1481,13 +1465,17 @@ class SwarmManager:
             "replanRequired": run.get("replanRequired", False),
         }
 
-    def _resolve_attempt(self, swarm: dict[str, Any], payload: dict[str, Any]) -> None:
+    def _resolve_attempt(
+        self, swarm: dict[str, Any], payload: dict[str, Any], actor: str = "user"
+    ) -> None:
         run = swarm["run"]
         attempt = self._attempt(run, payload.get("attemptId"))
         if not attempt or attempt["state"] != "uncertain":
             raise SwarmError("Only an uncertain attempt can be reconciled")
         if any(a["swarmId"] == swarm["id"] for a in self._checks.values()) or any(
-            a["swarmId"] == swarm["id"] and a["agentId"] == attempt["ownerId"]
+            a["swarmId"] == swarm["id"]
+            and a["agentId"] == attempt["ownerId"]
+            and (actor != self._orchestrator(swarm) or a.get("attemptId") == attempt["id"])
             for a in self._active.values()
         ):
             raise SwarmError("Wait for the active operation to stop before reconciliation")
@@ -1508,11 +1496,11 @@ class SwarmManager:
                     message.get("attemptId") == attempt["id"]
                     or delivery.get("executionAttemptId") == attempt["id"]
                 ):
-                    delivery.update(state="dismissed", reason="Attempt reconciled by user")
+                    delivery.update(state="dismissed", reason=f"Attempt reconciled by {actor}")
         self._event(
             run,
             "attempt_resolved",
-            "user",
+            actor,
             {"attemptId": attempt["id"], "reason": reason, "resolution": payload["resolution"]},
         )
 
@@ -1732,7 +1720,11 @@ class SwarmManager:
                 return result
             if action == "read":
                 return self._member_read(swarm, actor, payload)
-            if action == "repair":
+            if action == "resolve_attempt":
+                if actor != self._orchestrator(swarm):
+                    raise SwarmError("Only the coordinator may reconcile attempts")
+                self._resolve_attempt(swarm, payload, actor)
+            elif action == "repair":
                 self._repair(swarm, actor, payload)
             elif action == "replan":
                 self._replan(swarm, actor, payload)
@@ -1933,7 +1925,10 @@ an isolated candidate and run combined checks. Inspect result.conflicts on failu
 Repair conflicts in a new assignment based on current integration, never overwrite workers.
 Call integrate without a milestone to verify the final combined revision.
 repair (orchestrator only): milestoneId, attemptId, reason explaining the changed approach.
-Repair attempts are bounded. Old attempts retain their files, results and audit trail.
+Repair attempts have no application-imposed count limit.
+Old attempts retain their files, results and audit trail.
+resolve_attempt (orchestrator only): attemptId, resolution=review or dismiss, reason.
+Inspect retained effects first; never replay uncertain work blindly.
 replan (orchestrator only): reason containing a changed plan after a stall.
 complete (orchestrator only): all active milestones accepted, no unresolved actionable
 requests or uncertain attempts, and the combined integration revision verified.
@@ -1954,7 +1949,7 @@ Before ending your turn, post useful findings and next steps to the board. Do no
 an actionable acknowledgement merely to acknowledge another acknowledgement.
 """
 
-    def _fail_idle(self, swarm: dict[str, Any]) -> bool:
+    def _recover_idle(self, swarm: dict[str, Any]) -> bool:
         run = swarm["run"]
         if run["state"] != "running" or any(
             item["swarmId"] == swarm["id"]
@@ -1969,21 +1964,27 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             for d in m["deliveries"]
         ):
             return False
-        reason = "All agents are idle and no assignment can run."
-        run.update(state="failed", failureReason=reason, idleDiagnosis={"state": "pending"})
         self._post(
             swarm,
             "system",
             {
-                "body": reason + " Coordinator: explain why work stopped, identify the blocking "
-                "assignments or missing next step, and give the user a concise recovery plan. "
-                "The run has failed. Do not restart agents or execute project work.",
-                "actionable": False,
+                "body": "No assignment is running. Review the current milestones and unblock "
+                "the next step: reconcile uncertain attempts, review submitted evidence, "
+                "repair failed work, or assign ready work. If all milestones are accepted, "
+                "verify the combined result, post a final summary with next steps, and call "
+                "complete. Do not end with unfinished work and no next assignment. "
+                "Preserve prior effects and inspect them before retrying uncertain work.",
+                "recipientId": self._orchestrator(swarm),
+                "actionable": True,
             },
         )
-        self._event(run, "idle_failure", "system", {"reason": reason})
+        # A separate coordinator turn can inspect uncertain effects without replaying
+        # the interrupted assignment. Only the scheduler can mark a recovery message.
+        run["messages"][-1]["recovery"] = True
+        run["recovery"] = {"state": "queued", "updatedAt": _now()}
+        self._event(run, "idle_recovery", "system", {})
         self._save(swarm)
-        return True
+        return False
 
     async def _diagnose_idle(
         self, swarm: dict[str, Any], cancel: threading.Event
@@ -2003,7 +2004,14 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     {
                         "task": run["task"],
                         "objectives": run["objectives"],
-                        "agents": run["agentStates"],
+                        "agents": {
+                            key: {
+                                field: value
+                                for field, value in state.items()
+                                if field not in {"messages", "traces"}
+                            }
+                            for key, state in run["agentStates"].items()
+                        },
                         "board": run["messages"][-20:],
                     }
                 ),
@@ -2150,7 +2158,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                         a.get("projectRoot") == root
                         for a in [*self._active.values(), *self._checks.values()]
                     )
-                    if self._fail_idle(swarm):
+                    if self._recover_idle(swarm):
                         continue
                     if time.time() >= run["nextCheckAt"]:
                         # Timers reconcile unseen updates; idle ticks cost no model call.
@@ -2361,6 +2369,8 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 if selected and (attempt is None or selected["attemptId"] != attempt["id"]):
                     attempt = self._attempt(run, selected["attemptId"])
                     run["agentStates"][agent_id].pop("consecutiveFailures", None)
+                if any(m.get("recovery") for m in eligible):
+                    run["recovery"] = {"state": "working", "updatedAt": _now()}
                 if attempt is None:
                     attempt = {
                         "id": _id(),
@@ -2458,6 +2468,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                                             "integrate",
                                             "repair",
                                             "replan",
+                                            "resolve_attempt",
                                         ],
                                     },
                                     "agents": {"type": "array", "items": {"type": "object"}},
@@ -2492,6 +2503,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                                     "offset": {"type": "integer"},
                                     "limit": {"type": "integer"},
                                     "result": {"type": "object"},
+                                    "resolution": {"type": "string", "enum": ["review", "dismiss"]},
                                 },
                                 "required": ["action"],
                             },
@@ -2557,7 +2569,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             self._post(
                                 current,
                                 agent_id,
-                                {"body": body[:32000], "recipientId": "all", "actionable": False},
+                                {"body": body, "recipientId": "all", "actionable": False},
                             )
                     elif event["type"] == "compaction":
                         current_run["agentStates"][agent_id]["messages"] = event["messages"]
@@ -2577,7 +2589,6 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                                 delivery.update(state="accepted", reason="Provider turn started")
                     self._save(current)
         except TimeoutError:
-            cancel.set()
             error = "Provider request timed out"
         except asyncio.CancelledError:
             error = "Agent turn interrupted"
@@ -2637,32 +2648,6 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             run["stalledTurns"] = run.get("stalledTurns", 0) + 1
                         else:
                             run["stalledTurns"] = 0
-                        threshold = run["configuration"].get("stallTurnLimit", 6)
-                        if run["stalledTurns"] >= threshold:
-                            if run.get("replanRequired"):
-                                run.update(
-                                    state="paused",
-                                    pauseReason="Swarm stalled; record a changed plan",
-                                )
-                            else:
-                                run["replanRequired"] = True
-                                self._post(
-                                    current,
-                                    "system",
-                                    {
-                                        "body": (
-                                            "No new milestone result across completed turns. "
-                                            "Call replan with a changed approach before continuing."
-                                        ),
-                                        "actionable": True,
-                                    },
-                                )
-                                self._event(
-                                    run,
-                                    "replan_required",
-                                    "system",
-                                    {"stalledTurns": run["stalledTurns"]},
-                                )
                     for message in run["messages"]:
                         for delivery in message["deliveries"]:
                             if delivery["agentId"] == agent_id and delivery["state"] in {
@@ -2703,7 +2688,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     if active is not None:
                         active["outcome"] = "uncertain" if error or cancel.is_set() else "completed"
                     self._active.pop(f"{swarm_id}:{agent_id}", None)
-                    self._fail_idle(current)
+                    self._recover_idle(current)
 
                 if swarm_id in self._runnable:
                     self._due[swarm_id] = 0

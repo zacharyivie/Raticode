@@ -27,6 +27,7 @@ async function main() {
   await runBrowserTest(path.join(__dirname, "studio.browser.cjs"), { GOFER_SWARM_ONLY: "1" });
   await runBrowserTest(path.join(__dirname, "../electron/tests/studio-policy.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "../electron/tests/conversation-storage.browser.cjs"));
+  await runBrowserTest(path.join(__dirname, "../electron/tests/background-lifecycle.browser.cjs"));
 }
 
 main().catch((error) => {

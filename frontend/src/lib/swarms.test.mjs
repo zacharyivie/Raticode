@@ -51,3 +51,21 @@ test("progress history distinguishes objective edits from delivery resolution sn
   assert.equal(change.after.percent, 80);
   assert.equal(change.after.totalWeight, 5);
 });
+
+test("overview distinguishes completion, unresolved work, idle recovery and provider errors", async () => {
+  const { swarmOverview } = await import("./swarms.js");
+  const agents = [{ id: "lead", name: "Lead" }];
+  const run = { state: "running", objectives: [{ milestones: [{ id: "m", title: "Ship", status: "working" }] }], agentStates: { lead: { state: "idle" } } };
+  assert.equal(swarmOverview(run, agents).stalled, true);
+  run.agentStates.lead = { state: "retry_wait", error: "Provider rate limit", retryAt: 123 };
+  assert.equal(swarmOverview(run, agents).issues[0].body, "Provider rate limit");
+  assert.equal(swarmOverview(run, agents).stalled, false);
+  run.state = "completed";
+  assert.equal(swarmOverview(run, agents).success, false);
+  run.objectives[0].milestones[0].status = "accepted";
+  run.agentStates.lead = { state: "idle" };
+  assert.equal(swarmOverview(run, agents).success, true);
+  run.idleDiagnosis = { state: "failed", error: "Prompt error" };
+  assert.equal(swarmOverview(run, agents).issues[0].body, "Prompt error");
+  assert.equal(swarmOverview({ state: "completed", objectives: [] }, agents).success, false);
+});

@@ -1,3 +1,4 @@
+import { pathKey, samePath } from "./workspacePaths.js";
 import { shareInFlight, startPolling } from "./refresh.js";
 
 export const RECENT_PROJECT_REFRESH_MS = 60_000;
@@ -8,7 +9,7 @@ export const DOCTOR_REFRESH_MS = 60_000;
 // repeat filesystem and Git work for every other project.
 export function createRecentProjectValidator({ now = Date.now, maxEntries = 64 } = {}) {
   const entries = new Map();
-  const keyFor = (root, selected) => JSON.stringify([root, selected]);
+  const keyFor = (root, selected) => JSON.stringify([pathKey(root), pathKey(selected)]);
   const put = (key, entry) => {
     entries.delete(key);
     entries.set(key, entry);
@@ -39,19 +40,19 @@ export function createRecentProjectValidator({ now = Date.now, maxEntries = 64 }
           let selected = selectedProjectRoot;
           if (!await check(selected)) {
             entries.delete(key);
-            if (selected === projectRoot || !await check(projectRoot)) return null;
+            if (samePath(selected, projectRoot) || !await check(projectRoot)) return null;
             selected = projectRoot;
           }
           const cached = entries.get(keyFor(projectRoot, selected));
           if (cached && cached.expires > now()) {
             const result = await cached.value;
-            if (result.mainProjectRoot !== selected && !await check(result.mainProjectRoot, false)) {
+            if (!samePath(result.mainProjectRoot, selected) && !await check(result.mainProjectRoot, false)) {
               entries.delete(key);
               return { mainProjectRoot: selected, selectedProjectRoot: selected };
             }
             return result;
           }
-          const payload = await shareInFlight(`recent-worktrees:${selected}`,
+          const payload = await shareInFlight(`recent-worktrees:${pathKey(selected)}`,
             () => workspace.gitWorktrees?.(selected));
           const result = { mainProjectRoot: resolveMainRoot(payload, projectRoot), selectedProjectRoot: selected };
           put(keyFor(projectRoot, selected), { expires: now() + RECENT_PROJECT_REFRESH_MS, value: result });

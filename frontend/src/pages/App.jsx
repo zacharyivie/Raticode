@@ -1,4 +1,6 @@
-import { threadIsArchived, inspectThreadScopes } from "../lib/threadActivity.js";
+import { fetchChatTurn } from "../lib/chatTransport.js";
+import { pathKey, samePath, pathWithin, uniquePaths, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
+import { threadIsArchived, inspectThreadScopes, cachedThreadScopes, threadScopeKey } from "../lib/threadActivity.js";
 import { loadEditorSession, saveEditorSession, loadWorkflowDraft, saveWorkflowDraft } from "../lib/editorSession.js";
 import brandCompat from "../lib/brandCompat.js";
 import { createConversationCache } from "../lib/conversationCache.js";
@@ -54,15 +56,14 @@ import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
 const DagCanvas = lazy(() => import("../components/DagCanvas.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
 const SwarmWorkspace = lazy(() => import("../components/SwarmWorkspace.jsx"));
-import CodeFileExplorer from "../components/CodeFileExplorer.jsx";
-import CodeWorkspace, {
-  applyCodeFilesystemChange,
-  resolveMarkdownFileLinkTarget,
-  markdownFileLinkTarget,
-} from "../components/CodeWorkspace.jsx";
+const CodeFileExplorer = lazy(() => import("../components/CodeFileExplorer.jsx"));
+const CodeWorkspace = lazy(() => import("../components/CodeWorkspace.jsx"));
+import { applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
+import { resolveMarkdownFileLinkTarget, markdownFileLinkTarget } from "../lib/fileLinks.js";
 import MarkdownContent from "../components/MarkdownContent.jsx";
 import ChatComposer, { MessageAttachments } from "../components/ChatComposer.jsx";
-import SettingsPopover, { defaultSettingsSnapshot } from "../components/SettingsPopover.jsx";
+const SettingsPopover = lazy(() => import("../components/SettingsPopover.jsx"));
+import { defaultSettingsSnapshot } from "../lib/settings.js";
 import RaticodeMark from "../components/RaticodeMark.jsx";
 import UnifiedBottomPanel from "../components/UnifiedBottomPanel.jsx";
 import RunSummary from "../components/RunSummary.jsx";
@@ -268,12 +269,14 @@ export async function withProjectOpenTimeout(operation, timeoutMs = 30000) {
   }
 }
 
-export async function discoverProjectWorkflows(projectRoot, { signal } = {}) {
+export async function discoverProjectWorkflows(projectRoot, { signal, onResolvedRoot, onTrustedRoot } = {}) {
   const normalizedRoot = String(projectRoot ?? "").trim();
   if (!normalizedRoot) return [];
 
-  await window.goferDesktop?.workspace?.trustProjectRoot?.(normalizedRoot);
+  const trustedRoot = await window.goferDesktop?.workspace?.trustProjectRoot?.(normalizedRoot);
   signal?.throwIfAborted();
+  // Desktop validation completes before the backend discovers and compiles workflows.
+  if (typeof trustedRoot === "string" && trustedRoot) onTrustedRoot?.(trustedRoot);
   const projectGrantId =
     window.goferDesktop?.workspace?.pathGrantForApi?.(normalizedRoot) ?? "";
   const response = await fetch(apiUrl("/projects/open"), {
@@ -289,6 +292,7 @@ export async function discoverProjectWorkflows(projectRoot, { signal } = {}) {
   if (!response.ok) {
     throw new Error(payload.error || `Project API returned ${response.status}`);
   }
+  if (typeof payload.projectRoot === "string" && payload.projectRoot) onResolvedRoot?.(payload.projectRoot);
   return Array.isArray(payload.workflows) ? payload.workflows : [];
 }
 
@@ -302,7 +306,6 @@ export default function App() {
     if (!bridge) return;
     void bridge.settings().then((memory) => {
       setSettings((current) => ({ ...current, memory: { ...current.memory, ...memory } }));
-      if (memory.archiveFolder) void archiveAllConversations();
     }).catch(reportArchiveError);
   }, []);
   useEffect(() => {
@@ -511,7 +514,7 @@ export default function App() {
   const activeWorkflow = workflows.find(item => item.id === activeWorkflowId);
   const browsingWorkspace = activeWorkspaceForProject(workflows, undefined, activeProjectRoot) ?? projectWorkspace(activeProjectRoot);
   const swarmProjectRoot = browsingWorkspace?.projectRoot || activeProjectRoot || "";
-  const codeWorkspaceWorkflow = workflows.find(item => item.sourcePath === activeCodePath) ?? activeWorkflow ?? browsingWorkspace;
+  const codeWorkspaceWorkflow = workflows.find(item => samePath(item.sourcePath, activeCodePath)) ?? activeWorkflow ?? browsingWorkspace;
 
 
   const changeSetting = useCallback((path, value) => {
@@ -672,21 +675,21 @@ export default function App() {
     const stop = startPolling(() => Promise.all(roots.map((projectRoot) =>
       recentProjectValidatorRef.current.validate(
         projectRoot,
-        lastWorktreeByProject[projectRoot] || projectRoot,
+        pathValue(lastWorktreeByProject, projectRoot) || projectRoot,
         window.goferDesktop.workspace,
         mainWorktreeRoot,
       ),
     )).then((projects) => {
       if (cancelled) return;
-      const existingProjects = projects.filter((project, index) => project && recentProjectRoots.includes(roots[index]));
+      const existingProjects = projects.filter((project, index) => project && recentProjectRoots.some(root => samePath(root, roots[index])));
       const missingRoots = roots.flatMap((root, index) => {
-        const selected = lastWorktreeByProject[root] || root;
+        const selected = pathValue(lastWorktreeByProject, root) || root;
         return !projects[index] || projects[index].selectedProjectRoot !== selected ? [selected] : [];
       });
       if (missingRoots.length) {
-        setWorkflows((current) => current.filter((workflow) => !missingRoots.includes(workflow.projectRoot)));
-        if (missingRoots.includes(activeProjectRoot)) {
-          const replacementIndex = roots.findIndex((root) => lastWorktreeByProject[root] === activeProjectRoot);
+        setWorkflows((current) => current.filter((workflow) => !missingRoots.some(root => samePath(root, workflow.projectRoot))));
+        if (missingRoots.some(root => samePath(root, activeProjectRoot))) {
+          const replacementIndex = roots.findIndex((root) => samePath(pathValue(lastWorktreeByProject, root), activeProjectRoot));
           const replacement = projects[replacementIndex]?.selectedProjectRoot || "";
           setActiveProjectRoot(replacement === activeProjectRoot ? "" : replacement);
           // Open documents keep their original project context.
@@ -904,7 +907,7 @@ export default function App() {
 
   useEffect(() => {
     const tab = workflowTabs[activeCodePath];
-    const target = tab ? workflows.find(item => item.id === tab.workflowId) : workflows.find(item => item.sourcePath === activeCodePath);
+    const target = tab ? workflows.find(item => item.id === tab.workflowId) : workflows.find(item => samePath(item.sourcePath, activeCodePath));
     if (target && target.id !== activeWorkflowId) setActiveWorkflowId(target.id);
     if (activeCodePath) setStudioView(tab ? "graph" : "code");
   }, [activeCodePath, activeWorkflowId, workflowTabs, workflows]);
@@ -913,7 +916,7 @@ export default function App() {
     setSelectedSwarm(null);
     setActiveCodePath(path);
     const target = workflowTabs[path] ? workflows.find(item => item.id === workflowTabs[path].workflowId)
-      : workflows.find(item => item.sourcePath === path);
+      : workflows.find(item => samePath(item.sourcePath, path));
     if (target) setActiveWorkflowId(target.id);
     setStudioView(workflowTabs[path] ? "graph" : "code");
   }
@@ -1112,7 +1115,7 @@ export default function App() {
     setStudioView("code");
   }
 
-  async function reloadActiveRattishDocument(sourcePath, targetWorkflow = workflows.find(item => item.sourcePath === sourcePath) ?? activeWorkflow) {
+  async function reloadActiveRattishDocument(sourcePath, targetWorkflow = workflows.find(item => samePath(item.sourcePath, sourcePath)) ?? activeWorkflow) {
     const activeWorkflow = targetWorkflow;
     const { rattishEditorStateRef, setRattishEditorState } = documentSession(activeWorkflow?.id);
     if (activeWorkflow?.sourceFormat !== "rattish") return;
@@ -1134,7 +1137,7 @@ export default function App() {
   }
 
   function scheduleRattishAnalysis(source, sourcePath) {
-    const activeWorkflow = workflows.find(item => item.sourcePath === sourcePath) ?? workflows.find(item => item.id === activeWorkflowId);
+    const activeWorkflow = workflows.find(item => samePath(item.sourcePath, sourcePath)) ?? workflows.find(item => item.id === activeWorkflowId);
     const { rattishEditorStateRef, rattishAnalysisTimerRef, rattishAnalysisRequestRef, setRattishEditorState } = documentSession(activeWorkflow?.id);
     if (activeWorkflow?.sourceFormat !== "rattish") return;
     const workflowId = activeWorkflow.id;
@@ -1177,7 +1180,7 @@ export default function App() {
   }
 
   async function refreshRattishAfterFileSave(savedSource, sourcePath) {
-    const activeWorkflow = workflows.find(item => item.sourcePath === sourcePath) ?? workflows.find(item => item.id === activeWorkflowId);
+    const activeWorkflow = workflows.find(item => samePath(item.sourcePath, sourcePath)) ?? workflows.find(item => item.id === activeWorkflowId);
     const { rattishEditorStateRef, setRattishEditorState } = documentSession(activeWorkflow?.id);
     if (activeWorkflow?.sourceFormat !== "rattish") return null;
     const response = await fetch(
@@ -1204,23 +1207,30 @@ export default function App() {
     setOpeningProjectRoot(projectRoot);
     setProjectError("");
     try {
-      const discoveredPayloads = await withProjectOpenTimeout(discoverProjectWorkflows(projectRoot, { signal: controller.signal }));
+      const discoveredPayloads = await withProjectOpenTimeout(discoverProjectWorkflows(projectRoot, {
+        signal: controller.signal,
+        onTrustedRoot: root => {
+          if (projectOpenRequestRef.current !== requestId) return;
+          setActiveProjectRoot(root);
+          setCodeEditorOpened(true);
+        },
+        onResolvedRoot: root => { projectRoot = root; },
+      }));
       if (projectOpenRequestRef.current !== requestId) return null;
-      let mainProjectRoot = projectRoot;
-      try {
-        const worktreePayload = await withProjectOpenTimeout(Promise.resolve(window.goferDesktop?.workspace?.gitWorktrees?.(projectRoot)), 3000);
-        mainProjectRoot = mainWorktreeRoot(worktreePayload, projectRoot);
-      } catch {
-        // Non-Git projects use their selected folder as the recent-project identity.
+      // Recent-project identity is optional metadata, not a prerequisite for navigation.
+      if (rememberProject) {
+        const openedRoot = projectRoot;
+        void withProjectOpenTimeout(Promise.resolve().then(() => window.goferDesktop?.workspace?.gitWorktrees?.(openedRoot)), 3000)
+          .catch(() => null).then(payload => {
+            if (projectOpenRequestRef.current !== requestId) return;
+            const mainProjectRoot = mainWorktreeRoot(payload, openedRoot);
+            recentProjectValidatorRef.current.remember(mainProjectRoot, openedRoot);
+            setRecentProjectRoots(current => rememberRecentProject(current, mainProjectRoot));
+            setLastWorktreeByProject(current => withPathValue(current, mainProjectRoot, openedRoot));
+          });
       }
-      if (projectOpenRequestRef.current !== requestId) return null;
       const discovered = discoveredPayloads.map((workflow) =>
         summarizeWorkflow(workflow, dataDir));
-      if (rememberProject) {
-        recentProjectValidatorRef.current.remember(mainProjectRoot, projectRoot);
-        setRecentProjectRoots((current) => rememberRecentProject(current, mainProjectRoot));
-        setLastWorktreeByProject((current) => ({ ...current, [mainProjectRoot]: projectRoot }));
-      }
       setActiveProjectRoot(projectRoot);
       if (!discovered.length) {
         if (focusPath) {
@@ -1239,7 +1249,7 @@ export default function App() {
           ...discovered,
         ];
       });
-      const selectedWorkflow = discovered.find((workflow) => workflow.sourcePath === focusPath)
+      const selectedWorkflow = discovered.find((workflow) => samePath(workflow.sourcePath, focusPath))
         ?? discovered[0];
       if (focusPath) {
         setCodeOpenPaths((current) => mergeCodeOpenPaths(current, [focusPath]));
@@ -1342,7 +1352,7 @@ export default function App() {
     const mainProjectRoot = options.mainProjectRoot || projectRoot;
     const selectedProjectRoot = options.mainProjectRoot
       ? projectRoot
-      : lastWorktreeByProject[mainProjectRoot] || projectRoot;
+      : pathValue(lastWorktreeByProject, mainProjectRoot) || projectRoot;
     if (options.missing) {
       setTopBarNotice({ type: "error", message: `Worktree folder is missing: ${selectedProjectRoot}` });
       return;
@@ -1356,7 +1366,7 @@ export default function App() {
   }
 
   function removeRecentProject(projectRoot) {
-    setRecentProjectRoots((current) => current.filter((root) => root !== projectRoot));
+    setRecentProjectRoots((current) => current.filter((root) => !samePath(root, projectRoot)));
   }
 
   function handleCodeFilesystemChange(change) {
@@ -1625,7 +1635,7 @@ export default function App() {
           return currentId;
         }
         const projectWorkflow = nextWorkflows.find(
-          (workflow) => workflow.projectRoot === initialStudioSession.projectRoot,
+          (workflow) => samePath(workflow.projectRoot, initialStudioSession.projectRoot),
         );
         if (projectWorkflow) return projectWorkflow.id;
         return nextWorkflows[0]?.id;
@@ -3556,7 +3566,7 @@ export default function App() {
         onDeleteWorkflow={deleteWorkflow}
         onDuplicateWorkflow={duplicateWorkflow}
         onCodeFileOpen={(...args) => { openCodeFile(...args); closeCompactPane(); }}
-        selectedSwarmId={selectedSwarm?.projectRoot === swarmProjectRoot ? selectedSwarm.id : null}
+        selectedSwarmId={samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? selectedSwarm.id : null}
         onOpenSwarm={(id, agentId) => { setSelectedSwarm({ id, agentId, projectRoot: swarmProjectRoot }); closeCompactPane(); }}
         activeCodePath={activeCodePath}
         onCloseCodeFile={closeActiveCodeFile}
@@ -3596,15 +3606,16 @@ export default function App() {
                 <strong>Draft recovery: </strong>{rattishEditorState.recoveryWarning}
               </div>
             ) : null}
-        {selectedSwarm?.projectRoot === swarmProjectRoot ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
-        <div className={`${selectedSwarm?.projectRoot === swarmProjectRoot ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
+        {samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
+        <div className={`${samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
             {!workflowTabs[activeCodePath] && (activeCodePath || sidebarActivity !== "workflows") && topBarNotice?.message ? (
               <div role={topBarNotice.type === "error" ? "alert" : "status"} className="shrink-0 border-b border-line bg-surface px-3 py-2 text-xs text-ink break-words">
                 {topBarNotice.message}
               </div>
             ) : null}
+            <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading editor...</p>}>
             <CodeWorkspace
-              active={selectedSwarm?.projectRoot !== swarmProjectRoot}
+              active={!samePath(selectedSwarm?.projectRoot, swarmProjectRoot)}
               activePath={activeCodePath}
               browserTabs={browserTabs}
               navigationRequest={codeNavigationRequest}
@@ -3619,14 +3630,14 @@ export default function App() {
                 onOpenProject={() => void openProjectFolder()} onOpenSettings={() => setSettingsOpen(true)}
                 onRefresh={() => loadWorkflows({ discoverProject: true })}
               /> : undefined}
-              onOpenGraph={(path) => openWorkflowGraph(workflows.find(item => item.sourcePath === path))}
+              onOpenGraph={(path) => openWorkflowGraph(workflows.find(item => samePath(item.sourcePath, path)))}
               workflowTabs={editorWorkflowTabs}
               renderWorkflowTab={renderWorkflowGraph}
               onWorkflowTabAction={handleWorkflowTabAction}
               onDuplicateWorkflowTab={duplicateWorkflowTab}
               onBeforeCloseWorkflowTabs={beforeCloseWorkflowViews}
               rattishDocuments={Object.fromEntries(workflows.filter(item => item.sourcePath && rattishSessions[item.id]).map(item => [item.sourcePath, rattishSessions[item.id]]))}
-              onSaveRattishDocument={(path) => saveWorkflowDocument(workflows.find(item => item.sourcePath === path))}
+              onSaveRattishDocument={(path) => saveWorkflowDocument(workflows.find(item => samePath(item.sourcePath, path)))}
               rattishDocument={rattishEditorState?.document}
               rattishDirty={Boolean(rattishEditorState?.document?.dirty)}
               theme={theme}
@@ -3639,7 +3650,7 @@ export default function App() {
               onClosePaths={closeCodeFiles}
               saveBeforeClosePaths={[...terminalEditorRequestsRef.current.keys()]}
               onDocumentStateChange={(nextState, path) => {
-                const target = workflows.find(item => item.sourcePath === path) ?? codeWorkspaceWorkflow;
+                const target = workflows.find(item => samePath(item.sourcePath, path)) ?? codeWorkspaceWorkflow;
                 documentSession(target.id).setRattishEditorState(nextState);
                 if (nextState?.document?.dirty) pinCodeFile(target.sourcePath);
               }}
@@ -3656,6 +3667,7 @@ export default function App() {
               onRattishSaved={refreshRattishAfterFileSave}
               onSettingChange={changeSetting}
             />
+            </Suspense>
         </div>
         {runsOpen ? <RunSummary records={visibleRunRecords} projectPath={activeProjectRoot} onReview={reviewWorkflowRun} onStop={runRegistry.stop} onClose={() => setRunsOpen(false)} onRefresh={runRegistry.refresh} loading={runRegistry.loading} connectionError={runRegistry.error} /> : null}
         {pinnedRun ? <div className="flex items-center justify-between border-t border-line px-3 py-1 text-[11px] text-muted"><span className="truncate">Run logs · {pinnedRun.workflowName} · {pinnedRun.runId}</span><button type="button" onClick={() => setPinnedRun(null)}>Unpin logs</button></div> : null}
@@ -3703,6 +3715,7 @@ export default function App() {
       </section>
 
       {settingsOpen ? (
+        <Suspense fallback={<p role="status">Loading settings...</p>}>
         <SettingsPopover
           initialCategory={settingsCategory}
           dataDir={dataDir}
@@ -3716,6 +3729,7 @@ export default function App() {
             catch (error) { reportArchiveError(error); }
           }}
         />
+        </Suspense>
       ) : null}
 
       <div className={assistantPaneVisible ? "contents" : "hidden"} aria-hidden={!assistantPaneVisible}>
@@ -4327,29 +4341,6 @@ function resolveDisplayPath(pathValue = "", basePath = "") {
   return `${String(basePath).replace(/[\\/]+$/, "")}${separator}${value.replace(/^[\\/]+/, "")}`;
 }
 
-function replacePathPrefix(path, sourcePath, destinationPath, isDirectory) {
-  if (!path || !sourcePath || !destinationPath) return path;
-  if (!isDirectory) return path === sourcePath ? destinationPath : path;
-  const normalizedPath = String(path).replaceAll("\\", "/");
-  const normalizedSource = String(sourcePath).replaceAll("\\", "/").replace(/\/$/, "");
-  if (normalizedPath !== normalizedSource && !normalizedPath.startsWith(`${normalizedSource}/`)) {
-    return path;
-  }
-  const suffix = normalizedPath.slice(normalizedSource.length);
-  const separator = String(destinationPath).includes("\\") && !String(destinationPath).includes("/")
-    ? "\\"
-    : "/";
-  return `${String(destinationPath).replace(/[\\/]+$/, "")}${suffix.replaceAll("/", separator)}`;
-}
-
-function pathMatchesChange(path, changedPath, isDirectory) {
-  if (!path || !changedPath) return false;
-  if (!isDirectory) return path === changedPath;
-  const normalizedPath = String(path).replaceAll("\\", "/");
-  const normalizedChanged = String(changedPath).replaceAll("\\", "/").replace(/\/$/, "");
-  return normalizedPath === normalizedChanged || normalizedPath.startsWith(`${normalizedChanged}/`);
-}
-
 export function useResponsivePanes() {
   const [compact, setCompact] = useState(() => (globalThis.window?.innerWidth ?? 1280) < 1000);
   const compactRef = useRef(compact);
@@ -4441,12 +4432,12 @@ export function WorkflowSidebar({
   const [renamingProjectRoot, setRenamingProjectRoot] = useState("");
   const [projectLabelDraft, setProjectLabelDraft] = useState("");
   const workflowGroups = useMemo(
-    () => groupWorkflowsByProject((workflows ?? []).filter((item) => !activeWorkflow?.projectRoot || item.projectRoot === activeWorkflow.projectRoot), projectLabels),
+    () => groupWorkflowsByProject((workflows ?? []).filter((item) => !activeWorkflow?.projectRoot || samePath(item.projectRoot, activeWorkflow.projectRoot)), projectLabels),
     [activeWorkflow?.projectRoot, projectLabels, workflows],
   );
   const recentProjects = useMemo(
     () => mergeRecentProjects([], recentProjectRoots ?? []).map((root) => ({
-      name: projectLabels[root]?.trim() || projectNameFromPath(root),
+      name: pathValue(projectLabels, root)?.trim() || projectNameFromPath(root),
       root,
     })),
     [projectLabels, recentProjectRoots],
@@ -4516,8 +4507,7 @@ export function WorkflowSidebar({
     const label = nextLabel.trim();
     const folderName = projectNameFromPath(root);
     setProjectLabels((current) => {
-      if (!label || label === folderName) return withoutKey(current, root);
-      return { ...current, [root]: label };
+      return withPathValue(current, root, !label || label === folderName ? undefined : label);
     });
     setRenamingProjectRoot("");
     setProjectLabelDraft("");
@@ -4590,6 +4580,7 @@ export function WorkflowSidebar({
         </div>
       ) : null}
       <div aria-busy={Boolean(openingProjectRoot)} className="workflow-scrollbar relative min-h-0 flex-1 overflow-hidden pb-3 pt-1">
+        <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading explorer...</p>}>
         <CodeFileExplorer
             activeFilePath={activeCodePath}
             newFileRequest={newFileRequest}
@@ -4724,6 +4715,7 @@ export function WorkflowSidebar({
           </div>
         )}
           />
+        </Suspense>
         {projectMenu ? (
           <div
             aria-label={`${projectMenu.name} project actions`}
@@ -4784,11 +4776,11 @@ export function groupWorkflowsByProject(workflows, projectLabels = {}) {
   const groups = new Map();
   for (const workflow of workflows ?? []) {
     const root = workflow.projectRoot || workflow.sourcePath || "Unregistered";
-    const id = `project:${root}`;
+    const id = `project:${pathKey(root)}`;
     if (!groups.has(id)) {
       groups.set(id, {
         id,
-        name: projectLabels[root]?.trim() || projectNameFromPath(root),
+        name: pathValue(projectLabels, root)?.trim() || projectNameFromPath(root),
         defaultName: projectNameFromPath(root),
         root,
         items: [],
@@ -4922,12 +4914,12 @@ export function saveStudioSession(session, storage = globalThis.window?.localSto
 }
 
 export function mergeRecentProjects(current = [], additions = []) {
-  return [...new Set([...current, ...additions].map((root) => String(root).trim()).filter(Boolean))];
+  return uniquePaths([...current, ...additions].map((root) => String(root).trim()).filter(Boolean));
 }
 
 export function rememberRecentProject(current = [], projectRoot = "") {
   const root = String(projectRoot).trim();
-  return root ? [root, ...current.filter((candidate) => candidate !== root)] : current;
+  return root ? [root, ...current.filter((candidate) => !samePath(candidate, root))] : current;
 }
 
 export function projectWorkspace(projectRoot = "") {
@@ -4952,10 +4944,10 @@ export function activeWorkspaceForProject(workflows = [], activeWorkflowId, acti
   const projectRoot = String(activeProjectRoot).trim();
   const matchedWorkflow = workflows.find((workflow) => (
     workflow.id === activeWorkflowId
-    && (!projectRoot || workflow.projectRoot === projectRoot)
+    && (!projectRoot || samePath(workflow.projectRoot, projectRoot))
   ));
   const projectWorkflow = projectRoot
-    ? workflows.find((workflow) => workflow.projectRoot === projectRoot)
+    ? workflows.find((workflow) => samePath(workflow.projectRoot, projectRoot))
     : workflows[0];
   return matchedWorkflow ?? projectWorkflow ?? (projectRoot ? projectWorkspace(projectRoot) : undefined);
 }
@@ -4991,7 +4983,7 @@ export function scopeChatThreadToProject(
   return {
     ...thread,
     projectRoot: root,
-    ...(thread.projectRoot !== root ? { projectBranch: undefined } : {}),
+    ...(!samePath(thread.projectRoot, root) ? { projectBranch: undefined } : {}),
     projectName: String(projectName || (root ? projectNameFromPath(root) : "No project")),
     selectedWorkflowId: null,
   };
@@ -5009,7 +5001,7 @@ export function chatWorkflowContextForThread(thread, workflows = [], openFiles =
     projectRoot,
     selectedWorkflowId: null,
     openFiles: [...new Set(openFiles)],
-    workflows: workflows.filter((workflow) => projectRoot && workflow?.projectRoot === projectRoot)
+    workflows: workflows.filter((workflow) => projectRoot && samePath(workflow?.projectRoot, projectRoot))
       .map(({ id, name, sourcePath }) => ({ id, name, sourcePath })),
   };
 }
@@ -5367,7 +5359,7 @@ export function RecentProjectSelector({ projectRoot = "", openingProjectRoot = "
     {open ? <div role="menu" aria-label="Recent projects" className="absolute left-0 top-full z-[90] mt-1 max-h-[min(20rem,calc(100vh-160px))] w-full overflow-y-auto rounded-lg border border-line bg-white p-1 shadow-panel" onKeyDown={event => { if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return; event.preventDefault(); const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]')]; const index = items.indexOf(document.activeElement); items[event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus(); }}>
       <p className="px-2 py-1.5 text-[10px] font-semibold text-muted">Recent projects</p>
       {projects.map(root => <div className="group flex items-center rounded-md hover:bg-slate-50" key={root}>
-        <button type="button" role="menuitem" title={root} className="min-w-0 flex-1 rounded-md px-2 py-2 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={() => { setOpen(false); onSelectProject?.(root); }}><span className="flex items-center gap-2 font-medium text-ink"><span className="truncate">{projectNameFromPath(root)}</span>{root === projectRoot ? <Check aria-hidden="true" size={12} /> : null}</span><span className="block truncate pt-0.5 text-[10px] text-muted">{root}</span></button>
+        <button type="button" role="menuitem" title={root} className="min-w-0 flex-1 rounded-md px-2 py-2 text-left text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={() => { setOpen(false); onSelectProject?.(root); }}><span className="flex items-center gap-2 font-medium text-ink"><span className="truncate">{projectNameFromPath(root)}</span>{samePath(root, projectRoot) ? <Check aria-hidden="true" size={12} /> : null}</span><span className="block truncate pt-0.5 text-[10px] text-muted">{root}</span></button>
         {onRemoveRecentProject ? <button type="button" role="menuitem" aria-label={`Remove ${projectNameFromPath(root)} from recent projects`} className="m-1 grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 focus-visible:outline" onClick={() => onRemoveRecentProject(root)}><X aria-hidden="true" size={13} /></button> : null}
       </div>)}
       {!projects.length ? <p className="px-2 py-2 text-xs text-muted">No recent projects</p> : null}
@@ -5426,7 +5418,7 @@ export function GlobalToolbar({
       />
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3">
         {projectError ? <div role="alert" className="flex min-w-0 items-center gap-2 text-xs text-red-700 dark:text-red-300"><span className="truncate" title={projectError}>{projectError}</span><button type="button" className="shrink-0 underline" onClick={() => onMenuAction?.("file.openFolder")}>Open project</button></div> : null}
-        {projectWorktrees.root === projectRoot && projectWorktrees.items.length > 1 ? <label className="flex min-w-0 max-w-48 items-center gap-1 text-muted" title="Browsing worktree"><GitBranch aria-hidden="true" size={13} /><select aria-label="Browsing worktree" className="h-7 min-w-0 rounded bg-white text-xs text-ink focus-visible:outline" value={projectRoot} onChange={event => onSelectProject?.(event.target.value, { mainProjectRoot: projectWorktrees.items[0]?.path || projectRoot })}>{projectWorktrees.items.map(item => <option key={item.path} value={item.path}>{item.branch || "Detached HEAD"}</option>)}</select></label> : null}
+        {samePath(projectWorktrees.root, projectRoot) && projectWorktrees.items.length > 1 ? <label className="flex min-w-0 max-w-48 items-center gap-1 text-muted" title="Browsing worktree"><GitBranch aria-hidden="true" size={13} /><select aria-label="Browsing worktree" className="h-7 min-w-0 rounded bg-white text-xs text-ink focus-visible:outline" value={projectWorktrees.items.find(item => samePath(item.path, projectRoot))?.path || projectRoot} onChange={event => onSelectProject?.(event.target.value, { mainProjectRoot: projectWorktrees.items[0]?.path || projectRoot })}>{projectWorktrees.items.map(item => <option key={item.path} value={item.path}>{item.branch || "Detached HEAD"}</option>)}</select></label> : null}
       </div>
       <div className="flex items-center gap-1">
         {onOpenRuns ? <button type="button" onClick={onOpenRuns} aria-label={`Open runs, ${runSummary?.active.length || 0} active, ${runSummary?.unread.length || 0} unread`} className="flex h-7 items-center gap-1.5 rounded px-2 text-xs text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"><History aria-hidden="true" size={14} />Runs{runSummary?.active.length ? <span>{runSummary.active.length} active</span> : null}{runSummary?.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}{runSummary?.disconnected.length ? <span title="Some run status is out of date">!</span> : null}</button> : null}
@@ -5633,7 +5625,7 @@ function RecentProjectsMenuItem({ recentProjectRoots, onSelect }) {
   const [open, setOpen] = useState(false);
   const labels = loadProjectLabels();
   const projects = mergeRecentProjects([], recentProjectRoots).map((root) => ({
-    name: labels[root]?.trim() || projectNameFromPath(root),
+    name: pathValue(labels, root)?.trim() || projectNameFromPath(root),
     root,
   }));
   return (
@@ -6050,7 +6042,7 @@ export function ChatPane({
   const scopedProjectRoot = String(
     activeThread?.projectRoot ?? homeProjectRoot ?? prospectiveProjectRoot,
   ).trim();
-  const scopedProjectName = projectLabels[scopedProjectRoot]?.trim()
+  const scopedProjectName = pathValue(projectLabels, scopedProjectRoot)?.trim()
     || activeThread?.projectName
     || (scopedProjectRoot ? projectNameFromPath(scopedProjectRoot) : "No project");
   const [scopeWorktrees, setScopeWorktrees] = useState([]);
@@ -6106,7 +6098,7 @@ export function ChatPane({
     const worktree = scopeWorktrees.find(item => item.path === root);
     return {
       root,
-      name: projectLabels[root]?.trim() || projectNameFromPath(root),
+      name: pathValue(projectLabels, root)?.trim() || projectNameFromPath(root),
       branch: worktree?.branch,
     };
   });
@@ -6312,9 +6304,14 @@ export function ChatPane({
     openMarkdownLinkRef.current?.(href, scopedProjectRoot);
   }, [scopedProjectRoot]);
 
-  function openScopedFile(path) {
-    onOpenFile?.(path, scopedProjectRoot);
-  }
+  const openFileRef = useRef(onOpenFile);
+  openFileRef.current = onOpenFile;
+  const openScopedFile = useCallback(path => {
+    openFileRef.current?.(path, scopedProjectRoot);
+  }, [scopedProjectRoot]);
+  const toggleThoughtGroup = useCallback(id => {
+    setExpandedThoughtGroups(current => ({ ...current, [id]: current[id] === false }));
+  }, []);
 
   useEffect(() => {
     if (!conversationMenuOpen) return undefined;
@@ -6433,6 +6430,12 @@ export function ChatPane({
       if (deletedChatThreadIdsRef.current.has(targetThreadId)) return;
       const assistantMessageId = uniqueClientId();
       updateThreadMessages(targetThreadId, (current) => {
+        const previous = current.at(-1);
+        if (kind === "thought" && extra.deltaStreamId &&
+            previous?.kind === "thought" && previous.groupId === extra.groupId &&
+            previous.deltaStreamId === extra.deltaStreamId) {
+          return [...current.slice(0, -1), { ...previous, body: previous.body + body }];
+        }
         const currentMessages = kind === "final"
           ? removeTrailingDuplicateOutputThought(current, body, thoughtGroupId)
           : current;
@@ -6470,13 +6473,8 @@ export function ChatPane({
       }
       if (memorySettings.secondBrainEnabled) await window.goferDesktop?.workspace?.trustProjectRoot?.(memorySettings.secondBrainRoot);
       const requestMessages = await repository.context(targetThreadId, nextMessages, Boolean(originalMessage));
-      const response = await fetch(apiUrl("/chat/stream"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        signal: abortController.signal,
-        body: JSON.stringify(chatStreamRequestBody({
+      if (activeTurn.stopRequested) throw new DOMException("Rem stopped", "AbortError");
+      const response = await fetchChatTurn(chatStreamRequestBody({
           conversationId: targetThreadId,
           turnId: activeTurn.turnId,
           permissionMode,
@@ -6484,7 +6482,7 @@ export function ChatPane({
           model,
           effort: effort || undefined,
           messages: requestMessages
-            .filter((message) => message.kind !== "turn-summary")
+            .filter((message) => !["turn-summary", "error"].includes(message.kind))
             .map(chatMessageForRequest),
           workflow: {
             ...workflowContext,
@@ -6497,8 +6495,7 @@ export function ChatPane({
             id: `workflow-assistant:${targetThreadId}`,
             chatThreadId: targetThreadId,
           },
-        })),
-      });
+        }), { signal: abortController.signal });
       if (!response.ok) {
         const payload = await response.json();
         throw new Error(payload.error || `Chat API returned ${response.status}`);
@@ -6528,6 +6525,7 @@ export function ChatPane({
                 if (event.generation < activeTurn.generation) continue;
                 activeTurn.generation = event.generation;
                 activeTurn.ready = true;
+                if (activeTurn.stopRequested) void stopAssistant(targetThreadId);
                 continue;
               }
               if (event.type === "steering") {
@@ -6555,10 +6553,12 @@ export function ChatPane({
               if (event.type === "stopped") throw new DOMException("Rem stopped", "AbortError");
 
               if (event.type === "thought") {
-                const thought = String(event.text ?? "").trim();
+                const deltaStreamId = typeof event.deltaStreamId === "string" ? event.deltaStreamId : "";
+                const thought = deltaStreamId ? String(event.text ?? "") : String(event.text ?? "").trim();
                 if (!thought) continue;
                 appendAssistantMessage(thought, "thought", {
                   groupId: thoughtGroupId,
+                  deltaStreamId: deltaStreamId || undefined,
                   trace: event.trace && typeof event.trace === "object" ? event.trace : undefined,
               });
             } else if (event.type === "compaction") {
@@ -6657,12 +6657,13 @@ export function ChatPane({
           durationMs: Date.now() - clientTurnStartedAt,
         });
       }
+      appendAssistantMessage(error instanceof Error ? error.message : "Unable to send message", "error", { role: "system" });
       setChatStateByThread((current) => ({
         ...current,
         [targetThreadId]: {
           sending: false,
           hasNewResponse: false,
-          error: error instanceof Error ? error.message : "Unable to send message",
+          error: chatStorageErrorsRef.current[targetThreadId] || "",
         },
       }));
     } finally {
@@ -6714,7 +6715,9 @@ export function ChatPane({
 
   async function stopAssistant(threadId) {
     const turn = activeChatTurnsRef.current[threadId];
-    if (!turn?.ready) { chatAbortControllersRef.current[threadId]?.abort(); return; }
+    if (!turn) return;
+    turn.stopRequested = true;
+    if (!turn.ready) return;
     try {
       const response = await fetch(apiUrl("/chat/stop"), {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -6799,7 +6802,7 @@ export function ChatPane({
       root,
       workflows,
       activeWorkflowId,
-      projectLabels[root]?.trim() || (root ? projectNameFromPath(root) : "No project"),
+      pathValue(projectLabels, root)?.trim() || (root ? projectNameFromPath(root) : "No project"),
     );
     const nextThreads = [thread, ...threads];
     persistChatThreads(nextThreads);
@@ -6821,7 +6824,7 @@ export function ChatPane({
       const context = event.detail || {};
       let root = context.projectRoot;
       if (!root && context.path) {
-        const candidates = [...recentProjectRoots, ...workflows.map(item => item.projectRoot)].filter(item => typeof item === "string" && context.path.startsWith(`${item.replace(/\/$/, "")}/`));
+        const candidates = [...recentProjectRoots, ...workflows.map(item => item.projectRoot)].filter(item => typeof item === "string" && pathWithin(context.path, item));
         root = candidates.sort((a, b) => b.length - a.length)[0];
         if (!root) {
           try { root = (await window.goferDesktop?.workspace?.gitStatus?.(context.path.replace(/[/\\][^/\\]+$/, "")))?.root; } catch { /* Non-Git files still carry their exact path. */ }
@@ -6880,7 +6883,7 @@ export function ChatPane({
         scopedProjectRoot,
         workflows,
         activeWorkflowId,
-        projectLabels[scopedProjectRoot]?.trim()
+        pathValue(projectLabels, scopedProjectRoot)?.trim()
           || (scopedProjectRoot ? projectNameFromPath(scopedProjectRoot) : "No project"),
       );
       setThreads(current => [scopedThread, ...current.filter(candidate => candidate.id !== threadId)]);
@@ -6914,7 +6917,8 @@ export function ChatPane({
         return <ThoughtGroup
           key={item.id}
           expanded={expandedThoughtGroups[item.id] !== false}
-          onToggle={() => setExpandedThoughtGroups(current => ({ ...current, [item.id]: current[item.id] === false }))}
+          groupId={item.id}
+          onToggle={toggleThoughtGroup}
           searchMessageId={matchId}
           thoughts={item.thoughts}
           onOpenLink={openScopedMarkdownLink}
@@ -6943,7 +6947,7 @@ export function ChatPane({
 
   function changeThreadProjectScope(projectRoot) {
     const root = String(projectRoot ?? "").trim();
-    if (!root || root === scopedProjectRoot) {
+    if (!root || samePath(root, scopedProjectRoot)) {
       setScopeMenuOpen(false);
       return;
     }
@@ -6960,7 +6964,7 @@ export function ChatPane({
               root,
               workflows,
               activeWorkflowId,
-              projectLabels[root]?.trim() || projectNameFromPath(root),
+              pathValue(projectLabels, root)?.trim() || projectNameFromPath(root),
             )
           : thread,
       );
@@ -6976,7 +6980,7 @@ export function ChatPane({
     const { id, projectRoot } = activeThread;
     window.goferDesktop?.workspace?.gitStatus?.(projectRoot)?.then(snapshot => {
       if (cancelled || !snapshot || snapshot.error) return;
-      setThreads(current => current.map(thread => thread.id === id && thread.projectRoot === projectRoot
+      setThreads(current => current.map(thread => thread.id === id && samePath(thread.projectRoot, projectRoot)
         ? { ...thread, projectBranch: snapshot.active ? snapshot.branch || "" : "" } : thread));
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -7032,8 +7036,7 @@ export function ChatPane({
     const thread = threads.find(item => item.id === threadId) || loadChatThread(threadId);
     if (!window.confirm(`Delete thread "${thread?.title || "Untitled"}"? This cannot be undone.`)) return;
     deletedChatThreadIdsRef.current.add(threadId);
-    chatAbortControllersRef.current[threadId]?.abort();
-    delete chatAbortControllersRef.current[threadId];
+    await stopAssistant(threadId);
     const nextThreads = threads.filter((thread) => thread.id !== threadId);
     const archived = await archiveThreadFromStorage(threadId, () => repository.all(threadId), true);
     if (!archived) {
@@ -7187,7 +7190,7 @@ export function ChatPane({
                   <button
                     key={project.root}
                     className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition hover:bg-slate-50 ${
-                      project.root === scopedProjectRoot
+                      samePath(project.root, scopedProjectRoot)
                         ? "bg-indigo-50 font-semibold text-indigo-700"
                         : "text-ink"
                     }`}
@@ -7198,7 +7201,7 @@ export function ChatPane({
                   >
                     <FolderOpen aria-hidden="true" className="shrink-0 text-muted" size={13} />
                     <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                    {project.root === scopedProjectRoot ? (
+                    {samePath(project.root, scopedProjectRoot) ? (
                       <Check aria-hidden="true" className="shrink-0" size={12} />
                     ) : null}
                   </button>
@@ -7317,12 +7320,8 @@ export function ChatPane({
                   sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
                   onOpenFile={openScopedFile}
                   thoughts={item.thoughts}
-                  onToggle={() =>
-                    setExpandedThoughtGroups((current) => ({
-                      ...current,
-                      [item.id]: current[item.id] === false,
-                    }))
-                  }
+                  groupId={item.id}
+                  onToggle={toggleThoughtGroup}
                 />
               ) : (
                 <ChatMessageBubble
@@ -7407,22 +7406,22 @@ export function ChatPane({
 export function ThreadSections({ threads, ...props }) {
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveCount, setArchiveCount] = useState(10);
-  const [scopeState, setScopeState] = useState(null);
+  const [scopeState, setScopeState] = useState(() => cachedThreadScopes(window.goferDesktop?.workspace));
   const [now, setNow] = useState(Date.now);
-  const entries = [...new Map([...chatThreadIndex(), ...threads.map(threadIndexEntry)].map(entry => [entry.id, entry])).values()];
-  const scopeKey = JSON.stringify(entries.map(({ projectRoot, projectBranch }) => ({ projectRoot, projectBranch })));
+  const entries = useMemo(() => [...new Map([...chatThreadIndex(), ...threads.map(threadIndexEntry)].map(entry => [entry.id, entry])).values()], [threads]);
+  const scopeKey = threadScopeKey(entries, now);
   useEffect(() => {
     let cancelled = false;
     let running = false;
-    const refresh = async () => {
+    const refresh = async (force = false) => {
       if (running) return;
       running = true;
-      const result = await inspectThreadScopes(JSON.parse(scopeKey), window.goferDesktop?.workspace);
+      const result = await inspectThreadScopes(JSON.parse(scopeKey), window.goferDesktop?.workspace, { force: Boolean(force) });
       running = false;
       if (!cancelled) { setScopeState(result); setNow(Date.now()); }
     };
     void refresh();
-    const timer = window.setInterval(refresh, 60000);
+    const timer = window.setInterval(() => refresh(true), 60000);
     window.addEventListener("focus", refresh);
     window.addEventListener("gofer:git-files-changed", refresh);
     return () => {
@@ -7436,24 +7435,33 @@ export function ThreadSections({ threads, ...props }) {
   for (const entry of entries) {
     (threadIsArchived(entry, scopeState?.missingRoots, scopeState?.branches, now) ? archived : entry.pinned ? pinned : active).push(entry);
   }
-  const load = entries => entries.map(entry => threads.find(thread => thread.id === entry.id) || loadChatThread(entry.id)).filter(Boolean);
+  const loaded = useMemo(() => new Map(threads.map(thread => [thread.id, thread])), [threads]);
+  const rowCache = useRef(new Map());
+  const loadThread = entry => {
+    if (loaded.has(entry.id)) return loaded.get(entry.id);
+    const cached = rowCache.current.get(entry.id);
+    if (cached?.entry === entry) return cached.thread;
+    const thread = loadChatThread(entry.id);
+    rowCache.current.set(entry.id, { entry, thread });
+    return thread;
+  };
   const sortedArchived = archived.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   const sectionHeadingClass = "mb-2 px-3 py-1 text-xs font-semibold text-muted";
   return <>
     {pinned.length ? <section aria-label="Pinned threads">
       <h3 className={sectionHeadingClass}>Pinned threads</h3>
-      <ThreadList {...props} threads={load(pinned)} />
+      <ThreadList {...props} threads={pinned} loadThread={loadThread} />
     </section> : null}
     <section aria-label="Active threads" className={pinned.length ? "mt-4 border-t border-line pt-3" : undefined}>
       <h3 className={sectionHeadingClass}>Active threads</h3>
-      {scopeState ? <ThreadList {...props} threads={load(active)} /> : <p role="status" className="px-2 py-2 text-xs text-muted">Checking active threads...</p>}
+      <ThreadList {...props} threads={active} loadThread={loadThread} />
     </section>
     <section className="mt-4 border-t border-line pt-3">
       <button type="button" aria-expanded={archiveOpen} className={`${sectionHeadingClass} flex w-full items-center gap-2 text-left`}
         onClick={() => { setArchiveOpen(open => !open); setArchiveCount(10); }}>
         <ChevronRight aria-hidden="true" size={13} className={archiveOpen ? "rotate-90" : ""} />Archived threads
       </button>
-      {archiveOpen && scopeState ? <ThreadList {...props} archived key="archive" threads={load(sortedArchived.slice(0, archiveCount))}
+      {archiveOpen ? <ThreadList {...props} archived key="archive" threads={sortedArchived.slice(0, archiveCount)} loadThread={loadThread}
         pageSize={10} totalCount={archived.length} onLoadOlder={setArchiveCount} /> : null}
     </section>
   </>;
@@ -7486,13 +7494,13 @@ function ThreadActions({ thread, onPin, onDelete }) {
   </div>;
 }
 
-export function ThreadList({ activeThreadId, activityByThread = {}, onArchive, onPin, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15 }) {
+export function ThreadList({ activeThreadId, activityByThread = {}, onArchive, onPin, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry }) {
   const [visibleCount, setVisibleCount] = useState(pageSize);
   const sortedThreads = [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   if (threads.length) {
     return (
       <div className="space-y-1">
-          {sortedThreads.slice(0, visibleCount).map((thread) => (
+          {sortedThreads.slice(0, visibleCount).map(loadThread).filter(Boolean).map((thread) => (
             <div
               key={thread.id}
               className={`group flex items-center gap-1 rounded-lg px-1 transition ${
@@ -7589,6 +7597,13 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
 
   if (message.kind === "turn-summary") {
     return <TurnSummaryCard message={message} onUndo={() => onUndoChanges(message)} />;
+  }
+  if (message.kind === "error") {
+    return <div data-message-id={message.id} data-history-anchor={message.id}
+      role="alert" aria-live="assertive"
+      className="whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+      {message.body}
+    </div>;
   }
   const isSystem = message.role === "system" || message.kind === "system";
   const isUser = message.role === "user";
@@ -7919,8 +7934,8 @@ export function MarkdownMessage({ compact = false, inverse = false, onOpenLink, 
   );
 }
 
-function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
-  const trace = buildThoughtTrace(thoughts);
+const ThoughtGroup = memo(function ThoughtGroup({ groupId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
+  const trace = useMemo(() => buildThoughtTrace(thoughts), [thoughts]);
   const count = trace.length;
   const match = thoughts.find(thought => String(thought.id) === String(searchMessageId));
   const matchKey = match?.trace?.id ? `trace-${match.trace.id}` : match?.id;
@@ -7933,7 +7948,7 @@ function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, 
         <button
           className="flex w-full items-center justify-between gap-3 rounded-md px-1 py-1.5 text-left transition hover:text-ink"
           type="button"
-          onClick={onToggle}
+          onClick={() => onToggle(groupId)}
         >
           <span className="min-w-0 text-xs font-semibold text-ink">
             {expanded ? "Hide thoughts" : "Show thoughts"}
@@ -7950,7 +7965,7 @@ function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, 
         >
           <div className="overflow-hidden">
             <div className="px-1 pb-1 pt-2">
-              {trace.map((entry, index) => (
+              {expanded && trace.map((entry, index) => (
                 <div
                   key={entry.key}
                   data-history-anchor={`${thoughts[0]?.groupId || ""}:${entry.key}`}
@@ -7999,7 +8014,7 @@ function ThoughtGroup({ expanded, onOpenFile, onOpenLink, onToggle, sourcePath, 
       </div>
     </div>
   );
-}
+});
 
 function ToolTraceDisclosure({ entry, initiallyExpanded = false }) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
@@ -8035,10 +8050,12 @@ function ToolTraceDisclosure({ entry, initiallyExpanded = false }) {
         }`}
       >
         <div className="overflow-hidden">
-          <div className="mt-1 overflow-hidden rounded-md border border-line bg-white dark:bg-[#181818]">
-            {entry.input ? <TracePayload label="In" value={entry.input} /> : null}
-            {entry.output ? <TracePayload label="Out" value={entry.output} divided={Boolean(entry.input)} /> : null}
-          </div>
+          {expanded ? <>
+            <div className="mt-1 overflow-hidden rounded-md border border-line bg-white dark:bg-[#181818]">
+              {entry.input ? <TracePayload label="In" value={entry.input} /> : null}
+              {entry.output ? <TracePayload label="Out" value={entry.output} divided={Boolean(entry.input)} /> : null}
+            </div>
+          </> : null}
         </div>
       </div>
     </div>
@@ -8092,21 +8109,23 @@ function EditDisclosure({ entry, onOpenFile, initiallyExpanded = false }) {
         }`}
       >
         <div className="overflow-hidden">
-          {details.path ? (
-            <button
-              aria-label={`Open ${details.path} in code editor`}
-              className="mt-0.5 block w-full min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-left text-[10px] text-muted outline-none transition hover:text-brand focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand/30"
-              style={{ direction: "rtl" }}
-              title={details.path}
-              type="button"
-              onClick={() => onOpenFile?.(details.path)}
-            >
-              {details.path}
-            </button>
-          ) : null}
-          <pre className="workflow-scrollbar mt-1 max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-slate-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-600 dark:bg-[#111113] dark:text-[#b9b9b9]">
-            {details.input || "Waiting for edit details..."}
-          </pre>
+          {expanded ? <>
+            {details.path ? (
+              <button
+                aria-label={`Open ${details.path} in code editor`}
+                className="mt-0.5 block w-full min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-left text-[10px] text-muted outline-none transition hover:text-brand focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand/30"
+                style={{ direction: "rtl" }}
+                title={details.path}
+                type="button"
+                onClick={() => onOpenFile?.(details.path)}
+              >
+                {details.path}
+              </button>
+            ) : null}
+            <pre className="workflow-scrollbar mt-1 max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-slate-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-600 dark:bg-[#111113] dark:text-[#b9b9b9]">
+              {details.input || "Waiting for edit details..."}
+            </pre>
+          </> : null}
         </div>
       </div>
     </div>
@@ -8156,14 +8175,17 @@ function ShellCommandDisclosure({ entry, initiallyExpanded = false }) {
         }`}
       >
         <div className="overflow-hidden">
-          <pre className="workflow-scrollbar mt-1 max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-slate-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-600 dark:bg-[#111113] dark:text-[#b9b9b9]">
-            {details.command || "Waiting for command..."}
-          </pre>
+          {expanded ? <>
+            <pre className="workflow-scrollbar mt-1 max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-slate-50 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-600 dark:bg-[#111113] dark:text-[#b9b9b9]">
+              {details.command || "Waiting for command..."}
+            </pre>
+          </> : null}
         </div>
       </div>
     </div>
   );
 }
+
 
 export function shellTraceDetails(entry) {
   if (!entry || entry.kind !== "tool") return null;

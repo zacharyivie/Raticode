@@ -1,3 +1,4 @@
+import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath } from "../lib/workspacePaths.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -33,7 +34,7 @@ import SwarmSidebar from "./SwarmSidebar.jsx";
 import RatSwarmIcon from "./RatSwarmIcon.jsx";
 import ProjectSearch from "./ProjectSearch.jsx";
 import { Dialog } from "./Dialog.jsx";
-import { hasUnsavedCodeChanges } from "./CodeWorkspace.jsx";
+import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 import { PathNameDialog } from "./PathNameDialog.jsx";
 import { DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
 
@@ -320,8 +321,7 @@ export default function CodeFileExplorer({
       if (result.switchBlocked) return;
       if (action === "commit") setCommitMessage("");
       setSourceControl(result);
-      await refreshTree();
-      await loadGitPanels();
+      await Promise.all([refreshTree(), loadGitPanels()]);
       onFilesystemChange?.({ type: "git", rootPath });
       return true;
     } catch (cause) {
@@ -414,12 +414,15 @@ export default function CodeFileExplorer({
     });
 
     async function revealActiveFile() {
-      for (const directory of ancestorPaths) {
-        if (revealRequestRef.current !== request) return;
-        if (!directoriesRef.current[directory]) {
-          await loadDirectory(directory, { clearError: false });
+      let index = 0;
+      await Promise.all(Array.from({ length: Math.min(4, ancestorPaths.length) }, async () => {
+        while (index < ancestorPaths.length && revealRequestRef.current === request) {
+          const directory = ancestorPaths[index++];
+          if (!directoriesRef.current[directory]) {
+            await loadDirectory(directory, { clearError: false });
+          }
         }
-      }
+      }));
     }
 
     void revealActiveFile();
@@ -455,7 +458,7 @@ export default function CodeFileExplorer({
   );
   const selectedEntry = useMemo(
     () => entryForPath(rootPath, directories, selectedPath)
-      ?? rows.find(({ entry }) => entry.path === selectedPath)?.entry
+      ?? rows.find(({ entry }) => samePath(entry.path, selectedPath))?.entry
       ?? null,
     [directories, rootPath, rows, selectedPath],
   );
@@ -525,7 +528,7 @@ export default function CodeFileExplorer({
 
   function requestRename(entry = selectedEntry) {
     setContextMenu(null);
-    if (!entry || entry.path === rootPath) return;
+    if (!entry || samePath(entry.path, rootPath)) return;
     setNameRequest({
       directory: parentWorkspacePath(entry.path),
       entry,
@@ -586,7 +589,7 @@ export default function CodeFileExplorer({
 
   function copyEntry(entry = selectedEntry) {
     setContextMenu(null);
-    if (!entry || entry.path === rootPath) return;
+    if (!entry || samePath(entry.path, rootPath)) return;
     setClipboardEntry(entry);
     treeRef.current?.focus();
   }
@@ -622,7 +625,7 @@ export default function CodeFileExplorer({
   async function deleteEntry(entry = selectedEntry) {
     if (gitBusy) return;
     setContextMenu(null);
-    if (!entry || entry.path === rootPath) return;
+    if (!entry || samePath(entry.path, rootPath)) return;
     const kind = entry.isDirectory ? "folder" : "file";
     if (!window.confirm(`Move ${entry.name} to the trash? This ${kind} can be restored from the operating system trash.`)) return;
     setError("");
@@ -818,7 +821,7 @@ export default function CodeFileExplorer({
       const bounds = treeRef.current?.getBoundingClientRect?.() ?? { left: 8, top: 8 };
       setContextMenu({
         ...explorerMenuPosition(bounds.left + 36, bounds.top + 36),
-        entry: selectedEntry?.path === rootPath ? null : selectedEntry,
+        entry: samePath(selectedEntry?.path, rootPath) ? null : selectedEntry,
         directory: selectedDirectory || rootPath,
       });
     }
@@ -974,7 +977,7 @@ export default function CodeFileExplorer({
               {recentProjects.length ? recentProjects.map((project) => (
                 <div
                   key={project.root}
-                  className={`group flex h-8 items-center rounded-md hover:bg-slate-50 focus-within:bg-slate-50 ${project.root === rootPath ? "bg-indigo-50 font-semibold text-indigo-700" : "text-ink"}`}
+                  className={`group flex h-8 items-center rounded-md hover:bg-slate-50 focus-within:bg-slate-50 ${samePath(project.root, rootPath) ? "bg-indigo-50 font-semibold text-indigo-700" : "text-ink"}`}
                   role="none"
                 >
                   <button
@@ -989,7 +992,7 @@ export default function CodeFileExplorer({
                   >
                     <FolderOpen className="shrink-0 text-muted" size={13} />
                     <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                    {project.root === rootPath ? <Check className="shrink-0 group-hover:hidden group-focus-within:hidden" size={12} /> : null}
+                    {samePath(project.root, rootPath) ? <Check className="shrink-0 group-hover:hidden group-focus-within:hidden" size={12} /> : null}
                   </button>
                   <button
                     aria-label={`Remove ${project.name} from recent projects`}
@@ -1139,7 +1142,7 @@ export default function CodeFileExplorer({
                         <button aria-label={`Discard all ${group} changes`} title={`Discard all ${group} changes`} className="grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-red-700 focus-visible:outline disabled:opacity-40" disabled={gitBusy || !entries.length || entries.some(entry => entry.status === "!")} type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); void changeSourceControl(group === "staged" ? "revert-staged" : "revert", entries.filter(entry => group !== "staged" || entry.status !== "!").map((entry) => entry.path)); }}><Trash2 size={12} /></button>
                       </span>
                     </summary>
-                    {entries.map((entry) => <div key={entry.path} className={`scm-file flex min-h-12 items-center gap-1 rounded px-2 ${activeFilePath === joinWorkspacePath(rootPath, entry.path) ? "bg-indigo-50" : "hover:bg-slate-50"}`}>
+                    {entries.map((entry) => <div key={entry.path} className={`scm-file flex min-h-12 items-center gap-1 rounded px-2 ${samePath(activeFilePath, joinWorkspacePath(rootPath, entry.path)) ? "bg-indigo-50" : "hover:bg-slate-50"}`}>
                       <span title={entry.status === "!" ? "Unresolved index conflict. Stage the working file to resolve." : undefined} className="w-3 shrink-0 text-[10px] text-muted">{entry.status}</span>
                       <button className="min-w-0 flex-1 truncate text-left text-[11px] text-ink" title={entry.path} type="button" onClick={() => onOpenFile?.(joinWorkspacePath(rootPath, entry.path), { diff: true, gitGroup: entry.status === "!" ? "unstaged" : group })}><span className="block truncate text-xs font-medium">{workspaceBasename(entry.path)}</span><span className="block truncate text-[11px] text-muted">{entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : ""}</span></button>
                       <button aria-label={`${group === "staged" ? "Unstage" : "Stage"} ${entry.path}`} title={group === "staged" ? "Unstage change" : "Stage change"} className="grid h-7 w-7 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 focus-visible:outline disabled:opacity-40" disabled={gitBusy || (group === "staged" && entry.status === "!")} type="button" onClick={() => void changeSourceControl(group === "staged" ? "unstage" : "stage", entry.path)}>{group === "staged" ? <Minus size={12} /> : <Plus size={12} />}</button>
@@ -1552,16 +1555,17 @@ export function visibleTreeRows(rootPath, directories, expanded, query = "", sta
 
 export function directoryEntriesWithGitChanges(rootPath, directory, entries = [], statuses = []) {
   const next = [...entries];
-  const names = new Set(next.map((entry) => entry.name.toLowerCase()));
-  const relativeDirectory = workspaceRelativePath(rootPath, directory);
-  const prefix = relativeDirectory ? `${relativeDirectory}/` : "";
+  const nameKey = name => normalizeWorkspacePath(joinWorkspacePath(directory, name));
+  const names = new Set(next.map((entry) => nameKey(entry.name)));
+
   for (const change of statuses) {
     if (change.status === "D") continue;
-    if (!change.path.startsWith(prefix)) continue;
-    const remainder = change.path.slice(prefix.length);
+    const changedPath = joinWorkspacePath(rootPath, change.path);
+    if (!pathWithin(changedPath, directory)) continue;
+    const remainder = workspaceRelativePath(directory, changedPath);
     if (!remainder || remainder.startsWith("../")) continue;
     const [name, ...rest] = remainder.split("/");
-    if (!name || names.has(name.toLowerCase())) continue;
+    if (!name || names.has(nameKey(name))) continue;
     const isDirectory = rest.length > 0;
     next.push({
       hidden: name.startsWith("."),
@@ -1570,7 +1574,7 @@ export function directoryEntriesWithGitChanges(rootPath, directory, entries = []
       name,
       path: joinWorkspacePath(directory, name),
     });
-    names.add(name.toLowerCase());
+    names.add(nameKey(name));
   }
   return next.sort((left, right) => {
     if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
@@ -1579,17 +1583,11 @@ export function directoryEntriesWithGitChanges(rootPath, directory, entries = []
 }
 
 export function sourceControlStatusForPath(rootPath, targetPath, statuses = [], directory = false) {
-  const relativePath = workspaceRelativePath(rootPath, targetPath);
   if (directory) {
-    const prefix = relativePath ? `${relativePath}/` : "";
-    return statuses.some((change) => (
-      change.status !== "D"
-      && (change.path === relativePath || change.path.startsWith(prefix))
-    ))
-      ? "changed"
-      : "";
+    return statuses.some(change => change.status !== "D"
+      && pathWithin(joinWorkspacePath(rootPath, change.path), targetPath)) ? "changed" : "";
   }
-  return statuses.find((change) => change.path === relativePath)?.status ?? "";
+  return statuses.find(change => samePath(joinWorkspacePath(rootPath, change.path), targetPath))?.status ?? "";
 }
 
 function sourceControlSnapshotsEqual(left, right) {
@@ -1622,20 +1620,11 @@ export function parentWorkspacePath(value = "") {
 }
 
 export function workspaceAncestorPaths(rootPath = "", targetPath = "") {
-  const normalizedRoot = normalizeWorkspacePath(rootPath);
-  const normalizedTarget = normalizeWorkspacePath(targetPath);
-  if (
-    !normalizedRoot
-    || !normalizedTarget.startsWith(`${normalizedRoot}/`)
-  ) {
-    return [];
-  }
-
-  const relativePath = String(targetPath)
-    .replace(/\\/g, "/")
-    .slice(String(rootPath).replace(/\\/g, "/").replace(/\/+$/, "").length + 1);
+  if (!pathWithin(targetPath, rootPath) || samePath(targetPath, rootPath)) return [];
+  const root = displayPath(rootPath);
+  const relativePath = displayPath(targetPath).slice(root.endsWith("/") ? root.length : root.length + 1);
   const directoryNames = relativePath.split("/").filter(Boolean).slice(0, -1);
-  const ancestors = [rootPath.replace(/[\\/]+$/, "")];
+  const ancestors = [rootPath];
   for (const directoryName of directoryNames) {
     ancestors.push(joinWorkspacePath(ancestors.at(-1), directoryName));
   }
@@ -1655,11 +1644,11 @@ export function explorerMenuPosition(clientX, clientY, viewportWidth = window.in
 
 function entryForPath(rootPath, directories, targetPath) {
   if (!targetPath) return null;
-  if (targetPath === rootPath) {
+  if (samePath(targetPath, rootPath)) {
     return { isDirectory: true, isFile: false, name: workspaceBasename(rootPath), path: rootPath };
   }
   for (const entries of Object.values(directories)) {
-    const match = entries.find((entry) => entry.path === targetPath);
+    const match = entries.find((entry) => samePath(entry.path, targetPath));
     if (match) return match;
   }
   return null;
@@ -1676,16 +1665,13 @@ export function mainWorktreePath(worktrees = [], fallback = "") {
 }
 
 function workspaceRelativePath(rootPath = "", targetPath = "") {
-  const root = String(rootPath).replace(/\\/g, "/").replace(/\/+$/, "");
-  const target = String(targetPath).replace(/\\/g, "/").replace(/\/+$/, "");
-  if (target.toLowerCase() === root.toLowerCase()) return "";
-  if (!target.toLowerCase().startsWith(`${root.toLowerCase()}/`)) return target;
-  return target.slice(root.length + 1);
+  const root = displayPath(rootPath);
+  const target = displayPath(targetPath);
+  if (samePath(target, root)) return "";
+  if (!pathWithin(target, root)) return target;
+  return target.slice(root.endsWith("/") ? root.length : root.length + 1);
 }
 
-function normalizeWorkspacePath(value = "") {
-  return value.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
-}
 
 function withSetValue(current, value) {
   const next = new Set(current);
@@ -1702,7 +1688,7 @@ function withoutSetValue(current, value) {
 function discardDirectoryBranch(setDirectories, branchPath) {
   setDirectories((current) => Object.fromEntries(
     Object.entries(current).filter(([directory]) =>
-      directory !== branchPath && !normalizeWorkspacePath(directory).startsWith(`${normalizeWorkspacePath(branchPath)}/`)),
+      !pathWithin(directory, branchPath)),
   ));
 }
 

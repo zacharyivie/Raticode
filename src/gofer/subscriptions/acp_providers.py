@@ -17,9 +17,13 @@ from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_capabilities import ProviderId, resolve_provider_executable
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_profiles import ResolvedProviderSettings, validate_provider_settings
-from gofer.subscriptions.acp_config import acp_session_config, deny_acp_permission
+from gofer.subscriptions.acp_config import (
+    acp_session_config,
+    deny_acp_permission,
+    grok_mcp_permission_handler,
+)
 from gofer.subscriptions.acp_session import initialize_session, prompt_session, wait_grok_mcp
-from gofer.subscriptions.acp_transport import AcpTransportError, open_acp_transport
+from gofer.subscriptions.acp_transport import AcpTransportError, RequestHandler, open_acp_transport
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.grok_identity import grok_build_version
 
@@ -81,6 +85,11 @@ async def stream_acp(
             # This process belongs to one turn. Startup injection also works when
             # Grok advertises session pluginDirs but does not load those servers.
             command = acp_command(provider, command[0], config.params["_meta"]["pluginDirs"][0])
+        permission_handler: RequestHandler = deny_acp_permission
+
+        async def handle_permission(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            return await permission_handler(method, params)
+
         async with open_acp_transport(
             command,
             cwd=cwd,
@@ -88,7 +97,7 @@ async def stream_acp(
             cancel_event=cancel_event,
             timeout=timeout,
             max_output_bytes=max_output_bytes,
-            request_handler=deny_acp_permission,
+            request_handler=handle_permission,
         ) as rpc:
             selected_effort = effort if effort != "cli-default" else None
             if selected_effort and provider != "grok":
@@ -96,6 +105,9 @@ async def stream_acp(
             if selected_effort and (not model or model == "cli-default"):
                 config.params.setdefault("_meta", {})["reasoningEffort"] = selected_effort
             session = await initialize_session(rpc, config.params)
+            # Authorize only this session's injected MCP identities and only an
+            # offered one-time grant. Native/unknown tool requests remain denied.
+            permission_handler = grok_mcp_permission_handler(session, config.grants)
             if model and model != "cli-default":
                 selection: dict[str, Any] = {"sessionId": session, "modelId": model}
                 if selected_effort:

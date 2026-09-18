@@ -834,27 +834,24 @@ async def test_run_workflow_chat_has_no_timeout(
 
 
 @pytest.mark.asyncio
-async def test_run_workflow_chat_rejects_oversized_prompt_before_provider(
-    monkeypatch,
-    tmp_path,
-) -> None:
+async def test_run_workflow_chat_leaves_prompt_limits_to_provider(monkeypatch, tmp_path):
     monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/codex")
+    calls = []
 
-    async def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("provider subprocess should not be invoked")
+    async def provider(*args, **kwargs):
+        calls.append(args)
+        return 0, "done", ""
 
-    monkeypatch.setattr(chat, "run_subprocess", fail_if_called)
-
-    with pytest.raises(ChatProviderError, match="Chat prompt exceeds limit 8 bytes"):
-        await run_workflow_chat(
-            provider="codex",
-            model="cli-default",
-            messages=[{"role": "user", "body": "hello"}],
-            workflow={"id": "limited", "resourceLimits": {"max_chat_prompt_bytes": 8}},
-            working_dir=tmp_path,
-            data_dir=tmp_path,
-            resource_limits=ResourceLimits(max_chat_prompt_bytes=1_000_000),
-        )
+    monkeypatch.setattr(chat, "run_subprocess", provider)
+    await run_workflow_chat(
+        provider="codex",
+        model="cli-default",
+        messages=[{"role": "user", "body": "hello"}],
+        workflow={"resourceLimits": {"max_chat_prompt_bytes": 8}},
+        working_dir=tmp_path,
+        data_dir=tmp_path,
+    )
+    assert calls
 
 
 @pytest.mark.asyncio
@@ -1472,29 +1469,25 @@ async def test_stream_workflow_chat_awaits_selection_validation(
 
 
 @pytest.mark.asyncio
-async def test_stream_workflow_chat_rejects_oversized_prompt_before_provider(
-    monkeypatch,
-    tmp_path,
-) -> None:
+async def test_stream_workflow_chat_leaves_prompt_limits_to_provider(monkeypatch, tmp_path):
     monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/codex")
+    calls = []
 
-    async def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("provider subprocess should not be invoked")
-        yield {}
+    async def provider(*args, **kwargs):
+        calls.append(args)
+        yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
 
-    monkeypatch.setattr(chat, "stream_subprocess", fail_if_called)
-
-    with pytest.raises(ChatProviderError, match="Chat prompt exceeds limit 8 bytes"):
-        async for _event in stream_workflow_chat(
-            provider="codex",
-            model="cli-default",
-            messages=[{"role": "user", "body": "hello"}],
-            workflow={"id": "limited", "resourceLimits": {"max_chat_prompt_bytes": 8}},
-            working_dir=tmp_path,
-            data_dir=tmp_path,
-            resource_limits=ResourceLimits(max_chat_prompt_bytes=1_000_000),
-        ):
-            pass
+    monkeypatch.setattr(chat, "stream_subprocess", provider)
+    async for _ in stream_workflow_chat(
+        provider="codex",
+        model="cli-default",
+        messages=[{"role": "user", "body": "hello"}],
+        workflow={"resourceLimits": {"max_chat_prompt_bytes": 8}},
+        working_dir=tmp_path,
+        data_dir=tmp_path,
+    ):
+        pass
+    assert calls
 
 
 @pytest.mark.asyncio
@@ -1758,15 +1751,49 @@ async def test_unlimited_swarm_output_keeps_terminal_text_and_usage(monkeypatch,
 
 
 def test_editor_context_contains_paths_without_contents_or_assumed_subject() -> None:
-    context = chat._compact_workflow_context({
-        "projectRoot": "/project",
-        "openFiles": ["/project/notes.md", "/project/workflow.rattish"],
-        "selectedWorkflowId": "stale",
-        "workflows": [{"id": "stale", "sourcePath": "/project/workflow.rattish",
-                       "nodes": [{"prompt": "private content"}]}],
-    })
+    context = chat._compact_workflow_context(
+        {
+            "projectRoot": "/project",
+            "openFiles": ["/project/notes.md", "/project/workflow.rattish"],
+            "selectedWorkflowId": "stale",
+            "workflows": [
+                {
+                    "id": "stale",
+                    "sourcePath": "/project/workflow.rattish",
+                    "nodes": [{"prompt": "private content"}],
+                }
+            ],
+        }
+    )
     assert "/project/notes.md" in context
     assert "private content" not in context
     assert "Selected workflow:" not in context
     assert "do not imply the subject" in context
     assert "Read a referenced file" in context
+
+
+@pytest.mark.asyncio
+async def test_compaction_handles_one_huge_message_and_preserves_source(monkeypatch, tmp_path):
+    chunks = []
+
+    async def summarize(**kwargs):
+        chunks.extend(kwargs["messages"])
+        return "Preserved decisions and outstanding work."
+
+    monkeypatch.setattr(chat, "_summarize_chat_messages", summarize)
+    source = "Important tool result " * 10000
+    messages, compacted = await chat._compact_chat_messages_if_needed(
+        provider="codex",
+        model="cli-default",
+        effort=None,
+        messages=[{"role": "user", "body": source}],
+        binary_path="codex",
+        data_dir=tmp_path,
+        working_dir=tmp_path,
+        limits=ResourceLimits(),
+    )
+    assert compacted
+    assert len(chunks) > 1
+    assert all(len(item["body"]) <= chat.CHAT_COMPACT_CHAR_LIMIT for item in chunks)
+    assert chat._messages_size(messages) < chat.CHAT_COMPACT_CHAR_LIMIT
+    assert source in next((tmp_path / "chat-context").glob("*.txt")).read_text()

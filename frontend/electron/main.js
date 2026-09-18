@@ -12,6 +12,8 @@ const {
   app,
   BrowserWindow,
   Menu,
+  Tray,
+  nativeImage,
   dialog,
   ipcMain,
   shell,
@@ -39,6 +41,7 @@ const {
   readGitFileBaseline,
   readGitHistory,
   readGitStatus,
+  readGitBranches,
   readGitWorktrees,
   removeGitWorktree,
 } = require("./git-status.cjs");
@@ -100,6 +103,8 @@ const LATEST_RELEASE_URL =
 const isProduction =
   app.isPackaged || process.env.GOFER_ELECTRON_MODE === "production";
 const isSmokeTest = process.env.GOFER_ELECTRON_SMOKE_TEST === "1";
+let backendReady;
+let backgroundTray;
 let backendProcess;
 let backendLogStream;
 const desktopGrantSecret = crypto.randomBytes(32).toString("hex");
@@ -146,6 +151,7 @@ function createWindow(apiBaseUrl, apiToken = "") {
     height: 960,
     minWidth: 980,
     minHeight: 640,
+    show: false,
     title: "Raticode",
     icon: path.join(__dirname, app.isPackaged ? "../dist/icon.png" : "../public/icon.png"),
     backgroundColor: "#1f1f1f",
@@ -155,6 +161,7 @@ function createWindow(apiBaseUrl, apiToken = "") {
       nodeIntegration: false,
       sandbox: !isSmokeTest,
       webviewTag: true,
+      backgroundThrottling: false,
       additionalArguments: [
         `--gofer-api-base-url=${apiBaseUrl}`,
         `--gofer-api-token=${apiToken}`,
@@ -163,6 +170,9 @@ function createWindow(apiBaseUrl, apiToken = "") {
       ],
     },
   });
+  // Set the launch size before showing the startup shell to avoid a small-window flash.
+  mainWindow.maximize();
+  mainWindow.show();
   const terminalOwnerId = mainWindow.webContents.id;
   const studioOptions = { indexPath: distIndexPath, devServerUrl: VITE_DEV_SERVER_URL, isProduction };
   installPermissionPolicy(session.fromPartition("persist:raticode-browser"), mainWindow.webContents.session,
@@ -208,8 +218,10 @@ function createWindow(apiBaseUrl, apiToken = "") {
   mainWindow.webContents.once("did-finish-load", () => {
     if (!isSmokeTest) return;
 
-    console.log(ELECTRON_READY_MESSAGE);
-    setTimeout(() => app.quit(), 250);
+    void backendReady.then(() => {
+      console.log(ELECTRON_READY_MESSAGE);
+      setTimeout(() => app.quit(), 250);
+    }).catch(() => {});
   });
 
   mainWindow.webContents.once(
@@ -245,6 +257,12 @@ function createWindow(apiBaseUrl, apiToken = "") {
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
+  mainWindow.on("close", (event) => {
+    if (isQuitting || isSmokeTest) return;
+    event.preventDefault();
+    mainWindow.hide();
+  });
+
   mainWindow.on("closed", () => {
     closeBrowsersForOwner(terminalOwnerId);
     closeTerminalsForOwner(terminalOwnerId);
@@ -252,7 +270,20 @@ function createWindow(apiBaseUrl, apiToken = "") {
   });
 }
 
-function startBackend() {
+// Choose the API origin before loading the document so CSP remains restricted
+// to one port. A bind conflict is surfaced by normal backend startup handling.
+function allocateBackendPort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const port = probe.address().port;
+      probe.close(error => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+function startBackend(port = 0) {
   const manualApiBaseUrl = process.env.GOFER_API_BASE_URL || process.env.VITE_API_BASE_URL;
   if (manualApiBaseUrl) {
     return Promise.resolve({
@@ -268,7 +299,7 @@ function startBackend() {
       "ui",
       "serve",
       "--port",
-      "0",
+      String(port),
       "--data-dir",
       getGoferDataDir(),
     ];
@@ -538,11 +569,15 @@ app.whenReady().then(async () => {
   setupIpcHandlers();
   setupAutoUpdater();
   try {
-    await startTerminalEditorServer();
-    const backend = await startBackend();
+    createBackgroundTray();
+    const backendPort = await allocateBackendPort();
+    backendReady = startBackend(backendPort);
+    // Handlers await readiness; neither Python nor terminal setup gates first paint.
+    createWindow(process.env.GOFER_API_BASE_URL || process.env.VITE_API_BASE_URL || `http://127.0.0.1:${backendPort}`);
+    void startTerminalEditorServer().catch(error => applicationLog.write("error", "terminal", error.message));
+    const backend = await backendReady;
     activeApiBaseUrl = backend.apiBaseUrl;
     activeUiApiToken = backend.apiToken;
-    createWindow(backend.apiBaseUrl, backend.apiToken);
   } catch (error) {
     if (isSmokeTest) {
       console.error(
@@ -557,29 +592,39 @@ app.whenReady().then(async () => {
     createBackendErrorWindow(error);
   }
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0 && activeApiBaseUrl) {
-      createWindow(activeApiBaseUrl, activeUiApiToken);
-    }
-  });
 });
 
-app.on("second-instance", () => {
-  if (!mainWindow) return;
+app.on("activate", showMainWindow);
 
-  if (mainWindow.isMinimized()) {
-    mainWindow.restore();
-  }
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
   mainWindow.focus();
-});
+}
+
+function createBackgroundTray() {
+  const iconPath = path.join(__dirname, app.isPackaged ? "../dist/icon.png" : "../public/icon.png");
+  backgroundTray = new Tray(nativeImage.createFromPath(iconPath).resize({ width: 20, height: 20 }));
+  backgroundTray.setToolTip("Raticode · running in background");
+  backgroundTray.setContextMenu(Menu.buildFromTemplate([
+    { label: "Open Raticode", click: showMainWindow },
+    { type: "separator" },
+    { label: "Quit Raticode and stop background work", click: () => app.quit() },
+  ]));
+  backgroundTray.on("click", showMainWindow);
+  backgroundTray.on("double-click", showMainWindow);
+}
+
+app.on("second-instance", showMainWindow);
 
 app.on("before-quit", (event) => {
+  isQuitting = true;
   if (!archivesDrained) {
     event.preventDefault();
     void conversationArchives.close().finally(() => { archivesDrained = true; app.quit(); });
     return;
   }
-  isQuitting = true;
   closeAllBrowsers();
   closeTerminalEditorServer();
   closeAllTerminals();
@@ -594,9 +639,8 @@ app.on("before-quit", (event) => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
+  // The desktop host owns backend services until an explicit Quit.
+  if (isQuitting || isSmokeTest) app.quit();
 });
 
 function setupIpcHandlers() {
@@ -643,6 +687,7 @@ function setupIpcHandlers() {
     gitFileAction,
     gitSwitchBranch,
     gitStatus,
+    gitBranches,
     gitFileBaseline,
     gitHistory,
     gitWorktrees,
@@ -652,7 +697,10 @@ function setupIpcHandlers() {
     grantDroppedPath,
     grantUserPath,
     getUpdateState,
-    apiSession: () => ({ apiBaseUrl: activeApiBaseUrl, apiToken: activeUiApiToken }),
+    apiSession: async () => {
+      await backendReady;
+      return { apiBaseUrl: activeApiBaseUrl, apiToken: activeUiApiToken };
+    },
     installDownloadedUpdate,
     listDirectory,
     searchProject: (_event, options = {}) => searchProject(resolveExactPath(options.projectRoot, { grantId: options.grantId, mustExist: true }), options),
@@ -1171,16 +1219,17 @@ function isAllowedBrowserNavigation(session, value) {
   }
 }
 
-function createTerminal(event, options = {}) {
+async function createTerminal(event, options = {}) {
   const requestedCwd = typeof options.cwd === "string" ? options.cwd.trim() : "";
   const cwd = requestedCwd
     ? resolveExactPath(requestedCwd, { grantId: options.grantId, mustExist: true })
     : getGoferDataDir();
-  if (!fs.statSync(cwd).isDirectory()) {
+  if (!(await fs.promises.stat(cwd)).isDirectory()) {
     throw new Error(`Terminal directory is not a folder: ${cwd}`);
   }
 
-  const shell = terminalShell();
+  const [shell, editorCommand] = await Promise.all([terminalShell(), terminalEditorCommand()]);
+  if (event.sender.isDestroyed()) throw new Error("Terminal owner was closed.");
   const id = crypto.randomUUID();
   const editorToken = crypto.randomBytes(32).toString("hex");
   const terminal = pty.spawn(shell.command, shell.args, {
@@ -1190,7 +1239,7 @@ function createTerminal(event, options = {}) {
       ...process.env,
       ...(shell.env ?? {}),
       COLORTERM: "truecolor",
-      GIT_EDITOR: terminalEditorCommand(),
+      GIT_EDITOR: editorCommand,
       TERM: "xterm-256color",
       RATICODE_EDITOR_CWD: cwd,
       RATICODE_EDITOR_ENDPOINT: terminalEditorEndpoint,
@@ -1198,7 +1247,7 @@ function createTerminal(event, options = {}) {
       RATICODE_EDITOR_SCRIPT: path.join(__dirname, "terminal-editor.cjs"),
       RATICODE_EDITOR_TOKEN: editorToken,
       RATICODE_TERMINAL_ID: id,
-      VISUAL: terminalEditorCommand(),
+      VISUAL: editorCommand,
     },
     name: "xterm-256color",
     rows: terminalDimension(options.rows, 24, 1, 200),
@@ -1267,17 +1316,23 @@ function completeTerminalEditor(event, options = {}) {
   return { completed: true };
 }
 
+let terminalEditorCommandPromise;
 function terminalEditorCommand() {
-  const launcherPath = terminalEditorLauncherPath();
-  return process.platform === "win32" ? `"${launcherPath}"` : shellQuote(launcherPath);
+  terminalEditorCommandPromise ??= terminalEditorLauncherPath().then(launcherPath => (
+    process.platform === "win32" ? `"${launcherPath}"` : shellQuote(launcherPath)
+  )).catch(error => {
+    terminalEditorCommandPromise = undefined;
+    throw error;
+  });
+  return terminalEditorCommandPromise;
 }
 
-function terminalEditorLauncherPath() {
+async function terminalEditorLauncherPath() {
   const directory = path.join(app.getPath("userData"), "terminal-editor");
-  fs.mkdirSync(directory, { recursive: true });
+  await fs.promises.mkdir(directory, { recursive: true });
   if (process.platform === "win32") {
     const launcherPath = path.join(directory, "raticode-editor.cmd");
-    fs.writeFileSync(launcherPath, [
+    await fs.promises.writeFile(launcherPath, [
       "@echo off",
       "set ELECTRON_RUN_AS_NODE=1",
       '"%RATICODE_EDITOR_RUNTIME%" "%RATICODE_EDITOR_SCRIPT%" %*',
@@ -1286,13 +1341,13 @@ function terminalEditorLauncherPath() {
     return launcherPath;
   }
   const launcherPath = path.join(directory, "raticode-editor");
-  fs.writeFileSync(launcherPath, [
+  await fs.promises.writeFile(launcherPath, [
     "#!/bin/sh",
     "export ELECTRON_RUN_AS_NODE=1",
     'exec "$RATICODE_EDITOR_RUNTIME" "$RATICODE_EDITOR_SCRIPT" "$@"',
     "",
   ].join("\n"), { encoding: "utf8", mode: 0o700 });
-  fs.chmodSync(launcherPath, 0o700);
+  await fs.promises.chmod(launcherPath, 0o700);
   return launcherPath;
 }
 
@@ -1405,7 +1460,7 @@ function ownedTerminalSession(event, id) {
   return session;
 }
 
-function terminalShell() {
+async function terminalShell() {
   if (process.platform === "win32") {
     return {
       args: ["-NoLogo", "-NoExit", "-Command", powershellIntegrationCommand()],
@@ -1419,7 +1474,7 @@ function terminalShell() {
       label: "PowerShell",
     };
   }
-  const integrationPath = bashIntegrationPath();
+  const integrationPath = await bashIntegrationPath();
   if (integrationPath) {
     return {
       args: ["--rcfile", integrationPath],
@@ -1440,7 +1495,16 @@ function terminalShell() {
   };
 }
 
+let bashIntegrationPromise;
 function bashIntegrationPath() {
+  bashIntegrationPromise ??= writeBashIntegration().then(result => {
+    if (!result) bashIntegrationPromise = undefined;
+    return result;
+  });
+  return bashIntegrationPromise;
+}
+
+async function writeBashIntegration() {
   try {
     const integrationDirectory = path.join(app.getPath("userData"), "shell-integration");
     const integrationPath = path.join(integrationDirectory, "bash.sh");
@@ -1461,8 +1525,8 @@ function bashIntegrationPath() {
       "esac",
       "",
     ].join("\n");
-    fs.mkdirSync(integrationDirectory, { recursive: true });
-    fs.writeFileSync(integrationPath, source, { encoding: "utf8", mode: 0o600 });
+    await fs.promises.mkdir(integrationDirectory, { recursive: true });
+    await fs.promises.writeFile(integrationPath, source, { encoding: "utf8", mode: 0o600 });
     return integrationPath;
   } catch {
     return "";
@@ -2158,6 +2222,16 @@ async function gitSwitchBranch(_event, options = {}) {
   return switchGitBranch(projectRoot, options.branch);
 }
 
+async function gitBranches(_event, options = {}) {
+  try {
+    const projectRoot = await resolveGitProjectDirectory(options);
+    return await readGitBranches(projectRoot, { force: options.force === true });
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes(error.code || error.cause?.code)) return { active: false, missing: true };
+    throw error;
+  }
+}
+
 async function gitStatus(_event, options = {}) {
   try {
     const projectRoot = resolveExactPath(options.projectRoot, {
@@ -2354,6 +2428,7 @@ function persistTrustedRoot(root) {
 
 let restoredBackendRootsFor = "";
 async function restoreBackendTrustedRoots() {
+  await backendReady;
   if (!activeApiBaseUrl || !activeUiApiToken || restoredBackendRootsFor === activeUiApiToken) return;
   const response = await fetch(`${activeApiBaseUrl}/api/desktop/trusted-roots`, {
     headers: { Authorization: `Bearer ${activeUiApiToken}`, "X-Gofer-Desktop-Grant-Secret": desktopGrantSecret },
@@ -2368,6 +2443,7 @@ async function restoreBackendTrustedRoots() {
 }
 
 async function registerBackendPathGrant(handle) {
+  await backendReady;
   if (getIpcSecurity().isUserGrant(handle?.grantId)) {
     throw new Error("User file navigation does not grant agent access.");
   }
@@ -2433,14 +2509,15 @@ function getIpcSecurity() {
 async function restartBackend() {
   stopBackend();
   try {
-    const backend = await startBackend();
+    backendReady = startBackend();
+    const backend = await backendReady;
     activeApiBaseUrl = backend.apiBaseUrl;
     activeUiApiToken = backend.apiToken;
     if (backendErrorWindow && !backendErrorWindow.isDestroyed()) {
       backendErrorWindow.close();
     }
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.close();
+      mainWindow.destroy();
     }
     createWindow(backend.apiBaseUrl, backend.apiToken);
   } catch (error) {
