@@ -1119,6 +1119,17 @@ swarmFixture.run.events = [
 swarmFixture.run.configuration = { agents: structuredClone(swarmFixture.agents) };
 swarmFixture.history = [{ ...structuredClone(swarmFixture.run), id: "prior-run", task: "Previous release", state: "completed" }];
 let swarmMutations = [];
+let releaseSwarmDeliveryResponse;
+
+async function clickSwarmButton(label) {
+  await waitFor(() => evaluate(label => {
+    const button = [...document.querySelectorAll("[aria-label='Swarm workspace'] button")]
+      .find(button => button.textContent === label);
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+  }, label), 25, `enabled swarm button: ${label}`);
+}
 
 async function checkSwarmWidths(layoutSelector, longTextSelector = "") {
   windowRef.setSize(2400, 1000);
@@ -1272,17 +1283,25 @@ async function exerciseSwarms() {
   await evaluate(() => { document.querySelector(".swarm-board-panel").open = true; });
   await wait(150);
   fs.writeFileSync("/tmp/raticode-swarm-active.png", (await windowRef.webContents.capturePage()).toPNG());
-  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Retry message").click());
+  await clickSwarmButton("Retry message");
   await waitFor(() => swarmMutations.some((item) => item.path.endsWith("/deliveries")));
   assert.deepEqual(swarmMutations.at(-1).body, { messageId: "msg1", agentId: "builder", action: "retry", projectRoot: "/workspace/gofer-flow" });
 
-  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find(button => button.textContent === "Retry now").click());
+  // Receiving the request does not mean React has finished the mutation.
+  // Hold its response so this disabled interval is covered on every run.
+  try {
+    await waitFor(() => evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")]
+      .find(button => button.textContent === "Retry now")?.disabled));
+  } finally {
+    releaseSwarmDeliveryResponse();
+  }
+  await clickSwarmButton("Retry now");
   await waitFor(() => swarmMutations.some(item => item.body.messageId === "lead-message"));
   assert.deepEqual(swarmMutations.at(-1).body, { messageId: "lead-message", agentId: "lead", action: "retry", projectRoot: "/workspace/gofer-flow" });
 
   await evaluate(() => { document.querySelector(".swarm-objectives").open = true; });
   assert.equal(await evaluate(() => document.querySelector("progress[aria-label='Overall progress']").value), 80);
-  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Edit milestones").click());
+  await clickSwarmButton("Edit milestones");
   await checkSwarmWidths(".swarm-dashboard", ".swarm-message-content > p");
   await evaluate(() => {
     const input = document.querySelector("[aria-label='Milestone 3 weight']");
@@ -1562,6 +1581,10 @@ async function startServer() {
           if (url.pathname.endsWith("/objectives")) { swarmFixture.run.objectives = payload.objectives; swarmFixture.run.revision += 1; }
           if (request.method === "PUT") { swarmFixture = { ...swarmFixture, ...payload }; }
           if (payload.action === "stop") swarmFixture.run.state = "stopped";
+          if (url.pathname.endsWith("/deliveries") && payload.messageId === "msg1" && payload.action === "retry") {
+            releaseSwarmDeliveryResponse = () => json(response, { swarm: swarmFixture });
+            return;
+          }
           json(response, { swarm: swarmFixture });
         });
         return;
