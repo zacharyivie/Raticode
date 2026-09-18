@@ -1,6 +1,6 @@
 # Maintainer: Raticode <maintainers@goferflow.local>
 pkgname=gofer-flow-cli
-pkgver=0.3.2
+pkgver=0.3.3
 pkgrel=1
 pkgdesc="Command line workflow automation tool for Raticode"
 arch=("x86_64")

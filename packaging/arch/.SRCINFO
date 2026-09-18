@@ -1,6 +1,6 @@
 pkgbase = gofer-flow
 	pkgdesc = Local workflow automation studio for Raticode
-	pkgver = 0.3.2
+	pkgver = 0.3.3
 	pkgrel = 1
 	url = https://github.com/zacharyivie/gofer-flow
 	arch = x86_64
@@ -19,7 +19,7 @@ pkgbase = gofer-flow
 	sha256sums = d47d296d0ee293e7f2bc46c6997dd44b327c0699548c71b1d80abed020d97973
 	sha256sums = 3bc092d4b9b9d4f13c0da69496b82e16958dbc5364d2075379a3381d34218db6
 	sha256sums = 5f23b392f8adf4b863c4a03c47319aaafba72b762830a4427272c6ab71f8f6e1
-	source_x86_64 = Raticode-0.3.2-x86_64.AppImage::https://github.com/zacharyivie/gofer-flow/releases/download/v0.3.2/Raticode-0.3.2-x86_64.AppImage
+	source_x86_64 = Raticode-0.3.3-x86_64.AppImage::https://github.com/zacharyivie/gofer-flow/releases/download/v0.3.3/Raticode-0.3.3-x86_64.AppImage
 	sha256sums_x86_64 = 4b25cea0265aeb1d7508ed3597c0955e51a0e77ddda40278834b75456d2f1696
 
 pkgname = gofer-flow
