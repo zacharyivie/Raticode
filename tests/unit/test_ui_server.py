@@ -2961,6 +2961,30 @@ def test_provider_settings_persist_and_reject_invalid_updates(monkeypatch, tmp_p
     assert denied.status == 401
 
 
+def test_provider_model_defaults_round_trip(monkeypatch, tmp_path) -> None:
+    from gofer.core import provider_preferences
+
+    monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
+    for model, effort in [("astra", "high"), ("", "")]:
+        changes = {"defaultModel": model, "defaultEffort": effort}
+        result = _request(
+            tmp_path,
+            "POST",
+            "/api/provider/settings",
+            body={"provider": "codex", **changes},
+        )
+        assert result.status == 200
+        assert provider_preferences.provider_preference("codex") == changes
+    invalid = _request(
+        tmp_path,
+        "POST",
+        "/api/provider/settings",
+        body={"provider": "codex", "defaultModel": ["astra"]},
+    )
+    assert invalid.status == 400
+    assert provider_preferences.provider_preference("codex")["defaultModel"] == ""
+
+
 def test_provider_auth_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 

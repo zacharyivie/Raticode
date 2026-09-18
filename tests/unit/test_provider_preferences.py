@@ -67,3 +67,54 @@ async def test_disabled_provider_cannot_start_rem_turn(tmp_path: Path, provider:
             working_dir=tmp_path,
             data_dir=tmp_path,
         )
+
+
+@pytest.mark.parametrize("provider", capabilities.CLI_PROVIDERS)
+def test_model_and_effort_defaults_override_discovery_without_mutating_cache(provider) -> None:
+    capability = capabilities.ProviderCapability(
+        id=provider,
+        display_name=provider,
+        available=True,
+        discovery_status="ready",
+        default_model="sol",
+        models=[
+            capabilities.ModelCapability(id="sol", display_name="Sol", is_default=True),
+            capabilities.ModelCapability(
+                id="astra",
+                display_name="Astra",
+                default_effort="medium",
+                efforts=[
+                    capabilities.EffortCapability(id=level, display_name=level)
+                    for level in ("medium", "high")
+                ],
+            ),
+        ],
+    )
+    preferences.save_provider_preference(
+        provider, {"defaultModel": "astra", "defaultEffort": "high"}
+    )
+    payload = capability.to_ui_payload()
+    assert payload["defaultModel"] == "astra"
+    assert payload["providerDefaultModel"] == "sol"
+    assert payload["models"][1]["defaultEffort"] == "high"
+    assert payload["models"][1]["providerDefaultEffort"] == "medium"
+    assert [model["id"] for model in payload["models"] if model["isDefault"]] == ["astra"]
+    assert capability.default_model == "sol"
+    assert capability.models[1].default_effort == "medium"
+    preferences.save_provider_preference(provider, {"defaultEffort": "unavailable"})
+    assert capability.to_ui_payload()["models"][1]["defaultEffort"] == "medium"
+    preferences.save_provider_preference(provider, {"defaultModel": "removed-model"})
+    assert capability.to_ui_payload()["defaultModel"] == "sol"
+    assert preferences.provider_preference(provider)["defaultModel"] == "removed-model"
+    preferences.save_provider_preference(provider, {"defaultModel": "", "defaultEffort": ""})
+    assert capability.to_ui_payload()["defaultModel"] == "sol"
+    assert capability.to_ui_payload()["models"][1]["defaultEffort"] == "medium"
+
+
+@pytest.mark.parametrize(
+    "changes", [{"defaultModel": None}, {"defaultEffort": 3}, {"defaultModel": "a" * 257}]
+)
+def test_invalid_default_preferences_are_rejected(changes) -> None:
+    with pytest.raises(ValueError):
+        preferences.save_provider_preference("codex", changes)
+    assert preferences.provider_preference("codex") == {}

@@ -737,7 +737,7 @@ function categoryKeywords(category) {
     editor: "font line tab wrap minimap autosave markdown html preview code",
     browser: "homepage new tab search engine url web",
     terminal: "font line cursor blink scrollback shell",
-    providers: "providers enabled disabled executable coding harness path apps",
+    providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
     assistant: "rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
     developer: "developer diagnostics logs logging app data storage version backend restart tools",

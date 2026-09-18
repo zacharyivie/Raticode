@@ -32,8 +32,15 @@ def save_provider_preference(provider: str, changes: dict[str, Any]) -> None:
 
     if not isinstance(provider, str) or provider not in PROVIDER_BINARIES:
         raise ValueError("Unknown provider")
-    if set(changes) - {"enabled", "executable"}:
+    if set(changes) - {"enabled", "executable", "defaultModel", "defaultEffort"}:
         raise ValueError("Unknown provider setting")
+    changes = dict(changes)
+    for field in ("defaultModel", "defaultEffort"):
+        if field in changes:
+            value = changes[field]
+            if not isinstance(value, str) or len(value) > 256:
+                raise ValueError(f"{field} must be a string of at most 256 characters")
+            changes[field] = value.strip()
     if "enabled" in changes and not isinstance(changes["enabled"], bool):
         raise ValueError("Enabled must be a boolean")
     if "executable" in changes:

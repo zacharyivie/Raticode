@@ -98,6 +98,22 @@ class ProviderCapability(BaseModel):
     def to_ui_payload(self) -> dict[str, Any]:
         preference = provider_preference(self.id)
         executable = resolve_provider_executable(self.id)
+        override_model = preference.get("defaultModel", "")
+        override_effort = preference.get("defaultEffort", "")
+        default_model = next(
+            (model.id for model in self.models if model.id == override_model),
+            self.default_model,
+        )
+        # Apply preferences to the response, never to the cached discovery result.
+        # Stale overrides remain saved but cannot select an unavailable model/effort.
+        effort_model = next((model for model in self.models if model.id == default_model), None)
+        effective_effort = (
+            override_effort
+            if effort_model
+            and (not override_model or override_model == default_model)
+            and any(effort.id == override_effort for effort in effort_model.efforts)
+            else None
+        )
         return {
             "enabled": preference.get("enabled", executable is not None),
             "executable": executable,
@@ -141,13 +157,19 @@ class ProviderCapability(BaseModel):
             else "cli-managed"
             if self.id == "grok"
             else "default",
-            "defaultModel": self.default_model,
+            "defaultModel": default_model,
+            "providerDefaultModel": self.default_model,
+            "defaultModelOverride": override_model,
+            "defaultEffortOverride": override_effort,
             "models": [
                 {
                     "id": model.id,
                     "displayName": model.display_name,
                     "description": model.description,
-                    "defaultEffort": model.default_effort,
+                    "defaultEffort": effective_effort
+                    if model.id == default_model and effective_effort is not None
+                    else model.default_effort,
+                    "providerDefaultEffort": model.default_effort,
                     "efforts": [
                         {
                             "id": effort.id,
@@ -156,7 +178,7 @@ class ProviderCapability(BaseModel):
                         }
                         for effort in model.efforts
                     ],
-                    "isDefault": model.is_default,
+                    "isDefault": model.id == default_model,
                 }
                 for model in self.models
             ],

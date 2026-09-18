@@ -9,6 +9,9 @@ Changes since the `v0.3.1` tag.
 
 ### Changed
 
+- Settings → Providers now saves per-provider model and effort defaults that
+  override discovered defaults when switching providers. Reset them to follow
+  the provider again.
 - Closing the desktop window now hides Raticode and keeps background work running.
   Reopen it from the tray or by launching Raticode again. Use the tray's
   "Quit Raticode and stop background work" action to exit.

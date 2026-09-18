@@ -13999,3 +13999,120 @@ test("Stop during Rem startup waits for the turn identity and explicitly stops b
     assert.match(dom.text(), /Rem stopped/);
   } finally { await dom.unmount(); }
 });
+
+test("provider defaults save, survive remount, apply when switching back, and reset", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const picker = await viteServer.ssrLoadModule("/src/components/ProviderModelEffortFields.jsx");
+  let preferences = { defaultModel: "", defaultEffort: "" };
+  const saved = [];
+  function catalog() {
+    return [{ id: "codex", displayName: "Codex", available: true, discoveryStatus: "ready",
+      defaultModel: preferences.defaultModel || "sol", providerDefaultModel: "sol",
+      defaultModelOverride: preferences.defaultModel, defaultEffortOverride: preferences.defaultEffort,
+      models: [{ id: "sol", displayName: "Sol" }, { id: "astra", displayName: "Astra",
+        defaultEffort: preferences.defaultEffort || "medium", providerDefaultEffort: "medium",
+        efforts: [ { id: "medium" }, { id: "high" } ] }] },
+    { id: "claude_code", displayName: "Claude Code", available: true, discoveryStatus: "ready",
+      defaultModel: "sonnet", models: [{ id: "sonnet", displayName: "Sonnet" }] }];
+  }
+  function Harness() {
+    const providerState = picker.useProviderCapabilities();
+    const [selection, setSelection] = React.useState({ provider: "claude_code", model: "sonnet", effort: "" });
+    return React.createElement(React.Fragment, null,
+      React.createElement(settings.default, { providerState }),
+      React.createElement(picker.ProviderModelEffortFields, { ...selection, ...providerState,
+        onChange: patch => setSelection(current => ({ ...current, ...patch })) }),
+      React.createElement("output", { "aria-label": "Selection" }, JSON.stringify(selection)));
+  }
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url.startsWith("/api/provider/capabilities")) return { ok: true, json: async () => ({ providers: catalog() }) };
+    if (url === "/api/provider/settings") {
+      const { provider, ...patch } = JSON.parse(options.body);
+      saved.push({ provider, ...patch }); preferences = { ...preferences, ...patch };
+      return { ok: true, json: async () => ({ saved: true }) };
+    }
+    return null;
+  }]);
+  const dispatch = event => {
+    for (const listener of document.listeners[event.type] ?? []) listener(event);
+    return true;
+  };
+  let dom = await mountReact(React.createElement(Harness), fetchMock);
+  window.dispatchEvent = dispatch;
+  async function switchTo(name) {
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "provider"));
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("role") === "option" && textOf(el).startsWith(name)));
+    await dom.flush();
+  }
+  try {
+    await dom.flush();
+    await dom.change(dom.byLabel("Codex default model"), "astra"); await dom.flush();
+    await dom.change(dom.byLabel("Codex default effort"), "high"); await dom.flush();
+    assert.deepEqual(saved, [{ provider: "codex", defaultModel: "astra", defaultEffort: "" }, { provider: "codex", defaultEffort: "high" }]);
+    await dom.unmount();
+    dom = await mountReact(React.createElement(Harness), fetchMock);
+    window.dispatchEvent = dispatch;
+    await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Codex default model")).value, "astra");
+    assert.equal(reactProps(dom.byLabel("Codex default effort")).value, "high");
+    assert.equal(reactProps(dom.byLabel("Claude Code default effort")).disabled, true);
+    await switchTo("Codex");
+    assert.deepEqual(JSON.parse(textOf(dom.byLabel("Selection"))), { provider: "codex", model: "astra", effort: "high" });
+    await switchTo("Claude Code"); await switchTo("Codex");
+    assert.deepEqual(JSON.parse(textOf(dom.byLabel("Selection"))), { provider: "codex", model: "astra", effort: "high" });
+    await dom.click(dom.byText("Reset model and effort defaults")); await dom.flush();
+    // Changing defaults must not overwrite the current explicit selection.
+    assert.deepEqual(JSON.parse(textOf(dom.byLabel("Selection"))), { provider: "codex", model: "astra", effort: "high" });
+    await switchTo("Claude Code"); await switchTo("Codex");
+    assert.deepEqual(JSON.parse(textOf(dom.byLabel("Selection"))), { provider: "codex", model: "sol", effort: "" });
+  } finally { await dom.unmount(); }
+});
+
+test("provider defaults are unavailable until model discovery is ready and save failures are visible", async () => {
+  const module = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const dom = await mountReact(React.createElement(module.default, { providerState: {
+    capabilities: [
+      { id: "codex", displayName: "Codex", available: true, discoveryStatus: "ready", defaultModel: "sol", models: [{ id: "sol" }] },
+      { id: "grok", displayName: "Grok", available: true, discoveryStatus: "unauthenticated", models: [{ id: "grok" }] },
+    ], loading: false, refresh() {},
+  } }), async () => ({ ok: false, json: async () => ({ error: "Could not save defaults" }) }));
+  try {
+    assert.equal(allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Grok default model"), false);
+    await dom.change(dom.byLabel("Codex default model"), "sol"); await dom.flush();
+    assert.match(dom.text(), /Could not save defaults/);
+    assert.equal(reactProps(dom.byLabel("Codex default model")).value, "");
+  } finally { await dom.unmount(); }
+});
+
+test("Rem sends provider model and effort overrides on startup and after switching back", async () => {
+  const providers = [
+    { id: "codex", displayName: "Codex", available: true, discoveryStatus: "ready",
+      defaultModel: "astra", defaultModelOverride: "astra", defaultEffortOverride: "high",
+      models: [{ id: "sol" }, { id: "astra", defaultEffort: "high", efforts: [{ id: "medium" }, { id: "high" }] }] },
+    { id: "claude_code", displayName: "Claude Code", available: true, discoveryStatus: "ready",
+      defaultModel: "sonnet", models: [{ id: "sonnet" }] },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers }),
+    (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  try {
+    await dom.flush();
+    for (const switchBack of [false, true]) {
+      if (switchBack) {
+        for (const name of ["Claude Code", "Codex"]) {
+          await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "provider"));
+          await dom.click(allElements(dom.container).find(el => el.getAttribute?.("role") === "option" && textOf(el).startsWith(name)));
+          await dom.flush();
+        }
+      }
+      await dom.change(dom.first("textarea"), "Check defaults");
+      await dom.click(dom.byTitle("Send message")); await dom.flush();
+      const request = JSON.parse(fetchMock.calls.filter(call => call.url === "/api/chat/stream").at(-1).options.body);
+      assert.equal(request.provider, "codex");
+      assert.equal(request.model, "astra");
+      assert.equal(request.effort, "high");
+    }
+  } finally { await dom.unmount(); }
+});

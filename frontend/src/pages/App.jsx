@@ -6203,7 +6203,10 @@ export function ChatPane({
       nextProvider.models?.find((item) => item.id === nextProvider.defaultModel) ??
       nextProvider.models?.[0];
     if (!nextModel) return;
-    if (!model) setModel(nextModel.id);
+    if (!model) {
+      setModel(nextModel.id);
+      if (!effort && nextProvider.defaultEffortOverride) setEffort(nextModel.defaultEffort ?? "");
+    }
     if (effort && !nextModel.efforts?.some((item) => item.id === effort)) {
       setEffort(nextModel.defaultEffort ?? "");
     }
