@@ -95,7 +95,6 @@ const VITE_DEV_SERVER_URL =
   process.env.VITE_DEV_SERVER_URL ||
   "http://127.0.0.1:5173";
 const BACKEND_READY_PREFIX = "GOFER_UI_READY ";
-const BACKEND_START_TIMEOUT_MS = 15000;
 const ELECTRON_READY_MESSAGE = "GOFER_ELECTRON_READY";
 const BACKEND_EXECUTABLE_NAME = process.platform === "win32" ? "gof.exe" : "gof";
 const LATEST_RELEASE_URL =
@@ -319,14 +318,12 @@ function startBackend(port = 0) {
     let settled = false;
     let stdoutBuffer = "";
     let stderrBuffer = "";
-    const timeoutId = setTimeout(() => {
-      fail(new Error("Timed out waiting for the Raticode backend to start."));
-    }, BACKEND_START_TIMEOUT_MS);
+    // Cold starts can take minutes on slow machines. Wait for the ready message
+    // or a real process failure; elapsed time must not kill a healthy backend.
 
     function succeed(apiBaseUrl, apiToken = "") {
       if (settled) return;
       settled = true;
-      clearTimeout(timeoutId);
       writeBackendLog(`READY ${apiBaseUrl}\n`);
       resolve({ apiBaseUrl, apiToken });
     }
@@ -334,7 +331,6 @@ function startBackend(port = 0) {
     function fail(error) {
       if (settled) return;
       settled = true;
-      clearTimeout(timeoutId);
       stopBackend();
       reject(error);
     }
