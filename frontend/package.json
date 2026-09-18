@@ -1,6 +1,6 @@
 {
   "name": "gofer-flow-ui",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Local workflow automation studio for Raticode.",
   "author": "Raticode",
   "license": "AGPL-3.0-only",

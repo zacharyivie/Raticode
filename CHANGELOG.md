@@ -3,6 +3,43 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
+## 0.3.2 - 2026-09-18
+
+Changes since the `v0.3.1` tag.
+
+### Changed
+
+- Closing the desktop window now hides Raticode and keeps background work running.
+  Reopen it from the tray or by launching Raticode again. Use the tray's
+  "Quit Raticode and stop background work" action to exit.
+- Rem turns now run independently of their HTTP connection, with disk-backed
+  events for reconnecting without repeating provider work or delivered messages.
+- Idle swarms now ask the coordinator to recover unfinished work rather than
+  immediately failing. Coordinators can resolve uncertain attempts after
+  inspecting retained effects, and repair attempts have no fixed count limit.
+- Removed the global default swarm concurrency ceiling and automatic stall-turn
+  pauses. Per-swarm concurrency settings and manual pause/stop controls remain.
+- Large chat histories are archived before compaction and summarized in chunks.
+- Reduced startup work, file-tree and thread-list loading, Git branch queries,
+  and rendering of collapsed tool output. The desktop opens maximized with a
+  startup screen while the backend loads.
+
+### Fixed
+
+- Reconnect Rem when the initial response is lost after a turn has started.
+  Reconnection uses the existing turn ID and never repeats the launch request.
+- Preserve streamed thought batches through reconnection so conversation history
+  commits a batch once instead of writing each event separately.
+- Improved Rem edit attribution for Codex and Claude Code, and retained chat
+  errors in conversation history. Stop requests made during startup are delivered
+  once the turn is ready.
+- Fixed Windows path comparisons across project, thread, terminal, and editor
+  state, including drive-letter case, separators, and UNC paths.
+- Preserved editor sessions across file moves and handled Git refreshes without
+  discarding unsaved edits. Project selection becomes available before workflow
+  discovery finishes.
+- Fixed Grok MCP permission handling and preserved streamed ACP thought updates.
+
 ## 0.3.1 - 2026-09-17
 
 Changes since the `v0.3.0` tag.
