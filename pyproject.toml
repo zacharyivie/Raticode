@@ -21,7 +21,7 @@ dependencies = [
     "tomli-w>=1.0",
     "questionary>=2.0",
     "jsonschema>=4.23",
-    "tzdata>=2026.2",
+    "tzdata>=2026.3",
     "watchdog>=6.0.0",
     "vosk>=0.3.45; sys_platform != 'darwin'",
 ]
