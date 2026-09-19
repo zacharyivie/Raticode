@@ -74,3 +74,26 @@ test("settings reset and normalization return independent default values", () =>
   normalized.keybindings = {};
   assert.notDeepEqual(normalized.keybindings, defaultSettingsSnapshot().keybindings);
 });
+
+test("shared cancellation keeps another subscriber alive and evicts abandoned requests", async () => {
+  const { shareCancellable } = await import("./refresh.js");
+  let resolve, calls = 0, sharedSignal;
+  const task = signal => { calls++; sharedSignal = signal; return new Promise(done => { resolve = done; }); };
+  const a = new AbortController(), b = new AbortController();
+  const first = shareCancellable("discovery", task, a.signal);
+  const second = shareCancellable("discovery", task, b.signal);
+  await Promise.resolve();
+  a.abort();
+  await assert.rejects(first, { name: "AbortError" });
+  assert.equal(sharedSignal.aborted, false);
+  assert.equal(calls, 1);
+  resolve("B");
+  assert.equal(await second, "B");
+  const abandoned = shareCancellable("discovery", task, b.signal);
+  await Promise.resolve();
+  b.abort();
+  await assert.rejects(abandoned, { name: "AbortError" });
+  assert.equal(sharedSignal.aborted, true);
+  assert.equal(await shareCancellable("discovery", async () => "retry"), "retry");
+  resolve("late");
+});

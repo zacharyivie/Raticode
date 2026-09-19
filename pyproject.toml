@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gofer-flow"
-version = "0.3.3"
+version = "0.3.4"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.14.2",
     "rich>=13.7",
-    "anyio>=4.4",
+    "anyio>=4.14.2",
     "python-dotenv>=1.0",
     "sqlalchemy>=2.0",
     "tomli-w>=1.0",

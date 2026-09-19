@@ -196,7 +196,7 @@ export default function ChatComposer({
               event.preventDefault();
               if (sending) {
                 if ((draft.trim() || attachments.length) && !steeringPending) onSteer?.();
-              } else if (!sendDisabled && (draft.trim() || attachments.length)) onSend();
+              } else if (!sendDisabled && (draft.trim() || attachments.length)) onSend(null, { background: event.ctrlKey });
             }
           }}
         />

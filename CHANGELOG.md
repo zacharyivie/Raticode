@@ -3,6 +3,35 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
+## 0.3.4 - 2026-09-19
+
+Changes since the `v0.3.3` tag.
+
+### Added
+
+- Added a swarm inbox for human approvals and restart recovery decisions, with
+  retained decision history.
+- Swarm agents can work across multiple repositories. Named review worktrees
+  are prepared for all projects before tasks are dispatched.
+- Added Rem access to swarm workspaces, swarm diagnostics, and run completion
+  handling.
+- Added global project selection for Rem and thread creation in background
+  projects.
+
+### Changed
+
+- Rem's conflict-resolution instructions now include completing the pending
+  merge or rebase after resolving conflicts.
+- Desktop backend path grants are queued and cached to avoid repeated requests.
+
+### Fixed
+
+- Updated AnyIO to 4.14.2 to address TLS hostname validation and process-pool
+  stderr deadlock vulnerabilities, CVE-2026-63374 and CVE-2026-64847.
+- Workflow discovery handles filesystem errors and files changing during scans.
+- Cancel stale project discovery requests and preserve current results when
+  switching projects.
+
 ## 0.3.3 - 2026-09-18
 
 ### Fixed

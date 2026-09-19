@@ -69,7 +69,9 @@ class SwarmManager:
         stream: Callable[..., AsyncIterator[dict[str, Any]]] | None = None,
         start_runtime: bool = True,
         max_concurrency: int | None = None,
+        authorize_workspace: Callable[[Path, str | None], None] | None = None,
     ) -> None:
+        self.authorize_workspace = authorize_workspace
         self.data_dir = data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
         self.resource_limits = resource_limits
@@ -99,6 +101,7 @@ class SwarmManager:
         self._terminal: dict[str, str] = {}
         self._finalizing: set[str] = set()
         self._tokens: dict[str, tuple[str, str, str, str]] = {}
+        self._turn_tokens: set[str] = set()
         self._thread: threading.Thread | None = None
         self._http: SwarmToolServer | None = None
         with self._lock:
@@ -113,7 +116,7 @@ class SwarmManager:
                 }
                 pending_terminal = (
                     (metadata.get("run") or {}).get("state") in {"stopped", "failed"}
-                    and (metadata.get("run") or {}).get("workspace", {}).get("branch")
+                    and any(w.get("branch") for w in self._workspaces(metadata["run"]))
                     and not (metadata.get("run") or {}).get("cleanup")
                 )
                 if (
@@ -127,14 +130,25 @@ class SwarmManager:
                 run = swarm.get("run")
                 if run and run["state"] in {"running", "stopping", "paused"}:
                     run.setdefault("workspace", {"mode": "serial", "path": swarm["projectRoot"]})
-                    changed = run["state"] != "paused"
+                    was_running = run["state"] == "running"
+                    changed = run["state"] != "paused" and not run.get("recoveryGeneration")
                     if run.pop("integrationBusy", False):
                         changed = True
                         run["integration"] = {"passed": False, "error": "Integration interrupted"}
+                        for workspace in run.get("projectWorkspaces", {}).values():
+                            workspace["integration"] = {
+                                "passed": False,
+                                "error": "Integration interrupted",
+                            }
                     run["state"] = "stopped" if run["state"] == "stopping" else "paused"
                     for state in run["agentStates"].values():
                         if state["state"] == "working":
-                            state.update(state="interrupted", error="Application restarted")
+                            state.update(
+                                state="interrupted",
+                                error="Application restarted",
+                                previousError=state.get("error"),
+                                turnKey=_id(),
+                            )
                             changed = True
                     for message in run["messages"]:
                         for delivery in message["deliveries"]:
@@ -142,14 +156,60 @@ class SwarmManager:
                                 delivery.update(state="uncertain", reason="Application restarted")
                                 changed = True
                     for attempt in run.get("attempts", []):
-                        if attempt["state"] in {"running", "verifying", "integrating"}:
+                        if attempt["state"] in {
+                            "running",
+                            "dispatching",
+                            "starting",
+                            "verifying",
+                            "integrating",
+                        }:
+                            run["agentStates"][attempt["ownerId"]].update(
+                                state="interrupted", turnKey=_id()
+                            )
+                            previous_state = attempt["state"]
                             attempt.update(state="uncertain", interruptedAt=_now())
+                            attempt["restartRecovery"] = {
+                                "previousState": previous_state,
+                                "diagnostic": "Application restarted; provider ownership was lost. "
+                                "Prior execution and external effects are unconfirmed.",
+                            }
                             changed = True
+                    for attempt in run.get("attempts", []):
+                        if attempt["state"] == "uncertain":
+                            self._request_approval(
+                                swarm,
+                                attempt["ownerId"],
+                                {
+                                    "requestId": (
+                                        f"recovery:{attempt['id']}:"
+                                        f"{attempt.get('interruptedAt', 'legacy')}"
+                                    ),
+                                    "description": "Interrupted execution; effects unknown.",
+                                    "recommendedAction": (
+                                        "Confirm the prior process stopped, inspect the workspace, "
+                                        "then keep its output for verification."
+                                    ),
+                                    "attemptId": attempt["id"],
+                                    "kind": "recovery",
+                                },
+                            )
                     if changed:
+                        run["recoveryGeneration"] = run.get("recoveryGeneration", 0) + 1
                         run["pauseReason"] = (
                             "Application restarted. Review interrupted deliveries before resuming."
                         )
                         self._event(run, "recovered", "system", {})
+                    if (
+                        was_running
+                        and run.get("humanInbox")
+                        and any(
+                            d["state"] == "queued" and self._dispatchable(run, m, d["agentId"])
+                            for m in run["messages"]
+                            for d in m["deliveries"]
+                        )
+                    ):
+                        run["state"] = "running"
+                        run.pop("pauseReason", None)
                 if run and run.get("idleDiagnosis", {}).get("state") == "working":
                     run["idleDiagnosis"]["state"] = "pending"
                 self._save(swarm)
@@ -167,7 +227,13 @@ class SwarmManager:
         return str(path)
 
     @contextmanager
-    def rem_session(self, project_root: Path, *, read_only: bool = False) -> Iterator[str]:
+    def rem_session(
+        self,
+        project_root: Path,
+        *,
+        read_only: bool = False,
+        workspace_grants: dict[str, str] | None = None,
+    ) -> Iterator[str]:
         """Grant Rem access to one validated project for the lifetime of a chat turn."""
         from gofer.ui.rem_swarms import SWARM_TOOL, RemSwarmAccess
 
@@ -177,7 +243,12 @@ class SwarmManager:
             if self._http is None:
                 self._http = SwarmToolServer()
             http = self._http
-            access = RemSwarmAccess(self, self._project(project_root), read_only=read_only)
+            access = RemSwarmAccess(
+                self,
+                self._project(project_root),
+                read_only=read_only,
+                workspace_grants=workspace_grants,
+            )
             url = http.register(access.call, [SWARM_TOOL])
         try:
             yield url
@@ -241,7 +312,10 @@ class SwarmManager:
         if (
             run.get("state") in {"completed", "completing", "stopped", "failed"}
             and not run.get("cleanup")
-            and (run.get("workspace", {}).get("mode") == "git" or run.get("idleDiagnosis"))
+            and (
+                any(w.get("mode") == "git" for w in self._workspaces(run))
+                or run.get("idleDiagnosis")
+            )
         ):
             self._terminal[swarm["id"]] = swarm["projectRoot"]
         self._wake.set()
@@ -394,6 +468,13 @@ class SwarmManager:
                 agent[key] = str(agent.get(key, "")).strip()
                 if not agent[key]:
                     raise SwarmError(f"Agent {key} is required")
+            workspace_path = agent.get("workspacePath")
+            if workspace_path is not None and workspace_path != "":
+                if not isinstance(workspace_path, str) or not Path(workspace_path).is_absolute():
+                    raise SwarmError("Agent workspace must be an absolute project folder")
+                agent["workspacePath"] = str(Path(workspace_path).resolve())
+            else:
+                agent.pop("workspacePath", None)
             agent["provider"] = agent.get("provider", "codex")
             if not isinstance(agent["provider"], str) or agent["provider"] not in {
                 "codex",
@@ -467,6 +548,9 @@ class SwarmManager:
                 "run": None,
                 "history": [],
             }
+            self._validate_agent_projects(
+                swarm["projectRoot"], swarm["agents"], payload.get("workspaceGrants")
+            )
             self._save(swarm)
             return self._view(swarm)
 
@@ -478,6 +562,9 @@ class SwarmManager:
             if swarm.get("run") and swarm["run"]["state"] in {"running", "stopping"}:
                 raise SwarmError("Pause the swarm before editing its configuration")
             configuration = self._configuration({**swarm, **payload})
+            self._validate_agent_projects(
+                swarm["projectRoot"], configuration["agents"], payload.get("workspaceGrants")
+            )
             swarm.update(configuration)
             self._save(swarm)
             return self._view(swarm)
@@ -491,7 +578,89 @@ class SwarmManager:
             raise SwarmError("Start a run first")
         return dict(swarm["run"])
 
-    def start(self, project_root: str | Path, swarm_id: str, task: str) -> dict[str, Any]:
+    def _agent_project(self, run: dict[str, Any], agent_id: str) -> str:
+        agent: dict[str, Any] = next(
+            (a for a in run["configuration"]["agents"] if a["id"] == agent_id), {}
+        )
+        return str(
+            agent.get("workspacePath")
+            or run["workspace"].get("projectRoot")
+            or run["workspace"]["path"]
+        )
+
+    def _workspace_for(
+        self, run: dict[str, Any], attempt: dict[str, Any] | None = None, project: str | None = None
+    ) -> dict[str, Any]:
+        project = project or (attempt or {}).get("projectRoot")
+        if project is None and attempt:
+            project = self._agent_project(run, attempt["ownerId"])
+        return dict(run.get("projectWorkspaces", {}).get(project, run["workspace"]))
+
+    def _workspaces(self, run: dict[str, Any]) -> builtins.list[dict[str, Any]]:
+        return [run.get("workspace", {}), *run.get("projectWorkspaces", {}).values()]
+
+    def _project_checks(
+        self,
+        run: dict[str, Any],
+        workspace: dict[str, Any],
+        milestone: dict[str, Any] | None = None,
+    ) -> builtins.list[builtins.list[str]]:
+        checks = (
+            list(run["configuration"].get("integrationChecks", []))
+            if workspace["path"] == run["workspace"]["path"]
+            else []
+        )
+        for item in self._milestones(run):
+            attempt = self._attempt(run, item.get("attemptId"))
+            if self._workspace_for(run, attempt)["path"] != workspace["path"]:
+                continue
+            if item["status"] == "accepted" or item is milestone:
+                for check in item.get("checks", []):
+                    if check not in checks:
+                        checks.append(check)
+        return checks
+
+    def _validate_agent_projects(
+        self, root: str, agents: builtins.list[dict[str, Any]], grants: dict[str, str] | None = None
+    ) -> None:
+        for project in sorted(
+            {
+                str(a["workspacePath"])
+                for a in agents
+                if a.get("workspacePath") and a["workspacePath"] != root
+            }
+        ):
+            path = Path(project)
+            if not path.is_dir():
+                raise SwarmError(f"Agent workspace folder is unavailable: {project}")
+            if self.authorize_workspace:
+                self.authorize_workspace(path, (grants or {}).get(project))
+
+    def _prepare_project_workspace(
+        self, swarm: dict[str, Any], run_id: str, project: str
+    ) -> dict[str, Any]:
+        suffix = (
+            ""
+            if project == swarm["projectRoot"]
+            else ("-" + hashlib.sha256(project.encode()).hexdigest()[:16])
+        )
+        return {
+            **workspaces.prepare_run(
+                Path(project),
+                self.data_dir / "workspaces" / (run_id + suffix),
+                name=f"{swarm['name']}-{Path(project).name}",
+            ),
+            "projectRoot": project,
+        }
+
+    def start(
+        self,
+        project_root: str | Path,
+        swarm_id: str,
+        task: str,
+        *,
+        workspace_grants: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(task, str) or not task.strip():
             raise SwarmError("A nonempty run task is required")
         with self._lock:
@@ -510,13 +679,13 @@ class SwarmManager:
                 if swarm["run"]["state"] in {"running", "paused", "stopping", "completing"}:
                     raise SwarmError("Stop the current run before starting another")
                 swarm.setdefault("history", []).append(swarm["run"])
+            self._validate_agent_projects(swarm["projectRoot"], swarm["agents"], workspace_grants)
             run_id = _id()
-            workspace = workspaces.prepare_run(
-                Path(swarm["projectRoot"]), self.data_dir / "workspaces" / run_id
-            )
+            workspace = self._prepare_project_workspace(swarm, run_id, swarm["projectRoot"])
             swarm["run"] = {
                 "id": run_id,
                 "workspace": workspace,
+                "projectWorkspaces": {},
                 "attempts": [],
                 "stalledTurns": 0,
                 "usage": {"input_tokens": None, "output_tokens": None},
@@ -534,12 +703,41 @@ class SwarmManager:
                 "nextCheckAt": time.time() + swarm["wakeIntervalSeconds"],
                 "agentStates": {a["id"]: {"state": "idle", "error": None} for a in swarm["agents"]},
             }
+            # Persist each destination before any provider can run. If preparation
+            # fails, retain the successful worktrees and their review paths.
+            run = swarm["run"]
+            run["state"] = "paused"
+            self._save(swarm)
+            try:
+                for project in sorted(
+                    {
+                        a["workspacePath"]
+                        for a in swarm["agents"]
+                        if a.get("workspacePath") and a["workspacePath"] != swarm["projectRoot"]
+                    }
+                ):
+                    run["projectWorkspaces"][project] = self._prepare_project_workspace(
+                        swarm, run_id, project
+                    )
+                    self._save(swarm)
+            except Exception as exc:
+                run.update(state="failed", failureReason=f"Workspace preparation failed: {exc}")
+                self._save(swarm)
+                raise SwarmError(run["failureReason"]) from exc
+            run["state"] = "running"
             self._post(swarm, "user", {"body": task, "recipientId": self._orchestrator(swarm)})
             self._event(swarm["run"], "started", "user", {"task": task})
             self._save(swarm)
             return self._view(swarm)
 
-    def control(self, project_root: str | Path, swarm_id: str, action: str) -> dict[str, Any]:
+    def control(
+        self,
+        project_root: str | Path,
+        swarm_id: str,
+        action: str,
+        *,
+        workspace_grants: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             swarm = self._get(project_root, swarm_id)
             run = self._run(swarm)
@@ -555,6 +753,9 @@ class SwarmManager:
                     raise SwarmError(
                         "This run has been cleaned up. Start a new run from its parent branch."
                     )
+                self._validate_agent_projects(
+                    swarm["projectRoot"], run["configuration"]["agents"], workspace_grants
+                )
                 run["state"] = "running"
                 self._dispatch_assignments(swarm)
                 run.pop("pauseReason", None)
@@ -575,6 +776,100 @@ class SwarmManager:
             self._event(run, action, "user", {})
             self._save(swarm)
             return self._view(swarm)
+
+    def _request_approval(self, swarm: dict[str, Any], actor: str, payload: dict[str, Any]) -> None:
+        run = swarm["run"]
+        description = str(payload.get("description", "")).strip()
+        recommendation = str(payload.get("recommendedAction", "")).strip()
+        if not description or not recommendation:
+            raise SwarmError("Approval needs a description and recommendedAction")
+        request_id = payload.get("requestId")
+        inbox = run.setdefault("humanInbox", [])
+        if request_id and any(
+            item.get("requestId") == request_id and item["agentId"] == actor for item in inbox
+        ):
+            return
+        attempt_id = payload.get("attemptId") or run["agentStates"].get(actor, {}).get("attemptId")
+        attempt = self._attempt(run, attempt_id)
+        if attempt_id and (attempt is None or attempt["ownerId"] != actor):
+            raise SwarmError("Approval must reference the requesting agent's attempt")
+        inbox.append(
+            {
+                "id": _id(),
+                "requestId": request_id,
+                "agentId": actor,
+                "attemptId": attempt_id,
+                "milestoneId": (attempt or {}).get("milestoneId"),
+                "workspace": copy.deepcopy((attempt or {}).get("workspace")),
+                "kind": payload.get("kind", "approval"),
+                "state": "pending",
+                "description": description,
+                "recommendedAction": recommendation,
+                "createdAt": _now(),
+            }
+        )
+        self._event(run, "approval_requested", actor, {"notificationId": inbox[-1]["id"]})
+
+    def _respond_approval(self, swarm: dict[str, Any], payload: dict[str, Any]) -> None:
+        run = swarm["run"]
+        item = next(
+            (i for i in run.get("humanInbox", []) if i["id"] == payload.get("notificationId")), None
+        )
+        if item is None:
+            raise SwarmError("Unknown human inbox notification")
+        if item["state"] != "pending":
+            return  # A repeated response must not schedule a second turn.
+        decision = payload.get("decision")
+        instruction = str(payload.get("instruction", "")).strip()
+        if decision not in {"proceed", "redirect"} or (decision == "redirect" and not instruction):
+            raise SwarmError("Use proceed or redirect with additional instruction")
+        if any(
+            a["swarmId"] == swarm["id"] and a.get("agentId") == item["agentId"]
+            for a in self._active.values()
+        ):
+            raise SwarmError("Wait for the requesting agent to finish before responding")
+        resolution = payload.get("resolution", "review")
+        if item["kind"] == "recovery":
+            self._resolve_attempt(
+                swarm,
+                {
+                    "attemptId": item["attemptId"],
+                    "resolution": resolution,
+                    "reason": instruction or item["recommendedAction"],
+                },
+            )
+        elif item.get("attemptId"):
+            attempt = self._attempt(run, item["attemptId"])
+            if attempt and attempt["state"] in {"succeeded", "pending"}:
+                attempt["state"] = "pending"
+                run["agentStates"][item["agentId"]].update(retryAttemptId=attempt["id"], retryAt=0)
+        next_steps = instruction or item["recommendedAction"]
+        if item["kind"] == "recovery":
+            action = {
+                "review": "Keep output for verification",
+                "retry": "Retry this attempt in its existing workspace",
+                "dismiss": "Dismiss this attempt",
+            }[resolution]
+            next_steps = f"{action}. {next_steps}"
+        item.update(
+            state="addressed",
+            nextSteps=next_steps,
+            decision=decision,
+            instruction=instruction,
+            resolution=resolution,
+            addressedAt=_now(),
+        )
+        self._post(
+            swarm,
+            "user",
+            {
+                "body": f"Human response: {next_steps}",
+                "recipientId": item["agentId"],
+                "requestId": f"approval:{item['id']}",
+                "actionable": item["kind"] != "recovery",
+            },
+        )
+        self._event(run, "approval_addressed", "user", {"notificationId": item["id"]})
 
     def _post(self, swarm: dict[str, Any], actor: str, payload: dict[str, Any]) -> None:
         run = swarm["run"]
@@ -682,6 +977,22 @@ class SwarmManager:
             attempt = self._attempt(
                 run, message.get("attemptId") or delivery.get("executionAttemptId")
             )
+            if attempt and any(
+                i.get("attemptId") == attempt["id"]
+                and i["kind"] == "recovery"
+                and i["state"] == "pending"
+                for i in run.get("humanInbox", [])
+            ):
+                self._resolve_attempt(
+                    swarm,
+                    {
+                        "attemptId": attempt["id"],
+                        "resolution": "retry" if action == "retry" else "dismiss",
+                        "reason": "User reviewed the interrupted delivery and requested " + action,
+                    },
+                )
+                self._save(swarm)
+                return self._view(swarm)
             if attempt:
                 milestone = (
                     self._milestone(run, attempt["milestoneId"])
@@ -940,7 +1251,9 @@ class SwarmManager:
                 and attempt["id"] not in active | self._cleaning_attempts
             ):
                 self._cleaning_attempts.add(attempt["id"])
-                cleanup.append((copy.deepcopy(run.get("workspace", {})), copy.deepcopy(attempt)))
+                cleanup.append(
+                    (copy.deepcopy(self._workspace_for(run, attempt)), copy.deepcopy(attempt))
+                )
         return cleanup
 
     def _cleanup_accepted_attempts(
@@ -1014,6 +1327,10 @@ class SwarmManager:
         )
 
     def _dispatchable(self, run: dict[str, Any], message: dict[str, Any], actor: str) -> bool:
+        if any(
+            i["agentId"] == actor and i["state"] == "pending" for i in run.get("humanInbox", [])
+        ):
+            return False
         if run["agentStates"].get(actor, {}).get("retryAt", 0) > time.time():
             return False
         if (
@@ -1089,7 +1406,7 @@ class SwarmManager:
 
     def _require_verified(self, run: dict[str, Any], milestone: dict[str, Any]) -> None:
         attempt = self._attempt(run, milestone["attemptId"])
-        is_git = run.get("workspace", {}).get("mode") == "git"
+        is_git = self._workspace_for(run, attempt).get("mode") == "git"
         # Accepted Git work survives disposal of its temporary checkout. Only
         # preserve an existing acceptance with identical verified scope; new
         # acceptances still require a current, clean attempt workspace.
@@ -1125,7 +1442,7 @@ class SwarmManager:
                 raise SwarmError("Integrate and check the submitted revision before acceptance")
             try:
                 workspaces.git(
-                    Path(run["workspace"]["path"]),
+                    Path(self._workspace_for(run, attempt)["path"]),
                     "merge-base",
                     "--is-ancestor",
                     attempt["result"]["revision"],
@@ -1185,14 +1502,25 @@ class SwarmManager:
             swarm = self._get(project_root, swarm_id)
             if swarm["run"]["state"] not in {"running", "paused"}:
                 raise SwarmError("Run must be running or paused")
+            if payload.get("action") in {"verify", "integrate"}:
+                self._validate_agent_projects(
+                    swarm["projectRoot"],
+                    swarm["run"]["configuration"]["agents"],
+                    payload.get("workspaceGrants"),
+                )
             token = secrets.token_urlsafe(32)
             self._tokens[token] = (str(swarm["projectRoot"]), swarm_id, "user", swarm["run"]["id"])
         try:
             if payload.get("action") in {"verify", "integrate"}:
                 return self._verify_tool(token, payload)
+            if payload.get("action") == "complete":
+                self.tool(token, payload)
+                return self.get(project_root, swarm_id, include_history=False)
             with self._lock:
                 swarm = self._get(project_root, swarm_id)
-                if payload.get("action") == "resolve_attempt":
+                if payload.get("action") == "human_response":
+                    self._respond_approval(swarm, payload)
+                elif payload.get("action") == "resolve_attempt":
                     self._resolve_attempt(swarm, payload)
                 elif payload.get("action") == "repair":
                     self._repair(swarm, "user", payload)
@@ -1211,13 +1539,14 @@ class SwarmManager:
         # lock so other teams, stop requests, and status reads remain responsive.
         with self._lock:
             identity = self._tokens.get(token)
-            if not identity:
+            if not identity or not self._capability_current(token):
                 raise SwarmError("Expired or invalid agent capability")
             root, sid, actor, rid = identity
             swarm = self._get(root, sid)
             run = swarm["run"]
             if run["id"] != rid or run["state"] not in {"running", "paused"}:
                 raise SwarmError("This run no longer accepts agent updates")
+            recovery_generation = run.get("recoveryGeneration", 0)
             integration = payload["action"] == "integrate"
             if integration and actor not in {"user", self._orchestrator(swarm)}:
                 raise SwarmError("Only the orchestrator or user may integrate")
@@ -1252,21 +1581,29 @@ class SwarmManager:
                 raise SwarmError("Another integration is in progress")
             if run.get("integrationBusy"):
                 raise SwarmError("Another integration is in progress")
-            workspace = copy.deepcopy(run.get("workspace", {"mode": "serial", "path": root}))
+            selected_project = payload.get("workspaceRoot")
+            if selected_project and selected_project not in {
+                w.get("projectRoot") for w in self._workspaces(run)
+            }:
+                raise SwarmError("Unknown swarm workspace")
+            workspace = copy.deepcopy(
+                self._workspace_for(run, attempt, selected_project if not attempt else None)
+            )
             if workspace["mode"] == "serial" and (
                 any(
-                    a.get("projectRoot") == root and a.get("agentId") != actor
+                    a.get("workspaceRoot", a.get("projectRoot"))
+                    == workspace.get("projectRoot", root)
+                    and (a.get("agentId") != actor or a.get("swarmId") != sid)
                     for a in self._active.values()
                 )
-                or any(a.get("projectRoot") == root for a in self._checks.values())
+                or any(
+                    a.get("workspaceRoot", a.get("projectRoot"))
+                    == workspace.get("projectRoot", root)
+                    for a in self._checks.values()
+                )
             ):
                 raise SwarmError("Wait for the project's current writer or checks to finish")
-            checks = list(run["configuration"].get("integrationChecks", []))
-            for item in self._milestones(run):
-                if item["status"] == "accepted" or item is milestone:
-                    for check in item.get("checks", []):
-                        if check not in checks:
-                            checks.append(check)
+            checks = self._project_checks(run, workspace, milestone)
             if integration:
                 if workspace["mode"] != "git":
                     raise SwarmError("Non-Git results are accepted after artifact verification")
@@ -1282,7 +1619,12 @@ class SwarmManager:
             progress_before_checks = self._progress_signature(run)
             check_id = _id()
             check_cancel = threading.Event()
-            self._checks[check_id] = {"swarmId": sid, "projectRoot": root, "cancel": check_cancel}
+            self._checks[check_id] = {
+                "swarmId": sid,
+                "projectRoot": root,
+                "workspaceRoot": workspace.get("projectRoot", root),
+                "cancel": check_cancel,
+            }
             snapshot = copy.deepcopy(attempt)
             milestone_snapshot = copy.deepcopy(milestone)
             self._event(
@@ -1335,7 +1677,7 @@ class SwarmManager:
             self._checks.pop(check_id, None)
             swarm = self._get(root, sid)
             run = swarm["run"]
-            if run["id"] != rid:
+            if run["id"] != rid or run.get("recoveryGeneration", 0) != recovery_generation:
                 raise SwarmError("Run changed during verification")
             if check_cancel.is_set() or run["state"] not in {"running", "paused"}:
                 result.update(passed=False, error="Checks interrupted; reconcile this attempt")
@@ -1389,9 +1731,14 @@ class SwarmManager:
                     else "failed"
                 )
             if integration:
-                run["integration"] = result
+                if workspace["path"] == run["workspace"]["path"]:
+                    run["integration"] = result
+                    target_workspace = run["workspace"]
+                else:
+                    target_workspace = run["projectWorkspaces"][workspace["projectRoot"]]
+                    target_workspace["integration"] = result
                 if result["passed"]:
-                    run["workspace"]["revision"] = result["revision"]
+                    target_workspace["revision"] = result["revision"]
             if result["passed"] and self._progress_signature(run) != progress_before_checks:
                 run["stalledTurns"] = 0
             elif not result["passed"]:
@@ -1459,6 +1806,7 @@ class SwarmManager:
             "revision": run["revision"],
             "state": run["state"],
             "workspace": run.get("workspace"),
+            "projectWorkspaces": run.get("projectWorkspaces", {}),
             "assignments": [m for m in self._milestones(run) if m.get("ownerId") == actor],
             "usage": run.get("usage"),
             "capacityScope": run.get("capacityScope"),
@@ -1480,23 +1828,63 @@ class SwarmManager:
         ):
             raise SwarmError("Wait for the active operation to stop before reconciliation")
         reason = str(payload.get("reason", "")).strip()
-        if payload.get("resolution") not in {"review", "dismiss"} or not reason:
+        if payload.get("resolution") not in {"review", "dismiss", "retry"} or not reason:
             raise SwarmError(
-                "Use resolution=review or dismiss and a reason after checking prior effects"
+                "Use resolution=review, dismiss or retry and a reason after checking prior effects"
             )
+        if actor != "user" and any(
+            i.get("attemptId") == attempt["id"]
+            and i["kind"] == "recovery"
+            and i["state"] == "pending"
+            for i in run.get("humanInbox", [])
+        ):
+            raise SwarmError("Restart recovery requires a human inbox decision")
+        retry = payload["resolution"] == "retry"
+        if retry and attempt.get("milestoneId"):
+            milestone = self._milestone(run, attempt["milestoneId"])
+            if milestone["attemptId"] != attempt["id"] or milestone["status"] in {
+                "accepted",
+                "cancelled",
+            }:
+                raise SwarmError("Cannot retry a stale or finished assignment")
         attempt.update(
-            state="succeeded" if payload["resolution"] == "review" else "interrupted",
+            state="pending"
+            if retry
+            else "succeeded"
+            if payload["resolution"] == "review"
+            else "interrupted",
             resolution=payload["resolution"],
             resolutionReason=reason,
             resolvedAt=_now(),
         )
         for message in run["messages"]:
             for delivery in message["deliveries"]:
-                if delivery["state"] == "uncertain" and (
+                if delivery["state"] in {"uncertain", "queued"} and (
                     message.get("attemptId") == attempt["id"]
                     or delivery.get("executionAttemptId") == attempt["id"]
+                    or (
+                        message["id"] in attempt.get("messageIds", [])
+                        and delivery["agentId"] == attempt["ownerId"]
+                    )
                 ):
                     delivery.update(state="dismissed", reason=f"Attempt reconciled by {actor}")
+        for item in run.get("humanInbox", []):
+            if item.get("attemptId") == attempt["id"] and item["kind"] == "recovery":
+                item.update(state="addressed", resolution=payload["resolution"], addressedAt=_now())
+        state = run["agentStates"][attempt["ownerId"]]
+        if retry:
+            state.update(state="idle", retryAt=0, retryAttemptId=attempt["id"])
+            attempt["recovery"] = {
+                "instruction": reason + " Inspect preserved files and recorded "
+                "results before repeating any prior side effects."
+            }
+            self._post(
+                swarm,
+                "user",
+                {"body": attempt["recovery"]["instruction"], "recipientId": attempt["ownerId"]},
+            )
+        elif state.get("state") == "interrupted":
+            state.update(state="idle", error=None)
         self._event(
             run,
             "attempt_resolved",
@@ -1504,10 +1892,33 @@ class SwarmManager:
             {"attemptId": attempt["id"], "reason": reason, "resolution": payload["resolution"]},
         )
 
+    def _capability_current(self, token: str) -> bool:
+        identity = self._tokens.get(token)
+        if not identity:
+            return False
+        root, sid, actor, rid = identity
+        row = self._db.execute(
+            "SELECT body FROM swarms WHERE id=? AND project=?", (sid, root)
+        ).fetchone()
+        if not row:
+            return False
+        run = json.loads(row[0]).get("run") or {}
+        if run.get("id") != rid:
+            return False
+        key = run.get("agentStates", {}).get(actor, {}).get("turnKey")
+        return token not in self._turn_tokens or key == hashlib.sha256(token.encode()).hexdigest()
+
     def _record_activity(
-        self, swarm_id: str, agent_id: str, event: dict[str, Any], secret: str
+        self, swarm_id: str, agent_id: str, event: dict[str, Any], secret: str, *, token: str
     ) -> None:
         with self._lock:
+            identity = self._tokens.get(token)
+            if (
+                not identity
+                or identity[1:3] != (swarm_id, agent_id)
+                or not self._capability_current(token)
+            ):
+                return
             safe = json.loads(json.dumps(event).replace(secret, "[swarm tool]"))
             with self._db:
                 metadata = self._store.activity(swarm_id, agent_id, safe, _now())
@@ -1578,7 +1989,10 @@ class SwarmManager:
         dependencies = {d for m in assigned for d in m.get("dependsOn", [])}
         context = {
             "roster": [
-                {k: a[k] for k in ("id", "name", "role", "isOrchestrator")}
+                {
+                    **{k: a[k] for k in ("id", "name", "role", "isOrchestrator")},
+                    "workspacePath": self._agent_project(run, a["id"]),
+                }
                 for a in run["configuration"]["agents"]
             ],
             "assignments": assigned,
@@ -1590,6 +2004,7 @@ class SwarmManager:
             "revision": run["revision"],
             "inbox": inbox,
             "workspace": (attempt or {}).get("workspace"),
+            "integrationWorkspaces": self._workspaces(run),
             "plan": run.get("plan", run["task"]),
             "recovery": (attempt or {}).get("recovery"),
             "recentBoard": [],
@@ -1669,7 +2084,7 @@ class SwarmManager:
             return self._verify_tool(token, payload)
         with self._lock:
             identity = self._tokens.get(token)
-            if identity is None:
+            if identity is None or not self._capability_current(token):
                 raise SwarmError("Expired or invalid agent capability")
             root, swarm_id, actor, run_id = identity
             if payload.get("action") == "read":
@@ -1754,6 +2169,8 @@ class SwarmManager:
                     ],
                 }
                 self._event(run, "digest_updated", actor, run["digest"])
+            elif action == "request_approval":
+                self._request_approval(swarm, actor, {**payload, "kind": "approval"})
             elif action == "message":
                 self._post(swarm, actor, payload)
             elif action == "objectives":
@@ -1806,8 +2223,10 @@ class SwarmManager:
                     },
                 )
             elif action == "complete":
-                if actor != self._orchestrator(swarm):
-                    raise SwarmError("Only the orchestrator may finish a run")
+                if any(i["state"] == "pending" for i in run.get("humanInbox", [])):
+                    raise SwarmError("Resolve the human inbox before completing")
+                if actor not in {"user", self._orchestrator(swarm)}:
+                    raise SwarmError("Only the orchestrator or user may finish a run")
                 if any(
                     a["swarmId"] == swarm_id and a["agentId"] != actor
                     for a in self._active.values()
@@ -1840,28 +2259,32 @@ class SwarmManager:
                     for a in run.get("attempts", [])
                 ):
                     raise SwarmError("Reconcile outstanding attempts before completing")
-                workspace = run.get("workspace", {})
-                if workspace.get("mode") == "git":
-                    integration = run.get("integration", {})
-                    required_checks = list(run["configuration"].get("integrationChecks", []))
-                    for item in self._milestones(run):
-                        if item["status"] == "accepted":
-                            for check in item.get("checks", []):
-                                if check not in required_checks:
-                                    required_checks.append(check)
+                for workspace in self._workspaces(run):
+                    if workspace.get("mode") != "git":
+                        continue
+                    integration = (
+                        run.get("integration", {})
+                        if workspace["path"] == run["workspace"]["path"]
+                        else workspace.get("integration", {})
+                    )
+                    required_checks = self._project_checks(run, workspace)
                     if (
                         [check["command"] for check in integration.get("checks", [])]
                         != required_checks
                         or not integration.get("passed")
-                    ) or (
-                        workspaces.git(Path(workspace["path"]), "rev-parse", "HEAD")
+                        or workspaces.git(Path(workspace["path"]), "rev-parse", "HEAD")
                         != integration.get("revision")
                         or workspaces.git(Path(workspace["path"]), "status", "--porcelain")
                     ):
                         raise SwarmError(
-                            "Verify the combined integration revision before completing"
+                            "Verify the combined integration revision before completing: "
+                            + workspace["path"]
                         )
-                run["state"] = "completing" if workspace.get("mode") == "git" else "completed"
+                run["state"] = (
+                    "completing"
+                    if any(w.get("mode") == "git" for w in self._workspaces(run))
+                    else "completed"
+                )
                 self._event(
                     run,
                     "completion_requested" if run["state"] == "completing" else "completed",
@@ -1922,11 +2345,19 @@ and the submitted revision. Commit changes in your attempt worktree before verif
 Code changes require checks. Research results require existing artifact files.
 integrate (orchestrator only): milestoneId and attemptId. Merge a verified submission in
 an isolated candidate and run combined checks. Inspect result.conflicts on failure.
+Each agent works in its configured repository. Coordinate across repositories through the
+shared board and milestones. Integrate attempts only into their own repository. For final
+checks, call integrate with workspaceRoot for each integrationWorkspaces projectRoot.
+Swarm integrationChecks apply to the default repository; milestone checks apply to the
+assigned agent repository.
 Repair conflicts in a new assignment based on current integration, never overwrite workers.
 Call integrate without a milestone to verify the final combined revision.
 repair (orchestrator only): milestoneId, attemptId, reason explaining the changed approach.
 Repair attempts have no application-imposed count limit.
 Old attempts retain their files, results and audit trail.
+request_approval: description, recommendedAction, optional requestId for deduplication.
+Use for every decision that requires human approval. End your turn after requesting it.
+The human inbox returns the response to you. Other agents may continue independent work.
 resolve_attempt (orchestrator only): attemptId, resolution=review or dismiss, reason.
 Inspect retained effects first; never replay uncertain work blindly.
 replan (orchestrator only): reason containing a changed plan after a stall.
@@ -1956,7 +2387,13 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             for item in [*self._active.values(), *self._checks.values()]
         ):
             return False
-        if any(s.get("state") == "retry_wait" for s in run["agentStates"].values()):
+        if any(
+            s.get("state") == "retry_wait"
+            and not any(
+                i["state"] == "pending" and i["agentId"] == actor for i in run.get("humanInbox", [])
+            )
+            for actor, s in run["agentStates"].items()
+        ):
             return False
         if any(
             d["state"] == "queued" and self._dispatchable(run, m, d["agentId"])
@@ -1964,6 +2401,12 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             for d in m["deliveries"]
         ):
             return False
+        if any(i["state"] == "pending" for i in run.get("humanInbox", [])):
+            run.update(
+                state="paused", pauseReason="Human review is required. Open the human inbox."
+            )
+            self._save(swarm)
+            return True
         self._post(
             swarm,
             "system",
@@ -1997,6 +2440,11 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             "blockers and a concrete recovery step in at most five sentences. "
             "Only diagnose. Do not edit files, run commands, call tools, or resume work."
         )
+        project = self._agent_project(run, agent["id"])
+        workspace = self._workspace_for(run, project=project)
+        working_dir = (
+            workspace["path"] if workspace.get("projectRoot", project) == project else project
+        )
         transcript = [
             {
                 "role": "user",
@@ -2025,10 +2473,10 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             messages=transcript,
             workflow={
                 "id": f"swarm-diagnosis-{run['id']}",
-                "projectRoot": swarm["projectRoot"],
+                "projectRoot": working_dir,
                 "remResources": {"shell": False, "web": False, "mcpServers": []},
             },
-            working_dir=Path(run["workspace"]["path"]),
+            working_dir=Path(working_dir),
             data_dir=self.data_dir,
             resource_limits=self.resource_limits,
             cancel_event=cancel,
@@ -2061,6 +2509,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                         "agentId": actor,
                         "cancel": cancel,
                         "projectRoot": root,
+                        "workspaceRoot": self._agent_project(swarm["run"], actor),
                         "runId": run_id,
                     }
                     swarm["run"]["idleDiagnosis"]["state"] = "working"
@@ -2106,11 +2555,22 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     self._active.pop(f"{swarm_id}:{actor}", None)
                     self._save(swarm)
             try:
-                result = await asyncio.to_thread(
-                    workspaces.cleanup_run,
-                    copy.deepcopy(swarm["run"]["workspace"]),
-                    copy.deepcopy(swarm["run"].get("attempts", [])),
-                )
+                result: dict[str, Any] = {"passed": True, "removed": [], "archives": []}
+                for workspace in self._workspaces(swarm["run"]):
+                    attempts = [
+                        a
+                        for a in swarm["run"].get("attempts", [])
+                        if self._workspace_for(swarm["run"], a)["path"] == workspace["path"]
+                    ]
+                    outcome = await asyncio.to_thread(
+                        workspaces.cleanup_run, copy.deepcopy(workspace), copy.deepcopy(attempts)
+                    )
+                    result["removed"].extend(outcome.get("removed", []))
+                    result["archives"].extend(outcome.get("archives", []))
+                    if workspace["path"] == swarm["run"]["workspace"]["path"] and outcome.get(
+                        "branch"
+                    ):
+                        result["branch"] = outcome["branch"]
             except Exception as exc:
                 result = {"passed": False, "error": str(exc)}
             with self._lock:
@@ -2139,6 +2599,17 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 self._terminal.pop(swarm_id, None)
                 self._finalizing.discard(swarm_id)
 
+    def _project_busy(self, run: dict[str, Any], agent_id: str) -> bool:
+        project = self._agent_project(run, agent_id)
+        workspace = self._workspace_for(run, project=project)
+        # Until an external repository is prepared, conservatively serialize it.
+        if workspace.get("projectRoot") != project or workspace.get("mode") == "serial":
+            return any(
+                a.get("workspaceRoot", a.get("projectRoot")) == project
+                for a in [*self._active.values(), *self._checks.values()]
+            )
+        return False
+
     async def _loop(self) -> None:
         tasks: set[asyncio.Task[None]] = set()
         while not self._closed.is_set():
@@ -2154,10 +2625,6 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     busy = {
                         a["agentId"] for a in self._active.values() if a["swarmId"] == swarm["id"]
                     }
-                    serial_busy = run.get("workspace", {}).get("mode") == "serial" and any(
-                        a.get("projectRoot") == root
-                        for a in [*self._active.values(), *self._checks.values()]
-                    )
                     if self._recover_idle(swarm):
                         continue
                     if time.time() >= run["nextCheckAt"]:
@@ -2199,6 +2666,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             if d["state"] == "queued"
                             and d["agentId"] not in busy
                             and self._dispatchable(run, m, d["agentId"])
+                            and not self._project_busy(run, d["agentId"])
                         ),
                         None,
                     )
@@ -2206,12 +2674,12 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                         target
                         and len(self._active) < self.max_concurrency
                         and len(busy) < run["configuration"]["maxConcurrency"]
-                        and not serial_busy
                     ):
                         cancel = threading.Event()
                         self._active[f"{swarm['id']}:{target}"] = {
                             "swarmId": swarm["id"],
                             "projectRoot": root,
+                            "workspaceRoot": self._agent_project(run, target),
                             "runId": run["id"],
                             "agentId": target,
                             "cancel": cancel,
@@ -2297,6 +2765,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     continue
                 message, delivery = selected
                 run_id = swarm["run"]["id"]
+                recovery_generation = swarm["run"].get("recoveryGeneration", 0)
                 delivery["state"] = "steering"
                 delivery["steeringAttempted"] = True
                 self._save(swarm)
@@ -2309,7 +2778,10 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 state = "uncertain"
             with self._lock:
                 swarm = self._get(swarm["projectRoot"], swarm_id)
-                if swarm["run"]["id"] != run_id:
+                if (
+                    swarm["run"]["id"] != run_id
+                    or swarm["run"].get("recoveryGeneration", 0) != recovery_generation
+                ):
                     continue
                 if (
                     state == "accepted"
@@ -2387,6 +2859,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 launched = True
                 progress_before = self._progress_signature(run)
                 self._tokens[token] = (root, swarm_id, agent_id, run["id"])
+                self._turn_tokens.add(token)
                 inbox: list[dict[str, Any]] = []
                 for message in eligible:
                     if message.get("attemptId") and message["attemptId"] != turn_attempt_id:
@@ -2412,6 +2885,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 run["turnCount"] += 1
                 run["agentStates"][agent_id].update(
                     state="working",
+                    turnKey=hashlib.sha256(token.encode()).hexdigest(),
                     error=None,
                     attemptId=turn_attempt_id,
                     milestoneId=attempt.get("milestoneId"),
@@ -2425,8 +2899,18 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 )
                 self._save(swarm)
                 if "workspace" not in attempt:
+                    project = self._agent_project(run, agent_id)
+                    if project != run["workspace"].get("projectRoot", run["workspace"]["path"]):
+                        projects = run.setdefault("projectWorkspaces", {})
+                        if project not in projects:
+                            # Legacy runs may not have prepared every project yet.
+                            projects[project] = self._prepare_project_workspace(
+                                swarm, run["id"], project
+                            )
+                            self._save(swarm)
+                    attempt["projectRoot"] = project
                     attempt["workspace"] = workspaces.prepare_attempt(
-                        run.get("workspace", {"mode": "serial", "path": root}), turn_attempt_id
+                        self._workspace_for(run, attempt), turn_attempt_id
                     )
                 working_dir = Path(attempt["workspace"]["path"])
                 run["agentStates"][agent_id]["workspace"] = str(working_dir)
@@ -2459,6 +2943,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                                         "enum": [
                                             "git",
                                             "digest",
+                                            "request_approval",
                                             "read",
                                             "message",
                                             "objectives",
@@ -2472,6 +2957,9 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                                         ],
                                     },
                                     "agents": {"type": "array", "items": {"type": "object"}},
+                                    "description": {"type": "string"},
+                                    "recommendedAction": {"type": "string"},
+                                    "requestId": {"type": "string"},
                                     "body": {"type": "string"},
                                     "operation": {
                                         "type": "string",
@@ -2497,6 +2985,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                                     "reason": {"type": "string"},
                                     "milestoneId": {"type": "string"},
                                     "attemptId": {"type": "string"},
+                                    "workspaceRoot": {"type": "string"},
                                     "status": {"type": "string"},
                                     "evidence": {"type": "string"},
                                     "section": {"type": "string"},
@@ -2541,8 +3030,11 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 trusted_swarm_url=tool_url,
                 **kwargs,
             ):
+                with self._lock:
+                    if not self._capability_current(token):
+                        break
                 if provider_started and event["type"] == "thought":
-                    self._record_activity(swarm_id, agent_id, event, tool_url or token)
+                    self._record_activity(swarm_id, agent_id, event, tool_url or token, token=token)
                     continue
                 provider_started = True
                 with self._lock:
@@ -2598,10 +3090,16 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             if tool_url and self._http:
                 self._http.revoke(tool_url)
             with self._lock:
+                stale = launched and not self._capability_current(token)
                 self._tokens.pop(token, None)
+                self._turn_tokens.discard(token)
+                if stale:
+                    launched = False
                 if launched and not saw_final and not error:
                     error = "Provider ended without a final result"
-                if not launched:
+                if stale:
+                    self._active.pop(f"{swarm_id}:{agent_id}", None)
+                elif not launched:
                     self._active.pop(f"{swarm_id}:{agent_id}", None)
                     current = self._get(root, swarm_id)
                     if current["run"]["state"] == "stopping" and not any(
@@ -2694,12 +3192,16 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     self._due[swarm_id] = 0
                 self._wake.set()
                 cleanup = (
-                    (copy.deepcopy(run.get("workspace", {})), copy.deepcopy(attempt))
+                    (copy.deepcopy(self._workspace_for(run, attempt)), copy.deepcopy(attempt))
                     if launched
                     and attempt
                     and attempt.get("state") == "succeeded"
+                    and not any(
+                        i["state"] == "pending" and i.get("attemptId") == attempt["id"]
+                        for i in run.get("humanInbox", [])
+                    )
                     and not attempt.get("milestoneId")
-                    and run.get("workspace", {}).get("mode") == "git"
+                    and self._workspace_for(run, attempt).get("mode") == "git"
                     else None
                 )
                 if cleanup:

@@ -12,7 +12,7 @@ import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -987,6 +987,7 @@ async def run_workflow_chat(
     resource_limits: ResourceLimits | None = None,
     permission_mode: str | None = None,
     trusted_swarm_url: str | None = None,
+    trusted_rem_threads_url: str | None = None,
 ) -> dict[str, Any]:
     if provider in ADDITIONAL_PROVIDERS | ACP_PROVIDERS | {"antigravity"}:
         source = stream_workflow_chat(
@@ -1000,6 +1001,7 @@ async def run_workflow_chat(
             resource_limits=resource_limits,
             permission_mode=permission_mode,
             trusted_swarm_url=trusted_swarm_url,
+            trusted_rem_threads_url=trusted_rem_threads_url,
         )
         try:
             async for event in source:
@@ -1106,6 +1108,7 @@ async def run_workflow_chat(
         image_paths=image_paths,
         permission_mode=permission_mode,
         trusted_swarm_url=trusted_swarm_url,
+        trusted_rem_threads_url=trusted_rem_threads_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
         second_brain_cli_path=(
             gofer_cli_path
@@ -1153,8 +1156,9 @@ async def stream_workflow_chat(
     steering: CodexTurnControl | None = None,
     agent_instructions: str | None = None,
     trusted_swarm_url: str | None = None,
+    trusted_rem_threads_url: str | None = None,
     unlimited_output: bool = False,
-) -> AsyncIterator[dict[str, Any]]:
+) -> AsyncGenerator[dict[str, Any], None]:
     turn_started_at = monotonic()
     if cancel_event is not None and cancel_event.is_set():
         return
@@ -1263,6 +1267,7 @@ async def stream_workflow_chat(
         image_paths=image_paths,
         permission_mode=permission_mode,
         trusted_swarm_url=trusted_swarm_url,
+        trusted_rem_threads_url=trusted_rem_threads_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
         second_brain_cli_path=(
             gofer_cli_path
@@ -2289,6 +2294,7 @@ def _build_chat_command(
     second_brain_cli_path: Path | None = None,
     permission_mode: str | None = None,
     trusted_swarm_url: str | None = None,
+    trusted_rem_threads_url: str | None = None,
 ) -> list[str]:
     if provider == "antigravity":
         if image_paths:
@@ -2390,6 +2396,21 @@ def _build_chat_command(
                     "-c",
                     f'mcp_servers.{swarm_name}.tools.swarm_action.approval_mode="approve"',
                 ]
+            if trusted_rem_threads_url is not None and any(
+                server.enabled
+                and server.name == "rem_threads"
+                and server.type == "http"
+                and server.url == trusted_rem_threads_url
+                for server in resources.mcpServers
+            ):
+                thread_server = codex_mcp_server_names(resources, working_dir)["rem_threads"]
+                tools = ["select_project", "start_thread"]
+                command += ["-c", f"mcp_servers.{thread_server}.enabled_tools={json.dumps(tools)}"]
+                for tool in tools:
+                    command += [
+                        "-c",
+                        f'mcp_servers.{thread_server}.tools.{tool}.approval_mode="approve"',
+                    ]
         command.append(prompt)
         return command
 
@@ -2883,8 +2904,14 @@ def _compact_all_workflows_context(context: dict[str, Any]) -> str:
         "Open files do not imply the subject of the user's request. "
         "Read a referenced file with filesystem tools when the request calls for it. "
         "This editor snapshot supersedes earlier open-file or selected-workflow context.",
-        "Open files:",
     ]
+    if context.get("remThreadInstructions"):
+        lines.extend([str(context["remThreadInstructions"]), "Open projects:"])
+        lines.extend(
+            f"- {item['name']}: {item['root']}"
+            for item in (context.get("remThreads") or {}).get("projects", [])
+        )
+    lines.append("Open files:")
     open_files = context.get("openFiles") or []
     paths = [path for path in open_files if isinstance(path, str) and path]
     lines.extend((f"- {path}" for path in paths) if paths else ["- none"])

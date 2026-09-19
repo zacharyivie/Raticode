@@ -135,6 +135,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     scrollback: 5000,
   },
   assistant: {
+    defaultScope: "current-directory",
     swarmAccessEnabled: true,
     avatarEnabled: true,
     avatarAnimated: true,
@@ -182,6 +183,7 @@ export function normalizeAppSettings(value = {}) {
   const settings = mergeSettings(defaultSettingsSnapshot(), value);
   const storedVersion = Number(value?.version) || 1;
   settings.version = 2;
+  settings.assistant.defaultScope = enumValue(settings.assistant.defaultScope, ["current-directory", "global"], "current-directory");
   settings.assistant.swarmAccessEnabled = settings.assistant.swarmAccessEnabled !== false;
   settings.assistant.avatarEnabled = settings.assistant.avatarEnabled !== false;
   settings.assistant.avatarAnimated = settings.assistant.avatarAnimated !== false;

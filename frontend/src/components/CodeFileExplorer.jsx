@@ -145,6 +145,7 @@ export default function CodeFileExplorer({
         currentPath: directory,
         create: false,
       });
+      if (currentRootRef.current !== rootPath) return [];
       if (!payload) throw new Error("The desktop filesystem bridge is unavailable.");
       const entries = payload.entries ?? [];
       setDirectories((current) => {
@@ -155,6 +156,7 @@ export default function CodeFileExplorer({
       if (directory === rootPath) setGrantRequired(false);
       return entries;
     } catch (loadError) {
+      if (currentRootRef.current !== rootPath || loadError?.name === "AbortError") return [];
       const message = loadError instanceof Error ? loadError.message : String(loadError);
       setError(message);
       if (directory === rootPath && /approved|grant|outside/i.test(message)) {
@@ -162,7 +164,7 @@ export default function CodeFileExplorer({
       }
       return [];
     } finally {
-      setLoadingPaths((current) => withoutSetValue(current, directory));
+      if (currentRootRef.current === rootPath) setLoadingPaths((current) => withoutSetValue(current, directory));
     }
   }, [rootPath]);
 
@@ -173,13 +175,15 @@ export default function CodeFileExplorer({
     try {
       const payload = await shareInFlight(`git-status:${rootPath}`, () => window.goferDesktop?.workspace?.gitStatus?.(rootPath));
       if (gitStatusLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
+      if (payload?.error) throw new Error(payload.error);
       const next = payload?.active
         ? { ...payload, active: true, entries: payload.entries ?? [] }
         : { active: false, entries: [] };
       setSourceControl((current) => sourceControlSnapshotsEqual(current, next) ? current : next);
       setSourceControlRoot(rootPath);
-    } catch {
-      if (gitStatusLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
+    } catch (error) {
+      if (gitStatusLoadingRef.current !== request || currentRootRef.current !== rootPath || error?.name === "AbortError") return;
+      setGitError(error instanceof Error ? error.message : "Unable to load Git status");
       setSourceControl({ active: false, entries: [] });
       setSourceControlRoot(rootPath);
     } finally {
@@ -349,6 +353,7 @@ export default function CodeFileExplorer({
     try {
       await window.goferDesktop?.workspace?.trustProjectRoot?.(rootPath);
     } catch (trustError) {
+      if (currentRootRef.current !== rootPath || trustError?.name === "AbortError") return;
       setError(trustError instanceof Error ? trustError.message : String(trustError));
       setGrantRequired(true);
       return;
@@ -369,10 +374,11 @@ export default function CodeFileExplorer({
         window.goferDesktop?.workspace?.gitWorktrees?.(rootPath),
       ]);
       if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
+      if (historyPayload?.error || worktreePayload?.error) throw new Error(historyPayload?.error || worktreePayload.error);
       if (includeHistory) setGitHistory({ active: Boolean(historyPayload?.active), commits: historyPayload?.commits ?? [], loading: false });
       setWorktrees({ active: Boolean(worktreePayload?.active), items: worktreePayload?.worktrees ?? [], loading: false });
     } catch (loadError) {
-      if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
+      if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath || loadError?.name === "AbortError") return;
       setGitHistory((current) => ({ ...current, loading: false }));
       setWorktrees((current) => ({ ...current, loading: false }));
       setGitError(loadError instanceof Error ? loadError.message : "Unable to load Git information");
@@ -1125,7 +1131,7 @@ export default function CodeFileExplorer({
             {gitNotice && !blockedBranch ? <p role="status" className="mb-3 px-1 text-xs text-muted">{gitNotice}</p> : null}
             {sourceControl.operation || sourceControl.entries.some(entry => entry.status === "!") ? <section aria-label="Merge conflicts" className="mb-4 space-y-2 rounded border border-line p-3 text-xs">
               <strong>{sourceControl.operation ? `${sourceControl.operation === "rebase" ? "Rebase" : "Merge"} paused` : "Unresolved conflicts"}</strong>
-              <p>The ! entry in Staged is an unresolved index conflict. Review and save the working file in Unstaged, then stage it to resolve.</p>
+              <p>The ! entry in Staged is an unresolved index conflict. Rem can resolve and stage the fixes, commit them, and continue until the rebase or merge is complete.</p>
               <div className="flex flex-wrap gap-2"><button className="rounded border border-line px-2 py-1.5" type="button" onClick={() => window.dispatchEvent(new CustomEvent("gofer:rem-context", { detail: { mode: "conflicts", projectRoot: rootPath, text: sourceControl.entries.filter(entry => entry.status === "!").map(entry => entry.path).join("\n") } }))}>Resolve conflicts with Rem</button>
               {sourceControl.operation ? <><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy || sourceControl.entries.some(entry => entry.status === "!")} onClick={() => void changeSourceControl(`${sourceControl.operation}-continue`)}>Continue {sourceControl.operation}</button><button className="rounded border border-line px-2 py-1.5" type="button" disabled={gitBusy} onClick={() => { if (window.confirm(`Abort this ${sourceControl.operation}? Conflict resolution edits will be discarded.`)) void changeSourceControl(`${sourceControl.operation}-abort`); }}>Abort {sourceControl.operation}</button></> : null}</div>
             </section> : null}

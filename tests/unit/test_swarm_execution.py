@@ -570,7 +570,7 @@ def test_activity_updates_do_not_load_or_rewrite_history(manager, tmp_path):
     with patch.object(manager._store, "load", side_effect=AssertionError("Full history load")):
         for i in range(105):
             manager._record_activity(
-                sid, "lead", {"type": "thought", "text": f"Step {i}"}, "secret"
+                sid, "lead", {"type": "thought", "text": f"Step {i}"}, "secret", token="lead"
             )
     manager._db.set_trace_callback(None)
     assert not any("Historical message" in sql for sql in statements)
@@ -840,3 +840,384 @@ async def test_repeating_successful_verification_does_not_reset_stall_counter(ma
     manager._save(state)
     assert manager.tool("one", args)["result"]["passed"]
     assert manager.get(root, sid)["run"]["stalledTurns"] == 2
+
+
+@pytest.mark.parametrize(
+    "attempt_state", ["running", "dispatching", "starting", "verifying", "integrating"]
+)
+def test_restart_preserves_attempt_context_and_completed_work(tmp_path, attempt_state):
+    data, root = tmp_path / "data", tmp_path / "project"
+    manager = SwarmManager(data, start_runtime=False)
+    sid = team(manager, root)
+    state = plan(manager, root, sid, [milestone()])
+    run = state["run"]
+    attempt = run["attempts"][0]
+    attempt.update(
+        state=attempt_state,
+        workspace={"path": str(root)},
+        result={"revision": "recorded", "error": "original diagnostic"},
+        sessionId="provider-session",
+        messageIds=[run["messages"][-1]["id"]],
+    )
+    preserved = {
+        key: attempt[key]
+        for key in ("id", "milestoneId", "workspace", "result", "sessionId", "messageIds")
+    }
+    completed = [
+        {"id": status, "ownerId": "two", "state": status, "result": {"passed": True}}
+        for status in ("succeeded", "verified", "integrated", "interrupted", "superseded")
+    ]
+    run["attempts"].extend(completed)
+    run["state"] = "paused"
+    manager._save(state)
+    manager.close()
+    for _ in range(2):
+        manager = SwarmManager(data, start_runtime=False)
+        try:
+            recovered = manager.get(root, sid)["run"]
+            actual = recovered["attempts"][0]
+            assert {key: actual[key] for key in preserved} == preserved
+            assert actual["state"] == "uncertain"
+            assert actual["restartRecovery"]["previousState"] == attempt_state
+            assert recovered["attempts"][1:] == completed
+            assert len(recovered["humanInbox"]) == 1
+            assert recovered["humanInbox"][0]["workspace"] == preserved["workspace"]
+            assert sum(e["kind"] == "recovered" for e in recovered["events"]) == 1
+            assert sum(e["kind"] == "approval_requested" for e in recovered["events"]) == 1
+            assert not manager._active
+        finally:
+            manager.close()
+
+
+async def test_recovered_resume_requires_decision_and_retry_reuses_workspace(tmp_path):
+    data, root = tmp_path / "data", tmp_path / "project"
+    manager = SwarmManager(data, start_runtime=False)
+    sid = team(manager, root)
+    state = plan(manager, root, sid, [milestone()])
+    run = state["run"]
+    attempt = run["attempts"][0]
+    attempt.update(
+        state="running", workspace={"path": str(root)}, messageIds=[run["messages"][-1]["id"]]
+    )
+    aid = attempt["id"]
+    for message in run["messages"]:
+        for delivery in message["deliveries"]:
+            delivery["state"] = "completed"
+    run["state"] = "paused"
+    manager._save(state)
+    manager.close()
+    manager = SwarmManager(data, start_runtime=False)
+    calls = []
+
+    async def fake(**kwargs):
+        calls.append(kwargs)
+        yield {"type": "final", "message": {"body": "Reviewed existing files"}}
+
+    manager._stream = fake
+    try:
+        run = manager.control(root, sid, "resume")["run"]
+        await manager._turn(str(root), sid, "one", threading.Event())
+        assert not calls
+        state = manager._get(root, sid)
+        assert manager._recover_idle(state)
+        assert manager.get(root, sid)["run"]["state"] == "paused"
+        notification = run["humanInbox"][0]
+        payload = {
+            "action": "human_response",
+            "notificationId": notification["id"],
+            "decision": "redirect",
+            "resolution": "retry",
+            "instruction": "Prior process stopped. Inspect the saved draft before continuing.",
+        }
+        manager.execution(root, sid, payload)
+        manager.execution(root, sid, payload)
+        manager.control(root, sid, "resume")
+        await manager._turn(str(root), sid, "one", threading.Event())
+        actual = manager.get(root, sid)["run"]
+        assert len(calls) == 1
+        assert calls[0]["working_dir"] == root
+        assert len(actual["attempts"]) == 1 and actual["attempts"][0]["id"] == aid
+        assert actual["attempts"][0]["state"] == "succeeded"
+        assert sum(e["kind"] == "approval_addressed" for e in actual["events"]) == 1
+        assert "saved draft" in calls[0]["messages"][-1]["body"]
+        assert actual["humanInbox"][0]["nextSteps"] == (
+            "Retry this attempt in its existing workspace. " + payload["instruction"]
+        )
+        # A second interruption of this same attempt needs a new decision.
+        state = manager._get(root, sid)
+        state["run"]["state"] = "paused"
+        state["run"]["attempts"][0]["state"] = "running"
+        manager._save(state)
+        manager.close()
+        manager = SwarmManager(data, start_runtime=False)
+        inbox = manager.get(root, sid)["run"]["humanInbox"]
+        assert len(inbox) == 2 and inbox[-1]["state"] == "pending"
+    finally:
+        manager.close()
+
+
+async def test_restart_fences_late_provider_output_tools_and_finalizer(tmp_path):
+    data, root = tmp_path / "data", tmp_path / "project"
+    manager = SwarmManager(data, start_runtime=False)
+    sid = team(manager, root)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def fake(**kwargs):
+        yield {"type": "thought", "text": "Before restart"}
+        entered.set()
+        await release.wait()
+        yield {"type": "final", "message": {"body": "STALE OUTPUT"}}
+
+    manager._stream = fake
+    turn = asyncio.create_task(manager._turn(str(root), sid, "lead", threading.Event()))
+    await entered.wait()
+    token = next(key for key in manager._tokens if key not in {"lead", "one", "two"})
+    recovered = SwarmManager(data, start_runtime=False)
+    try:
+        before = recovered.get(root, sid)["run"]
+        with pytest.raises(SwarmError, match="capability"):
+            manager.tool(token, {"action": "message", "body": "STALE TOOL"})
+        manager._record_activity(
+            sid, "lead", {"type": "thought", "text": "STALE TRACE"}, "secret", token=token
+        )
+        release.set()
+        await turn
+        after = recovered.get(root, sid)["run"]
+        assert after == before
+        assert after["attempts"][0]["state"] == "uncertain"
+    finally:
+        release.set()
+        await turn
+        manager.close()
+        recovered.close()
+
+
+async def test_agents_in_distinct_repositories_verify_and_integrate_independently(
+    manager, tmp_path
+):
+    desktop, mobile = tmp_path / "desktop", tmp_path / "mobile"
+    for root, name in ((desktop, "desktop"), (mobile, "mobile")):
+        root.mkdir()
+        git(root, "init")
+        (root / "identity.txt").write_text(name)
+        git(root, "add", ".")
+        git(root, "commit", "-m", "Initial")
+    sid = team(
+        manager,
+        desktop,
+        agents=[
+            {"id": "lead", "name": "Lead", "role": "Coordinate", "isOrchestrator": True},
+            {"id": "one", "name": "One", "role": "Desktop"},
+            {"id": "two", "name": "Two", "role": "Mobile", "workspacePath": str(mobile)},
+        ],
+    )
+    checks = {
+        name: [
+            sys.executable,
+            "-c",
+            f"assert open('identity.txt').read() == '{name}'; "
+            f"assert open('output.txt').read() == '{name}'",
+        ]
+        for name in ("desktop", "mobile")
+    }
+    plan(
+        manager,
+        desktop,
+        sid,
+        [milestone(checks=[checks["desktop"]]), milestone("b", "two", checks=[checks["mobile"]])],
+    )
+
+    async def edit(**kwargs):
+        cwd = kwargs["working_dir"]
+        name = (cwd / "identity.txt").read_text()
+        (cwd / "output.txt").write_text(name)
+        git(cwd, "add", ".")
+        git(cwd, "commit", "-m", name)
+        yield {"type": "final", "message": {"body": name}}
+
+    manager._stream = edit
+    await asyncio.gather(
+        *(manager._turn(str(desktop), sid, agent, threading.Event()) for agent in ("one", "two"))
+    )
+    for mid, owner, project in (("a", "one", desktop), ("b", "two", mobile)):
+        _, attempt = assignment(manager, desktop, sid, mid)
+        assert attempt["projectRoot"] == str(project)
+        checkout = Path(attempt["workspace"]["path"])
+        assert checkout != project
+        assert manager.tool(
+            owner,
+            {
+                "action": "verify",
+                "milestoneId": mid,
+                "attemptId": attempt["id"],
+                "result": {"revision": git(checkout, "rev-parse", "HEAD")},
+            },
+        )["result"]["passed"]
+        result = manager.tool(
+            "lead", {"action": "integrate", "milestoneId": mid, "attemptId": attempt["id"]}
+        )["result"]
+        assert result["passed"], result
+        assert [c["command"] for c in result["checks"]] == [checks[project.name]]
+    run = manager.get(desktop, sid)["run"]
+    assert run["integration"]["passed"]
+    assert run["projectWorkspaces"][str(mobile)]["integration"]["passed"]
+    assert len(run["projectWorkspaces"]) == 1
+    for workspace, name in (
+        (run["workspace"], "desktop"),
+        (run["projectWorkspaces"][str(mobile)], "mobile"),
+    ):
+        assert (Path(workspace["path"]) / "output.txt").read_text() == name
+    for root in (desktop, mobile):
+        assert not (root / "output.txt").exists()
+        assert not git(root, "status", "--porcelain")
+    objectives = run["objectives"]
+    for item in objectives[0]["milestones"]:
+        item.update(status="accepted", evidence="Checked in its repository")
+    manager.objectives(desktop, sid, {"objectives": objectives})
+    # Acceptance and cleanup retain each revision in its own integration repository.
+    run = manager.get(desktop, sid)["run"]
+    for item in run["objectives"][0]["milestones"]:
+        manager._require_verified(run, item)
+    with pytest.raises(SwarmError, match="Unknown swarm workspace"):
+        manager.tool("lead", {"action": "integrate", "workspaceRoot": str(tmp_path / "other")})
+    result = manager.tool("lead", {"action": "integrate", "workspaceRoot": str(mobile)})
+    assert result["result"]["passed"]
+    assert [c["command"] for c in result["result"]["checks"]] == [checks["mobile"]]
+    manager.control(desktop, sid, "stop")
+    await manager._finish_run(str(desktop), sid)
+    assert manager.get(desktop, sid)["run"]["cleanup"]["passed"]
+    for root in (desktop, mobile):
+        assert git(root, "worktree", "list", "--porcelain").count("worktree ") == 2
+
+
+async def test_external_workspace_identity_survives_recovery_and_configuration_changes(tmp_path):
+    root, mobile, other = (tmp_path / name for name in ("desktop", "mobile", "other"))
+    mobile.mkdir()
+    other.mkdir()
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    sid = team(
+        manager,
+        root,
+        agents=[
+            {"id": "lead", "name": "Lead", "role": "Coordinate", "isOrchestrator": True},
+            {"id": "one", "name": "One", "role": "Mobile", "workspacePath": str(mobile)},
+        ],
+    )
+    plan(manager, root, sid, [milestone()])
+
+    async def edit(**kwargs):
+        assert kwargs["working_dir"] == mobile
+        (mobile / "retained.txt").write_text("Keep")
+        yield {"type": "final", "message": {"body": "Saved"}}
+
+    manager._stream = edit
+    await manager._turn(str(root), sid, "one", threading.Event())
+    state = manager.get(root, sid)
+    attempt = state["run"]["attempts"][0]
+    attempt.update(state="running")
+    state["run"]["state"] = "paused"
+    state["run"]["agentStates"]["one"]["state"] = "working"
+    manager._save(state)
+    old_id = attempt["id"]
+    manager.close()
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    try:
+        state = manager.get(root, sid)
+        recovered = state["run"]["attempts"][0]
+        assert recovered["id"] == old_id
+        assert recovered["state"] == "uncertain"
+        assert recovered["workspace"]["path"] == str(mobile)
+        assert recovered["projectRoot"] == str(mobile)
+        state["agents"][1]["workspacePath"] = str(other)
+        manager.update(root, sid, {"agents": state["agents"]})
+        manager.control(root, sid, "resume")
+        run = manager.get(root, sid)["run"]
+        assert manager._agent_project(run, "one") == str(mobile)
+        assert run["attempts"][0]["state"] == "uncertain"
+        assert (mobile / "retained.txt").read_text() == "Keep"
+        assert not list(other.iterdir())
+        # Non-Git writers block only their shared repository, including another swarm.
+        manager._active["different:agent"] = {
+            "projectRoot": str(other),
+            "workspaceRoot": str(mobile),
+        }
+        assert manager._project_busy(run, "one")
+        assert not manager._project_busy(run, "lead")
+        manager._active.clear()
+    finally:
+        manager.close()
+
+
+def test_agent_workspace_validation_and_grants_are_not_persisted(tmp_path):
+    root, mobile = tmp_path / "desktop", tmp_path / "mobile"
+    root.mkdir()
+    mobile.mkdir()
+    authorized = []
+
+    def authorize(path, grant):
+        if grant != "mobile-grant":
+            raise SwarmError("Workspace not approved")
+        authorized.append(path)
+
+    manager = SwarmManager(tmp_path / "data", start_runtime=False, authorize_workspace=authorize)
+    payload: dict[str, Any] = {
+        "name": "Team",
+        "agents": [
+            {
+                "id": "lead",
+                "name": "Lead",
+                "role": "Coordinate",
+                "isOrchestrator": True,
+                "workspacePath": str(mobile),
+            }
+        ],
+    }
+    try:
+        with pytest.raises(SwarmError, match="not approved"):
+            manager.create(root, payload)
+        state = manager.create(root, {**payload, "workspaceGrants": {str(mobile): "mobile-grant"}})
+        assert "mobile-grant" not in str(manager.get(root, state["id"]))
+        with pytest.raises(SwarmError, match="not approved"):
+            manager.start(root, state["id"], "Task")
+        assert manager.get(root, state["id"])["run"] is None
+        manager.start(root, state["id"], "Task", workspace_grants={str(mobile): "mobile-grant"})
+        manager.control(root, state["id"], "pause")
+        with pytest.raises(SwarmError, match="not approved"):
+            manager.control(root, state["id"], "resume")
+        assert manager.get(root, state["id"])["run"]["state"] == "paused"
+        assert authorized == [mobile, mobile]
+        payload["agents"][0]["workspacePath"] = "relative"
+        with pytest.raises(SwarmError, match="absolute"):
+            manager.create(root, payload)
+    finally:
+        manager.close()
+
+
+async def test_coordinator_diagnosis_uses_selected_repository(manager, tmp_path):
+    mobile = tmp_path / "mobile"
+    mobile.mkdir()
+    root = tmp_path / "desktop"
+    sid = team(
+        manager,
+        root,
+        agents=[
+            {
+                "id": "lead",
+                "name": "Lead",
+                "role": "Coordinate",
+                "isOrchestrator": True,
+                "workspacePath": str(mobile),
+            }
+        ],
+    )
+    calls = []
+
+    async def diagnose(**kwargs):
+        calls.append(kwargs)
+        yield {"type": "final", "message": {"body": "Review the blocker"}}
+
+    manager._stream = diagnose
+    await manager._diagnose_idle(manager.get(root, sid), threading.Event())
+    assert calls[0]["working_dir"] == mobile
+    assert calls[0]["workflow"]["projectRoot"] == str(mobile)
+    assert calls[0]["permission_mode"] == "read-only"

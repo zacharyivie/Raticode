@@ -69,3 +69,18 @@ test("overview distinguishes completion, unresolved work, idle recovery and prov
   assert.equal(swarmOverview(run, agents).issues[0].body, "Prompt error");
   assert.equal(swarmOverview({ state: "completed", objectives: [] }, agents).success, false);
 });
+
+test("swarm requests include separate grants for selected agent repositories", async () => {
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  let body;
+  globalThis.window = { goferDesktop: { workspace: { pathGrantForApi: path => `grant:${path}` } } };
+  globalThis.fetch = async (url, init) => { body = JSON.parse(init.body); return { ok: true, json: async () => ({}) }; };
+  try {
+    await swarmRequest("/desktop", "/team/start", { method: "POST", task: "Apps", workspacePaths: ["/mobile"] });
+    assert.equal(body.projectRoot, "/desktop");
+    assert.equal(body.grantId, "grant:/desktop");
+    assert.deepEqual(body.workspaceGrants, { "/mobile": "grant:/mobile" });
+    assert.equal(body.workspacePaths, undefined);
+  } finally { globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});

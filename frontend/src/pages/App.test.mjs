@@ -9800,11 +9800,12 @@ function saveWorkflowResponse() {
 }
 
 function createDeferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
+  let resolve, reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function streamResponse(chunks) {
@@ -11705,6 +11706,43 @@ test("Explain with Rem sends the selection once in a fresh project thread", asyn
   await dom.unmount();
 });
 
+test("Resolve conflicts with Rem sends completion and reporting instructions in the project thread", async () => {
+  let uploaded;
+  const chatStream = streamResponse(['{"type":"final","message":{"body":"Resolved"}}\n']);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url, options) => {
+      if (url !== "/api/chat/attachments") return null;
+      uploaded = JSON.parse(options.body);
+      return jsonResponse(url, { attachments: [{ id: "conflicts", name: "merge-conflicts.txt", type: "text/plain", storageName: "conflicts.txt" }] }, { method: "POST" })(url, options);
+    },
+    url => url === "/api/chat/stream" ? chatStream(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
+  await dom.dispatchWindow("gofer:rem-context", { detail: { mode: "conflicts", projectRoot: "/worktrees/feature", text: "src/code.py\nremoved.txt" } });
+  await dom.flush();
+  const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream");
+  assert.equal(requests.length, 1);
+  const request = JSON.parse(requests[0].options.body);
+  assert.equal(request.workflow.projectRoot, "/worktrees/feature");
+  const prompt = request.messages.at(-1).body || request.messages.at(-1).content;
+  assert.match(prompt, /authorizes resolving files, staging the fixes, committing them with meaningful commit messages/);
+  assert.match(prompt, /stage each resolved path explicitly, including resolved deletions/);
+  assert.match(prompt, /Preserve unrelated local changes and do not stage them/);
+  assert.match(prompt, /git rebase --continue to create the resolved commit/);
+  assert.match(prompt, /editor noninteractively/);
+  assert.match(prompt, /If new conflicts appear, resolve, check, stage, and continue again/);
+  assert.match(prompt, /Repeat until the rebase is complete/);
+  assert.match(prompt, /complete the merge with a meaningful commit message/);
+  assert.match(prompt, /Verify that no unmerged paths remain/);
+  assert.match(prompt, /report the exact blocker and remaining Git state/);
+  assert.match(prompt, /numbered list of one-line summaries, one summary per conflict fix/);
+  assert.match(prompt, /Conflicted files:\nsrc\/code.py\nremoved.txt/);
+  assert.doesNotMatch(prompt, /Leave the results for me to review/);
+  assert.equal(Buffer.from(uploaded.files[0].data, "base64").toString(), prompt);
+  await dom.unmount();
+});
+
 test("source control exposes conflicts and locks parent controls during integration previews", async () => {
   let finishPreview;
   const snapshot = { active: true, root: "/repo", branch: "main", branches: ["main", "feature", "available"], stashCount: 0, entries: [{ path: "code.py", status: "!", staged: false, unstaged: true }], operation: "merge" };
@@ -11997,12 +12035,14 @@ test("Rem permissions cannot change while a message is running", () => {
 
 
 test("Electron folder registration reports failures without leaking credentials and recovers", async () => {
+  const { createPathGrantQueue } = await import("../../electron/path-grant-queue.cjs");
   const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
   const functionSource = source.slice(source.indexOf("async function registerBackendPathGrant(handle)"), source.indexOf("function getIpcSecurity()"));
   const logs = [];
   const handle = { path: "/outside/brain", grantId: "private-grant" };
   let response;
   const sandbox = {
+    backendPathGrants: createPathGrantQueue(),
     getIpcSecurity: () => ({ isUserGrant: () => false }),
     backendReady: Promise.resolve(),
     activeApiBaseUrl: "http://127.0.0.1:1234",
@@ -12998,6 +13038,7 @@ for (const enabled of [true, false]) {
     const dom = await mountReact(React.createElement(appModule.ChatPane, {
       workflows: [workflow], workflow, width: 380,
       assistantDefaults: { swarmAccessEnabled: enabled },
+      swarmProjectPaths: ["/projects/mobile", "/projects/mobile"],
     }), fetchMock, { desktop });
     try {
       await dom.flush();
@@ -13008,8 +13049,12 @@ for (const enabled of [true, false]) {
       assert.ok(call);
       const request = JSON.parse(call.options.body);
       assert.equal(request.workflow.projectRoot, "/projects/team");
-      assert.deepEqual(request.workflow.remSwarmAccess, { enabled, grantId: "grant:/projects/team" });
-      assert.equal(trusted.includes("/projects/team"), enabled);
+      assert.deepEqual(request.workflow.remSwarmAccess, {
+        enabled, grantId: "grant:/projects/team",
+        ...(enabled ? { workspaceGrants: { "/projects/mobile": "grant:/projects/mobile" } } : {}),
+      });
+      assert.equal(trusted.includes("/projects/team"), true);
+      assert.deepEqual(request.workflow.remThreads.projects, [{ root: "/projects/team", name: "team", grantId: "grant:/projects/team" }]);
     } finally { await dom.unmount(); }
   });
 }
@@ -14115,4 +14160,350 @@ test("Rem sends provider model and effort overrides on startup and after switchi
       assert.equal(request.effort, "high");
     }
   } finally { await dom.unmount(); }
+});
+
+test("canonical project discovery shares work and cancelled callers receive no late callbacks", async () => {
+  const pending = createDeferred();
+  const controllers = [new AbortController(), new AbortController()];
+  window.goferDesktop = { workspace: { trustProjectRoot: async () => "/canonical/project" } };
+  const fetchMock = createFetchMock([url => url === "/api/projects/open"
+    ? { ok: true, json: () => pending.promise } : null]);
+  globalThis.fetch = fetchMock;
+  const callbacks = [];
+  const a = appModule.discoverProjectWorkflows("/alias", { signal: controllers[0].signal, onResolvedRoot: () => callbacks.push("A") });
+  const b = appModule.discoverProjectWorkflows("/canonical/project", { signal: controllers[1].signal, onResolvedRoot: () => callbacks.push("B") });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fetchMock.calls.length, 1);
+  controllers[0].abort();
+  await assert.rejects(a, { name: "AbortError" });
+  assert.equal(fetchMock.calls[0].options.signal.aborted, false);
+  pending.resolve({ projectRoot: "/canonical/project", workflows: [{ id: "shared" }] });
+  assert.deepEqual(await b, [{ id: "shared" }]);
+  assert.deepEqual(callbacks, ["B"]);
+});
+
+for (const lateFailure of [false, true]) test(`project B survives late project A ${lateFailure ? "failure" : "workflows"}`, async () => {
+  const a = createDeferred();
+  const b = createDeferred();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    (url, options) => {
+      if (url !== "/api/projects/open") return null;
+      const root = JSON.parse(options.body).projectRoot;
+      return { ok: true, json: () => (root === "/A" ? a : b).promise };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: {
+      "gofer.recentProjects": JSON.stringify(["/A", "/B"]),
+      [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/initial", view: "code" }),
+    },
+    desktop: { workspace: { trustProjectRoot: async root => root, gitWorktrees: async () => ({ worktrees: [] }) } },
+  });
+  try {
+    await dom.flush();
+    for (const root of ["/A", "/B"]) {
+      await dom.click(dom.byLabel("Recent projects"));
+      await dom.click(dom.byTitle(root));
+      await dom.flush();
+    }
+    const aRequest = fetchMock.calls.find(call => call.url === "/api/projects/open" && JSON.parse(call.options.body).projectRoot === "/A");
+    assert.equal(aRequest.options.signal.aborted, true);
+    b.resolve({ projectRoot: "/B", workflows: [] });
+    await dom.flush();
+    if (lateFailure) a.reject(new Error("A private failure"));
+    else a.resolve({ projectRoot: "/A", workflows: [{ ...workflowFixture({ id: "obsolete-a", name: "Obsolete A" }), projectRoot: "/A" }] });
+    await dom.flush();
+    assert.equal(appModule.loadStudioSession().projectRoot, "/B");
+    assert.equal(dom.byLabel("Recent projects").getAttribute("title"), "/B");
+    assert.doesNotMatch(dom.text(), /Obsolete A|A private failure|Discovery cancelled/);
+  } finally {
+    a.resolve({ workflows: [] }); b.resolve({ workflows: [] });
+    await dom.unmount();
+  }
+});
+
+test("provider responses and errors belong to the latest project generation", async () => {
+  const { useProviderCapabilities } = await viteServer.ssrLoadModule("/src/components/ProviderModelEffortFields.jsx");
+  const pending = [];
+  let switchRoot;
+  function Harness() {
+    const [root, setRoot] = React.useState("/A");
+    switchRoot = setRoot;
+    const state = useProviderCapabilities(root);
+    return React.createElement("output", null, JSON.stringify({ root, ...state }));
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([
+    url => {
+      if (!url.startsWith("/api/provider/capabilities")) return null;
+      const request = createDeferred(); pending.push(request);
+      return { ok: true, json: () => request.promise };
+    },
+  ]));
+  try {
+    await dom.flush();
+    await React.act(async () => switchRoot("/B"));
+    pending[1].resolve({ providers: [{ id: "B-provider" }] }); await dom.flush();
+    pending[0].resolve({ providers: [{ id: "A-provider" }] }); await dom.flush();
+    assert.match(dom.text(), /B-provider/);
+    assert.doesNotMatch(dom.text(), /A-provider/);
+    await React.act(async () => switchRoot("/C"));
+    await React.act(async () => switchRoot("/D"));
+    pending[2].reject(new Error("C failure"));
+    pending[3].reject(new Error("D failure")); await dom.flush();
+    assert.match(dom.text(), /D failure/);
+    assert.doesNotMatch(dom.text(), /C failure/);
+  } finally { await dom.unmount(); }
+});
+
+test("late Git and directory results cannot overwrite the new explorer project", async () => {
+  const gitA = createDeferred(), dirA = createDeferred();
+  let switchRoot;
+  function Harness() {
+    const [root, setRoot] = React.useState("/A"); switchRoot = setRoot;
+    return React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: root }, onOpenFile() {} });
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { desktop: { workspace: {
+    listDirectory: ({ currentPath }) => currentPath === "/A" ? dirA.promise : Promise.resolve({ entries: [{ name: "B.txt", path: "/B/B.txt", isFile: true }] }),
+    gitStatus: root => root === "/A" ? gitA.promise : Promise.resolve({ active: true, branch: "B-branch", entries: [] }),
+  } } });
+  try {
+    await dom.flush();
+    await React.act(async () => switchRoot("/B")); await dom.flush();
+    gitA.resolve({ active: true, branch: "A-branch", entries: [{ path: "A.txt", status: "M" }] });
+    dirA.reject(new Error("A directory failure")); await dom.flush();
+    assert.match(dom.text(), /B.txt/);
+    assert.doesNotMatch(dom.text(), /A-branch|A.txt|A directory failure/);
+  } finally { dirA.resolve({ entries: [] }); gitA.resolve({}); await dom.unmount(); }
+});
+
+test("obsolete workflow list cannot replace a selected project and current discovery errors remain visible", async () => {
+  const oldList = createDeferred();
+  const b = createDeferred();
+  const fetchMock = createFetchMock([
+    url => url === "/api/workflows" ? { ok: true, json: () => oldList.promise } : null,
+    url => url === "/api/projects/open" ? { ok: false, json: () => b.promise } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: {
+      "gofer.recentProjects": JSON.stringify(["/B"]),
+      [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/A", view: "code" }),
+    },
+    desktop: { workspace: { trustProjectRoot: async root => root, gitWorktrees: async () => ({ worktrees: [] }) } },
+  });
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Recent projects")); await dom.click(dom.byTitle("/B")); await dom.flush();
+    assert.ok(fetchMock.calls.filter(call => call.url === "/api/workflows").some(call => call.options.signal?.aborted));
+    oldList.resolve(workflowsPayload([{ ...workflowFixture({ id: "old-list-a", name: "Obsolete list A" }), projectRoot: "/A" }]));
+    b.resolve({ error: "Unable to discover project workflows: permission denied. Retry on refresh." });
+    await dom.flush();
+    assert.equal(appModule.loadStudioSession().projectRoot, "/B");
+    assert.match(dom.text(), /permission denied/);
+    assert.doesNotMatch(dom.text(), /Obsolete list A|Discovery cancelled/);
+  } finally { oldList.resolve(workflowsPayload([])); b.resolve({}); await dom.unmount(); }
+});
+
+test("human inbox shows all requests and sends additional instruction to the selected notification", async () => {
+  const { HumanInbox } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const calls = [];
+  const run = { humanInbox: [
+    { id: "approve", agentId: "worker", kind: "approval", state: "pending", description: "Publish <script>draft</script>?", recommendedAction: "Review the diff" },
+    { id: "other", agentId: "lead", kind: "approval", state: "pending", description: "Choose a scope", recommendedAction: "Keep current scope" },
+    { id: "done", agentId: "worker", kind: "approval", state: "addressed", description: "Old request" },
+  ] };
+  const dom = await mountReact(React.createElement(HumanInbox, { run, agents: [{ id: "worker", name: "Worker" }], onAction: value => calls.push(value) }), createFetchMock());
+  try {
+    assert.match(dom.text(), /2 unread/);
+    assert.match(dom.text(), /Review the diff/);
+    assert.match(dom.text(), /Choose a scope/);
+    assert.match(dom.text(), /Old request/);
+    assert.match(dom.text(), /Read/);
+    assert.equal(allElements(dom.container).filter(el => el.tagName === "SCRIPT").length, 0);
+    const article = dom.first("article");
+    const alternate = allElements(article).find(el => el.tagName === "BUTTON" && el.textContent === "Do something else");
+    await dom.click(alternate);
+    await dom.change(dom.first("textarea"), "Inspect only. Do not publish.");
+    await dom.pointer(dom.first("form"), "onSubmit");
+    assert.deepEqual(calls, [{ action: "human_response", notificationId: "approve", decision: "redirect", instruction: "Inspect only. Do not publish.", resolution: "review" }]);
+  } finally { await dom.unmount(); }
+});
+
+test("recovery inbox proceeds without a checkbox and offers retry of the existing attempt", async () => {
+  const { HumanInbox } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const calls = [];
+  const run = { humanInbox: [{ id: "recover", agentId: "worker", kind: "recovery", state: "pending", attemptId: "existing", workspace: { path: "/preserved/checkout" }, description: "Interrupted execution", recommendedAction: "Inspect prior effects" }] };
+  const dom = await mountReact(React.createElement(HumanInbox, { run, agents: [], onAction: value => calls.push(value) }), createFetchMock());
+  try {
+    assert.match(dom.text(), /\/preserved\/checkout/);
+    assert.match(dom.text(), /Attempt existing/);
+    assert.equal(allElements(dom.container).filter(el => el.tagName === "INPUT").length, 0);
+    assert.equal(reactProps(dom.byText("Proceed")).disabled, false);
+    await dom.change(dom.first("select"), "retry");
+    assert.equal(reactProps(dom.byText("Proceed")).disabled, false);
+    await dom.pointer(dom.first("form"), "onSubmit");
+    assert.equal(calls[0].resolution, "retry");
+    assert.equal(calls[0].notificationId, "recover");
+    const html = renderToStaticMarkup(React.createElement(HumanInbox, { run, agents: [], readOnly: true }));
+    assert.doesNotMatch(html, /<button/);
+  } finally { await dom.unmount(); }
+});
+
+
+test("human inbox keeps unread issues first and read solutions visible without response controls", async () => {
+  const { HumanInbox } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const run = { humanInbox: [
+    { id: "old", state: "addressed", description: "Old problem", instruction: "Inspect the draft", createdAt: "2026-09-16" },
+    { id: "read", state: "addressed", description: "Solved problem", nextSteps: "Keep the existing workspace", createdAt: "2026-09-18" },
+    { id: "pending", state: "pending", description: "Waiting problem", recommendedAction: "Review the diff", createdAt: "2026-09-17" },
+  ] };
+  const dom = await mountReact(React.createElement(HumanInbox, { run, agents: [] }), createFetchMock());
+  try {
+    const articles = allElements(dom.container).filter(el => el.tagName === "ARTICLE");
+    assert.match(articles[0].textContent, /Waiting problem/);
+    assert.match(articles[1].textContent, /Read.*Solved problem.*Next steps:.*Keep the existing workspace/);
+    assert.match(articles[2].textContent, /Next steps:.*Inspect the draft/);
+    assert.equal(allElements(articles[1]).filter(el => el.tagName === "BUTTON").length, 0);
+    assert.equal(allElements(articles[2]).filter(el => el.tagName === "BUTTON").length, 0);
+    assert.deepEqual(run.humanInbox.map(item => item.id), ["old", "read", "pending"]);
+  } finally { await dom.unmount(); }
+});
+
+test("human inbox cancels draft instructions before proceeding with the recommendation", async () => {
+  const { HumanInbox } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const calls = [];
+  const run = { humanInbox: [{ id: "request", state: "pending", recommendedAction: "Review" }] };
+  const dom = await mountReact(React.createElement(HumanInbox, { run, agents: [], onAction: value => calls.push(value) }), createFetchMock());
+  try {
+    await dom.click(dom.byText("Do something else"));
+    await dom.change(dom.first("textarea"), "Abandoned instruction");
+    await dom.click(dom.byText("Cancel"));
+    await dom.pointer(dom.first("form"), "onSubmit");
+    assert.equal(calls[0].decision, "proceed");
+    assert.equal(calls[0].instruction, "");
+  } finally { await dom.unmount(); }
+});
+
+test("agent workspace selector chooses another project and restores the swarm default", async () => {
+  const { AgentWorkspaceField } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const calls = [];
+  function Field() {
+    const [value, setValue] = React.useState("");
+    return React.createElement(AgentWorkspaceField, { value, rootPath: "/desktop", projectPaths: ["/desktop", "/mobile", "/mobile"], onChange: path => { calls.push(path); setValue(path); } });
+  }
+  const dom = await mountReact(React.createElement(Field), createFetchMock());
+  try {
+    assert.equal(dom.first("select").options.length, 2);
+    assert.equal(reactProps(dom.first("select")).value, "");
+    await dom.change(dom.first("select"), "/mobile");
+    assert.equal(reactProps(dom.first("select")).value, "/mobile");
+    await dom.change(dom.first("select"), "");
+    assert.deepEqual(calls, ["/mobile", ""]);
+  } finally { await dom.unmount(); }
+  const html = renderToStaticMarkup(React.createElement(AgentWorkspaceField, { value: "/saved-project", rootPath: "/desktop", projectPaths: [], disabled: true }));
+  assert.match(html, /disabled/);
+  assert.match(html, /value="\/saved-project" selected/);
+});
+
+test("swarm agent settings save workspace selections without changing other agents", async () => {
+  const { SwarmSettings } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const calls = [];
+  const swarm = { name: "Apps", agents: [
+    { id: "lead", name: "Desktop", role: "Desktop", provider: "codex", isOrchestrator: true },
+    { id: "mobile", name: "Mobile", role: "Mobile", provider: "codex" },
+  ] };
+  const dom = await mountReact(React.createElement(SwarmSettings, { swarm, selectedAgentId: "mobile", rootPath: "/desktop", projectPaths: ["/mobile"], onSave: payload => calls.push(payload) }), createFetchMock());
+  try {
+    const workspace = dom.controlAfterLabel("Workspace project");
+    await dom.change(workspace, "/mobile");
+    await dom.pointer(dom.first("form"), "onSubmit");
+    assert.equal(calls[0].agents.find(agent => agent.id === "mobile").workspacePath, "/mobile");
+    assert.equal(calls[0].agents.find(agent => agent.id === "lead").workspacePath, undefined);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem default scope validates and persists the global setting", () => {
+  assert.equal(settingsModule.normalizeAppSettings({}).assistant.defaultScope, "current-directory");
+  assert.equal(settingsModule.normalizeAppSettings({ assistant: { defaultScope: "invalid" } }).assistant.defaultScope, "current-directory");
+  assert.equal(settingsModule.normalizeAppSettings({ assistant: { defaultScope: "global" } }).assistant.defaultScope, "global");
+});
+
+test("Ctrl+Enter starts background threads while Enter opens the new thread", async () => {
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    activeProjectRoot: "/projects/mobile", recentProjectRoots: ["/projects/mobile"], workflows: [], width: 380,
+  }), fetchMock);
+  await dom.flush();
+  await dom.change(dom.first("textarea"), "Background work");
+  await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+  await dom.flush();
+  assert.throws(() => dom.byLabel("Back to active threads"));
+  assert.ok(dom.byText("Background work"));
+  await dom.change(dom.first("textarea"), "Foreground work");
+  await dom.keyDown(dom.first("textarea"), "Enter");
+  await dom.flush();
+  assert.ok(dom.byLabel("Back to active threads"));
+  const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream").map(call => JSON.parse(call.options.body));
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0].conversationId, requests[1].conversationId);
+  assert.equal(requests[0].workflow.projectRoot, "/projects/mobile");
+  await dom.unmount();
+});
+
+test("global Rem scope becomes the selected project before the final response", async () => {
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse([
+      '{"type":"project-scope","projectRoot":"/projects/mobile","projectName":"Mobile"}\n',
+      '{"type":"final","message":{"body":"Changed mobile"}}\n',
+    ])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    activeProjectRoot: "/projects/desktop", recentProjectRoots: ["/projects/mobile", "/projects/desktop"],
+    assistantDefaults: { defaultScope: "global" }, workflows: [], width: 380,
+  }), fetchMock);
+  await dom.flush();
+  assert.ok(dom.byLabel("Scoped to Global. Change project scope"));
+  await dom.change(dom.first("textarea"), "Fix the mobile app");
+  await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
+  const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
+  assert.equal(request.workflow.projectRoot, "");
+  assert.equal(request.workflow.remThreads.global, true);
+  assert.deepEqual(request.workflow.remThreads.projects.map(project => project.root).sort(), ["/projects/desktop", "/projects/mobile"]);
+  assert.ok(dom.byLabel("Scoped to Mobile. Change project scope"));
+  await dom.click(dom.byLabel("Back to active threads"));
+  assert.ok(dom.byLabel("Scoped to Global. Change project scope"));
+  await dom.unmount();
+});
+
+test("Rem new-thread events start one scoped child and keep the parent visible", async () => {
+  let count = 0;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => {
+      if (url !== "/api/chat/stream") return null;
+      count += 1;
+      const event = '{"type":"new-thread","threadId":"child-mobile","projectRoot":"/projects/mobile","message":"Run 7 rounds with 6 agents against BTC"}\n';
+      return streamResponse(count === 1 ? [event, event, '{"type":"final","message":{"body":"Started"}}\n'] : ['{"type":"final","message":{"body":"Experiment complete"}}\n'])(url);
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    activeProjectRoot: "/projects/desktop", recentProjectRoots: ["/projects/mobile"], workflows: [], width: 380,
+  }), fetchMock);
+  await dom.flush();
+  await dom.change(dom.first("textarea"), "Start a new thread in mobile and run an experiment");
+  await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
+  const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream").map(call => JSON.parse(call.options.body));
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].conversationId, "child-mobile");
+  assert.equal(requests[1].workflow.projectRoot, "/projects/mobile");
+  assert.equal(requests[1].workflow.remThreads.spawned, true);
+  assert.equal(requests[1].messages.length, 1);
+  assert.equal(requests[1].messages[0].body, "Run 7 rounds with 6 agents against BTC");
+  assert.equal(requests[1].provider, requests[0].provider);
+  assert.ok(dom.byLabel("Scoped to desktop. Change project scope"));
+  await dom.unmount();
 });

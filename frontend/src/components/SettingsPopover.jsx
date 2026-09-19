@@ -290,6 +290,7 @@ function assistantRows(settings, onChange, row, providerState) {
     ?? models.find((item) => item.id === provider?.defaultModel)
     ?? models[0];
   return [
+    row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
     row("avatar", "Show Rem avatar", "Show Rem on the chat welcome screen.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
     row("avatarAnimation", "Animate Rem", "Greet you when the pane opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
     row("swarmAccess", "Swarm access", "Let Rem manage project teams and runs when asked. Instructions load on demand. Changes apply to the next message.", <SwitchControl checked={settings.assistant.swarmAccessEnabled} onChange={(value) => onChange("assistant.swarmAccessEnabled", value)} />),
@@ -738,7 +739,7 @@ function categoryKeywords(category) {
     browser: "homepage new tab search engine url web",
     terminal: "font line cursor blink scrollback shell",
     providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
-    assistant: "rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
+    assistant: "default scope current directory global projects rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
     developer: "developer diagnostics logs logging app data storage version backend restart tools",
     layout: "width pane sidebar panel inspector",

@@ -1797,3 +1797,32 @@ async def test_compaction_handles_one_huge_message_and_preserves_source(monkeypa
     assert all(len(item["body"]) <= chat.CHAT_COMPACT_CHAR_LIMIT for item in chunks)
     assert chat._messages_size(messages) < chat.CHAT_COMPACT_CHAR_LIMIT
     assert source in next((tmp_path / "chat-context").glob("*.txt")).read_text()
+
+
+@pytest.mark.parametrize("trusted", [None, "http://127.0.0.1/wrong", "http://127.0.0.1/threads"])
+def test_rem_thread_tool_grant_requires_exact_server_url(
+    tmp_path: Path, trusted: str | None
+) -> None:
+    from gofer.core.prompt_envelope import AgentResources
+
+    command = _build_chat_command(
+        provider="codex",
+        model="cli-default",
+        prompt="work",
+        working_dir=tmp_path,
+        resources=AgentResources.model_validate(
+            {
+                "mcpServers": [
+                    {"name": "rem_threads", "type": "http", "url": "http://127.0.0.1/threads"},
+                ]
+            }
+        ),
+        trusted_rem_threads_url=trusted,
+    )
+    approved = [arg for arg in command if "approval_mode" in arg]
+    if trusted == "http://127.0.0.1/threads":
+        assert len(approved) == 2
+        assert any("select_project" in arg for arg in approved)
+        assert any("start_thread" in arg for arg in approved)
+    else:
+        assert approved == []

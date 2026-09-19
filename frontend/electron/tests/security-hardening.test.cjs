@@ -249,12 +249,16 @@ http.server_close()
   const lines = createInterface({ input: child.stdout });
   const iterator = lines[Symbol.asyncIterator]();
   const ready = JSON.parse((await iterator.next()).value);
-  const register = mainFunction("registerBackendPathGrant", {
+  const registrationContext = {
     getIpcSecurity: () => security,
     backendReady: Promise.resolve(),
     Date, fetch, AbortSignal, activeApiBaseUrl: `http://127.0.0.1:${ready.port}`,
     activeUiApiToken: "fixture-token", desktopGrantSecret: "fixture-secret", writeBackendLog: () => {},
-  });
+  };
+  let grantTime = 0;
+  registrationContext.backendPathGrants = require("../path-grant-queue.cjs").createPathGrantQueue({ now: () => grantTime });
+  registrationContext.sendBackendPathGrant = mainFunction("sendBackendPathGrant", registrationContext);
+  const register = mainFunction("registerBackendPathGrant", registrationContext);
   const allowed = async (handle, expire = false) => {
     child.stdin.write(`${JSON.stringify({ ...handle, expire })}\n`);
     return JSON.parse((await iterator.next()).value).allowed;
@@ -269,6 +273,7 @@ http.server_close()
   await register(handle);
   assert.equal(await allowed(handle), true);
   assert.equal(await allowed(handle, true), false);
+  grantTime += 15 * 60 * 1000;
   await register(security.renewPath(outside));
   assert.equal(await allowed(handle), true);
   assert.throws(() => security.renewPath(path.dirname(inside)), /outside/);

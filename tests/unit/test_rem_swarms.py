@@ -202,3 +202,139 @@ def test_rem_long_context_is_retrievable_without_bloating_summaries(access: RemS
     assert len(result["run"]["task"]) == 500
     assert context in invoke(access, "read", sid, section="task")["task"]
     assert context not in json.dumps(invoke(access, "list"))
+
+
+def test_rem_can_read_and_answer_human_inbox_but_plan_mode_cannot(access):
+    sid = create(access)
+    run = invoke(access, "start", sid, task="Inspect")["run"]
+    access.manager._tokens["worker"] = (access.project, sid, "worker", run["id"])
+    access.manager.tool(
+        "worker",
+        {
+            "action": "request_approval",
+            "description": "Change files?",
+            "recommendedAction": "Review the proposed edit",
+        },
+    )
+    item = invoke(access, "read", sid, section="human_inbox")["items"][0]
+    readonly = RemSwarmAccess(access.manager, access.project, read_only=True)
+    assert invoke(readonly, "read", sid, section="human_inbox")["total"] == 1
+    with pytest.raises(ValueError, match="read-only"):
+        invoke(readonly, "human_response", sid, notificationId=item["id"], decision="proceed")
+    invoke(access, "human_response", sid, notificationId=item["id"], decision="proceed")
+    assert invoke(access, "read", sid, section="human_inbox")["items"][0]["state"] == "addressed"
+    messages = invoke(access, "read", sid, section="board")["items"]
+    assert messages[-1]["recipientIds"] == ["worker"]
+
+
+def test_rem_workspace_grants_are_private_and_revalidated(tmp_path: Path) -> None:
+    from gofer.ui.server import DesktopPathGrantStore
+
+    mobile = tmp_path / "mobile"
+    mobile.mkdir()
+    grants = DesktopPathGrantStore()
+    grant = grants.register(mobile)
+
+    def authorize(path: Path, token: str | None) -> None:
+        if not grants.covers(path, token):
+            raise ValueError("Workspace grant expired or missing")
+
+    manager = SwarmManager(tmp_path / "data", start_runtime=False, authorize_workspace=authorize)
+    access = RemSwarmAccess(manager, str(tmp_path), workspace_grants={str(mobile): grant})
+    try:
+        help_data = invoke(access, "help")
+        assert str(mobile) in help_data["workspacePaths"]
+        assert "mcpServers" in help_data["resourcesSchema"]["properties"]
+        assert grant not in json.dumps(help_data)
+        sid = create(access)
+        config = invoke(access, "read", sid, section="configuration")
+        config["agents"][1]["workspacePath"] = str(mobile)
+        invoke(access, "update", sid, **config)
+        saved = invoke(access, "read", sid, section="configuration")
+        assert saved["agents"][1]["workspacePath"] == str(mobile)
+        assert grant not in json.dumps(manager.get(tmp_path, sid))
+        invoke(access, "start", sid, task="Inspect only")
+        run_config = invoke(access, "read", sid, section="run_configuration")
+        assert run_config["agents"][1]["workspacePath"] == str(mobile)
+        invoke(access, "control", sid, action="pause")
+        # Expiry after turn creation must still be enforced by the runtime.
+        with grants._lock:
+            grants._grants.clear()
+        for action, params in (
+            ("update", {"charter": "Changed"}),
+            ("control", {"action": "resume"}),
+            ("verify", {"milestoneId": "m", "attemptId": "a"}),
+            ("integrate", {}),
+        ):
+            with pytest.raises(ValueError, match="grant expired"):
+                invoke(access, action, sid, **params)
+        grants.register(mobile, grant)
+        invoke(access, "control", sid, action="resume")
+        assert invoke(access, "read", sid)["run"]["state"] == "running"
+    finally:
+        manager.close()
+
+
+def test_rem_reads_workspace_diagnostics_and_archived_attempts(access: RemSwarmAccess) -> None:
+    sid = create(access)
+    run_id = invoke(access, "start", sid, task="Inspect")["run"]["id"]
+    with access.manager._lock:
+        swarm = access.manager._get(access.project, sid)
+        swarm["run"]["attempts"] = [
+            {"id": "retained-attempt", "ownerId": "worker", "state": "completed"}
+        ]
+        swarm["run"]["cleanup"] = {"state": "failed", "error": "Retained workspace"}
+        swarm["run"]["digest"] = {"summary": "Awaiting review"}
+        access.manager._save(swarm)
+    workspace = invoke(access, "read", sid, section="workspaces")
+    assert workspace["workspace"]["projectRoot"] == access.project
+    diagnostics = invoke(access, "read", sid, section="diagnostics")
+    assert diagnostics["cleanup"]["error"] == "Retained workspace"
+    assert diagnostics["digest"]["summary"] == "Awaiting review"
+    invoke(access, "control", sid, action="stop")
+    invoke(access, "start", sid, task="Next")
+    archived = invoke(access, "read", sid, section="attempts", runId=run_id)
+    assert archived["items"][0]["id"] == "retained-attempt"
+    assert invoke(access, "read", sid, section="attempts")["items"] == []
+    assert invoke(access, "read", sid, section="workspaces", runId=run_id) == workspace
+
+
+def test_rem_completion_uses_runtime_checks(access: RemSwarmAccess) -> None:
+    sid = create(access)
+    invoke(access, "start", sid, task="Review")
+    readonly = RemSwarmAccess(access.manager, access.project, read_only=True)
+    with pytest.raises(ValueError, match="read-only"):
+        invoke(readonly, "complete", sid)
+    with pytest.raises(ValueError, match="milestones"):
+        invoke(access, "complete", sid)
+    invoke(
+        access,
+        "objectives",
+        sid,
+        revision=0,
+        objectives=[
+            {
+                "id": "o",
+                "title": "Review",
+                "milestones": [
+                    {
+                        "id": "m",
+                        "title": "Inspect",
+                        "ownerId": "worker",
+                        "status": "accepted",
+                        "evidence": "User inspected the result",
+                        "waiverReason": "User reviewed artifact",
+                    }
+                ],
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="deliveries"):
+        invoke(access, "complete", sid)
+    with access.manager._lock:
+        swarm = access.manager._get(access.project, sid)
+        for message in swarm["run"]["messages"]:
+            for delivery in message["deliveries"]:
+                delivery["state"] = "completed"
+        access.manager._save(swarm)
+    assert invoke(access, "complete", sid)["run"]["state"] == "completed"

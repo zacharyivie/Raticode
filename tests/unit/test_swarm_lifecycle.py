@@ -340,3 +340,213 @@ def test_coordinator_can_review_prior_uncertain_attempt_during_recovery(tmp_path
     finally:
         manager._active.clear()
         manager.close()
+
+
+@pytest.mark.parametrize("decision", ["proceed", "redirect"])
+def test_human_approval_waits_only_when_no_independent_work_remains(tmp_path, decision):
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    try:
+        sid = team(manager, tmp_path)
+        request = {
+            "action": "request_approval",
+            "description": "Publish the change?",
+            "recommendedAction": "Review the diff before publishing",
+            "requestId": "publish",
+        }
+        manager.tool("worker", request)
+        manager.tool("worker", request)
+        state = manager._get(tmp_path, sid)
+        assert len(state["run"]["humanInbox"]) == 1
+        # The coordinator still has its initial task and may run independently.
+        assert not manager._recover_idle(state)
+        for message in state["run"]["messages"]:
+            for delivery in message["deliveries"]:
+                delivery["state"] = "completed"
+        manager._save(state)
+        assert manager._recover_idle(state)
+        run = manager.get(tmp_path, sid)["run"]
+        assert run["state"] == "paused"
+        item = run["humanInbox"][0]
+        payload = {
+            "action": "human_response",
+            "notificationId": item["id"],
+            "decision": decision,
+            "instruction": "Only inspect the diff. Do not publish."
+            if decision == "redirect"
+            else "",
+        }
+        manager.execution(tmp_path, sid, payload)
+        manager.execution(tmp_path, sid, payload)
+        run = manager.get(tmp_path, sid)["run"]
+        responses = [m for m in run["messages"] if m.get("requestId") == f"approval:{item['id']}"]
+        assert len(responses) == 1
+        assert responses[0]["recipientIds"] == ["worker"]
+        assert responses[0]["deliveries"][0]["state"] == "queued"
+        expected = payload["instruction"] or request["recommendedAction"]
+        assert run["humanInbox"][0]["nextSteps"] == expected
+        assert run["humanInbox"][0]["state"] == "addressed"
+        assert responses[0]["body"] == f"Human response: {expected}"
+        manager.close()
+        manager = SwarmManager(tmp_path / "data", start_runtime=False)
+        assert manager.get(tmp_path, sid)["run"]["humanInbox"][0]["nextSteps"] == expected
+        assert manager._dispatchable(run, responses[0], "worker")
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("state", ["completed", "stopped", "failed"])
+def test_startup_does_not_recover_terminal_runs(tmp_path, state):
+    data = tmp_path / "data"
+    manager = SwarmManager(data, start_runtime=False)
+    sid = team(manager, tmp_path)
+    swarm = manager._get(tmp_path, sid)
+    swarm["run"]["state"] = state
+    swarm["run"]["attempts"] = [{"id": "old", "ownerId": "worker", "state": "running"}]
+    manager._save(swarm)
+    before = manager.get(tmp_path, sid)["run"]
+    manager.close()
+    recovered = SwarmManager(data, start_runtime=False)
+    try:
+        assert recovered.get(tmp_path, sid)["run"] == before
+    finally:
+        recovered.close()
+
+
+def test_legacy_recovery_keeps_independent_work_runnable_and_is_idempotent(tmp_path):
+    data = tmp_path / "data"
+    manager = SwarmManager(data, start_runtime=False)
+    sid = team(manager, tmp_path)
+    swarm = manager._get(tmp_path, sid)
+    # Original JSON persistence, with no turn keys, inbox or recovery fields.
+    swarm["run"]["attempts"] = [
+        {
+            "id": "legacy",
+            "ownerId": "worker",
+            "state": "dispatching",
+            "workspace": {"path": str(tmp_path)},
+            "milestoneId": None,
+        }
+    ]
+    with manager._db:
+        manager._db.execute("UPDATE swarms SET body=? WHERE id=?", (json.dumps(swarm), sid))
+    manager.close()
+    previous = None
+    for _ in range(2):
+        manager = SwarmManager(data, start_runtime=False)
+        try:
+            run = manager.get(tmp_path, sid)["run"]
+            assert run["state"] == "running"  # Coordinator's initial task is independent.
+            assert manager._dispatchable(run, run["messages"][0], "lead")
+            assert run["attempts"][0]["state"] == "uncertain"
+            assert len(run["humanInbox"]) == 1
+            assert sum(e["kind"] == "recovered" for e in run["events"]) == 1
+            if previous is not None:
+                assert run == previous
+            previous = run
+        finally:
+            manager.close()
+
+
+def test_start_prepares_named_review_worktrees_once_per_project_and_retains_them(tmp_path):
+    desktop = project(tmp_path)
+    mobile_parent = tmp_path / "mobile"
+    mobile_parent.mkdir()
+    mobile = project(mobile_parent)
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    try:
+        sid = manager.create(
+            desktop,
+            {
+                "name": "Mobile + Desktop / Release",
+                "agents": [
+                    {
+                        "id": "lead",
+                        "name": "Lead",
+                        "role": "Coordinate",
+                        "provider": "codex",
+                        "isOrchestrator": True,
+                    },
+                    {
+                        "id": "mobile",
+                        "name": "Mobile",
+                        "role": "Implement",
+                        "provider": "codex",
+                        "workspacePath": str(mobile),
+                    },
+                    {
+                        "id": "reviewer",
+                        "name": "Reviewer",
+                        "role": "Review",
+                        "provider": "codex",
+                        "workspacePath": str(mobile),
+                    },
+                ],
+            },
+        )["id"]
+        run = manager.start(desktop, sid, "Prepare release")["run"]
+        assert run["attempts"] == []
+        assert list(run["projectWorkspaces"]) == [str(mobile)]
+        destinations = [run["workspace"], run["projectWorkspaces"][str(mobile)]]
+        assert destinations[0]["path"] != destinations[1]["path"]
+        for root, workspace in zip((desktop, mobile), destinations, strict=True):
+            path = Path(workspace["path"])
+            assert path.name == "mobile-desktop-release-project-review"
+            assert git(path, "branch", "--show-current") == workspace["branch"]
+            assert git(root, "worktree", "list", "--porcelain").count("worktree ") == 2
+            child = prepare_attempt(workspace, "unfinished")
+            (Path(child["path"]) / "draft.txt").write_text(str(root))
+            outcome = cleanup_run(workspace, [{"id": "unfinished", "workspace": child}])
+            assert outcome["passed"] and outcome["archives"]
+            assert path.is_dir() and not Path(child["path"]).exists()
+            assert not (path / "draft.txt").exists()
+            assert cleanup_run(workspace, [])["passed"]
+        # Reopening preserves destinations, including two repos with identical basenames.
+        reopened = SwarmManager(tmp_path / "data", start_runtime=False)
+        try:
+            restored = reopened.get(desktop, sid)["run"]
+            assert restored["workspace"] == run["workspace"]
+            assert restored["projectWorkspaces"] == run["projectWorkspaces"]
+        finally:
+            reopened.close()
+    finally:
+        manager.close()
+
+
+def test_start_preparation_failure_preserves_review_destination_without_dispatch(tmp_path):
+    root = project(tmp_path)
+    mobile = tmp_path / "mobile"
+    mobile.mkdir()
+    manager = SwarmManager(tmp_path / "data", start_runtime=False)
+    try:
+        sid = manager.create(
+            root,
+            {
+                "name": "Release",
+                "agents": [
+                    {
+                        "id": "lead",
+                        "name": "Lead",
+                        "role": "Coordinate",
+                        "provider": "codex",
+                        "isOrchestrator": True,
+                        "workspacePath": str(mobile),
+                    }
+                ],
+            },
+        )["id"]
+        original = prepare_run
+
+        def prepare(path, directory, **kwargs):
+            if path == mobile:
+                raise OSError("Disk full")
+            return original(path, directory, **kwargs)
+
+        with patch("gofer.ui.swarms.workspaces.prepare_run", side_effect=prepare):
+            with pytest.raises(SwarmError, match="Workspace preparation failed: Disk full"):
+                manager.start(root, sid, "Prepare release")
+        run = manager.get(root, sid)["run"]
+        assert run["state"] == "failed"
+        assert not run["attempts"] and not run["messages"]
+        assert Path(run["workspace"]["path"]).is_dir()
+    finally:
+        manager.close()

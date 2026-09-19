@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -228,8 +229,10 @@ def discover_registered_workflows(
     project_root: Path,
     *,
     registry_dir: Path | None = None,
+    check_cancelled: Callable[[], None] = lambda: None,
 ) -> tuple[RegisteredWorkflow, ...]:
     """Register only .raticode/<workflow-name>/workflow.rattish entrypoints."""
+    check_cancelled()
     project_root = project_root.expanduser().resolve()
     if not project_root.is_dir():
         raise RattishWorkspaceError(f"Project folder does not exist: {project_root}")
@@ -240,12 +243,14 @@ def discover_registered_workflows(
     candidates: set[Path] = set()
     if workspace_root.is_dir():
         for workflow_root in workspace_root.iterdir():
+            check_cancelled()
             if workflow_root.is_symlink() or not workflow_root.is_dir():
                 continue
             entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
             if entrypoint.is_file() and not entrypoint.is_symlink():
                 candidates.add(entrypoint)
 
+    check_cancelled()
     registry_root = (registry_dir or get_data_dir()).expanduser().resolve()
     document = _read_registry(registry_root)
     existing = [_registered_workflow(item) for item in document["workflows"]]
@@ -254,6 +259,7 @@ def discover_registered_workflows(
     changed = False
 
     for entrypoint in sorted(candidates):
+        check_cancelled()
         workflow_root = entrypoint.parent
         registered = existing_by_source.get(entrypoint)
         if registered is not None:
@@ -279,6 +285,7 @@ def discover_registered_workflows(
         discovered.append(registered)
         changed = True
 
+    check_cancelled()
     if changed:
         _write_registry(registry_root, document)
     return tuple(discovered)

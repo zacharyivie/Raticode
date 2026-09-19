@@ -57,6 +57,8 @@ const { searchProject, replaceProject } = require("./project-search.cjs");
 const { createAppLog } = require("./app-log.cjs");
 const { createArchiveQueue } = require("./archive-queue.cjs");
 const conversationArchives = createArchiveQueue();
+const { createPathGrantQueue } = require("./path-grant-queue.cjs");
+const backendPathGrants = createPathGrantQueue();
 let archivesDrained = false;
 let logsDrained = false;
 let logsClosing = false;
@@ -283,6 +285,7 @@ function allocateBackendPort() {
 }
 
 function startBackend(port = 0) {
+  backendPathGrants.reset();
   const manualApiBaseUrl = process.env.GOFER_API_BASE_URL || process.env.VITE_API_BASE_URL;
   if (manualApiBaseUrl) {
     return Promise.resolve({
@@ -376,6 +379,7 @@ function startBackend(port = 0) {
     child.on("exit", (code, signal) => {
       writeBackendLog(`BACKEND_EXIT ${JSON.stringify({ code, signal, expected: isQuitting || expectedBackendStops.has(child) })}\n`);
       if (backendProcess === child) {
+        backendPathGrants.reset();
         backendProcess = undefined;
         closeBackendLogStream();
       }
@@ -471,6 +475,7 @@ function dataDirConfigPath() {
 }
 
 function stopBackend() {
+  backendPathGrants.reset();
   if (!backendProcess || backendProcess.killed) return;
 
   const child = backendProcess;
@@ -2443,6 +2448,10 @@ async function registerBackendPathGrant(handle) {
   if (getIpcSecurity().isUserGrant(handle?.grantId)) {
     throw new Error("User file navigation does not grant agent access.");
   }
+  return backendPathGrants.register(handle || {}, () => sendBackendPathGrant(handle));
+}
+
+async function sendBackendPathGrant(handle) {
   const startedAt = Date.now();
   let reason = "backend-unavailable";
   let status = null;
@@ -2470,7 +2479,7 @@ async function registerBackendPathGrant(handle) {
     if (!response.ok) throw new Error("Registration rejected");
     reason = "invalid-response";
     const payload = await response.json();
-    if (payload?.grantId !== handle.grantId || typeof payload?.path !== "string" || !payload.path) {
+    if (payload?.grantId !== handle.grantId || typeof payload?.path !== "string" || payload.path !== handle.path) {
       throw new Error("Registration acknowledgment does not match");
     }
     writeBackendLog(`PATH_GRANT_REGISTERED ${JSON.stringify({ path: handle.path, status, durationMs: Date.now() - startedAt })}\n`);

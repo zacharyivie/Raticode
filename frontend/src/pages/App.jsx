@@ -9,7 +9,7 @@ import { CONVERSATION_PAGE_SIZE, conversationRepository } from "../lib/conversat
 import ThreadSearch from "../components/ThreadSearch.jsx";
 import ThreadHistoryMatch from "../components/ThreadHistoryMatch.jsx";
 import { createConversationArchiveScheduler } from "../lib/conversationArchive.js";
-import { startPolling, shareInFlight } from "../lib/refresh.js";
+import { startPolling, shareCancellable } from "../lib/refresh.js";
 import { createRecentProjectValidator, startWorkspacePolling } from "../lib/projectRefresh.js";
 import { equalJson } from "../lib/jsonValue.js";
 import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
@@ -277,21 +277,21 @@ export async function discoverProjectWorkflows(projectRoot, { signal, onResolved
   signal?.throwIfAborted();
   // Desktop validation completes before the backend discovers and compiles workflows.
   if (typeof trustedRoot === "string" && trustedRoot) onTrustedRoot?.(trustedRoot);
-  const projectGrantId =
-    window.goferDesktop?.workspace?.pathGrantForApi?.(normalizedRoot) ?? "";
-  const response = await fetch(apiUrl("/projects/open"), {
-    signal,
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      projectGrantId: projectGrantId || undefined,
-      projectRoot: normalizedRoot,
-    }),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || `Project API returned ${response.status}`);
-  }
+  const canonicalRoot = typeof trustedRoot === "string" && trustedRoot ? trustedRoot : normalizedRoot;
+  const payload = await shareCancellable(`project-discovery:${pathKey(canonicalRoot)}`, async sharedSignal => {
+    const projectGrantId = window.goferDesktop?.workspace?.pathGrantForApi?.(canonicalRoot) ?? "";
+    const response = await fetch(apiUrl("/projects/open"), {
+      signal: sharedSignal,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectGrantId: projectGrantId || undefined, projectRoot: canonicalRoot }),
+    });
+    const result = await response.json();
+    sharedSignal.throwIfAborted();
+    if (!response.ok) throw new Error(result.error || `Project API returned ${response.status}`);
+    return result;
+  }, signal);
+  signal?.throwIfAborted();
   if (typeof payload.projectRoot === "string" && payload.projectRoot) onResolvedRoot?.(payload.projectRoot);
   return Array.isArray(payload.workflows) ? payload.workflows : [];
 }
@@ -339,6 +339,8 @@ export default function App() {
   const [openingProjectRoot, setOpeningProjectRoot] = useState("");
   const [projectError, setProjectError] = useState("");
   const [activeProjectRoot, setActiveProjectRoot] = useState(initialStudioSession.projectRoot);
+  const activeProjectRootRef = useRef(activeProjectRoot);
+  activeProjectRootRef.current = activeProjectRoot;
   const [selectedSwarm, setSelectedSwarm] = useState(null);
   const [studioView, setStudioView] = useState(initialStudioSession.view || settings.general.defaultView);
   const [, setCodeEditorOpened] = useState(
@@ -496,9 +498,14 @@ export default function App() {
   const workflowLoadRequestRef = useRef(0);
   const projectOpenRequestRef = useRef(0);
   const projectOpenAbortRef = useRef(null);
+  const projectOpenPendingRef = useRef(null);
+  const workflowLoadAbortRef = useRef(null);
   const recentProjectValidatorRef = useRef(null);
   if (!recentProjectValidatorRef.current) recentProjectValidatorRef.current = createRecentProjectValidator();
-  useEffect(() => () => projectOpenAbortRef.current?.abort(), []);
+  useEffect(() => () => {
+    projectOpenAbortRef.current?.abort();
+    workflowLoadAbortRef.current?.abort();
+  }, []);
   const openProjectFolderRef = useRef(null);
   const openFileRef = useRef(null);
   const chordPendingRef = useRef(null);
@@ -1198,9 +1205,22 @@ export default function App() {
     return payload.document;
   }
 
-  async function openProjectAtPath(projectRoot, { rememberProject = false, focusPath = "" } = {}) {
+  function openProjectAtPath(projectRoot, options = {}) {
+    const pending = projectOpenPendingRef.current;
+    if (pending && samePath(pending.root, projectRoot)) return pending.promise;
+    const request = { root: projectRoot };
+    request.promise = performProjectOpen(projectRoot, options).finally(() => {
+      if (projectOpenPendingRef.current === request) projectOpenPendingRef.current = null;
+    });
+    projectOpenPendingRef.current = request;
+    return request.promise;
+  }
+
+  async function performProjectOpen(projectRoot, { rememberProject = false, focusPath = "" } = {}) {
     const requestId = projectOpenRequestRef.current + 1;
     projectOpenRequestRef.current = requestId;
+    ++workflowLoadRequestRef.current;
+    workflowLoadAbortRef.current?.abort();
     projectOpenAbortRef.current?.abort();
     const controller = new AbortController();
     projectOpenAbortRef.current = controller;
@@ -1267,7 +1287,7 @@ export default function App() {
       if (focusPath) setStudioView("code");
       return { discovered, projectRoot };
     } catch (error) {
-      if (projectOpenRequestRef.current !== requestId) return null;
+      if (projectOpenRequestRef.current !== requestId || error?.name === "AbortError") return null;
       setProjectError(error instanceof Error ? error.message : "Unable to open project");
       throw error;
     } finally {
@@ -1584,20 +1604,31 @@ export default function App() {
     projectRoot = activeProjectRoot,
     silent = false,
   } = {}) => {
+    if (pathKey(projectRoot) !== pathKey(activeProjectRootRef.current)) return;
     if (!silent) {
       setLoadState({ loading: true, error: "" });
     }
     const requestId = ++workflowLoadRequestRef.current;
+    const projectGeneration = projectOpenRequestRef.current;
+    const previous = workflowLoadAbortRef.current;
+    const controller = previous && !previous.signal.aborted && samePath(previous.projectRoot, projectRoot)
+      ? previous : new AbortController();
+    controller.projectRoot = projectRoot;
+    workflowLoadAbortRef.current = controller;
+    const discovery = discoverProject && projectRoot
+      ? discoverProjectWorkflows(projectRoot, { signal: controller.signal }) : null;
+    if (previous !== controller) previous?.abort();
     try {
       if (discoverProject && projectRoot) {
-        await shareInFlight(`discover-project:${projectRoot}`, () => discoverProjectWorkflows(projectRoot));
+        await discovery;
       }
-      const payload = await shareInFlight("workflow-list", async () => {
-        const response = await fetch(apiUrl("/workflows"));
+      controller.signal.throwIfAborted();
+      const payload = await shareCancellable("workflow-list", async signal => {
+        const response = await fetch(apiUrl("/workflows"), { signal });
         if (!response.ok) throw new Error(`Workflow API returned ${response.status}`);
         return response.json();
-      });
-      if (requestId !== workflowLoadRequestRef.current) return;
+      }, controller.signal);
+      if (pathKey(projectRoot) !== pathKey(activeProjectRootRef.current) || projectGeneration !== projectOpenRequestRef.current || requestId !== workflowLoadRequestRef.current) return;
       const payloadDataDir = payload.dataDir ?? "";
       setPromptAgentIds(payload.promptAgentIds ?? []);
       const listedWorkflows = payload.workflows ?? [];
@@ -1640,15 +1671,13 @@ export default function App() {
         if (projectWorkflow) return projectWorkflow.id;
         return nextWorkflows[0]?.id;
       });
-      setLoadState({ loading: false, error: "" });
+      setLoadState({ loading: false, error: (payload.errors ?? []).map(item => `${item.path}: ${item.message}`).join("\n") });
     } catch (error) {
-      if (requestId !== workflowLoadRequestRef.current) return;
-      if (!silent) {
-        setLoadState({
-          loading: false,
-          error: error instanceof Error ? error.message : "Unable to load workflows",
-        });
-      }
+      if (controller.signal.aborted || pathKey(projectRoot) !== pathKey(activeProjectRootRef.current) || projectGeneration !== projectOpenRequestRef.current || requestId !== workflowLoadRequestRef.current) return;
+      setLoadState({
+        loading: false,
+        error: error instanceof Error ? error.message : "Unable to load workflows",
+      });
     }
   }, [activeProjectRoot, initialStudioSession.projectRoot]);
 
@@ -3606,7 +3635,7 @@ export default function App() {
                 <strong>Draft recovery: </strong>{rattishEditorState.recoveryWarning}
               </div>
             ) : null}
-        {samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
+        {samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace projectPaths={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots).map(root => pathValue(lastWorktreeByProject, root) || root)} selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
         <div className={`${samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
             {!workflowTabs[activeCodePath] && (activeCodePath || sidebarActivity !== "workflows") && topBarNotice?.message ? (
               <div role={topBarNotice.type === "error" ? "alert" : "status"} className="shrink-0 border-b border-line bg-surface px-3 py-2 text-xs text-ink break-words">
@@ -3741,6 +3770,7 @@ export default function App() {
           assistantDefaults={settings.assistant}
           audioInputDeviceId={settings.devices.audioInputId}
           recentProjectRoots={recentProjectRoots}
+          swarmProjectPaths={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots).map(root => pathValue(lastWorktreeByProject, root) || root)}
           width={chatPaneWidth}
           activeWorkflowId={activeWorkflow?.id}
           activeProjectRoot={activeProjectRoot}
@@ -4983,6 +5013,7 @@ export function scopeChatThreadToProject(
   return {
     ...thread,
     projectRoot: root,
+    scopeMode: "project",
     ...(!samePath(thread.projectRoot, root) ? { projectBranch: undefined } : {}),
     projectName: String(projectName || (root ? projectNameFromPath(root) : "No project")),
     selectedWorkflowId: null,
@@ -5899,6 +5930,7 @@ function formatRevisionDate(value) {
 }
 
 export function ChatPane({
+  swarmProjectPaths = [],
   visible = true,
   reducedMotion = "system",
   activeWorkflowId,
@@ -5942,7 +5974,7 @@ export function ChatPane({
     error: providerDiscoveryError,
     loading: providersLoading,
     refresh: refreshProviders,
-  } = useProviderCapabilities();
+  } = useProviderCapabilities(prospectiveProjectRoot);
   const providerCapability = providers.find(item => item.id === providerId);
   const permissionOptions = providerPermissionOptions(providerId, providerCapability);
   const [threads, setThreads] = useState([]);
@@ -5990,7 +6022,8 @@ export function ChatPane({
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [resourcesOpen, setResourcesOpen] = useState(false);
-  const [homeProjectRoot, setHomeProjectRoot] = useState(prospectiveProjectRoot);
+  const defaultGlobalScope = assistantDefaults.defaultScope === "global";
+  const [homeProjectRoot, setHomeProjectRoot] = useState(defaultGlobalScope ? "" : prospectiveProjectRoot);
   const chatAbortControllersRef = useRef({});
   const activeChatTurnsRef = useRef({});
   const steeringRequestsRef = useRef({});
@@ -6042,14 +6075,15 @@ export function ChatPane({
   const scopedProjectRoot = String(
     activeThread?.projectRoot ?? homeProjectRoot ?? prospectiveProjectRoot,
   ).trim();
-  const scopedProjectName = pathValue(projectLabels, scopedProjectRoot)?.trim()
+  const globalScope = activeThread ? activeThread.scopeMode === "global" : homeProjectRoot === "" && defaultGlobalScope;
+  const scopedProjectName = (globalScope ? "Global" : "") || pathValue(projectLabels, scopedProjectRoot)?.trim()
     || activeThread?.projectName
     || (scopedProjectRoot ? projectNameFromPath(scopedProjectRoot) : "No project");
   const [scopeWorktrees, setScopeWorktrees] = useState([]);
   const [scopeAvailableRoots, setScopeAvailableRoots] = useState([]);
   const [scopeLoading, setScopeLoading] = useState(false);
   const scopeRoots = mergeRecentProjects(
-    scopedProjectRoot ? [scopedProjectRoot] : [],
+    [scopedProjectRoot, prospectiveProjectRoot].filter(Boolean),
     mergeRecentProjects(
       recentProjectRoots,
       workflows.map((item) => item.projectRoot).filter(Boolean),
@@ -6191,8 +6225,8 @@ export function ChatPane({
   }, [activeThreadId, conversationTextKey, activeSearchTarget]);
 
   useEffect(() => {
-    if (!activeThreadId) setHomeProjectRoot(prospectiveProjectRoot);
-  }, [activeThreadId, prospectiveProjectRoot]);
+    if (!activeThreadId) setHomeProjectRoot(defaultGlobalScope ? "" : prospectiveProjectRoot);
+  }, [activeThreadId, prospectiveProjectRoot, defaultGlobalScope]);
 
   useEffect(() => {
     const current = providers.find((provider) => provider.id === providerId);
@@ -6348,26 +6382,33 @@ export function ChatPane({
     };
   }, [scopeMenuOpen]);
 
-  async function sendMessage(editedMessage = null) {
+  async function sendMessage(editedMessage = null, options = {}) {
     const editedMessageIndex = editedMessage
       ? messages.findIndex((message) => message.id === editedMessage.id && message.role === "user")
       : -1;
     const originalMessage = editedMessageIndex >= 0 ? messages[editedMessageIndex] : null;
-    const text = originalMessage ? String(editedMessage.body ?? "").trim() : draft.trim();
-    const selectedAttachments = originalMessage ? [] : attachments;
+    const text = originalMessage ? String(editedMessage.body ?? "").trim() : options.text ?? draft.trim();
+    const selectedAttachments = originalMessage || options.targetThread ? [] : attachments;
     const hasMessageAttachments = Boolean(
       originalMessage?.attachments?.length || selectedAttachments.length,
     );
-    if ((!text && !hasMessageAttachments) || chatState.sending || historyLoadingRef.current || historyState.error) return;
-    if (requiresPermissionChoice) return;
-    const resourceError = remResourceError(activeThread?.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES);
+    if ((!text && !hasMessageAttachments) || (!options.targetThread && (chatState.sending || historyLoadingRef.current || historyState.error))) return;
+    if (!options.targetThread && requiresPermissionChoice) return;
+    const resourceError = remResourceError(options.targetThread?.resources || activeThread?.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES);
     if (resourceError) { setAttachmentError(resourceError); return; }
     returnToLatestMessages();
     const clientTurnStartedAt = Date.now();
     const turnSummaryId = uniqueClientId();
-    const targetThread = activeThread ?? createThread();
+    const targetThread = options.targetThread ?? activeThread ?? createThread(scopedProjectRoot, { background: options.background, global: globalScope });
     const targetThreadId = targetThread.id;
     const workflowContext = chatWorkflowContextForThread(targetThread, workflows, openFiles);
+    const turnProvider = targetThread.provider || providerId;
+    const turnModel = targetThread.model ?? model;
+    const turnEffort = targetThread.effort ?? effort;
+    const turnCapability = providers.find(item => item.id === turnProvider);
+    const requestedPermission = targetThread.permissionsByProvider?.[turnProvider];
+    const turnPermission = providerPermissionOptions(turnProvider, turnCapability).some(([id]) => id === requestedPermission)
+      ? requestedPermission : providerPermissionDefault(turnProvider, turnCapability);
     setChatStateByThread((current) => ({
       ...current,
       [targetThreadId]: { sending: true, error: "", hasNewResponse: false },
@@ -6417,12 +6458,14 @@ export function ChatPane({
         };
     const nextMessages = originalMessage
       ? [...messages.slice(0, editedMessageIndex), userMessage]
-      : [...messages, userMessage];
+      : [...(options.targetThread ? [] : messages), userMessage];
     updateThreadMessages(targetThreadId, nextMessages);
     updateThreadTitleFromMessage(targetThreadId, titleSource);
-    setDraft("");
-    delete draftsByThreadRef.current[activeThreadId || "new-thread"];
-    setAttachments([]);
+    if (!options.targetThread) {
+      setDraft("");
+      delete draftsByThreadRef.current[activeThreadId || "new-thread"];
+      setAttachments([]);
+    }
     if (originalMessage) setExpandedThoughtGroups({});
     setBackgroundChatAnnouncement("");
     setChatAnnouncementByThread((current) => ({ ...current, [targetThreadId]: "" }));
@@ -6477,21 +6520,36 @@ export function ChatPane({
       if (memorySettings.secondBrainEnabled) await window.goferDesktop?.workspace?.trustProjectRoot?.(memorySettings.secondBrainRoot);
       const requestMessages = await repository.context(targetThreadId, nextMessages, Boolean(originalMessage));
       if (activeTurn.stopRequested) throw new DOMException("Rem stopped", "AbortError");
+      const threadProjects = [];
+      for (const root of mergeRecentProjects(targetThread.projectRoot ? [targetThread.projectRoot] : [], scopeRoots)) {
+        const workspace = window.goferDesktop?.workspace;
+        if (workspace?.getPathInfo && !(await workspace.getPathInfo(root))?.isDirectory) continue;
+        await workspace?.trustProjectRoot?.(root);
+        threadProjects.push({ root, name: pathValue(projectLabels, root)?.trim() || projectNameFromPath(root), grantId: workspace?.pathGrantForApi?.(root) });
+      }
+      if (activeTurn.stopRequested) throw new DOMException("Rem stopped", "AbortError");
       const response = await fetchChatTurn(chatStreamRequestBody({
           conversationId: targetThreadId,
           turnId: activeTurn.turnId,
-          permissionMode,
-          provider: providerId,
-          model,
-          effort: effort || undefined,
+          permissionMode: turnPermission,
+          provider: turnProvider,
+          model: turnModel,
+          effort: turnEffort || undefined,
           messages: requestMessages
             .filter((message) => !["turn-summary", "error"].includes(message.kind))
             .map(chatMessageForRequest),
           workflow: {
             ...workflowContext,
+            remThreads: { global: targetThread.scopeMode === "global", projects: threadProjects, spawned: Boolean(targetThread.parentThreadId) },
             remSwarmAccess: {
               enabled: assistantDefaults.swarmAccessEnabled !== false,
               grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(workflowContext.projectRoot),
+              ...(assistantDefaults.swarmAccessEnabled !== false ? {
+                workspaceGrants: Object.fromEntries(uniquePaths(swarmProjectPaths).flatMap(path => {
+                  const grant = window.goferDesktop?.workspace?.pathGrantForApi?.(path);
+                  return grant ? [[path, grant]] : [];
+                })),
+              } : {}),
             },
             remSecondBrain: { enabled: memorySettings.secondBrainEnabled, root: memorySettings.secondBrainRoot, format: memorySettings.secondBrainFormat, theme: memorySettings.secondBrainTheme, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(memorySettings.secondBrainRoot) },
             remResources: targetThread.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES,
@@ -6555,6 +6613,15 @@ export function ChatPane({
               }
               if (event.type === "stopped") throw new DOMException("Rem stopped", "AbortError");
 
+              if (event.type === "project-scope") {
+                setThreads(current => current.map(thread => thread.id === targetThreadId
+                  ? scopeChatThreadToProject(thread, event.projectRoot, workflows, null, event.projectName) : thread));
+                continue;
+              }
+              if (event.type === "new-thread") {
+                remContextActionsRef.current.spawnThread(event, targetThread);
+                continue;
+              }
               if (event.type === "thought") {
                 const deltaStreamId = typeof event.deltaStreamId === "string" ? event.deltaStreamId : "";
                 const thought = deltaStreamId ? String(event.text ?? "") : String(event.text ?? "").trim();
@@ -6789,12 +6856,12 @@ export function ChatPane({
     void sendMessage({ id: messageId, body });
   }
 
-  function createThread(projectRoot = scopedProjectRoot) {
+  function createThread(projectRoot = scopedProjectRoot, options = {}) {
     const now = new Date().toISOString();
     const root = String(projectRoot ?? "").trim();
     const thread = scopeChatThreadToProject(
       {
-        id: uniqueClientId(),
+        id: options.id || uniqueClientId(),
         title: "New thread",
         provider: providerId, model, effort,
         resources: structuredClone(assistantDefaults.resources || DEFAULT_REM_RESOURCES),
@@ -6807,19 +6874,34 @@ export function ChatPane({
       activeWorkflowId,
       pathValue(projectLabels, root)?.trim() || (root ? projectNameFromPath(root) : "No project"),
     );
-    const nextThreads = [thread, ...threads];
-    persistChatThreads(nextThreads);
-    setThreads(nextThreads);
-    activeThreadIdRef.current = thread.id;
-    setActiveThreadId(thread.id);
-    setDraft("");
+    if (options.global || (!root && globalScope && !options.parent)) {
+      thread.scopeMode = "global";
+      thread.projectName = "Global";
+    }
+    if (options.parent) {
+      Object.assign(thread, { provider: options.parent.provider, model: options.parent.model, effort: options.parent.effort,
+        resources: structuredClone(options.parent.resources), permissionsByProvider: { ...options.parent.permissionsByProvider }, parentThreadId: options.parent.id });
+    }
+    setThreads(current => [thread, ...current.filter(item => item.id !== thread.id)]);
+    if (!options.background) {
+      activeThreadIdRef.current = thread.id;
+      setActiveThreadId(thread.id);
+      setDraft("");
+    }
     setScopeMenuOpen(false);
     return thread;
   }
 
   // Context events and deferred sends use the current thread settings and draft.
   const remContextActionsRef = useRef(null);
-  remContextActionsRef.current = { createThread, sendMessage };
+  const spawnedThreadsRef = useRef(new Set());
+  function spawnThread(event, parent) {
+    if (spawnedThreadsRef.current.has(event.threadId) || loadChatThread(event.threadId)) return;
+    spawnedThreadsRef.current.add(event.threadId);
+    const thread = createThread(event.projectRoot, { id: event.threadId, background: true, parent });
+    void sendMessage(null, { targetThread: thread, text: event.message });
+  }
+  remContextActionsRef.current = { createThread, sendMessage, spawnThread };
 
   useEffect(() => {
     let active = true;
@@ -6836,7 +6918,7 @@ export function ChatPane({
       if (!active) return;
       const thread = remContextActionsRef.current.createThread(root || "");
       const body = context.mode === "conflicts"
-        ? `Resolve the Git conflicts in this project. Inspect the current and incoming changes, preserve the intended behavior, and edit the conflicted files. Leave the results for me to review before staging or continuing the merge or rebase.\n\nConflicted files:\n${context.text}`
+        ? `Resolve the Git conflicts in this project and finish the active rebase or merge. This request authorizes resolving files, staging the fixes, committing them with meaningful commit messages, and continuing the operation without asking for confirmation at each step.\n\nInspect the live Git status and operation in this project before editing; the file list below is only an initial snapshot. Inspect both sides of each conflict and preserve the intended behavior. Resolve all current conflicts, check the fixes, and stage each resolved path explicitly, including resolved deletions. Preserve unrelated local changes and do not stage them.\n\nDuring a rebase, use git rebase --continue to create the resolved commit, preserving a meaningful original commit message or improving it when needed. Configure the editor noninteractively so continuation cannot hang waiting for input. After every continuation, inspect Git status and the operation again. If new conflicts appear, resolve, check, stage, and continue again. Repeat until the rebase is complete; do not stop with fixes unstaged or the rebase paused. For a merge, stage the resolutions and complete the merge with a meaningful commit message. If no merge or rebase is active, commit the conflict fixes with a meaningful message.\n\nDo not abort the operation, discard unrelated work, skip commits, or push without separate authorization. If a command fails for a reason other than another conflict, investigate and fix it when possible; otherwise report the exact blocker and remaining Git state rather than claiming completion. Verify that no unmerged paths remain and that the rebase or merge has ended before reporting success.\n\nAt the end, state whether the operation completed and give a full report as a numbered list of one-line summaries, one summary per conflict fix. Each summary must identify the file, what Rem changed, and why; distinguish repeated fixes to the same file in different replayed commits. Include verification results and any remaining blockers.\n\nConflicted files:\n${context.text}`
         : `File: ${context.path || "workflow.rattish"}\nProject: ${root || "No project"}\nLines: ${context.startLine || 1}-${context.endLine || context.startLine || 1}\n${context.version || "Editor selection"}\n\n${context.text || ""}`;
       const file = new File([body], context.mode === "conflicts" ? "merge-conflicts.txt" : "editor-selection.txt", { type: "text/plain" });
       const result = readChatAttachments([file], []);
@@ -7187,6 +7269,7 @@ export function ChatPane({
                 role="menu"
               >
                 <p className="px-2 py-1 text-[10px] font-semibold text-muted">Projects and worktrees</p>
+                {!activeThreadId && defaultGlobalScope ? <button type="button" role="menuitem" className="w-full px-2 py-1 text-left text-xs" onClick={() => { setHomeProjectRoot(""); setScopeMenuOpen(false); }}>Global</button> : null}
                 {scopeLoading ? <p role="status" className="px-2 py-1 text-xs text-muted">Checking workspace folders...</p> : null}
                 {!scopeLoading && !scopeProjects.length ? <p role="status" className="px-2 py-1 text-xs text-muted">No workspace folders available.</p> : null}
                 {scopeProjects.map((project) => (
@@ -7219,7 +7302,7 @@ export function ChatPane({
             className="studio-icon-button grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
             title="New thread"
             type="button"
-            onClick={() => createThread()}
+            onClick={() => createThread(defaultGlobalScope ? "" : prospectiveProjectRoot, { global: defaultGlobalScope })}
           >
             <Plus aria-hidden="true" size={17} />
           </button>
@@ -7401,6 +7484,7 @@ export function ChatPane({
             onSend={sendMessage}
             onStop={() => activeThreadId && stopAssistant(activeThreadId)}
           />
+          {!activeThreadId ? <p className="mt-1 text-center text-[10px] text-muted">Enter opens the thread · Ctrl+Enter starts it here</p> : null}
       </div>
     </aside>
   );

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from gofer.core.prompt_envelope import AgentResources
 
 if TYPE_CHECKING:
     from gofer.ui.swarms import SwarmManager
@@ -42,17 +45,28 @@ Actions and params:
 - read: swarmId required. section defaults to overview. Options: configuration
   (saved team for the next run), run_configuration (members/settings of this run),
   task (full task and handoff context), progress (objectives and revision),
-  board (messages/delivery receipts), events,
-  agent (requires agentId; stream=messages or traces). Board/events/agent accept
+  board (messages/delivery receipts), events, human_inbox (all approval notifications),
+  attempts, workspaces (review destinations per repository), diagnostics (checks, cleanup,
+  failures, usage and coordinator diagnosis), agent (requires agentId;
+  stream=messages or traces). Board/events/attempts/inbox/agent accept
   offset=0 and limit=20, maximum 100. Optional runId reads an archived run.
 - history: swarmId; offset=0. Returns up to 20 previous run summaries; use read
   with runId to inspect one. The current run is in read, not history.
 - create: params contains name, optional charter, and agents. Each agent needs
   name, role, provider (codex, claude_code, cursor, copilot, opencode, antigravity or grok),
   model (default cli-default), optional effort, id, resources,
-  allowSteering (default false), isOrchestrator (boolean).
+  allowSteering (default false), isOrchestrator (boolean), optional workspacePath
+  (absolute project folder; defaults to the swarm project). Workspace changes apply
+  to the next run. help.workspacePaths lists projects supplied by the desktop for this
+  turn. Their grants are attached privately to mutations; never request or invent tokens.
+  Expired grants require reopening/reselecting the project and sending a new chat turn.
+  Omit workspacePath or set it to "" to return an agent to the swarm project.
+  permissionMode uses the provider's modes: codex read-only/workspace-write/danger-full-access;
+  claude_code default/acceptEdits/auto/manual/dontAsk/plan/bypassPermissions;
+  other providers default, with cli-managed also supported by antigravity/grok.
+  resources follows help.resourcesSchema (shell, web, skills, mcpServers).
   Exactly one orchestrator and 1-16 agents. Optional wakeIntervalSeconds=60
-  (10-3600), maxConcurrency=3 (1-8),
+  (10-3600), maxConcurrency=3 (positive integer),
   contextCharLimit=48000,
   integrationChecks (command argument arrays), gitPermissions={local:true,remote:false}.
   Local Git allows managed staging/commits in assignment worktrees. Remote Git adds
@@ -63,6 +77,8 @@ Actions and params:
   backoff, starting at 10 seconds and capped at 300 seconds. Stop cancels retries.
   Non-Git projects serialize turns.
   Git projects snapshot local edits using a private index and isolate worktrees.
+  Before agents start, each repository gets a named review worktree that accumulates
+  integrated changes and survives cleanup. Read workspaces to find paths and branches.
   Capacity covers app-managed turns, not provider-native children. Usage is unknown
   when the provider does not report it. read section=attempts exposes attempt records.
 - update: swarmId and changed configuration fields as params. Read configuration
@@ -76,8 +92,10 @@ Actions and params:
   and a concise summary. Returns immediately; use read later.
 - control: swarmId; action is pause, resume, or stop. Pause prevents new turns;
   stop requests cancellation and child workspace cleanup. Read state to confirm agents have stopped.
-  cleanup retries a failed cleanup. Completed/stopped Git runs retain only the parent
-  branch/worktree; unmerged commits and dirty files are archived outside it.
+  action=cleanup retries a failed cleanup. Completed/stopped Git runs retain the review
+  branch/worktree for each repository; unmerged work is archived outside it.
+- complete: swarmId. Request completion through the same evidence, inbox, delivery,
+  attempt and per-repository integration checks as the coordinator. Does not waive checks.
 - message: swarmId; body required, optional context as for start, recipientId
   (agent ID or all; defaults to orchestrator), actionable (default true), requestId
   (reuse on retry to avoid duplicate posts). Messages are shared on the board.
@@ -95,13 +113,17 @@ Actions and params:
   progress again before applying changes. Only claim completion from recorded data.
 - verify: swarmId; milestoneId, attemptId, result with revision (Git commit SHA)
   and/or artifacts (relative file paths). Runs configured checks and records evidence.
-- integrate: swarmId; milestoneId, attemptId. Integrates verified work in the swarm
+- integrate: swarmId; milestoneId, attemptId. Integrates verified work in its own repository
   workspace, runs combined checks and preserves conflicts. Omit milestoneId for
-  final combined verification. The user's checkout remains unchanged.
+  final combined verification; workspaceRoot selects a repository from projectWorkspaces.
+  The user's checkout remains unchanged.
 - repair: swarmId; milestoneId, attemptId, reason describing the changed approach.
 - replan: swarmId; reason with a changed plan. Use it to record a changed approach.
-- resolve_attempt: swarmId; attemptId, resolution (review or dismiss), reason.
-  Only after the user reviews uncertain effects and confirms prior execution stopped.
+- human_response: swarmId; notificationId, decision (proceed or redirect), instruction.
+  For recovery also resolution (review, retry or dismiss). Inspect the workspace and
+  confirm prior execution stopped before retrying. Act only on the user's authorization.
+- resolve_attempt: swarmId; attemptId, resolution (review, retry or dismiss), reason.
+  Under the user's authorization, review uncertain effects and confirm prior execution stopped.
   Review preserves output for verification; dismiss allows an explicit new repair.
 - deliveries: swarmId; messageId, agentId, action (retry or dismiss). Use only
   after the user requests review of an uncertain delivery; retry may repeat work.
@@ -173,10 +195,26 @@ def _handoff(params: dict[str, Any], field: str) -> str:
 
 
 class RemSwarmAccess:
-    def __init__(self, manager: SwarmManager, project: str, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        manager: SwarmManager,
+        project: str,
+        *,
+        read_only: bool = False,
+        workspace_grants: dict[str, str] | None = None,
+    ) -> None:
         self.manager = manager
         self.project = project
         self.read_only = read_only
+        self._workspace_grants: dict[str, str] = {}
+        for path, grant in (workspace_grants or {}).items():
+            if (
+                not isinstance(path, str)
+                or not Path(path).is_absolute()
+                or not isinstance(grant, str)
+            ):
+                raise ValueError("Workspace grants require absolute paths and string grants")
+            self._workspace_grants[str(Path(path).resolve())] = grant
 
     def call(self, _name: str, arguments: dict[str, Any]) -> Any:
         if set(arguments) - {"action", "swarmId", "params"}:
@@ -191,6 +229,8 @@ class RemSwarmAccess:
                 "instructions": SWARM_HELP,
                 "projectRoot": self.project,
                 "readOnly": self.read_only,
+                "workspacePaths": sorted({self.project, *self._workspace_grants}),
+                "resourcesSchema": AgentResources.model_json_schema(),
             }
         if action == "list":
             return _page([_summary(s) for s in self.manager.list(self.project)], params)
@@ -209,6 +249,8 @@ class RemSwarmAccess:
             "repair",
             "replan",
             "resolve_attempt",
+            "human_response",
+            "complete",
         }:
             raise ValueError("Unknown action; call help")
         swarm_id = arguments.get("swarmId")
@@ -228,14 +270,25 @@ class RemSwarmAccess:
             return self._read(swarm_id, params)
         if self.read_only:
             raise ValueError("Swarm changes are unavailable in read-only/plan mode")
+        params = {"workspaceGrants": dict(self._workspace_grants), **params}
         if action == "create":
             result = self.manager.create(self.project, params)
         elif action == "update":
             result = self.manager.update(self.project, swarm_id, params)
         elif action == "start":
-            result = self.manager.start(self.project, swarm_id, _handoff(params, "task"))
+            result = self.manager.start(
+                self.project,
+                swarm_id,
+                _handoff(params, "task"),
+                workspace_grants=params.get("workspaceGrants"),
+            )
         elif action == "control":
-            result = self.manager.control(self.project, swarm_id, params.get("action", ""))
+            result = self.manager.control(
+                self.project,
+                swarm_id,
+                params.get("action", ""),
+                workspace_grants=params.get("workspaceGrants"),
+            )
         elif action == "message":
             result = self.manager.message(
                 self.project, swarm_id, {**params, "body": _handoff(params, "body")}
@@ -244,7 +297,15 @@ class RemSwarmAccess:
             if "revision" not in params:
                 raise ValueError("Read progress and supply its revision before updating objectives")
             result = self.manager.objectives(self.project, swarm_id, params)
-        elif action in {"verify", "integrate", "repair", "replan", "resolve_attempt"}:
+        elif action in {
+            "verify",
+            "integrate",
+            "repair",
+            "replan",
+            "resolve_attempt",
+            "human_response",
+            "complete",
+        }:
             result = self.manager.execution(self.project, swarm_id, {**params, "action": action})
             return result if "result" in result else _summary(result)
         else:
@@ -286,6 +347,25 @@ class RemSwarmAccess:
             return result
         if not run:
             raise ValueError("This swarm has no run")
+        if section == "workspaces":
+            return {key: run.get(key) for key in ("workspace", "projectWorkspaces")}
+        if section == "diagnostics":
+            return {
+                key: run.get(key)
+                for key in (
+                    "state",
+                    "pauseReason",
+                    "failureReason",
+                    "cleanup",
+                    "integration",
+                    "integrationBusy",
+                    "idleDiagnosis",
+                    "digest",
+                    "usage",
+                )
+            }
+        if section == "human_inbox":
+            return _page(run.get("humanInbox", []), params)
         if section == "task":
             return {"task": run["task"]}
         if section == "run_configuration":
@@ -293,7 +373,10 @@ class RemSwarmAccess:
         if section == "progress":
             return {"objectives": run["objectives"], "revision": run["revision"]}
         if section in {"board", "events", "attempts"}:
-            return _page(run["messages" if section == "board" else "events"], params)
+            return _page(
+                run[{"board": "messages", "events": "events", "attempts": "attempts"}[section]],
+                params,
+            )
         if section == "agent":
             agent = run["agentStates"].get(params.get("agentId"))
             if agent is None:

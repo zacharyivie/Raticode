@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -59,13 +61,132 @@ from gofer.utils.run_state import workflow_run_stop_path
 
 
 def test_workflow_discovery_prunes_worktrees_and_dependencies(tmp_path: Path) -> None:
-    for folder in ("workspaces/run/attempt", "node_modules/package", ".venv/lib", ".git"):
+    for folder in (
+        "workspaces/run/attempt",
+        "node_modules/package",
+        ".venv/lib",
+        ".git",
+        "venv/lib",
+        ".agents",
+        "__pycache__",
+        "nested/node_modules/package",
+    ):
         directory = tmp_path / folder
         directory.mkdir(parents=True)
         (directory / "pyproject.toml").write_text("not a workflow")
     payload = list_workflow_payloads(tmp_path)
     assert payload["workflows"] == []
     assert payload["errors"] == []
+
+
+@pytest.mark.parametrize(
+    ("error_number", "reason", "preserve_index"),
+    [
+        (errno.ENOENT, "path disappeared", False),
+        (errno.ENOTDIR, "path type changed", False),
+        (errno.EACCES, "permission denied", True),
+        (errno.EIO, "filesystem error; retry on refresh", True),
+    ],
+)
+def test_workflow_discovery_survives_broken_subtree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    reason: str,
+    preserve_index: bool,
+) -> None:
+    broken = tmp_path / "a-broken"
+    broken.mkdir()
+    create_workflow_payload("Hidden", broken)
+    create_workflow_payload("Healthy", tmp_path)
+    create_workflow_payload("Stale", tmp_path)
+    list_workflow_payloads(tmp_path)
+    (tmp_path / "stale.toml").unlink()
+    original_scandir = os.scandir
+
+    def failing_scandir(path: Any) -> Any:
+        if Path(path) == broken:
+            raise OSError(error_number, "private OS detail\nsecret", str(broken))
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", failing_scandir)
+    result = list_workflow_payloads(tmp_path)
+
+    assert [workflow["id"] for workflow in result["workflows"]] == ["healthy"]
+    assert result["errors"] == [{"path": "a-broken", "message": f"Skipped: {reason}."}]
+    entries = api_module._read_workflow_index(tmp_path)["workflows"]
+    assert ("a-broken/hidden.toml" in entries) is preserve_index
+    assert "healthy.toml" in entries
+    assert "stale.toml" not in entries
+    monkeypatch.setattr(os, "scandir", original_scandir)
+    assert len(list_workflow_payloads(tmp_path)["workflows"]) == 2
+
+
+@pytest.mark.parametrize("phase", ["parse", "payload", "index", "replace"])
+def test_workflow_discovery_survives_file_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    create_workflow_payload("Broken", tmp_path)
+    create_workflow_payload("Healthy", tmp_path)
+    broken = tmp_path / "broken.toml"
+    # Force parsing while retaining an old entry to exercise invalidation.
+    broken.write_text(broken.read_text() + "\n# refresh\n")
+    if phase == "parse":
+        original_parse = api_module.AgenticWorkflow.from_file
+
+        def disappearing_parse(path: Path) -> Any:
+            if path == broken:
+                path.unlink()
+            return original_parse(path)
+
+        monkeypatch.setattr(api_module.AgenticWorkflow, "from_file", disappearing_parse)
+    elif phase == "payload":
+        original_payload = api_module.workflow_to_payload
+
+        def disappearing_payload(workflow: Any, path: Path, **kwargs: Any) -> Any:
+            if path == broken:
+                path.unlink()
+            return original_payload(workflow, path, **kwargs)
+
+        monkeypatch.setattr(api_module, "workflow_to_payload", disappearing_payload)
+    else:
+        original_entry = api_module._workflow_index_entry
+
+        def changing_entry(path: Path, payload: Any) -> Any:
+            if path == broken:
+                path.unlink()
+                if phase == "replace":
+                    path.write_text('[workflow]\nid = "replacement"\nname = "Replacement"\n')
+            return original_entry(path, payload)
+
+        monkeypatch.setattr(api_module, "_workflow_index_entry", changing_entry)
+
+    result = list_workflow_payloads(tmp_path)
+    assert [workflow["id"] for workflow in result["workflows"]] == ["healthy"]
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["path"] == "broken.toml"
+    assert "Skipped:" in result["errors"][0]["message"]
+    assert "broken.toml" not in api_module._read_workflow_index(tmp_path)["workflows"]
+
+
+def test_workflow_discovery_orders_workflows_and_traversal_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("Zebra", "Alpha"):
+        create_workflow_payload(name, tmp_path)
+    for name in ("z-broken", "a-broken"):
+        (tmp_path / name).mkdir()
+    original_scandir = os.scandir
+
+    def failing_scandir(path: Any) -> Any:
+        if Path(path).name.endswith("-broken"):
+            raise PermissionError(errno.EACCES, "private", str(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", failing_scandir)
+    result = list_workflow_payloads(tmp_path)
+    assert [workflow["id"] for workflow in result["workflows"]] == ["alpha", "zebra"]
+    assert [error["path"] for error in result["errors"]] == ["a-broken", "z-broken"]
 
 
 def test_list_workflow_payloads_serializes_real_nodes_and_edges(tmp_path: Path) -> None:
@@ -3346,3 +3467,108 @@ condition = "on_failure"
     run = workflow_run_log_payload("approval-flow", run_id, tmp_path)
     assert run["nodeOutputs"]["approve"]["data"]["decision"] == "timeout"
     assert run["nodeOutputs"]["notify"]["data"]["body"] == "Decision: timeout"
+
+
+def test_cancelled_legacy_traversal_preserves_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_workflow_payload("Keep", tmp_path)
+    list_workflow_payloads(tmp_path)
+    original = api_module._read_workflow_index(tmp_path)
+    cancelled = False
+    real_walk = os.walk
+
+    def walk(*args: Any, **kwargs: Any) -> Any:
+        nonlocal cancelled
+        for entry in real_walk(*args, **kwargs):
+            cancelled = True
+            yield entry
+
+    def check() -> None:
+        if cancelled:
+            raise api_module.DiscoveryCancelled()
+
+    monkeypatch.setattr(os, "walk", walk)
+    with pytest.raises(api_module.DiscoveryCancelled):
+        list_workflow_payloads(tmp_path, check_cancelled=check)
+    assert api_module._read_workflow_index(tmp_path) == original
+
+
+@pytest.mark.parametrize("phase", ["traversal", "compilation"])
+def test_project_discovery_cancellation_stops_remaining_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    project = tmp_path / "project"
+    registry = tmp_path / "registry"
+    for name in ("a", "b"):
+        root = project / ".raticode" / name
+        root.mkdir(parents=True)
+        (root / "workflow.rattish").write_text(f"Rattish: 1\nWorkflow:\n  name: {name}\n")
+    cancelled = False
+    compiled: list[str] = []
+    real_compile = api_module.compile_rattish_file
+    real_iterdir = Path.iterdir
+
+    def iterdir(path: Path) -> Any:
+        nonlocal cancelled
+        for entry in real_iterdir(path):
+            if path == project / ".raticode" and phase == "traversal":
+                cancelled = True
+            yield entry
+
+    def compile_file(path: Path, **kwargs: Any) -> Any:
+        nonlocal cancelled
+        compiled.append(str(path))
+        artifact = real_compile(path, **kwargs)
+        cancelled = True
+        return artifact
+
+    def check() -> None:
+        if cancelled:
+            raise api_module.DiscoveryCancelled()
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    monkeypatch.setattr(api_module, "compile_rattish_file", compile_file)
+    with pytest.raises(api_module.DiscoveryCancelled):
+        open_project_payload(project, registry_dir=registry, check_cancelled=check)
+    assert len(compiled) == (1 if phase == "compilation" else 0)
+    if phase == "traversal":
+        assert not registry.exists()
+
+
+def test_project_discovery_reports_real_filesystem_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise PermissionError("secret backend detail")
+
+    monkeypatch.setattr(api_module, "discover_registered_workflows", fail)
+    with pytest.raises(WorkflowCreateError, match="permission denied") as error:
+        open_project_payload(tmp_path)
+    assert "secret" not in str(error.value)
+
+
+def test_project_discovery_keeps_compile_errors_in_project_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    registry = tmp_path / "registry"
+    for name in ("broken", "healthy"):
+        root = project / ".raticode" / name
+        root.mkdir(parents=True)
+        (root / "workflow.rattish").write_text(f"Rattish: 1\nWorkflow:\n  name: {name}\n")
+    real_compile = api_module.compile_rattish_file
+
+    def compile_file(path: Path, **kwargs: Any) -> Any:
+        if path.parent.name == "broken":
+            raise PermissionError("private OS detail\nsecret")
+        return real_compile(path, **kwargs)
+
+    monkeypatch.setattr(api_module, "compile_rattish_file", compile_file)
+    payload = open_project_payload(project, registry_dir=registry)
+    broken, healthy = payload["workflows"]
+    assert broken["projectRoot"] == str(project)
+    assert broken["invalid"]
+    assert "permission denied" in broken["validationError"]
+    assert "secret" not in broken["validationError"]
+    assert not healthy["invalid"]

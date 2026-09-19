@@ -8,33 +8,47 @@ const activePickerStyle = {
   color: "var(--model-picker-active-fg)",
 };
 
-export function useProviderCapabilities() {
+export function useProviderCapabilities(projectRoot = "") {
+  const requestRef = useRef(0);
+  const abortRef = useRef(null);
+  const rootRef = useRef(projectRoot);
+  rootRef.current = projectRoot;
   const [capabilities, setCapabilities] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   const load = useCallback(async (refresh = false) => {
+    const requestId = ++requestRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const current = () => requestId === requestRef.current && rootRef.current === projectRoot && !controller.signal.aborted;
     setLoading(true);
     setError("");
     try {
       const suffix = refresh ? "?refresh=1" : "";
-      const response = await fetch(apiUrl(`/provider/capabilities${suffix}`));
+      const response = await fetch(apiUrl(`/provider/capabilities${suffix}`), { signal: controller.signal });
       if (!response.ok) throw new Error("Could not discover provider capabilities");
       const payload = await response.json();
+      if (!current()) return;
       setCapabilities(Array.isArray(payload.providers) ? payload.providers : []);
     } catch (loadError) {
+      if (!current() || loadError?.name === "AbortError") return;
       setCapabilities([]);
       setError(loadError instanceof Error ? loadError.message : "Could not discover providers");
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
-  }, []);
+  }, [projectRoot]);
 
   useEffect(() => {
     load();
     const reload = (event) => load(event.detail?.refresh === true);
     window.addEventListener("raticode:providers-changed", reload);
-    return () => window.removeEventListener("raticode:providers-changed", reload);
+    return () => {
+      abortRef.current?.abort();
+      window.removeEventListener("raticode:providers-changed", reload);
+    };
   }, [load]);
 
   return { capabilities, error, loading, refresh: () => load(true) };

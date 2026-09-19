@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hmac
 import json
 import os
@@ -10,7 +11,7 @@ import time
 import tomllib
 import urllib.parse
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast, overload
@@ -220,13 +221,22 @@ WORKFLOW_INDEX_FILE = "workflows.json"
 RUN_INDEX_PREFIX = "runs-"
 
 
-def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
+class DiscoveryCancelled(Exception):
+    """The caller no longer needs this discovery result."""
+
+
+def list_workflow_payloads(
+    data_dir: Path | None = None, *, check_cancelled: Callable[[], None] = lambda: None
+) -> dict[str, Any]:
     """Return registered Rattish workflow summaries for Studio."""
+    check_cancelled()
     base = _data_dir(data_dir)
     workflows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
-    if not base.exists():
+    try:
+        base.stat()
+    except FileNotFoundError:
         return {
             "authoringLanguage": "rattish",
             "dataDir": str(base),
@@ -235,40 +245,88 @@ def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
             "promptAgentIds": [],
         }
 
+    except OSError:
+        # Let traversal report an inaccessible root through the errors payload.
+        pass
+
     workflow_index = _read_workflow_index(base)
     index_entries = _workflow_index_entries(workflow_index)
     index_changed = False
     # Managed worktrees and dependencies are not legacy workflow registries.
-    # os.walk also tolerates directories disappearing during enumeration.
     excluded = {"workspaces", "node_modules", ".git", ".venv", "venv", ".agents", "__pycache__"}
+    unreadable_paths: list[Path] = []
+
+    def report_skip(path: Path, exc: OSError) -> None:
+        # Do not expose raw OS messages, which may contain absolute paths or data.
+        if isinstance(exc, PermissionError):
+            reason = "permission denied"
+        elif isinstance(exc, FileNotFoundError):
+            reason = "path disappeared"
+        elif isinstance(exc, (NotADirectoryError, IsADirectoryError)):
+            reason = "path type changed"
+        elif exc.errno == errno.EAGAIN:
+            reason = "file changed during discovery; retry on refresh"
+        else:
+            reason = "filesystem error; retry on refresh"
+        errors.append({"path": _workflow_index_key(base, path), "message": f"Skipped: {reason}."})
+
+    def traversal_error(exc: OSError) -> None:
+        path = Path(os.fsdecode(exc.filename)) if exc.filename is not None else base
+        report_skip(path, exc)
+        if not isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            unreadable_paths.append(path)
+
     workflow_paths: list[Path] = []
-    for directory, children, files in os.walk(base, followlinks=False):
-        children[:] = [name for name in children if name not in excluded]
+    for directory, children, files in os.walk(base, onerror=traversal_error, followlinks=False):
+        check_cancelled()
+        children[:] = sorted(name for name in children if name not in excluded)
         workflow_paths.extend(Path(directory) / name for name in files if name.endswith(".toml"))
     workflow_paths.sort()
     for path in workflow_paths:
+        check_cancelled()
         index_key = _workflow_index_key(base, path)
-        cached = _workflow_index_payload(base, index_entries.get(index_key), path)
-        if cached is not None:
-            workflows.append(cached)
-            continue
         try:
-            workflow = AgenticWorkflow.from_file(path)
-        except Exception as exc:
-            error = {"path": index_key, "message": str(exc)}
-            errors.append(error)
-            payload = invalid_workflow_payload(path, str(exc), base)
-            workflows.append(payload)
-            index_entries[index_key] = _workflow_index_entry(path, payload)
-            index_changed = True
+            before = path.stat()
+            cached = _workflow_index_payload(base, index_entries.get(index_key), path)
+            if cached is not None:
+                if path.stat() != before:
+                    raise OSError(errno.EAGAIN, "Workflow changed")
+                workflows.append(cached)
+                continue
+            validation_error = None
+            try:
+                workflow = AgenticWorkflow.from_file(path)
+            except OSError:
+                raise
+            except Exception as exc:
+                validation_error = str(exc)
+                payload = invalid_workflow_payload(path, validation_error, base)
+            else:
+                payload = workflow_to_payload(workflow, path, source_base=base)
+            entry = _workflow_index_entry(path, payload)
+            if path.stat() != before:
+                raise OSError(errno.EAGAIN, "Workflow changed")
+        except OSError as exc:
+            report_skip(path, exc)
+            # Never reuse a payload whose source could not be read consistently.
+            if index_entries.pop(index_key, None) is not None:
+                index_changed = True
             continue
-        payload = workflow_to_payload(workflow, path, source_base=base)
+        if validation_error is not None:
+            errors.append({"path": index_key, "message": validation_error})
         workflows.append(payload)
-        index_entries[index_key] = _workflow_index_entry(path, payload)
+        index_entries[index_key] = entry
         index_changed = True
 
+    check_cancelled()
     existing_names = {_workflow_index_key(base, path) for path in workflow_paths}
-    stale_names = [name for name in index_entries if name not in existing_names]
+    # Absence beneath an unreadable subtree is not evidence of deletion.
+    stale_names = [
+        name
+        for name in index_entries
+        if name not in existing_names
+        and not any((base / name).is_relative_to(path) for path in unreadable_paths)
+    ]
     for name in stale_names:
         index_entries.pop(name, None)
         index_changed = True
@@ -282,6 +340,7 @@ def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
         registered = ()
     legacy_ids = {str(workflow.get("id", "")).lower() for workflow in workflows}
     for registered_workflow in registered:
+        check_cancelled()
         if registered_workflow.workflow_id.lower() in legacy_ids:
             errors.append(
                 {
@@ -294,12 +353,13 @@ def list_workflow_payloads(data_dir: Path | None = None) -> dict[str, Any]:
             )
             continue
         workflows.append(_registered_rattish_payload(registered_workflow, base))
+        check_cancelled()
 
     return {
         "authoringLanguage": "rattish",
         "dataDir": str(base),
         "workflows": workflows,
-        "errors": errors,
+        "errors": sorted(errors, key=lambda error: (error["path"], error["message"])),
         "promptAgentIds": prompt_agent_ids(base),
     }
 
@@ -323,16 +383,35 @@ def open_project_payload(
     project_root: Path,
     *,
     registry_dir: Path | None = None,
+    check_cancelled: Callable[[], None] = lambda: None,
 ) -> dict[str, Any]:
-    """Register existing Rattish workflows discovered inside a project folder."""
+    """Register and compile workflows while the requesting client still needs them."""
+    check_cancelled()
     base = _data_dir(registry_dir)
     try:
-        registered = discover_registered_workflows(project_root, registry_dir=base)
+        registered = discover_registered_workflows(
+            project_root, registry_dir=base, check_cancelled=check_cancelled
+        )
     except RattishWorkspaceError as exc:
         raise WorkflowCreateError(str(exc)) from exc
+    except OSError as exc:
+        reason = (
+            "permission denied"
+            if isinstance(exc, PermissionError)
+            else "filesystem changed or unavailable"
+        )
+        raise WorkflowCreateError(
+            f"Unable to discover project workflows: {reason}. Retry on refresh."
+        ) from exc
+    workflows = []
+    for workflow in registered:
+        check_cancelled()
+        workflows.append(_registered_rattish_payload(workflow, base))
+        # Compilation is synchronous; discard its result and stop before the next file.
+        check_cancelled()
     return {
         "projectRoot": str(project_root.expanduser().resolve()),
-        "workflows": [_registered_rattish_payload(workflow, base) for workflow in registered],
+        "workflows": workflows,
     }
 
 
@@ -417,18 +496,31 @@ def _registered_rattish_payload(
         node_count = len(artifact.ir["nodes"])
         edge_count = sum(len(node["routes"]) for node in artifact.ir["nodes"])
         inputs = _rattish_workflow_inputs(artifact.ir["workflow"]["inputs"])
-    except (RattishArtifactError, RattishError) as exc:
+    except (RattishArtifactError, RattishError, OSError) as exc:
         status = "Error"
-        validation_error = str(exc)
+        filesystem_error = exc if isinstance(exc, OSError) else exc.__cause__
+        if isinstance(filesystem_error, OSError):
+            reason = (
+                "permission denied"
+                if isinstance(filesystem_error, PermissionError)
+                else "file changed or unavailable"
+            )
+            validation_error = f"Unable to compile workflow: {reason}. Retry on refresh."
+        else:
+            validation_error = str(exc)
         node_count = 0
         edge_count = 0
         inputs = {}
+    try:
+        updated_at = _updated_at(workflow.entrypoint)
+    except OSError:
+        updated_at = "Unknown"
     return {
         "id": workflow.workflow_id,
         "name": workflow.name,
         "description": f"{node_count} Rattish nodes, {edge_count} routes.",
         "status": status,
-        "updatedAt": _updated_at(workflow.entrypoint),
+        "updatedAt": updated_at,
         "sourcePath": str(workflow.entrypoint),
         "sourceFormat": "rattish",
         "readOnly": False,

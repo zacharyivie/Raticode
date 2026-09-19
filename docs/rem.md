@@ -222,25 +222,29 @@ running and paused runs and records a deliberate new delivery attempt.
 Steering does not cancel an already-running command or undo its effects. Other providers
 use the same queue without claiming active-turn steering support.
 
-Runs default to three concurrent agents, a 60-second orchestrator check interval, and a
-100-turn limit. These are configurable. Agents share the project directory, so the
-orchestrator should assign nonoverlapping file ownership and perform integration checks.
+Runs default to three concurrent agents and a 60-second orchestrator check interval.
+There is no cumulative turn or elapsed-time limit. Each agent can choose a workspace
+project. Git repositories get a named review worktree before agents start, with isolated
+assignment worktrees feeding their changes into it. Cleanup retains each repository's
+review worktree. Non-Git projects serialize writers within each project.
 The timer reconciles new board activity; it does not start repeated empty provider turns.
 Pause prevents new turns while current turns finish. Stop requests cancellation. Reopening
 the application leaves interrupted runs paused, with uncertain deliveries visible for
-review. Provider failures and the turn limit pause the run. No run starts merely by
-opening a project or selecting a swarm.
+review. Provider failures retry with bounded backoff in their preserved workspace.
+No run starts merely by opening a project or selecting a swarm.
 
 ### Rem access
 
 Settings > Rem > Swarm access enables the built-in swarm MCP connection. It is on
 by default and applies to the next message in any thread, including existing threads.
-The connection uses that thread's project and works with both providers even when
-Rem's shell access is off. Read-only and plan modes allow inspection only.
+The connection uses that thread's project and works through the provider MCP adapter
+even when Rem's shell access is off. Read-only and plan modes allow inspection only.
 
 Ask Rem to create or edit a team, start a requested run, pause/resume/stop work,
 message members, update objectives, or inspect progress, agent activity, and previous
-runs. Creating a team does not start it. Members still use their own configured
+runs. Rem can also verify and integrate attempts, resolve the human inbox, repair or
+replan work, retry cleanup, and request completion through the runtime's normal checks.
+Creating a team does not start it. Members still use their own configured
 providers and resources.
 
 Only a compact tool description is offered initially. The tool's `help` action loads
@@ -248,6 +252,28 @@ its instructions; team and run details are fetched separately. Board messages, e
 and agent activity are paginated. Rem can hand off selected conversation context as
 text or JSON with a task or message. The app does not copy the transcript automatically.
 Large handoffs should use project file references and a summary.
+
+The on-demand instructions live in `src/gofer/ui/rem_swarms.py` as `SWARM_HELP`;
+there is no separate swarm SKILL.md to install. Help includes the resource schema and
+workspace paths supplied by the desktop. Set each agent's `workspacePath` to one of
+these paths, or omit it to use the swarm project. Read configuration before updating
+the roster and preserve agent IDs. Agent permission modes, resources, provider, model,
+effort, steering, roles, and coordinator selection are configurable. Saved changes
+apply to the next run.
+
+The desktop forwards existing grants for the projects offered by the workspace selector
+privately with the chat request. Rem does not need to see or copy grant tokens. Start,
+resume, verify, integrate, create, and update still validate the required workspace grants;
+an expired grant requires selecting the project again and starting a new chat turn.
+This does not grant access to arbitrary directories.
+
+Read `workspaces` for each repository's review destination and `diagnostics` for
+integration, cleanup, recovery, coordinator digest, and usage. Read `attempts` for
+attempt workspaces and evidence, including archived runs. Board participation uses
+`message`: target a member or everyone, use `actionable=false` for an informational
+post, and reuse `requestId` when retrying a post. Read the board to inspect delivery
+receipts. Rem monitors when called; its turn-scoped connection is not a background
+subscription. Unknown provider usage remains unknown.
 
 The connection reuses the running application's swarm manager and expires when the
 Rem turn ends. It cannot switch to another project. Disabling Swarm access removes

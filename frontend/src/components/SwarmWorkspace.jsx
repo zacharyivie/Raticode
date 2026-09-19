@@ -13,7 +13,7 @@ const fieldClass = "w-full min-w-0 rounded-lg border border-line bg-white px-3 p
 const buttonClass = "inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-white px-3 py-1.5 text-xs font-semibold text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand disabled:cursor-not-allowed disabled:opacity-50";
 const primaryClass = "inline-flex items-center justify-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-not-allowed disabled:opacity-50";
 
-export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, defaults = {}, selectedAgentId }) {
+export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, defaults = {}, selectedAgentId, projectPaths = [] }) {
   const [swarm, setSwarm] = useState(null);
   const [editor, setEditor] = useState(swarmId === "new" ? "team" : null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -49,7 +49,7 @@ export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, d
   async function mutate(suffix, payload, method = "POST") {
     setBusy(true); setError("");
     try {
-      const result = await swarmRequest(rootPath, swarmId === "new" ? "" : `/${swarmId}${suffix}`, { method, ...payload });
+      const result = await swarmRequest(rootPath, swarmId === "new" ? "" : `/${swarmId}${suffix}`, { method, ...payload, workspacePaths: [...new Set([...(payload.agents || swarm?.agents || []), ...(swarm?.run?.configuration?.agents || [])].map(agent => agent.workspacePath).filter(Boolean))] });
       setSwarm(result.swarm);
       window.dispatchEvent(new CustomEvent("gofer:swarms-changed"));
       if (swarmId === "new") onSelect(result.swarm.id);
@@ -74,10 +74,12 @@ export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, d
     {loading ? <p role="status" className="p-6 text-sm text-muted">Loading swarm...</p> : <>
       {editor ? <section aria-label={editor === "team" ? "Swarm settings" : "Agent settings"} className="flex min-h-0 flex-1 flex-col">
         <div className="swarm-toolbar"><h3 className="flex-1 text-sm font-semibold">{editor === "team" ? "Team setup" : `${swarm?.agents.find(agent => agent.id === editor)?.name || "Agent"} settings`}</h3>{swarm ? <button type="button" className={buttonClass} onClick={() => setEditor(null)}>Back to dashboard</button> : null}</div>
-        <SwarmSettings key={editor} selectedAgentId={editor === "team" ? null : editor} defaults={defaults} swarm={swarm} busy={busy} active={active} onSave={async definition => { const saved = await mutate("", definition, swarmId === "new" ? "POST" : "PUT"); if (saved) setEditor(null); return saved; }} />
+        <SwarmSettings rootPath={rootPath} projectPaths={projectPaths} key={editor} selectedAgentId={editor === "team" ? null : editor} defaults={defaults} swarm={swarm} busy={busy} active={active} onSave={async definition => { const saved = await mutate("", definition, swarmId === "new" ? "POST" : "PUT"); if (saved) setEditor(null); return saved; }} />
       </section> : null}
       {swarm ? <div hidden={Boolean(editor)} className={`swarm-scroll workflow-scrollbar ${editor ? "hidden" : ""}`}>
         <div className="swarm-dashboard">
+            {run ? <HumanInbox key={run.id} run={run} agents={runAgents} readOnly={Boolean(archiveId) || !["running", "paused"].includes(run.state)} busy={busy} onAction={payload => mutate("/execution", payload)} /> : null}
+
           <section className="swarm-run-heading" aria-label="Run overview">
             <div className="swarm-run-topline"><span className="swarm-run-label">{archiveId ? "Previous run" : run ? "Current run" : "New run"}</span><RunStatus state={run?.state || "ready"} />
               <div className="ml-auto flex flex-wrap gap-2">{archiveId ? <button className={buttonClass} onClick={() => setArchiveId("")}>Return to current run</button> : active ? <><button type="button" disabled={busy || stopping || diagnosing} className={buttonClass} onClick={() => void mutate("/control", { action: currentRun.state === "paused" ? "resume" : "pause" })}>{currentRun.state === "paused" ? <Play size={13} /> : <Pause size={13} />}{currentRun.state === "paused" ? "Resume" : "Pause"}</button><button type="button" disabled={busy || stopping} className={buttonClass} onClick={() => void mutate("/control", { action: "stop" })}><Square size={12} />Stop</button></> : null}</div>
@@ -147,10 +149,11 @@ export function SwarmExecution({ run, agents, readOnly, busy, onAction }) {
   return <section aria-label="Execution and verification" className="space-y-3 border-t border-line pt-4 text-xs">
     <p className="text-muted">{run.turnCount || 0} turns{run.createdAt ? ` · Started ${new Date(run.createdAt).toLocaleString()}` : ""}</p>
     <div className="flex flex-wrap gap-x-5 gap-y-2 text-muted"><span>Input tokens: {usage.input_tokens == null ? "Unknown" : usage.input_tokens.toLocaleString()}</span><span>Output tokens: {usage.output_tokens == null ? "Unknown" : usage.output_tokens.toLocaleString()}</span><span>{run.workspace?.mode === "git" ? "Isolated Git worktrees" : "One writer at a time"}</span></div>
-    {run.workspace?.path ? <p className="break-all text-muted">{run.workspace.mode === "git" ? "Integration workspace" : "Project"}: {run.workspace.path}</p> : null}
+    {run.workspace?.path ? <p className="break-all text-muted">{run.workspace.mode === "git" ? "Review worktree" : "Project"}: {run.workspace.path}</p> : null}
+    {run.workspace?.branch ? <p className="break-all text-muted">Review branch: <code>{run.workspace.branch}</code></p> : null}
+    {Object.entries(run.projectWorkspaces || {}).map(([project, workspace]) => <div key={project} className="space-y-1"><p className="break-all text-muted">Project: {project}</p><p className="break-all text-muted">{workspace.mode === "git" ? "Review worktree" : "Workspace"}: {workspace.path}</p>{workspace.branch ? <p className="break-all text-muted">Review branch: <code>{workspace.branch}</code></p> : null}{workspace.integration ? <p role="status">Checks: {workspace.integration.passed ? "Passed" : "Incomplete"}{workspace.integration.error ? ` · ${workspace.integration.error}` : ""}</p> : null}{!readOnly && workspace.mode === "git" ? <button type="button" className={buttonClass} disabled={busy} onClick={() => onAction({ action: "integrate", workspaceRoot: project })}>Check combined changes</button> : null}</div>)}
     {run.integration ? <p role="status">Combined checks: {run.integration.passed ? "Passed" : "Incomplete"}{run.integration.error ? ` · ${run.integration.error}` : ""}</p> : null}
     {run.replanRequired && !readOnly ? <form className="space-y-2" onSubmit={async event => { event.preventDefault(); if (await onAction({ action: "replan", reason })) setReason(""); }}><label className="block space-y-1">Changed plan<textarea className={fieldClass} required value={reason} onChange={event => setReason(event.target.value)} /></label><button type="submit" className={buttonClass} disabled={busy || !reason.trim()}>Record plan</button><p className="text-muted">Record the changed approach, then resume the run.</p></form> : null}
-    {run.workspace?.branch ? <p className="break-all text-muted">Parent branch: <code>{run.workspace.branch}</code></p> : null}
     <details open={open} onToggle={event => setOpen(event.currentTarget.open)}><summary className="cursor-pointer font-semibold">Assignment attempts and checks ({attempts.length})</summary>{open ? <div className="mt-3 space-y-4">
       <p className="text-muted">{run.capacityScope || "Provider usage limits apply. Failed agents retry after 10 seconds, doubling up to 5 minutes."} Provider session recovery and child discovery are unavailable.</p>
       {attempts.slice(-20).reverse().map(attempt => <article key={attempt.id} className="space-y-2 border-t border-line pt-3">
@@ -161,12 +164,57 @@ export function SwarmExecution({ run, agents, readOnly, busy, onAction }) {
         {attempt.result?.artifacts?.map(artifact => <p key={artifact.path} className="break-all text-muted">Artifact: {artifact.path} · SHA-256 {artifact.sha256}</p>)}
         {[...(attempt.result?.checks || []), ...(attempt.integration?.checks || [])].map(check => <p key={check.logPath} className="break-all text-muted">Exit {check.exitCode}: {check.command.join(" ")} · Log: {check.logPath}</p>)}
         {attempt.integration?.conflicts?.length ? <p role="alert">Integration conflict: {attempt.integration.conflicts.join(", ")} · Preserved at {attempt.integration.path}</p> : null}
-        {!readOnly && attempt.result?.passed && !attempt.integration?.passed && run.workspace?.mode === "git" ? <button type="button" className={buttonClass} disabled={busy} onClick={() => onAction({ action: "integrate", milestoneId: attempt.milestoneId, attemptId: attempt.id })}>Integrate and check</button> : null}
+        {!readOnly && attempt.result?.passed && !attempt.integration?.passed && (run.projectWorkspaces?.[attempt.projectRoot] || run.workspace)?.mode === "git" ? <button type="button" className={buttonClass} disabled={busy} onClick={() => onAction({ action: "integrate", milestoneId: attempt.milestoneId, attemptId: attempt.id })}>Integrate and check</button> : null}
         {!readOnly && attempt.state === "uncertain" ? <AttemptReview attempt={attempt} busy={busy} onAction={onAction} /> : null}
       </article>)}
       {attempts.length > 20 ? <p className="text-muted">Showing the latest 20 attempts. Ask Rem for older attempt records.</p> : null}
     </div> : null}</details>
   </section>;
+}
+
+export function HumanInbox({ run, agents, readOnly, busy, onAction }) {
+  const items = [...(run.humanInbox || [])].sort((a, b) =>
+    Number(b.state === "pending") - Number(a.state === "pending") ||
+    String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const pending = items.filter(item => item.state === "pending");
+  return <section aria-label="Human inbox" className="swarm-inbox">
+    <div className="swarm-inbox-heading"><h2>Human inbox</h2><span className="swarm-count">{pending.length} unread</span></div>
+    {!pending.length ? <p className="swarm-inbox-empty">No decisions waiting for you.</p> : null}
+    {items.length ? <div className="swarm-inbox-list workflow-scrollbar" role="region" aria-label="Inbox issues" tabIndex={0}>
+      {items.map(item => <HumanInboxItem key={item.id} item={item} agent={agents.find(agent => agent.id === item.agentId)} busy={Boolean(busy || run.agentStates?.[item.agentId]?.state === "working")} readOnly={readOnly} onAction={onAction} />)}
+    </div> : null}
+  </section>;
+}
+
+const recoveryActions = {
+  review: "Keep output for verification",
+  retry: "Retry this attempt in its existing workspace",
+  dismiss: "Dismiss this attempt",
+};
+
+function HumanInboxItem({ item, agent, busy, readOnly, onAction }) {
+  const [redirect, setRedirect] = useState(false);
+  const [instruction, setInstruction] = useState("");
+  const [resolution, setResolution] = useState("review");
+  const recovery = item.kind === "recovery";
+  const addressed = item.state !== "pending";
+  const nextSteps = item.nextSteps || [recovery ? recoveryActions[item.resolution] : "", item.instruction || item.recommendedAction].filter(Boolean).join(". ");
+  return <article className="swarm-inbox-item" data-read={addressed || undefined}>
+    <div className="swarm-inbox-byline"><span>{agent?.name || item.agentId}</span><span>{addressed ? "Read" : "Unread"}</span></div>
+    <h3>Needs Attention:</h3>
+    <p>{item.description}</p>
+    <h3>{addressed ? "Next steps:" : "Recommended Action:"}</h3>
+    <p>{addressed ? nextSteps || "Response recorded." : item.recommendedAction}</p>
+    {recovery ? <details className="swarm-inbox-context"><summary>Attempt details</summary>
+      {item.workspace?.path ? <p>Workspace: {item.workspace.path}</p> : null}
+      <p>Attempt {item.attemptId}{item.milestoneId ? ` · Milestone ${item.milestoneId}` : ""}</p>
+    </details> : null}
+    {!readOnly && !addressed ? <form onSubmit={event => { event.preventDefault(); if (!busy) void onAction({ action: "human_response", notificationId: item.id, decision: redirect ? "redirect" : "proceed", instruction: redirect ? instruction : "", resolution }); }}>
+      {recovery ? <label className="swarm-inbox-resolution">On proceed<select className={fieldClass} value={resolution} onChange={event => setResolution(event.target.value)}>{Object.entries(recoveryActions).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : null}
+      {redirect ? <label className="swarm-inbox-instruction">Additional instruction<textarea autoFocus required className={fieldClass} rows={2} value={instruction} onChange={event => setInstruction(event.target.value)} /></label> : null}
+      <div className="swarm-inbox-actions"><button type="submit" className={primaryClass} disabled={busy || (redirect && !instruction.trim())}>{redirect ? "Send instruction" : "Proceed"}</button><button type="button" className={buttonClass} disabled={busy} onClick={() => setRedirect(value => !value)}>{redirect ? "Cancel" : "Do something else"}</button></div>
+    </form> : null}
+  </article>;
 }
 
 function AttemptReview({ attempt, busy, onAction }) {
@@ -213,7 +261,20 @@ export function PositiveNumberField({ label, value, onChange, min = 1, disabled 
   return <label className="block space-y-1.5 text-xs text-muted"><span>{label}</span><input aria-label={label} type="text" inputMode="decimal" className={fieldClass} value={draft} disabled={disabled} onFocus={() => setFocused(true)} onChange={(event) => setDraft(event.target.value)} onBlur={commit} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} /></label>;
 }
 
-function SwarmSettings({ swarm, active, busy, onSave, defaults, selectedAgentId }) {
+export function AgentWorkspaceField({ value, rootPath, projectPaths, disabled, onChange }) {
+  const paths = [...new Set(projectPaths.filter(path => path && path !== rootPath))];
+  if (value && value !== rootPath && !paths.includes(value)) paths.push(value);
+  return <label className="swarm-setup-field">Workspace project
+    <select className={fieldClass} disabled={disabled} value={value} onChange={event => onChange(event.target.value)}>
+      <option value="">Swarm project{rootPath ? ` · ${rootPath}` : ""}</option>
+      {value === rootPath ? <option value={rootPath}>{rootPath}</option> : null}
+      {paths.map(path => <option key={path} value={path}>{path}</option>)}
+    </select>
+    <span className="swarm-setup-hint">Works in this repository and coordinates with the whole team. Changes apply to the next run.</span>
+  </label>;
+}
+
+export function SwarmSettings({ swarm, active, busy, onSave, defaults = {}, selectedAgentId, rootPath = "", projectPaths = [] }) {
   const createAgent = (orchestrator = false) => ({ ...newSwarmAgent(orchestrator), provider: defaults.provider || "codex", model: defaults.model || "", effort: defaults.effort || "", resources: structuredClone(defaults.resources || DEFAULT_REM_RESOURCES) });
   const [draft, setDraft] = useState(() => swarm ? structuredClone({ name: swarm.name, charter: swarm.charter, agents: swarm.agents, wakeIntervalSeconds: swarm.wakeIntervalSeconds, maxConcurrency: swarm.maxConcurrency, gitPermissions: swarm.gitPermissions ?? { local: true, remote: false } }) : { name: "", charter: "", agents: [createAgent(true)], wakeIntervalSeconds: 60, maxConcurrency: 3, gitPermissions: { local: true, remote: false } });
   const [expandedAgentId, setExpandedAgentId] = useState(selectedAgentId || draft.agents[0]?.id);
@@ -277,6 +338,7 @@ function SwarmSettings({ swarm, active, busy, onSave, defaults, selectedAgentId 
             <fieldset data-swarm-agent={agent.id} disabled={disabled} className="swarm-setup-agent-body">
               <legend className="sr-only">{agent.name || "New agent"} settings</legend>
               <label className="swarm-setup-field">Name<input required className={fieldClass} value={agent.name} onChange={event => patchAgent(agent.id, { name: event.target.value })} /></label>
+              <AgentWorkspaceField value={agent.workspacePath || ""} rootPath={rootPath} projectPaths={projectPaths} disabled={disabled} onChange={workspacePath => patchAgent(agent.id, { workspacePath })} />
               <label className="swarm-setup-field">Role and instructions<textarea required rows={3} className={fieldClass} value={agent.role} onChange={event => patchAgent(agent.id, { role: event.target.value })} /></label>
               <div className="swarm-setup-model"><span className="swarm-setup-field-label">Model</span><ProviderModelEffortFields loading={loading} capabilities={capabilities} provider={agent.provider} model={agent.model} effort={agent.effort} disabled={disabled} onRefresh={refresh} onChange={values => patchAgent(agent.id, { ...values, ...(values.provider && values.provider !== agent.provider ? { permissionMode: providerPermissionDefault(values.provider) } : {}) })} /></div>
               <details className="swarm-setup-advanced">
@@ -360,7 +422,7 @@ function SwarmAgentActivity({ run, agents, selectedAgentId, compact = false }) {
   const agent = agents.find((item) => item.id === agentId);
   return <div className="workflow-scrollbar min-h-0 flex-1 overflow-y-auto p-4"><div className="mx-auto max-w-3xl space-y-5">
     {!compact ? <label className="block space-y-1.5 text-xs text-muted">Agent<select className={fieldClass} value={agentId} onChange={(event) => setAgentId(event.target.value)}>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.isOrchestrator ? " · Orchestrator" : ""}</option>)}</select></label> : null}
-    <div className="space-y-1 text-xs"><p className="font-semibold">{agent?.role}</p><p className="text-muted">{agent?.provider} · {agent?.model || "Default model"} · {agent?.effort || "Default effort"}</p><p role="status" className="text-muted">{state?.state || "Idle"}{state?.activity ? ` · ${state.activity}` : ""}</p>{state?.error ? <p role="alert" className="text-red-600 dark:text-red-300">{state.error}</p> : null}</div>
+    <div className="space-y-1 text-xs"><p className="font-semibold">{agent?.role}</p><p className="text-muted">{agent?.provider} · {agent?.model || "Default model"} · {agent?.effort || "Default effort"}</p><p className="break-all text-muted">Project: {agent?.workspacePath || "Swarm project"}</p><p role="status" className="text-muted">{state?.state || "Idle"}{state?.activity ? ` · ${state.activity}` : ""}</p>{state?.error ? <p role="alert" className="text-red-600 dark:text-red-300">{state.error}</p> : null}</div>
     <section className="space-y-3"><h3 className="text-sm font-semibold">Recent tool activity</h3>{!state?.traces?.length ? <p className="text-xs text-muted">Tool activity appears here as the agent works.</p> : state.traces.slice().reverse().map((trace, index) => <details key={index} className="border-b border-line pb-3"><summary className="cursor-pointer text-xs">{trace.title || trace.trace?.title || trace.text || "Provider activity"}</summary><pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded bg-slate-50 p-3 text-xs leading-5">{trace.body || trace.trace?.body || JSON.stringify(trace, null, 2)}</pre></details>)}</section>
     <section className="space-y-3"><h3 className="text-sm font-semibold">Conversation</h3>{!state?.messages?.length ? <p className="text-xs text-muted">This agent has not started a turn.</p> : state.messages.map((message, index) => <details key={index} open={message.role === "assistant"} className="border-b border-line pb-3"><summary className="cursor-pointer text-xs font-semibold">{message.role === "assistant" ? agent?.name : "Task and shared context"}</summary><p className="mt-2 whitespace-pre-wrap break-words text-xs leading-6">{message.body}</p></details>)}</section>
   </div></div>;

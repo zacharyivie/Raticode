@@ -1,12 +1,12 @@
 pkgbase = gofer-flow-cli
 	pkgdesc = Command line workflow automation tool for Raticode
-	pkgver = 0.3.3
+	pkgver = 0.3.4
 	pkgrel = 1
 	url = https://github.com/zacharyivie/gofer-flow
 	arch = x86_64
 	license = AGPL-3.0-only
 	options = !strip
-	source_x86_64 = gof-linux-x64-0.3.3::https://github.com/zacharyivie/gofer-flow/releases/download/v0.3.3/gof-linux-x64
+	source_x86_64 = gof-linux-x64-0.3.4::https://github.com/zacharyivie/gofer-flow/releases/download/v0.3.4/gof-linux-x64
 	sha256sums_x86_64 = SKIP
 
 pkgname = gofer-flow-cli

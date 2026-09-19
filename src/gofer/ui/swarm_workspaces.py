@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import tarfile
@@ -47,7 +48,7 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
     return result.stdout.strip()
 
 
-def prepare_run(root: Path, directory: Path) -> dict[str, Any]:
+def prepare_run(root: Path, directory: Path, *, name: str = "") -> dict[str, Any]:
     try:
         top = Path(git(root, "rev-parse", "--show-toplevel")).resolve()
     except (ValueError, FileNotFoundError):
@@ -74,8 +75,11 @@ def prepare_run(root: Path, directory: Path) -> dict[str, Any]:
             parent = ["-p", head] if head else []
             baseline = git(root, "commit-tree", tree, *parent, "-m", "Swarm input snapshot")
     assert baseline is not None
-    path = directory / "integration"
-    branch = f"raticode/swarm/{directory.name}/parent"
+    # Keep the run ID namespace, but give reviewers a readable destination.
+    label = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:80].rstrip("-")
+    destination = f"{label}-review" if label else "integration"
+    path = directory / destination
+    branch = f"raticode/swarm/{directory.name}/{destination if label else 'parent'}"
     git(root, "worktree", "add", "-b", branch, str(path), baseline)
     return {
         "mode": "git",

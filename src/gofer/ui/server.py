@@ -8,6 +8,7 @@ import html
 import json
 import os
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -16,8 +17,8 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +37,7 @@ from gofer.core.workflow import AgenticWorkflow
 from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
 from gofer.rattish.workspaces import list_registered_workflows
 from gofer.ui.api import (
+    DiscoveryCancelled,
     ProviderProfileError,
     RunnerQueueError,
     WorkflowAlreadyExistsError,
@@ -318,8 +320,20 @@ class GoferUiServer(ThreadingHTTPServer):
         self.swarms = SwarmManager(
             data_dir,
             resource_limits=self.resource_limits,
+            authorize_workspace=self._authorize_swarm_workspace,
             max_concurrency=int(os.environ.get("GOFER_SWARM_MAX_CONCURRENCY", "8")),
         )
+
+    def _authorize_swarm_workspace(self, path: Path, grant_id: str | None) -> None:
+        canonical = _canonical_path_for_containment(path)
+        if not (
+            _is_path_inside(canonical, _canonical_path_for_containment(self.data_dir))
+            or self.path_grants.covers_canonical(canonical, str(grant_id or ""))
+        ):
+            raise WorkflowBundleError(
+                "Agent workspace is outside the approved Raticode desktop roots. "
+                "Open the project and select it again."
+            )
 
     def server_close(self) -> None:
         auth = getattr(self, "provider_auth", None)
@@ -461,6 +475,16 @@ class GoferUiServer(ThreadingHTTPServer):
 
 
 class GoferUiRequestHandler(BaseHTTPRequestHandler):
+    def _check_discovery_cancelled(self) -> None:
+        """Observe a fetch abort without consuming any HTTP request bytes."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            disconnected = bool(readable) and not self.connection.recv(1, socket.MSG_PEEK)
+        except OSError:
+            disconnected = True
+        if disconnected:
+            raise DiscoveryCancelled()
+
     server: GoferUiServer
     server_version = "GoferUi/0.1"
 
@@ -630,9 +654,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         elif method == "PUT" and swarm_id and not action:
             result = manager.update(project_root, swarm_id, body)
         elif method == "POST" and action == "start":
-            result = manager.start(project_root, swarm_id, body.get("task", ""))
+            result = manager.start(
+                project_root,
+                swarm_id,
+                body.get("task", ""),
+                workspace_grants=body.get("workspaceGrants"),
+            )
         elif method == "POST" and action == "control":
-            result = manager.control(project_root, swarm_id, body.get("action", ""))
+            result = manager.control(
+                project_root,
+                swarm_id,
+                body.get("action", ""),
+                workspace_grants=body.get("workspaceGrants"),
+            )
         elif method == "POST" and action == "messages":
             result = manager.message(project_root, swarm_id, body)
         elif method == "POST" and action == "deliveries":
@@ -713,7 +747,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/workflows":
             query = parse_qs(parsed.query)
-            payload = list_workflow_payloads(self._request_data_dir(query))
+            try:
+                payload = list_workflow_payloads(
+                    self._request_data_dir(query), check_cancelled=self._check_discovery_cancelled
+                )
+            except DiscoveryCancelled:
+                return
             self._send_json(payload)
             return
 
@@ -1016,7 +1055,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 payload = open_project_payload(
                     project_root,
                     registry_dir=self._request_data_dir(query),
+                    check_cancelled=self._check_discovery_cancelled,
                 )
+            except DiscoveryCancelled:
+                return
             except (WorkflowCreateError, json.JSONDecodeError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
@@ -1519,10 +1561,14 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 self._validate_second_brain(body)
+                self._validate_rem_thread_projects(body)
                 data_dir = self._request_data_dir(query)
                 if "conversationId" not in body and "turnId" not in body:
                     # Legacy clients retain their request-scoped behavior.
-                    with self._rem_swarm_session(body) as (chat_body, swarm_url):
+                    with self._rem_swarm_session(body, defer_threads=True) as (
+                        chat_body,
+                        swarm_url,
+                    ):
                         self._send_stream_headers()
                         self._run_async(self._stream_chat_response(chat_body, data_dir, swarm_url))
                     return
@@ -1530,7 +1576,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 def run(emit: Callable[[dict[str, Any]], None]) -> None:
                     # Resource grants and swarm sessions live as long as the job,
                     # independently of its HTTP subscribers.
-                    with self._rem_swarm_session(body) as (chat_body, swarm_url):
+                    with self._rem_swarm_session(body, defer_threads=True) as (
+                        chat_body,
+                        swarm_url,
+                    ):
                         asyncio.run(
                             self._stream_chat_response(chat_body, data_dir, swarm_url, emit=emit)
                         )
@@ -2167,6 +2216,33 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         *,
         emit: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
+        from gofer.ui.rem_threads import stream_with_thread_tools
+
+        async def scoped_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
+            scoped_body = {**body, "workflow": options.get("workflow")}
+            with self._rem_swarm_session(scoped_body) as (prepared, swarm_url):
+                async with aclosing(
+                    stream_workflow_chat(
+                        **{
+                            **options,
+                            "workflow": prepared.get("workflow"),
+                            "trusted_swarm_url": swarm_url,
+                        }
+                    )
+                ) as stream:
+                    async for event in stream:
+                        yield event
+
+        async def thread_stream(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
+            factory = (
+                scoped_source
+                if (options.get("workflow") or {}).get("remThreads")
+                else stream_workflow_chat
+            )
+            async with aclosing(stream_with_thread_tools(factory, **options)) as stream:
+                async for event in stream:
+                    yield event
+
         write_event = emit or self._write_stream_event
         cancel_event = threading.Event()
         turn: ChatTurn | None = None
@@ -2191,9 +2267,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     str(body.get("model", "cli-default")),
                     data_dir=data_dir,
                 )
-                source = self.server.chat_steering.stream(turn, stream_workflow_chat, **kwargs)
+                source = self.server.chat_steering.stream(turn, thread_stream, **kwargs)
             else:
-                source = stream_workflow_chat(cancel_event=cancel_event, **kwargs)
+                source = thread_stream(cancel_event=cancel_event, **kwargs)
             async for event in source:
                 write_event(event)
         except (BrokenPipeError, ConnectionResetError):
@@ -2235,9 +2311,12 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     @contextmanager
     def _rem_swarm_session(
-        self, body: dict[str, Any]
+        self, body: dict[str, Any], *, defer_threads: bool = False
     ) -> Iterator[tuple[dict[str, Any], str | None]]:
         workflow = body.get("workflow") or {}
+        if defer_threads and workflow.get("remThreads"):
+            yield body, None
+            return
         config = workflow.get("remSwarmAccess") or {}
         if config.get("enabled") is not True:
             yield body, None
@@ -2258,12 +2337,33 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(server, GoferUiServer):
             raise ValueError("Swarms are unavailable on this server")
         read_only = body.get("permissionMode") in {"read-only", "plan"}
-        with server.swarms.rem_session(project, read_only=read_only) as url:
+        workspace_grants = config.get("workspaceGrants") or {}
+        if not isinstance(workspace_grants, dict):
+            raise ValueError("Workspace grants must be an object")
+        with server.swarms.rem_session(
+            project, read_only=read_only, workspace_grants=workspace_grants
+        ) as url:
             resources = dict(workflow.get("remResources") or {})
             resources["mcpServers"] = [
                 item for item in resources.get("mcpServers", []) if item.get("name") != "swarm"
             ] + [{"name": "swarm", "type": "http", "url": url}]
             yield {**body, "workflow": {**workflow, "remResources": resources}}, url
+
+    def _validate_rem_thread_projects(self, body: dict[str, Any]) -> None:
+        config = (body.get("workflow") or {}).get("remThreads") or {}
+        if not isinstance(config, dict):
+            raise ValueError("Invalid Rem thread configuration")
+        projects = config.get("projects", [])
+        if not isinstance(projects, list) or len(projects) > 100:
+            raise ValueError("Expected at most 100 open projects")
+        for project in projects:
+            if not isinstance(project, dict) or not isinstance(project.get("root"), str):
+                raise ValueError("Invalid Rem project")
+            root = Path(project["root"])
+            if not root.is_absolute() or not root.is_dir():
+                raise ValueError("Rem projects must be existing absolute directories")
+            self._assert_bundle_path_allowed(root, project.get("grantId"), must_exist=True)
+            project["name"] = str(project.get("name") or root.name)
 
     def _validate_second_brain(self, body: dict[str, Any]) -> None:
         config = (body.get("workflow") or {}).get("remSecondBrain") or {}

@@ -17,6 +17,7 @@ function harness(t) {
   const crashes = [];
   const logs = [];
   const context = {
+    backendPathGrants: { reset() {} },
     process: { env: {}, stderr: { write() {} } },
     console: { log() {} },
     setTimeout, clearTimeout,

@@ -121,6 +121,7 @@ def _request(
 
     server = _fake_server(tmp_path, resource_limits=resource_limits)
     handler = GoferUiRequestHandler.__new__(GoferUiRequestHandler)
+    setattr(handler, "_check_discovery_cancelled", lambda: None)
     handler.server = server
     handler.path = path
     handler.headers = Message()
@@ -1252,7 +1253,7 @@ def test_ui_server_log_endpoint_forwards_range_query(monkeypatch, tmp_path) -> N
 def test_ui_server_get_routes_forward_to_api_payloads(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
 
-    def fake_list(data_dir):
+    def fake_list(data_dir, *, check_cancelled):
         calls["list"] = data_dir
         return {"workflows": []}
 
@@ -1326,7 +1327,7 @@ def test_ui_server_post_workflow_routes_and_syncs(monkeypatch, tmp_path) -> None
         calls["create"] = (name, project_root, registry_dir)
         return {"id": "created"}
 
-    def fake_open_project(project_root, *, registry_dir):
+    def fake_open_project(project_root, *, registry_dir, check_cancelled):
         calls["open_project"] = (project_root, registry_dir)
         return {"projectRoot": str(project_root), "workflows": [{"id": "existing"}]}
 
@@ -2701,6 +2702,12 @@ def test_rem_swarm_grant_is_private_and_revoked_after_chat(
         assert help_data["projectRoot"] == str(tmp_path)
         assert help_data["readOnly"] is True
         assert help_data["instructions"] == SWARM_HELP
+        assert str(tmp_path / "mobile") in help_data["workspacePaths"]
+        assert "private-mobile-grant" not in json.dumps(help_data)
+        from gofer.ui.chat import build_chat_prompt
+
+        prompt = build_chat_prompt("codex", "cli-default", [], kwargs["workflow"])
+        assert "private-mobile-grant" not in prompt
         denied = rpc(url, "tools/call", {"name": "swarm_action", "arguments": {"action": "create"}})
         assert denied["result"]["isError"] is True
         if fail:
@@ -2728,7 +2735,10 @@ def test_rem_swarm_grant_is_private_and_revoked_after_chat(
                 "permissionMode": "read-only",
                 "workflow": {
                     "projectRoot": str(tmp_path),
-                    "remSwarmAccess": {"enabled": True},
+                    "remSwarmAccess": {
+                        "enabled": True,
+                        "workspaceGrants": {str(tmp_path / "mobile"): "private-mobile-grant"},
+                    },
                     "remResources": {
                         "shell": False,
                         "mcpServers": [
@@ -3026,3 +3036,154 @@ def test_provider_auth_start_failure_is_reported(
     result = _request(tmp_path, "POST", "/api/provider/auth", body={"provider": "cursor"})
     assert result.status == 400
     assert result.json() == {"error": "Could not launch login"}
+
+
+def test_discovery_checkpoint_detects_disconnect_without_consuming_request() -> None:
+    import socket
+
+    from gofer.ui.api import DiscoveryCancelled
+
+    server_socket, client_socket = socket.socketpair()
+    handler = GoferUiRequestHandler.__new__(GoferUiRequestHandler)
+    handler.connection = server_socket
+    try:
+        handler._check_discovery_cancelled()
+        client_socket.sendall(b"x")
+        handler._check_discovery_cancelled()
+        assert server_socket.recv(1) == b"x"
+        client_socket.close()
+        with pytest.raises(DiscoveryCancelled):
+            handler._check_discovery_cancelled()
+    finally:
+        server_socket.close()
+        client_socket.close()
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_discovery_cancellation_sends_no_error_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    from gofer.ui.api import DiscoveryCancelled
+
+    handler = _fake_handler(_fake_server(tmp_path))
+    handler.path = "/api/workflows" if method == "GET" else "/api/projects/open"
+    monkeypatch.setattr(handler, "_request_data_dir", lambda query: tmp_path)
+    monkeypatch.setattr(handler, "_read_json", lambda: {"projectRoot": str(tmp_path)})
+    monkeypatch.setattr(handler, "_assert_bundle_path_allowed", lambda *args, **kwargs: tmp_path)
+
+    def cancelled(*args: Any, **kwargs: Any) -> Any:
+        raise DiscoveryCancelled()
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("Cancelled discovery must not send an error or reconcile schedules")
+
+    monkeypatch.setattr(server_module, "list_workflow_payloads", cancelled)
+    monkeypatch.setattr(server_module, "open_project_payload", cancelled)
+    monkeypatch.setattr(handler, "_send_json", unexpected)
+    monkeypatch.setattr(handler, "_sync_schedules", unexpected)
+    getattr(handler, f"_dispatch_{method}")()
+
+
+def test_swarm_external_workspace_requires_its_own_current_grant(tmp_path: Path) -> None:
+    from gofer.ui.api import WorkflowBundleError
+
+    server = _fake_server(tmp_path)
+    external = tmp_path.parent / (tmp_path.name + "-mobile")
+    external.mkdir()
+    with pytest.raises(WorkflowBundleError, match="approved"):
+        server._authorize_swarm_workspace(external, None)
+    default_grant = server.path_grants.register(tmp_path)
+    with pytest.raises(WorkflowBundleError, match="approved"):
+        server._authorize_swarm_workspace(external, default_grant)
+    grant = server.path_grants.register(external)
+    server._authorize_swarm_workspace(external, grant)
+    server.path_grants._grants.clear()
+    with pytest.raises(WorkflowBundleError, match="approved"):
+        server._authorize_swarm_workspace(external, grant)
+
+
+def test_rem_threads_reject_ungranted_project_before_starting(tmp_path: Path, monkeypatch) -> None:
+    async def unexpected(**kwargs):
+        raise AssertionError("Provider should not start")
+        yield {}
+
+    monkeypatch.setattr(server_module, "stream_workflow_chat", unexpected)
+    response = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/stream",
+        body={
+            "workflow": {
+                "remThreads": {
+                    "global": True,
+                    "projects": [
+                        {"root": str(tmp_path.parent), "name": "outside"},
+                    ],
+                }
+            },
+        },
+    )
+    assert response.status == 400
+    assert "approved" in response.text()
+
+
+def test_global_rem_scope_handoff_through_local_mcp(tmp_path: Path, monkeypatch) -> None:
+    import urllib.request
+
+    project = tmp_path / "mobile"
+    project.mkdir()
+    calls = []
+    tool_urls = []
+
+    async def fake_provider(**kwargs):
+        workflow = kwargs["workflow"]
+        calls.append((workflow.get("projectRoot"), kwargs.get("permission_mode")))
+        tool = next(
+            item for item in workflow["remResources"]["mcpServers"] if item["name"] == "rem_threads"
+        )
+        tool_urls.append(tool["url"])
+        if len(calls) == 1:
+            request = urllib.request.Request(
+                tool["url"],
+                data=json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "select_project",
+                            "arguments": {"projectRoot": str(project)},
+                        },
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=2) as response:
+                result = json.load(response)
+            assert not result["result"].get("isError")
+        yield {"type": "final", "message": {"body": "Done"}}
+
+    monkeypatch.setattr(server_module, "stream_workflow_chat", fake_provider)
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/stream",
+        body={
+            "provider": "codex",
+            "permissionMode": "workspace-write",
+            "messages": [{"role": "user", "body": "Fix mobile"}],
+            "workflow": {
+                "remThreads": {
+                    "global": True,
+                    "projects": [
+                        {"root": str(project), "name": "Mobile"},
+                    ],
+                }
+            },
+        },
+    )
+    assert result.status == 200
+    events = [json.loads(line) for line in result.text().splitlines() if line]
+    assert [event["type"] for event in events] == ["project-scope", "final"]
+    assert calls == [(None, "read-only"), (str(project), "workspace-write")]
+    assert len(set(tool_urls)) == 2

@@ -48,3 +48,36 @@ export function startPolling(refresh, { interval = 2000, immediate = false, targ
     documentTarget?.removeEventListener("visibilitychange", wake);
   };
 }
+
+const cancellableRequests = new Map();
+
+// Each subscriber owns its cancellation. Only the last departure aborts shared work.
+export function shareCancellable(key, task, signal) {
+  signal?.throwIfAborted();
+  let entry = cancellableRequests.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    entry = { controller, consumers: 0 };
+    entry.promise = Promise.resolve().then(() => task(controller.signal)).finally(() => {
+      if (cancellableRequests.get(key) === entry) cancellableRequests.delete(key);
+    });
+    cancellableRequests.set(key, entry);
+  }
+  entry.consumers++;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", cancel);
+      if (--entry.consumers === 0) {
+        if (cancellableRequests.get(key) === entry) cancellableRequests.delete(key);
+        entry.controller.abort();
+      }
+      callback(value);
+    };
+    const cancel = () => finish(reject, new DOMException("Discovery cancelled", "AbortError"));
+    signal?.addEventListener("abort", cancel, { once: true });
+    entry.promise.then(value => finish(resolve, value), error => finish(reject, error));
+  });
+}

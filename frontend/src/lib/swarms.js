@@ -1,11 +1,11 @@
 import { apiUrl } from "./api.js";
 
-export async function swarmRequest(projectRoot, path = "", { method = "GET", query = {}, ...body } = {}) {
+export async function swarmRequest(projectRoot, path = "", { method = "GET", query = {}, workspacePaths = [], ...body } = {}) {
   const response = await fetch(apiUrl(`/swarms${path}?${new URLSearchParams({ projectRoot, ...query })}`), {
     method,
     ...(method === "GET" ? {} : {
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, projectRoot, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined }),
+      body: JSON.stringify({ ...body, ...(workspacePaths.length ? { workspaceGrants: Object.fromEntries(workspacePaths.map(path => [path, window.goferDesktop?.workspace?.pathGrantForApi?.(path) || ""])) } : {}), projectRoot, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(projectRoot) || undefined }),
     }),
   });
   const payload = await response.json();

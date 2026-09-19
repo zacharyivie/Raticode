@@ -280,3 +280,21 @@
   .swarm-milestone-list section > div { grid-template-columns: 12px minmax(0, 1fr) auto; gap: 6px; }
   .swarm-milestone-list .swarm-state { grid-column: auto; font-size: 10px; }
 }
+
+/* The inbox precedes the dashboard and keeps decision history in one scroll area. */
+.swarm-inbox { grid-column: 1 / -1; min-width: 0; margin-bottom: 20px; border: 1px solid rgb(var(--color-line)); border-top: 3px solid var(--swarm-accent); border-radius: 6px; background: var(--swarm-panel); }
+.swarm-inbox-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 14px 18px; }
+.swarm-inbox-heading h2 { font-size: 15px; font-weight: 600; }
+.swarm-inbox-empty { padding: 0 18px 14px; font-size: 12px; color: rgb(var(--color-muted)); }
+.swarm-inbox-list { max-height: 440px; overflow-y: auto; scrollbar-gutter: stable; }
+.swarm-inbox-item { padding: 16px 18px; border-top: 1px solid rgb(var(--color-line)); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.swarm-inbox-byline { display: flex; justify-content: space-between; gap: 12px; color: rgb(var(--color-muted)); font-size: 11px; margin-bottom: 10px; }
+.swarm-inbox-item h3 { font-size: 13px; font-weight: 600; margin: 10px 0 3px; }
+.swarm-inbox-item p { max-width: 78ch; white-space: pre-wrap; }
+.swarm-inbox-item[data-read] { background: var(--swarm-recess); }
+.swarm-inbox-context { font-size: 11px; color: rgb(var(--color-muted)); margin-top: 12px; }
+.swarm-inbox-context summary { cursor: pointer; }
+.swarm-inbox-item form { margin-top: 14px; }
+.swarm-inbox-resolution, .swarm-inbox-instruction { display: grid; gap: 5px; margin-bottom: 12px; font-size: 12px; }
+.swarm-inbox-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.swarm-inbox-actions button { flex: 0 0 auto; max-width: 100%; min-height: 34px; height: auto; padding: 8px 12px; line-height: 1.4; white-space: normal; overflow-wrap: normal; }
