@@ -172,7 +172,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.2.0",
-    "autoprefixer": "^10.4.20",
+    "autoprefixer": "^10.5.5",
     "concurrently": "^9.2.1",
     "electron": "^41.10.7",
     "electron-builder": "^26.15.3",
