@@ -1,0 +1,1 @@
+Secret Service backend is available/activatable on this host. No credential entry was read, unlocked or written. This is not an OS-store roundtrip test.

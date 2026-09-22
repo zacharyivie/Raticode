@@ -1,0 +1,15 @@
+{
+  "primaryKeyId": 1008714661,
+  "key": [
+    {
+      "keyData": {
+        "typeUrl": "type.googleapis.com/google.crypto.tink.AesGcmHkdfStreamingKey",
+        "value": "EggIgIBAEBAYAxoQjNZl0yMiQbePBa9b0yxtVw==",
+        "keyMaterialType": "SYMMETRIC"
+      },
+      "status": "ENABLED",
+      "keyId": 1008714661,
+      "outputPrefixType": "RAW"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000002",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "sequence": 2,
+  "type": "chat.message",
+  "payload": {
+    "message_id": "00000000-0000-4000-8000-000000000003",
+    "text": "The request needs desktop approval before publication.",
+    "attachment_ids": [],
+    "final": true
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000000",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "sequence": 0,
+  "type": "chat.submit",
+  "payload": {
+    "text": "Start a swarm to implement attachment previews; prepare a PR for review.",
+    "attachment_ids": []
+  }
+}

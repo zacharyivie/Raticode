@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "id": "10000000-0000-4000-8000-000000000007",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "sequence": 7,
+  "type": "approval.required",
+  "payload": {
+    "approval_id": "00000000-0000-4000-8000-000000000007",
+    "action_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "summary": "Publish the prepared PR",
+    "expires_at": 2000000300,
+    "remote_allowed": false
+  }
+}

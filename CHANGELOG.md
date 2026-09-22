@@ -3,6 +3,48 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
+## 0.3.5 - 2026-09-22
+
+Changes since the `v0.3.4` tag.
+
+### Added
+
+- Experimental pairing with Android phones and other desktops, with locally
+  confirmed identities, encrypted LAN and relay messaging, protected credential
+  storage, and device revocation and removal.
+- Shared desktop and phone conversations with searchable history, grouped tool
+  activity, attachment labels, and running-turn status. Phones can create,
+  configure, pin, archive, and request deletion of shared threads.
+- Scoped file transfers and delegation to paired desktop workers, with local
+  authorization, durable request tracking, and replay protection.
+
+### Changed
+
+- Confirming a new phone pairing enables desktop thread and project sync by
+  default. Existing phones retain their sync setting. Shared phones act as the
+  same user and can change provider permissions; legacy scoped grants retain
+  their limits. Desktop must remain open to synchronize archived history.
+
+### Fixed
+
+- Accept Cursor CLI builds without a build-date allowlist. Selected project and
+  Global working folders use Cursor's workspace trust flag while retaining
+  provider tool permissions.
+- Share relay rate-limit cooldowns across subscriptions and pause sessions for
+  the server's requested backoff.
+- Reject named pipes during device file snapshots without blocking the device
+  service while waiting for a writer.
+- Include device dependencies and the protocol schema in packaged backends.
+- Run paired-device and mobile-conversation browser regressions in the standard
+  release validation suite.
+
+### Release limitations
+
+- Device networking remains experimental and requires explicit opt-in.
+  Independent security review, physical phone and two-host testing, relay
+  endurance, and exact-package acceptance remain open before public device
+  support is advertised. See `docs/security/device-release.md`.
+
 ## 0.3.4 - 2026-09-19
 
 Changes since the `v0.3.3` tag.

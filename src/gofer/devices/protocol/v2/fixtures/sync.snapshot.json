@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "sync.snapshot",
+  "payload": {
+    "revision": 1,
+    "through_sequence": 0,
+    "threads": []
+  }
+}

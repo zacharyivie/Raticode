@@ -12,6 +12,7 @@ import select
 import shutil
 import signal
 import socket
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -271,6 +272,37 @@ class DesktopPathGrantStore:
 
 
 class GoferUiServer(ThreadingHTTPServer):
+    async def _device_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
+        """Use the desktop's provider, resource and swarm services for shared turns."""
+        workflow = dict(options.get("workflow") or {})
+        config = workflow.get("remSwarmAccess") or {}
+        project = workflow.get("projectRoot")
+        if config.get("enabled") is not True or not project:
+            async with aclosing(stream_workflow_chat(**options)) as stream:
+                async for event in stream:
+                    yield event
+            return
+        root = Path(project).resolve(strict=True)
+        if not root.is_relative_to(
+            self.data_dir.resolve()
+        ) and not self.path_grants.covers_canonical(root, str(config.get("grantId") or "")):
+            raise ValueError("desktop_project_grant_expired")
+        with self.swarms.rem_session(
+            root,
+            read_only=options.get("permission_mode") in {"read-only", "plan"},
+            workspace_grants=config.get("workspaceGrants") or {},
+        ) as url:
+            resources = dict(workflow.get("remResources") or {})
+            resources["mcpServers"] = [
+                item for item in resources.get("mcpServers", []) if item.get("name") != "swarm"
+            ] + [{"name": "swarm", "type": "http", "url": url}]
+            workflow["remResources"] = resources
+            async with aclosing(
+                stream_workflow_chat(**{**options, "workflow": workflow, "trusted_swarm_url": url})
+            ) as stream:
+                async for event in stream:
+                    yield event
+
     def __init__(
         self,
         server_address: tuple[str, int],
@@ -282,10 +314,18 @@ class GoferUiServer(ThreadingHTTPServer):
         data_dir.mkdir(parents=True, exist_ok=True)
         super().__init__(server_address, GoferUiRequestHandler)
         self.data_dir = data_dir
+        self.resource_limits = resource_limits or bundle_resource_limits_from_env()
         self.chat_steering = ChatSteering(data_dir)
         self.chat_jobs = ChatJobs(data_dir, UI_MAX_EXPENSIVE_REQUESTS)
         self.provider_auth = ProviderAuthSessions()
-        self.resource_limits = resource_limits or bundle_resource_limits_from_env()
+        # Optional device dependencies must not prevent normal local UI startup.
+        self.devices: Any = None
+        try:
+            from gofer.devices.control import DeviceControl
+
+            self.devices = DeviceControl(data_dir)
+        except ImportError:
+            pass
         self.api_token = api_token or os.environ.get("GOFER_UI_API_TOKEN") or _new_ui_api_token()
         self.emit_ready_token = os.environ.get("GOFER_UI_EMIT_READY_TOKEN") == "1"
         self.allowed_origins = (
@@ -324,6 +364,15 @@ class GoferUiServer(ThreadingHTTPServer):
             max_concurrency=int(os.environ.get("GOFER_SWARM_MAX_CONCURRENCY", "8")),
         )
 
+        if self.devices is not None:
+            self.devices.attach_chat(
+                self.chat_jobs,
+                self.chat_steering,
+                data_dir,
+                self.resource_limits,
+                source=self._device_chat_source,
+            )
+
     def _authorize_swarm_workspace(self, path: Path, grant_id: str | None) -> None:
         canonical = _canonical_path_for_containment(path)
         if not (
@@ -336,6 +385,9 @@ class GoferUiServer(ThreadingHTTPServer):
             )
 
     def server_close(self) -> None:
+        devices = getattr(self, "devices", None)
+        if devices is not None:
+            devices.close()
         auth = getattr(self, "provider_auth", None)
         if auth is not None:
             auth.close()
@@ -682,6 +734,18 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"swarm": result or None})
 
     def _dispatch_GET(self) -> None:
+        if urlparse(self.path).path == "/api/devices":
+            self._send_json(
+                self.server.devices.status()
+                if self.server.devices
+                else {
+                    "enabled": False,
+                    "network_release": False,
+                    "peers": [],
+                    "error": "Install the desktop devices dependencies to configure pairing.",
+                }
+            )
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
@@ -1008,6 +1072,81 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/devices":
+            if self.server.devices is None:
+                self._send_json({"error": "Device service dependencies unavailable"}, status=503)
+                return
+            try:
+                body = self._read_json(limit=10 * 1024 * 1024)
+                if body.get("action") == "workspace_exchange":
+                    from gofer.ui.device_context import shared_context
+
+                    metadata = body.get("metadata")
+                    if not isinstance(metadata, dict) or not isinstance(body.get("messages"), list):
+                        raise ValueError("Missing desktop thread")
+                    workflow = body.get("workflow") or {}
+                    self._validate_rem_thread_projects({"workflow": workflow})
+                    self._validate_second_brain({"workflow": workflow})
+                    project = metadata.get("projectRoot")
+                    canonical = None
+                    if project:
+                        try:
+                            canonical = self._assert_bundle_path_allowed(
+                                Path(str(project)), body.get("grantId"), must_exist=True
+                            )
+                        except (WorkflowBundleError, OSError):
+                            # Deleted/closed scopes remain searchable. They must be
+                            # reassigned before dispatch, not block every other thread.
+                            canonical = None
+                    body["context"] = shared_context(
+                        metadata, workflow, provider_capabilities_payload()["providers"], canonical
+                    )
+                if (
+                    body.get("action") in {"workspace_poll", "workspace_exchange"}
+                    and self.server.devices.application is not None
+                ):
+                    providers = provider_capabilities_payload()["providers"]
+                    self.server.devices.application.workspace.providers = [
+                        {
+                            "id": p["id"],
+                            "permission_modes": [
+                                mode["id"] for mode in p.get("permissionModes", [])
+                            ],
+                            "default_permission": p.get("defaultPermissionMode", "default"),
+                            "efforts": {
+                                m["id"]: [e["id"] for e in m.get("efforts", [])]
+                                for m in p.get("models", [])[:100]
+                            },
+                            "models": list(dict.fromkeys([m["id"] for m in p.get("models", [])]))[
+                                :100
+                            ],
+                        }
+                        for p in providers
+                        if p.get("available") and p.get("enabled")
+                    ][:32]
+                if body.get("action") == "authorize_thread":
+                    context = body.get("context")
+                    if not isinstance(context, dict):
+                        raise ValueError("Missing local thread context")
+                    canonical_project = self._assert_bundle_path_allowed(
+                        Path(str(context.get("project_path", ""))),
+                        body.get("grantId"),
+                        must_exist=True,
+                    )
+                    context["project_path"] = str(canonical_project)
+                self._send_json(self.server.devices.action(body))
+            except (ValueError, OSError, sqlite3.Error, WorkflowBundleError):
+                # Do not expose raw storage, TLS, or user-input exceptions.
+                self._send_json(
+                    {
+                        "error": (
+                            "Device action failed. Check identity, expiry "
+                            "and the unlocked OS credential store."
+                        )
+                    },
+                    status=400,
+                )
+            return
         if parsed.path == "/api/provider/auth":
             try:
                 body = self._read_json()
@@ -2216,6 +2355,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         *,
         emit: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
+        from gofer.ui.device_tools import stream_with_fleet_tools
         from gofer.ui.rem_threads import stream_with_thread_tools
 
         async def scoped_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
@@ -2239,7 +2379,17 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 if (options.get("workflow") or {}).get("remThreads")
                 else stream_workflow_chat
             )
-            async with aclosing(stream_with_thread_tools(factory, **options)) as stream:
+
+            async def fleet_source(**fleet_options: Any) -> AsyncGenerator[dict[str, Any], None]:
+                async with aclosing(
+                    stream_with_fleet_tools(
+                        factory, getattr(self.server, "devices", None), **fleet_options
+                    )
+                ) as fleet_stream:
+                    async for event in fleet_stream:
+                        yield event
+
+            async with aclosing(stream_with_thread_tools(fleet_source, **options)) as stream:
                 async for event in stream:
                     yield event
 

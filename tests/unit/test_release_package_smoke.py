@@ -68,6 +68,7 @@ def test_probe_checks_archive_and_runs_outside_checkout(
     binary.touch(mode=0o755)
     entries = [
         "third-party-licenses/inventory.json",
+        "gofer/devices/protocol/v2/event.schema.json",
         "third-party-licenses/PYTHON-LICENSE.txt",
         "third-party-licenses/native-inventory.json",
     ]
@@ -85,6 +86,13 @@ def test_probe_checks_archive_and_runs_outside_checkout(
     calls.return_value = "gof 0.0.0"
     with pytest.raises(RuntimeError, match="Wrong packaged version"):
         smoke.probe(binary)
+    schema = "gofer/devices/protocol/v2/event.schema.json"
+    archive.toc.pop(schema)
+    calls.reset_mock()
+    with pytest.raises(RuntimeError, match="event.schema.json"):
+        smoke.probe(binary)
+    calls.assert_not_called()
+    archive.toc[schema] = None
     archive.toc.pop(entries[-1])
     calls.reset_mock()
     with pytest.raises(RuntimeError, match="native-inventory"):

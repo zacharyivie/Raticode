@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" tests="9" skipped="0" failures="0" errors="0" timestamp="2026-09-19T17:57:11.297Z" hostname="Mossblaster9000" time="0.97">
+  <properties/>
+  <testcase name="pythonRejectsTlsReplay" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.117"/>
+  <testcase name="expiredPinnedCertificateFails" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.107"/>
+  <testcase name="pythonRejectsTlsTampering" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.108"/>
+  <testcase name="p384PinnedCertificateFails" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.104"/>
+  <testcase name="absentAlpnFails" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.108"/>
+  <testcase name="pythonClientAndKotlinServer" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.109"/>
+  <testcase name="kotlinClientAndPythonServer" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.108"/>
+  <testcase name="wrongAlpnFails" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.099"/>
+  <testcase name="pythonRejectsWrongMobilePin" classname="dev.raticode.mobile.protocol.v2.PythonTlsInteropTest" time="0.109"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

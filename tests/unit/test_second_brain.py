@@ -27,11 +27,21 @@ def test_notes_search_external_edits_deletions_and_links(tmp_path: Path) -> None
     assert matches[0]["path"] == "projects/launch.md"
     stable_id = matches[0]["id"]
     (tmp_path / "projects/launch.md").write_text("Launch uses Postgres.")
-    assert not brain.search("SQLite")
-    assert brain.search("Postgres")[0]["id"] == stable_id
+    # Native filesystem notifications arrive asynchronously.
+    from tests.unit.test_second_brain_index import eventually
+
+    def edited():
+        assert not brain.search("SQLite")
+        assert brain.search("Postgres")[0]["id"] == stable_id
+
+    eventually(edited)
     assert brain.call("read_note", {"path": "projects/launch.md"})["content"].endswith("Postgres.")
     (tmp_path / "projects/launch.md").unlink()
-    assert not brain.search("Postgres")
+
+    def deleted():
+        assert not brain.search("Postgres")
+
+    eventually(deleted)
 
 
 def test_note_format_containment_and_existing_knowledge(tmp_path: Path) -> None:

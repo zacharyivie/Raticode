@@ -10,7 +10,7 @@ const env = {
 const uvCommand = process.platform === "win32" ? "uv.exe" : "uv";
 const result = spawnSync(
   uvCommand,
-  ["run", "--locked", "--extra", "xlsx", "pyinstaller", "--clean", "--noconfirm", "gof.spec"],
+  ["run", "--locked", "--extra", "xlsx", "--extra", "devices", "pyinstaller", "--clean", "--noconfirm", "gof.spec"],
   {
     cwd: repoRoot,
     env,

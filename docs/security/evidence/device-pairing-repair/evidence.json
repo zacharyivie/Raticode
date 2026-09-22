@@ -1,0 +1,222 @@
+{
+  "attempt": "db1b67d7c0f64b8e8ee693cfac7de2b3",
+  "recovered_revision": "7ee89bccaa6308ff89ea52e35e3fbdb529aa7269",
+  "retained_artifacts": {
+    "docs/security/evidence/device-pairing/backend-full.txt": "e42f4b4c1d0f9d5499be96731dd8e23b404d9b4b3020846180c8c271aee5bca0",
+    "docs/security/evidence/device-pairing/backend-full.xml": "b97bb202bf1a76235ee15348216d63752f3d430d8cde8072ab148a7c21f351cf",
+    "docs/security/evidence/device-pairing/browser.txt": "7a9c58f8f3a0411059a1a9d1fd19f433c5a5e3a8482f142a5a5dc7172cf24ac1",
+    "docs/security/evidence/device-pairing/environment.json": "176a96653af5a91faf92fdc33cb0774f5263ccbb664eb1b61cfbc32fd090f381",
+    "docs/security/evidence/device-pairing/evidence.json": "e695740b04af33819aaabcfe8ec0fba0d55996e69aa47a959ce3bff09882d14f",
+    "docs/security/evidence/device-pairing/frontend-build.txt": "80121ab37376bd1624b03ebf0246bd4b2e7b15b58aa5c11fb1f6b6b8ae2764f7",
+    "docs/security/evidence/device-pairing/frontend-lint.txt": "8a5470a0f399df7d1e3e4d33b96efd2c17fb2b3607318d143ce990d499087643",
+    "docs/security/evidence/device-pairing/frontend-tests.txt": "1dc97a6de7d6930791404cee971669c40d16dc2d91c104d619591edab1dbaa81",
+    "docs/security/evidence/device-pairing/mypy.txt": "5121fc685080825cb99f883cfb985d5afef7655417c3f0f72394d1125fc671f1",
+    "docs/security/evidence/device-pairing/os-store-probe.txt": "94de411dbd80c1ad54987ae26c1ec65d3ef61999cfecbf5f227bb12ea21476cb",
+    "docs/security/evidence/device-pairing/release-scripts.txt": "daa4e0b4ac655fb9fa14b7782490ca5a16a3d084983c7efb792e1b1987de42c0",
+    "docs/security/evidence/device-pairing/ruff.txt": "d54afb2519dfce7ee3e269340df2dbeb4dcb3b74e08191e5835314bf352b6a5d",
+    "docs/security/evidence/device-pairing/source-sha256.json": "107fdf1efa7f2ec44d8aebf2ad2ea318cf26d8693cd19d036fb592f382a109b3",
+    "docs/security/evidence/device-pairing/targeted.txt": "fe330892322a094fcf90ee6858dadbde16c67626349448165010973c222c11cb",
+    "docs/security/evidence/device-pairing/targeted.xml": "dac0b88f02e8d999c9b91d78a1ba5cbcf23023e9fe2328794d7becaf960265ab",
+    "docs/security/evidence/device-pairing/recovery.json": "3f1773a37a9adc3865b3943a6c73646a948b5d46688565b0ca87936d7a5039cd"
+  },
+  "measurement_scope": "Developer precommit measurements. Managed checks after commit supply exact revision evidence; these measurements are not that receipt.",
+  "changes": [
+    "Empty enrollment capabilities persisted across restart, nonempty remote grants rejected, frozen wire fixtures unchanged.",
+    "Optional invalid device-host setup safely disables listener, normal authenticated local UI remains usable.",
+    "Select nvm before backend release tests.",
+    "Second Brain asynchronous external watcher checks use bounded eventual assertions with unchanged content, stable ID and deletion assertions.",
+    "Four exhaustive sorted node-ID partitions, run/revision/tree binding and JUnit/per-test reconciliation."
+  ],
+  "diagnosis": {
+    "release": "Controlled PATH=/usr/bin:/bin reproduced precisely six FileNotFoundError node failures and eight passes. Both default shell Node26 and required nvm Node22 runs passed14. Original managed log lacks traceback/environment; missing Node is a matching reproduction, not proof of original PATH. Runner now selects required Node before all phases.",
+    "second_brain": "First targeted run reproduced stale Postgres result immediately after unlink. Native watchdog delivers asynchronously; existing test_second_brain_index uses a 2-second eventually helper. Later baseline runs passed, preserving evidence that failure is timing-dependent. Applied existing helper to external edit/delete assertions; no production behavior changed.",
+    "reconciliation": "Initial reconciliation rejected ordering because pytest fixture grouping reordered collected selection. Compare sorted IDs, still reject duplicates and enforce exact expected partition. Corrected reconciliation over retained measurements passed. Five negative evidence mutations rejected. Fresh final managed run remains required."
+  },
+  "checks": {
+    "backend": {
+      "total": 2560,
+      "passed": 2558,
+      "skipped": 2,
+      "phases": {
+        "phase-1": {
+          "seconds": 38.89118834096007,
+          "exit_code": 0,
+          "count": 640
+        },
+        "phase-2": {
+          "seconds": 25.66722058004234,
+          "exit_code": 0,
+          "count": 640
+        },
+        "phase-3": {
+          "seconds": 36.29556683800183,
+          "exit_code": 0,
+          "count": 640
+        },
+        "phase-4": {
+          "seconds": 30.45420617191121,
+          "exit_code": 0,
+          "count": 640
+        }
+      }
+    },
+    "targeted": 125,
+    "frontend_tests": 576,
+    "frontend_lint": "pass",
+    "frontend_build": "pass with existing size warnings",
+    "browser": "pass",
+    "ruff": "pass --fix",
+    "mypy": "pass 241 files",
+    "negative_reconciliation": {
+      "missing": "rejected",
+      "duplicate": "rejected",
+      "stale": "rejected",
+      "failed": "rejected",
+      "junit_tamper": "rejected"
+    }
+  },
+  "artifact_manifest": {
+    "reports-swarm/measurement/backend-1.log": {
+      "sha256": "28f6679393a2ffe86b940ec7e077ad097a4df599a23b7508b533b48367359fe7",
+      "bytes": 249006
+    },
+    "reports-swarm/measurement/mypy.log": {
+      "sha256": "0e25eb46e912b97adf13749a5ee30a1115097e41ca673e21b3e36c9777c6e396",
+      "bytes": 83
+    },
+    "reports-swarm/measurement/frontend-test.log": {
+      "sha256": "e27d023197e1a615ff9f69dbea0c5fb89df63d1eb7ce1c4c455f249d96fcc9c3",
+      "bytes": 60045
+    },
+    "reports-swarm/measurement/frontend-lint.log": {
+      "sha256": "4086f22ddf40c32dfe06ef6e06135c32662e7fcd0e32bd4d14e39517dde8b008",
+      "bytes": 78
+    },
+    "reports-swarm/measurement/frontend-build.log": {
+      "sha256": "2df26d4efef1c7458942cb416115a27476b627a4ff37779d6a1e4231e9659149",
+      "bytes": 9994
+    },
+    "reports-swarm/measurement/browser.log": {
+      "sha256": "b5a4e2d28cf28ea19907f7afb2eb0e519f05ce3a2fdab9804e2c117d042bf601",
+      "bytes": 334
+    },
+    "reports-swarm/measurement/backend-2.log": {
+      "sha256": "a120cf801901966f5fb7f623931fa0d1cc1dc4799eda508762ad5f4685d2e875",
+      "bytes": 241456
+    },
+    "reports-swarm/measurement/backend-3.log": {
+      "sha256": "990dc91af81c0509831ea322cfb93b057f275e1233c397fa4e3a9396ba1f6e03",
+      "bytes": 242518
+    },
+    "reports-swarm/measurement/backend-4.log": {
+      "sha256": "b8e1738a589409fc90c6a87ac61da5d374c4f525c39a4aed9a4c3e8acec2c6dd",
+      "bytes": 243355
+    },
+    "reports-swarm/measurement/backend-reconcile.log": {
+      "sha256": "ae43bf753602b7305c04056fa0a1101ea144f046d3b201c0b1763dd83e47c51a",
+      "bytes": 638
+    },
+    "reports-swarm/measurement/reconciliation-negative.json": {
+      "sha256": "1a946a31e63b6e8b9e36c31d030d046d9baae6aba7f21e9d554bd542c683b7d5",
+      "bytes": 132
+    },
+    "reports-swarm/measurement/diagnostics/release-default-path.txt": {
+      "sha256": "8edfea0b85713a8505b637548627abd93d64fd8a6ed0fb4aa789f65e43bf640e",
+      "bytes": 99
+    },
+    "reports-swarm/measurement/diagnostics/release-without-nvm.txt": {
+      "sha256": "ab75700f934d5429eacf43416e64e82c16ddb2769cc27b4dee3395bf1bdaff09",
+      "bytes": 55583
+    },
+    "reports-swarm/measurement/diagnostics/test_second_brain_original.py": {
+      "sha256": "45f0d7b26518205dfed36a92b2235361ce31a2bc7b735a9726de3a4c9dc96cfd",
+      "bytes": 8636
+    },
+    "reports-swarm/measurement/diagnostics/second-brain-before.txt": {
+      "sha256": "41c3b06b1f0237013bf2a2d9555cfc394501d11435eed1ea4fe0a018aef42c2e",
+      "bytes": 98
+    },
+    "reports-swarm/measurement/diagnostics/second-brain-before-1.txt": {
+      "sha256": "0cddb2f9522c5fc98e9503738cea759bed811b3ad3b391083a46a5d5f403e174",
+      "bytes": 98
+    },
+    "reports-swarm/measurement/diagnostics/second-brain-before-2.txt": {
+      "sha256": "866432d567eb30f716ad0380ad29e9453b6fd80645780de4fbe94565dc3eab20",
+      "bytes": 98
+    },
+    "reports-swarm/measurement/diagnostics/second-brain-before-3.txt": {
+      "sha256": "7f20721722339faad833bedbd918bbce72ec5ee8917b82cf8b1a09bf4e47f2f3",
+      "bytes": 98
+    },
+    "reports-swarm/measurement/diagnostics/second-brain-before-4.txt": {
+      "sha256": "866432d567eb30f716ad0380ad29e9453b6fd80645780de4fbe94565dc3eab20",
+      "bytes": 98
+    },
+    "reports-swarm/measurement/diagnostics/second-brain-before-5.txt": {
+      "sha256": "b336bfbb42d8a55315e2f7350d4a6528e0fd95453f81c1e21f96f9ae7c5d2932",
+      "bytes": 98
+    },
+    "reports-swarm/measurement/backend/inventory.json": {
+      "sha256": "0352ba7fa4b4e590e699b1579f1c4e00e7cb63076b102915b7624d51f05c3034",
+      "bytes": 257649
+    },
+    "reports-swarm/measurement/backend/selection-1.json": {
+      "sha256": "c5692bef8cb870b68af9df84913ede30e4f4854850587ee8ae170554a81a3ba9",
+      "bytes": 63014
+    },
+    "reports-swarm/measurement/backend/phase-1.xml": {
+      "sha256": "a9425449144593f9b9545902ec92f947b6523f36581f24ffe542b722c12b7562",
+      "bytes": 86332
+    },
+    "reports-swarm/measurement/backend/phase-1.json": {
+      "sha256": "5ebac43586fcc8b7a80b8ba802d24cd3f8cc781ee124b170ecae3d0989acaab1",
+      "bytes": 400701
+    },
+    "reports-swarm/measurement/backend/selection-2.json": {
+      "sha256": "77f8d08280174628cba9fc368c674feef406e42ffa4a6af005c225855202ca42",
+      "bytes": 63353
+    },
+    "reports-swarm/measurement/backend/phase-2.xml": {
+      "sha256": "c7dad8add0ff20582058fb5774f2b58aeefc8d5eaff76587dd62c863e6af1344",
+      "bytes": 86104
+    },
+    "reports-swarm/measurement/backend/phase-2.json": {
+      "sha256": "fac0146f73f95d83f24df3503bcd2280f971fc65bf000b0e14619a2da53752ed",
+      "bytes": 402415
+    },
+    "reports-swarm/measurement/backend/selection-3.json": {
+      "sha256": "b84608bc30bb3cb59afc8ec6e751d09d32cb118be17d45334e14f84a642b7d0b",
+      "bytes": 62998
+    },
+    "reports-swarm/measurement/backend/phase-3.xml": {
+      "sha256": "fefd8b9a3c223824c9f4eeec2802e66dd2d40c89a063e091d24d1df0645e5905",
+      "bytes": 85748
+    },
+    "reports-swarm/measurement/backend/phase-3.json": {
+      "sha256": "8ba63d050c2cb91f61b7fbb8438c0e9bba1b71ba58f3752e55407a953fe4e9b3",
+      "bytes": 400995
+    },
+    "reports-swarm/measurement/backend/selection-4.json": {
+      "sha256": "5f8021d4c4e0ca09d65f5be50a9f0882e32e19bf0900ec47c531704201ad881e",
+      "bytes": 62796
+    },
+    "reports-swarm/measurement/backend/phase-4.xml": {
+      "sha256": "e2e0cd6cab1437c29995cb69b0870d190a4fdd0b183bdd435d3a16e4643473a3",
+      "bytes": 85525
+    },
+    "reports-swarm/measurement/backend/phase-4.json": {
+      "sha256": "78a3160655c05e854b3df992e2e0d2b1a8b1e70c867679c6675f5093bfcf327a",
+      "bytes": 400187
+    },
+    "reports-swarm/measurement/backend/reconciled.json": {
+      "sha256": "46e1d1934dc2e1db4106a237cd53d422334fe07d9f2cd90d83474d8f72283f96",
+      "bytes": 631
+    }
+  },
+  "limits": [
+    "OS protected-store availability probe only; real credential round trips on supported platforms remain unverified.",
+    "Android-to-service enrollment awaits mobile milestone.",
+    "No physical phone, two-host LAN or public relay test in this repair.",
+    "Independent cryptographic review unsatisfied; no production readiness or later chat/sync/files/fleet capability claim."
+  ]
+}

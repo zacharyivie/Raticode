@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 import threading
 import time
@@ -34,10 +33,6 @@ from gofer.subscriptions.base import Subscription
 from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
 
 ADDITIONAL_PROVIDERS = {"cursor", "copilot", "opencode"}
-
-# Resource filtering relies on private Cursor options, not just --plugin-dir.
-# See docs/cli-provider-adapters.md for the inspected implementations.
-CURSOR_RESOURCE_BUILD_FAMILIES = frozenset({"2026.09.10", "2026.09.15"})
 
 
 @dataclass
@@ -172,7 +167,9 @@ def cli_command(
     )
     if provider == "cursor":
         model = cursor_model_id(model, effort)
-        command = [binary, "--print", "--output-format", "stream-json"]
+        # Selecting a working directory in Raticode grants workspace trust.
+        # Keep tool permissions in the per-invocation resource configuration.
+        command = [binary, "--trust", "--print", "--output-format", "stream-json"]
         for path in extra_paths or []:
             command += ["--add-dir", str(path)]
     elif provider == "copilot":
@@ -194,23 +191,6 @@ def cli_command(
 async def check_cursor_plugins(
     executable: str, cancel_event: threading.Event | None = None
 ) -> None:
-    code, version, _ = await run_subprocess(
-        [executable, "--version"],
-        timeout=10,
-        max_output_bytes=128 * 1024,
-        cancel_event=cancel_event,
-        env=env_with_executable_on_path(executable),
-    )
-    version = version.strip()
-    build = re.fullmatch(r"(\d{4}\.\d{2}\.\d{2})(?:[.-][A-Za-z0-9]+)*", version)
-    if code or build is None or build.group(1) not in CURSOR_RESOURCE_BUILD_FAMILIES:
-        supported = ", ".join(sorted(CURSOR_RESOURCE_BUILD_FAMILIES))
-        detected = version[:100] if version else "unknown"
-        raise ValueError(
-            f"Cursor CLI build {detected!r} is not supported for Raticode resource controls. "
-            f"Supported build families: {supported}. Update Raticode or select a supported "
-            "Cursor executable in Settings > Providers."
-        )
     if os.environ.get("CURSOR_ENABLE_BEDROCK") == "1" or os.environ.get(
         "CURSOR_LOCAL_AGENT_BASE_URL"
     ):

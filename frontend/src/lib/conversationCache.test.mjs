@@ -2,6 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createConversationCache } from './conversationCache.js';
 
+test('visible phone thought deltas replace prior imported text without duplicating messages', () => {
+  const f = fixture();
+  const user = { id: 'phone-user', role: 'user', body: 'Question', origin: 'phone' };
+  const thought = { id: 'trace', role: 'assistant', kind: 'thought', body: 'First', deviceRequestId: user.id, deviceSequence: 1 };
+  f.cache.hydrate('phone', [user, thought], { recent: true, device: true });
+  f.cache.hydrate('phone', [{ ...thought, body: 'First, then second' }], { recent: true, device: true });
+  assert.equal(f.snapshot.phone.length, 2);
+  assert.equal(f.snapshot.phone[1].body, 'First, then second');
+});
+
 function fixture(options = {}) {
   const stored = new Map();
   const writes = [];

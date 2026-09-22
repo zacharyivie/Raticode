@@ -1,0 +1,13 @@
+{
+  "type": "session.bind",
+  "version": 2,
+  "profile": "raticode-tls13-v2",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "mode": "resume",
+  "initiator_id": "00000000-0000-4000-8000-000000000002",
+  "responder_id": "00000000-0000-4000-8000-000000000003",
+  "initiator_role": "controller",
+  "responder_role": "desktop",
+  "invitation_sha256": null,
+  "secret": null
+}

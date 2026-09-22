@@ -376,7 +376,10 @@ echo "args=$*" >>"{log_path}"
     log = log_path.read_text(encoding="utf8")
     assert f"cwd={repo}" in log
     assert f"UV_CACHE_DIR={repo / '.uv-cache'}" in log
-    assert "args=run --locked --extra xlsx pyinstaller --clean --noconfirm gof.spec" in log
+    assert (
+        "args=run --locked --extra xlsx --extra devices pyinstaller --clean --noconfirm gof.spec"
+        in log
+    )
 
 
 def test_build_backend_binary_sh_invokes_uv_with_tmp_cache(tmp_path: Path) -> None:
@@ -401,7 +404,10 @@ echo "args=$*" >>"{log_path}"
     log = log_path.read_text(encoding="utf8")
     assert f"cwd={repo}" in log
     assert "UV_CACHE_DIR=/tmp/uv-cache" in log
-    assert "args=run --locked --extra xlsx pyinstaller --clean --noconfirm gof.spec" in log
+    assert (
+        "args=run --locked --extra xlsx --extra devices pyinstaller --clean --noconfirm gof.spec"
+        in log
+    )
 
 
 def test_check_frontend_build_invokes_npm_in_frontend(tmp_path: Path) -> None:

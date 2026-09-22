@@ -1,0 +1,79 @@
+{
+  "checked_at": "2026-09-19T17:57:45.171675+00:00",
+  "base_revision": "dc109fa58fe412f5ab3d05f1fad837b9b28ef0e7",
+  "checks": [
+    {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "pytest",
+        "tests/unit/test_device_protocol.py",
+        "-q"
+      ],
+      "exit_code": 0,
+      "log": "docs/security/evidence/device-protocol/pytest.log"
+    },
+    {
+      "command": [
+        ".venv/bin/ruff",
+        "check",
+        "src",
+        "tests",
+        "--fix"
+      ],
+      "exit_code": 0,
+      "log": "docs/security/evidence/device-protocol/ruff.log"
+    },
+    {
+      "command": [
+        ".venv/bin/mypy",
+        "src",
+        "tests"
+      ],
+      "exit_code": 0,
+      "log": "docs/security/evidence/device-protocol/mypy.log"
+    }
+  ],
+  "source_hashes": {
+    "src/gofer/devices/__init__.py": "f1f5ae818cbcc03ff75f3f78a2e0169a52578fe76158cf76a56b74a7d0ad1827",
+    "src/gofer/devices/tls.py": "81a533ae8cf863de2ff79bec5e581b499ed9a22f92777d3a8079bc858b65950c",
+    "src/gofer/devices/framing.py": "6fb47026a7ce5e8532e6d447f893cdaedc3e74ec2dff5be826becfa4b9c2331b",
+    "src/gofer/devices/binding.py": "11edc1738a91caa2cfe6b8ec6499eb857673194515f2d149a3355b345837fc2e",
+    "src/gofer/devices/protocol/v2/frame.schema.json": "2a3235efb8e005cdb1e56a8d196baacb9c072b1bad4e196a3d98785722e7a7e7",
+    "src/gofer/devices/protocol/v2/invitation.schema.json": "31a00f035852dd9651d986cb181922b2e31f7a7c84ac0bf57d8951aaa67f4215",
+    "src/gofer/devices/protocol/v2/session.schema.json": "7bc4e77251d50379ec459cf33aad4c4354e7aa561e08d5e61cdc6e21c8526210",
+    "src/gofer/devices/protocol/v2/event.schema.json": "f4d5d824bd2643fb978e99b3d990234199bda86768fa7dccb97a467ce5655bc1",
+    "src/gofer/devices/protocol/v2/SHA256SUMS": "f3faf4bb173b6fe4238530cf271c9fbe647025ce7587195cb1e7401ac9ba8e60",
+    "src/gofer/devices/protocol/v2/fixtures/frame.json": "c8a3eba13b94448fa52881d1add67aa664aa262eea12277d7efdf6589447e9b2",
+    "src/gofer/devices/protocol/v2/fixtures/invitation.json": "feaccc5c7d5861d837633ed901bb5f1ae3326403795d9c621c72a485e6556ee0",
+    "src/gofer/devices/protocol/v2/fixtures/session.json": "48fcb4d21148cfaf7cbf840d770779561ae34f6635a76df7eb818f5c589fb2ad",
+    "src/gofer/devices/protocol/v2/fixtures/approval.required.json": "495c23124b9a55756e0508a0e3e09b76ae3f2b01a0f932a2d6021069a06cd817",
+    "src/gofer/devices/protocol/v2/fixtures/approval.resolve.json": "4d02cee9cf48771c3d45a0dd27f327814b02eed43e52f2a41497ec5c460de5e0",
+    "src/gofer/devices/protocol/v2/fixtures/chat.accepted.json": "5dfa385fff1f40c15edb44291cddcc62180ecb4d4d22fd8d20f18017a895802e",
+    "src/gofer/devices/protocol/v2/fixtures/chat.message.json": "09add34e74b623623b6df84ff5bb2e78b63975117f73927b39507604fe16582b",
+    "src/gofer/devices/protocol/v2/fixtures/chat.submit.json": "da79277f89028d07237f01c45bb52354584623c352c51f3183e83200c72bd453",
+    "src/gofer/devices/protocol/v2/fixtures/error.json": "79a69090401559b2578b8d78d8d712c03984c2b60887361acb49c945fbc4edee",
+    "src/gofer/devices/protocol/v2/fixtures/file.offer.json": "724905ba78bd5b2cfa7dbb8106536270e4f223e6923922c899134e0da71bfa05",
+    "src/gofer/devices/protocol/v2/fixtures/file.request.json": "1e426576e0f772fac7494c912bd868ea82d695860e3a31f052aebfabf4819499",
+    "src/gofer/devices/protocol/v2/fixtures/request.cancel.json": "4e6164e8e7131085ed9bba925bc8c0d0dbad864cab36c87cc4690b353c51c7e2",
+    "src/gofer/devices/protocol/v2/fixtures/request.status.json": "5394623efb7f5f3ce43e8fee9a04eab65ffd9d81e552ed2c191f79285e051425",
+    "src/gofer/devices/protocol/v2/fixtures/swarm.snapshot.json": "d116a7893e91d75b26cdbb381757a91fed14d70eb02f0da0f88b0fbe7a2c8327",
+    "src/gofer/devices/protocol/v2/fixtures/thread.snapshot.json": "0783552a4f584a1248dfbaa01b0ea5c63f4f2030e80696479066e55fd8b56585",
+    "src/gofer/devices/protocol/v2/fixtures/catalog.request.json": "0ce3a932af54af26af7bd688a4b065534aeb0101061b4c9f7020ce584b2e9670",
+    "src/gofer/devices/protocol/v2/fixtures/catalog.snapshot.json": "34e4d4890ca904cd4fcd340b4f9561651a9ddc393b967e89092c15fcc011888e",
+    "src/gofer/devices/protocol/v2/fixtures/thread.create.json": "b8c1719ba59539641a20ed12d4817c0115b51804fdf094a9b30e63ec0978868c",
+    "src/gofer/devices/protocol/v2/fixtures/thread.context.update.json": "c81913d26fa37f37a82c7323b6686fe7e393f89b224c6721e9d9f81d0f16c3fc",
+    "src/gofer/devices/protocol/v2/fixtures/sync.request.json": "cf1ccdc2113027a55611d3a526ef98b60c97339c7d7d155f0ee45451a67d742a",
+    "src/gofer/devices/protocol/v2/fixtures/sync.snapshot.json": "52ee8739d782b4f6f61e742fdf8ded21c3e78ace5c0bdb310c102c8774fd8199",
+    "src/gofer/devices/protocol/v2/fixtures/fleet.request.json": "f112e0fde37b1a4b15e1c4a63f656235dc863c8d7e8518c7b745797ca06c8901",
+    "src/gofer/devices/protocol/v2/fixtures/fleet.snapshot.json": "6599988c49a467defd5c1484747f45ffd1e85899c8a1b6ba3b81839b965b905e",
+    "src/gofer/devices/protocol/v2/fixtures/job.submit.json": "0fd08ab7c7ff375e525e2ba89279e5f51bdee96878c434312172616ea7533e02",
+    "src/gofer/devices/protocol/v2/fixtures/job.status.json": "448e1f127447766df748f065999d63a91540e2e9877b27d2151bb6e4c9ae95f2",
+    "src/gofer/devices/protocol/v2/fixtures/job.cancel.json": "d86f81288671c397ef2e1b600619815ef087e8ebcb08dc449f0a20c3b540de42",
+    "src/gofer/devices/protocol/v2/fixtures/job.get.json": "01c472417917fb8e5a891fe4170aa77ef149db4ed0c86ce028d4a53c5ca0eb8c",
+    "scripts/device_tls_probe.py": "783f782acd4bc9bc1912113f64f0c044caceb337e58bd9a2fb8db4277d81a0df",
+    "tests/unit/test_device_protocol.py": "6fb6afa70b8048e29bba1a22166b4487807004ebea0634c932ba6ccfc777a592",
+    "pyproject.toml": "9913a287d744158d5ff7626cd040a0eb62304807a9ac8ce2be00d2511ca25e0d",
+    "uv.lock": "c9134f41eebe4793b81a9d9c12f0b69b2882f8a0f407d30a97da5f3c124e05c8"
+  }
+}

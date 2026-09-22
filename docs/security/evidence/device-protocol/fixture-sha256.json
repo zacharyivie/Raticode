@@ -1,0 +1,18 @@
+{
+  "tests/fixtures/device_protocol/README.md": "d5ee57d8cdf86d4501e6356e00afdfc8ffcc869ed5c1566a993c0b56d28f47ae",
+  "tests/fixtures/device_protocol/desktop-test-only.cert.pem": "a5a1e2fc14c09737b1e79ce2a78a78ab451991619e4a7979e2797b0abc555e0e",
+  "tests/fixtures/device_protocol/desktop-test-only.key.pem": "e6d268f1c830a0c3e5b69fc3433f42406aebd38af2753e864002050817ab877a",
+  "tests/fixtures/device_protocol/expired-test-only.cert.pem": "5f1e8534a413052e533e94681914f02a3fe895d9870647e4ac83a30e1b62d1cf",
+  "tests/fixtures/device_protocol/expired-test-only.key.pem": "0874d2e6a72821e4974755d7d40fd88900623db608ecc26269361cdfa5b0fa12",
+  "tests/fixtures/device_protocol/java-streaming.ciphertext": "1a3851f3c8453ec2b843197fdd96bee22e21e7a55e2b81b2017c5ba7d0bc6933",
+  "tests/fixtures/device_protocol/mobile-test-only.cert.pem": "2bd471db8311785448a7f43b73ae6e9470e3b2cddd67a9f797e1bbd5038271fa",
+  "tests/fixtures/device_protocol/mobile-test-only.key.pem": "814eead9f8934c57bd62ed96c9071f88ff1661dc84c506dfcd30f441d41aa179",
+  "tests/fixtures/device_protocol/other-test-only.cert.pem": "c292431d8d40020de2a6996df69ead5c46996c17991dc64b7a11ccac7be0c9bd",
+  "tests/fixtures/device_protocol/other-test-only.key.pem": "239c8f3ae82a5a45d21d39731bc357a431446006a1b8c45cb59aac824e896259",
+  "tests/fixtures/device_protocol/p384-test-only.cert.pem": "468dc2670935a0d9b4b27ac2d71e84c3aea28dd28059e97c67274f9fac117298",
+  "tests/fixtures/device_protocol/p384-test-only.key.pem": "94c93d82688a6455cba37e5ed30baeba2f1612640f2d56d500aff0a8e4c3397c",
+  "tests/fixtures/device_protocol/pins.json": "abd2ae9e9783c69ac8d3f95c536dc375a548b3c02e3b520daa5381c566cdef64",
+  "tests/fixtures/device_protocol/python-streaming.ciphertext": "42ddbe9aca9c5e3e2e632368a93ed2ed96348e006f9d48a62e2febf266655a27",
+  "tests/fixtures/device_protocol/streaming-test-only.keyset.json": "e97dc66524ea93119fe16a64eb7673140314bdd8a6ec1b89331ce7e0804c338e",
+  "tests/fixtures/device_protocol/streaming.json": "f32815df11e24c37c20f515875a249215e3fdbe7f93013956ce1511a23539924"
+}

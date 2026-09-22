@@ -79,3 +79,10 @@ audit-evidence/
 
 # Local performance fixture builds
 frontend/perf-dist/
+
+# Disposable paired-device browser checks
+frontend/artifacts/paired-devices/
+
+# Disposable mobile conversation verification
+/artifacts/mobile-conversation/
+/frontend/artifacts/mobile-conversation/

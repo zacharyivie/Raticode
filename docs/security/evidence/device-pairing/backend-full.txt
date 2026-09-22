@@ -1,0 +1,256 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.5, pytest-9.0.3, pluggy-1.6.0
+rootdir: /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5
+configfile: pyproject.toml
+testpaths: tests
+plugins: mock-3.15.1, cov-7.1.0, asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2546 items
+
+tests/integration/test_scheduler_trigger.py .                            [  0%]
+tests/integration/test_workflow_execution.py ..                          [  0%]
+tests/regression/test_end_to_end.py .                                    [  0%]
+tests/unit/test_acp_config.py ................                           [  0%]
+tests/unit/test_acp_providers.py ...............                         [  1%]
+tests/unit/test_acp_session.py ...............................           [  2%]
+tests/unit/test_acp_transport.py ...................................     [  3%]
+tests/unit/test_agent.py .............                                   [  4%]
+tests/unit/test_antigravity.py ........................                  [  5%]
+tests/unit/test_approvals.py .......                                     [  5%]
+tests/unit/test_atomic_output.py ....s.......                            [  6%]
+tests/unit/test_authoring_schema.py ..........................           [  7%]
+tests/unit/test_bindings.py ...............                              [  7%]
+tests/unit/test_brand_compat.py ........                                 [  8%]
+tests/unit/test_builder.py ............                                  [  8%]
+tests/unit/test_chat_jobs.py ...                                         [  8%]
+tests/unit/test_chat_snapshots.py .............................          [  9%]
+tests/unit/test_chat_steering.py .............................           [ 10%]
+tests/unit/test_cli.py ................................................. [ 12%]
+................                                                         [ 13%]
+tests/unit/test_cli_branches.py .....................................    [ 14%]
+tests/unit/test_cli_providers.py ....................................... [ 16%]
+............................                                             [ 17%]
+tests/unit/test_codex_steering.py .............                          [ 18%]
+tests/unit/test_commit_message.py .......                                [ 18%]
+tests/unit/test_dag_renderer.py ........................................ [ 19%]
+........................................................                 [ 22%]
+tests/unit/test_data_dir_isolation.py .......                            [ 22%]
+tests/unit/test_device_pairing.py ................................       [ 23%]
+tests/unit/test_device_protocol.py ..................................... [ 25%]
+........................................................................ [ 27%]
+                                                                         [ 27%]
+tests/unit/test_executor.py ............................................ [ 29%]
+........................................................................ [ 32%]
+.........................................                                [ 34%]
+tests/unit/test_fan_out.py ...........................                   [ 35%]
+tests/unit/test_graph.py ........                                        [ 35%]
+tests/unit/test_grok_identity.py ........                                [ 35%]
+tests/unit/test_grok_models.py ......                                    [ 36%]
+tests/unit/test_health.py ..........................                     [ 37%]
+tests/unit/test_http.py .......                                          [ 37%]
+tests/unit/test_license_packaging.py .........                           [ 37%]
+tests/unit/test_license_source_cache.py .......                          [ 37%]
+tests/unit/test_native_filesystem_security.py s...                       [ 38%]
+tests/unit/test_operations.py ..........                                 [ 38%]
+tests/unit/test_planner.py .............................                 [ 39%]
+tests/unit/test_process.py ....................                          [ 40%]
+tests/unit/test_prompt_envelope.py ............                          [ 40%]
+tests/unit/test_prompt_manager.py ......                                 [ 41%]
+tests/unit/test_provider_auth.py .......                                 [ 41%]
+tests/unit/test_provider_capabilities.py ............................... [ 42%]
+...................                                                      [ 43%]
+tests/unit/test_provider_preferences.py ......................           [ 44%]
+tests/unit/test_provider_profiles.py ................................... [ 45%]
+                                                                         [ 45%]
+tests/unit/test_rattish_agent_runtime.py .....                           [ 45%]
+tests/unit/test_rattish_asset_cache.py ..                                [ 45%]
+tests/unit/test_rattish_bundles.py ....                                  [ 46%]
+tests/unit/test_rattish_canonical_json.py ........                       [ 46%]
+tests/unit/test_rattish_cli.py ..................                        [ 47%]
+tests/unit/test_rattish_compiler.py ...........................          [ 48%]
+tests/unit/test_rattish_conformance_artifacts.py ....................... [ 49%]
+...........................                                              [ 50%]
+tests/unit/test_rattish_contract_validator.py ......                     [ 50%]
+tests/unit/test_rattish_editor.py .......                                [ 50%]
+tests/unit/test_rattish_formatter.py ......                              [ 50%]
+tests/unit/test_rattish_hardening.py ................................... [ 52%]
+...........                                                              [ 52%]
+tests/unit/test_rattish_http_request.py ......                           [ 52%]
+tests/unit/test_rattish_live_runs.py ....                                [ 53%]
+tests/unit/test_rattish_migration.py ........                            [ 53%]
+tests/unit/test_rattish_notification.py .......                          [ 53%]
+tests/unit/test_rattish_provider_contracts.py ..                         [ 53%]
+tests/unit/test_rattish_remaining_nodes.py .....................         [ 54%]
+tests/unit/test_rattish_resource_nodes.py .....                          [ 54%]
+tests/unit/test_rattish_run_service.py ..............                    [ 55%]
+tests/unit/test_rattish_runtime.py .....................                 [ 56%]
+tests/unit/test_rattish_workflow_node.py .................               [ 56%]
+tests/unit/test_rattish_workflow_runtime.py .....................        [ 57%]
+tests/unit/test_rattish_workspaces.py ....................               [ 58%]
+tests/unit/test_release_candidate.py ................................... [ 59%]
+...........................................                              [ 61%]
+tests/unit/test_release_package_smoke.py .................               [ 62%]
+tests/unit/test_release_scripts.py ..............                        [ 62%]
+tests/unit/test_release_workflow.py ..............                       [ 63%]
+tests/unit/test_rem_swarms.py ...........                                [ 63%]
+tests/unit/test_rem_threads.py ...                                       [ 63%]
+tests/unit/test_resource_security.py .....................               [ 64%]
+tests/unit/test_runner.py ................                               [ 65%]
+tests/unit/test_scheduler.py ...........                                 [ 65%]
+tests/unit/test_second_brain.py .......................................  [ 67%]
+tests/unit/test_second_brain_index.py ..........................         [ 68%]
+tests/unit/test_structured_agent_results.py ........................     [ 69%]
+tests/unit/test_subflows.py ......................                       [ 70%]
+tests/unit/test_subscriptions.py .............................           [ 71%]
+tests/unit/test_swarm_execution.py ..................................... [ 72%]
+...........                                                              [ 73%]
+tests/unit/test_swarm_git.py .......................                     [ 73%]
+tests/unit/test_swarm_integration_retry.py ......                        [ 74%]
+tests/unit/test_swarm_lifecycle.py ......................                [ 75%]
+tests/unit/test_swarm_performance.py ....                                [ 75%]
+tests/unit/test_swarm_tools.py ....                                      [ 75%]
+tests/unit/test_swarms.py .............................................. [ 77%]
+                                                                         [ 77%]
+tests/unit/test_thoughts.py ....                                         [ 77%]
+tests/unit/test_tui_editor.py .......................................... [ 78%]
+..............                                                           [ 79%]
+tests/unit/test_ui_api.py .............................................. [ 81%]
+........................................................................ [ 84%]
+...............................                                          [ 85%]
+tests/unit/test_ui_chat.py ............................................. [ 87%]
+.....................                                                    [ 87%]
+tests/unit/test_ui_chat_media.py ........                                [ 88%]
+tests/unit/test_ui_server.py ........................................... [ 89%]
+........................................................................ [ 92%]
+..................................................                       [ 94%]
+tests/unit/test_usage.py ...                                             [ 94%]
+tests/unit/test_watcher.py .............................                 [ 96%]
+tests/unit/test_webhook_triggers.py ...............                      [ 96%]
+tests/unit/test_workflow_bundles.py ........................             [ 97%]
+tests/unit/test_workflow_parameters.py ..........                        [ 97%]
+tests/unit/test_workflow_provider_discovery.py ..........                [ 98%]
+tests/unit/test_workflow_resources.py .                                  [ 98%]
+tests/unit/test_workflow_revisions.py .....                              [ 98%]
+tests/unit/test_workflow_templates.py .....                              [ 98%]
+tests/unit/test_workflow_validation.py .................                 [ 99%]
+tests/unit/test_workflow_variables.py ..............                     [100%]
+
+=============================== warnings summary ===============================
+tests/unit/test_authoring_schema.py::test_operation_examples_match_schema_and_round_trip_through_toml_parser
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_authoring_schema.py:82: UserWarning: Node 'example-local-vectorize' local_vectorize scans local files; limits apply: max_files_scanned=5000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000, max_vector_index_bytes=50000000
+    workflow.validate()
+
+tests/unit/test_authoring_schema.py::test_operation_examples_match_schema_and_round_trip_through_toml_parser
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_authoring_schema.py:87: UserWarning: Node 'example-local-vectorize' local_vectorize scans local files; limits apply: max_files_scanned=5000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000, max_vector_index_bytes=50000000
+    reparsed.validate(toml_path)
+
+tests/unit/test_builder.py::test_builder_creates_metadata_schedule_and_watcher_with_defaulted_numbers
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_builder.py:92: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    loaded.validate(path)
+
+tests/unit/test_builder.py::test_builder_creates_fan_out_sources
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_builder.py:92: UserWarning: Node 'dir' directory fan-out includes file content; limits apply: max_fanout_items=1000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000
+    loaded.validate(path)
+
+tests/unit/test_builder.py::test_builder_creates_fan_out_sources
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_builder.py:92: UserWarning: Node 'events' trigger-event fan-out includes changed file content; limits apply: max_fanout_items=1000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000
+    loaded.validate(path)
+
+tests/unit/test_cli.py::test_workflow_run_verbose_surfaces_local_vector_index_stats
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/cli/commands/workflow.py:1147: UserWarning: Node 'index' local_vectorize scans local files; limits apply: max_files_scanned=5000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000, max_vector_index_bytes=50000000
+    wf.validate(workflow_path, profile_data_dir)
+
+tests/unit/test_cli.py::test_workflow_mutation_commands_configure_loop_for_trigger_events
+tests/unit/test_cli.py::test_workflow_recipe_watch_folder_summarize
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/cli/commands/workflow.py:672: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    wf.validate(path)
+
+tests/unit/test_cli.py::test_workflow_mutation_commands_configure_loop_for_trigger_events
+tests/unit/test_cli.py::test_workflow_recipe_watch_folder_summarize
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/cli/commands/workflow.py:672: UserWarning: Node 'changed-files' trigger-event fan-out includes changed file content; limits apply: max_fanout_items=1000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000
+    wf.validate(path)
+
+tests/unit/test_cli_branches.py::test_schedule_add_displays_external_agent_access
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/cli/commands/schedule.py:60: UserWarning: Agent 'reviewer' grants provider filesystem access outside working_dir: extra_paths entry '/tmp/pytest-of-doonk/pytest-779/test_schedule_add_displays_ext0/shared' is outside '/tmp/pytest-of-doonk/pytest-779/test_schedule_add_displays_ext0/work'
+    wf.validate()
+
+tests/unit/test_cli_branches.py::test_watch_start_shutdowns_on_interrupt
+tests/unit/test_cli_branches.py::test_sync_watchers_skips_invalid_workflows_and_watchers
+tests/unit/test_cli_branches.py::test_watch_start_displays_external_agent_access
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/cli/commands/watch.py:33: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    workflow.validate()
+
+tests/unit/test_cli_branches.py::test_watch_start_displays_external_agent_access
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/cli/commands/watch.py:33: UserWarning: Agent 'reviewer' grants provider filesystem access outside working_dir: extra_paths entry '/tmp/pytest-of-doonk/pytest-779/test_watch_start_displays_exte0/shared' is outside '/tmp/pytest-of-doonk/pytest-779/test_watch_start_displays_exte0/work'
+    workflow.validate()
+
+tests/unit/test_scheduler.py::test_scheduled_execution_logs_external_agent_access
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/scheduler.py:26: UserWarning: Agent 'reviewer' grants provider filesystem access outside working_dir: extra_paths entry '/tmp/pytest-of-doonk/pytest-779/test_scheduled_execution_logs_0/shared' is outside '/tmp/pytest-of-doonk/pytest-779/test_scheduled_execution_logs_0/work'
+    wf.validate(path)
+
+tests/unit/test_ui_api.py::test_workflow_payload_masks_secret_declarations_and_preserves_autosave
+tests/unit/test_ui_api.py::test_update_workflow_payload_persists_file_watcher
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/ui/api.py:1332: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    workflow.validate(path, base)
+
+tests/unit/test_ui_api.py::test_update_workflow_payload_persists_nodes_edges_and_agents
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/ui/api.py:1332: UserWarning: Agent 'reviewer' grants provider filesystem access outside working_dir: extra_paths entry '/tmp/pytest-of-doonk/pytest-779' is outside '/tmp/pytest-of-doonk/pytest-779/test_update_workflow_payload_p0'
+    workflow.validate(path, base)
+
+tests/unit/test_ui_api.py::test_run_workflow_payload_includes_external_agent_access_warnings
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/ui/api.py:1332: UserWarning: Agent 'reviewer' grants provider filesystem access outside working_dir: extra_paths entry '/tmp/pytest-of-doonk/pytest-779/ui-run-extra-access' is outside '/tmp/pytest-of-doonk/pytest-779/test_run_workflow_payload_incl0/work'
+    workflow.validate(path, base)
+
+tests/unit/test_watcher.py::test_watched_execution_logs_external_agent_access
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/watcher.py:372: UserWarning: Agent 'reviewer' grants provider filesystem access outside working_dir: extra_paths entry '/tmp/pytest-of-doonk/pytest-779/test_watched_execution_logs_ex0/shared' is outside '/tmp/pytest-of-doonk/pytest-779/test_watched_execution_logs_ex0/work'
+    workflow.validate(watched.workflow_path)
+
+tests/unit/test_watcher.py::test_watched_execution_logs_external_agent_access
+tests/unit/test_watcher.py::test_watched_execution_persists_usage_sidecar
+tests/unit/test_watcher.py::test_watched_execution_passes_trigger_context_to_executor
+tests/unit/test_watcher.py::test_watched_execution_adds_single_event_context
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/watcher.py:372: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    workflow.validate(watched.workflow_path)
+
+tests/unit/test_workflow_bundles.py::test_bundle_round_trips_workflow_scopes_and_invocation_bindings
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/bundles.py:303: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    AgenticWorkflow.from_file(plan.workflow_path).validate(plan.workflow_path, base)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+tests/unit/test_workflow_templates.py::test_ui_api_lists_and_creates_template_workflow
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/templates.py:131: UserWarning: Node 'changed-files' trigger-event fan-out includes changed file content; limits apply: max_fanout_items=1000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000
+    workflow.validate(workflow_path, data_dir)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+tests/unit/test_workflow_templates.py::test_ui_api_lists_and_creates_template_workflow
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/templates.py:131: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    workflow.validate(workflow_path, data_dir)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_workflow_templates.py:33: UserWarning: Node 'changed-files' trigger-event fan-out includes changed file content; limits apply: max_fanout_items=1000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000
+    loaded.validate(result.path, tmp_path)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_workflow_templates.py:33: UserWarning: Workflow watch queue is bounded: max_watcher_queue_depth=1000; oldest queued event batches are dropped on overflow
+    loaded.validate(result.path, tmp_path)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+tests/unit/test_workflow_templates.py::test_cli_lists_and_creates_template_workflow
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/templates.py:131: UserWarning: Node 'vectorize' local_vectorize scans local files; limits apply: max_files_scanned=5000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000, max_vector_index_bytes=50000000
+    workflow.validate(workflow_path, data_dir)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_workflow_templates.py:33: UserWarning: Node 'vectorize' local_vectorize scans local files; limits apply: max_files_scanned=5000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000, max_vector_index_bytes=50000000
+    loaded.validate(result.path, tmp_path)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/src/gofer/core/templates.py:131: UserWarning: Node 'markdown-files' directory fan-out includes file content; limits apply: max_fanout_items=1000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000
+    workflow.validate(workflow_path, data_dir)
+
+tests/unit/test_workflow_templates.py::test_all_workflow_templates_generate_valid_workflows
+  /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/tests/unit/test_workflow_templates.py:33: UserWarning: Node 'markdown-files' directory fan-out includes file content; limits apply: max_fanout_items=1000, max_file_read_bytes=1048576, max_aggregate_read_bytes=32000000
+    loaded.validate(result.path, tmp_path)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+- generated xml file: /home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/69e4eb69d1b94e70879326389dbdb1d5/docs/security/evidence/device-pairing/backend-full.xml -
+=========== 2544 passed, 2 skipped, 37 warnings in 119.80s (0:01:59) ===========

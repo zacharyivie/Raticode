@@ -26,6 +26,7 @@ datas += collect_data_files("tzdata")
 if find_spec("vosk") is not None:
     datas += collect_data_files("vosk")
 datas += [
+    ("src/gofer/devices/protocol", "gofer/devices/protocol"),
     ("rattish/contracts", "gofer/rattish/assets/contracts"),
     ("rattish/providers", "gofer/rattish/assets/providers"),
     ("rattish/schemas", "gofer/rattish/assets/schemas"),
@@ -36,6 +37,7 @@ datas += [
 hiddenimports = []
 hiddenimports += collect_submodules("apscheduler")
 hiddenimports += collect_submodules("gofer")
+hiddenimports += collect_submodules("segno")
 hiddenimports += collect_submodules("openpyxl")
 hiddenimports += collect_submodules("pydantic")
 hiddenimports += collect_submodules("pydantic_settings")

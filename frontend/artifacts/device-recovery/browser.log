@@ -1,0 +1,8 @@
+
+> gofer-flow-ui@0.3.4 test:pairing-browser
+> node browser-tests/run-paired-devices.cjs
+
+Port 5173 is in use, trying another one...
+(node:2283851) [DEP0180] DeprecationWarning: fs.Stats constructor is deprecated.
+(Use `electron --trace-deprecation ...` to show where the warning was created)
+Pairing UI: draft editing, QR/identity consent, fleet opt-in and revocation, stable request retry, and no local secret persistence passed.

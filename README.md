@@ -23,6 +23,10 @@ The installed command is `gof`.
 - Pass outputs between nodes through prompt interpolation, explicit input mappings, or piped stdin.
 - Retry nodes, set timeouts, and conditionally traverse edges based on success, failure, or output regex matches.
 
+## Phone access
+
+Settings > Paired devices lists paired phones and their thread-sync access. Use **Pair a device** for QR setup, **Project access** for individual grants, and **Connection and troubleshooting** for the LAN address and port. Use **Device details > Unpair** to remove pairing without blocking a device. **Revoked devices > Remove from revoked list** permits fresh QR pairing without restoring old access. Pairing does not grant execution authority. See [device setup](docs/security/device-pairing.md).
+
 ## Requirements
 
 - Python 3.11 or newer
@@ -983,3 +987,47 @@ python -m pytest tests/unit/test_executor.py::test_name -v
 ```
 
 The test suite uses `FakeSubscription` from `tests/conftest.py`, so tests do not require real Claude Code or Codex CLI access.
+
+### Experimental paired devices
+
+Desktop Settings > Paired devices now supports protected identities, expiring
+QR invitations, local identity confirmation, revocation and pinned reconnect.
+Real encrypted LAN pairing requires explicit experimental opt-in. Independent
+security review is still pending. Encrypted mobile chat, relay transport, local
+thread grants, scoped files and authorized desktop fleet execution are available
+for experimental testing. See the
+[setup, recovery and verification guide](docs/security/device-pairing.md).
+
+Phone invitations require `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1` at desktop
+startup, including `electron:dev`. Without it, both phone networking and invitation
+creation are disabled. Set `RATICODE_DEVICE_HOST` to the desktop's private LAN IP
+for LAN preference; otherwise the invitation uses encrypted relay transport only.
+
+The experimental paired-device messaging, local thread grants, fleet dispatch and
+bounded file transfer are described in [device messaging](docs/security/device-messaging.md).
+Independent review and physical/internet acceptance remain release gates.
+
+The current [release scope and acceptance guide](docs/security/device-release.md)
+describes fleet grant/revocation, storage recovery, packaging and the remaining
+security, physical-device and distribution decisions.
+
+
+### Phone conversations and LAN preference
+
+With `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1`, desktop selects its outgoing private IPv4 address for the device listener. `RATICODE_DEVICE_HOST` overrides it. The separate UI API stays on loopback. Updated phones learn the current LAN endpoint over encrypted sync, prefer LAN and retain ntfy when direct access fails.
+
+Confirm a phone in Paired devices to sync your desktop threads and projects by default. Identity, connection details, Unpair and Revoke appear directly under Phone. The phone uses your desktop provider settings and approval policies. Install and authenticate the selected provider on desktop first.
+
+
+### Shared desktop threads on mobile
+
+**Sync desktop threads with this phone** is checked by default for new phone pairings in Paired devices. It shares current/future desktop thread metadata, text history and provider/model catalogs. Keep the desktop window open. Mobile keeps the thread list open, creates threads in your desktop projects, chooses models, attaches verified files and supports Android on-device dictation. Settings and replies return to the same renderer conversations. Sync activates only after desktop identity confirmation and the phone acknowledgment. Existing sync choices remain unchanged.
+
+Remote execution keeps Codex read-only/workspace-write, Claude plan/default and Cursor/Copilot/OpenCode default policies. Other provider catalogs and project-less histories are readable; their remote execution remains unavailable. Both peers need the updated v2 history/pagination extension. See [device messaging](docs/security/device-messaging.md) and the mobile repository's live setup guide.
+
+Phone-started turns now appear in the same desktop conversation with the normal thought trace, tool activity, reply and turn summary. A small phone icon marks the user message. The desktop reads its existing local Rem event journal during reconciliation, including turns completed while the window was closed. This requires the updated desktop backend and frontend; restarting an older packaged binary does not load source changes. The phone still receives the bounded text history over encrypted device sync.
+
+
+Paired mobile clients can use shared desktop thread scope, model, effort and permission settings, Global project selection, saved-message search and group/running state. The desktop retains dispatch and approval authority. Update both apps together; see [mobile parity details](docs/mobile-desktop-parity.md).
+
+Mobile 0.5.3 adds the compact desktop-style thread home, unnamed creation with first-message titles, scope/model/permission controls, and synchronized pin/archive/delete. Update both the desktop backend and renderer. See [mobile parity](docs/mobile-desktop-parity.md).

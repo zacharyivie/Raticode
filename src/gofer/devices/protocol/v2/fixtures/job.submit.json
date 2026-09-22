@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "job.submit",
+  "payload": {
+    "job_id": "00000000-0000-4000-8000-000000000005",
+    "target_device_id": "00000000-0000-4000-8000-000000000004",
+    "project_id": "00000000-0000-4000-8000-000000000003",
+    "resource_ids": [],
+    "intent": "Harmless public test intent",
+    "expected_policy_revision": 1
+  }
+}

@@ -1,0 +1,6 @@
+
+> gofer-flow-ui@0.3.4 test:pairing-browser
+> node browser-tests/run-paired-devices.cjs
+
+3:23:00 PM [vite] (client) Re-optimizing dependencies because vite config has changed
+Pairing UI: draft clear/type/blur, QR cancel, identity consent, revoke confirmation, no local secret persistence passed.

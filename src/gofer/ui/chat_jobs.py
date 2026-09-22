@@ -94,7 +94,38 @@ class ChatJobs:
 
         return follow()
 
+    def revision(self, conversation_id: str, turn_id: str) -> str:
+        """Cheap local journal revision, including completion without another event."""
+        try:
+            stat = self._path(conversation_id, turn_id).stat()
+        except FileNotFoundError:
+            return "missing"
+        with self._condition:
+            active = (conversation_id, turn_id) in self._active
+        return f"{stat.st_size}:{stat.st_mtime_ns}:{active}"
+
+    def snapshot(self, conversation_id: str, turn_id: str) -> list[dict[str, Any]]:
+        """Read already committed events without waiting for a running provider.
+
+        Used only by the authenticated local desktop conversation mirror. These
+        diagnostics are never part of the phone protocol or provider context.
+        """
+        try:
+            with self._condition:
+                with self._path(conversation_id, turn_id).open(encoding="utf-8") as handle:
+                    return [json.loads(line) for line in handle if line.endswith("\n")]
+        except FileNotFoundError:
+            return []
+
     def close(self) -> None:
         with self._condition:
             self._closed = True
             self._condition.notify_all()
+
+    def active_snapshot(self) -> list[dict[str, str]]:
+        """Current backend work identities, without prompt text or resource paths."""
+        with self._condition:
+            return [
+                {"thread_id": conversation, "turn_id": turn, "state": "running"}
+                for conversation, turn in sorted(self._active)
+            ]

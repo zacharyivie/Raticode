@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<testsuite name="dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest" tests="13" failures="0" errors="0" skipped="0" time="1.351" timestamp="2026-09-19T17:51:51" hostname="localhost">
+  <properties>
+    <property name="device" value="Swarm_Mobile_Protocol_API36(AVD) - 16" />
+    <property name="flavor" value="" />
+    <property name="project" value=":app" />
+  </properties>
+  <testcase name="invalidCertificateProfiles" classname="dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest" time="0.006" />
+  <testcase name="wrongPinsFailBothDirections" classname="dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest" time="0.071" />
+  <testcase name="maximumRecordsThroughTls" classname="dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest" time="0.102" />
+  <testcase name="fragmentedMutualTlsRoundTrip" classname="dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest" time="0.077" />
+  <testcase name="tamperReplayAndPreviousSessionFail" classname="dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest" time="0.076" />
+  <testcase name="boundsAndHandshakeRequired" classname="dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest" time="0.026" />
+  <testcase name="androidRejectsAbsentAlpn" classname="dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest" time="0.151" />
+  <testcase name="androidClientToPython" classname="dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest" time="0.101" />
+  <testcase name="androidRejectsWrongAlpn" classname="dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest" time="0.101" />
+  <testcase name="pythonClientToAndroid" classname="dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest" time="0.102" />
+  <testcase name="pythonToAndroid" classname="dev.raticode.mobile.protocol.v2.StreamingDeviceTest" time="0.026" />
+  <testcase name="tamperTruncationWrongAad" classname="dev.raticode.mobile.protocol.v2.StreamingDeviceTest" time="0.0" />
+  <testcase name="multiSegmentBoundaries" classname="dev.raticode.mobile.protocol.v2.StreamingDeviceTest" time="0.026" />
+</testsuite>

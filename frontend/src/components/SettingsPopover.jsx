@@ -24,6 +24,7 @@ import {
 import DeveloperSettings, { RemMemorySettings } from "./DeveloperSettings.jsx";
 import RemResources from "./RemResources.jsx";
 import ProviderSettings from "./ProviderSettings.jsx";
+import PairedDevices from "./PairedDevices.jsx";
 import { useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevices.js";
 import {
@@ -37,6 +38,7 @@ import {
 const CATEGORIES = [
   { id: "general", label: "General", icon: MonitorCog },
   { id: "devices", label: "Devices", icon: Mic },
+  { id: "paired-devices", label: "Paired devices", icon: MonitorCog },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "editor", label: "Editor", icon: Code2 },
   { id: "browser", label: "Browser", icon: Globe2 },
@@ -213,6 +215,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     element: <SettingRow key={key} label={label} description={description}>{element}</SettingRow>,
     searchText: `${label} ${description}`,
   });
+  if (category === "paired-devices") return [{ searchText: "Paired devices phone mobile desktop pairing QR trust revoke", element: <PairedDevices key="paired-devices" /> }];
   if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps", element: <ProviderSettings key="providers" providerState={providerState} /> }];
   if (category === "developer") return [{ searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> }];
   if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown", element: <RemMemorySettings key="memory" value={settings.memory} onChange={onChange} /> }];

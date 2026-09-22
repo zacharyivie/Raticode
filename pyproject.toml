@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gofer-flow"
-version = "0.3.4"
+version = "0.3.5"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
@@ -27,10 +27,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+devices = [
+    "cryptography==50.0.1",
+    "pyOpenSSL==26.4.0",
+    "tink==1.16.1",
+    "keyring==25.7.0",
+    "segno==1.6.6",
+]
 xlsx = [
     "openpyxl>=3.1",
 ]
 dev = [
+    "cryptography==50.0.1",
+    "pyOpenSSL==26.4.0",
+    "tink==1.16.1",
+    "keyring==25.7.0",
+    "segno==1.6.6",
     "jsonschema>=4.23",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
@@ -63,7 +75,7 @@ strict = true
 python_version = "3.11"
 
 [[tool.mypy.overrides]]
-module = ["networkx", "networkx.*", "tomli_w", "apscheduler", "apscheduler.*", "openpyxl", "openpyxl.*", "vosk", "vosk.*"]
+module = ["networkx", "networkx.*", "tomli_w", "apscheduler", "apscheduler.*", "openpyxl", "openpyxl.*", "vosk", "vosk.*", "tink", "tink.*", "segno", "segno.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

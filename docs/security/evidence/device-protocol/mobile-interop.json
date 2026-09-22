@@ -1,0 +1,53 @@
+{
+  "mobile_attempt": "f385440103764194adc3c719873f751a",
+  "executed_by": "Mobile dev",
+  "python_peer_revision": "0a5e7bc1985e8621fb90df8e6369dd705f554aea",
+  "tls_and_probe_unchanged_since_peer_revision": true,
+  "artifacts": [
+    {
+      "origin": "app/build/test-results/testDebugUnitTest/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml",
+      "sha256": "c785b9f953f21a2226bb09f1b00671bef2853f2d55d17629c659c9192fd7c8a6",
+      "summary": {
+        "name": "dev.raticode.mobile.protocol.v2.PythonTlsInteropTest",
+        "tests": "9",
+        "skipped": "0",
+        "failures": "0",
+        "errors": "0",
+        "timestamp": "2026-09-19T17:57:11.297Z",
+        "hostname": "Mossblaster9000",
+        "time": "0.97"
+      },
+      "retained_artifact": "docs/security/evidence/device-protocol/mobile-TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml"
+    },
+    {
+      "origin": "app/build/test-results/testDebugUnitTest/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml",
+      "sha256": "9b57c39fc04150e83c3196db3858030a559f5c2a460d3d4ee8d5ce79a6d5f802",
+      "summary": {
+        "name": "dev.raticode.mobile.protocol.v2.StreamingInteropTest",
+        "tests": "3",
+        "skipped": "0",
+        "failures": "0",
+        "errors": "0",
+        "timestamp": "2026-09-19T17:57:12.274Z",
+        "hostname": "Mossblaster9000",
+        "time": "0.162"
+      },
+      "retained_artifact": "docs/security/evidence/device-protocol/mobile-TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml"
+    },
+    {
+      "origin": "app/build/outputs/androidTest-results/connected/debug/TEST-Swarm_Mobile_Protocol_API36(AVD) - 16-_app-.xml",
+      "sha256": "7f8940dec5657a6a2ab0269a4076a837b9ae947508e396384482ac81ef85366b",
+      "summary": {
+        "name": "dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest",
+        "tests": "13",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "1.351",
+        "timestamp": "2026-09-19T17:51:51",
+        "hostname": "localhost"
+      },
+      "retained_artifact": "docs/security/evidence/device-protocol/mobile-TEST-Swarm_Mobile_Protocol_API36(AVD)_-_16-_app-.xml"
+    }
+  ]
+}

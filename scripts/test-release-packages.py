@@ -63,6 +63,7 @@ def probe(binary: Path) -> None:
     if not inventory:
         raise RuntimeError(f"Packaged backend has an empty license inventory: {binary}")
     for required in (
+        "gofer/devices/protocol/v2/event.schema.json",
         "third-party-licenses/PYTHON-LICENSE.txt",
         "third-party-licenses/native-inventory.json",
     ):

@@ -147,6 +147,8 @@ def test_cursor_effort_reaches_rem_and_subscription_commands(effort):
     for command in commands:
         assert command[command.index("--model") + 1] == f"cursor-grok-4.5-{effort}"
         assert "--effort" not in command
+        assert "--trust" in command
+        assert "--yolo" not in command and "--force" not in command
 
 
 def swarm_resources(url: str = "http://localhost:1234/tool", **kwargs: Any) -> AgentResources:
@@ -386,23 +388,16 @@ def test_swarm_roster_persists_provider_and_model(provider, tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "version, supported",
-    [
-        ("2026.09.10-a1b2", True),
-        ("2026.09.15-d2fe57e", True),
-        ("2026.09.15\n", True),
-        ("2026.09.09", False),
-        ("2026.09.16-new", False),
-        ("2026.09.150", False),
-        ("unrelated 2026.09.15-d2fe57e", False),
-        ("unrelated 1.0", False),
-        ("", False),
-    ],
+    "version",
+    ["2026.09.09", "2026.09.18-9a7762b", "2099.01.01-new", "1.0", ""],
 )
-async def test_cursor_private_flags_require_evidenced_version(version, supported, monkeypatch):
+async def test_cursor_resource_check_does_not_gate_builds(version, monkeypatch):
     from gofer.subscriptions.cli_providers import check_cursor_plugins
 
+    commands = []
+
     async def probe(command, **kwargs):
+        commands.append(command)
         return (
             0,
             version if command[-1] == "--version" else "Start the Cursor Agent --plugin-dir",
@@ -412,34 +407,27 @@ async def test_cursor_private_flags_require_evidenced_version(version, supported
     monkeypatch.setattr("gofer.subscriptions.cli_providers.run_subprocess", probe)
     monkeypatch.delenv("CURSOR_ENABLE_BEDROCK", raising=False)
     monkeypatch.delenv("CURSOR_LOCAL_AGENT_BASE_URL", raising=False)
-    if supported:
-        await check_cursor_plugins("cursor-agent")
-    else:
-        with pytest.raises(ValueError, match="Settings > Providers") as error:
-            await check_cursor_plugins("cursor-agent")
-        assert repr(version.strip() or "unknown") in str(error.value)
+    await check_cursor_plugins("cursor-agent")
+    assert commands == [["cursor-agent", "--help"]]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "version_code, help_code, help_text, env_name, message",
+    "help_code, help_text, env_name, message",
     [
-        (1, 0, "Start the Cursor Agent --plugin-dir", None, "not supported"),
-        (0, 1, "Start the Cursor Agent --plugin-dir", None, "must support --plugin-dir"),
-        (0, 0, "Start the Cursor Agent", None, "must support --plugin-dir"),
-        (0, 0, "Other CLI --plugin-dir", None, "must support --plugin-dir"),
-        (0, 0, "Start the Cursor Agent --plugin-dir", "CURSOR_ENABLE_BEDROCK", "normal mode"),
-        (0, 0, "Start the Cursor Agent --plugin-dir", "CURSOR_LOCAL_AGENT_BASE_URL", "normal mode"),
+        (1, "Start the Cursor Agent --plugin-dir", None, "must support --plugin-dir"),
+        (0, "Start the Cursor Agent", None, "must support --plugin-dir"),
+        (0, "Other CLI --plugin-dir", None, "must support --plugin-dir"),
+        (0, "Start the Cursor Agent --plugin-dir", "CURSOR_ENABLE_BEDROCK", "normal mode"),
+        (0, "Start the Cursor Agent --plugin-dir", "CURSOR_LOCAL_AGENT_BASE_URL", "normal mode"),
     ],
 )
 async def test_cursor_resource_check_preserves_capability_guards(
-    version_code, help_code, help_text, env_name, message, monkeypatch
+    help_code, help_text, env_name, message, monkeypatch
 ):
     from gofer.subscriptions.cli_providers import check_cursor_plugins
 
     async def probe(command, **kwargs):
-        if command[-1] == "--version":
-            return version_code, "2026.09.15-d2fe57e", ""
         return help_code, help_text, ""
 
     monkeypatch.setattr("gofer.subscriptions.cli_providers.run_subprocess", probe)
@@ -464,11 +452,15 @@ def test_catalog_publishes_default_only_permissions_for_new_providers():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["cursor", "copilot", "opencode"])
+@pytest.mark.parametrize("scope", ["project", "global"])
 async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
-    provider, tmp_path, monkeypatch
+    provider, scope, tmp_path, monkeypatch
 ):
     from gofer.ui import chat
 
+    working_dir = tmp_path if scope == "project" else None
+    expected_cwd = tmp_path if scope == "project" else tmp_path / "data"
+    expected_cwd.mkdir(exist_ok=True)
     seen = []
     paths = []
 
@@ -478,6 +470,8 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
     async def fake(command, **kwargs):
         seen.append(command)
         if provider == "cursor":
+            assert "--trust" in command
+            assert kwargs["cwd"] == expected_cwd
             path = Path(command[command.index("--plugin-dir") + 1])
             assert path.exists()
             paths.append(path)
@@ -532,7 +526,7 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
             "custom/model",
             messages,
             None,
-            working_dir=tmp_path,
+            working_dir=working_dir,
             data_dir=tmp_path / "data",
             agent_instructions="Keep this persona",
         )
@@ -546,7 +540,12 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
     )
     assert "--resume" not in seen[-1] and "--session" not in seen[-1]
     result = await chat.run_workflow_chat(
-        provider, "custom/model", messages, None, working_dir=tmp_path, data_dir=tmp_path / "data"
+        provider,
+        "custom/model",
+        messages,
+        None,
+        working_dir=working_dir,
+        data_dir=tmp_path / "data",
     )
     assert result["message"]["body"] == "Answer"
     assert all(not path.exists() for path in paths)

@@ -1,3 +1,4 @@
+import { orderDeviceMessages, startDeviceWorkspaceSync } from "../lib/deviceWorkspaceSync.js";
 import { fetchChatTurn } from "../lib/chatTransport.js";
 import { pathKey, samePath, pathWithin, uniquePaths, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
 import { threadIsArchived, inspectThreadScopes, cachedThreadScopes, threadScopeKey } from "../lib/threadActivity.js";
@@ -46,6 +47,7 @@ import {
   Search,
   Settings as SettingsIcon,
   Sun,
+  Smartphone,
   Trash2,
   Undo2,
   Upload,
@@ -297,6 +299,8 @@ export async function discoverProjectWorkflows(projectRoot, { signal, onResolved
 }
 
 export default function App() {
+  const deviceSyncContext = useRef({});
+  useEffect(() => startDeviceWorkspaceSync({ getContext: () => deviceSyncContext.current, deleteThread: deletePhoneThread }), []);
   const [settings, setSettings] = useState(loadAppSettings);
   const [initialStudioSession] = useState(loadStudioSession);
   const [initialEditorSession] = useState(loadEditorSession);
@@ -354,6 +358,7 @@ export default function App() {
   const [newCodeFileRequest, setNewCodeFileRequest] = useState(0);
   const [recentCodePaths, setRecentCodePaths] = useState(loadRecentCodePaths);
   const [recentProjectRoots, setRecentProjectRoots] = useState(loadRecentProjectRoots);
+  deviceSyncContext.current = { settings, roots: mergeRecentProjects(recentProjectRoots, workflows.map(item => item.projectRoot).filter(Boolean)) };
   const [lastWorktreeByProject, setLastWorktreeByProject] = useState(loadLastWorktreeByProject);
   const [rattishSessions, setRattishSessions] = useState({});
   const documentSessionsRef = useRef(new Map());
@@ -6014,6 +6019,37 @@ export function ChatPane({
     changed: setMessagesByThread,
   });
   useEffect(() => { persistChatThreads(threads); }, [threads]);
+  useEffect(() => {
+    const receive = ({ detail }) => {
+      const { metadata, messages, running, activeTurn } = detail;
+      setThreads(current => [metadata, ...current.filter(t => t.id !== metadata.id)]);
+      if (activeThreadIdRef.current === metadata.id) {
+        setProviderId(metadata.provider || "codex");
+        setModel(metadata.model || "");
+      }
+      if (messages.length) conversationCacheRef.current.hydrate(metadata.id, messages, { recent: true, device: true });
+      if (!chatAbortControllersRef.current[metadata.id] && typeof running === "boolean") {
+        if (activeTurn && (!activeChatTurnsRef.current[metadata.id] || activeChatTurnsRef.current[metadata.id].remote)) activeChatTurnsRef.current[metadata.id] = { turnId: activeTurn, ready: true, remote: true };
+        else if (activeChatTurnsRef.current[metadata.id]?.remote) delete activeChatTurnsRef.current[metadata.id];
+        setChatStateByThread(current => ({ ...current, [metadata.id]: { ...current[metadata.id], deviceRunning: running } }));
+      }
+    };
+    const removed = ({ detail: { id } }) => {
+      deletedChatThreadIdsRef.current.add(id);
+      chatAbortControllersRef.current[id]?.abort();
+      delete activeChatTurnsRef.current[id];
+      conversationCacheRef.current.remove(id);
+      setThreads(current => current.filter(t => t.id !== id));
+      setChatStateByThread(current => { const next = { ...current }; delete next[id]; return next; });
+      if (activeThreadIdRef.current === id) { activeThreadIdRef.current = null; setActiveThreadId(null); }
+    };
+    window.addEventListener("gofer:device-thread-sync", receive);
+    window.addEventListener("gofer:device-thread-deleted", removed);
+    return () => {
+      window.removeEventListener("gofer:device-thread-sync", receive);
+      window.removeEventListener("gofer:device-thread-deleted", removed);
+    };
+  }, []);
   const [chatStateByThread, setChatStateByThread] = useState({});
   const [chatAnnouncementByThread, setChatAnnouncementByThread] = useState({});
   const [backgroundChatAnnouncement, setBackgroundChatAnnouncement] = useState("");
@@ -6143,9 +6179,8 @@ export function ChatPane({
         : [],
     [activeThreadId, messagesByThread],
   );
-  const chatState = activeThreadId
-    ? chatStateByThread[activeThreadId] ?? { sending: false, error: "" }
-    : { sending: false, error: "" };
+  const threadChatState = chatStateByThread[activeThreadId] || {};
+  const chatState = { ...threadChatState, sending: Boolean(threadChatState.sending || threadChatState.deviceRunning), error: threadChatState.error || "" };
   const chatAnnouncement = activeThreadId
     ? chatAnnouncementByThread[activeThreadId] ?? ""
     : "";
@@ -6156,7 +6191,7 @@ export function ChatPane({
     const emptyThreadOpened = historyState.threadId === activeThreadId && !historyState.loading && !historyState.firstMessageId;
     return repository.durable ? messages.slice(start >= 0 ? start : emptyThreadOpened ? 0 : -CONVERSATION_PAGE_SIZE) : messages;
   }, [messages, historyState.threadId, historyState.firstMessageId, historyState.loading, activeThreadId, repository.durable]);
-  const chatItems = useMemo(() => buildChatItems(visibleMessages), [visibleMessages]);
+  const chatItems = useMemo(() => buildChatItems(orderDeviceMessages(visibleMessages)), [visibleMessages]);
   const conversationItems = useMemo(() => {
     if (!liveTurn || chatItems.some((item) => item.message?.id === liveTurn.id)) return chatItems;
     return [...chatItems, { type: "message", message: liveTurn }];
@@ -6281,7 +6316,7 @@ export function ChatPane({
   useEffect(() => {
     conversationCacheRef.current.activate([
       activeThreadId,
-      ...Object.keys(chatStateByThread).filter((id) => chatStateByThread[id]?.sending),
+      ...Object.keys(chatStateByThread).filter((id) => (chatStateByThread[id]?.sending || chatStateByThread[id]?.deviceRunning)),
     ]);
   }, [activeThreadId, chatStateByThread]);
 
@@ -7637,7 +7672,7 @@ export function ThreadList({ activeThreadId, activityByThread = {}, onArchive, o
 }
 
 function ThreadActivityIndicator({ state }) {
-  if (state?.sending) {
+  if (state?.sending || state?.deviceRunning) {
     return (
       <span
         className="grid h-4 w-4 shrink-0 place-items-center text-brand"
@@ -7746,6 +7781,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
           <>
             {isUser ? (
               <div className="mb-1 flex h-5 items-center justify-end gap-0.5">
+                {message.origin === "phone" && <span title="Sent from your phone" aria-label="Sent from your phone" className="mr-1 inline-flex"><Smartphone aria-hidden="true" size={12} /></span>}
                 {canEdit ? (
                   <button
                     aria-label="Edit message"
@@ -8426,6 +8462,17 @@ function archiveThreadFromStorage(threadId, messages, deleted = false) {
     const thread = JSON.parse(storage.getItem(chatThreadMetadataKey(threadId)) || "null") || { id: threadId };
     return bridge.archive(thread, typeof messages === "function" ? await messages() : messages, deleted);
   }, { deleted });
+}
+
+async function deletePhoneThread(id) {
+  const repository = conversationRepository();
+  if (!await archiveThreadFromStorage(id, () => repository.all(id), true)) {
+    throw new Error("Phone deletion is waiting for the desktop archive. Reconnect its folder or stop archiving in Settings > Memory.");
+  }
+  const response = await fetch(apiUrl(`/chat/threads/${encodeURIComponent(id)}`), { method: "DELETE" });
+  if (!response.ok) throw new Error("Phone deletion could not stop and remove the desktop turn. It will retry.");
+  await repository.remove(id);
+  deleteStoredChatThread(id);
 }
 
 async function archiveAllConversations() {

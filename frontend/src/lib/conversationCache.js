@@ -1,3 +1,4 @@
+import { mergeDeviceMessages } from "./deviceWorkspaceSync.js";
 // Only persisted inactive histories may be evicted. Active/running histories and
 // failed writes remain available even when they exceed the inactive budget.
 export function createConversationCache({ load, save, changed, maxInactive = 4, maxBytes = 8 * 1024 * 1024 }) {
@@ -66,13 +67,13 @@ export function createConversationCache({ load, save, changed, maxInactive = 4, 
       const entry = entries.get(id);
       if (entry && !entry.dirty) entries.set(id, { messages: entry.messages.slice(-limit), persisted: entry.messages.slice(-limit), dirty: false });
     },
-    hydrate(id, messages, { recent = false } = {}) {
+    hydrate(id, messages, { recent = false, device = false } = {}) {
       const entry = entries.get(id);
       const current = entry?.messages || [];
       const merged = new Map((recent ? current : messages).map(message => [message.id, message]));
       if (recent) for (const message of messages) if (!merged.has(message.id)) merged.set(message.id, message);
       for (const message of current) merged.set(message.id, message);
-      const combined = [...merged.values()];
+      const combined = device ? mergeDeviceMessages(current, messages) : [...merged.values()];
       if (entry) {
         entry.messages = combined;
         if (!entry.dirty) entry.persisted = combined;

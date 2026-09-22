@@ -1,0 +1,8 @@
+{
+  "template": "AES128_GCM_HKDF_1MB",
+  "aad_utf8": "raticode-file-v2\n00000000-0000-4000-8000-000000000001\n32768\ne11360251d1173650cdcd20f111d8f1ca2e412f572e8b36a4dc067121c1799b8",
+  "plaintext_pattern": "bytes(range(256)) repeated 128 times",
+  "plaintext_size": 32768,
+  "plaintext_sha256": "e11360251d1173650cdcd20f111d8f1ca2e412f572e8b36a4dc067121c1799b8",
+  "ciphertext_sha256": "42ddbe9aca9c5e3e2e632368a93ed2ed96348e006f9d48a62e2febf266655a27"
+}

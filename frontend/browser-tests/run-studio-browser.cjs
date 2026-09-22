@@ -24,6 +24,8 @@ async function main() {
   await runBrowserTest(path.join(__dirname, "studio.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "studio.browser.cjs"), { GOFER_TERMINAL_ONLY: "1" });
   await runBrowserTest(path.join(__dirname, "workflow-tabs.browser.cjs"));
+  await runBrowserTest(path.join(__dirname, "paired-devices.browser.cjs"));
+  await runBrowserTest(path.join(__dirname, "mobile-conversation.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "studio.browser.cjs"), { GOFER_SWARM_ONLY: "1" });
   await runBrowserTest(path.join(__dirname, "../electron/tests/studio-policy.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "../electron/tests/conversation-storage.browser.cjs"));

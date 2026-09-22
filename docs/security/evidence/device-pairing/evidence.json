@@ -1,0 +1,139 @@
+{
+  "milestone": "d-pair",
+  "attempt": "69e4eb69d1b94e70879326389dbdb1d5",
+  "base_revision": "e5f46649a2f6be0cd85e41c013397d8cebe136a5",
+  "candidate_binding": "The managed Git commit containing this file and the source-sha256 inventory identifies this candidate. Exact SHA is submitted on the shared swarm board.",
+  "implemented": [
+    "OS-protected P-256 identity and AES-GCM routing credential storage",
+    "Transactional backend trust registry with confirmed/active/revoked states, endpoints and fixed listener port",
+    "Expiring single-use QR invitations and local fingerprint consent",
+    "Real bounded TLS 1.3 TCP enrollment for controllers and desktop peers",
+    "Explicit opt-in real LAN configuration and loopback defaults",
+    "Pinned reconnect, lost-ready/ack recovery and revocation checks",
+    "Backend-owned lifecycle independent of an open renderer",
+    "Settings QR/paste/confirm/revoke controls with no browser secret persistence",
+    "Desktop binary build wrappers include devices dependencies"
+  ],
+  "checks": {
+    "full_backend": {
+      "tests": 2546,
+      "passed": 2544,
+      "failures": 0,
+      "errors": 0,
+      "skipped": [
+        {
+          "test": "tests.unit.test_atomic_output.test_windows_atomic_output_holds_parent_against_rename",
+          "reason": "Windows directory handle sharing"
+        },
+        {
+          "test": "tests.unit.test_native_filesystem_security.test_windows_junction_ancestors_cannot_redirect_file_operations",
+          "reason": "Native Windows junctions"
+        }
+      ]
+    },
+    "targeted": {
+      "tests": 306,
+      "passed": 306,
+      "failures": 0,
+      "errors": 0,
+      "skipped": []
+    },
+    "pairing_cases": 32,
+    "frontend_tests": {
+      "passed": 576,
+      "failed": 0,
+      "skipped": 0
+    },
+    "ruff": "pass",
+    "mypy": "pass; 241 source files",
+    "frontend_lint": "pass",
+    "frontend_build": "pass; existing chunk-size warning",
+    "browser": "pass; isolated real Chromium, fake settings API",
+    "release_script_tests": "14 passed",
+    "aggregate_script": "bash syntax checked; each constituent check executed separately, full aggregate managed execution pending"
+  },
+  "commands": [
+    ".venv/bin/pytest --junitxml=docs/security/evidence/device-pairing/backend-full.xml",
+    ".venv/bin/pytest tests/unit/test_device_pairing.py tests/unit/test_device_protocol.py tests/unit/test_ui_server.py --junitxml=docs/security/evidence/device-pairing/targeted.xml",
+    ".venv/bin/ruff check src tests --fix",
+    ".venv/bin/mypy src tests",
+    "source \"$HOME/.nvm/nvm.sh\" && nvm use 22.12.0",
+    "npm --prefix frontend test",
+    "npm --prefix frontend run lint",
+    "npm --prefix frontend run check:build",
+    "xvfb-run -a npm --prefix frontend run test:pairing-browser"
+  ],
+  "frozen_protocol_v2_sha256": "f3faf4bb173b6fe4238530cf271c9fbe647025ce7587195cb1e7401ac9ba8e60",
+  "lan_fixture_sha256": "13cde99651d643750e31359c2a4f2332bd2cce4d0a15702ef94c65139741991b",
+  "mobile_framing_agreement_board_id": "1cedf8ccc8114c25827538f38f2911d8",
+  "limits": [
+    "Managed verification awaits check expansion after this attempt yields",
+    "Desktop reviewer exact candidate/integrated review pending",
+    "Independent cryptographic review not supplied; experimental opt-in is not certification",
+    "No new Android/service enrollment exchange yet; required m-pair handoff",
+    "No physical phone/two-physical-host or public relay tests",
+    "OS Secret Service availability only; no real credential entries read/written; macOS/Windows roundtrip untested",
+    "Binary packaging not run; build wrappers tested with mock uv",
+    "Relay, durable application sync/outbox, Rem/fleet dispatch, files and approvals are later milestones",
+    "Revoked identities cannot be silently re-enrolled; no in-place revoked-identity reset UI",
+    "Listener handles enrollment/session control only; no application claims"
+  ],
+  "artifacts": {
+    "docs/security/evidence/device-pairing/backend-full.txt": {
+      "sha256": "e42f4b4c1d0f9d5499be96731dd8e23b404d9b4b3020846180c8c271aee5bca0",
+      "bytes": 24587
+    },
+    "docs/security/evidence/device-pairing/backend-full.xml": {
+      "sha256": "b97bb202bf1a76235ee15348216d63752f3d430d8cde8072ab148a7c21f351cf",
+      "bytes": 341010
+    },
+    "docs/security/evidence/device-pairing/browser.txt": {
+      "sha256": "7a9c58f8f3a0411059a1a9d1fd19f433c5a5e3a8482f142a5a5dc7172cf24ac1",
+      "bytes": 296
+    },
+    "docs/security/evidence/device-pairing/environment.json": {
+      "sha256": "176a96653af5a91faf92fdc33cb0774f5263ccbb664eb1b61cfbc32fd090f381",
+      "bytes": 685
+    },
+    "docs/security/evidence/device-pairing/frontend-build.txt": {
+      "sha256": "80121ab37376bd1624b03ebf0246bd4b2e7b15b58aa5c11fb1f6b6b8ae2764f7",
+      "bytes": 9955
+    },
+    "docs/security/evidence/device-pairing/frontend-lint.txt": {
+      "sha256": "8a5470a0f399df7d1e3e4d33b96efd2c17fb2b3607318d143ce990d499087643",
+      "bytes": 40
+    },
+    "docs/security/evidence/device-pairing/frontend-tests.txt": {
+      "sha256": "1dc97a6de7d6930791404cee971669c40d16dc2d91c104d619591edab1dbaa81",
+      "bytes": 60026
+    },
+    "docs/security/evidence/device-pairing/mypy.txt": {
+      "sha256": "5121fc685080825cb99f883cfb985d5afef7655417c3f0f72394d1125fc671f1",
+      "bytes": 45
+    },
+    "docs/security/evidence/device-pairing/os-store-probe.txt": {
+      "sha256": "94de411dbd80c1ad54987ae26c1ec65d3ef61999cfecbf5f227bb12ea21476cb",
+      "bytes": 153
+    },
+    "docs/security/evidence/device-pairing/release-scripts.txt": {
+      "sha256": "daa4e0b4ac655fb9fa14b7782490ca5a16a3d084983c7efb792e1b1987de42c0",
+      "bytes": 99
+    },
+    "docs/security/evidence/device-pairing/ruff.txt": {
+      "sha256": "d54afb2519dfce7ee3e269340df2dbeb4dcb3b74e08191e5835314bf352b6a5d",
+      "bytes": 1223
+    },
+    "docs/security/evidence/device-pairing/source-sha256.json": {
+      "sha256": "107fdf1efa7f2ec44d8aebf2ad2ea318cf26d8693cd19d036fb592f382a109b3",
+      "bytes": 2666
+    },
+    "docs/security/evidence/device-pairing/targeted.txt": {
+      "sha256": "fe330892322a094fcf90ee6858dadbde16c67626349448165010973c222c11cb",
+      "bytes": 1368
+    },
+    "docs/security/evidence/device-pairing/targeted.xml": {
+      "sha256": "dac0b88f02e8d999c9b91d78a1ba5cbcf23023e9fe2328794d7becaf960265ab",
+      "bytes": 41297
+    }
+  }
+}
