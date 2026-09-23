@@ -437,3 +437,29 @@ def test_desktop_packages_exclude_electron_test_code() -> None:
     assert "electron/**/*" in files
     assert "!electron/tests/**/*" in files
     assert "!electron/**/*.test.cjs" in files
+
+
+def test_macos_speech_dependency_and_permissions_are_packaged() -> None:
+    import plistlib
+
+    from packaging.requirements import Requirement
+
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    speech = [
+        Requirement(value)
+        for value in project["project"]["dependencies"]
+        if value.startswith("vosk")
+    ]
+    for platform, version in (("darwin", "0.3.44"), ("linux", "0.3.45"), ("win32", "0.3.45")):
+        selected = [
+            req for req in speech if req.marker and req.marker.evaluate({"sys_platform": platform})
+        ]
+        assert len(selected) == 1
+        assert version in selected[0].specifier
+    mac = _read_json(REPO_ROOT / "frontend/package.json")["build"]["mac"]
+    assert "Rem" in mac["extendInfo"]["NSMicrophoneUsageDescription"]
+    for field in ("entitlements", "entitlementsInherit"):
+        entitlements = plistlib.loads((REPO_ROOT / "frontend" / mac[field]).read_bytes())
+        assert entitlements["com.apple.security.device.audio-input"] is True
+        assert entitlements["com.apple.security.cs.allow-jit"] is True
+    assert '"*.dyld"' in (REPO_ROOT / "gof.spec").read_text()

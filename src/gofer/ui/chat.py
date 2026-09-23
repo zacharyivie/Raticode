@@ -139,7 +139,12 @@ class _ChatFileState:
 class _ChatSnapshot(dict[str, _ChatFileState]):
     def __init__(self) -> None:
         super().__init__()
-        self.spool = tempfile.TemporaryDirectory(prefix="raticode-chat-")
+        # macOS temp paths commonly start with /var -> /private/var. Resolve
+        # the trusted temp root once, before creating our private directory;
+        # later reads must still reject links swapped into the snapshot path.
+        self.spool = tempfile.TemporaryDirectory(
+            prefix="raticode-chat-", dir=Path(tempfile.gettempdir()).resolve(strict=True)
+        )
         self.complete = True
 
 
@@ -773,6 +778,7 @@ def _finalize_chat_changes(
         "projectRoot": str(root),
         "undone": False,
         "undoable": changes["undoable"],
+        "undoUnavailableReason": changes["undoUnavailableReason"],
         "files": stored_files,
     }
     store = _chat_change_store(data_dir, change_set_id)
@@ -834,12 +840,23 @@ def _chat_changes_from_snapshots(
     files: list[dict[str, Any]] = []
     stored_files: list[dict[str, Any]] = []
     undoable = True
+    snapshot_unavailable = False
     for path in changed_paths:
         previous = before.get(path)
         current = after.get(path)
-        diff, additions, deletions, binary = _chat_file_diff(path, previous, current)
+        readable = True
+        try:
+            diff, additions, deletions, binary = _chat_file_diff(path, previous, current)
+        except OSError:
+            # Previews and the persistence-error fallback both read spool files.
+            # A missing/unreadable blob must not fail the provider turn, or allow
+            # undo based on an incomplete snapshot.
+            log.warning("Could not read Rem snapshot for %s", path, exc_info=True)
+            diff, additions, deletions, binary = "Snapshot content is unavailable.", 0, 0, True
+            readable = False
+            snapshot_unavailable = True
         file_reversible = _chat_file_available(previous) and _chat_file_available(current)
-        undoable = undoable and file_reversible
+        undoable = undoable and file_reversible and readable
         files.append(
             {
                 "path": path,
@@ -852,7 +869,7 @@ def _chat_changes_from_snapshots(
                 "diff": diff,
             }
         )
-        if store_files:
+        if store_files and readable:
             stored_files.append(
                 {
                     "path": path,
@@ -868,7 +885,11 @@ def _chat_changes_from_snapshots(
         "deletions": sum(int(item["deletions"]) for item in files),
         "undoable": undoable,
         "undoUnavailableReason": (
-            None if undoable else "A changed file is too large to undo and redo"
+            "Snapshot content is unavailable"
+            if snapshot_unavailable
+            else None
+            if undoable
+            else "A changed file is too large to undo and redo"
         ),
         "undone": False,
         "files": files,
@@ -913,7 +934,10 @@ def _apply_chat_changes(
             "fileCount": len(payload.get("files") or []),
         }
     if not payload.get("undoable"):
-        raise ChatChangeError("This turn changed a file that is too large to undo and redo")
+        raise ChatChangeError(
+            payload.get("undoUnavailableReason")
+            or "This turn changed a file that is too large to undo and redo"
+        )
     root = Path(str(payload.get("projectRoot") or "")).resolve()
     files = payload.get("files")
     if not root.is_dir() or not isinstance(files, list):

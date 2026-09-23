@@ -11,6 +11,12 @@ in `uv.lock`, including other platforms and optional/build dependencies. It does
 not resolve away platform-specific packages. The release publishes both audit
 JSON documents and lock inventories with its artifacts.
 
+When the lock contains multiple versions of one Python package, the audit splits
+them into separate pip-audit invocations and combines their results. Every locked
+version must appear in the report, with no skipped entries. Any advisory,
+incomplete report, or failed invocation fails validation. Previous audit output
+is removed before scanning so a failed scan cannot reuse clean evidence.
+
 Release validation requires Ruff, mypy, the complete Python suite, frontend lint,
 frontend unit/browser tests, and both advisory checks before packaging. Every
 advisory severity fails the gate. There are currently no exceptions. A future
@@ -63,7 +69,14 @@ On the first launch after this update, isolated preload reads the existing
 absolute paths into `trusted-projects.json` and records
 `legacyRecentProjectsMigrated: true` in the same atomic replacement. This
 one-time acceptance of legacy renderer history is an explicit compatibility
-decision. Later changes to that list cannot authorize additional folders.
+decision. Later changes to that list cannot replay migration.
+
+Desktop navigation accepts any OS-accessible folder, including sibling worktrees.
+Selecting a project persists its root and registers backend access for project
+services. Ordinary file browsing and terminal navigation do not require that
+registration. These desktop operations remain restricted to the trusted Studio
+sender and frame; embedded remote pages cannot invoke them. Backend and agent
+filesystem operations retain their own authenticated path grants.
 
 The launch capability stays inside preload. Main checks the sender and frame,
 consumes the capability once, and never exposes migration on `goferDesktop`.

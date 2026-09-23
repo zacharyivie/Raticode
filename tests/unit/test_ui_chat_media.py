@@ -5,6 +5,7 @@ import io
 import json
 import sys
 import wave
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -165,3 +166,19 @@ def _wav_bytes(pcm: bytes) -> bytes:
         target.setframerate(16_000)
         target.writeframes(pcm)
     return output.getvalue()
+
+
+def test_vosk_model_canonicalizes_data_root_alias(monkeypatch, tmp_path):
+    real = tmp_path / "private" / "var"
+    real.mkdir(parents=True)
+    alias = tmp_path / "var"
+    alias.symlink_to(real, target_is_directory=True)
+    paths: list[Path] = []
+    monkeypatch.setattr(chat_media, "_vosk_model", None)
+    monkeypatch.setattr(chat_media, "_vosk_model_path", None)
+    monkeypatch.setattr(chat_media, "_ensure_vosk_model", paths.append)
+    monkeypatch.setitem(sys.modules, "vosk", SimpleNamespace(Model=lambda path: path))
+    assert chat_media._load_vosk_model(alias) == str(
+        real / "speech-models" / chat_media.VOSK_MODEL_NAME
+    )
+    assert paths == [real / "speech-models" / chat_media.VOSK_MODEL_NAME]

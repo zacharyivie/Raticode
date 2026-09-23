@@ -38,10 +38,20 @@ Windows may show Unknown publisher or SmartScreen prompts. macOS may require
 approval under **System Settings > Privacy & Security** after the first launch.
 Unsigned Apple Silicon apps use local ad-hoc signatures so they can run; those do
 not establish a verified publisher and are not Apple notarization.
-Unsigned macOS apps check for releases and open the release page for manual
-installation. They do not offer automatic installation. Windows and Linux retain
+Unsigned macOS apps check for releases and offer **Download Mac installer**,
+which opens the matching architecture's DMG download in the browser. Open the DMG,
+quit Raticode, and drag Raticode into Applications to replace the old copy.
+They do not offer automatic installation. Windows and Linux retain
 the existing updater behavior. Test installation and updates on clean machines
 before publishing; CI backend smoke tests do not establish Gatekeeper or SmartScreen behavior.
+
+Mac builds include Vosk 0.3.44, the latest published universal2 wheel, and its
+`libvosk.dyld` native library. Other platforms retain Vosk 0.3.45. The app declares
+microphone usage and audio-input entitlements. Before publishing a Mac candidate,
+test Rem recording with microphone access granted and denied, then test Settings >
+Devices microphone input. If access was denied, enable Raticode under System Settings >
+Privacy & Security > Microphone and restart it. The first transcription downloads
+the local speech model and needs an internet connection.
 
 ## Optional signing setup for later
 

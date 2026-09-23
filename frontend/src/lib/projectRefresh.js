@@ -25,9 +25,10 @@ export function createRecentProjectValidator({ now = Date.now, maxEntries = 64 }
     validate(projectRoot, selectedProjectRoot, workspace, resolveMainRoot) {
       const key = keyFor(projectRoot, selectedProjectRoot);
       return shareInFlight(`recent-path:${key}`, async () => {
-        const check = async (root, renew = true) => {
+        const check = async (root) => {
           try {
-            if (renew && !entries.has(keyFor(projectRoot, root))) await workspace.trustProjectRoot?.(root);
+            // Desktop metadata does not need a backend grant. A busy backend
+            // must not prevent old worktree entries from being consolidated.
             return Boolean((await workspace.getPathInfo(root))?.isDirectory);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -46,7 +47,7 @@ export function createRecentProjectValidator({ now = Date.now, maxEntries = 64 }
           const cached = entries.get(keyFor(projectRoot, selected));
           if (cached && cached.expires > now()) {
             const result = await cached.value;
-            if (!samePath(result.mainProjectRoot, selected) && !await check(result.mainProjectRoot, false)) {
+            if (!samePath(result.mainProjectRoot, selected) && !await check(result.mainProjectRoot)) {
               entries.delete(key);
               return { mainProjectRoot: selected, selectedProjectRoot: selected };
             }

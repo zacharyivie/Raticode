@@ -7923,18 +7923,18 @@ test("source control keeps the Worktrees tab selected when switching worktrees",
   const worktreeButton = (root) => dom.allByTitle(root).find((node) => node.tagName === "BUTTON");
   delayStatus = true;
   for (const root of [roots[1], roots[0]]) {
-    const branchSelector = dom.byLabel("Switch branch");
+    const branchSelector = dom.byLabel("Switch to branch feature");
     const row = worktreeButton(root);
     await dom.click(worktreeButton(root));
     await dom.flush();
     assert.doesNotMatch(dom.text(), /This project is not a Git repository/);
-    assert.equal(dom.byLabel("Switch branch"), branchSelector);
+    assert.equal(dom.byLabel("Switch to branch feature"), branchSelector);
     assert.equal(reactProps(branchSelector).disabled, true);
     assert.equal(worktreeButton(root), row);
     resolveStatus();
     await dom.flush();
-    assert.equal(reactProps(branchSelector).disabled, false);
-    assert.equal(reactProps(branchSelector).value, root === roots[0] ? "main" : "feature");
+    assert.equal(reactProps(branchSelector).disabled, root === roots[1]);
+    assert.equal(dom.byLabel("Current branch").textContent, root === roots[0] ? "main" : "feature");
     assert.equal(worktreeButton(root).getAttribute("aria-current"), "page");
     assert.equal(statusRoots.at(-1), root);
     assert.doesNotMatch(dom.text(), /Commit message/);
@@ -9323,7 +9323,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     payload: {
       cols: 120,
       cwd: "/outside/ungranted",
-      grantId: "grant-/outside/ungranted",
+      grantId: "",
       rows: 40,
     },
   });
@@ -9338,7 +9338,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     channel: "gofer:browser-create",
     payload: {
       clientId: "browser:1",
-      grantId: "grant-/workspace/project/index.html",
+      grantId: "",
       path: "/workspace/project/index.html",
       url: "",
     },
@@ -10482,7 +10482,7 @@ test("Rem resource drafts allow clear, type, blur and survive row removal", asyn
   await dom.unmount();
 });
 
-test("source control displays an unborn branch and keeps one option after the first commit", async () => {
+test("source control displays the current unborn branch before and after the first commit", async () => {
   const { runGit, readGitStatus } = require("../../electron/git-status.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-unborn-"));
   const git = (...args) => runGit(["-C", root, ...args]);
@@ -10502,12 +10502,8 @@ test("source control displays an unborn branch and keeps one option after the fi
     } } });
     await dom.click(dom.byLabel("Source control"));
     const assertMainOption = () => {
-      const selector = dom.byLabel("Switch branch");
-      assert.equal(reactProps(selector).value, "main");
-      const options = selector.childNodes.filter(node => node.tagName === "OPTION");
-      assert.equal(options.length, 1);
-      assert.equal(options[0].textContent, "main");
-      assert.equal(reactProps(options[0]).value, "main");
+      assert.equal(dom.byLabel("Current branch").textContent, "main");
+      assert.throws(() => dom.byLabel("Switch branch"));
     };
     assertMainOption();
     await git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Initial commit");
@@ -10787,6 +10783,7 @@ test("source control tabs keep drafts and expose staging, commits, and branch re
     },
     gitSwitchBranch: async () => { throw new Error("error: Your local changes would be overwritten by checkout: src/example.js"); },
     gitRepoAction: async (root, action, value) => {
+      if (action === "stash-list") return { stashes: [] };
       actions.push([action, value]);
       snapshot = { ...snapshot, entries: [] };
       return snapshot;
@@ -10816,13 +10813,15 @@ test("source control tabs keep drafts and expose staging, commits, and branch re
   assert.deepEqual(actions[0], ["stage", "src/example.js"]);
   assert.ok(dom.byLabel("Unstage src/example.js"));
   window.dispatchEvent = () => true;
-  await dom.change(dom.byLabel("Switch branch"), "feature");
+  await dom.click(dom.byText("Branches"));
+  await dom.click(dom.byLabel("Switch to branch feature"));
   await dom.flush();
   assert.ok(dom.byText("Changes would be overwritten"));
   assert.ok(dom.byText("Technical details"));
   assert.ok(dom.byText("Stash & switch"));
   await dom.click(dom.byText("Stay on main"));
   assert.throws(() => dom.byText("Technical details"));
+  await dom.click(dom.byText("Changes"));
   const form = dom.ancestor(dom.byLabel("Commit message"), "FORM");
   await React.act(async () => { await reactProps(form).onSubmit(testEvent(form)); });
   await dom.flush();
@@ -11754,7 +11753,7 @@ test("source control exposes conflicts and locks parent controls during integrat
   const selected = [];
   const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" }, onOpenFile: (...args) => opened.push(args), onSelectProject: root => selected.push(root) }), createFetchMock([]), { desktop: { workspace } });
   await dom.click(dom.byLabel("Source control")); await dom.flush();
-  assert.deepEqual(dom.byLabel("Switch branch").childNodes.filter(node => node.tagName === "OPTION").map(node => reactProps(node).value), ["main", "available"]);
+  assert.throws(() => dom.byLabel("Switch branch"));
   assert.ok(dom.byText("Resolve conflicts with Rem")); assert.ok(dom.byText("Merge paused"));
   assert.ok(allElements(dom.byLabel("Staged")).some(el => el.getAttribute("title") === "code.py"));
   assert.ok(allElements(dom.byLabel("Unstaged")).some(el => el.getAttribute("title") === "code.py"));
@@ -14506,4 +14505,291 @@ test("Rem new-thread events start one scoped child and keep the parent visible",
   assert.equal(requests[1].provider, requests[0].provider);
   assert.ok(dom.byLabel("Scoped to desktop. Change project scope"));
   await dom.unmount();
+});
+
+
+test("terminal and local preview opening never request backend grants", async () => {
+  const calls = [];
+  const exposed = runPreload({
+    argv: ["electron", "preload"],
+    invoke(channel, payload) {
+      assert.notEqual(channel, "gofer:grant-path");
+      calls.push(channel);
+      return { channel, payload };
+    },
+  });
+  await exposed.goferTerminal.create({ cwd: "/outside/worktree" });
+  await exposed.goferBrowser.create({ path: "/outside/report.html" });
+  assert.deepEqual(calls, ["gofer:terminal-create", "gofer:browser-create"]);
+});
+
+test("provider settings render immediately, update independently and preserve executable drafts", async () => {
+  const { useProviderSettingsCapabilities } = await viteServer.ssrLoadModule("/src/lib/useProviderSettingsCapabilities.js");
+  const { default: ProviderSettings } = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const snapshot = createDeferred(), codex = createDeferred(), grok = createDeferred();
+  function Harness() {
+    return React.createElement(ProviderSettings, { providerState: useProviderSettingsCapabilities(true) });
+  }
+  const providers = [
+    { id: "codex", displayName: "Codex", enabled: true, detected: true, executable: "/bin/codex", executableOverride: "/bin/codex", discoveryStatus: "pending", models: [] },
+    { id: "grok", displayName: "Grok", enabled: false, discoveryStatus: "pending", models: [] },
+  ];
+  const saved = [];
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url.endsWith("?snapshot=1")) return { ok: true, json: () => snapshot.promise };
+    if (url.includes("?provider=codex")) return { ok: true, json: () => codex.promise };
+    if (url.includes("?provider=grok")) return { ok: true, json: () => grok.promise };
+    if (url === "/api/provider/settings") { saved.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ saved: true }) }; }
+    return null;
+  }]);
+  const dom = await mountReact(React.createElement(Harness), fetchMock);
+  try {
+    for (const name of ["Codex", "Claude Code", "Cursor", "GitHub Copilot", "OpenCode", "Antigravity", "Grok"]) assert.ok(dom.byText(name));
+    assert.doesNotMatch(dom.text(), /Executable not found/);
+    snapshot.resolve({ providers }); await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url.includes("&refresh=1")).length, 2);
+    assert.match(dom.text(), /Found: \/bin\/codex/);
+    assert.equal(reactProps(dom.byLabel("Grok status")).value, "disabled");
+    const input = dom.byLabel("Codex executable");
+    await dom.focus(input); await dom.change(input, "");
+    codex.resolve({ providers: [{ ...providers[0], available: true, discoveryStatus: "ready", models: [{ id: "fast-model" }] }] });
+    await dom.flush();
+    assert.ok(dom.byLabel("Codex default model"));
+    assert.match(dom.text(), /Checking providers/);
+    assert.equal(dom.byLabel("Codex executable"), input);
+    assert.equal(input.value, "");
+    await dom.change(input, "/new/codex"); await dom.blur(input); await dom.flush();
+    assert.deepEqual(saved, [{ provider: "codex", executable: "/new/codex" }]);
+    grok.reject(new Error("Grok is offline")); await dom.flush();
+    assert.match(dom.text(), /Grok is offline/);
+    assert.ok(dom.byLabel("Codex default model"));
+    assert.doesNotMatch(dom.text(), /Checking providers/);
+  } finally { snapshot.resolve({ providers }); codex.resolve({ providers: [] }); grok.resolve({ providers: [] }); await dom.unmount(); }
+});
+
+test("provider settings reuse cached rows on remount and survive failed background refreshes", async () => {
+  const { useProviderSettingsCapabilities } = await viteServer.ssrLoadModule("/src/lib/useProviderSettingsCapabilities.js");
+  const { default: ProviderSettings } = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const provider = { id: "codex", displayName: "Codex", enabled: true, available: true, discoveryStatus: "ready", models: [{ id: "cached-model" }] };
+  let setVisible, fail = false;
+  const snapshot = createDeferred(), refresh = createDeferred();
+  function Content() { return React.createElement(ProviderSettings, { providerState: useProviderSettingsCapabilities(true) }); }
+  function Harness() {
+    const [visible, update] = React.useState(true); setVisible = update;
+    return visible ? React.createElement(Content) : null;
+  }
+  const fetchMock = createFetchMock([url => {
+    if (url.endsWith("?snapshot=1")) return { ok: true, json: () => fail ? snapshot.promise : Promise.resolve({ providers: [provider] }) };
+    if (url.includes("?provider=codex")) return { ok: true, json: () => fail ? refresh.promise : Promise.resolve({ providers: [provider] }) };
+    return null;
+  }]);
+  const dom = await mountReact(React.createElement(Harness), fetchMock);
+  try {
+    await dom.flush();
+    assert.ok(dom.byLabel("Codex default model"));
+    await React.act(async () => setVisible(false));
+    fail = true;
+    await React.act(async () => setVisible(true));
+    assert.ok(dom.byLabel("Codex default model"));
+    assert.equal(reactProps(dom.byLabel("Codex default model")).disabled, false);
+    assert.match(dom.text(), /Checking providers/);
+    snapshot.resolve({ providers: [provider] }); await dom.flush();
+    refresh.reject(new Error("Offline")); await dom.flush();
+    assert.match(dom.text(), /Offline/);
+    assert.ok(dom.byLabel("Codex default model"));
+    assert.equal(fetchMock.calls.filter(call => call.url.includes("&refresh=1")).length, 2);
+    await dom.click(dom.byText("Refresh providers")); await dom.flush();
+    assert.ok(dom.byLabel("Codex default model"));
+  } finally { snapshot.resolve({ providers: [provider] }); refresh.resolve({ providers: [provider] }); await dom.unmount(); }
+});
+
+test("provider settings reopen refreshes and ignores responses from the previous opening", async () => {
+  const { useProviderSettingsCapabilities } = await viteServer.ssrLoadModule("/src/lib/useProviderSettingsCapabilities.js");
+  const requests = [];
+  let setOpen;
+  function Harness() {
+    const [open, update] = React.useState(false); setOpen = update;
+    return React.createElement("output", null, JSON.stringify(useProviderSettingsCapabilities(open)));
+  }
+  const fetchMock = createFetchMock([url => {
+    if (!url.startsWith("/api/provider/capabilities")) return null;
+    const request = createDeferred(); requests.push(request);
+    return { ok: true, json: () => request.promise };
+  }]);
+  const dom = await mountReact(React.createElement(Harness), fetchMock);
+  try {
+    assert.equal(requests.length, 0);
+    await React.act(async () => setOpen(true));
+    requests[0].resolve({ providers: [{ id: "codex", displayName: "Old snapshot" }] }); await dom.flush();
+    await React.act(async () => setOpen(false));
+    assert.equal(fetchMock.calls[1].options.signal.aborted, true);
+    await React.act(async () => setOpen(true));
+    requests[2].resolve({ providers: [{ id: "codex", displayName: "New snapshot" }] }); await dom.flush();
+    requests[3].resolve({ providers: [{ id: "codex", displayName: "New result" }] }); await dom.flush();
+    requests[1].resolve({ providers: [{ id: "codex", displayName: "Obsolete result" }] }); await dom.flush();
+    assert.match(dom.text(), /New result/);
+    assert.doesNotMatch(dom.text(), /Obsolete result/);
+  } finally { for (const request of requests) request.resolve({ providers: [] }); await dom.unmount(); }
+});
+
+
+test("project picker lists only repository roots while browsing a linked worktree", async () => {
+  const worktrees = [{ path: "/repo", branch: "main", main: true }, { path: "/feature", branch: "feature" }, { path: "/release", branch: "release" }];
+  const opened = [];
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/projects/open", { workflows: [] }, { method: "POST" }),
+  ]), {
+    storage: {
+      [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/feature", view: "code" }),
+      "gofer.recentProjects": JSON.stringify(["/repo", "/feature", "/release", "/other"]),
+      "gofer.lastWorktreeByProject": JSON.stringify({ "/repo": "/feature" }),
+    },
+    desktop: { workspace: {
+      trustProjectRoot: async root => { opened.push(root); return root; },
+      getPathInfo: async () => ({ isDirectory: true }),
+      gitWorktrees: async root => ({ worktrees: root === "/other" ? [{ path: "/other", main: true }] : worktrees }),
+    } },
+  });
+  try {
+    await dom.flush();
+    const picker = dom.byLabel("Recent projects");
+    assert.equal(picker.getAttribute("title"), "/repo");
+    await dom.click(picker);
+    const choices = allElements(dom.container).filter(el => el.getAttribute("role") === "menuitem" && el.getAttribute("title"));
+    assert.deepEqual(choices.map(el => el.getAttribute("title")), ["/repo", "/other"]);
+    await dom.click(choices[1]);
+    await dom.flush();
+    assert.equal(appModule.loadStudioSession().projectRoot, "/other");
+    assert.ok(opened.includes("/other"));
+  } finally { await dom.unmount(); }
+});
+
+test("branch rows switch locally or open the existing worktree and mark the current branch", async () => {
+  let snapshot = { active: true, branch: "main", branches: ["main", "feature", "occupied"], entries: [] };
+  const switched = [], selected = [];
+  const workspace = {
+    trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => snapshot, gitHistory: async () => ({ commits: [] }),
+    gitWorktrees: async () => ({ worktrees: [{ path: "/repo", branch: snapshot.branch, main: true }, { path: "/occupied", branch: "occupied" }] }),
+    gitSwitchBranch: async (root, branch) => { switched.push([root, branch]); snapshot = { ...snapshot, branch }; return snapshot; },
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, {
+    workflow: { projectRoot: "/repo" }, onSelectProject: (...args) => selected.push(args),
+  }), createFetchMock([]), { desktop: { workspace } });
+  window.dispatchEvent = () => true;
+  try {
+    await dom.click(dom.byLabel("Source control")); await dom.flush();
+    assert.throws(() => dom.byLabel("Switch branch"));
+    await dom.click(dom.byText("Branches"));
+    const current = dom.byLabel("Switch to branch main");
+    assert.equal(current.getAttribute("aria-current"), "page");
+    assert.ok(allElements(current.parentNode).some(el => el.getAttribute("class")?.includes("w-px bg-brand")));
+    await dom.click(dom.byLabel("Switch to branch feature")); await dom.flush();
+    assert.deepEqual(switched, [["/repo", "feature"]]);
+    assert.equal(dom.byLabel("Switch to branch feature").getAttribute("aria-current"), "page");
+    assert.equal(dom.byLabel("Switch to branch main").getAttribute("aria-current"), null);
+    await dom.click(dom.byLabel("Switch to branch occupied"));
+    assert.deepEqual(selected, [["/occupied", { mainProjectRoot: "/repo" }]]);
+    assert.equal(switched.length, 1);
+  } finally { await dom.unmount(); }
+});
+
+test("Runs lives beside Run Timeline and preserves filters across panel switches", async () => {
+  const reviewed = [], stopped = [];
+  const records = [
+    { key: "one", workflowId: "a", workflowName: "Active workflow", projectPath: "/repo", runId: "one", status: "running" },
+    { key: "two", workflowId: "b", workflowName: "Other workflow", projectPath: "/other", runId: "two", status: "error", unread: true },
+  ];
+  const dom = await mountReact(React.createElement(React.Fragment, null,
+    React.createElement(appModule.GlobalToolbar),
+    React.createElement(bottomPanelModule.default, { runsProps: { records, projectPath: "/repo", onReview: record => reviewed.push(record), onStop: record => stopped.push(record) } }),
+  ), createFetchMock([]));
+  try {
+    const toolbar = dom.byLabel("Application toolbar");
+    assert.doesNotMatch(toolbar.textContent, /Runs/);
+    assert.equal(allElements(toolbar).some(el => el.getAttribute("aria-label") === "Browsing worktree"), false);
+    const tabs = allElements(dom.byLabel("Bottom panel views")).filter(el => el.getAttribute("role") === "tab");
+    assert.deepEqual(tabs.map(el => textOf(el).trim()), ["Problems", "Run Timeline", "Runs1 active· 1 unread", "Terminal"]);
+    await dom.click(tabs[2]);
+    assert.ok(dom.byLabel("Workflow runs"));
+    assert.ok(dom.byLabel("Collapse bottom panel"));
+    await dom.change(dom.byLabel("Filter runs by project"), "project");
+    assert.doesNotMatch(dom.byLabel("Workflow runs").textContent, /Other workflow/);
+    await dom.click(dom.byText("Open run"));
+    await dom.click(dom.byLabel("Stop run one of Active workflow"));
+    assert.deepEqual(reviewed, [records[0]]); assert.deepEqual(stopped, [records[0]]);
+    await dom.click(tabs[0]); await dom.click(tabs[2]);
+    assert.equal(reactProps(dom.byLabel("Filter runs by project")).value, "project");
+    await dom.dispatchWindow("gofer:toggle-bottom-panel", { detail: { tab: "runs", open: true } });
+    assert.ok(dom.byLabel("Collapse bottom panel"));
+    await dom.click(dom.byLabel("Close runs panel"));
+    assert.ok(dom.byLabel("Expand bottom panel"));
+    await dom.click(tabs[2]);
+    assert.ok(dom.byLabel("Collapse bottom panel"));
+  } finally { await dom.unmount(); }
+});
+
+for (const recentRoots of [["/feature", "/release", "/other"], ["/repo", "/other"]]) {
+  test(`saved worktree projects consolidate without backend grants: ${recentRoots.join(", ")}`, async () => {
+    const worktrees = [{ path: "/repo", branch: "main" }, { path: "/feature", branch: "feature" }, { path: "/release", branch: "release" }];
+    const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+      jsonResponse("/api/workflows", workflowsPayload([])),
+    ]), {
+      storage: {
+        [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/feature", view: "code" }),
+        "gofer.recentProjects": JSON.stringify(recentRoots),
+        "gofer.lastWorktreeByProject": JSON.stringify({ "/repo": "/release", "/release": "/release" }),
+      },
+      desktop: { workspace: {
+        trustProjectRoot: async () => { throw new Error("Backend unavailable"); },
+        getPathInfo: async () => ({ isDirectory: true }),
+        gitWorktrees: async root => ({ worktrees: root === "/other" ? [{ path: root }] : worktrees }),
+      } },
+    });
+    try {
+      await dom.flush();
+      assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer.recentProjects")), ["/repo", "/other"]);
+      assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer.lastWorktreeByProject")), { "/repo": "/feature", "/other": "/other" });
+      assert.equal(dom.byLabel("Recent projects").getAttribute("title"), "/repo");
+      assert.equal(appModule.loadStudioSession().projectRoot, "/feature");
+    } finally { await dom.unmount(); }
+  });
+}
+
+test("opening a linked worktree consolidates its project before workflow discovery finishes", async () => {
+  const discovery = createDeferred();
+  const worktrees = [{ path: "/repo", branch: "main" }, { path: "/feature", branch: "feature" }, { path: "/release", branch: "release" }];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    url => url === "/api/projects/open" ? { ok: true, json: () => discovery.promise } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: {
+      "gofer.recentProjects": JSON.stringify(["/release", "/other"]),
+      "gofer.lastWorktreeByProject": JSON.stringify({ "/release": "/release" }),
+    },
+    desktop: { workspace: {
+      selectPath: async () => "/feature",
+      trustProjectRoot: async root => root,
+      gitWorktrees: async () => ({ root: "/feature", worktrees }),
+    } },
+  });
+  try {
+    await dom.flush();
+    await dom.click(dom.byText("File"));
+    await dom.click(dom.ancestor(dom.byText("Open Project..."), "BUTTON"));
+    await dom.flush();
+    assert.equal(appModule.loadStudioSession().projectRoot, "/feature");
+    assert.equal(dom.byLabel("Recent projects").getAttribute("title"), "/repo");
+    assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer.recentProjects")), ["/repo", "/other"]);
+    assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer.lastWorktreeByProject")), { "/repo": "/feature" });
+    assert.equal(JSON.parse(fetchMock.calls.find(call => call.url === "/api/projects/open").options.body).projectRoot, "/feature");
+    discovery.resolve({ workflows: [] });
+    await dom.flush();
+    await dom.click(dom.byLabel("Recent projects"));
+    await dom.click(dom.byTitle("/repo"));
+    await dom.flush();
+    assert.equal(appModule.loadStudioSession().projectRoot, "/feature", "Reopening the root project retains the selected worktree");
+  } finally { discovery.resolve({ workflows: [] }); await dom.unmount(); }
 });

@@ -269,7 +269,9 @@ def _new_vosk_recognizer(data_dir: Path) -> Any:
 
 def _load_vosk_model(data_dir: Path) -> Any:
     global _vosk_model, _vosk_model_path
-    model_path = data_dir / "speech-models" / VOSK_MODEL_NAME
+    # macOS data roots can pass through /var -> /private/var. Canonicalize
+    # the trusted root, while preserving link checks below it.
+    model_path = data_dir.resolve() / "speech-models" / VOSK_MODEL_NAME
     with _vosk_model_lock:
         if _vosk_model is not None and _vosk_model_path == model_path:
             return _vosk_model

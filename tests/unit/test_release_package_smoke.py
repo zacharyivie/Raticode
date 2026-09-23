@@ -67,6 +67,8 @@ def test_probe_checks_archive_and_runs_outside_checkout(
     binary = tmp_path / "gof"
     binary.touch(mode=0o755)
     entries = [
+        "vosk/"
+        + {"darwin": "libvosk.dyld", "win32": "libvosk.dll"}.get(sys.platform, "libvosk.so"),
         "third-party-licenses/inventory.json",
         "gofer/devices/protocol/v2/event.schema.json",
         "third-party-licenses/PYTHON-LICENSE.txt",
@@ -92,12 +94,28 @@ def test_probe_checks_archive_and_runs_outside_checkout(
     with pytest.raises(RuntimeError, match="event.schema.json"):
         smoke.probe(binary)
     calls.assert_not_called()
+
     archive.toc[schema] = None
     archive.toc.pop(entries[-1])
     calls.reset_mock()
     with pytest.raises(RuntimeError, match="native-inventory"):
         smoke.probe(binary)
     calls.assert_not_called()
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32", "linux"])
+def test_probe_rejects_missing_speech_library(smoke, tmp_path, monkeypatch, platform):
+    readers = importlib.import_module("PyInstaller.archive.readers")
+    binary = tmp_path / "gof"
+    binary.touch(mode=0o755)
+    archive = Mock(
+        toc={"third-party-licenses/inventory.json": None},
+        extract=Mock(return_value=b'[{"name":"vosk"}]'),
+    )
+    monkeypatch.setattr(readers, "CArchiveReader", Mock(return_value=archive))
+    monkeypatch.setattr(smoke.sys, "platform", platform)
+    with pytest.raises(RuntimeError, match="Vosk speech library"):
+        smoke.probe(binary)
 
 
 def test_missing_backend_is_rejected(smoke: ModuleType, tmp_path: Path) -> None:

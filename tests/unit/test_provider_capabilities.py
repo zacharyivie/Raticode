@@ -752,3 +752,114 @@ def test_grok_ui_defaults_to_cli_managed_permissions() -> None:
         id="grok", display_name="xAI Grok", available=True, discovery_status="ready"
     )
     assert capability.to_ui_payload()["defaultPermissionMode"] == "cli-managed"
+
+
+async def test_settings_snapshot_returns_preferences_and_stale_catalog_without_probing(monkeypatch):
+    service = ProviderCapabilityService()
+    preferences = {"enabled": False, "executable": "/chosen/codex"}
+    executable = "/chosen/codex"
+    monkeypatch.setattr(provider_capabilities, "provider_preference", lambda _: preferences)
+    monkeypatch.setattr(
+        provider_capabilities, "resolve_provider_executable", lambda _, **kwargs: executable
+    )
+    monkeypatch.setattr(provider_capabilities, "_executable_mtime_ns", lambda _: 1)
+    calls = []
+
+    async def discover(_executable):
+        calls.append(_executable)
+        return ProviderCapability(
+            id="codex",
+            display_name="Codex",
+            available=True,
+            discovery_status="ready",
+            models=[provider_capabilities.ModelCapability(id="model", display_name="Model")],
+        )
+
+    monkeypatch.setattr(service._probes["codex"], "discover", discover)
+    cold = service.snapshot_payload()["providers"]
+    assert len(cold) == 7
+    assert cold[0]["enabled"] is False
+    assert cold[0]["executableOverride"] == "/chosen/codex"
+    assert cold[0]["discoveryStatus"] == "pending"
+    assert cold[0]["discoveredAt"] is None
+    assert calls == []
+
+    await service.provider_async("codex")
+    for entry in service._cache.values():
+        entry.expires_at = 0
+    preferences["enabled"] = True
+    warm = service.snapshot_payload()["providers"][0]
+    assert warm["enabled"] is True
+    assert warm["models"][0]["id"] == "model"
+    assert warm["discoveryStatus"] == "ready"
+    assert calls == ["/chosen/codex"]
+
+    # Catalogs from another executable must not be offered as current defaults.
+    executable = "/new/codex"
+    changed = service.snapshot_payload()["providers"][0]
+    assert changed["models"] == []
+    assert changed["discoveryStatus"] == "pending"
+
+
+async def test_settings_snapshot_exposes_finished_provider_while_another_is_pending(monkeypatch):
+    service = ProviderCapabilityService()
+    monkeypatch.setattr(
+        provider_capabilities, "resolve_provider_executable", lambda _, **kwargs: None
+    )
+    monkeypatch.setattr(provider_capabilities, "provider_preference", lambda _: {})
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def slow(_executable):
+        started.set()
+        await finish.wait()
+        return ProviderCapability(
+            id="claude_code", display_name="Claude Code", available=True, discovery_status="ready"
+        )
+
+    monkeypatch.setattr(service._probes["claude_code"], "discover", slow)
+    task = asyncio.create_task(service.provider_async("claude_code"))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        await service.provider_async("codex")
+        snapshot = service.snapshot_payload()["providers"]
+        assert snapshot[0]["discoveryStatus"] == "missing"
+        assert snapshot[1]["discoveryStatus"] == "pending"
+        assert not task.done()
+    finally:
+        finish.set()
+        await task
+
+
+async def test_settings_snapshot_never_probes_cursor_alias_and_reuses_verified_alias(
+    monkeypatch, tmp_path
+):
+    service = ProviderCapabilityService()
+    alias = str(tmp_path / "agent")
+    monkeypatch.setattr(provider_capabilities, "provider_preference", lambda _: {})
+    monkeypatch.setattr(
+        provider_capabilities.shutil, "which", lambda name: alias if name == "agent" else None
+    )
+    monkeypatch.setenv("NVM_DIR", str(tmp_path / "nvm"))
+    checks = []
+
+    def check_alias(executable):
+        checks.append(executable)
+        return True
+
+    async def discover(executable):
+        assert executable == alias
+        return ProviderCapability(
+            id="cursor", display_name="Cursor", available=True, discovery_status="ready"
+        )
+
+    monkeypatch.setattr(provider_capabilities, "_is_cursor_agent", check_alias)
+    monkeypatch.setattr(service._probes["cursor"], "discover", discover)
+    assert service.snapshot_payload()["providers"][2]["discoveryStatus"] == "pending"
+    assert checks == []
+    await service.provider_async("cursor")
+    assert checks == [alias]
+    cached = service.snapshot_payload()["providers"][2]
+    assert cached["discoveryStatus"] == "ready"
+    assert cached["executable"] == alias
+    assert checks == [alias]

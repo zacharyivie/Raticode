@@ -10,6 +10,94 @@ import pytest
 from gofer.ui import chat
 
 
+def test_snapshot_lifecycle_under_symlinked_temp_root(tmp_path, monkeypatch):
+    # Reproduce macOS /var -> /private/var without requiring a Mac runner.
+    canonical = tmp_path.resolve() / "private" / "var"
+    canonical.mkdir(parents=True)
+    alias = tmp_path / "var"
+    alias.symlink_to(canonical, target_is_directory=True)
+    monkeypatch.setattr(chat.tempfile, "tempdir", str(alias))
+    project = tmp_path.resolve() / "project"
+    project.mkdir()
+    file = project / "example.txt"
+    file.write_text("before\n")
+    before = chat._capture_chat_project(project)
+    assert chat._chat_file_bytes(before["example.txt"]) == b"before\n"
+    blob = before["example.txt"].blob
+    assert blob is not None and blob.is_relative_to(canonical)
+    file.write_text("after\n")
+    preview = chat._preview_chat_changes(project, before)
+    assert preview is not None and "+after" in preview["files"][0]["diff"]
+    data = tmp_path.resolve() / "data"
+    changes = chat._finalize_chat_changes(project, before, data)
+    assert changes is not None and changes["undoable"]
+    chat.undo_chat_changes(changes["id"], data)
+    assert file.read_text() == "before\n"
+    chat.redo_chat_changes(changes["id"], data)
+    assert file.read_text() == "after\n"
+
+
+@pytest.mark.parametrize("failure", ["missing", "symlink", "permission"])
+def test_unreadable_snapshot_does_not_break_preview_or_finalization(tmp_path, monkeypatch, failure):
+    project = tmp_path.resolve() / "project"
+    project.mkdir()
+    file = project / "example.txt"
+    file.write_text("before\n")
+    before = chat._capture_chat_project(project)
+    blob = before["example.txt"].blob
+    assert blob is not None
+    if failure == "permission":
+        real_open = chat.open_binary_input
+
+        def deny_blob(path):
+            if path == blob:
+                raise PermissionError("snapshot unreadable")
+            return real_open(path)
+
+        monkeypatch.setattr(chat, "open_binary_input", deny_blob)
+    else:
+        blob.unlink()
+        if failure == "symlink":
+            blob.symlink_to(file)
+    file.write_text("after\n")
+    preview = chat._preview_chat_changes(project, before)
+    assert preview is not None and not preview["undoable"]
+    assert preview["files"][0]["diff"] == "Snapshot content is unavailable."
+    data = tmp_path.resolve() / "data"
+    changes = chat._finalize_chat_changes(project, before, data)
+    assert changes is not None and not changes["undoable"]
+    assert changes["undoUnavailableReason"] == "Snapshot content is unavailable"
+    with pytest.raises(chat.ChatChangeError, match="Snapshot content is unavailable"):
+        chat.undo_chat_changes(changes["id"], data)
+    assert file.read_text() == "after\n"
+
+
+@pytest.mark.parametrize("lose_blob", [False, True])
+def test_snapshot_persistence_failure_fallback(tmp_path, monkeypatch, lose_blob):
+    project = tmp_path.resolve() / "project"
+    project.mkdir()
+    file = project / "example.txt"
+    file.write_text("before\n")
+    before = chat._capture_chat_project(project)
+    file.write_text("after\n")
+
+    def fail_serialization(*args, **kwargs):
+        if lose_blob:
+            blob = before["example.txt"].blob
+            assert blob is not None
+            blob.unlink()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(chat, "_serialized_chat_file_state", fail_serialization)
+    changes = chat._finalize_chat_changes(project, before, tmp_path.resolve() / "data")
+    assert changes is not None and not changes["undoable"]
+    if lose_blob:
+        assert changes["files"][0]["diff"] == "Snapshot content is unavailable."
+    else:
+        assert "+after" in changes["files"][0]["diff"]
+    assert changes["undoUnavailableReason"] == "The undo snapshot could not be saved"
+
+
 def test_snapshots_spool_content_and_reuse_unchanged_files(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()

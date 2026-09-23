@@ -37,7 +37,10 @@ def python_license_declaration(dist) -> str:
 
 
 def verify_review(policy: dict, ecosystem: str, name: str, version: str, license: str) -> None:
-    expected = policy.get(ecosystem, {}).get(f"{name}@{version}" if ecosystem == "npm" else name)
+    reviews = policy.get(ecosystem, {})
+    expected = reviews.get(
+        f"{name}@{version}", reviews.get(name) if ecosystem == "python" else None
+    )
     if expected != {"version": version, "license": license}:
         raise ValueError(f"License review required: {ecosystem} {name} {version}: {license}")
 
@@ -73,7 +76,7 @@ def collect(output: Path) -> None:
     inventory = []
     policy = json.loads((ROOT / "packaging/licenses/reviewed.json").read_text())
     lock_packages = tomllib.loads((ROOT / "uv.lock").read_text())["package"]
-    locked = {re.sub(r"[-_.]+", "-", p["name"]).lower(): p["version"] for p in lock_packages}
+    locked = {(re.sub(r"[-_.]+", "-", p["name"]).lower(), p["version"]) for p in lock_packages}
     required = set()
     pending = [
         ("gofer-flow", frozenset({"xlsx"})),
@@ -101,7 +104,7 @@ def collect(output: Path) -> None:
         normalized = re.sub(r"[-_.]+", "-", name).lower()
         if normalized not in required or normalized == "gofer-flow":
             continue
-        if locked[normalized] != version:
+        if (normalized, version) not in locked:
             raise ValueError(f"Python lock mismatch: {name} {version}")
         declaration = python_license_declaration(dist)
         verify_review(policy, "python", normalized, version, declaration)

@@ -1097,15 +1097,10 @@ export default function CodeFileExplorer({
         </div>
           {sourceControl.active ? <div className="shrink-0 space-y-2 border-b border-line px-3 pb-3">
             <p className="truncate text-[11px] text-muted" title={rootPath}>{workspaceBasename(rootPath)}</p>
-                <label className="flex items-center gap-2 px-1 text-xs">
+                <p aria-label="Current branch" className="flex items-center gap-2 px-1 text-xs">
                   <GitBranch aria-hidden="true" size={13} />
-                  <span className="sr-only">Current branch</span>
-                  <select aria-label="Switch branch" className="h-8 min-w-0 flex-1 rounded border border-line bg-white px-1 text-ink focus-visible:outline" disabled={gitBusy || worktrees.loading} value={sourceControl.branch || ""} onChange={(event) => void changeSourceControl("switch", event.target.value)}>
-                    {!sourceControl.branch ? <option value="">Detached HEAD</option> : null}
-                    {sourceControl.branch && !sourceControl.branches?.includes(sourceControl.branch) ? <option value={sourceControl.branch}>{sourceControl.branch}</option> : null}
-                    {(sourceControl.branches || []).filter(branch => branch === sourceControl.branch || !worktrees.items.some(worktree => worktree.branch === branch)).map((branch) => <option key={branch} value={branch}>{branch}</option>)}
-                  </select>
-                </label>
+                  <span className="truncate">{sourceControl.branch || "Detached HEAD"}</span>
+                </p>
                 <p className="px-1 text-[11px] text-muted">{sourceControl.ahead == null ? "Local branch" : `${sourceControl.ahead} ahead · ${sourceControl.behind} behind`}</p>
                 {sourceControl.ahead == null && sourceControl.remotes?.length ? <div className="flex flex-wrap gap-1 px-1">
                     <select aria-label="Publish remote" className="min-w-0 flex-1 rounded border border-line bg-white text-[11px]" value={remote || sourceControl.remotes?.[0] || ""} onChange={(event) => setRemote(event.target.value)}>
@@ -1222,11 +1217,16 @@ export default function CodeFileExplorer({
               {(sourceControl.branches || []).map(branch => {
                 const current = branch === sourceControl.branch;
                 const checkedOut = current || worktrees.items.some(item => item.branch === branch);
-                return <div key={branch} aria-label={`Branch ${branch}`} tabIndex={0} className="flex min-h-8 items-center gap-1.5 rounded px-1.5 text-[11px] hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"
+                return <div key={branch} aria-label={`Branch ${branch}`} tabIndex={0} className="relative flex min-h-8 items-center gap-1.5 rounded px-1.5 text-[11px] hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"
                   onContextMenu={event => openBranchMenu(event, branch)}
                   onKeyDown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openBranchMenu(event, branch); }}>
                   <GitBranch aria-hidden="true" className="shrink-0 text-muted" size={12} />
-                  <span className="min-w-0 flex-1 truncate text-ink" title={branch}>{branch}</span>
+                  {current ? <span aria-hidden="true" className="absolute inset-y-1 left-0 w-px bg-brand" /> : null}
+                  <button type="button" aria-label={`Switch to branch ${branch}`} aria-current={current ? "page" : undefined} disabled={gitBusy || worktrees.loading || current} className="min-w-0 flex-1 truncate py-1 text-left text-ink focus-visible:outline disabled:cursor-default" title={branch} onClick={() => {
+                    const worktree = worktrees.items.find(item => item.branch === branch && !item.missing && !item.prunable);
+                    if (worktree) onSelectProject?.(worktree.path, { mainProjectRoot: mainWorktreePath(worktrees.items, rootPath) });
+                    else void changeSourceControl("switch", branch);
+                  }}>{branch}</button>
                   {checkedOut ? <span className="shrink-0 text-[10px] text-muted">{current ? "Current" : "Worktree"}</span> : null}
                   <button type="button" aria-label={`Actions for branch ${branch}`} title="Branch actions" disabled={gitBusy} className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink focus-visible:outline disabled:opacity-40" onClick={event => openBranchMenu(event, branch)}><MoreHorizontal size={13} /></button>
                   <button type="button" aria-label={`Delete branch ${branch}`} title={checkedOut ? "Cannot delete a checked-out branch" : `Delete branch ${branch}`} disabled={gitBusy || worktrees.loading || checkedOut} className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted hover:text-red-700 focus-visible:outline disabled:opacity-40" onClick={() => void deleteBranch(branch)}><Trash2 size={12} /></button>

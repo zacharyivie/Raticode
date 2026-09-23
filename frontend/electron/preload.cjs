@@ -287,13 +287,7 @@ contextBridge.exposeInMainWorld("goferTerminal", {
 
 async function createTerminal(options = {}) {
   const requestedCwd = typeof options.cwd === "string" ? options.cwd : "";
-  if (requestedCwd && !grantForPath(requestedCwd)) {
-    await trustProjectRoot(requestedCwd);
-  }
   const grantId = grantForPath(requestedCwd);
-  if (requestedCwd && !grantId) {
-    throw new Error("The workflow project folder could not be trusted.");
-  }
   return ipcRenderer.invoke("gofer:terminal-create", {
     cols: Number.isFinite(options.cols) ? options.cols : 80,
     cwd: requestedCwd,
@@ -304,9 +298,6 @@ async function createTerminal(options = {}) {
 
 async function createBrowser(options = {}) {
   const targetPath = typeof options.path === "string" ? options.path : "";
-  if (targetPath && !grantForPath(targetPath)) {
-    await trustProjectRoot(targetPath);
-  }
   return ipcRenderer.invoke("gofer:browser-create", {
     ...(options.applicationKeybindings
       ? { applicationKeybindings: browserKeybindings(options.applicationKeybindings) }

@@ -1250,6 +1250,34 @@ def test_ui_server_log_endpoint_forwards_range_query(monkeypatch, tmp_path) -> N
     }
 
 
+def test_provider_settings_discovery_routes(monkeypatch, tmp_path) -> None:
+    calls = []
+
+    def provider(provider_id, *, refresh):
+        calls.append((provider_id, refresh))
+        return SimpleNamespace(to_ui_payload=lambda: {"id": provider_id, "models": []})
+
+    monkeypatch.setattr(
+        server_module,
+        "provider_capability_service",
+        lambda: SimpleNamespace(
+            snapshot_payload=lambda: {"providers": [{"id": "codex", "discoveryStatus": "pending"}]},
+            provider=provider,
+        ),
+    )
+    snapshot = _request(tmp_path, "GET", "/api/provider/capabilities?snapshot=1")
+    assert snapshot.status == 200
+    assert snapshot.json() == {"providers": [{"id": "codex", "discoveryStatus": "pending"}]}
+    assert calls == []
+    refreshed = _request(tmp_path, "GET", "/api/provider/capabilities?provider=codex&refresh=1")
+    assert refreshed.status == 200
+    assert refreshed.json() == {"providers": [{"id": "codex", "models": []}]}
+    assert calls == [("codex", True)]
+    invalid = _request(tmp_path, "GET", "/api/provider/capabilities?provider=unknown")
+    assert invalid.status == 400
+    assert calls == [("codex", True)]
+
+
 def test_ui_server_get_routes_forward_to_api_payloads(monkeypatch, tmp_path) -> None:
     calls: dict[str, object] = {}
 

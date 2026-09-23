@@ -1264,10 +1264,18 @@ async def test_stream_workflow_chat_preserves_codex_reasoning_and_command_trace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("linked_temp_root", [False, True])
 async def test_stream_workflow_chat_records_reviewable_changes_and_undoes_them(
     monkeypatch,
     tmp_path,
+    linked_temp_root,
 ) -> None:
+    if linked_temp_root:
+        real_temp = tmp_path / "private-var"
+        real_temp.mkdir()
+        alias = tmp_path / "var"
+        alias.symlink_to(real_temp, target_is_directory=True)
+        monkeypatch.setattr(chat.tempfile, "tempdir", str(alias))
     project = tmp_path / "project"
     project.mkdir()
     workflow_path = project / "workflow.rattish"

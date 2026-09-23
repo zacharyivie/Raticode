@@ -28,7 +28,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from gofer.core.provider_auth import ProviderAuthSessions
-from gofer.core.provider_capabilities import provider_capabilities_payload
+from gofer.core.provider_capabilities import (
+    CLI_PROVIDERS,
+    provider_capabilities_payload,
+    provider_capability_service,
+)
 from gofer.core.provider_preferences import save_provider_preference
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
 from gofer.core.scheduler import WorkflowScheduler
@@ -884,7 +888,17 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/provider/capabilities":
             query = parse_qs(parsed.query)
             refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
-            self._send_json(provider_capabilities_payload(refresh=refresh))
+            provider = query.get("provider", [""])[0]
+            if "provider" in query:
+                if provider not in CLI_PROVIDERS:
+                    self._send_json({"error": "Unknown provider"}, status=400)
+                    return
+                capability = provider_capability_service().provider(provider, refresh=refresh)
+                self._send_json({"providers": [capability.to_ui_payload()]})
+            elif query.get("snapshot", ["0"])[0] in {"1", "true"}:
+                self._send_json(provider_capability_service().snapshot_payload())
+            else:
+                self._send_json(provider_capabilities_payload(refresh=refresh))
             return
 
         if parsed.path == "/api/provider/profiles":

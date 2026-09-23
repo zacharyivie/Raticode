@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ProviderAuthentication, ProviderDiscoveryLoading } from "./ProviderModelEffortFields.jsx";
+import { ProviderAuthentication } from "./ProviderModelEffortFields.jsx";
 import { apiUrl } from "../lib/api";
 
 export default function ProviderSettings({ providerState }) {
@@ -8,7 +8,7 @@ export default function ProviderSettings({ providerState }) {
     <p className="text-xs text-muted">Choose the coding apps Rem can use. Found providers are enabled by default. Choosing an executable overrides automatic discovery.</p>
     <button type="button" className="text-xs font-semibold text-brand" disabled={loading} onClick={refresh}>{loading ? "Checking providers…" : "Refresh providers"}</button>
     {error ? <p role="alert" className="text-xs text-red-600">{error}</p> : null}
-    {loading ? <ProviderDiscoveryLoading /> : capabilities.map(provider => <ProviderRow key={provider.id} provider={provider} />)}
+    {capabilities.map(provider => <ProviderRow key={provider.id} provider={provider} />)}
   </div>;
 }
 
@@ -49,20 +49,23 @@ function ProviderRow({ provider }) {
   return <section className="space-y-2 border-t border-line pt-3">
     <div className="flex items-center justify-between gap-3">
       <h3 className="text-xs font-semibold">{provider.displayName || provider.id}</h3>
-      <select aria-label={`${provider.displayName} status`} className="rounded border border-line bg-white px-2 py-1 text-xs" disabled={saving}
-        value={(provider.enabled ?? provider.available) ? "enabled" : "disabled"}
+      <select aria-label={`${provider.displayName} status`} className="rounded border border-line bg-white px-2 py-1 text-xs" disabled={saving || provider.settingsPending}
+        value={provider.settingsPending ? "pending" : (provider.enabled ?? provider.available) ? "enabled" : "disabled"}
         onChange={event => save({ enabled: event.target.value === "enabled" })}>
+        {provider.settingsPending ? <option value="pending">Loading settings…</option> : null}
         <option value="enabled">Enabled</option><option value="disabled">Disabled</option>
       </select>
     </div>
-    <p className="break-all text-xs text-muted">{provider.detected ? `Found: ${provider.executable}` : "Executable not found"}</p>
+    <p className="break-all text-xs text-muted">{provider.detected ? `Found: ${provider.executable}` : provider.discoveryStatus === "pending" ? "Checking executable…" : "Executable not found"}</p>
+    {provider.refreshing ? <p role="status" className="text-xs text-muted">{provider.discoveredAt ? "Refreshing provider information…" : "Discovering provider models…"}</p> : null}
+    {provider.version ? <p className="text-xs text-muted">Version: {provider.version}</p> : null}
     <label className="block text-xs text-muted">Executable override
-      <input aria-label={`${provider.displayName} executable`} className="mt-1 w-full rounded border border-line bg-white px-2 py-1.5 text-xs text-ink" placeholder="Automatic discovery" value={draft} disabled={saving}
+      <input aria-label={`${provider.displayName} executable`} className="mt-1 w-full rounded border border-line bg-white px-2 py-1.5 text-xs text-ink" placeholder="Automatic discovery" value={draft} disabled={saving || provider.settingsPending}
         onFocus={() => { focused.current = true; }} onChange={event => setDraft(event.target.value)}
         onBlur={() => { focused.current = false; if (draft !== (provider.executableOverride || "")) void save({ executable: draft }); }}
         onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} />
     </label>
-    <button type="button" className="text-xs font-semibold text-brand disabled:opacity-50" disabled={saving || !window.goferDesktop?.workspace?.selectPath} onClick={browse}>Choose executable…</button>
+    <button type="button" className="text-xs font-semibold text-brand disabled:opacity-50" disabled={saving || provider.settingsPending || !window.goferDesktop?.workspace?.selectPath} onClick={browse}>Choose executable…</button>
     {canSetDefaults ? <div className="space-y-2 pt-2">
       <p className="text-xs text-muted">Use these defaults when selecting this provider in Raticode.</p>
       <label className="block text-xs text-muted">Default model
@@ -85,7 +88,9 @@ function ProviderRow({ provider }) {
       {modelOverride || effortOverride ? <button type="button" className="text-xs font-semibold text-brand disabled:opacity-50" disabled={saving}
         onClick={() => save({ defaultModel: "", defaultEffort: "" })}>Reset model and effort defaults</button> : null}
     </div> : null}
-    <ProviderAuthentication provider={provider} disabled={saving} alwaysShow />
+    {!canSetDefaults && (modelOverride || effortOverride) ? <p className="text-xs text-muted">Saved defaults: {modelOverride || "Provider model"}{effortOverride ? `, ${effortOverride} effort` : ""}</p> : null}
+    <ProviderAuthentication provider={provider} disabled={saving || provider.settingsPending} alwaysShow />
+    {provider.refreshError ? <p role="alert" className="text-xs text-red-600">{provider.refreshError}</p> : null}
     {provider.error ? <p className="text-xs text-muted">{provider.error}</p> : null}
     {error ? <p role="alert" className="text-xs text-red-600">{error}</p> : null}
   </section>;

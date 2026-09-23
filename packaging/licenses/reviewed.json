@@ -870,6 +870,10 @@
       "license": "UNKNOWN",
       "version": "0.3.45"
     },
+    "vosk@0.3.44": {
+      "license": "UNKNOWN",
+      "version": "0.3.44"
+    },
     "watchdog": {
       "license": "Apache-2.0",
       "version": "6.0.0"

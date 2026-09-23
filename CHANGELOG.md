@@ -3,6 +3,48 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
+## 0.3.6 - 2026-09-22
+
+Changes since the `v0.3.5` tag.
+
+### Changed
+
+- Show every provider section immediately in Settings. Retain saved preferences
+  and cached model catalogs while providers refresh independently in the
+  background each time Settings opens.
+- List each project's root worktree once in the project selector. Opening a
+  linked worktree selects it under its root project, and previously saved
+  worktree entries consolidate without losing the active selection.
+- Keep branch and worktree switching in Source Control > Branches. Branch rows
+  are clickable and mark the current branch with a purple bar. Remove the branch
+  dropdowns from Source Control and the global toolbar.
+- Move Runs from the toolbar to a bottom-panel tab beside Run Timeline, retaining
+  run counts, filters, and controls.
+- Offer the matching Mac DMG download and manual installation instructions for
+  unsigned macOS updates.
+
+### Fixed
+
+- Open sibling worktrees and other accessible desktop folders without requiring
+  prior picker approval. Keep desktop navigation independent of backend grants;
+  project selection still registers access for backend project services.
+- Handle macOS temporary-folder aliases when capturing Rem file changes and
+  loading speech models. Unreadable snapshots no longer fail a completed turn
+  and disable undo with an explanation.
+- Include the macOS Vosk speech library, microphone usage declaration, and audio
+  entitlements in desktop packages.
+- Clear the downloading state when an automatic update download fails.
+- Audit every locked Python package version when platforms require different
+  versions of the same package. Reject incomplete or skipped audit results and
+  discard stale evidence before each scan.
+
+### Release limitations
+
+- Paired-device networking remains experimental and opt-in, with the acceptance
+  gates documented in `docs/security/device-release.md` still open.
+- macOS manual updates and microphone permissions require testing with the exact
+  release package. See `docs/releasing.md`.
+
 ## 0.3.5 - 2026-09-22
 
 Changes since the `v0.3.4` tag.

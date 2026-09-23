@@ -62,6 +62,11 @@ def probe(binary: Path) -> None:
     inventory = json.loads(archive.extract(entries[required]))
     if not inventory:
         raise RuntimeError(f"Packaged backend has an empty license inventory: {binary}")
+    speech_library = {"darwin": "libvosk.dyld", "win32": "libvosk.dll"}.get(
+        sys.platform, "libvosk.so"
+    )
+    if f"vosk/{speech_library}" not in entries:
+        raise RuntimeError(f"Packaged backend missing Vosk speech library: {binary}")
     for required in (
         "gofer/devices/protocol/v2/event.schema.json",
         "third-party-licenses/PYTHON-LICENSE.txt",

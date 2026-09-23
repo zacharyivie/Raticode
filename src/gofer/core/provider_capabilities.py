@@ -95,9 +95,12 @@ class ProviderCapability(BaseModel):
     error: str | None = None
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    def to_ui_payload(self) -> dict[str, Any]:
+    def to_ui_payload(
+        self, *, executable: str | None = None, resolve_executable: bool = True
+    ) -> dict[str, Any]:
         preference = provider_preference(self.id)
-        executable = resolve_provider_executable(self.id)
+        if resolve_executable:
+            executable = resolve_provider_executable(self.id)
         override_model = preference.get("defaultModel", "")
         override_effort = preference.get("defaultEffort", "")
         default_model = next(
@@ -443,6 +446,47 @@ class ProviderCapabilityService:
         _require_sync_context("ProviderCapabilityService.payload", "payload_async")
         return asyncio.run(self.payload_async(refresh=refresh))
 
+    def snapshot_payload(self) -> dict[str, list[dict[str, Any]]]:
+        """Return settings and cached catalogs immediately, without running CLI probes.
+
+        Expired catalogs remain useful for display while the UI refreshes each
+        provider. Execution validation still uses the normal cache deadlines.
+        """
+        providers = []
+        for provider_id, probe in self._probes.items():
+            executable = resolve_provider_executable(provider_id, probe_alias=False)
+            key = _CacheKey(provider_id, executable, _executable_mtime_ns(executable))
+            with self._lock:
+                cached = self._cache.get(key)
+            # Cursor's generic `agent` alias needs a CLI identity check. Only
+            # reuse it here if discovery already verified this executable.
+            if (
+                executable is None
+                and provider_id == "cursor"
+                and not provider_preference(provider_id).get("executable")
+            ):
+                alias = shutil.which("agent")
+                alias_key = _CacheKey(provider_id, alias, _executable_mtime_ns(alias))
+                with self._lock:
+                    alias_cached = self._cache.get(alias_key) if alias else None
+                if alias_cached:
+                    executable, cached = alias, alias_cached
+            capability = (
+                cached.capability
+                if cached
+                else ProviderCapability(
+                    id=provider_id,
+                    display_name=probe.display_name,
+                    available=executable is not None,
+                    discovery_status="missing",
+                )
+            )
+            payload = capability.to_ui_payload(executable=executable, resolve_executable=False)
+            if cached is None:
+                payload.update(discoveryStatus="pending", discoveredAt=None)
+            providers.append(payload)
+        return {"providers": providers}
+
     def provider(
         self,
         provider_id: ProviderId,
@@ -612,9 +656,7 @@ async def validate_provider_selection_async(
     """Validate a provider selection from within an active event loop."""
     if provider_id not in CLI_PROVIDERS:
         raise ProviderCapabilityError(f"Unknown provider '{provider_id}'")
-    capability = await (service or provider_capability_service()).provider_async(
-        provider_id
-    )
+    capability = await (service or provider_capability_service()).provider_async(provider_id)
     _validate_capability_selection(capability, model, effort)
 
 
@@ -654,7 +696,7 @@ def _require_sync_context(sync_name: str, async_name: str) -> None:
     )
 
 
-def resolve_provider_executable(provider_id: ProviderId) -> str | None:
+def resolve_provider_executable(provider_id: ProviderId, *, probe_alias: bool = True) -> str | None:
     """Return the executable the backend will use for a local provider.
 
     Desktop applications do not source shell startup files, so an npm global
@@ -672,7 +714,7 @@ def resolve_provider_executable(provider_id: ProviderId) -> str | None:
     if executable := shutil.which(binary_name):
         return executable
 
-    if provider_id == "cursor":
+    if provider_id == "cursor" and probe_alias:
         agent_executable = shutil.which("agent")
         if agent_executable and _is_cursor_agent(agent_executable):
             return agent_executable

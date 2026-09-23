@@ -68,7 +68,6 @@ const SettingsPopover = lazy(() => import("../components/SettingsPopover.jsx"));
 import { defaultSettingsSnapshot } from "../lib/settings.js";
 import RaticodeMark from "../components/RaticodeMark.jsx";
 import UnifiedBottomPanel from "../components/UnifiedBottomPanel.jsx";
-import RunSummary from "../components/RunSummary.jsx";
 import { useWorkflowRunRegistry } from "../lib/useWorkflowRunRegistry.js";
 import { exactWorkflowRunStopPath, workflowRunSummary } from "../lib/workflowRuns.js";
 import {
@@ -445,7 +444,6 @@ export default function App() {
   const latestRunStateRef = useRef(runState);
   const runRegistry = useWorkflowRunRegistry(workflows);
   const recordWorkflowRun = runRegistry.record;
-  const [runsOpen, setRunsOpen] = useState(false);
   const [pinnedRun, setPinnedRun] = useState(initialEditorSession?.pinnedRun || null);
   useEffect(() => {
     saveEditorSession({ paths: codeOpenPaths, activePath: activeCodePath, workflowTabs, browserTabs, activity: sidebarActivity, pinnedRun });
@@ -687,15 +685,19 @@ export default function App() {
     const stop = startPolling(() => Promise.all(roots.map((projectRoot) =>
       recentProjectValidatorRef.current.validate(
         projectRoot,
-        pathValue(lastWorktreeByProject, projectRoot) || projectRoot,
+        samePath(projectRoot, activeProjectRoot) ? projectRoot : pathValue(lastWorktreeByProject, projectRoot) || projectRoot,
         window.goferDesktop.workspace,
         mainWorktreeRoot,
       ),
     )).then((projects) => {
       if (cancelled) return;
       const existingProjects = projects.filter((project, index) => project && recentProjectRoots.some(root => samePath(root, roots[index])));
+      const activeProject = projects.find((project, index) => project && samePath(roots[index], activeProjectRoot));
+      if (activeProject && existingProjects.some(project => samePath(project.mainProjectRoot, activeProject.mainProjectRoot))) {
+        existingProjects.push(activeProject);
+      }
       const missingRoots = roots.flatMap((root, index) => {
-        const selected = pathValue(lastWorktreeByProject, root) || root;
+        const selected = samePath(root, activeProjectRoot) ? root : pathValue(lastWorktreeByProject, root) || root;
         return !projects[index] || projects[index].selectedProjectRoot !== selected ? [selected] : [];
       });
       if (missingRoots.length) {
@@ -712,10 +714,15 @@ export default function App() {
         [],
         existingProjects.map((project) => project.mainProjectRoot),
       );
-      const selections = Object.fromEntries(existingProjects.map((project) => [
-        project.mainProjectRoot,
-        project.selectedProjectRoot,
-      ]));
+      const selections = {};
+      for (const project of existingProjects) {
+        const root = nextRoots.find(root => samePath(root, project.mainProjectRoot));
+        // Old recent lists can contain several worktrees of the same repository.
+        // Keep the active checkout, or the first remembered selection, when folding them.
+        if (!selections[root] || samePath(project.selectedProjectRoot, activeProjectRoot)) {
+          selections[root] = project.selectedProjectRoot;
+        }
+      }
       setLastWorktreeByProject((current) => (
         Object.keys(current).length === Object.keys(selections).length
           && Object.entries(selections).every(([root, selected]) => current[root] === selected)
@@ -1231,6 +1238,25 @@ export default function App() {
     projectOpenAbortRef.current = controller;
     setOpeningProjectRoot(projectRoot);
     setProjectError("");
+    let rememberedRoot = "";
+    const rememberOpenedProject = (openedRoot) => {
+      if (!rememberProject || samePath(rememberedRoot, openedRoot)) return;
+      rememberedRoot = openedRoot;
+      void withProjectOpenTimeout(Promise.resolve().then(() => window.goferDesktop?.workspace?.gitWorktrees?.(openedRoot)), 3000)
+        .catch(() => null).then(payload => {
+          if (projectOpenRequestRef.current !== requestId || !samePath(rememberedRoot, openedRoot)) return;
+          const mainProjectRoot = mainWorktreeRoot(payload, openedRoot);
+          const aliases = [openedRoot, ...(payload?.worktrees || []).map(worktree => worktree.path)];
+          recentProjectValidatorRef.current.remember(mainProjectRoot, openedRoot);
+          setRecentProjectRoots(current => rememberRecentProject(
+            current.filter(root => !aliases.some(alias => samePath(alias, root))), mainProjectRoot,
+          ));
+          setLastWorktreeByProject(current => withPathValue(
+            Object.fromEntries(Object.entries(current).filter(([root]) => !aliases.some(alias => samePath(alias, root)))),
+            mainProjectRoot, openedRoot,
+          ));
+        });
+    };
     try {
       const discoveredPayloads = await withProjectOpenTimeout(discoverProjectWorkflows(projectRoot, {
         signal: controller.signal,
@@ -1238,22 +1264,13 @@ export default function App() {
           if (projectOpenRequestRef.current !== requestId) return;
           setActiveProjectRoot(root);
           setCodeEditorOpened(true);
+          rememberOpenedProject(root);
         },
         onResolvedRoot: root => { projectRoot = root; },
       }));
       if (projectOpenRequestRef.current !== requestId) return null;
-      // Recent-project identity is optional metadata, not a prerequisite for navigation.
-      if (rememberProject) {
-        const openedRoot = projectRoot;
-        void withProjectOpenTimeout(Promise.resolve().then(() => window.goferDesktop?.workspace?.gitWorktrees?.(openedRoot)), 3000)
-          .catch(() => null).then(payload => {
-            if (projectOpenRequestRef.current !== requestId) return;
-            const mainProjectRoot = mainWorktreeRoot(payload, openedRoot);
-            recentProjectValidatorRef.current.remember(mainProjectRoot, openedRoot);
-            setRecentProjectRoots(current => rememberRecentProject(current, mainProjectRoot));
-            setLastWorktreeByProject(current => withPathValue(current, mainProjectRoot, openedRoot));
-          });
-      }
+      // Also handle canonical roots returned by web or older desktop bridges.
+      rememberOpenedProject(projectRoot);
       const discovered = discoveredPayloads.map((workflow) =>
         summarizeWorkflow(workflow, dataDir));
       setActiveProjectRoot(projectRoot);
@@ -1879,6 +1896,11 @@ export default function App() {
         ? await window.goferUpdates.installDownloaded()
         : await window.goferUpdates.downloadAndInstall();
       setUpdateState((current) => ({ ...current, ...nextState }));
+      if (update.supported === false) {
+        setTopBarNotice({ type: "info", message: update.platform === "darwin"
+          ? "Open the downloaded DMG, quit Raticode, and drag Raticode into Applications to replace the old copy."
+          : "Download and install the update from the release page." });
+      }
     } catch (error) {
       setTopBarNotice({
         type: "error",
@@ -3364,7 +3386,7 @@ export default function App() {
 
   async function stopExactWorkflowRun(workflow) {
     const active = workflowRunSummary(runRegistry.records, workflow.id).active;
-    if (active.length !== 1 || !exactWorkflowRunStopPath(active[0])) { setRunsOpen(true); return; }
+    if (active.length !== 1 || !exactWorkflowRunStopPath(active[0])) { window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel", { detail: { tab: "runs", open: true } })); return; }
     try { await runRegistry.stop(active[0]); }
     catch (error) { setTopBarNotice({ type: "error", message: error.message }); }
   }
@@ -3376,7 +3398,7 @@ export default function App() {
       if (action === "save") await saveWorkflowDocument(target);
       if (action === "run") await runWorkflowNow(target);
       if (action === "stop") await stopExactWorkflowRun(target);
-      if (action === "review") setRunsOpen(true);
+      if (action === "review") window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel", { detail: { tab: "runs", open: true } }));
     } catch (error) { setTopBarNotice({ type: "error", message: error.message }); }
   }
 
@@ -3555,9 +3577,6 @@ export default function App() {
       </Dialog> : null}
       <GlobalToolbar
         projectError={projectError}
-        onOpenRuns={() => setRunsOpen(current => !current)}
-        runSummary={workflowRunSummary(visibleRunRecords)}
-        projectRoot={activeProjectRoot}
         activeCodeDocument={activeCodeDocumentState}
         activeCodePath={activeCodePath}
         assistantPaneVisible={assistantPaneVisible}
@@ -3582,6 +3601,7 @@ export default function App() {
         activity={sidebarActivity}
         paneVisible={projectPaneVisible}
         activeWorkflow={browsingWorkspace}
+        mainProjectRoot={Object.entries(lastWorktreeByProject).find(([, root]) => samePath(root, activeProjectRoot))?.[0] || activeProjectRoot}
         activeWorkflowId={activeWorkflow?.id}
         loading={loadState.loading}
         openingProjectRoot={openingProjectRoot}
@@ -3703,9 +3723,9 @@ export default function App() {
             />
             </Suspense>
         </div>
-        {runsOpen ? <RunSummary records={visibleRunRecords} projectPath={activeProjectRoot} onReview={reviewWorkflowRun} onStop={runRegistry.stop} onClose={() => setRunsOpen(false)} onRefresh={runRegistry.refresh} loading={runRegistry.loading} connectionError={runRegistry.error} /> : null}
         {pinnedRun ? <div className="flex items-center justify-between border-t border-line px-3 py-1 text-[11px] text-muted"><span className="truncate">Run logs · {pinnedRun.workflowName} · {pinnedRun.runId}</span><button type="button" onClick={() => setPinnedRun(null)}>Unpin logs</button></div> : null}
         <UnifiedBottomPanel
+          runsProps={{ records: visibleRunRecords, projectPath: activeProjectRoot, onReview: reviewWorkflowRun, onStop: runRegistry.stop, onRefresh: runRegistry.refresh, loading: runRegistry.loading, connectionError: runRegistry.error }}
           diagnostics={panelDiagnostics}
           onSettingChange={changeSetting}
           projectRoot={panelProjectRoot}
@@ -4426,6 +4446,7 @@ export function WorkflowGraphPane({ workflow, active, visible, saveState, onRetr
 }
 
 export function WorkflowSidebar({
+  mainProjectRoot,
   openingProjectRoot = "",
   paneVisible = true,
   activity,
@@ -4599,7 +4620,7 @@ export function WorkflowSidebar({
 
       {paneVisible ? <div className="relative z-30 px-3.5 pb-2">
         <RecentProjectSelector
-          projectRoot={activeWorkflow?.projectRoot || ""}
+          projectRoot={mainProjectRoot ?? activeWorkflow?.projectRoot ?? ""}
           openingProjectRoot={openingProjectRoot}
           recentProjectRoots={recentProjectRoots}
           onSelectProject={onSelectProject}
@@ -5378,7 +5399,7 @@ export function RecentProjectSelector({ projectRoot = "", openingProjectRoot = "
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
-  const projects = mergeRecentProjects(projectRoot ? [projectRoot] : [], recentProjectRoots);
+  const projects = mergeRecentProjects([], recentProjectRoots);
   useEffect(() => {
     if (!open) return undefined;
     const close = (event) => { if (!rootRef.current?.contains(event.target)) setOpen(false); };
@@ -5405,9 +5426,6 @@ export function RecentProjectSelector({ projectRoot = "", openingProjectRoot = "
 }
 
 export function GlobalToolbar({
-  onOpenRuns,
-  runSummary,
-  projectRoot = "",
   projectError = "",
   activeCodeDocument,
   activeCodePath = "",
@@ -5428,15 +5446,6 @@ export function GlobalToolbar({
   onToggleTheme,
   onMenuAction,
 }) {
-  const [projectWorktrees, setProjectWorktrees] = useState({ root: "", items: [], error: "" });
-  useEffect(() => {
-    let cancelled = false;
-    if (!projectRoot || !window.goferDesktop?.workspace?.gitWorktrees) return undefined;
-    Promise.resolve(window.goferDesktop.workspace.gitWorktrees(projectRoot)).then(payload => {
-      if (!cancelled) setProjectWorktrees({ root: projectRoot, items: (payload?.worktrees ?? []).filter(item => !item.missing && !item.prunable), error: payload?.error || "" });
-    }).catch(error => { if (!cancelled) setProjectWorktrees({ root: projectRoot, items: [], error: error.message || "Unable to load worktrees" }); });
-    return () => { cancelled = true; };
-  }, [projectRoot]);
   const hasUpdateBridge = Boolean(window.goferUpdates?.check);
   const buttonClass = "studio-icon-button grid h-7 w-7 place-items-center rounded-md text-muted transition hover:bg-slate-100 hover:text-ink";
   return (
@@ -5454,10 +5463,8 @@ export function GlobalToolbar({
       />
       <div className="flex min-w-0 flex-1 items-center gap-2 px-3">
         {projectError ? <div role="alert" className="flex min-w-0 items-center gap-2 text-xs text-red-700 dark:text-red-300"><span className="truncate" title={projectError}>{projectError}</span><button type="button" className="shrink-0 underline" onClick={() => onMenuAction?.("file.openFolder")}>Open project</button></div> : null}
-        {samePath(projectWorktrees.root, projectRoot) && projectWorktrees.items.length > 1 ? <label className="flex min-w-0 max-w-48 items-center gap-1 text-muted" title="Browsing worktree"><GitBranch aria-hidden="true" size={13} /><select aria-label="Browsing worktree" className="h-7 min-w-0 rounded bg-white text-xs text-ink focus-visible:outline" value={projectWorktrees.items.find(item => samePath(item.path, projectRoot))?.path || projectRoot} onChange={event => onSelectProject?.(event.target.value, { mainProjectRoot: projectWorktrees.items[0]?.path || projectRoot })}>{projectWorktrees.items.map(item => <option key={item.path} value={item.path}>{item.branch || "Detached HEAD"}</option>)}</select></label> : null}
       </div>
       <div className="flex items-center gap-1">
-        {onOpenRuns ? <button type="button" onClick={onOpenRuns} aria-label={`Open runs, ${runSummary?.active.length || 0} active, ${runSummary?.unread.length || 0} unread`} className="flex h-7 items-center gap-1.5 rounded px-2 text-xs text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand"><History aria-hidden="true" size={14} />Runs{runSummary?.active.length ? <span>{runSummary.active.length} active</span> : null}{runSummary?.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}{runSummary?.disconnected.length ? <span title="Some run status is out of date">!</span> : null}</button> : null}
         {hasUpdateBridge ? updateState?.available ? (
           <button className="inline-flex h-8 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-70" disabled={Boolean(updateState.downloading)} title={updateButtonTitle(updateState)} type="button" onClick={onApplyUpdate}>
             {updateState.downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
@@ -5788,6 +5795,7 @@ function WorkflowSaveStatus({ saveState, onRetry }) {
 }
 
 function updateButtonLabel(updateState) {
+  if (updateState?.supported === false) return updateState.platform === "darwin" ? "Download Mac installer" : "Open update downloads";
   if (updateState?.downloaded) return "Restart to update";
   if (updateState?.downloading) {
     const percent = Math.max(0, Math.min(100, updateState.progress?.percent ?? 0));
@@ -5797,6 +5805,9 @@ function updateButtonLabel(updateState) {
 }
 
 function updateButtonTitle(updateState) {
+  if (updateState?.supported === false) return updateState.platform === "darwin"
+    ? "Download the Mac installer. Open the DMG, quit Raticode, and drag it into Applications. This build requires manual installation."
+    : "Open the release page to download and install the update manually";
   if (updateState?.downloaded) return "Restart Raticode and apply the downloaded update";
   if (updateState?.downloading) return "Downloading update";
   return "Download, install, and restart Raticode";

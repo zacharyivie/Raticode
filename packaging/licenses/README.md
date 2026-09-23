@@ -57,3 +57,8 @@ notice file must remain in the desktop distribution.
 
 The speech model is downloaded separately, not shipped in this bundle.
 vosk-model-en-us-0.22-lgraph is listed as Apache-2.0 by the upstream model catalog.
+
+Mac builds use Vosk 0.3.44, the last published universal2 wheel. Its metadata
+classifies the project as Apache Software License but declares License: UNKNOWN,
+as does 0.3.45. The supplied vosk-0.3.44-COPYING duplicates the Apache-2.0
+text from the v0.3.45 source referenced above; upstream has no v0.3.44 Git tag.

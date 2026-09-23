@@ -1405,7 +1405,6 @@ function handleTerminalEditorConnection(socket) {
         return;
       }
       const handle = pathHandle(targetPath);
-      if (!getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
       const request = {
         id: crypto.randomUUID(),
         ownerId: session.ownerId,
@@ -1668,13 +1667,25 @@ async function checkForUpdates() {
 
 async function downloadAndInstallUpdate() {
   if (!supportsAutoUpdates()) {
-    await openUpdateRelease();
+    if (process.platform === "darwin" && app.isPackaged && !isSmokeTest) {
+      const installerUrl = updateState.info?.installerUrl;
+      if (!installerUrl) throw new Error("No compatible Mac installer was found. Check for updates again or open the release page.");
+      await shell.openExternal(installerUrl);
+    } else {
+      await openUpdateRelease();
+    }
     return getUpdateState();
   }
 
   installUpdateAfterDownload = true;
   setUpdateState({ downloading: true, error: "" });
-  await autoUpdater.downloadUpdate();
+  try {
+    await autoUpdater.downloadUpdate();
+  } catch (error) {
+    installUpdateAfterDownload = false;
+    setUpdateState({ downloading: false, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
   return getUpdateState();
 }
 
@@ -1784,9 +1795,19 @@ async function checkLatestReleaseFallback() {
       version: normalizeVersion(release.tag_name || release.name || ""),
       releaseName: release.name || release.tag_name || "",
       releaseDate: release.published_at || "",
+      installerUrl: macInstallerUrl(release),
     },
     progress: null,
   };
+}
+
+function macInstallerUrl(release) {
+  if (process.platform !== "darwin") return "";
+  const version = normalizeVersion(release.tag_name);
+  const name = `Raticode-${version}-${process.arch}.dmg`;
+  const expected = `https://github.com/zacharyivie/gofer-flow/releases/download/${encodeURIComponent(release.tag_name)}/${name}`;
+  const asset = Array.isArray(release.assets) && release.assets.find((item) => item.name === name);
+  return asset?.browser_download_url === expected ? expected : "";
 }
 
 function isNoPublishedVersionsError(error) {
@@ -1880,9 +1901,8 @@ async function resolveProjectFile(_event, options = {}) {
   const stat = await fs.promises.stat(selectedPath);
   const selectedDirectory = stat.isDirectory() ? selectedPath : path.dirname(selectedPath);
   const discoveredRoot = nearestProjectRoot(selectedDirectory);
-  const projectRoot = getIpcSecurity().grantForPath(discoveredRoot) ? discoveredRoot : selectedDirectory;
+  const projectRoot = discoveredRoot;
   const handle = pathHandle(projectRoot);
-  if (!getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
   return {
     directory: projectRoot,
     grantId: handle.grantId,
@@ -1915,10 +1935,10 @@ async function grantPath(_event, options = {}) {
   if (!options.targetPath || typeof options.targetPath !== "string") {
     throw new Error("A path is required.");
   }
-  await restoreBackendTrustedRoots();
   let handle;
   try {
-    handle = getIpcSecurity().renewPath(options.targetPath);
+    // The desktop user may select any OS-accessible project, including sibling worktrees.
+    handle = getIpcSecurity().trustPath(options.targetPath);
   } catch (error) {
     if (["ENOENT", "ENOTDIR"].includes(error.code || error.cause?.code)) {
       return { missing: true };
@@ -1936,7 +1956,6 @@ async function grantDroppedPath(_event, options = {}) {
   const stat = await fs.promises.stat(selectedPath);
   const root = stat.isFile() ? nearestProjectRoot(path.dirname(selectedPath)) : selectedPath;
   const handle = getIpcSecurity().trustPath(root);
-  await registerBackendPathGrant(handle);
   return { path: selectedPath, grantId: handle.grantId };
 }
 
@@ -2184,7 +2203,7 @@ async function configureRem(_event, options = {}) {
   const config = remSettings();
   if (options.key === "reset") Object.assign(config, { archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" });
   else if (["archiveFolder", "secondBrainRoot"].includes(options.key)) {
-    const folder = options.value ? getIpcSecurity().resolveAllowedPath(options.value, { grantId: options.grantId, mustExist: true }) : "";
+    const folder = options.value ? getIpcSecurity().resolveDesktopPath(options.value, { mustExist: true }) : "";
     if (folder && !(await fs.promises.stat(folder)).isDirectory()) throw new Error("Choose a folder.");
     config[options.key] = folder;
   } else if (options.key === "secondBrainEnabled") {
@@ -2298,7 +2317,6 @@ async function gitWorktreeAdd(_event, options = {}) {
   if (!targetStat.isDirectory()) throw new Error("The worktree target must be a folder.");
   const result = await addGitWorktree(projectRoot, targetPath, options.branch.trim(), { createBranch: options.createBranch === true, startPoint: options.startPoint });
   const handle = pathHandle(targetPath);
-  if (!getIpcSecurity().isUserGrant(handle.grantId)) await registerBackendPathGrant(handle);
   return { ...result, createdPath: targetPath, grantId: handle.grantId };
 }
 
@@ -2362,7 +2380,6 @@ async function selectPath(_event, options = {}) {
   const root = selectedStat.isFile() ? nearestProjectRoot(path.dirname(selectedPath)) : selectedPath;
   const trusted = getIpcSecurity().trustPath(root);
   const handle = { path: selectedPath, grantId: trusted.grantId };
-  await registerBackendPathGrant(handle);
   return handle;
 }
 
@@ -2425,22 +2442,6 @@ function readTrustedRoots() {
 
 function persistTrustedRoot(root) {
   trustedProjectStore().add([...readTrustedRoots(), root]);
-}
-
-let restoredBackendRootsFor = "";
-async function restoreBackendTrustedRoots() {
-  await backendReady;
-  if (!activeApiBaseUrl || !activeUiApiToken || restoredBackendRootsFor === activeUiApiToken) return;
-  const response = await fetch(`${activeApiBaseUrl}/api/desktop/trusted-roots`, {
-    headers: { Authorization: `Bearer ${activeUiApiToken}`, "X-Gofer-Desktop-Grant-Secret": desktopGrantSecret },
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!response.ok) throw new Error("Could not restore trusted project folders.");
-  const payload = await response.json();
-  for (const root of payload.roots || []) {
-    try { getIpcSecurity().trustPath(root); } catch { /* Removed projects remain unavailable. */ }
-  }
-  restoredBackendRootsFor = activeUiApiToken;
 }
 
 async function registerBackendPathGrant(handle) {

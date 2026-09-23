@@ -25,7 +25,7 @@ import DeveloperSettings, { RemMemorySettings } from "./DeveloperSettings.jsx";
 import RemResources from "./RemResources.jsx";
 import ProviderSettings from "./ProviderSettings.jsx";
 import PairedDevices from "./PairedDevices.jsx";
-import { useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
+import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
 import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevices.js";
 import {
   DEFAULT_APP_SETTINGS,
@@ -66,7 +66,7 @@ export default function SettingsPopover({
   const onCloseRef = useRef(onClose);
   const [category, setCategory] = useState(initialCategory);
   const [query, setQuery] = useState("");
-  const providerState = useProviderCapabilities();
+  const providerState = useProviderSettingsCapabilities(open);
   onCloseRef.current = onClose;
 
   useEffect(() => {
@@ -276,7 +276,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   if (category === "layout") return [
     row("workflowPane", "Project pane width", "Default and current width of the left project pane.", <NumberControl value={settings.layout.workflowPaneWidth} min={240} max={420} suffix="px" onCommit={(value) => onChange("layout.workflowPaneWidth", value)} />),
     row("assistantPane", "Rem pane width", "Default and current width of Rem's chat pane.", <NumberControl value={settings.layout.assistantPaneWidth} min={300} max={520} suffix="px" onCommit={(value) => onChange("layout.assistantPaneWidth", value)} />),
-    row("bottomPanel", "Bottom panel height", "Height used for Problems, Run Timeline, and Terminal.", <NumberControl value={settings.layout.bottomPanelHeight} min={140} max={480} suffix="px" onCommit={(value) => onChange("layout.bottomPanelHeight", value)} />),
+    row("bottomPanel", "Bottom panel height", "Height used for Problems, Run Timeline, Runs, and Terminal.", <NumberControl value={settings.layout.bottomPanelHeight} min={140} max={480} suffix="px" onCommit={(value) => onChange("layout.bottomPanelHeight", value)} />),
     row("inspector", "Graph inspector width", "Width of the node and workflow inspector.", <NumberControl value={settings.layout.graphInspectorWidth} min={280} max={520} suffix="px" onCommit={(value) => onChange("layout.graphInspectorWidth", value)} />),
   ];
   if (category === "keybindings") return keybindingRows(settings, onChange);

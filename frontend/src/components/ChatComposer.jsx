@@ -357,7 +357,7 @@ function AttachmentChip({ attachment, onRemove }) {
 
 function microphoneErrorMessage(error) {
   if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
-    return "Microphone access was denied. Allow microphone access to transcribe a message.";
+    return "Microphone access was denied. Allow microphone access to transcribe a message. On Mac, enable Raticode in System Settings > Privacy & Security > Microphone, then restart Raticode.";
   }
   if (error?.name === "NotFoundError") return "No microphone is available.";
   if (error?.name === "OverconstrainedError") {

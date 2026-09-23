@@ -199,3 +199,18 @@ def test_cli_reports_missing_bundle(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["licenses", "--output", str(tmp_path / "export")])
     assert result.exit_code == 1
     assert "License bundle is missing" in result.output
+
+
+def test_bundle_handles_platform_specific_locked_versions(license_build):
+    root, distributions, output = license_build
+    with (root / "uv.lock").open("a") as lock:
+        lock.write('\n[[package]]\nname = "example"\nversion = "2"\n')
+    # A later platform variant must not mask the installed version.
+    collector.collect(output)
+    distributions["example"].version = "2"
+    policy_path = root / "packaging/licenses/reviewed.json"
+    policy = json.loads(policy_path.read_text())
+    policy["python"]["example@2"] = {"version": "2", "license": "MIT"}
+    policy_path.write_text(json.dumps(policy))
+    collector.collect(output)
+    assert (output / "python/example-2").is_dir()

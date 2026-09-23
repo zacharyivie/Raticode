@@ -1,8 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, AlertTriangle, ChevronDown, History, Terminal as TerminalIcon } from "lucide-react";
+import { Activity, AlertCircle, AlertTriangle, ChevronDown, History, Terminal as TerminalIcon } from "lucide-react";
 
 const RunTimelinePanel = lazy(() => import("./DagCanvas.jsx").then(module => ({ default: module.RunTimelinePanel })));
 import { DEFAULT_APP_SETTINGS, formatKeybinding, matchesCommand, settingBinding } from "../lib/settings.js";
+
+import RunSummary from "./RunSummary.jsx";
+import { workflowRunSummary } from "../lib/workflowRuns.js";
 
 const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
 import { bottomPanelTabForShortcut, clamp } from "../lib/terminalWorkspace.js";
@@ -19,6 +22,7 @@ export default function UnifiedBottomPanel({
   settings = DEFAULT_APP_SETTINGS,
   theme = "light",
   timelineProps,
+  runsProps = {},
 }) {
   const hasExplicitPanelSelectionRef = useRef(false);
   const [activeTab, setActiveTab] = useState("timeline");
@@ -26,6 +30,7 @@ export default function UnifiedBottomPanel({
   const [height, setHeight] = useState(settings.layout.bottomPanelHeight);
   const [newTerminalRequest, setNewTerminalRequest] = useState(0);
   const [terminalMounted, setTerminalMounted] = useState(false);
+  const [runsMounted, setRunsMounted] = useState(false);
   const [timelineMounted, setTimelineMounted] = useState(false);
   useEffect(() => { if (activeTab === "timeline" && !collapsed) setTimelineMounted(true); }, [activeTab, collapsed]);
 
@@ -33,6 +38,7 @@ export default function UnifiedBottomPanel({
     hasExplicitPanelSelectionRef.current = true;
     setActiveTab(tab);
     setCollapsed(false);
+    if (tab === "runs") setRunsMounted(true);
     if (tab === "terminal") setTerminalMounted(true);
   }, []);
 
@@ -77,7 +83,7 @@ export default function UnifiedBottomPanel({
 
     function handleExternalToggle(event) {
       if (event.detail?.tab) {
-        if (activeTab === event.detail.tab && !collapsed) {
+        if (activeTab === event.detail.tab && !collapsed && !event.detail.open) {
           setCollapsed(true);
         } else {
           selectTab(event.detail.tab);
@@ -157,6 +163,7 @@ export default function UnifiedBottomPanel({
     onSettingChange?.("layout.bottomPanelHeight", nextHeight);
   }
 
+  const runSummary = workflowRunSummary(runsProps.records ?? []);
   const errorCount = diagnostics.filter((diagnostic) => diagnostic.severity === "error").length;
 
   return (
@@ -210,6 +217,16 @@ export default function UnifiedBottomPanel({
           onClick={() => handleTabClick("timeline")}
         />
         <PanelTab
+          active={activeTab === "runs"}
+          icon={Activity}
+          label="Runs"
+          onClick={() => handleTabClick("runs")}
+        >
+          {runSummary.active.length ? <span>{runSummary.active.length} active</span> : null}
+          {runSummary.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}
+          {runSummary.disconnected.length ? <span aria-label="Some run status is out of date" title="Some run status is out of date">!</span> : null}
+        </PanelTab>
+        <PanelTab
           active={activeTab === "terminal"}
           icon={TerminalIcon}
           label="Terminal"
@@ -234,6 +251,9 @@ export default function UnifiedBottomPanel({
         <div className={activeTab === "timeline" ? "h-full" : "hidden"} role="tabpanel">
           {timelineMounted ? <Suspense fallback={<p role="status" className="p-3 text-xs">Loading run history...</p>}><RunTimelinePanel {...timelineProps} collapsed={false} embedded height={height - 36} /></Suspense> : null}
         </div>
+        {runsMounted ? <div className={activeTab === "runs" ? "h-full" : "hidden"} role="tabpanel" aria-label="Runs">
+          <RunSummary {...runsProps} embedded onClose={() => setCollapsed(true)} />
+        </div> : null}
         {terminalMounted ? (
           <div className={activeTab === "terminal" ? "h-full" : "hidden"} role="tabpanel">
             <Suspense fallback={<p role="status" className="p-3 text-xs text-muted">Loading terminal...</p>}><TerminalWorkspace

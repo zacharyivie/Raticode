@@ -9,7 +9,7 @@ export function RunStatus({ status }) {
   return <span className={`inline-flex items-center gap-1.5 ${status === "error" ? "text-red-700 dark:text-red-300" : status === "success" ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-600 dark:text-zinc-300"}`}><Icon size={13} aria-hidden="true" />{LABELS[status] ?? status}</span>;
 }
 
-export default function RunSummary({ records = [], projectPath = "", onReview, onStop, onClose, onRefresh, loading = false, connectionError = "" }) {
+export default function RunSummary({ embedded = false, records = [], projectPath = "", onReview, onStop, onClose, onRefresh, loading = false, connectionError = "" }) {
   const [scope, setScope] = useState("all");
   const [pending, setPending] = useState(new Set());
   const [error, setError] = useState("");
@@ -26,7 +26,7 @@ export default function RunSummary({ records = [], projectPath = "", onReview, o
     finally { setPending((current) => { const next = new Set(current); next.delete(record.key); return next; }); }
   }
 
-  return <section aria-label="Workflow runs" className="flex max-h-80 min-h-32 flex-col border-t border-zinc-300 bg-white text-xs dark:border-zinc-700 dark:bg-zinc-900">
+  return <section aria-label="Workflow runs" className={`flex flex-col bg-white text-xs dark:bg-zinc-900 ${embedded ? "h-full min-h-0" : "max-h-80 min-h-32 border-t border-zinc-300 dark:border-zinc-700"}`}>
     <div className="flex flex-wrap items-center gap-3 border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
       <h2 className="font-semibold">Runs</h2>
       {onRefresh ? <button type="button" className="rounded px-2 py-1 hover:bg-slate-100 focus-visible:outline" onClick={onRefresh}>Refresh</button> : null}

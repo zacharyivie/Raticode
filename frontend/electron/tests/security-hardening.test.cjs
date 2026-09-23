@@ -119,7 +119,7 @@ test("parent replacement is rejected before a write and copy cannot install an e
   assert.equal(fs.existsSync(path.join(inside, "copy", "link")), false);
 });
 
-test("new paths require native selection and persisted roots renew without a picker", async (t) => {
+test("project selection accepts arbitrary roots and persists access without a picker", async (t) => {
   const { inside, outside, security } = await fixture(t);
   const registered = [];
   const common = { path, fs, getIpcSecurity: () => security,
@@ -127,7 +127,7 @@ test("new paths require native selection and persisted roots renew without a pic
     restoreBackendTrustedRoots: async () => {},
   };
   const renew = mainFunction("grantPath", common);
-  await assert.rejects(renew(null, { targetPath: outside }), /outside/);
+  assert.equal((await renew(null, { targetPath: outside })).path, outside);
   const select = mainFunction("selectPath", {
     ...common, mainWindow: null, resolvePickerDefaultPath: () => inside,
     dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [outside] }) },
@@ -139,7 +139,7 @@ test("new paths require native selection and persisted roots renew without a pic
   assert.equal(reopened.renewPath(outside).path, outside);
   const failRenew = mainFunction("grantPath", { ...common, registerBackendPathGrant: async () => { throw new Error("registration failed"); } });
   await assert.rejects(failRenew(null, { targetPath: outside }), /registration failed/);
-  await assert.rejects(renew(null, { targetPath: path.dirname(outside) }), /outside/);
+  assert.equal((await renew(null, { targetPath: path.dirname(outside) })).path, path.dirname(outside));
 });
 
 test("agent resolver requires an existing grant for every directory listing mode", async (t) => {
@@ -329,7 +329,7 @@ test("grant renewal returns missing without rejecting IPC after a trusted folder
   assert.equal((await grant(null, { targetPath: outside })).path, outside);
   const untrusted = path.join(path.dirname(inside), "untrusted");
   await fsp.mkdir(untrusted);
-  await assert.rejects(grant(null, { targetPath: untrusted }), /outside/);
+  assert.equal((await grant(null, { targetPath: untrusted })).path, untrusted);
 });
 
 test("injected agent resolver distinguishes missing folders from access violations", async (t) => {
@@ -457,4 +457,57 @@ test("desktop child paths retain name validation without requiring agent grants"
   assert.equal(resolve(outside, "new.txt", "expired"), path.join(outside, "new.txt"));
   assert.throws(() => resolve(outside, "../escape"), /plain file or folder name/);
   assert.equal(security.grantForPath(outside), "");
+});
+
+
+test("native selection, file project lookup and settings do not wait for backend grants", async (t) => {
+  const { inside, outside, security } = await fixture(t);
+  // A formerly trusted root must behave just like a newly visited directory.
+  security.trustPath(outside);
+  await fsp.mkdir(path.join(outside, ".git"));
+  const file = path.join(outside, "readme.md");
+  await fsp.writeFile(file, "hello");
+  const context = {
+    fs, path, LEGACY_BRANDS: [], getIpcSecurity: () => security,
+    registerBackendPathGrant: () => assert.fail("User actions must not contact the backend"),
+    mainWindow: null, resolvePickerDefaultPath: () => inside,
+    dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [file] }) },
+    remSettings: () => ({}), app: { getPath: () => inside },
+  };
+  for (const name of ["resolveExactPath", "pathHandle", "nearestProjectRoot"]) context[name] = mainFunction(name, context);
+  assert.equal((await mainFunction("selectPath", context)(null)).path, file);
+  assert.equal((await mainFunction("grantDroppedPath", context)(null, { targetPath: file })).path, file);
+  assert.equal((await mainFunction("resolveProjectFile", context)(null, { selectedPath: file })).directory, outside);
+  for (const key of ["archiveFolder", "secondBrainRoot"]) {
+    assert.equal((await mainFunction("configureRem", context)(null, { key, value: outside, grantId: "expired" }))[key], outside);
+  }
+});
+
+test("a sibling worktree can be created, selected and checked out without prior approval", async (t) => {
+  const { base, outside, security } = await fixture(t);
+  const { execFileSync } = require("node:child_process");
+  const git = require("../git-status.cjs");
+  execFileSync("git", ["init", "-b", "main", outside]);
+  execFileSync("git", ["-C", outside, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "Initial"]);
+  execFileSync("git", ["-C", outside, "branch", "other"]);
+  security.trustPath(outside);
+  const sibling = path.join(base, "sibling-worktree");
+  await fsp.mkdir(sibling);
+  const context = { fs, path, ...git, getIpcSecurity: () => security,
+    registerBackendPathGrant: () => assert.fail("Creating a worktree must not need the backend"),
+  };
+  for (const name of ["resolveExactPath", "resolveGitProjectDirectory", "pathHandle"]) context[name] = mainFunction(name, context);
+  const created = await mainFunction("gitWorktreeAdd", context)(null, {
+    projectRoot: outside, targetPath: sibling, branch: "feature", createBranch: true, grantId: "expired",
+  });
+  assert.equal(created.createdPath, sibling);
+  assert.equal(security.isUserGrant(created.grantId), true);
+  const registered = [];
+  context.registerBackendPathGrant = async handle => registered.push(handle);
+  const selected = await mainFunction("grantPath", context)(null, { targetPath: sibling });
+  assert.equal(selected.path, sibling);
+  assert.equal(registered.length, 1);
+  assert.equal(security.isUserGrant(selected.grantId), false);
+  await mainFunction("gitSwitchBranch", context)(null, { projectRoot: sibling, branch: "other", grantId: "expired" });
+  assert.equal(execFileSync("git", ["-C", sibling, "branch", "--show-current"], { encoding: "utf8" }).trim(), "other");
 });

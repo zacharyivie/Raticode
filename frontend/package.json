@@ -1,6 +1,6 @@
 {
   "name": "gofer-flow-ui",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Local workflow automation studio for Raticode.",
   "author": "Raticode",
   "license": "AGPL-3.0-only",
@@ -144,7 +144,12 @@
           "from": "../dist/gof",
           "to": "backend/gof"
         }
-      ]
+      ],
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Raticode uses your microphone to transcribe speech into Rem chat messages."
+      },
+      "entitlements": "build-resources/entitlements.mac.plist",
+      "entitlementsInherit": "build-resources/entitlements.mac.plist"
     },
     "dmg": {
       "artifactName": "Raticode-${version}-${arch}.${ext}"

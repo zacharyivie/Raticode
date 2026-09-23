@@ -16,14 +16,14 @@ test("switching among 15 recent projects reuses validation and checks only chang
   const roots = Array.from({ length: 15 }, (_, i) => `/project-${i}`);
   const validateAll = (order) => Promise.all(order.map(root => validator.validate(root, root, workspace, mainRoot)));
   await validateAll(roots);
-  assert.deepEqual(calls, { trust: 15, info: 15, git: 15 });
+  assert.deepEqual(calls, { trust: 0, info: 15, git: 15 });
   for (const selected of [roots[0], roots[1], roots[0]]) {
     validator.remember(selected, selected);
     await validateAll([selected, ...roots.filter(root => root !== selected)]);
   }
   assert.equal(calls.git, 15, "A → B → A does not re-enumerate recent roots");
   await validator.validate(roots[0], "/new-worktree", workspace, mainRoot);
-  assert.deepEqual(calls, { trust: 16, info: 61, git: 16 });
+  assert.deepEqual(calls, { trust: 0, info: 61, git: 16 });
   now = 60_001;
   await validateAll(roots);
   assert.equal(calls.git, 31, "external changes are checked after the TTL");
@@ -32,8 +32,8 @@ test("switching among 15 recent projects reuses validation and checks only chang
 test("validation shares pending requests, removes missing directories, and preserves transient errors", async () => {
   let calls = 0;
   const workspace = {
-    trustProjectRoot: async () => { calls++; },
     getPathInfo: async root => {
+      calls++;
       if (root === "/missing") throw new Error("No such file");
       if (root === "/busy") throw new Error("Temporary access failure");
       return { isDirectory: false };
@@ -123,7 +123,7 @@ test("deleting a cached worktree falls back to main immediately, then removes a 
 test("temporary failure does not forget the selected worktree", async () => {
   const validator = createRecentProjectValidator();
   assert.deepEqual(await validator.validate("/main", "/feature", {
-    trustProjectRoot: async () => { throw new Error("Permission denied"); },
+    getPathInfo: async () => { throw new Error("Permission denied"); },
   }, mainRoot), { mainProjectRoot: "/main", selectedProjectRoot: "/feature" });
 });
 
