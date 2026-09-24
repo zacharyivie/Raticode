@@ -16,7 +16,9 @@ import { equalJson } from "../lib/jsonValue.js";
 import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
 import { generateConventionalCommit } from "../lib/commit-message.js";
 import RemResources, { DEFAULT_REM_RESOURCES, remResourceError } from "../components/RemResources.jsx";
+import { snapshotRemResources } from "../lib/remResources.js";
 import RemAvatar from "../components/RemAvatar.jsx";
+import { copyForkAttachments, forkThreadHistory } from "../lib/forkThread.js";
 import { lazy, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -764,6 +766,13 @@ export default function App() {
     }
     function handleApplicationShortcut(event) {
       if (settingsOpen) return;
+      // The composer owns Enter, including Ctrl+Enter for background threads.
+      // Run workflow defaults to the same keys on Windows and Linux.
+      if (event.key === "Enter" && event.target?.tagName === "TEXTAREA"
+        && event.target.closest?.("[data-chat-composer]")) {
+        clearChordPending();
+        return;
+      }
       const pending = chordPendingRef.current;
       if (pending) {
         clearChordPending();
@@ -5994,6 +6003,14 @@ export function ChatPane({
   const providerCapability = providers.find(item => item.id === providerId);
   const permissionOptions = providerPermissionOptions(providerId, providerCapability);
   const [threads, setThreads] = useState([]);
+  const [launchedThreadId, setLaunchedThreadId] = useState(null);
+  const forkInProgressRef = useRef(false);
+  const [forkStatus, setForkStatus] = useState("");
+  useEffect(() => {
+    if (!launchedThreadId) return;
+    const timer = window.setTimeout(() => setLaunchedThreadId(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [launchedThreadId]);
   const [activeThreadId, setActiveThreadId] = useState(null);
   const [messagesByThread, setMessagesByThread] = useState({});
   const conversationCacheRef = useRef(null);
@@ -6018,7 +6035,6 @@ export function ChatPane({
     save: (id, history, previous, persisted) => {
       const saved = () => {
         delete chatStorageErrorsRef.current[id];
-        setThreads((current) => bumpChatThread(current, id));
         archiveThreadFromStorage(id, () => repository.all(id));
         return true;
       };
@@ -6033,7 +6049,8 @@ export function ChatPane({
   useEffect(() => {
     const receive = ({ detail }) => {
       const { metadata, messages, running, activeTurn } = detail;
-      setThreads(current => [metadata, ...current.filter(t => t.id !== metadata.id)]);
+      setThreads(current => current.some(t => t.id === metadata.id)
+        ? current.map(t => t.id === metadata.id ? metadata : t) : [metadata, ...current]);
       if (activeThreadIdRef.current === metadata.id) {
         setProviderId(metadata.provider || "codex");
         setModel(metadata.model || "");
@@ -6069,6 +6086,8 @@ export function ChatPane({
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [resourcesOpen, setResourcesOpen] = useState(false);
+  const [newThreadResources, setNewThreadResources] = useState(null);
+  const homeResources = newThreadResources ?? assistantDefaults.resources ?? DEFAULT_REM_RESOURCES;
   const defaultGlobalScope = assistantDefaults.defaultScope === "global";
   const [homeProjectRoot, setHomeProjectRoot] = useState(defaultGlobalScope ? "" : prospectiveProjectRoot);
   const chatAbortControllersRef = useRef({});
@@ -6296,6 +6315,7 @@ export function ChatPane({
     if (!activeThreadId) {
       historyRequestRef.current += 1;
       historyLoadingRef.current = false;
+      setHistoryState({ threadId: null, loading: false, hasMore: false, before: Infinity, error: "" });
       setDraft(draftsByThreadRef.current[activeThreadId || "new-thread"] || "");
       setAttachments([]);
       setAttachmentError("");
@@ -6438,15 +6458,22 @@ export function ChatPane({
     const hasMessageAttachments = Boolean(
       originalMessage?.attachments?.length || selectedAttachments.length,
     );
-    if ((!text && !hasMessageAttachments) || (!options.targetThread && (chatState.sending || historyLoadingRef.current || historyState.error))) return;
+    const historyBlocked = activeThreadId && historyState.threadId === activeThreadId
+      && (historyLoadingRef.current || historyState.error);
+    if ((!text && !hasMessageAttachments) || (!options.targetThread && (chatState.sending || historyBlocked))) return;
     if (!options.targetThread && requiresPermissionChoice) return;
-    const resourceError = remResourceError(options.targetThread?.resources || activeThread?.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES);
+    const turnResources = snapshotRemResources(options.targetThread?.resources ?? activeThread?.resources ?? homeResources);
+    const resourceError = remResourceError(turnResources);
     if (resourceError) { setAttachmentError(resourceError); return; }
     returnToLatestMessages();
     const clientTurnStartedAt = Date.now();
     const turnSummaryId = uniqueClientId();
     const targetThread = options.targetThread ?? activeThread ?? createThread(scopedProjectRoot, { background: options.background, global: globalScope });
     const targetThreadId = targetThread.id;
+    if (options.background && !activeThread && !options.targetThread) {
+      setLaunchedThreadId(targetThreadId);
+      setBackgroundChatAnnouncement("Thread started in the background.");
+    }
     const workflowContext = chatWorkflowContextForThread(targetThread, workflows, openFiles);
     const turnProvider = targetThread.provider || providerId;
     const turnModel = targetThread.model ?? model;
@@ -6506,6 +6533,7 @@ export function ChatPane({
       ? [...messages.slice(0, editedMessageIndex), userMessage]
       : [...(options.targetThread ? [] : messages), userMessage];
     updateThreadMessages(targetThreadId, nextMessages);
+    setThreads(current => bumpChatThread(current, targetThreadId));
     updateThreadTitleFromMessage(targetThreadId, titleSource);
     if (!options.targetThread) {
       setDraft("");
@@ -6513,7 +6541,7 @@ export function ChatPane({
       setAttachments([]);
     }
     if (originalMessage) setExpandedThoughtGroups({});
-    setBackgroundChatAnnouncement("");
+    if (!options.background) setBackgroundChatAnnouncement("");
     setChatAnnouncementByThread((current) => ({ ...current, [targetThreadId]: "" }));
     let contextBoundaryId = userMessage.id;
     const thoughtGroupId = uniqueClientId();
@@ -6598,7 +6626,7 @@ export function ChatPane({
               } : {}),
             },
             remSecondBrain: { enabled: memorySettings.secondBrainEnabled, root: memorySettings.secondBrainRoot, format: memorySettings.secondBrainFormat, theme: memorySettings.secondBrainTheme, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(memorySettings.secondBrainRoot) },
-            remResources: targetThread.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES,
+            remResources: turnResources,
             id: `workflow-assistant:${targetThreadId}`,
             chatThreadId: targetThreadId,
           },
@@ -6784,6 +6812,9 @@ export function ChatPane({
       }));
     } finally {
       if (chatAbortControllersRef.current[targetThreadId] === abortController) {
+        if (!deletedChatThreadIdsRef.current.has(targetThreadId)) {
+          setThreads(current => bumpChatThread(current, targetThreadId));
+        }
         delete chatAbortControllersRef.current[targetThreadId];
         delete activeChatTurnsRef.current[targetThreadId];
         void recoverSteering(targetThreadId);
@@ -6814,6 +6845,7 @@ export function ChatPane({
       const payload = await response.json();
       if (!response.ok || !payload.receipt) throw new Error(payload.error || "Steering was not confirmed. Retry to check the same instruction.");
       recordSteering(threadId, payload.receipt);
+      setThreads(current => bumpChatThread(current, threadId));
       if (draftsByThreadRef.current[threadId] === text) delete draftsByThreadRef.current[threadId];
       if (activeThreadIdRef.current === threadId) setDraft(current => current === text ? "" : current);
       if (activeThreadIdRef.current === threadId) {
@@ -6890,7 +6922,8 @@ export function ChatPane({
   }
 
   const messageActionsRef = useRef(null);
-  messageActionsRef.current = { editUserMessage, toggleAssistantChanges, activeThreadId };
+  messageActionsRef.current = { editUserMessage, toggleAssistantChanges, forkThread, activeThreadId };
+  const forkMessageAction = useCallback(id => messageActionsRef.current.forkThread(id), []);
   const editMessageAction = useCallback((id, body) => messageActionsRef.current.editUserMessage(id, body), []);
   const undoMessageAction = useCallback((message) => {
     const actions = messageActionsRef.current;
@@ -6902,6 +6935,35 @@ export function ChatPane({
     void sendMessage({ id: messageId, body });
   }
 
+  async function forkThread(messageId) {
+    if (!activeThread || forkInProgressRef.current) return;
+    forkInProgressRef.current = true;
+    setForkStatus("Forking thread…");
+    const parent = structuredClone(activeThread);
+    // Include unloaded pages and the latest in-memory updates from a running turn.
+    const snapshot = structuredClone(conversationCacheRef.current.get(parent.id));
+    try {
+      const saved = await repository.all(parent.id);
+      const history = new Map(saved.map(message => [message.id, message]));
+      for (const message of snapshot) history.set(message.id, message);
+      const fork = forkThreadHistory(parent, [...history.values()], messageId, uniqueClientId());
+      await copyForkAttachments(parent.id, fork.thread.id, fork.messages);
+      await repository.save(fork.thread.id, fork.messages);
+      persistChatThreads([fork.thread]);
+      setThreads(current => [fork.thread, ...current]);
+      conversationCacheRef.current.hydrate(fork.thread.id, fork.messages);
+      if (activeThreadIdRef.current === parent.id) {
+        openThread(fork.thread.id);
+        setContextFocusRequest(current => current + 1);
+      }
+      setForkStatus("Thread forked. Continue from here.");
+    } catch (error) {
+      setForkStatus(`Could not fork thread: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      forkInProgressRef.current = false;
+    }
+  }
+
   function createThread(projectRoot = scopedProjectRoot, options = {}) {
     const now = new Date().toISOString();
     const root = String(projectRoot ?? "").trim();
@@ -6910,7 +6972,7 @@ export function ChatPane({
         id: options.id || uniqueClientId(),
         title: "New thread",
         provider: providerId, model, effort,
-        resources: structuredClone(assistantDefaults.resources || DEFAULT_REM_RESOURCES),
+        resources: snapshotRemResources(homeResources),
         permissionsByProvider: { ...permissionsByProvider, [providerId]: permissionMode },
         createdAt: now,
         updatedAt: now,
@@ -6926,7 +6988,7 @@ export function ChatPane({
     }
     if (options.parent) {
       Object.assign(thread, { provider: options.parent.provider, model: options.parent.model, effort: options.parent.effort,
-        resources: structuredClone(options.parent.resources), permissionsByProvider: { ...options.parent.permissionsByProvider }, parentThreadId: options.parent.id });
+        resources: snapshotRemResources(options.parent.resources), permissionsByProvider: { ...options.parent.permissionsByProvider }, parentThreadId: options.parent.id });
     }
     setThreads(current => [thread, ...current.filter(item => item.id !== thread.id)]);
     if (!options.background) {
@@ -6980,11 +7042,11 @@ export function ChatPane({
     const receive = event => {
       const request = event.detail;
       if (!request || request.signal?.aborted) return;
-      generateConventionalCommit({ provider: providerId, model, effort, diff: request.diff, projectRoot: request.projectRoot, inspectStaged: request.inspectStaged, signal: request.signal }).then(request.resolve, request.reject);
+      generateConventionalCommit({ provider: providerId, model, effort, permissionMode, diff: request.diff, projectRoot: request.projectRoot, inspectStaged: request.inspectStaged, signal: request.signal }).then(request.resolve, request.reject);
     };
     window.addEventListener("gofer:rem-commit-message", receive);
     return () => window.removeEventListener("gofer:rem-commit-message", receive);
-  }, [providerId, model, effort]);
+  }, [providerId, model, effort, permissionMode]);
 
   // Apply context after the thread activation effect clears the previous draft.
   useEffect(() => {
@@ -7008,7 +7070,7 @@ export function ChatPane({
     if (match?.messageId != null) setExpandedThoughtGroups({});
     const thread = threads.find((candidate) => candidate.id === threadId) || loadChatThread(threadId);
     setThreadSearchOpen(false);
-    if (thread && !thread.projectRoot) {
+    if (thread && !thread.projectRoot && thread.scopeMode !== "global") {
       const scopedThread = scopeChatThreadToProject(
         thread,
         scopedProjectRoot,
@@ -7046,6 +7108,7 @@ export function ChatPane({
     return buildChatItems(displayHistory).map(item => {
       if (item.type === "thought-group") {
         return <ThoughtGroup
+          onFork={forkMessageAction}
           key={item.id}
           expanded={expandedThoughtGroups[item.id] !== false}
           groupId={item.id}
@@ -7059,7 +7122,8 @@ export function ChatPane({
       }
       const isMatch = String(item.message.id) === String(matchId);
       return <div key={item.message.id} data-thread-search-match={isMatch || undefined} tabIndex={isMatch ? -1 : undefined}>
-        <ChatMessageBubble
+        <ForkableMessage
+          onFork={forkMessageAction}
           message={item.message}
           onOpenLink={openScopedMarkdownLink}
           sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
@@ -7139,7 +7203,6 @@ export function ChatPane({
           ? {
               ...thread,
               title: thread.title === "New thread" ? threadTitleFromMessage(message) : thread.title,
-              updatedAt: new Date().toISOString(),
             }
           : thread,
       );
@@ -7373,6 +7436,8 @@ export function ChatPane({
           {conversationMenuOpen ? (
             <div className="absolute right-0 top-9 z-50 max-h-80 w-72 overflow-y-auto rounded-[14px] border border-line bg-white p-1.5 shadow-panel">
               <ThreadSections
+                launchedThreadId={launchedThreadId}
+                onLaunchAnimationEnd={() => setLaunchedThreadId(null)}
                 activityByThread={chatStateByThread}
                 threads={threads}
                 activeThreadId={activeThreadId}
@@ -7386,6 +7451,7 @@ export function ChatPane({
         </div>
       </div>
 
+      {forkStatus ? <p role="status" className="border-b border-line px-3.5 py-2 text-xs text-muted">{forkStatus}</p> : null}
       {threadSearchOpen ? <ThreadSearch repository={repository} loadThreads={loadAllChatThreads} onOpen={openThread} onClose={closeThreadSearch} /> : null}
 
       {activeSearchTarget ? <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3.5 py-2 text-xs text-muted">
@@ -7417,6 +7483,8 @@ export function ChatPane({
             </div>
             <section aria-label="Threads" className="border-t border-line pt-3">
               <ThreadSections
+                launchedThreadId={launchedThreadId}
+                onLaunchAnimationEnd={() => setLaunchedThreadId(null)}
                 activityByThread={chatStateByThread}
                 threads={threads}
                 activeThreadId={activeThreadId}
@@ -7446,6 +7514,7 @@ export function ChatPane({
             {conversationItems.map((item) =>
               item.type === "thought-group" ? (
                 <ThoughtGroup
+                  onFork={forkMessageAction}
                   key={item.id}
                   expanded={expandedThoughtGroups[item.id] !== false}
                   onOpenLink={openScopedMarkdownLink}
@@ -7456,7 +7525,8 @@ export function ChatPane({
                   onToggle={toggleThoughtGroup}
                 />
               ) : (
-                <ChatMessageBubble
+                <ForkableMessage
+                  onFork={forkMessageAction}
                   key={item.message.id}
                   canEdit={!chatState.sending && item.message.id === latestUserMessageId}
                   message={item.message}
@@ -7477,10 +7547,10 @@ export function ChatPane({
       </div>
 
       <div className="relative shrink-0 border-t border-line p-3">
-          {activeThread ? <div className="mb-2">
-            <button aria-expanded={resourcesOpen} className="rounded px-1 py-1 text-xs text-muted hover:bg-slate-50" type="button" onClick={() => setResourcesOpen((open) => !open)}>Thread tools, skills & MCP</button>
-            {resourcesOpen ? <div className="max-h-64 overflow-y-auto border-t border-line py-2"><RemResources key={activeThreadId} value={activeThread.resources || assistantDefaults.resources || DEFAULT_REM_RESOURCES} onChange={(resources) => updateThreadConfig({ resources })} /></div> : null}
-          </div> : null}
+          <div className="mb-2">
+            <button aria-expanded={resourcesOpen} className="rounded px-1 py-1 text-xs text-muted hover:bg-slate-50" type="button" onClick={() => setResourcesOpen((open) => !open)}>{activeThread ? "Thread tools, skills & MCP" : "New thread tools, skills & MCP"}</button>
+            {resourcesOpen ? <div className="max-h-64 overflow-y-auto border-t border-line py-2"><RemResources key={activeThreadId || "new-thread"} value={activeThread ? activeThread.resources ?? assistantDefaults.resources ?? DEFAULT_REM_RESOURCES : homeResources} onChange={(resources) => activeThread ? updateThreadConfig({ resources }) : setNewThreadResources(resources)} /></div> : null}
+          </div>
           <ProviderModelEffortFields
             capabilities={providers}
             loading={providersLoading}
@@ -7506,6 +7576,7 @@ export function ChatPane({
             <button type="button" className="mt-2 font-semibold underline" disabled={chatState.sending} onClick={() => selectPermission("cli-managed")}>Use CLI-managed permissions</button>
           </div> : null}
           <ChatComposer
+            shortcutHint={!activeThreadId ? "Enter to start thread Shift+Enter for a new line Ctrl+Enter to start thread in background" : undefined}
             onSteer={steerAssistant}
             steeringPending={Boolean(steeringBusy[activeThreadId])}
             provider={providerId}
@@ -7530,7 +7601,6 @@ export function ChatPane({
             onSend={sendMessage}
             onStop={() => activeThreadId && stopAssistant(activeThreadId)}
           />
-          {!activeThreadId ? <p className="mt-1 text-center text-[10px] text-muted">Enter opens the thread · Ctrl+Enter starts it here</p> : null}
       </div>
     </aside>
   );
@@ -7627,7 +7697,7 @@ function ThreadActions({ thread, onPin, onDelete }) {
   </div>;
 }
 
-export function ThreadList({ activeThreadId, activityByThread = {}, onArchive, onPin, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry }) {
+export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry }) {
   const [visibleCount, setVisibleCount] = useState(pageSize);
   const sortedThreads = [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   if (threads.length) {
@@ -7636,22 +7706,25 @@ export function ThreadList({ activeThreadId, activityByThread = {}, onArchive, o
           {sortedThreads.slice(0, visibleCount).map(loadThread).filter(Boolean).map((thread) => (
             <div
               key={thread.id}
-              className={`group flex items-center gap-1 rounded-lg px-1 transition ${
+              data-thread-id={thread.id}
+              data-thread-launching={thread.id === launchedThreadId || undefined}
+              onAnimationEnd={thread.id === launchedThreadId ? onLaunchAnimationEnd : undefined}
+              className={`group flex items-center gap-1 rounded-lg px-1 transition ${thread.id === launchedThreadId ? "rem-thread-launch" : ""} ${
                 thread.id === activeThreadId ? "bg-indigo-50" : "hover:bg-slate-50"
               }`}
             >
               <button
-                className="min-w-0 flex-1 px-2 py-1.5 text-left"
+                className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
                 type="button"
                 onClick={() => onOpen(thread.id)}
               >
-                <div className="flex min-w-0 items-center gap-2">
-                  <div className="min-w-0 flex-1 truncate text-xs font-medium text-ink">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium text-ink">
                     {thread.title}
                   </div>
-                  <ThreadActivityIndicator state={activityByThread[thread.id]} />
+                  <div className="mt-0.5 text-[10px] text-muted">{formatThreadDate(thread.updatedAt)}</div>
                 </div>
-                <div className="mt-0.5 text-[10px] text-muted">{formatThreadDate(thread.updatedAt)}</div>
+                <ThreadActivityIndicator state={activityByThread[thread.id]} />
               </button>
               {archived ? <button
                 className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-red-50 hover:text-red-600"
@@ -7719,6 +7792,18 @@ export function scrollConversationToBottom(element) {
   if (!element) return;
   element.scrollTop = element.scrollHeight;
 }
+
+function ForkButton({ messageId, onFork }) {
+  return onFork ? <button type="button" title="Fork thread from here" aria-label="Fork thread from here"
+    className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] text-muted hover:bg-slate-100 hover:text-ink focus-visible:outline-brand"
+    onClick={() => void onFork(messageId)}><GitBranch aria-hidden="true" size={12} /><span>Fork</span></button> : null;
+}
+
+const ForkableMessage = memo(function ForkableMessage({ onFork, ...props }) {
+  return <div><ChatMessageBubble {...props} />
+    {!props.message.running ? <div className="flex justify-end"><ForkButton messageId={props.message.id} onFork={onFork} /></div> : null}
+  </div>;
+});
 
 const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, message, onEdit, onOpenLink, onUndoChanges, sourcePath }) {
   const [copied, setCopied] = useState(false);
@@ -8068,7 +8153,7 @@ export function MarkdownMessage({ compact = false, inverse = false, onOpenLink, 
   );
 }
 
-const ThoughtGroup = memo(function ThoughtGroup({ groupId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
+const ThoughtGroup = memo(function ThoughtGroup({ onFork, groupId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
   const trace = useMemo(() => buildThoughtTrace(thoughts), [thoughts]);
   const count = trace.length;
   const match = thoughts.find(thought => String(thought.id) === String(searchMessageId));
@@ -8140,6 +8225,8 @@ const ThoughtGroup = memo(function ThoughtGroup({ groupId, expanded, onOpenFile,
                       <MarkdownMessage compact sourcePath={sourcePath} onOpenLink={onOpenLink} value={entry.body} />
                     </div>
                   ) : null}
+                  <div className="flex justify-end"><ForkButton onFork={onFork}
+                    messageId={thoughts.findLast(thought => entry.id ? String(thought.trace?.id) === entry.id : thought.id === entry.key)?.id} /></div>
                 </div>
               ))}
             </div>

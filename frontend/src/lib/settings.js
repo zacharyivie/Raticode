@@ -1,5 +1,6 @@
 import brandCompat from "./brandCompat.js";
 import { cloneJson } from "./jsonValue.js";
+import { DEFAULT_REM_RESOURCES, snapshotRemResources } from "./remResources.js";
 export const REPORT_THEMES = [
   {
     "id": "auto",
@@ -139,7 +140,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     swarmAccessEnabled: true,
     avatarEnabled: true,
     avatarAnimated: true,
-    resources: { shell: true, web: false, skills: [], mcpServers: [] },
+    resources: { ...DEFAULT_REM_RESOURCES },
     effort: "",
     model: "",
     provider: "codex",
@@ -187,6 +188,7 @@ export function normalizeAppSettings(value = {}) {
   settings.assistant.swarmAccessEnabled = settings.assistant.swarmAccessEnabled !== false;
   settings.assistant.avatarEnabled = settings.assistant.avatarEnabled !== false;
   settings.assistant.avatarAnimated = settings.assistant.avatarAnimated !== false;
+  settings.assistant.resources = snapshotRemResources(settings.assistant.resources);
   settings.general.autosave = settings.general.autosave !== false;
   settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["workflows", "files", "search", "source-control"], value?.general?.defaultView === "code" ? "files" : "workflows");
   // Retain the old field for older installations reading these settings.

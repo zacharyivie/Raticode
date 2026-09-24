@@ -182,3 +182,49 @@ def test_vosk_model_canonicalizes_data_root_alias(monkeypatch, tmp_path):
         real / "speech-models" / chat_media.VOSK_MODEL_NAME
     )
     assert paths == [real / "speech-models" / chat_media.VOSK_MODEL_NAME]
+
+
+def test_fork_copies_attachments_independently(tmp_path) -> None:
+    import shutil
+
+    from gofer.ui.chat_media import copy_chat_attachments, resolve_chat_attachment
+
+    attachments = store_chat_attachments(
+        {
+            "threadId": "original",
+            "files": [
+                {
+                    "name": "evidence.txt",
+                    "type": "text/plain",
+                    "data": base64.b64encode(b"original evidence").decode(),
+                }
+            ],
+        },
+        tmp_path,
+    )["attachments"]
+    copy_chat_attachments(
+        {"sourceThreadId": "original", "threadId": "fork", "attachments": attachments}, tmp_path
+    )
+    shutil.rmtree(tmp_path / "chat-attachments" / "original")
+    copied = resolve_chat_attachment(attachments[0], data_dir=tmp_path, thread_id="fork")
+    assert copied.read_bytes() == b"original evidence"
+
+
+def test_fork_attachment_copy_rejects_traversal_and_missing_sources(tmp_path) -> None:
+    from gofer.ui.chat_media import copy_chat_attachments
+
+    for source, target, name in [
+        ("../outside", "fork", "a" * 32 + "-test"),
+        ("original", "../outside", "a" * 32 + "-test"),
+        ("original", "fork", "../../secret"),
+        ("original", "fork", "a" * 32 + "-missing"),
+    ]:
+        with pytest.raises(ChatMediaError):
+            copy_chat_attachments(
+                {
+                    "sourceThreadId": source,
+                    "threadId": target,
+                    "attachments": [{"storageName": name}],
+                },
+                tmp_path,
+            )

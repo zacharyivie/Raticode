@@ -11896,6 +11896,11 @@ test("Conventional Commit generation uses the restricted endpoint and rejects in
     assert.equal(request.provider, "codex");
     assert.equal(request.effort, "high");
     assert.equal(request.diff, "+staged");
+    for (const provider of ["grok", "antigravity", "opencode"]) {
+      await generateConventionalCommit({ provider, model: "chosen-model", permissionMode: "cli-managed", diff: "+staged" });
+      assert.equal(request.provider, provider);
+      assert.equal(request.permissionMode, "cli-managed");
+    }
     for (const diff of ["x".repeat(120001), "\u0000".repeat(2100000)]) {
       await generateConventionalCommit({ provider: "codex", model: "cli-default", projectRoot: "/repo", diff });
       assert.equal(request.inspectStaged, true);
@@ -14427,6 +14432,44 @@ test("Rem default scope validates and persists the global setting", () => {
   assert.equal(settingsModule.normalizeAppSettings({ assistant: { defaultScope: "global" } }).assistant.defaultScope, "global");
 });
 
+test("app shortcuts yield Ctrl+Enter to the Rem composer", async () => {
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: {
+      [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ keybindings: { "workflow.run": "Ctrl+Enter" } }),
+    },
+  });
+  try {
+    await dom.flush();
+    const composer = allElements(dom.container).find(node => node.getAttribute("data-chat-composer") !== null);
+    const input = allElements(composer).find(node => node.tagName === "TEXTAREA");
+    assert.ok(input);
+    input.closest = selector => selector === "[data-chat-composer]" ? composer : null;
+    await dom.change(input, "Background work through app shortcuts");
+    let captured = false;
+    const keypress = {
+      target: input, key: "Enter", code: "Enter", ctrlKey: true,
+      preventDefault() { captured = true; },
+      stopPropagation() { captured = true; },
+    };
+    await dom.dispatchWindow("keydown", keypress);
+    assert.equal(captured, false, "the global workflow shortcut swallowed the chat keypress");
+    await dom.keyDown(input, "Enter", { ctrlKey: true });
+    await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 1);
+    assert.equal(reactProps(input).value, "");
+    assert.ok(allElements(dom.container).some(node => node.getAttribute("data-thread-launching") === "true"));
+    assert.throws(() => dom.byLabel("Back to active threads"));
+
+    captured = false;
+    await dom.dispatchWindow("keydown", { ...keypress, target: document.body });
+    assert.equal(captured, true, "the workflow shortcut must still work outside the composer");
+  } finally { await dom.unmount(); }
+});
+
 test("Ctrl+Enter starts background threads while Enter opens the new thread", async () => {
   const fetchMock = createFetchMock([
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
@@ -14441,6 +14484,11 @@ test("Ctrl+Enter starts background threads while Enter opens the new thread", as
   await dom.flush();
   assert.throws(() => dom.byLabel("Back to active threads"));
   assert.ok(dom.byText("Background work"));
+  assert.equal(reactProps(dom.first("textarea")).value, "");
+  assert.ok(allElements(dom.container).some(element => element.getAttribute("data-thread-launching") === "true"));
+  await dom.change(dom.first("textarea"), "A newline");
+  await dom.keyDown(dom.first("textarea"), "Enter", { shiftKey: true });
+  assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 1);
   await dom.change(dom.first("textarea"), "Foreground work");
   await dom.keyDown(dom.first("textarea"), "Enter");
   await dom.flush();
@@ -14449,7 +14497,147 @@ test("Ctrl+Enter starts background threads while Enter opens the new thread", as
   assert.equal(requests.length, 2);
   assert.notEqual(requests[0].conversationId, requests[1].conversationId);
   assert.equal(requests[0].workflow.projectRoot, "/projects/mobile");
+  assert.deepEqual(requests[0].workflow.remResources, { shell: true, web: true, skills: [], mcpServers: [] });
+  assert.deepEqual(requests[1].workflow.remResources, requests[0].workflow.remResources);
   await dom.unmount();
+});
+
+test("new thread resource defaults enable tools without overriding saved restrictions", () => {
+  assert.deepEqual(settingsModule.normalizeAppSettings({}).assistant.resources,
+    { shell: true, web: true, skills: [], mcpServers: [] });
+  assert.deepEqual(settingsModule.normalizeAppSettings({ assistant: { resources: { shell: false, web: false } } }).assistant.resources,
+    { shell: false, web: false, skills: [], mcpServers: [] });
+});
+
+test("background first turn captures tools, skills, MCP and permissions before any thread is opened", async () => {
+  const grant = createDeferred();
+  const resources = {
+    shell: false, web: false,
+    skills: [{ path: "/skills/weather", enabled: true }],
+    mcpServers: [{ name: "weather", type: "http", url: "https://example.com/mcp", enabled: true }],
+  };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    activeProjectRoot: "/repo", width: 380,
+    assistantDefaults: { provider: "codex", model: "gpt-6-luna", resources },
+  }), fetchMock, { desktop: { workspace: {
+    trustProjectRoot: () => grant.promise,
+    pathGrantForApi: () => "project-grant",
+  } } });
+  const checkbox = label => allElements(dom.byText(label)).find(el => el.tagName === "INPUT");
+  const requests = () => fetchMock.calls.filter(call => call.url === "/api/chat/stream").map(call => JSON.parse(call.options.body));
+  try {
+    await dom.flush();
+    await dom.click(dom.byText("New thread tools, skills & MCP"));
+    assert.equal(reactProps(checkbox("Search the web")).checked, false);
+    await dom.change(checkbox("Search the web"), true);
+    await dom.change(checkbox("Run commands"), true);
+    await dom.change(dom.byLabel("Rem permissions"), "workspace-write");
+    await dom.change(dom.first("textarea"), "Search the current temperature and calculate its square root");
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    await dom.flush();
+    assert.throws(() => dom.byLabel("Back to active threads"));
+    assert.equal(requests().length, 0, "provider must wait for the project grant");
+    const expected = { ...resources, shell: true, web: true };
+    const thread = appModule.loadChatThreads()[0];
+    assert.deepEqual(thread.resources, expected, "configuration is saved before dispatch");
+    // Configure the next thread while the first one is waiting to start.
+    await dom.change(checkbox("Search the web"), false);
+    await dom.change(checkbox("Run commands"), false);
+    await dom.click(dom.byLabel("Remove skill 1"));
+    await dom.click(dom.byLabel("Remove server 1"));
+    grant.resolve();
+    await dom.flush();
+    assert.equal(requests().length, 1);
+    assert.deepEqual(requests()[0].workflow.remResources, expected);
+    assert.equal(requests()[0].permissionMode, "workspace-write");
+    assert.equal(requests()[0].model, "gpt-6-luna");
+    assert.equal(requests()[0].workflow.projectRoot, "/repo");
+    assert.equal(requests()[0].workflow.remSwarmAccess.grantId, "project-grant");
+    assert.equal(reactProps(dom.first("textarea")).value, "");
+    // Opening the completed thread must not be needed to populate resources.
+    const row = allElements(dom.container).find(el => el.getAttribute("data-thread-id") === thread.id);
+    await dom.click(allElements(row).find(el => el.tagName === "BUTTON"));
+    await dom.flush();
+    assert.equal(reactProps(checkbox("Search the web")).checked, true);
+    assert.equal(dom.byLabel("Skill 1 path").value, "/skills/weather");
+    await dom.click(dom.byLabel("Back to active threads"));
+    await dom.change(dom.first("textarea"), "Second task with tools disabled");
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    await dom.flush();
+    assert.deepEqual(requests()[1].workflow.remResources, { shell: false, web: false, skills: [], mcpServers: [] });
+    assert.deepEqual(resources.skills, [{ path: "/skills/weather", enabled: true }]);
+    assert.equal(resources.web, false, "application defaults were not mutated");
+  } finally { grant.resolve(); await dom.flush(); await dom.unmount(); }
+});
+
+test("invalid new thread resources block background dispatch until corrected", async () => {
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  try {
+    await dom.flush();
+    const threadCount = appModule.loadChatThreads().length;
+    await dom.click(dom.byText("New thread tools, skills & MCP"));
+    await dom.click(dom.byExactText("Add skill"));
+    await dom.change(dom.first("textarea"), "Use my skill");
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 0);
+    assert.equal(appModule.loadChatThreads().length, threadCount);
+    assert.equal(reactProps(dom.first("textarea")).value, "Use my skill");
+    const path = dom.byLabel("Skill 1 path");
+    await dom.focus(path);
+    await dom.change(path, "/skills/weather");
+    await dom.blur(path);
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    await dom.flush();
+    const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
+    assert.deepEqual(request.workflow.remResources.skills, [{ path: "/skills/weather", enabled: true }]);
+  } finally { await dom.unmount(); }
+});
+
+test("a thread history error does not block starting a background thread from the list", async () => {
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    activeProjectRoot: "/repo", workflows: [], width: 380,
+  }), fetchMock);
+  const { conversationRepository } = await viteServer.ssrLoadModule("/src/lib/conversationRepository.js");
+  const repository = conversationRepository();
+  const { page, durable } = repository;
+  try {
+    await dom.change(dom.first("textarea"), "Existing thread");
+    await dom.keyDown(dom.first("textarea"), "Enter");
+    await dom.flush();
+    await dom.click(dom.byLabel("Back to active threads"));
+    repository.durable = true;
+    repository.page = async () => { throw new Error("History unavailable"); };
+    await dom.click(dom.ancestor(dom.byText("Existing thread"), "BUTTON"));
+    await dom.flush();
+    assert.ok(dom.byText("History unavailable"));
+    await dom.change(dom.first("textarea"), "Do not overwrite unavailable history");
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 1);
+    await dom.click(dom.byLabel("Back to active threads"));
+    await dom.change(dom.first("textarea"), "Independent background work");
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 2);
+    assert.equal(reactProps(dom.first("textarea")).value, "");
+    assert.throws(() => dom.byLabel("Back to active threads"));
+  } finally {
+    repository.page = page;
+    repository.durable = durable;
+    await dom.unmount();
+  }
 });
 
 test("global Rem scope becomes the selected project before the final response", async () => {
@@ -14792,4 +14980,208 @@ test("opening a linked worktree consolidates its project before workflow discove
     await dom.flush();
     assert.equal(appModule.loadStudioSession().projectRoot, "/feature", "Reopening the root project retains the selected worktree");
   } finally { discovery.resolve({ workflows: [] }); await dom.unmount(); }
+});
+
+
+test("forking an earlier message preserves the original and sends only the copied history", async () => {
+  const parent = { id: "fork-parent", title: "Original debugging", projectRoot: "/repo", projectName: "repo", provider: "codex", model: "cli-default", effort: "", resources: { shell: true, web: false, skills: [], mcpServers: [] }, permissionsByProvider: { codex: "workspace-write" }, updatedAt: new Date().toISOString() };
+  const history = [
+    { id: "first", role: "user", body: "First question" },
+    { id: "answer", role: "assistant", body: "First answer" },
+    { id: "later", role: "user", body: "Later question" },
+    { id: "future", role: "assistant", body: "Future answer" },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Fork answer"}}\n'])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage: {
+    "gofer-flow-chat-threads": JSON.stringify([parent]),
+    "gofer-flow-chat-thread-meta:fork-parent": JSON.stringify(parent),
+    "gofer-flow-chat-thread:fork-parent": JSON.stringify(history),
+  } });
+  try {
+    await dom.click(dom.ancestor(dom.byText(parent.title), "BUTTON")); await dom.flush();
+    const forks = allElements(dom.container).filter(element => element.getAttribute("aria-label") === "Fork thread from here");
+    assert.equal(forks.length, 4);
+    await dom.click(forks[1]); await dom.flush();
+    const child = appModule.loadChatThreads().find(thread => thread.forkedFromThreadId === parent.id);
+    assert.ok(child);
+    assert.equal(child.provider, parent.provider);
+    assert.deepEqual(child.resources, parent.resources);
+    assert.equal(child.forkedFromMessageId, "answer");
+    assert.match(dom.text(), /First answer/);
+    assert.doesNotMatch(dom.text(), /Future answer|Later question/);
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 0);
+    await dom.change(dom.first("textarea"), "Explore another approach");
+    await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
+    const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
+    assert.equal(request.conversationId, child.id);
+    assert.deepEqual(request.messages.map(message => message.body), ["First question", "First answer", "Explore another approach"]);
+    assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread:fork-parent")), history);
+  } finally { await dom.unmount(); }
+});
+
+test("thread order changes on user submission and completion, never streamed thoughts or history saves", async () => {
+  const first = controlledStreamResponse([
+    '{"type":"thought","text":"Inspecting the files"}\n',
+    '{"type":"thought","text":"More assistant commentary"}\n',
+    '{"type":"final","message":{"body":"First completed"}}\n',
+  ]);
+  const second = controlledStreamResponse(['{"type":"final","message":{"body":"Second completed"}}\n']);
+  const followup = controlledStreamResponse(['{"type":"final","message":{"body":"Followup completed"}}\n']);
+  const streams = [first, second, followup];
+  let submitted = 0;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streams[submitted++].response(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const ids = () => allElements(dom.container).map(el => el.getAttribute("data-thread-id")).filter(Boolean);
+  const savedTime = id => JSON.parse(window.localStorage.getItem(`gofer-flow-chat-thread-meta:${id}`)).updatedAt;
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "First task");
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    await dom.flush();
+    const firstId = ids()[0];
+    await dom.change(dom.first("textarea"), "Second task");
+    await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
+    await dom.flush();
+    const secondId = ids()[0];
+    assert.notEqual(firstId, secondId);
+    const timestamp = savedTime(firstId);
+    for (let i = 0; i < 2; i++) {
+      first.releaseNext(); await dom.flush();
+      assert.deepEqual(ids(), [secondId, firstId]);
+      assert.equal(savedTime(firstId), timestamp);
+    }
+    first.releaseNext(); await dom.flush();
+    assert.deepEqual(ids(), [firstId, secondId]);
+    second.releaseNext(); await dom.flush();
+    assert.deepEqual(ids(), [secondId, firstId]);
+    const row = allElements(dom.container).find(el => el.getAttribute("data-thread-id") === firstId);
+    await dom.click(allElements(row).find(el => el.tagName === "BUTTON"));
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Follow up on the first task");
+    await dom.keyDown(dom.first("textarea"), "Enter");
+    await dom.flush();
+    await dom.click(dom.byLabel("Back to active threads"));
+    await dom.flush();
+    assert.deepEqual(ids(), [firstId, secondId]);
+    followup.releaseNext(); await dom.flush();
+  } finally {
+    for (const stream of streams) for (let i = 0; i < 3; i++) stream.releaseNext();
+    await dom.flush(); await dom.unmount();
+  }
+});
+
+test("provider model access moves models both ways, persists, and hides denied configured options", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const picker = await viteServer.ssrLoadModule("/src/components/ProviderModelEffortFields.jsx");
+  let deniedModels = [];
+  let failSave = false;
+  const discoveredModels = [{ id: "sol", displayName: "Sol" }, { id: "astra", displayName: "Astra" }];
+  function catalog() {
+    return [{ id: "codex", displayName: "Codex", available: true, discoveryStatus: "ready", enabled: true,
+      defaultModel: deniedModels.includes("sol") ? "astra" : "sol", defaultModelOverride: "sol",
+      deniedModels, discoveredModels, models: discoveredModels.filter(model => !deniedModels.includes(model.id)) }];
+  }
+  function Harness() {
+    const state = picker.useProviderCapabilities();
+    return React.createElement(React.Fragment, null,
+      React.createElement(settings.default, { providerState: state }),
+      React.createElement(picker.ProviderModelEffortFields, { ...state, provider: "codex", model: "sol", onChange() {} }));
+  }
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url.startsWith("/api/provider/capabilities")) return { ok: true, json: async () => ({ providers: catalog() }) };
+    if (url === "/api/provider/commit-settings") return { ok: true, json: async () => ({}) };
+    if (url === "/api/provider/settings") {
+      if (failSave) return { ok: false, json: async () => ({ error: "Could not save models" }) };
+      deniedModels = JSON.parse(options.body).deniedModels;
+      return { ok: true, json: async () => ({ saved: true }) };
+    }
+    return null;
+  }]);
+  let dom = await mountReact(React.createElement(Harness), fetchMock);
+  const dispatch = event => { for (const listener of document.listeners[event.type] ?? []) listener(event); return true; };
+  window.dispatchEvent = dispatch;
+  async function select(label, values) {
+    await React.act(async () => { reactProps(dom.byLabel(label)).onChange({ target: { selectedOptions: values.map(value => ({ value })) } }); });
+  }
+  function options(label) { return allElements(dom.byLabel(label)).filter(el => el.tagName === "OPTION").map(el => reactProps(el).value); }
+  try {
+    await dom.flush();
+    await select("Codex allowed models", ["sol"]);
+    await dom.click(dom.byLabel("Deny selected Codex models")); await dom.flush();
+    assert.deepEqual(deniedModels, ["sol"]);
+    assert.deepEqual(options("Codex allowed models"), ["astra"]);
+    assert.deepEqual(options("Codex denied models"), ["sol"]);
+    assert.ok(!options("Codex default model").includes("sol"));
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "model"));
+    const menu = dom.byLabel("Model options");
+    assert.doesNotMatch(textOf(menu), /Sol|sol.*configured/);
+    assert.match(textOf(menu), /Astra/);
+    await dom.unmount();
+    dom = await mountReact(React.createElement(Harness), fetchMock);
+    window.dispatchEvent = dispatch;
+    await dom.flush();
+    assert.deepEqual(options("Codex denied models"), ["sol"]);
+    await select("Codex denied models", ["sol"]);
+    failSave = true;
+    await dom.click(dom.byLabel("Allow selected Codex models")); await dom.flush();
+    assert.match(dom.text(), /Could not save models/);
+    assert.deepEqual(options("Codex denied models"), ["sol"]);
+    failSave = false;
+    await dom.click(dom.byLabel("Allow selected Codex models")); await dom.flush();
+    assert.deepEqual(deniedModels, []);
+    assert.deepEqual(options("Codex allowed models"), ["sol", "astra"]);
+    await select("Codex allowed models", ["sol", "astra"]);
+    await dom.click(dom.byLabel("Deny selected Codex models")); await dom.flush();
+    assert.match(dom.text(), /All models are denied/);
+    assert.deepEqual(options("Codex allowed models"), []);
+    await select("Codex denied models", ["sol", "astra"]);
+    await dom.click(dom.byLabel("Allow selected Codex models")); await dom.flush();
+    assert.deepEqual(deniedModels, []);
+  } finally { await dom.unmount(); }
+});
+
+test("dedicated commit provider and model persist independently, report failures, and reset", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  let stored = {};
+  let failSave = false;
+  const providerState = { loading: false, refresh() {}, capabilities: [
+    { id: "codex", displayName: "Codex", enabled: true, available: true, discoveryStatus: "ready", defaultModel: "sol", models: [{ id: "sol", displayName: "Sol" }, { id: "astra", displayName: "Astra" }], deniedModels: ["denied"] },
+    { id: "cursor", displayName: "Cursor", enabled: true, available: true, discoveryStatus: "ready", defaultModel: "auto", models: [{ id: "auto" }] },
+  ] };
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url !== "/api/provider/commit-settings") return null;
+    if (options?.method === "POST") {
+      if (failSave) return { ok: false, json: async () => ({ error: "Could not save commit settings" }) };
+      stored = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ saved: true }) };
+    }
+    return { ok: true, json: async () => stored };
+  }]);
+  let dom = await mountReact(React.createElement(settings.default, { providerState }), fetchMock);
+  try {
+    await dom.flush();
+    await dom.change(dom.byLabel("Commit message provider"), "codex"); await dom.flush();
+    assert.deepEqual(stored, { provider: "codex", model: "sol" });
+    await dom.change(dom.byLabel("Commit message model"), "astra"); await dom.flush();
+    assert.deepEqual(stored, { provider: "codex", model: "astra" });
+    await dom.unmount();
+    dom = await mountReact(React.createElement(settings.default, { providerState }), fetchMock);
+    await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Commit message model")).value, "astra");
+    assert.doesNotMatch(textOf(dom.byLabel("Commit message model")), /denied/);
+    failSave = true;
+    await dom.change(dom.byLabel("Commit message provider"), "cursor"); await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Commit message provider")).value, "codex");
+    assert.match(dom.text(), /Could not save commit settings/);
+    failSave = false;
+    await dom.change(dom.byLabel("Commit message provider"), ""); await dom.flush();
+    assert.deepEqual(stored, { provider: "", model: "" });
+    assert.ok(!allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Commit message model"));
+  } finally { await dom.unmount(); }
 });

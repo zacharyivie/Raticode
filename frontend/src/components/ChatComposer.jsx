@@ -29,6 +29,7 @@ export default function ChatComposer({
   steeringPending = false,
   sending = false,
   sendDisabled = false,
+  shortcutHint = "Enter to send · Shift+Enter for a new line",
   provider = "codex",
   permissionMode = defaultPermissionMode(provider),
   permissionOptions = PROVIDER_PERMISSIONS[provider] || [["default", "CLI default"]],
@@ -298,7 +299,7 @@ export default function ChatComposer({
         </div>
       </div>
       {error ? <p id="chat-composer-error" className="mt-1.5 px-1 text-[10px] text-red-600">{error}</p> : null}
-      <p className="mt-1.5 px-1 text-[10px] text-muted">{sending ? "Enter to steer · Stop cancels the response" : "Enter to send · Shift+Enter for a new line"}</p>
+      <p className="mt-1.5 overflow-x-auto whitespace-nowrap px-1 text-[10px] text-muted">{sending ? "Enter to steer · Stop cancels the response" : shortcutHint}</p>
     </>
   );
 }

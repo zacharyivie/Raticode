@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { DEFAULT_REM_RESOURCES } from "../lib/remResources.js";
 
-export const DEFAULT_REM_RESOURCES = { shell: true, web: false, skills: [], mcpServers: [] };
+export { DEFAULT_REM_RESOURCES } from "../lib/remResources.js";
 
 // Keep editable strings untouched until blur, including partially entered paths and URLs.
 function DraftField({ label, value, onCommit, placeholder, multiline = false }) {

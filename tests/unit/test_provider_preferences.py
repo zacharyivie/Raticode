@@ -118,3 +118,64 @@ def test_invalid_default_preferences_are_rejected(changes) -> None:
     with pytest.raises(ValueError):
         preferences.save_provider_preference("codex", changes)
     assert preferences.provider_preference("codex") == {}
+
+
+@pytest.mark.parametrize("provider", capabilities.CLI_PROVIDERS)
+def test_denied_models_filter_catalog_and_defaults_but_can_be_restored(provider) -> None:
+    catalog = capabilities.ProviderCapability(
+        id=provider,
+        display_name=provider,
+        available=True,
+        discovery_status="ready",
+        default_model="first",
+        models=[
+            capabilities.ModelCapability(id="first", display_name="First"),
+            capabilities.ModelCapability(id="second", display_name="Second"),
+        ],
+    )
+    preferences.save_provider_preference(
+        provider,
+        {
+            "deniedModels": [" first ", "first", "removed"],
+            "defaultModel": "first",
+        },
+    )
+    payload = catalog.to_ui_payload()
+    assert payload["deniedModels"] == ["first", "removed"]
+    assert [model["id"] for model in payload["models"]] == ["second"]
+    assert [model["id"] for model in payload["discoveredModels"]] == ["first", "second"]
+    assert payload["defaultModel"] == "second"
+    assert len(catalog.models) == 2
+    preferences.save_provider_preference(provider, {"deniedModels": ["first", "second"]})
+    assert catalog.to_ui_payload()["models"] == []
+    assert catalog.to_ui_payload()["defaultModel"] is None
+    preferences.save_provider_preference(provider, {"deniedModels": []})
+    assert catalog.to_ui_payload()["defaultModel"] == "first"
+
+
+@pytest.mark.parametrize("models", [None, "first", [None], [""], ["a" * 257]])
+def test_invalid_denied_models_preserve_preferences(models) -> None:
+    preferences.save_provider_preference("codex", {"deniedModels": ["first"]})
+    with pytest.raises(ValueError):
+        preferences.save_provider_preference("codex", {"deniedModels": models})
+    assert preferences.provider_preference("codex")["deniedModels"] == ["first"]
+
+
+def test_commit_model_preference_roundtrip_and_validation() -> None:
+    selection = {"provider": "codex", "model": "sol"}
+    preferences.save_commit_message_preference(selection)
+    preferences.save_provider_preference("codex", {"deniedModels": ["astra"]})
+    assert preferences.commit_message_preference() == selection
+    for invalid in [
+        {"provider": "codex", "model": "astra"},
+        {"provider": "unknown", "model": "sol"},
+        {"provider": "codex", "model": ""},
+        {"provider": "", "model": "sol"},
+        {"provider": [], "model": "sol"},
+        {"provider": "codex", "model": None},
+    ]:
+        with pytest.raises(ValueError):
+            preferences.save_commit_message_preference(invalid)
+        assert preferences.commit_message_preference() == selection
+    preferences.save_commit_message_preference({"provider": "", "model": ""})
+    assert preferences.commit_message_preference() == {"provider": "", "model": ""}

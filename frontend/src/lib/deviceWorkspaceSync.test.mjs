@@ -133,3 +133,50 @@ test("renderer only acknowledges phone deletion after local archive and deletion
     assert.ok(actions.indexOf("archive-and-delete") < actions.indexOf("workspace_remove"));
   } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
 });
+
+test("phone sync bumps only new user messages and completion, not thoughts or replay", async () => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const oldTime = "2026-09-23T10:00:00Z";
+  const base = { id: "thread", title: "Work", updatedAt: oldTime, projectRoot: "/project" };
+  const data = new Map([["gofer-flow-chat-threads", JSON.stringify([base])], ["gofer-flow-chat-thread-meta:thread", JSON.stringify(base)]]);
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  let history = [], poll = 0;
+  const repository = { all: async () => history, save: async (_id, messages) => { history = messages; } };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const states = [
+    { running: true, messages: [{ id: "thought", role: "assistant", kind: "thought", body: "Checking", deviceRequestId: "request", deviceSequence: 1 }] },
+    { running: true, messages: [{ id: "thought", role: "assistant", kind: "thought", body: "Still checking", deviceRequestId: "request", deviceSequence: 1 }] },
+    { running: false, messages: [{ id: "reply", role: "assistant", kind: "final", body: "Done" }] },
+    { running: false, messages: [{ id: "reply", role: "assistant", kind: "final", body: "Done" }] },
+    { running: true, messages: [{ id: "new-user", role: "user", body: "Continue", origin: "phone" }] },
+  ];
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["paired"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_poll") {
+      const state = states[poll++];
+      return { ok: true, json: async () => ({ threads: [{ metadata: base, thread_id: "wire", revision: poll, ...state }] }) };
+    }
+    return { ok: true, json: async () => ({ metadata: body.metadata, messages: body.messages, revision: body.revision }) };
+  };
+  const timestamps = [];
+  let stop;
+  try {
+    await new Promise((resolve, reject) => {
+      host.addEventListener("gofer:device-sync-status", event => {
+        if (event.detail) { stop?.(); reject(new Error(event.detail)); return; }
+        timestamps.push(JSON.parse(data.get("gofer-flow-chat-thread-meta:thread")).updatedAt);
+        if (poll === states.length) { stop?.(); resolve(); }
+      });
+      stop = startDeviceWorkspaceSync({ storage, repository, interval: 5 });
+    });
+    assert.equal(timestamps[0], oldTime);
+    assert.equal(timestamps[1], oldTime);
+    assert.notEqual(timestamps[2], oldTime);
+    assert.equal(timestamps[3], timestamps[2]);
+    assert.ok(timestamps[4] > timestamps[3]);
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});

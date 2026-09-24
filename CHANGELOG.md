@@ -3,6 +3,77 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
+## 0.3.7 - Unreleased
+
+Changes since the `v0.3.6` tag.
+
+### Added
+
+- Start a Rem thread in the background with Ctrl+Enter from the thread list.
+  Stay on the list, clear the composer, and animate the new running thread into
+  view. Enter opens the new thread; Shift+Enter inserts a new line.
+- Fork Rem threads from messages and thought history. Copy history through the
+  selected point, provider and model settings, permissions, resources, project
+  scope, and attachments. Fork attachments remain available if the original
+  thread is deleted; file-change undo stays with the original thread.
+- Add Allowed and Denied model columns for each provider, with arrows to move
+  selected models and double arrows to allow or deny all. Save these preferences
+  across restarts and hide denied models from model dropdowns.
+- Choose a dedicated commit-message provider and model in Settings > Providers,
+  independently of the active Rem conversation. Keep the option to use the active
+  Rem selection and reject disabled providers or denied models when drafting.
+- Support commit-message drafting with Cursor, GitHub Copilot, OpenCode,
+  xAI/Grok, and Antigravity alongside Codex and Claude Code.
+
+### Changed
+
+- Replace the commit-message Rem button with a rat-and-sparkles action icon.
+- Move threads up the list when the user sends a message or a turn finishes.
+  Streamed thoughts and intermediate agent messages no longer reorder the list,
+  including updates received from paired devices.
+- Show tools, skills, and MCP controls on the thread list so resources can be
+  selected before starting a thread. Enable web search in new defaults while
+  preserving explicitly saved off settings.
+- Put the thread-start keyboard hints in one horizontal row beneath the composer.
+- Give every settings category a distinct icon, including Providers, Rem, Memory,
+  Paired devices, and Developer.
+
+### Fixed
+
+- Restore the macOS login-shell PATH before provider discovery so Dock and Finder
+  launches can find provider CLIs installed through the shell.
+- Keep the global Run workflow shortcut from intercepting Ctrl+Enter in the Rem
+  composer. Capture thread resources before the first request, including when
+  starting in the background.
+- Center thread activity spinners and unread completion dots with the archive
+  and menu buttons.
+- Preserve global scope when reopening a global thread.
+- Accept Markdown-wrapped Conventional Commit messages, use Cursor's final
+  answer instead of intermediate commentary, and retry invalid formatting once.
+  Report provider failures without treating them as formatting errors.
+- Capture staged changes once for commit-message generation and reuse the same
+  diff for formatting retries. Reject empty or oversized index snapshots before
+  launching a provider.
+
+### Security
+
+- Read the Git index with external diff helpers and text conversion disabled.
+  Run Codex and Claude commit drafting from a temporary directory containing the
+  captured diff instead of the project. Claude can only use its Read tool for
+  large diffs; remove its Git shell-command grants. Codex retains its read-only
+  sandbox.
+- Restrict Cursor, Copilot, and OpenCode commit drafting to read tools, with
+  shell and write access disabled. Keep Grok and Antigravity on their native
+  CLI-managed permission policies.
+
+### Release limitations
+
+- Dependency advisory scans and the full test suite still need verification in
+  an environment with network and local socket access.
+- macOS Dock provider discovery and live commit drafting require checks with the
+  release package. Refresh the Arch package checksums after building the 0.3.7
+  artifacts. See `docs/releasing.md`.
+
 ## 0.3.6 - 2026-09-22
 
 Changes since the `v0.3.5` tag.

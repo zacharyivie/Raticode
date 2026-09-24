@@ -777,3 +777,21 @@ select:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .rem-thread-search { animation: none; }
 }
+/* Rem's sparkle responds to a request. Thread motion marks the newly started row. */
+@keyframes rem-sparkle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .25; }
+}
+@keyframes rem-thread-arrive {
+  0% { opacity: 0; transform: translateX(18px) scale(.96); box-shadow: inset 3px 0 0 #6366f1; }
+  35% { opacity: 1; transform: translateX(-2px) scale(1); box-shadow: inset 3px 0 0 #6366f1; }
+  100% { opacity: 1; transform: none; box-shadow: inset 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .rem-action-button[aria-busy="true"] .rem-action-sparkle { animation: rem-sparkle 900ms ease-in-out infinite; }
+  .rem-action-button:hover .rem-action-sparkle { animation: rem-sparkle 600ms ease-in-out; }
+  .rem-thread-launch { animation: rem-thread-arrive 650ms cubic-bezier(.2,.7,.2,1) both; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rem-thread-launch { box-shadow: inset 3px 0 0 #6366f1; }
+}

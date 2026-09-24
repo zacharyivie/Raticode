@@ -2293,8 +2293,11 @@ def test_second_brain_requires_a_desktop_folder_grant(tmp_path: Path, endpoint: 
     assert "Retry your message" in result.text()
 
 
+@pytest.mark.parametrize(
+    "provider", ["codex", "claude_code", "cursor", "copilot", "opencode", "grok", "antigravity"]
+)
 def test_commit_message_endpoint_uses_restricted_generator(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str
 ) -> None:
     from unittest.mock import AsyncMock
 
@@ -2306,14 +2309,20 @@ def test_commit_message_endpoint_uses_restricted_generator(
         tmp_path,
         "POST",
         "/api/chat/commit-message",
-        body={"provider": "codex", "model": "cli-default", "diff": "+staged"},
+        body={
+            "provider": provider,
+            "model": "cli-default",
+            "diff": "+staged",
+            "permissionMode": "cli-managed",
+        },
     )
     assert response.status == 200
     assert response.json() == {"message": "fix: expose resolved edits"}
     generate.assert_awaited_once_with(
-        provider="codex",
+        provider=provider,
         model="cli-default",
         effort=None,
+        permission_mode="cli-managed",
         diff="+staged",
         project_root=None,
         inspect_staged=False,
@@ -2663,6 +2672,7 @@ def test_commit_message_inspection_endpoint_checks_project_access(
         provider="codex",
         model="cli-default",
         effort=None,
+        permission_mode=None,
         diff="",
         project_root=project,
         inspect_staged=True,
@@ -3215,3 +3225,59 @@ def test_global_rem_scope_handoff_through_local_mcp(tmp_path: Path, monkeypatch)
     assert [event["type"] for event in events] == ["project-scope", "final"]
     assert calls == [(None, "read-only"), (str(project), "workspace-write")]
     assert len(set(tool_urls)) == 2
+
+
+def test_fork_attachment_endpoint_copies_files(tmp_path: Path) -> None:
+    from gofer.ui.chat_media import resolve_chat_attachment, store_chat_attachments
+
+    attachments = store_chat_attachments(
+        {
+            "threadId": "source",
+            "files": [
+                {
+                    "name": "context.txt",
+                    "type": "text/plain",
+                    "data": base64.b64encode(b"context").decode(),
+                }
+            ],
+        },
+        tmp_path,
+    )["attachments"]
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/attachments/copy",
+        body={
+            "sourceThreadId": "source",
+            "threadId": "fork",
+            "attachments": attachments,
+        },
+    )
+    assert result.status == 201
+    assert (
+        resolve_chat_attachment(attachments[0], data_dir=tmp_path, thread_id="fork").read_bytes()
+        == b"context"
+    )
+    missing = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/attachments/copy",
+        body={
+            "sourceThreadId": "missing",
+            "threadId": "other",
+            "attachments": attachments,
+        },
+    )
+    assert missing.status == 400
+
+
+def test_commit_settings_routes_persist_validate_and_require_auth(tmp_path) -> None:
+    endpoint = "/api/provider/commit-settings"
+    selection = {"provider": "codex", "model": "sol"}
+    assert _request(tmp_path, "GET", endpoint).json() == {}
+    assert _request(tmp_path, "POST", endpoint, body=selection).status == 200
+    assert _request(tmp_path, "GET", endpoint).json() == selection
+    assert _request(tmp_path, "POST", endpoint, body={"provider": "codex"}).status == 400
+    assert _request(tmp_path, "POST", endpoint, body=selection, authenticated=False).status == 401
+    assert _request(tmp_path, "GET", endpoint, authenticated=False).status == 401
+    assert _request(tmp_path, "GET", endpoint).json() == selection

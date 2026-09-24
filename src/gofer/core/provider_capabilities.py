@@ -103,9 +103,13 @@ class ProviderCapability(BaseModel):
             executable = resolve_provider_executable(self.id)
         override_model = preference.get("defaultModel", "")
         override_effort = preference.get("defaultEffort", "")
+        denied_models = preference.get("deniedModels", [])
+        allowed_models = [model for model in self.models if model.id not in denied_models]
         default_model = next(
-            (model.id for model in self.models if model.id == override_model),
-            self.default_model,
+            (model.id for model in allowed_models if model.id == override_model),
+            self.default_model
+            if self.default_model not in denied_models
+            else next((model.id for model in allowed_models), None),
         )
         # Apply preferences to the response, never to the cached discovery result.
         # Stale overrides remain saved but cannot select an unavailable model/effort.
@@ -117,7 +121,7 @@ class ProviderCapability(BaseModel):
             and any(effort.id == override_effort for effort in effort_model.efforts)
             else None
         )
-        return {
+        payload: dict[str, Any] = {
             "enabled": preference.get("enabled", executable is not None),
             "executable": executable,
             "executableOverride": preference.get("executable", ""),
@@ -164,6 +168,7 @@ class ProviderCapability(BaseModel):
             "providerDefaultModel": self.default_model,
             "defaultModelOverride": override_model,
             "defaultEffortOverride": override_effort,
+            "deniedModels": denied_models,
             "models": [
                 {
                     "id": model.id,
@@ -188,6 +193,11 @@ class ProviderCapability(BaseModel):
             "error": self.error,
             "discoveredAt": self.discovered_at.isoformat(),
         }
+        payload["discoveredModels"] = payload["models"]
+        payload["models"] = [
+            model for model in payload["models"] if model["id"] not in denied_models
+        ]
+        return payload
 
 
 class ProviderCapabilityError(ValueError):

@@ -8,6 +8,7 @@ FORM: Operate-mode app popover extending the existing studio chrome.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
+  Brain,
   Code2,
   Command,
   Globe2,
@@ -15,9 +16,12 @@ import {
   Mic,
   MonitorCog,
   Palette,
+  PlugZap,
   RotateCcw,
   Search,
+  Smartphone,
   Terminal,
+  Wrench,
   X,
 } from "lucide-react";
 
@@ -38,15 +42,15 @@ import {
 const CATEGORIES = [
   { id: "general", label: "General", icon: MonitorCog },
   { id: "devices", label: "Devices", icon: Mic },
-  { id: "paired-devices", label: "Paired devices", icon: MonitorCog },
+  { id: "paired-devices", label: "Paired devices", icon: Smartphone },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "editor", label: "Editor", icon: Code2 },
   { id: "browser", label: "Browser", icon: Globe2 },
   { id: "terminal", label: "Terminal", icon: Terminal },
-  { id: "providers", label: "Providers", icon: Bot },
+  { id: "providers", label: "Providers", icon: PlugZap },
   { id: "assistant", label: "Rem", icon: Bot },
-  { id: "memory", label: "Memory", icon: Bot },
-  { id: "developer", label: "Developer", icon: Code2 },
+  { id: "memory", label: "Memory", icon: Brain },
+  { id: "developer", label: "Developer", icon: Wrench },
   { id: "layout", label: "Layout", icon: LayoutPanelLeft },
   { id: "keybindings", label: "Keybindings", icon: Command },
 ];
@@ -216,7 +220,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     searchText: `${label} ${description}`,
   });
   if (category === "paired-devices") return [{ searchText: "Paired devices phone mobile desktop pairing QR trust revoke", element: <PairedDevices key="paired-devices" /> }];
-  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps", element: <ProviderSettings key="providers" providerState={providerState} /> }];
+  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied commit messages", element: <ProviderSettings key="providers" providerState={providerState} /> }];
   if (category === "developer") return [{ searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> }];
   if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown", element: <RemMemorySettings key="memory" value={settings.memory} onChange={onChange} /> }];
   if (category === "general") return [

@@ -147,6 +147,43 @@ def resolve_chat_attachment(
     return path
 
 
+def copy_chat_attachments(payload: dict[str, Any], data_dir: Path) -> dict[str, bool]:
+    """Give a fork its own attachment files, so deleting its source is harmless."""
+    source_id = _safe_identifier(payload.get("sourceThreadId"), "thread")
+    target_id = _safe_identifier(payload.get("threadId"), "thread")
+    attachments = payload.get("attachments")
+    if source_id == target_id or not isinstance(attachments, list):
+        raise ChatMediaError("Choose a separate destination thread and its attachments.")
+    if not 0 < len(attachments) <= CHAT_ATTACHMENT_MAX_COUNT:
+        raise ChatMediaError(f"Copy up to {CHAT_ATTACHMENT_MAX_COUNT} attachments at a time.")
+    paths = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            raise ChatMediaError("Each attachment must be a file object.")
+        paths.append(resolve_chat_attachment(attachment, data_dir=data_dir, thread_id=source_id))
+    if any(path.stat().st_size > CHAT_ATTACHMENT_MAX_FILE_BYTES for path in paths):
+        raise ChatMediaError("An attachment is larger than 20 MB.")
+    target = attachment_thread_dir(data_dir, target_id)
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if target.is_symlink():
+        raise ChatMediaError("Invalid attachment destination.")
+    created: list[Path] = []
+    try:
+        for source in paths:
+            destination = target / source.name
+            with destination.open("xb") as output:
+                created.append(destination)
+                if os.name != "nt":
+                    destination.chmod(0o600)
+                with source.open("rb") as input_file:
+                    shutil.copyfileobj(input_file, output)
+    except OSError:
+        for destination in created:
+            destination.unlink(missing_ok=True)
+        raise
+    return {"copied": True}
+
+
 def attachment_thread_dir(data_dir: Path, thread_id: str) -> Path:
     return data_dir / "chat-attachments" / _safe_identifier(thread_id, "thread")
 

@@ -68,6 +68,7 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
   const controller = new AbortController();
   const sent = new Map();
   const peers = new Map();
+  const runningByThread = new Map();
   async function action(body) {
     const response = await fetch(apiUrl("/devices"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
     const result = await response.json();
@@ -85,12 +86,20 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
     const additions = merged.filter(m => JSON.stringify(m) !== JSON.stringify(byId.get(String(m.id))));
     if (additions.length) {
       await repository.save(id, merged, current, current);
+    }
+    const submitted = additions.some(m => m.role === "user" && !byId.has(String(m.id)));
+    const completed = remote.running === false && (runningByThread.get(id) === true
+      || additions.some(m => m.kind === "final" || m.kind === "error" || (m.kind === "turn-summary" && m.completedAt)));
+    if (typeof remote.running === "boolean") runningByThread.set(id, remote.running);
+    if (submitted || completed) {
       metadata = { ...metadata, updatedAt: new Date().toISOString() };
     }
     if (JSON.stringify(metadata) !== JSON.stringify(local) || additions.length || typeof remote.running === "boolean") {
       storage.setItem(metaKey(id), JSON.stringify(metadata));
       const index = read(storage, indexKey, []);
-      storage.setItem(indexKey, JSON.stringify([{ id, updatedAt: metadata.updatedAt, projectRoot: metadata.projectRoot || "", scopeIndexed: true }, ...index.filter(t => t.id !== id)]));
+      const entry = { id, updatedAt: metadata.updatedAt, projectRoot: metadata.projectRoot || "", scopeIndexed: true };
+      const nextIndex = index.some(t => t.id === id) ? index.map(t => t.id === id ? entry : t) : [entry, ...index];
+      storage.setItem(indexKey, JSON.stringify(nextIndex.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))));
       emit("gofer:device-thread-sync", { metadata, messages: additions, running: remote.running, activeTurn: remote.active_turn });
     }
   }

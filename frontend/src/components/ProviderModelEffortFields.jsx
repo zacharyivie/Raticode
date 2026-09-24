@@ -101,7 +101,9 @@ export function ProviderModelEffortFields({
   const selectedModelValue =
     configuredModelValue || (allowInheritedModel ? "" : selectedModel?.id ?? "");
   const selectedEffortValue = effort || nativeEffort || selectedModel?.defaultEffort || "";
-  const discoveryMessage = ["unauthenticated", "access_denied"].includes(selectedProvider?.discoveryStatus)
+  const deniedSelection = selectedProvider?.deniedModels?.includes(configuredModelValue);
+  const discoveryMessage = deniedSelection ? "This model is denied. Choose an allowed model."
+    : ["unauthenticated", "access_denied"].includes(selectedProvider?.discoveryStatus)
     ? null : selectedProvider?.error || (!selectedProvider?.models?.length ? "No models available. Refresh to try discovery again." : "");
 
   useEffect(() => {
@@ -230,7 +232,7 @@ function ModelPicker({
   const displayedEffortValue = selectedEffortValue || selectedModel?.defaultEffort || "";
   const selectedEffort = effortOptions.find((item) => item.id === displayedEffortValue);
   const providerName = selectedProvider?.displayName ?? selectedProvider?.id ?? "Provider";
-  const modelName =
+  const modelName = selectedProvider?.deniedModels?.includes(selectedModelValue) ? "Model denied" :
     modelOptions.find((item) => item.id === selectedModelValue)?.label ??
     selectedModel?.displayName ??
     selectedModel?.id ??
@@ -449,7 +451,7 @@ function selectableModels(provider, configuredModel, allowInheritedModel) {
       menuLabel: model.id === concreteDefaultModel?.id ? `${label} (default)` : label,
     });
   }
-  if (configuredModel && !models.some((item) => item.id === configuredModel)) {
+  if (configuredModel && !provider?.deniedModels?.includes(configuredModel) && !models.some((item) => item.id === configuredModel)) {
     options.push({
       id: configuredModel,
       label: `${configuredModel} — configured, not reported by this host`,

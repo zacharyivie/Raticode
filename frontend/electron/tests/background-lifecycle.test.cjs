@@ -24,11 +24,12 @@ test('window close hides the UI without quitting, but explicit quit closes it', 
 test('cold startup creates the shell while backend and terminal readiness are pending', async () => {
   const start = source.indexOf('app.whenReady().then(');
   const end = source.indexOf('function showMainWindow()', start);
-  let releaseBackend, readyCallback;
+  let releaseBackend, releaseShellPath, readyCallback;
   const backend = new Promise(resolve => { releaseBackend = resolve; });
   const never = new Promise(() => {});
   const windows = [];
   const context = {
+    shellPathReady: new Promise(resolve => { releaseShellPath = resolve; }),
     app: { whenReady: () => ({ then: callback => { readyCallback = callback; } }),
       getPath: () => '/logs', getVersion: () => 'test', on() {} },
     createAppLog: () => ({ write() {}, emergency() {} }),
@@ -47,6 +48,7 @@ test('cold startup creates the shell while backend and terminal readiness are pe
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(windows, ['http://127.0.0.1:43210']);
   assert.equal(context.activeApiBaseUrl, undefined);
+  releaseShellPath();
   releaseBackend({ apiBaseUrl: windows[0], apiToken: 'test-token' });
   await startup;
   assert.equal(context.activeUiApiToken, 'test-token');

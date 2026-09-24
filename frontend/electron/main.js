@@ -8,6 +8,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
+const { restoreShellPath } = require("./shell-path.cjs");
+const shellPathReady = restoreShellPath();
 const {
   app,
   BrowserWindow,
@@ -572,7 +574,7 @@ app.whenReady().then(async () => {
   try {
     createBackgroundTray();
     const backendPort = await allocateBackendPort();
-    backendReady = startBackend(backendPort);
+    backendReady = shellPathReady.then(() => startBackend(backendPort));
     // Handlers await readiness; neither Python nor terminal setup gates first paint.
     createWindow(process.env.GOFER_API_BASE_URL || process.env.VITE_API_BASE_URL || `http://127.0.0.1:${backendPort}`);
     void startTerminalEditorServer().catch(error => applicationLog.write("error", "terminal", error.message));

@@ -33,7 +33,11 @@ from gofer.core.provider_capabilities import (
     provider_capabilities_payload,
     provider_capability_service,
 )
-from gofer.core.provider_preferences import save_provider_preference
+from gofer.core.provider_preferences import (
+    commit_message_preference,
+    save_commit_message_preference,
+    save_provider_preference,
+)
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
 from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.usage import summarize_node_outputs
@@ -885,6 +889,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.provider_auth.status(provider))
             return
 
+        if parsed.path == "/api/provider/commit-settings":
+            self._send_json(commit_message_preference())
+            return
+
         if parsed.path == "/api/provider/capabilities":
             query = parse_qs(parsed.query)
             refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
@@ -1176,6 +1184,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(auth_payload)
             except (ValueError, OSError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/provider/commit-settings":
+            try:
+                save_commit_message_preference(self._read_json())
+            except (ValueError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"saved": True})
             return
 
         if parsed.path == "/api/provider/settings":
@@ -1550,6 +1567,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"workflow": workflow}, status=201)
             return
 
+        if parsed.path == "/api/chat/attachments/copy":
+            from gofer.ui.chat_media import copy_chat_attachments
+
+            try:
+                body = self._read_json()
+                payload = copy_chat_attachments(
+                    body, self._request_data_dir(parse_qs(parsed.query))
+                )
+                self._send_json(payload, status=201)
+            except (ChatMediaError, OSError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
         if parsed.path == "/api/chat/attachments":
             query = parse_qs(parsed.query)
             try:
@@ -1675,6 +1705,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         provider=str(body.get("provider", "codex")),
                         model=str(body.get("model", "cli-default")),
                         effort=_optional_body_str(body, "effort"),
+                        permission_mode=_optional_body_str(body, "permissionMode"),
                         diff=body.get("diff", ""),
                         project_root=commit_project_root,
                         inspect_staged=body.get("inspectStaged") is True,
