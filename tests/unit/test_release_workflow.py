@@ -216,6 +216,35 @@ def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
     assert "checksums-windows.txt" in windows_checksum_run
 
 
+@pytest.mark.parametrize("audit_status", [0, 1, 2])
+def test_npm_audit_logs_failure_evidence_and_preserves_exit_status(
+    tmp_path: Path, audit_status: int
+) -> None:
+    if os.name == "nt":
+        pytest.skip("Source validation runs in bash on Linux")
+    validation = _steps_by_name(_job(_entry_workflow("validate-source.yml"), "validate"))
+    command = validation["Audit frontend and shipped Electron dependencies"]["run"]
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    report = '{"metadata":{"vulnerabilities":{"total":1}}}'
+    npm = bin_dir / "npm"
+    npm.write_text(f"#!/bin/sh\nprintf '%s\\n' '{report}'\nexit {audit_status}\n")
+    npm.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-e", "-c", command],
+        cwd=frontend,
+        env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == audit_status
+    assert (tmp_path / "audit-evidence/npm-audit.json").read_text().strip() == report
+    assert result.stdout.strip() == (report if audit_status else "")
+
+
 def test_release_security_gates_are_mandatory_and_publish_provenance() -> None:
     workflow = _release_workflow()
     validation = _steps_by_name(_job(_entry_workflow("validate-source.yml"), "validate"))

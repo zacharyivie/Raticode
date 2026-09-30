@@ -980,3 +980,21 @@ async def test_summary_reduction_and_cancellation_are_bounded(monkeypatch) -> No
             on_progress=stop_after_second_batch,
         )
     assert stages == ["summary"]
+
+
+def test_cursor_success_without_result_text_retains_last_assistant_answer() -> None:
+    import json
+
+    capture = commit_message._AnswerCapture("cursor")
+    for text in ["Reading changes.", "fix: retain the answer\n\n - Keep the final text"]:
+        capture.feed(
+            json.dumps(
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+            )
+            + "\n"
+        )
+    capture.feed('{"type":"result","subtype":"success"}\n')
+    capture.finish()
+    capture.output.finish(0, "")
+    assert capture.message == "fix: retain the answer\n\n - Keep the final text"
+    assert capture.output.error is None

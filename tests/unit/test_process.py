@@ -648,3 +648,24 @@ async def test_keeps_child_output_and_parent_status_after_parent_exits(exit_code
     assert returncode == exit_code
     assert stdout == "child output\n"
     assert stderr == ""
+
+
+async def test_stdout_observer_keeps_split_utf8_after_stderr_fills_log_budget() -> None:
+    observed: list[str] = []
+    script = (
+        "import os, time\n"
+        "os.write(2, b'x' * 4096)\n"
+        "time.sleep(0.05)\n"
+        "os.write(1, b'caf\\xc3')\n"
+        "time.sleep(0.05)\n"
+        "os.write(1, b'\\xa9')\n"
+    )
+    code, stdout, stderr = await run_subprocess(
+        [sys.executable, "-c", script],
+        max_output_bytes=1024,
+        on_stdout=observed.append,
+    )
+    assert code == 0
+    assert "subprocess output truncated" in stderr
+    assert stdout == ""
+    assert "".join(observed) == "café"

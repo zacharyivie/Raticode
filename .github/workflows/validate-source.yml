@@ -70,7 +70,12 @@ jobs:
         working-directory: frontend
         run: |
           mkdir -p ../audit-evidence
-          npm audit --include=peer --audit-level=low --json > ../audit-evidence/npm-audit.json
+          audit_status=0
+          npm audit --include=peer --audit-level=low --json > ../audit-evidence/npm-audit.json || audit_status=$?
+          if [ "$audit_status" -ne 0 ]; then
+            cat ../audit-evidence/npm-audit.json
+          fi
+          exit "$audit_status"
 
       - name: Save dependency audit evidence
         # Earlier validation failures can skip both audits entirely.
@@ -94,4 +99,3 @@ jobs:
       - name: Browser-test workflow studio
         working-directory: frontend
         run: xvfb-run -a npm run test:browser
-

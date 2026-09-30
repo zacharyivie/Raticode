@@ -43,6 +43,9 @@ Changes since the `v0.3.7` tag.
 
 ### Fixed
 
+- Update locked `brace-expansion` and `fast-uri` dependencies to fix denial-of-service
+  and URI host-normalization advisories. Print failed npm audit reports in release
+  validation logs while retaining the audit failure and downloadable evidence.
 - Prevent competing runners from claiming and executing the same queued workflow.
   Keep active runner ownership and heartbeat updates through long jobs and
   cancellation, and preserve terminal status when completion races with Stop.
