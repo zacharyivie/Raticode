@@ -5,7 +5,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal, TypedDict
 
 import anyio
@@ -118,6 +118,7 @@ async def run_subprocess(
     timeout: float | None = None,
     stdin: bytes | None = None,
     max_output_bytes: int | None = None,
+    on_stdout: Callable[[str], None] | None = None,
 ) -> tuple[int, str, str]:
     """Run a subprocess and return (returncode, stdout, stderr)."""
     merged_env = build_subprocess_env(env)
@@ -134,6 +135,7 @@ async def run_subprocess(
             stdin=stdin,
             timeout=timeout,
             max_output_bytes=max_output_bytes,
+            on_stdout=on_stdout,
         ):
             if event["type"] == "chunk":
                 if event["stream"] == "stdout":
@@ -157,6 +159,7 @@ async def stream_subprocess(
     timeout: float | None = None,
     stdin: bytes | None = None,
     max_output_bytes: int | None = None,
+    on_stdout: Callable[[str], None] | None = None,
 ) -> AsyncIterator[ProcessStreamEvent]:
     """Run a subprocess and yield stdout/stderr chunks as they arrive."""
     merged_env = build_subprocess_env(env)
@@ -239,6 +242,7 @@ async def stream_subprocess(
                 )
                 return
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            observer_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while True:
                 try:
                     chunk = await stream.receive()
@@ -246,6 +250,9 @@ async def stream_subprocess(
                     break
                 if not chunk:
                     break
+                # Structured answers must survive even when retained tool logs fill up.
+                if stream_name == "stdout" and on_stdout is not None:
+                    on_stdout(observer_decoder.decode(chunk))
                 bounded = await bounded_chunk(chunk)
                 if bounded is None:
                     continue
@@ -260,6 +267,8 @@ async def stream_subprocess(
                         "returncode": None,
                     }
                 )
+            if stream_name == "stdout" and on_stdout is not None:
+                on_stdout(observer_decoder.decode(b"", final=True))
             tail = decoder.decode(b"", final=True)
             if tail:
                 await send.send(

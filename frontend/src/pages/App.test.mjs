@@ -15601,8 +15601,15 @@ for (const scenario of ["success", "disabled", "edited", "generation-error", "co
       }
       if (scenario === "disabled" || scenario === "commit-error") assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: generated message");
       if (scenario === "edited") assert.equal(reactProps(dom.byLabel("Commit message")).value, "My draft");
-      if (scenario === "generation-error") assert.match(dom.text(), /Generation failed/);
-      if (scenario === "commit-error") assert.match(dom.text(), /Commit hook failed/);
+      if (scenario === "generation-error") {
+        assert.match(dom.text(), /Commit-message generation failed: Generation failed/);
+        assert.doesNotMatch(dom.text(), /Git could not complete|Rem is drafting|generating in the background/);
+        assert.equal(reactProps(dom.byLabel("Generate commit message with Rem")).disabled, false);
+      }
+      if (scenario === "commit-error") {
+        assert.match(dom.text(), /Commit hook failed/);
+        assert.doesNotMatch(dom.text(), /Rem is drafting|generating in the background/);
+      }
     } finally { await dom.unmount(); }
   });
 }
@@ -15658,5 +15665,30 @@ test("auto commit checkbox persists and keeps its saved value on failure", async
     await dom.flush();
     assert.equal(reactProps(dom.byLabel("Auto commit changes")).checked, true);
     assert.match(dom.text(), /Save failed/);
+  } finally { await dom.unmount(); }
+});
+
+
+test("commit progress updates within one running job and clears after interruption", async () => {
+  let job = { id: "progress-job", status: "running", progress: "Reading changes 1/8", branch: "main" };
+  const snapshot = { active: true, branch: "main", branches: ["main"], entries: [{ path: "note", status: "M", staged: true }] };
+  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => snapshot,
+    gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [] }),
+  };
+  const fetchMock = createFetchMock([url => url.startsWith("/api/generation-jobs?")
+    ? { ok: true, json: async () => ({ jobs: [job] }) } : null]);
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), fetchMock, { desktop: { workspace } });
+  try {
+    await dom.click(dom.byLabel("Source control")); await dom.flush();
+    assert.match(dom.text(), /Reading changes 1\/8/);
+    job = { ...job, progress: "Reading changes 2/8", updatedAt: 1 };
+    await dom.flush(2000); await dom.flush();
+    assert.match(dom.text(), /Reading changes 2\/8/);
+    assert.doesNotMatch(dom.text(), /Reading changes 1\/8/);
+    job = { ...job, status: "interrupted", error: "Raticode stopped before this job finished.", updatedAt: 2 };
+    await dom.flush(2000); await dom.flush();
+    assert.match(dom.text(), /Commit-message generation failed: Raticode stopped/);
+    assert.doesNotMatch(dom.text(), /Reading changes|Rem is drafting|Git could not complete/);
+    assert.equal(reactProps(dom.byLabel("Generate commit message with Rem")).disabled, false);
   } finally { await dom.unmount(); }
 });

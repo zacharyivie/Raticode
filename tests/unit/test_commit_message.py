@@ -3,6 +3,7 @@
 import shlex
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -145,7 +146,7 @@ async def test_large_commit_uses_captured_diff_outside_project(
             ]
             assert kwargs["cwd"] == tmp_path
             return 0, diff, ""
-        assert (kwargs["cwd"] / "staged-diff.txt").read_text() == diff
+        assert not (kwargs["cwd"] / "staged-diff.txt").exists()
         return 0, "", ""
 
     run = AsyncMock(side_effect=execute)
@@ -164,20 +165,20 @@ async def test_large_commit_uses_captured_diff_outside_project(
     assert 'model_reasoning_effort="high"' in command if provider == "codex" else "high" in command
     prompt = run.call_args.kwargs["stdin"].decode()
     assert prompt not in command
-    assert prompt.startswith("Read staged-diff.txt in the current directory.")
+    assert prompt.startswith("Write only a commit message")
     assert "diff --git" not in prompt
-    assert "Do not use tools" not in prompt
+    assert "Do not use tools" in prompt
     directory = run.call_args.kwargs["cwd"]
     assert directory != tmp_path
     assert not directory.exists()
-    assert run.await_count == 2
+    assert run.await_count > 2
     if provider == "codex":
-        assert "features.shell_tool=true" in command
+        assert "features.shell_tool=false" in command
         assert command[command.index("--sandbox") + 1] == "read-only"
         assert command[command.index("--cd") + 1] == str(directory)
     else:
-        assert command[command.index("--tools") + 1] == "Read"
-        assert command[command.index("--allowedTools") + 1] == "Read"
+        assert command[command.index("--tools") + 1] == ""
+        assert "--allowedTools" not in command
         assert not any("Bash" in arg for arg in command)
         assert "Edit" not in command
 
@@ -222,7 +223,7 @@ async def test_format_retry_uses_same_index_snapshot(monkeypatch, tmp_path, prov
     async def execute(command, **kwargs):
         if command[0] == "git":
             return 0, "+original staged change", ""
-        attempts.append((kwargs["cwd"] / "staged-diff.txt").read_text())
+        attempts.append(kwargs.get("stdin", b"").decode() or command[command.index("-p") + 1])
         return (
             0,
             "invalid"
@@ -249,7 +250,10 @@ async def test_format_retry_uses_same_index_snapshot(monkeypatch, tmp_path, prov
         project_root=tmp_path,
         inspect_staged=True,
     ) == {"message": "fix: use original changes\n\n - Use original changes"}
-    assert attempts == ["+original staged change", "+original staged change"]
+    assert "+original staged change" in attempts[0]
+    assert "+original staged change" not in attempts[1]
+    assert '"previous_response": "invalid"' in attempts[1]
+    assert "validation_error" in attempts[1]
     assert sum(call.args[0][0] == "git" for call in run.call_args_list) == 1
 
 
@@ -300,8 +304,8 @@ async def test_cli_commit_drafting_reads_only_supplied_diff(
             return 0, diff, ""
         directory = kwargs["cwd"]
         assert isinstance(directory, Path) and directory != tmp_path
-        assert (directory / "staged-diff.txt").read_text() == diff
-        assert max(len(arg) for arg in command) < 2000
+        assert not (directory / "staged-diff.txt").exists()
+        assert max(len(arg.encode("utf-8")) for arg in command) < 32000
         assert command[command.index("--model") + 1] == "selected-model"
         if provider == "cursor":
             assert command[command.index("--mode") + 1] == "ask"
@@ -494,14 +498,14 @@ async def test_native_commit_uses_selected_model_and_permissions(
     directories = []
 
     async def stream(*args, **kwargs):
-        assert args[0] == "grok" if provider == "grok" else "staged-diff.txt" in args[0]
+        assert args[0] == "grok" if provider == "grok" else "staged_diff" in args[0]
         assert kwargs["model"] == "selected-model"
         assert kwargs["effort"] == "high"
         assert kwargs["permission_mode"] == "cli-managed"
         directory = kwargs["cwd"]
         directories.append(directory)
         assert directory != tmp_path
-        assert (directory / "staged-diff.txt").read_text() == "+change"
+        assert not (directory / "staged-diff.txt").exists()
         yield {"type": "thought", "text": "Inspecting"}
         yield {
             "type": "final",
@@ -710,7 +714,7 @@ async def test_large_background_diff_never_rereads_live_index(
         assert command[0] != "git"
         directory = kwargs["cwd"]
         assert isinstance(directory, Path)
-        assert (directory / "staged-diff.txt").read_text() == diff
+        assert not (directory / "staged-diff.txt").exists()
         return 0, "", ""
 
     monkeypatch.setattr(commit_message, "run_subprocess", run)
@@ -726,3 +730,253 @@ async def test_large_background_diff_never_rereads_live_index(
         captured_diff=True,
     )
     assert result["message"].startswith("fix: capture staged changes")
+
+
+@pytest.mark.parametrize(
+    "bullet", ["- Change", "  - Change  ", "\t- Change", "* Change", "• Change"]
+)
+def test_default_bullet_whitespace_is_normalized(bullet: str) -> None:
+    assert commit_message._validated_message("fix: preserve focus\n\n" + bullet) == {
+        "message": "fix: preserve focus\n\n - Change"
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex", "claude_code", "cursor", "opencode"])
+async def test_final_answer_survives_megabytes_of_tool_output(monkeypatch, provider) -> None:
+    import json
+
+    from gofer.utils.process import run_subprocess
+
+    answer = "fix: keep the final answer\n\n - Preserve the café label"
+    if provider == "codex":
+        final = {"type": "item.completed", "item": {"type": "agent_message", "text": answer}}
+    elif provider in {"claude_code", "cursor"}:
+        final = {"type": "result", "subtype": "success", "result": answer}
+    else:
+        final = {"type": "text", "part": {"text": answer}}
+    script = (
+        "import sys\n"
+        'sys.stdout.write(\'{"type":"tool_use","output":"\' + \'x\'*2100000 + \'"}\\n\')\n'
+        f"sys.stdout.write({json.dumps(final, ensure_ascii=False)!r})\n"
+    )
+    diagnostics: list[dict[str, Any]] = []
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
+
+    async def run(command, **kwargs):
+        return await run_subprocess([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    result = await commit_message.generate_commit_message(
+        provider=provider, model="cli-default", diff="+café", on_diagnostic=diagnostics.append
+    )
+    assert result == {"message": answer}
+    assert diagnostics[-1]["logsTruncated"] is True
+    assert diagnostics[-1]["draft"] == answer
+    assert diagnostics[-1]["exitCode"] == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_error_after_truncated_logs_is_not_accepted(monkeypatch) -> None:
+    import json
+
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
+    run = AsyncMock()
+
+    async def execute(command, **kwargs):
+        feed = kwargs["on_stdout"]
+        feed(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "fix: answer\n\n - Change"},
+                }
+            )
+            + "\n"
+        )
+        feed('{"type":"turn.failed","error":{"message":"Login expired"}}\n')
+        return 0, "[subprocess output truncated at 1048576 bytes]", ""
+
+    run.side_effect = execute
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    with pytest.raises(commit_message.ChatProviderError, match="Login expired"):
+        await commit_message.generate_commit_message(
+            provider="codex", model="cli-default", diff="+x"
+        )
+    assert run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_final_answer_reports_collection_failure_without_retry(monkeypatch) -> None:
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
+    run = AsyncMock(return_value=(0, '{"type":"turn.completed"}', ""))
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    with pytest.raises(commit_message.ChatProviderError, match="output collection failed"):
+        await commit_message.generate_commit_message(
+            provider="codex", model="cli-default", diff="+x"
+        )
+    assert run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_278_file_review_covers_binary_deleted_renamed_and_generated_files(
+    monkeypatch,
+) -> None:
+    import json
+
+    patches = []
+    for index in range(278):
+        metadata = (
+            "deleted file mode 100644\n"
+            if index == 0
+            else "similarity index 100%\nrename from old.txt\nrename to new.txt\n"
+            if index == 1
+            else "Binary files a/picture.png and b/picture.png differ\n"
+            if index == 2
+            else "new file mode 100644\n"
+        )
+        patches.append(
+            f"diff --git a/file-{index} b/file-{index}\n"
+            + metadata
+            + ("@@ -0,0 +1 @@\n+generated data\n" * 500 if index > 2 else "")
+        )
+    diff = "".join(patches)
+    reviewed = []
+    prompts = []
+    progress: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
+
+    async def run(command, **kwargs):
+        assert command[0] != "git"
+        prompt = kwargs["stdin"].decode()
+        prompts.append(prompt)
+        assert len(prompt.encode("utf-8")) < 2 * commit_message.COMMIT_INPUT_LIMIT + 8000
+        data = json.loads(prompt[prompt.rindex("\n{") + 1 :])
+        if "part" in data:
+            reviewed.append(data["staged_diff"])
+            answer = f"Part {data['part']}: update generated data and file metadata."
+        else:
+            assert "change_summaries" in data
+            answer = "chore: update project files\n\n- Refresh generated data and file metadata"
+        return 0, json.dumps({"type": "result", "result": answer}), ""
+
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    result = await commit_message.generate_commit_message(
+        provider="codex",
+        model="cli-default",
+        diff=diff,
+        captured_diff=True,
+        on_progress=progress.append,
+        on_diagnostic=diagnostics.append,
+    )
+    review = "".join(reviewed)
+    for index in range(278):
+        assert f"diff --git a/file-{index} b/file-{index}\n" in review
+    assert "deleted file mode" in review
+    assert "rename from old.txt" in review
+    assert "Binary files" in review
+    assert "content between excerpts is omitted" in review
+    assert result["message"].startswith("chore:")
+    assert diagnostics[0]["files"] == 278
+    assert diagnostics[0]["batches"] == len(reviewed)
+    assert progress[-1] == "Drafting commit message"
+
+
+@pytest.mark.parametrize("text", ["😀" * 20000, "+minified" * 10000, "line\n" * 10000])
+def test_diff_batches_preserve_every_character_with_bounded_utf8(text: str) -> None:
+    batches = commit_message._diff_batches(text)
+    assert "".join(batches) == text
+    assert all(len(batch.encode("utf-8")) <= commit_message.COMMIT_INPUT_LIMIT for batch in batches)
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude_code", "cursor", "opencode"])
+def test_answer_capture_ignores_commentary_and_tool_results(provider: str) -> None:
+    import json
+
+    answer = "fix: retain the answer\n\n - Keep the message"
+    capture = commit_message._AnswerCapture(provider)
+    capture.feed('{"type":"tool_use","result":"Tool output is not the answer"}\n')
+    if provider == "opencode":
+        events = [
+            {
+                "type": "text",
+                "part": {"id": "a", "messageID": "commentary", "text": "Reading changes."},
+            },
+            {"type": "text", "part": {"id": "b", "messageID": "answer", "text": answer}},
+            {"type": "text", "part": {"id": "b", "messageID": "answer", "text": answer}},
+        ]
+    elif provider == "codex":
+        events = [
+            {"type": "item.started", "item": {"type": "agent_message", "text": "Working"}},
+            {
+                "type": "response.completed",
+                "response": {
+                    "output": [
+                        {"role": "assistant", "content": [{"type": "output_text", "text": answer}]}
+                    ]
+                },
+            },
+        ]
+    else:
+        events = [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Working"}]}},
+            {"type": "result", "subtype": "success", "result": answer},
+        ]
+    for event in events:
+        line = json.dumps(event)
+        for index in range(0, len(line), 7):
+            capture.feed(line[index : index + 7])
+        capture.feed("\n")
+    capture.finish()
+    assert capture.message == answer
+    assert capture.error == ""
+
+
+@pytest.mark.asyncio
+async def test_summary_reduction_and_cancellation_are_bounded(monkeypatch) -> None:
+    import json
+    import threading
+
+    monkeypatch.setattr(commit_message, "COMMIT_INPUT_LIMIT", 1000)
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
+    stages = []
+    cancel = threading.Event()
+
+    async def run(command, **kwargs):
+        prompt = kwargs["stdin"].decode()
+        data = json.loads(prompt[prompt.rindex("\n{") + 1 :])
+        if "part" in data:
+            stages.append("summary")
+            answer = f"Batch {data['part']}: " + "Update metadata. " * 15
+        elif "summaries" in data:
+            stages.append("reduction")
+            answer = "Combine metadata changes."
+        else:
+            stages.append("draft")
+            answer = "chore: update metadata\n\n - Preserve all captured changes"
+        return 0, json.dumps({"type": "result", "result": answer}), ""
+
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    diff = "".join(f"diff --git a/{i} b/{i}\n+change\n" for i in range(200))
+    result = await commit_message.generate_commit_message(
+        provider="codex", model="cli-default", diff=diff, cancel_event=cancel
+    )
+    assert "reduction" in stages
+    assert result["message"].startswith("chore:")
+    assert stages[-1] == "draft"
+    stages.clear()
+
+    def stop_after_second_batch(text):
+        if text.startswith("Reading changes 2/"):
+            cancel.set()
+
+    with pytest.raises(commit_message.ChatProviderError, match="stopped"):
+        await commit_message.generate_commit_message(
+            provider="codex",
+            model="cli-default",
+            diff=diff,
+            cancel_event=cancel,
+            on_progress=stop_after_second_batch,
+        )
+    assert stages == ["summary"]

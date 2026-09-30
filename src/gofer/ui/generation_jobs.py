@@ -279,6 +279,7 @@ class GenerationJobs:
                     )
                 else:
                     root = Path(job["projectRoot"])
+                    self._update(job_id, progress="Reading staged changes")
                     # Immutable objects are independent of later checkouts or staging.
                     limit = 32 * 1024 * 1024
                     code, diff, stderr = asyncio.run(
@@ -308,7 +309,7 @@ class GenerationJobs:
                             "Staged changes exceed 32 MB. Split them into smaller commits."
                         )
                     # Large diffs use the same captured content, never the live index.
-                    result = asyncio.run(self._generate_commit(body, diff))
+                    result = asyncio.run(self._generate_commit(body, diff, job_id))
                     self._update(job_id, result=result)
                     if job["autoCommit"]:
                         try:
@@ -323,6 +324,7 @@ class GenerationJobs:
                                 job_id,
                                 status="needs_review",
                                 error=f"Message ready. Auto-commit failed: {exc}",
+                                progress="",
                             )
                             return
                 self._update(job_id, status="completed", result=result, progress="")
@@ -331,9 +333,20 @@ class GenerationJobs:
                     job_id,
                     status="interrupted" if self.stopped.is_set() else "failed",
                     error=str(exc) or "Generation failed.",
+                    progress="",
                 )
 
-    async def _generate_commit(self, body: dict[str, Any], diff: str) -> dict[str, str]:
+    def _commit_diagnostic(self, job_id: str, event: dict[str, Any]) -> None:
+        with self.lock:
+            diagnostics = self.jobs[job_id].get("diagnostics", [])
+            patch: dict[str, Any] = {"diagnostics": [*diagnostics, event][-32:]}
+            if event.get("stage") == "inventory":
+                patch["review"] = event
+            self._update(job_id, **patch)
+
+    async def _generate_commit(
+        self, body: dict[str, Any], diff: str, job_id: str
+    ) -> dict[str, str]:
         return await generate_commit_message(
             provider=str(body.get("provider", "codex")),
             model=str(body.get("model", "cli-default")),
@@ -342,4 +355,6 @@ class GenerationJobs:
             diff=diff,
             captured_diff=True,
             cancel_event=self.stopped,
+            on_progress=lambda text: self._update(job_id, progress=text),
+            on_diagnostic=lambda event: self._commit_diagnostic(job_id, event),
         )

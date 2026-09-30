@@ -297,3 +297,32 @@ def test_restart_recovers_commit_completed_before_receipt_was_saved(
     restored = GenerationJobs(tmp_path / "jobs").list("commit", str(repo), "main")[0]
     assert restored["status"] == "completed"
     assert restored["result"]["commit"] == commit
+
+
+def test_commit_progress_and_bounded_diagnostics_survive_failed_job(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module, "commit_message_preference", lambda: {"autoCommit": False})
+
+    async def generate(**kwargs: Any) -> dict[str, str]:
+        kwargs["on_progress"]("Formatting commit message")
+        kwargs["on_diagnostic"]({"stage": "inventory", "files": 278})
+        for index in range(40):
+            kwargs["on_diagnostic"]({"stage": "draft", "attempt": index, "draft": "invalid"})
+        kwargs["on_diagnostic"]({"stage": "validation", "reason": "Missing change bullets"})
+        raise ValueError("Missing change bullets")
+
+    monkeypatch.setattr(module, "generate_commit_message", generate)
+    staged(repo, "snapshot\n")
+    jobs = GenerationJobs(tmp_path / "jobs")
+    result = finished(jobs, jobs.start("commit", {}, repo))
+    assert result["status"] == "failed"
+    assert result["progress"] == ""
+    assert result["review"]["files"] == 278
+    assert len(result["diagnostics"]) == 32
+    assert result["diagnostics"][-1]["reason"] == "Missing change bullets"
+    restored = GenerationJobs(tmp_path / "jobs").list("commit", str(repo), "main")[0]
+    assert restored["diagnostics"] == result["diagnostics"]
+    assert restored["review"] == result["review"]

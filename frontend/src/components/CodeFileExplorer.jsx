@@ -122,9 +122,14 @@ export default function CodeFileExplorer({
         if (!active) return;
         setLoadingCommitJob(false);
         setGeneratingMessage(jobIsRunning(job));
-        if (!job || (commitJobRef.current?.id === job.id && commitJobRef.current?.status === job.status)) return;
+        if (!job) { if (!generationRef.current) setGitNotice(""); return; }
+        if (jobIsRunning(job)) setGitNotice(job.progress || "Rem is drafting your commit message.");
+        if (commitJobRef.current?.id === job.id && commitJobRef.current?.status === job.status && commitJobRef.current?.updatedAt === job.updatedAt) return;
         commitJobRef.current = job;
-        if (job.error) setGitError(job.error);
+        if (job.error) {
+          setGitNotice("");
+          setGitError(job.result?.message ? job.error : `Commit-message generation failed: ${job.error}`);
+        } else setGitError("");
         if (job.result?.commit) {
           setGitNotice(`Auto-committed ${job.result.commit.slice(0, 8)} on ${job.branch}.`);
           let current;
@@ -143,9 +148,9 @@ export default function CodeFileExplorer({
             setCommitMessage(message);
             window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ jobId: job.id, message }));
           }
-          setGitNotice("Rem's commit message is ready.");
+          if (!job.error) setGitNotice("Rem's commit message is ready.");
         }
-      } catch (cause) { if (active) { setLoadingCommitJob(false); setGitError(cause.message); } }
+      } catch (cause) { if (active) { setLoadingCommitJob(false); setGitNotice(""); setGitError(`Could not check commit-message generation: ${cause.message}`); } }
     }, { immediate: true });
     return () => { active = false; stop(); };
   }, [draftKey, rootPath, sourceControlRoot, sourceControl.active, sourceControl.root, sourceControl.branch]);
@@ -275,7 +280,7 @@ export default function CodeFileExplorer({
     if (generationRef.current || generatingMessage || loadingCommitJob || gitBusy || !stagedCount) return;
     const key = draftKey;
     generationRef.current = key;
-    setGeneratingMessage(true); setGitError("");
+    setGeneratingMessage(true); setGitError(""); setGitNotice("Rem is drafting your commit message.");
     try {
       const job = await new Promise((resolve, reject) => {
         const detail = { background: true, projectRoot: rootPath, branch: sourceControl.branch, resolve, reject, handled: false };
@@ -285,8 +290,11 @@ export default function CodeFileExplorer({
       let current;
       try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${key}`) || "null"); } catch { /* No stored draft. */ }
       window.localStorage.setItem(`rem-commit-draft:${key}`, JSON.stringify({ ...current, message: current?.message ?? commitMessage, pendingJobId: job.id, generationDraft: commitMessage }));
-      if (draftKeyRef.current === key) setGitNotice("Rem is generating in the background. You can switch branches or close the window.");
-    } catch (cause) { if (draftKeyRef.current === key) { setGitError(cause.message); setGeneratingMessage(false); } }
+      if (draftKeyRef.current === key && !(commitJobRef.current?.id === job.id && !jobIsRunning(commitJobRef.current))) {
+        setGeneratingMessage(jobIsRunning(job));
+        setGitNotice(jobIsRunning(job) ? (job.progress || "Rem is drafting your commit message.") : "");
+      }
+    } catch (cause) { if (draftKeyRef.current === key) { setGitNotice(""); setGitError(`Commit-message generation failed: ${cause.message}`); setGeneratingMessage(false); } }
     finally { if (generationRef.current === key) generationRef.current = null; }
   }
 
@@ -1762,6 +1770,7 @@ function discardDirectoryBranch(setDirectories, branchPath) {
 }
 
 export function sourceControlErrorSummary(message) {
+  if (/^(Commit-message generation failed|Could not check commit-message generation):/i.test(message)) return message;
   if (/unsaved editor/i.test(message)) return "Save your editor changes and try again.";
   if (/conflict|unmerged/i.test(message)) return "Resolve the Git conflicts before continuing.";
   if (/authentication|permission denied|could not read Username/i.test(message)) return "Git authentication failed. Check your remote access and try again.";
