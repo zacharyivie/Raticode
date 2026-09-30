@@ -23,7 +23,7 @@ dependencies = [
     "questionary>=2.0",
     "jsonschema>=4.23",
     "referencing>=0.35",
-    "tzdata>=2026.2",
+    "tzdata>=2026.4",
     "watchdog>=6.0.0",
     "vosk>=0.3.45; sys_platform != 'darwin'",
     "vosk==0.3.44; sys_platform == 'darwin'",
