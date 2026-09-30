@@ -13,6 +13,7 @@ from gofer.ui.second_brain import (
     REPORT_THEME_PROMPTS,
     SecondBrain,
     serve_second_brain,
+    serve_stdio,
     with_second_brain,
 )
 
@@ -92,6 +93,74 @@ def test_second_brain_mcp_lifecycle_and_errors(tmp_path: Path) -> None:
     }
     assert str(tmp_path) in responses[2]["result"]["content"][0]["text"]
     assert responses[3]["result"]["isError"] is True
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        None,
+        [],
+        ["rules"],
+        "rules",
+        1,
+        {},
+        {"name": []},
+        {"name": ""},
+        {"name": "rules", "arguments": None},
+        {"name": "rules", "arguments": []},
+        {"name": "read_note", "arguments": ["note.md"]},
+        {"name": "save_note", "arguments": "note.md"},
+    ],
+)
+def test_malformed_mcp_parameters_do_not_stop_the_server(tmp_path: Path, params: object) -> None:
+    source = io.StringIO(
+        json.dumps({"id": 1, "method": "tools/call", "params": params})
+        + '\n{"id":2,"method":"tools/call","params":{"name":"rules"}}\n'
+    )
+    output = io.StringIO()
+    serve_second_brain(tmp_path, input_stream=source, output_stream=output)
+    rejected, recovered = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rejected["id"] == 1
+    assert rejected["error"]["code"] == -32602
+    assert recovered["id"] == 2
+    assert str(tmp_path) in recovered["result"]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("identifier", ["\ud800", "\udfff", "café 🐀"])
+def test_mcp_unicode_ids_do_not_stop_utf8_output(tmp_path: Path, identifier: str) -> None:
+    source = io.StringIO(
+        json.dumps({"id": identifier, "method": "ping"})
+        + '\n{"id":2,"method":"tools/call","params":{"name":"rules"}}\n'
+    )
+    wire = io.BytesIO()
+    with io.TextIOWrapper(wire, encoding="utf-8", errors="strict") as output:
+        serve_second_brain(tmp_path, input_stream=source, output_stream=output)
+        replies = [json.loads(line) for line in wire.getvalue().decode("utf-8").splitlines()]
+    assert replies[0] == {"jsonrpc": "2.0", "id": identifier, "result": {}}
+    assert replies[1]["id"] == 2
+    assert str(tmp_path) in replies[1]["result"]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("depth", [65, 2000])
+def test_deep_mcp_requests_do_not_dispatch_or_stop_the_server(depth: int) -> None:
+    nested = "[" * depth + "0" + "]" * depth
+    source = io.StringIO(
+        '{"id":1,"method":"tools/call","params":{"name":"write",'
+        '"arguments":{"nested":' + nested + '}}}\n{"id":2,"method":"ping"}\n'
+    )
+    output = io.StringIO()
+    serve_stdio(
+        lambda *_: pytest.fail("Deep request must not invoke tools"),
+        [],
+        "",
+        "test",
+        input_stream=source,
+        output_stream=output,
+    )
+    rejected, recovered = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rejected["error"]["code"] == -32700
+    assert "nesting is too deep" in rejected["error"]["message"]
+    assert recovered == {"jsonrpc": "2.0", "id": 2, "result": {}}
 
 
 def test_tool_is_added_only_when_enabled_even_without_shell(tmp_path: Path) -> None:

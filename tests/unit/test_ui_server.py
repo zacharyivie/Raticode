@@ -73,6 +73,7 @@ def _fake_server(
     server.data_dir = tmp_path
     server.chat_steering = ChatSteering(tmp_path)
     server.chat_jobs = server_module.ChatJobs(tmp_path)
+    server.generation_jobs = server_module.GenerationJobs(tmp_path)
     server.provider_auth = server_module.ProviderAuthSessions()
     server.resource_limits = resource_limits or DEFAULT_RESOURCE_LIMITS
     server.api_token = "test-ui-token"
@@ -684,6 +685,32 @@ def test_ui_server_state_change_requires_ui_api_token(tmp_path) -> None:
     assert response.json() == {"error": "UI API authentication required"}
 
 
+@pytest.mark.parametrize("header", ["Authorization", "X-Gofer-UI-Token"])
+def test_ui_server_rejects_non_ascii_api_credentials(tmp_path: Path, header: str) -> None:
+    response = _request(
+        tmp_path,
+        "GET",
+        "/api/session",
+        headers={
+            header: "Bearer invalid-\u00e9" if header == "Authorization" else "invalid-\u00e9"
+        },
+        authenticated=False,
+    )
+
+    assert response.status == 401
+
+
+def test_ui_server_rejects_non_ascii_desktop_credentials(tmp_path: Path) -> None:
+    response = _request(
+        tmp_path,
+        "GET",
+        "/api/desktop/trusted-roots",
+        headers={"X-Gofer-Desktop-Grant-Secret": "invalid-\u00e9"},
+    )
+
+    assert response.status == 403
+
+
 def test_ui_server_exposes_revisioned_rattish_document_routes(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1056,6 +1083,26 @@ def test_ui_server_ignores_data_dir_query_override(tmp_path) -> None:
     assert handler._request_data_dir({"data_dir": [str(outside_data_dir)]}) == requested_data_dir
 
 
+@pytest.mark.parametrize("content", ["a", "!!!!", "eA==!"])
+def test_uploaded_bundle_rejects_invalid_base64_without_leaking_temp_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    monkeypatch.setattr(server_module.tempfile, "tempdir", str(tmp_path))
+    with pytest.raises(ValueError):
+        with server_module._bundle_path_from_body({"bundleContent": content}):
+            pytest.fail("Invalid base64 reached the bundle importer")
+    assert list(tmp_path.glob("*.zip")) == []
+
+
+def test_uploaded_bundle_cleans_up_after_consumer_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module.tempfile, "tempdir", str(tmp_path))
+    with pytest.raises(RuntimeError, match="consumer failed"):
+        with server_module._bundle_path_from_body({"bundleContent": "eA=="}) as path:
+            assert path.read_bytes() == b"x"
+            raise RuntimeError("consumer failed")
+    assert list(tmp_path.glob("*.zip")) == []
+
+
 def test_ui_bundle_path_allows_data_dir_path_without_grant(tmp_path: Path) -> None:
     bundle_path = tmp_path / "bundle.gof.zip"
     bundle_path.write_bytes(b"zip")
@@ -1128,7 +1175,8 @@ def test_ui_bundle_path_uses_nearest_existing_parent_for_missing_destination(
     handler._assert_bundle_path_allowed(destination, grant_id, must_exist=False)
 
 
-def test_ui_desktop_path_grant_registration_requires_secret(tmp_path: Path) -> None:
+@pytest.mark.parametrize("secret", ["", "invalid-\u00e9"])
+def test_ui_desktop_path_grant_registration_requires_secret(tmp_path: Path, secret: str) -> None:
     outside_dir = tmp_path.parent / f"{tmp_path.name}-registered"
     outside_dir.mkdir()
 
@@ -1137,6 +1185,7 @@ def test_ui_desktop_path_grant_registration_requires_secret(tmp_path: Path) -> N
         "POST",
         "/api/desktop/path-grants",
         body={"grantId": "grant-1", "path": str(outside_dir)},
+        headers={"X-Gofer-Desktop-Grant-Secret": secret},
     )
     assert denied.status == 400
 
@@ -1956,6 +2005,49 @@ def test_ui_server_unknown_invalid_json_and_options(tmp_path) -> None:
     assert options.header("Access-Control-Allow-Origin") == "http://127.0.0.1:5173"
     assert options.header("Access-Control-Allow-Methods") == "GET, POST, PUT, DELETE, OPTIONS"
     assert "Authorization" in (options.header("Access-Control-Allow-Headers") or "")
+
+
+def test_ui_server_rejects_deeply_nested_json_with_a_response(tmp_path) -> None:
+    body = b'{"name":' + b"[" * 2000 + b"0" + b"]" * 2000 + b"}"
+    response = _request(tmp_path, "POST", "/api/workflows", body=body)
+    assert response.status == 400
+    assert "nesting" in response.text()
+
+
+@pytest.mark.parametrize("extra_depth", [0, 1])
+def test_ui_json_nesting_limit_boundary(tmp_path, extra_depth: int) -> None:
+    depth = server_module.UI_JSON_MAX_DEPTH + extra_depth
+    body = b'{"value":' + b"[" * depth + b"]" * depth + b"}"
+    handler = _fake_handler(_fake_server(tmp_path))
+    handler.headers = Message()
+    handler.headers["Content-Length"] = str(len(body))
+    handler.rfile = BytesIO(body)
+    if extra_depth:
+        with pytest.raises(json.JSONDecodeError, match="nesting"):
+            handler._read_json()
+    else:
+        assert "value" in handler._read_json()
+
+
+@pytest.mark.parametrize("number", [b"NaN", b"Infinity", b"-Infinity", b"1e999"])
+def test_ui_server_rejects_nonfinite_json_numbers(tmp_path, number: bytes) -> None:
+    response = _request(tmp_path, "POST", "/api/workflows", body=b'{"name":' + number + b"}")
+    assert response.status == 400
+    assert "finite" in response.text()
+
+
+@pytest.mark.parametrize("value", [[], {}, True, 1.5])
+def test_ui_server_rejects_invalid_optional_integer(tmp_path, value) -> None:
+    response = _request(tmp_path, "POST", "/api/workflows/wf/logs/prune", body={"keepLast": value})
+    assert response.status == 400
+    assert "keepLast must be an integer" in response.text()
+
+
+@pytest.mark.parametrize("value", [[], {}, True, 1])
+def test_ui_server_rejects_invalid_optional_string(tmp_path, value) -> None:
+    response = _request(tmp_path, "POST", "/api/chat/commit-message", body={"effort": value})
+    assert response.status == 400
+    assert "effort must be a string" in response.text()
 
 
 def test_ui_server_continuous_monitor_starts_one_thread_and_cleans_inactive(
@@ -3272,12 +3364,185 @@ def test_fork_attachment_endpoint_copies_files(tmp_path: Path) -> None:
 
 
 def test_commit_settings_routes_persist_validate_and_require_auth(tmp_path) -> None:
+    from gofer.core.commit_message_format import DEFAULT_COMMIT_MESSAGE_TEMPLATE
+
     endpoint = "/api/provider/commit-settings"
     selection = {"provider": "codex", "model": "sol"}
-    assert _request(tmp_path, "GET", endpoint).json() == {}
+    defaults = {
+        "autoCommit": False,
+        "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+        "defaultTemplate": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    }
+    assert _request(tmp_path, "GET", endpoint).json() == defaults
     assert _request(tmp_path, "POST", endpoint, body=selection).status == 200
-    assert _request(tmp_path, "GET", endpoint).json() == selection
+    assert _request(tmp_path, "GET", endpoint).json() == {**defaults, **selection}
     assert _request(tmp_path, "POST", endpoint, body={"provider": "codex"}).status == 400
     assert _request(tmp_path, "POST", endpoint, body=selection, authenticated=False).status == 401
     assert _request(tmp_path, "GET", endpoint, authenticated=False).status == 401
-    assert _request(tmp_path, "GET", endpoint).json() == selection
+    assert _request(tmp_path, "GET", endpoint).json() == {**defaults, **selection}
+    template = "Summary: changes\n\n* One change"
+    assert _request(tmp_path, "POST", endpoint, body={"template": template}).json() == {
+        "saved": True,
+        "autoCommit": False,
+        **selection,
+        "template": template,
+    }
+    expected = {**defaults, **selection, "template": template}
+    assert _request(tmp_path, "GET", endpoint).json() == expected
+    assert _request(tmp_path, "POST", endpoint, body={"template": 5}).status == 400
+    assert _request(tmp_path, "GET", endpoint).json() == expected
+    assert _request(tmp_path, "POST", endpoint, body={"template": ""}).status == 200
+    assert _request(tmp_path, "GET", endpoint).json() == {**defaults, **selection}
+
+
+def test_usage_overview_and_period_validation(tmp_path: Path) -> None:
+    result = _request(tmp_path, "GET", "/api/usage/overview?days=7")
+    assert result.status == 200
+    payload = cast(dict[str, Any], result.json())
+    assert payload["scope"] == "device"
+    assert payload["activity"]["total_tokens"] is None
+    assert len(payload["accounts"]) == 9
+    assert _request(tmp_path, "GET", "/api/usage/overview?days=0").status == 400
+    assert _request(tmp_path, "GET", "/api/usage/overview", authenticated=False).status == 401
+
+
+def test_usage_refresh_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def refresh(data_dir: Path | None, *, days: int) -> dict[str, object]:
+        assert data_dir == tmp_path
+        return {"days": days, "accounts": []}
+
+    monkeypatch.setattr(server_module, "refresh_usage", refresh)
+    result = _request(tmp_path, "POST", "/api/usage/refresh?days=90", body={})
+    assert result.status == 200
+    assert result.json() == {"days": 90, "accounts": []}
+
+
+def test_report_theme_generation_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def generate(body: dict[str, Any]) -> dict[str, str]:
+        assert body == {"description": "Ocean", "provider": "codex", "effort": "high"}
+        return {"label": "Ocean", "instructions": "Navy ink", "html": "<html></html>"}
+
+    monkeypatch.setattr("gofer.ui.report_theme_generation.generate_report_theme", generate)
+    monkeypatch.setattr(server_module, "UI_JOB_DEADLINE_SECONDS", 0)
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/report-themes/generate",
+        body={
+            "description": "Ocean",
+            "provider": "codex",
+            "effort": "high",
+        },
+    )
+    assert result.status == 200
+    assert cast(dict[str, Any], result.json())["label"] == "Ocean"
+    assert (
+        _request(tmp_path, "POST", "/api/report-themes/generate", authenticated=False).status == 401
+    )
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_report_theme_stream_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
+) -> None:
+    async def generate(body: Any, emit: Any, cancel_event: Any) -> dict[str, str]:
+        assert not cancel_event.is_set()
+        emit({"type": "progress", "text": "Choosing colors"})
+        if fail:
+            raise ValueError("Provider unavailable")
+        return {"label": "Ocean", "instructions": "Navy", "html": "<html></html>"}
+
+    monkeypatch.setattr("gofer.ui.report_theme_generation.generate_report_theme", generate)
+    monkeypatch.setattr(server_module, "UI_JOB_DEADLINE_SECONDS", 0)
+    result = _request(
+        tmp_path,
+        "POST",
+        "/api/report-themes/generate",
+        headers={"Accept": "application/x-ndjson"},
+        body={"description": "Ocean"},
+    )
+    assert result.status == 200
+    events = [json.loads(line) for line in result.body.splitlines()]
+    assert events[0] == {"type": "progress", "text": "Choosing colors"}
+    assert events[-1]["type"] == ("error" if fail else "final")
+
+
+@pytest.mark.asyncio
+async def test_theme_disconnect_cancels_quiet_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    cancelled = []
+
+    async def generate(body: Any, emit: Any, cancel_event: Any) -> dict[str, str]:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(cancel_event.is_set())
+        return {}
+
+    def disconnected() -> None:
+        raise server_module.DiscoveryCancelled()
+
+    monkeypatch.setattr("gofer.ui.report_theme_generation.generate_report_theme", generate)
+    handler = GoferUiRequestHandler.__new__(GoferUiRequestHandler)
+    monkeypatch.setattr(handler, "_check_discovery_cancelled", disconnected)
+    monkeypatch.setattr(
+        handler, "_write_stream_event", lambda event: pytest.fail("Unexpected event")
+    )
+    await handler._stream_report_theme({"description": "Ocean"})
+    assert cancelled == [True]
+
+
+def test_generation_job_routes_require_authentication_and_project_grants(tmp_path: Path) -> None:
+    assert _request(tmp_path, "GET", "/api/generation-jobs", authenticated=False).status == 401
+    assert _request(tmp_path, "POST", "/api/generation-jobs", authenticated=False).status == 401
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    result = _request(tmp_path, "POST", "/api/generation-jobs", body={
+        "kind": "commit", "projectRoot": str(outside),
+    })
+    assert result.status == 400
+    assert "outside the approved" in result.text()
+    result = _request(tmp_path, "GET", f"/api/generation-jobs?kind=commit&projectRoot={outside}")
+    assert result.status == 400
+
+
+def test_generation_job_post_returns_receipt_without_waiting_for_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gofer.ui import generation_jobs
+
+    release = threading.Event()
+
+    async def theme(body: dict[str, Any], emit: Any, **kwargs: Any) -> dict[str, str]:
+        assert release.wait(5)
+        return {"label": "Ocean", "instructions": "Navy", "html": "<html>Preview</html>"}
+
+    monkeypatch.setattr(generation_jobs, "generate_report_theme", theme)
+    try:
+        result = _request(tmp_path, "POST", "/api/generation-jobs", body={
+            "kind": "theme", "description": "An ocean journal",
+        })
+        assert result.status == 202
+        payload = cast(dict[str, Any], result.json())
+        assert payload["status"] in {"queued", "running"}
+        assert payload["description"] == "An ocean journal"
+        assert "result" not in payload
+    finally:
+        release.set()
+    # Do not leave a fake provider writing into pytest's temporary directory.
+    import time
+
+    until = time.monotonic() + 5
+    while result.server.generation_jobs.list("theme")[0]["status"] in {"queued", "running"}:
+        assert time.monotonic() < until
+        time.sleep(0.01)
+    restored = _request(tmp_path, "GET", "/api/generation-jobs?kind=theme")
+    assert restored.status == 200
+    assert "<html>Preview</html>" in restored.text()
+    dismissed = _request(
+        tmp_path, "POST", "/api/generation-jobs/dismiss", body={"id": payload["id"]}
+    )
+    assert dismissed.status == 200
+    empty = _request(tmp_path, "GET", "/api/generation-jobs?kind=theme")
+    assert cast(dict[str, Any], empty.json())["jobs"] == []

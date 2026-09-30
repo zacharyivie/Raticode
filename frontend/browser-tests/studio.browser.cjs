@@ -1190,7 +1190,9 @@ async function exerciseSwarms() {
     tab.focus();
     tab.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
   });
-  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-swarms", "End reaches Swarms from Workflows");
+  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-organizations", "End reaches Organizations from Workflows");
+  await evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })));
+  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-swarms", "ArrowUp reaches Swarms from Organizations");
   await evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })));
   assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-workflows", "Home returns to Workflows");
   const editorTabs = await evaluate(() => document.querySelector("[aria-label='Editor tabs']").textContent);

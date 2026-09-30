@@ -85,7 +85,8 @@ def test_update_workflow_payload_preserves_masked_webhook_token(tmp_path: Path) 
 
 
 @pytest.mark.anyio
-async def test_webhook_trigger_rejects_unauthorized_request(tmp_path: Path) -> None:
+@pytest.mark.parametrize("token", ["wrong", "invalid-\u00e9"])
+async def test_webhook_trigger_rejects_unauthorized_request(tmp_path: Path, token: str) -> None:
     _write_webhook_workflow(tmp_path / "hooked.toml")
 
     with pytest.raises(WorkflowTriggerError, match="Unauthorized"):
@@ -94,7 +95,7 @@ async def test_webhook_trigger_rejects_unauthorized_request(tmp_path: Path) -> N
             "github",
             tmp_path,
             payload={"issue": {"number": 7}},
-            token="wrong",
+            token=token,
         )
 
 
@@ -127,11 +128,13 @@ command = "touch {marker}"
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("token", ["env-secret", "secret-\u00e9"])
 async def test_webhook_trigger_token_env_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    token: str,
 ) -> None:
-    monkeypatch.setenv("GOFER_TEST_WEBHOOK_TOKEN", "env-secret")
+    monkeypatch.setenv("GOFER_TEST_WEBHOOK_TOKEN", token)
     (tmp_path / "env-hook.toml").write_text(
         """
 [workflow]
@@ -158,7 +161,7 @@ command = 'printf "%s" "$MESSAGE"'
         "default",
         tmp_path,
         payload={"message": "ok"},
-        token="env-secret",
+        token=token,
     )
 
     assert result["run"]["success"] is True
@@ -354,6 +357,10 @@ async def test_webhook_trigger_interpolates_payload_headers_and_saves_replay(
         headers={
             "Authorization": "Bearer secret-token",
             "X-Gofer-Webhook-Token": "secret-token",
+            "X-Gofer-UI-Token": "desktop-api-secret",
+            "X-Gofer-Desktop-Grant-Secret": "desktop-grant-secret",
+            "Cookie": "session=cookie-secret",
+            "Proxy-Authorization": "Basic proxy-secret",
             "X-GitHub-Event": "issues",
         },
         source="github",
@@ -384,6 +391,9 @@ async def test_webhook_trigger_interpolates_payload_headers_and_saves_replay(
     assert replay_payload["headers"]["x_github_event"] == "issues"
     assert "authorization" not in replay_payload["headers"]
     assert "x_gofer_webhook_token" not in replay_payload["headers"]
+    assert replay_payload["headers"] == {"x_github_event": "issues"}
+    for secret in ("desktop-api-secret", "desktop-grant-secret", "cookie-secret", "proxy-secret"):
+        assert secret not in log_payload["logText"]
 
     runs = list_workflow_run_logs_payload("hooked", tmp_path)["runs"]
     assert runs[0]["triggerType"] == "webhook"

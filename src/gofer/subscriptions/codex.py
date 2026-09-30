@@ -11,6 +11,8 @@ from gofer.subscriptions.base import Subscription
 
 
 class CodexSubscription(Subscription):
+    provider = "codex"
+
     def _build_command(
         self,
         prompt: str,
@@ -49,7 +51,9 @@ class CodexSubscription(Subscription):
         payloads = subscription_base._json_payloads(stdout) + subscription_base._json_payloads(
             stderr
         )
-        metadata = subscription_base._usage_metadata_from_payloads(payloads)
+        from gofer.subscriptions.usage import provider_payload_usage
+
+        metadata = provider_payload_usage("codex", payloads)
         if metadata:
             metadata.setdefault("source", "provider_metadata")
         message = _codex_message_from_payloads(payloads)

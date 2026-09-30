@@ -737,6 +737,10 @@ max_watcher_concurrency = 4
 max_fanout_concurrency = 16
 ```
 
+Workflow bundles and organization ZIP packages accept stored or DEFLATE-compressed
+members. Repack BZIP2 or LZMA archives with DEFLATE before importing them. Raticode
+exports use DEFLATE.
+
 Workflow bundle import is validated before the bundled workflow TOML is trusted, so
 CLI/UI import and preview use host-side bundle limits. Configure those limits with
 environment variables on the `gof` or UI server process:

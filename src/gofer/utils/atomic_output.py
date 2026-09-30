@@ -146,6 +146,31 @@ def mkdir_without_links(directory: Path, *, exclusive: bool = False) -> None:
             raise OSError("Directory contains a symbolic link or reparse point")
 
 
+def unlink_without_links(destination: Path, *, directory: bool = False) -> None:
+    """Remove one entry without following parent links, including during rollback."""
+    destination = destination.expanduser().absolute()
+    with ExitStack() as held:
+        if os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd:
+            parent = os.open(destination.anchor, os.O_RDONLY | os.O_DIRECTORY)
+            held.callback(os.close, parent)
+            for part in destination.parent.parts[1:]:
+                parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                held.callback(os.close, parent)
+            if directory:
+                os.rmdir(destination.name, dir_fd=parent)
+            else:
+                os.unlink(destination.name, dir_fd=parent)
+        else:
+            if os.name == "nt":
+                held.enter_context(_windows_directory_handles(destination.parent, create=False))
+            elif destination.parent.resolve(strict=True) != destination.parent:
+                raise OSError("Refusing to remove a file through a symbolic link")
+            if directory:
+                destination.rmdir()
+            else:
+                destination.unlink()
+
+
 def remove_tree_without_links(
     directory: Path, *, onerror: Callable[..., None] | None = None
 ) -> None:
@@ -175,7 +200,12 @@ def remove_tree_without_links(
 
 
 @contextmanager
-def atomic_binary_output(destination: Path, *, exclusive: bool = False) -> Iterator[BinaryIO]:
+def atomic_binary_output(
+    destination: Path,
+    *,
+    exclusive: bool = False,
+    timestamps_ns: tuple[int, int] | None = None,
+) -> Iterator[BinaryIO]:
     """Pin the parent directory before creating/replacing an output on POSIX.
 
     Callers authorize the canonical destination before using this helper. Opening
@@ -199,7 +229,12 @@ def atomic_binary_output(destination: Path, *, exclusive: bool = False) -> Itera
                         part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
                     )
                 except FileNotFoundError:
-                    os.mkdir(part, mode=0o700, dir_fd=parent_fd)
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=parent_fd)
+                    except FileExistsError:
+                        # Another writer may have created this parent. The open
+                        # below still rejects files and links without following them.
+                        pass
                     next_fd = os.open(
                         part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
                     )
@@ -224,6 +259,13 @@ def atomic_binary_output(destination: Path, *, exclusive: bool = False) -> Itera
         with os.fdopen(fd, "wb") as output:
             yield output
             output.flush()
+            if timestamps_ns is not None:
+                if os.utime in os.supports_fd:
+                    os.utime(output.fileno(), ns=timestamps_ns)
+                else:
+                    # The parent is pinned on Windows and the temporary file
+                    # remains open without delete sharing until publication.
+                    os.utime(temporary_path, ns=timestamps_ns, follow_symlinks=False)
             os.fsync(output.fileno())
         if parent_fd is not None:
             if exclusive:

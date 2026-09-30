@@ -217,12 +217,16 @@ def test_cursor_plugin_contains_only_owned_config_and_cleans_on_failure():
             manifest = json.loads((path / ".cursor-plugin/plugin.json").read_text())
             config = json.loads((path / ".mcp.json").read_text())
             assert manifest["name"].startswith("raticode-")
+            # Cursor's extension loader uses the directory basename for the
+            # plugin identity and rejects roots directly under /tmp.
+            assert path.parent.name.startswith("raticode-provider-")
+            assert path.name == manifest["name"]
             assert next(iter(config["mcpServers"].values())) == {
                 "url": url,
                 "enabledTools": ["swarm_action"],
             }
             raise RuntimeError("spawn failed")
-    assert not path.exists()
+    assert not path.parent.exists()
     with cli_invocation("cursor", ["cursor-agent"], AgentResources(shell=False)) as (command, env):
         assert "--disable-project-configs" in command
         native = command[command.index("--allowed-tools") + 1]
@@ -230,6 +234,52 @@ def test_cursor_plugin_contains_only_owned_config_and_cleans_on_failure():
         assert "get_mcp_tools_tool_call" in native.split(",")
         config = json.loads((Path(env["CURSOR_CONFIG_DIR"]) / "cli-config.json").read_text())
         assert config["permissions"]["deny"] == ["Shell(*)", "WebFetch(*)"]
+
+
+@pytest.mark.parametrize("provider", ["cursor", "opencode"])
+def test_second_brain_tools_match_native_provider_permissions(provider, tmp_path):
+    from gofer.ui.second_brain import with_second_brain
+
+    cli = tmp_path / "gof"
+    workflow = with_second_brain(
+        {
+            "remSecondBrain": {"enabled": True, "root": str(tmp_path)},
+            "remResources": {"shell": False, "web": False},
+        },
+        cli,
+    )
+    assert workflow is not None
+    resources = AgentResources.model_validate(workflow["remResources"])
+    expected_tools = ["rules", "search", "read_note", "save_note"]
+    with cli_invocation(provider, [provider], resources, second_brain_cli_path=cli) as (
+        command,
+        env,
+    ):
+        if provider == "cursor":
+            root = Path(command[command.index("--plugin-dir") + 1])
+            servers = json.loads((root / ".mcp.json").read_text())["mcpServers"]
+            alias, server = next(iter(servers.items()))
+            assert server["command"] == str(cli)
+            assert server["enabledTools"] == expected_tools
+            config = json.loads((Path(env["CURSOR_CONFIG_DIR"]) / "cli-config.json").read_text())
+            # Mirror the native loader, which takes the plugin name from its
+            # folder, not the manifest. A mismatch silently denies MCP calls.
+            namespace = f"plugin-{root.name}-{alias}"
+            assert [p for p in config["permissions"]["allow"] if p.startswith("Mcp(")] == [
+                f"Mcp({namespace}:{tool})" for tool in expected_tools
+            ]
+            assert config["permissions"]["deny"] == ["Shell(*)", "WebFetch(*)"]
+            assert "--approve-mcps" not in command
+        else:
+            servers = json.loads(env["OPENCODE_CONFIG_CONTENT"])["mcp"]
+            alias, server = next(iter(servers.items()))
+            assert server["command"] == [str(cli), *resources.mcpServers[0].args]
+            permissions = json.loads(env["OPENCODE_PERMISSION"])
+            assert {key for key in permissions if key.startswith(alias)} == {
+                f"{alias}_{tool}" for tool in expected_tools
+            }
+            assert all(permissions[f"{alias}_{tool}"] == "allow" for tool in expected_tools)
+            assert permissions["*"] == permissions["bash"] == permissions["webfetch"] == "deny"
 
 
 @pytest.mark.asyncio

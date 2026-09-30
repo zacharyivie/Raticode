@@ -34,7 +34,7 @@ test("Git status reuses repository locations and still detects external branch c
     const idle = await readGitStatus(root);
     assert.equal(idle.operation, 'merge');
     assert.equal(calls.length, 1);
-    assert.ok(calls.every(args => ['status'].includes(args[2])));
+    assert.ok(calls.every(args => args.includes('status')));
     await module.exports.runGit(['-C', root, 'remote', 'add', 'origin', 'https://example.invalid/repo']);
     calls.length = 0;
     assert.deepEqual(Array.from((await readGitStatus(root)).remotes), ['origin']);
@@ -82,7 +82,7 @@ test('worktree reads share pending enumeration, never prune, and see external ch
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-worktrees-'));
   const linked = path.join(root, 'linked');
   fs.mkdirSync(linked);
-  let output = `worktree ${root}\nbranch refs/heads/main\n\nworktree ${linked}\nlocked reason\n\nworktree ${root}/missing\nprunable gone\n`;
+  let output = `worktree ${root}\0branch refs/heads/main\0\0worktree ${linked}\0locked reason\0\0worktree ${root}/missing\0prunable gone\0`;
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const calls = [];
@@ -104,7 +104,7 @@ test('worktree reads share pending enumeration, never prune, and see external ch
     fs.rmSync(linked, { recursive: true });
     assert.equal((await readGitWorktrees(root, { runGit })).worktrees.length, 1);
     fs.mkdirSync(linked);
-    output += `\nworktree ${linked}\nbranch refs/heads/new\n`;
+    output += `\0worktree ${linked}\0branch refs/heads/new\0`;
     assert.equal((await readGitWorktrees(root, { runGit })).worktrees.at(-1).branch, 'new');
     assert.ok(calls.every(args => !args.includes('prune')));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -126,7 +126,7 @@ test('adding a worktree cannot reuse a listing begun before the mutation', async
     }
     if (args[2] !== 'worktree' || args[3] !== 'list') return '';
     lists += 1;
-    const snapshot = `worktree ${root}\n\n${mutated ? `worktree ${linked}\n` : ''}`;
+    const snapshot = `worktree ${root}\0\0${mutated ? `worktree ${linked}\0` : ''}`;
     if (lists === 1) await gate;
     return snapshot;
   };
@@ -245,7 +245,7 @@ test('baseline cache avoids show/diff and invalidates external writes, index and
     await read(file);await read(file);calls.length=0;
     assert.equal((await read(file)).content,'original\n');
     assert.equal(calls.length,1);
-    assert.equal(calls[0][2],'status');
+    assert.ok(calls[0].includes('status'));
     fs.writeFileSync(file,'modified\n');
     assert.equal((await read(file)).modifiedContent,'modified\n');
     git('add','.');

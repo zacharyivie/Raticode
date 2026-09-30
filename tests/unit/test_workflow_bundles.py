@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
+import tomllib
 import zipfile
 from io import StringIO
 from pathlib import Path
 
 import pytest
+import tomli_w
 from rich.console import Console
 
+import gofer.core.bundles as bundles
 from gofer.cli.commands import workflow as workflow_cmd
 from gofer.core.bundles import (
     BundleError,
@@ -18,6 +23,48 @@ from gofer.core.bundles import (
 from gofer.core.resources import ResourceLimits
 from gofer.core.validation import validate_workflow_file
 from gofer.core.workflow import AgenticWorkflow
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        '{"formatVersion":1,"workflow":{"id":"review","name":"Review"},"extra":'
+        + "[" * (sys.getrecursionlimit() + 100)
+        + "0"
+        + "]" * (sys.getrecursionlimit() + 100)
+        + "}",
+        "[]",
+        '{"workflow":"invalid"}',
+        '{"workflow":{},"includedPaths":null}',
+        '{"workflow":{},"formatVersion":{}}',
+        '{"workflow":{},"includedPaths":[{"path":"asset.txt"}]}',
+        '{"workflow":{},"includedPaths":[{"archivePath":"asset.txt"}]}',
+        '{"workflow":{},"includedPaths":[{"path":[],"archivePath":"asset.txt"}]}',
+    ],
+    ids=[
+        "deep",
+        "array",
+        "workflow-type",
+        "paths-type",
+        "version-type",
+        "missing-archive-path",
+        "missing-path",
+        "path-value-type",
+    ],
+)
+def test_bundle_rejects_malformed_manifest_before_creating_files(
+    tmp_path: Path, manifest: str
+) -> None:
+    bundle = tmp_path / "invalid.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("manifest.json", manifest)
+        archive.writestr("workflow.toml", '[workflow]\nid="review"\nname="Review"\n')
+    target = tmp_path / "target"
+    with pytest.raises(BundleError, match="manifest"):
+        preview_workflow_bundle(bundle, data_dir=target)
+    with pytest.raises(BundleError, match="manifest"):
+        import_workflow_bundle(bundle, data_dir=target)
+    assert not target.exists()
 
 
 def _write_bundle_source(base: Path) -> Path:
@@ -85,6 +132,83 @@ def test_export_import_bundle_round_trips_and_validates(tmp_path: Path) -> None:
     assert (target_dir / "hello.toml").exists()
     assert (target_dir / "prompts" / "hello.md").read_text() == "Say {{secret.API_TOKEN}}\n"
     assert validate_workflow_file(target_dir / "hello.toml", data_dir=target_dir).ok
+
+
+@pytest.mark.parametrize("destination", ["prompts/hello.md", "hello.toml"])
+def test_bundle_replacement_does_not_modify_a_hardlinked_file_outside_the_target(
+    tmp_path: Path, destination: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    workflow_path = _write_bundle_source(source)
+    bundle = tmp_path / "hello.zip"
+    export_workflow_bundle(workflow_path, bundle)
+    target = tmp_path / "target"
+    entry = target / destination
+    entry.parent.mkdir(parents=True)
+    protected = tmp_path / "private.txt"
+    protected.write_text("Private content outside the import folder")
+    entry.hardlink_to(protected)
+
+    import_workflow_bundle(bundle, data_dir=target, replace=True)
+
+    assert protected.read_text() == "Private content outside the import folder"
+    assert entry.read_bytes() != protected.read_bytes()
+    assert validate_workflow_file(target / "hello.toml", data_dir=target).ok
+
+
+@pytest.mark.parametrize("destination", ["prompts/hello.md", "hello.toml"])
+@pytest.mark.skipif(os.name == "nt", reason="Creating symlinks needs Windows developer mode")
+def test_bundle_import_does_not_follow_a_destination_replaced_with_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, destination: str
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    bundle = tmp_path / "hello.zip"
+    export_workflow_bundle(_write_bundle_source(source), bundle)
+    target = tmp_path / "target"
+    entry = target / destination
+    entry.parent.mkdir(parents=True)
+    entry.write_text("Original destination")
+    protected = tmp_path / "private.txt"
+    protected.write_text("Private content outside the import folder")
+    original_read = zipfile.ZipExtFile.read
+    swapped = False
+
+    def replace_after_read(source, *args, **kwargs):
+        nonlocal swapped
+        content = original_read(source, *args, **kwargs)
+        if source.name == "assets/prompts/hello.md" and not swapped:
+            swapped = True
+            entry.unlink()
+            entry.symlink_to(protected)
+        return content
+
+    monkeypatch.setattr(zipfile.ZipExtFile, "read", replace_after_read)
+    import_workflow_bundle(bundle, data_dir=target, replace=True)
+
+    assert swapped
+    assert protected.read_text() == "Private content outside the import folder"
+    assert not entry.is_symlink()
+    assert validate_workflow_file(target / "hello.toml", data_dir=target).ok
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions")
+def test_bundle_replacement_keeps_existing_script_executable(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    bundle = tmp_path / "hello.zip"
+    export_workflow_bundle(_write_bundle_source(source), bundle)
+    target = tmp_path / "target"
+    script = target / "scripts/hello.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("echo old script\n")
+    script.chmod(0o751)
+
+    import_workflow_bundle(bundle, data_dir=target, replace=True)
+
+    assert script.read_text() == "echo hello\n"
+    assert script.stat().st_mode & 0o7777 == 0o751
 
 
 def test_bundle_round_trips_structured_output_schemas_and_predicates(tmp_path: Path) -> None:
@@ -571,6 +695,317 @@ json = { secret = "json-secret", safe = "public" }
     assert "visible=ok" in bundled_workflow
     assert 'query = "public"' in bundled_workflow
     assert 'safe = "public"' in bundled_workflow
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "api_key",
+        "apikey",
+        "access-key",
+        "access_key",
+        "auth",
+        "credential",
+        "credentials",
+        "passwd",
+        "private_key",
+        "x_api_key",
+        "Proxy-Authorization",
+        "Set-Cookie",
+    ],
+)
+def test_export_bundle_masks_common_credential_names_and_copies(tmp_path: Path, field: str) -> None:
+    source = tmp_path / "credentials.toml"
+    source.write_text(
+        tomli_w.dumps(
+            {
+                "workflow": {"id": "credentials", "name": "Credentials"},
+                "nodes": [
+                    {
+                        "id": "call",
+                        "type": "http_request",
+                        "url": f"https://example.test/?{field}=private-value",
+                        "headers": {field: "private-value"},
+                        "params": {field: "private-value"},
+                        "json": {"nested": {field: "private-value"}, "copy": "private-value"},
+                        "body": f"{field}=private-value visible=ok",
+                    }
+                ],
+            }
+        )
+    )
+    output = tmp_path / "credentials.zip"
+    export_workflow_bundle(source, output)
+    with zipfile.ZipFile(output) as archive:
+        exported = archive.read("workflow.toml").decode()
+    assert "private-value" not in exported
+    assert "visible=ok" in exported
+
+
+def test_export_bundle_masks_env_literals_containing_secret_references(tmp_path: Path) -> None:
+    source = tmp_path / "env.toml"
+    source.write_text(
+        tomli_w.dumps(
+            {
+                "workflow": {"id": "env", "name": "Env"},
+                "agents": {
+                    "bot": {
+                        "subscription": "codex",
+                        "working_dir": ".",
+                        "env": {"API_KEY": "private-value {{secret.OTHER}}"},
+                    }
+                },
+                "nodes": [
+                    {
+                        "id": "run",
+                        "type": "bash_command",
+                        "command": "echo ok",
+                        "env": {
+                            "PASSWORD": "{{secret.OTHER}} private-password",
+                            "SAFE_TOKEN": "{{secret.SAFE}}",
+                            "DEBUG": "true",
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    output = tmp_path / "env.zip"
+    manifest = export_workflow_bundle(source, output)
+    with zipfile.ZipFile(output) as archive:
+        exported = archive.read("workflow.toml").decode()
+    assert "private-value" not in exported
+    assert "private-password" not in exported
+    assert "{{secret.SAFE}}" in exported
+    assert 'DEBUG = "true"' in exported
+    assert {item["name"] for item in manifest.required_secrets} == {
+        "API_KEY",
+        "PASSWORD",
+        "OTHER",
+        "SAFE",
+    }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Creating symlinks needs Windows developer mode")
+@pytest.mark.parametrize("kind", ["file", "directory", "dangling", "fifo"])
+def test_export_bundle_rejects_linked_and_special_directory_assets(
+    tmp_path: Path, kind: str
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    samples = source_dir / "samples"
+    samples.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    protected = outside / "private.txt"
+    protected.write_text("{{secret.PRIVATE_OUTSIDE}}")
+    asset = samples / "asset"
+    if kind == "fifo":
+        os.mkfifo(asset)
+    else:
+        target = {"file": protected, "directory": outside, "dangling": outside / "missing"}[kind]
+        asset.symlink_to(target, target_is_directory=kind == "directory")
+    source = source_dir / "copy.toml"
+    source.write_text(
+        '[workflow]\nid="copy"\nname="Copy"\n'
+        '[[nodes]]\nid="copy"\ntype="copy_file"\n'
+        'source_path="samples"\ndestination_path="out"\n'
+    )
+    output = tmp_path / "copy.zip"
+    with pytest.raises(BundleError, match="ordinary file or directory"):
+        export_workflow_bundle(source, output)
+    assert not output.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Creating symlinks needs Windows developer mode")
+def test_export_bundle_rejects_asset_replaced_after_secret_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_bundle_source(tmp_path)
+    asset = tmp_path / "scripts/hello.sh"
+    protected = tmp_path / "private.txt"
+    protected.write_text("private content")
+    output = tmp_path / "existing.zip"
+    output.write_bytes(b"previous export")
+    write = bundles._write_bundle_asset
+
+    def swap(archive: zipfile.ZipFile, path: Path, name: str) -> None:
+        if path == asset:
+            asset.unlink()
+            asset.symlink_to(protected)
+        write(archive, path, name)
+
+    monkeypatch.setattr(bundles, "_write_bundle_asset", swap)
+    with pytest.raises(BundleError, match="Could not read bundle asset"):
+        export_workflow_bundle(source, output)
+    assert output.read_bytes() == b"previous export"
+
+
+def test_export_bundle_streams_assets_with_pre_zip_timestamps(tmp_path: Path) -> None:
+    source = _write_bundle_source(tmp_path)
+    asset = tmp_path / "scripts/hello.sh"
+    content = b"echo ok\n" * 200000
+    asset.write_bytes(content)
+    os.utime(asset, (0, 0))
+    output = tmp_path / "old-assets.zip"
+    export_workflow_bundle(source, output)
+    with zipfile.ZipFile(output) as archive:
+        assert archive.read("assets/scripts/hello.sh") == content
+        assert archive.getinfo("assets/scripts/hello.sh").date_time == (1980, 1, 1, 0, 0, 0)
+
+
+def test_export_bundle_removes_url_credentials_and_their_copies(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "url-credentials.toml"
+    workflow_path.write_text(
+        """
+[workflow]
+id = "url-credentials"
+name = "URL credentials"
+
+[[nodes]]
+id = "call"
+type = "http_request"
+url = "https://private-user:private%2Dpassword@[2606:4700:4700::1111]:8443/items?visible=ok"
+headers = { "X-Copy" = "private-password" }
+json = { copy = "private-user", visible = "public" }
+""".strip()
+        + "\n"
+    )
+    bundle = tmp_path / "credentials.zip"
+    export_workflow_bundle(workflow_path, bundle)
+    with zipfile.ZipFile(bundle) as archive:
+        source = archive.read("workflow.toml").decode()
+    assert "private-user" not in source
+    assert "private-password" not in source
+    assert "private%2Dpassword" not in source
+    operation = tomllib.loads(source)["nodes"][0]
+    assert operation["url"] == "https://[2606:4700:4700::1111]:8443/items?visible=ok"
+    assert operation["headers"]["X-Copy"] == "***"
+    assert operation["json"] == {"copy": "***", "visible": "public"}
+
+
+def test_export_bundle_omits_secret_scope_literals_and_preserves_bindings(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "scope-secrets.toml"
+    workflow_path.write_text(
+        """
+[workflow]
+id = "scope-secrets"
+name = "Scope secrets"
+
+[workflow.inputs.credential]
+type = "secret"
+default = "private-default"
+required = true
+
+[workflow.parameters.pin]
+type = "number"
+secret = true
+default = 987654321
+
+[workflow.inputs.visible]
+default = "public-default"
+
+[workflow.variables.credential]
+secret = true
+initial = "private-variable"
+
+[workflow.variables.reference]
+secret = true
+initial = "{{inputs.credential}}"
+
+[workflow.schedule]
+cron_expression = "0 9 * * *"
+inputs = { credential = "private-schedule", visible = "public-schedule" }
+params = { pin = 876543210 }
+
+[workflow.watch]
+path = "."
+params = { credential = "private-watch" }
+
+[workflow.webhooks.default]
+input_bindings = { credential = "{{trigger.payload.credential}}", pin = 765432109 }
+
+[component]
+id = "scope-secrets"
+
+[component.inputs.credential]
+secret = true
+default = "private-component"
+
+[[nodes]]
+id = "run"
+type = "bash_command"
+command = "echo ok"
+""".strip()
+        + "\n"
+    )
+    bundle = tmp_path / "scope-secrets.zip"
+    export_workflow_bundle(workflow_path, bundle)
+    with zipfile.ZipFile(bundle) as archive:
+        source = archive.read("workflow.toml").decode()
+    assert "private-" not in source
+    for pin in (987654321, 876543210, 765432109):
+        assert str(pin) not in source
+    exported = tomllib.loads(source)
+    assert exported["workflow"]["inputs"]["credential"]["required"] is True
+    assert "default" not in exported["workflow"]["inputs"]["credential"]
+    assert "default" not in exported["workflow"]["parameters"]["pin"]
+    assert "default" not in exported["component"]["inputs"]["credential"]
+    assert exported["workflow"]["schedule"]["inputs"] == {"visible": "public-schedule"}
+    assert exported["workflow"]["watch"]["params"] == {}
+    assert exported["workflow"]["webhooks"]["default"]["input_bindings"] == {
+        "credential": "{{trigger.payload.credential}}"
+    }
+    target = tmp_path / "imported"
+    import_workflow_bundle(bundle, data_dir=target)
+    workflow = AgenticWorkflow.from_file(target / "scope-secrets.toml")
+    assert workflow.config.inputs["credential"].default is None
+    assert workflow.config.variables["reference"].initial == "{{inputs.credential}}"
+    assert validate_workflow_file(target / "scope-secrets.toml", data_dir=target).ok
+    # Export must leave the source workflow and its credentials intact.
+    assert AgenticWorkflow.from_file(workflow_path).config.inputs["credential"].default == (
+        "private-default"
+    )
+
+
+def test_export_bundle_sanitizes_nested_subflow_sources(tmp_path: Path) -> None:
+    parent = tmp_path / "parent.toml"
+    parent.write_text(
+        '[workflow]\nid = "parent"\nname = "Parent"\n'
+        '[[nodes]]\nid = "child"\ntype = "subflow"\ncomponent_id = "child"\n'
+        '[[nodes]]\nid = "script"\ntype = "shell_script"\nscript_path = "child.toml"\n'
+    )
+    child = tmp_path / "child.toml"
+    child.write_text(
+        '[workflow]\nid = "child"\nname = "Child"\n'
+        '[workflow.inputs.credential]\ntype = "secret"\ndefault = "private-child"\n'
+        '[[nodes]]\nid = "grandchild"\ntype = "subflow"\ncomponent_id = "grandchild"\n'
+    )
+    grandchild = tmp_path / "grandchild.toml"
+    grandchild.write_text(
+        '[workflow]\nid = "grandchild"\nname = "Grandchild"\n'
+        '[[nodes]]\nid = "run"\ntype = "bash_command"\ncommand = "echo ok"\n'
+        'env = { API_TOKEN = "private-grandchild", VISIBLE = "public" }\n'
+    )
+    bundle = tmp_path / "parent.zip"
+    manifest = export_workflow_bundle(parent, bundle)
+    with zipfile.ZipFile(bundle) as archive:
+        for name in ("workflow.toml", "assets/child.toml", "assets/grandchild.toml"):
+            assert "private-" not in archive.read(name).decode()
+        exported_child = tomllib.loads(archive.read("assets/child.toml").decode())
+        assert "default" not in exported_child["workflow"]["inputs"]["credential"]
+        exported_grandchild = tomllib.loads(archive.read("assets/grandchild.toml").decode())
+        assert exported_grandchild["nodes"][0]["env"] == {"API_TOKEN": "***", "VISIBLE": "public"}
+    assert manifest.required_secrets == [
+        {"name": "API_TOKEN", "description": "Required by grandchild.toml"}
+    ]
+    target = tmp_path / "imported"
+    import_workflow_bundle(bundle, data_dir=target)
+    assert (
+        AgenticWorkflow.from_file(target / "child.toml").config.inputs["credential"].default is None
+    )
+    assert "private-child" in child.read_text()
+    assert "private-grandchild" in grandchild.read_text()
 
 
 def test_export_bundle_sanitizes_notification_secret_fields(tmp_path: Path) -> None:

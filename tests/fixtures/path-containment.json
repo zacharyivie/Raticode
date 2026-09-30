@@ -1,6 +1,20 @@
 {
   "cases": [
     {
+      "name": "existing child with two leading dots",
+      "root": "inside",
+      "candidate": "inside/..draft/file.txt",
+      "files": ["inside/..draft/file.txt"],
+      "must_exist": true,
+      "allowed": true
+    },
+    {
+      "name": "missing child with two leading dots",
+      "root": "inside",
+      "candidate": "inside/..draft/new.txt",
+      "allowed": true
+    },
+    {
       "name": "existing child",
       "root": "inside",
       "candidate": "inside/file.txt",

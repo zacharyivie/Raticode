@@ -31,9 +31,23 @@ def test_thread_actions_validate_scope_authorization_and_deduplicate() -> None:
     assert len(actions.events) == 1
 
 
+def test_select_project_is_callable_from_claude_code_plan_mode() -> None:
+    # Global Claude Code turns run in plan mode, which only admits read-only MCP tools.
+    tools = {tool["name"]: tool for tool in rem_threads.thread_tools(True, config()["projects"])}
+    assert tools["select_project"]["annotations"] == {"readOnlyHint": True}
+    assert "select_project" not in {
+        tool["name"] for tool in rem_threads.thread_tools(False, config()["projects"])
+    }
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider,mode", [("codex", "workspace-write"), ("claude_code", "dontAsk")]
+)
 async def test_global_handoff_restarts_in_selected_root_with_original_permissions(
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    mode: str,
 ) -> None:
     instances = []
 
@@ -66,16 +80,16 @@ async def test_global_handoff_restarts_in_selected_root_with_original_permission
         event
         async for event in rem_threads.stream_with_thread_tools(
             source,
-            provider="codex",
-            permission_mode="workspace-write",
+            provider=provider,
+            permission_mode=mode,
             workflow={"remThreads": config(), "remResources": {"shell": True}},
             messages=[{"role": "user", "body": "Fix the mobile app"}],
         )
     ]
     assert [event["type"] for event in events] == ["project-scope", "final"]
-    assert calls[0]["permission_mode"] == "read-only"
+    assert calls[0]["permission_mode"] == ("read-only" if provider == "codex" else mode)
     assert calls[0]["workflow"]["remResources"]["shell"] is False
-    assert calls[1]["permission_mode"] == "workspace-write"
+    assert calls[1]["permission_mode"] == mode
     assert calls[1]["workflow"]["projectRoot"] == "/mobile"
     assert calls[1]["workflow"]["remResources"]["shell"] is True
     assert calls[1]["workflow"]["remThreads"]["global"] is False

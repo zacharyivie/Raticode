@@ -7,9 +7,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
-
+from gofer.core.structured_output import StructuredOutputError, validate_schema
 from gofer.rattish.schema_compat import instance_matches_schema, schema_accepts_schema
 
 SUPPORTED_IR_VERSION = 1
@@ -292,6 +290,7 @@ def validate_ir_invariants(document: Mapping[str, Any]) -> None:
         _invalid("workflow contains duplicate output names")
     for output in document["workflow"]["outputs"]:
         _validate_schema(output["schema"], "workflow output")
+        _validate_schema(output["source"]["schema"], "workflow output source")
         _validate_reference(output["source"], known_nodes, "workflow output")
         if output["source"]["root"] in {"secret", "trigger"}:
             _invalid(f"workflow output {output['name']!r} uses execution-local or secret reference")
@@ -357,9 +356,9 @@ def _predicate_matches_success(predicate: Mapping[str, Any]) -> bool:
 
 def _validate_schema(schema: Mapping[str, Any], owner: str) -> None:
     try:
-        Draft202012Validator.check_schema(schema)
-    except SchemaError as exc:
-        _invalid(f"{owner} contains an invalid JSON Schema: {exc.message}")
+        validate_schema(dict(schema))
+    except StructuredOutputError as exc:
+        _invalid(f"{owner} contains an invalid JSON Schema: {exc}")
 
 
 def _validate_reference(reference: Mapping[str, Any], known_nodes: set[str], owner: str) -> None:

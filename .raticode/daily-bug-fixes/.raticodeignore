@@ -1,0 +1,24 @@
+# Sensitive local configuration
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Development and runtime state
+.git/
+.venv/
+venv/
+node_modules/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+logs/
+checkpoints/
+compiled/
+agent-memory/

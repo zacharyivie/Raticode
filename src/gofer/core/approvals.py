@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import smtplib
+import ssl
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -386,6 +387,7 @@ class DesktopNotificationAdapter:
                 notify_send,
                 "-u",
                 notification.urgency,
+                "--",
                 notification.title,
                 notification.body,
             ],
@@ -509,7 +511,7 @@ def _send_email_sync(notification: Notification) -> None:
         timeout=notification.timeout_seconds,
     ) as smtp:
         if notification.smtp_starttls:
-            smtp.starttls()
+            smtp.starttls(context=ssl.create_default_context())
         if notification.smtp_username or notification.smtp_password:
             smtp.login(notification.smtp_username or "", notification.smtp_password or "")
         smtp.send_message(message)

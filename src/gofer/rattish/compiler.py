@@ -3077,11 +3077,15 @@ class RattishCompiler:
             value = self._value(field["value"])
             sensitive_paths = list(self._sensitive_value_paths(value, field_name))
             if field_name == "url" and isinstance(value, str):
+                try:
+                    query = urllib.parse.urlsplit(value).query
+                except ValueError:
+                    # Preflight reports malformed authorities. Credential
+                    # warnings must not crash compilation or quote URL contents.
+                    query = ""
                 sensitive_paths.extend(
                     f"url.{key}"
-                    for key, _ in urllib.parse.parse_qsl(
-                        urllib.parse.urlsplit(value).query, keep_blank_values=True
-                    )
+                    for key, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)
                     if _SENSITIVE_NAME.search(key)
                 )
             for path in sorted(set(sensitive_paths)):

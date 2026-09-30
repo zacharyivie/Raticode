@@ -71,6 +71,22 @@ for (const entry of corpus.cases) {
   });
 }
 
+test("copy rejects a descendant with two leading dots before creating directories", async (t) => {
+  const { inside } = await fixture(t);
+  const source = path.join(inside, "source");
+  const destination = path.join(source, "..copy");
+  await fsp.mkdir(source);
+  let checks = 0;
+  const authorize = () => {
+    // Bound the regression if the self-copy guard fails and recursion begins.
+    if (++checks > 40) throw new Error("Copy recursed into its destination");
+  };
+  await assert.rejects(safeFiles.copyPath(source, destination, {
+    authorizeSource: authorize, authorizeDestination: authorize,
+  }), /Cannot copy a directory into itself/);
+  assert.equal(fs.existsSync(destination), false);
+});
+
 test("actual editor save rejects dangling and hard links without touching outside content", async (t) => {
   const { inside, outside, security } = await fixture(t);
   const save = mainFunction("writeTextFile", {
@@ -360,7 +376,7 @@ test("user file navigation opens outside roots without granting agent access", a
   assert.equal(security.resolveAllowedPath(outside, { grantId: handle.grantId }), outside);
   assert.throws(() => security.resolveAllowedPath(path.dirname(outside), { grantId: handle.grantId }), /outside/);
   const pathHandle = mainFunction("pathHandle", { getIpcSecurity: () => security });
-  const read = mainFunction("readTextFile", { fs, resolveExactPath: security.resolveAllowedPath, pathHandle });
+  const read = mainFunction("readTextFile", { fs, safeFiles, resolveExactPath: security.resolveAllowedPath, pathHandle });
   assert.equal((await read(null, { targetPath: file, grantId: handle.grantId })).content, "# Local notes");
   assert.equal(pathHandle(file).grantId, handle.grantId);
   const save = mainFunction("writeTextFile", { safeFiles, resolveExactPath: security.resolveAllowedPath, pathHandle });
@@ -424,7 +440,7 @@ test("desktop Git and files work outside agent roots with absent or stale grants
   execFileSync("git", ["-C", outside, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "Desktop history"]);
   const file = path.join(outside, "draft.txt");
   await fsp.writeFile(file, "draft");
-  const context = { fs, path, getIpcSecurity: () => security, ...git };
+  const context = { fs, path, safeFiles, getIpcSecurity: () => security, ...git };
   context.resolveExactPath = mainFunction("resolveExactPath", context);
   context.resolveGitProjectDirectory = mainFunction("resolveGitProjectDirectory", context);
   context.pathHandle = mainFunction("pathHandle", context);
@@ -510,4 +526,61 @@ test("a sibling worktree can be created, selected and checked out without prior 
   assert.equal(security.isUserGrant(selected.grantId), false);
   await mainFunction("gitSwitchBranch", context)(null, { projectRoot: sibling, branch: "other", grantId: "expired" });
   assert.equal(execFileSync("git", ["-C", sibling, "branch", "--show-current"], { encoding: "utf8" }).trim(), "other");
+});
+
+for (const name of ["readTextFile", "readBinaryPreview"]) {
+  for (const swapParent of [false, true]) {
+    test(`${name} rejects ${swapParent ? "parent" : "file"} links swapped after authorization`, async (t) => {
+      const { inside, outside } = await fixture(t);
+      const parent = path.join(inside, "folder");
+      await fsp.mkdir(parent);
+      const target = path.join(parent, "image.png");
+      await fsp.writeFile(target, "original");
+      await fsp.writeFile(path.join(outside, "image.png"), "private text");
+      try {
+        await fsp.symlink(outside, path.join(inside, "probe"), "dir");
+        await fsp.unlink(path.join(inside, "probe"));
+      } catch (error) {
+        if (["EPERM", "EACCES"].includes(error.code)) return t.skip("Symlinks unavailable");
+        throw error;
+      }
+      const resolve = () => {
+        if (swapParent) {
+          fs.renameSync(parent, path.join(inside, "moved"));
+          fs.symlinkSync(outside, parent, "dir");
+        } else {
+          fs.unlinkSync(target);
+          fs.symlinkSync(path.join(outside, "image.png"), target);
+        }
+        return target;
+      };
+      const read = mainFunction(name, {
+        fs, safeFiles, resolveWorkflowSource: resolve,
+        ...(name === "readBinaryPreview" ? { resolveExactPath: resolve } : {}),
+        imageMimeType: () => "image/png", pathHandle: target => ({ path: target }),
+      });
+      await assert.rejects(read(null, { targetPath: target }));
+    });
+  }
+}
+
+test("bounded desktop reads preserve text, image bytes and size errors", async t => {
+  const { inside } = await fixture(t);
+  const context = {
+    fs, safeFiles, resolveExactPath: target => target,
+    imageMimeType: () => "image/png", pathHandle: target => ({ path: target }),
+  };
+  const text = mainFunction("readTextFile", context);
+  const image = mainFunction("readBinaryPreview", context);
+  const target = path.join(inside, "ordinary.png");
+  await fsp.writeFile(target, "hello");
+  assert.equal((await text(null, { targetPath: target })).content, "hello");
+  const bytes = Buffer.from([137, 80, 78, 71, 0, 255]);
+  await fsp.writeFile(target, bytes);
+  assert.equal((await image(null, { targetPath: target })).dataUrl, `data:image/png;base64,${bytes.toString("base64")}`);
+  await assert.rejects(text(null, { targetPath: target }), /Binary files/);
+  await fsp.truncate(target, 2 * 1024 * 1024 + 1);
+  await assert.rejects(text(null, { targetPath: target }), /too large to edit/);
+  await fsp.truncate(target, 25 * 1024 * 1024 + 1);
+  await assert.rejects(image(null, { targetPath: target }), /too large to preview/);
 });

@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
+
 from gofer.core.agent import AgentResult
-from gofer.core.http import HttpClient, HttpRequest, UrllibHttpClient
+from gofer.core.http import HttpClient, HttpRequest, HttpResponse, UrllibHttpClient
 from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.subscriptions.base import Subscription
+from gofer.subscriptions.usage import api_quota_windows, normalize_usage, track_invocation
 
 
 class DirectProviderError(RuntimeError):
+    pass
+
+
+class _ProviderStopped(DirectProviderError):
     pass
 
 
@@ -22,6 +31,7 @@ class DirectApiSubscription(Subscription):
     def __init__(self, http_client: HttpClient | None = None) -> None:
         self._http_client = http_client or UrllibHttpClient()
 
+    @track_invocation
     async def execute(
         self,
         prompt: str,
@@ -30,7 +40,7 @@ class DirectApiSubscription(Subscription):
         mcp_servers: list[str],
         env: dict[str, str],
         timeout: float | None = None,
-        cancel_event: Any | None = None,
+        cancel_event: threading.Event | None = None,
         extra_paths: list[Path] | None = None,
         max_output_bytes: int | None = None,
         on_thought: Any | None = None,
@@ -51,13 +61,23 @@ class DirectApiSubscription(Subscription):
             )
 
         start = time.monotonic()
+        quota_metadata: dict[str, object] = {}
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _ProviderStopped("Provider request stopped by user")
             request = self._request(prompt, api_key, provider_settings, timeout)
-            response = await self._http_client.send(request)
+            response = await self._send(request, cancel_event)
+            windows = api_quota_windows(self.subscription_name, response.headers)
+            if windows:
+                quota_metadata = {
+                    "quota_windows": windows,
+                    "quota_observed_at": datetime.now(UTC).isoformat(),
+                }
             payload = _json_body(response.body)
             if response.status >= 400:
                 raise DirectProviderError(_normalized_error(response.status, payload))
             message, metadata = self._parse_success(payload, provider_settings)
+            metadata.update(quota_metadata)
             metadata.setdefault("provider", self.subscription_name)
             metadata.setdefault("profile", provider_settings.profile_name)
             metadata.setdefault("model", provider_settings.model or self.default_model)
@@ -80,13 +100,14 @@ class DirectApiSubscription(Subscription):
                 agent_id="",
                 success=False,
                 output=str(exc),
-                exit_code=1,
+                exit_code=130 if isinstance(exc, _ProviderStopped) else 1,
                 duration_seconds=time.monotonic() - start,
                 thoughts=[],
                 message=str(exc),
                 provider=self.subscription_name,
                 profile=provider_settings.profile_name,
                 model=provider_settings.model or self.default_model,
+                usage_metadata=quota_metadata,
             )
         except Exception as exc:  # noqa: BLE001
             message = f"Provider service is temporarily unavailable: {exc}"
@@ -101,7 +122,42 @@ class DirectApiSubscription(Subscription):
                 provider=self.subscription_name,
                 profile=provider_settings.profile_name,
                 model=provider_settings.model or self.default_model,
+                usage_metadata=quota_metadata,
             )
+
+    async def _send(
+        self, request: HttpRequest, cancel_event: threading.Event | None
+    ) -> HttpResponse:
+        if cancel_event is None:
+            return await self._http_client.send(request)
+
+        response: HttpResponse | None = None
+        error: Exception | None = None
+
+        async def send() -> None:
+            nonlocal response, error
+            try:
+                response = await self._http_client.send(request)
+            except Exception as exc:
+                # Re-raise outside the task group to preserve existing error handling.
+                error = exc
+            finally:
+                group.cancel_scope.cancel()
+
+        async with anyio.create_task_group() as group:
+            if not cancel_event.is_set():
+                group.start_soon(send)
+                while not cancel_event.is_set():
+                    await anyio.sleep(0.05)
+            # Cancelling the HTTP coroutine closes its active connection. The
+            # task group waits for cleanup before returning a stopped result.
+            group.cancel_scope.cancel()
+        if cancel_event.is_set():
+            raise _ProviderStopped("Provider request stopped by user")
+        if error is not None:
+            raise error
+        assert response is not None
+        return response
 
     def _build_command(
         self,
@@ -175,7 +231,7 @@ class OpenAiApiSubscription(DirectApiSubscription):
         message = _openai_message(payload)
         raw_usage = payload.get("usage")
         usage = cast(dict[str, Any], raw_usage) if isinstance(raw_usage, dict) else {}
-        metadata = _usage_metadata(usage)
+        metadata = normalize_usage(self.subscription_name, usage)
         metadata["model"] = str(payload.get("model") or settings.model or self.default_model)
         return message, metadata
 
@@ -220,7 +276,7 @@ class AnthropicApiSubscription(DirectApiSubscription):
         message = _anthropic_message(payload)
         raw_usage = payload.get("usage")
         usage = cast(dict[str, Any], raw_usage) if isinstance(raw_usage, dict) else {}
-        metadata = _usage_metadata(usage)
+        metadata = normalize_usage(self.subscription_name, usage)
         metadata["model"] = str(payload.get("model") or settings.model or self.default_model)
         return message, metadata
 

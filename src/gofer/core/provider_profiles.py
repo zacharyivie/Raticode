@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from gofer.core.cursor_models import cursor_model_id
+from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.paths import get_data_dir
 
 ProfileSubscription = Literal[
@@ -58,7 +59,7 @@ class ProviderProfile(BaseModel):
     name: str
     subscription: ProfileSubscription
     model: str | None = None
-    timeout: float | None = None
+    timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     effort: str | None = Field(
         default=None,
         validation_alias=AliasChoices("effort", "reasoning"),
@@ -82,19 +83,12 @@ class ProviderProfile(BaseModel):
         validate_provider_profile_name(value)
         return value
 
-    @field_validator("timeout")
-    @classmethod
-    def _validate_timeout(cls, value: float | None) -> float | None:
-        if value is not None and value <= 0:
-            raise ValueError("Profile timeout must be greater than 0")
-        return value
-
 
 class ResolvedProviderSettings(BaseModel):
     profile_name: str | None = None
     subscription: ProfileSubscription
     model: str | None = None
-    timeout: float | None = None
+    timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     effort: str | None = Field(
         default=None,
         validation_alias=AliasChoices("effort", "reasoning"),
@@ -140,14 +134,20 @@ def save_provider_profiles(
     data_dir: Path | None = None,
 ) -> None:
     path = profile_store_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Resolve the configured data directory, retaining support for relocated
+    # data roots while leaving the destination entry itself unresolved.
+    path = path.parent.resolve() / path.name
     payload = {
         "profiles": {
             name: profile.model_dump(exclude_none=True)
             for name, profile in sorted(profiles.items())
         }
     }
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    # Profiles may retain explicitly opted-in or legacy plaintext credentials.
+    # Publish privately and atomically without truncating files through links.
+    content = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    with atomic_binary_output(path) as output:
+        output.write(content)
 
 
 def is_sensitive_env_name(name: str) -> bool:

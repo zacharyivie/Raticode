@@ -16,7 +16,7 @@ from gofer.core.runner import (
     run_worker_once,
     workflow_required_capabilities,
 )
-from gofer.core.workflow import AgenticWorkflow
+from gofer.core.workflow import AgenticWorkflow, resolve_workflow_parameters
 from gofer.utils.paths import get_data_dir
 
 app = typer.Typer(help="Manage remote runners and queued workflow runs", no_args_is_help=True)
@@ -91,9 +91,11 @@ def queue_run(
 ) -> None:
     """Queue a workflow run for a separate runner process."""
     base = data_dir or get_data_dir()
+    parameters = _parse_parameters(parameter or [])
     try:
         workflow_obj, workflow_path = _resolve_workflow(workflow, base)
         workflow_obj.validate(workflow_path, base)
+        resolved_inputs = resolve_workflow_parameters(workflow_obj.config, parameters)
     except Exception as exc:
         console.print(f"[red]Queue failed: {exc}[/red]")
         raise typer.Exit(1)
@@ -103,7 +105,7 @@ def queue_run(
         workflow_path,
         priority=priority,
         trigger=trigger,
-        parameters=_parse_parameters(parameter or []),
+        parameters={"workflowInputs": resolved_inputs},
         target_labels=label or [],
         required_capabilities=workflow_required_capabilities(workflow_obj),
     )

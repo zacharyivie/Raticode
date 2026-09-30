@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import secrets
 import select
@@ -13,6 +15,7 @@ import shutil
 import signal
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -41,6 +44,12 @@ from gofer.core.provider_preferences import (
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
 from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.usage import summarize_node_outputs
+from gofer.core.usage_credentials import (
+    UsageCredentialError,
+    save_usage_credentials,
+    usage_credentials_payload,
+)
+from gofer.core.usage_service import refresh_usage, usage_overview
 from gofer.core.watcher import WorkflowWatcher
 from gofer.core.workflow import AgenticWorkflow
 from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
@@ -137,6 +146,11 @@ from gofer.ui.chat_media import (
     transcribe_chat_audio,
 )
 from gofer.ui.chat_steering import ChatSteering, ChatSteeringConflict, ChatTurn
+from gofer.ui.generation_jobs import GenerationJobs
+from gofer.ui.organization_operations import READ_OPERATIONS
+from gofer.ui.organization_packages import read_directory
+from gofer.ui.organization_store import OrganizationConflict
+from gofer.ui.organizations import OrganizationManager
 from gofer.ui.swarms import SwarmManager
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
@@ -148,6 +162,7 @@ UI_MAX_HANDLERS = 32
 UI_MAX_EXPENSIVE_REQUESTS = 8
 UI_READ_TIMEOUT_SECONDS = 15.0
 UI_REQUEST_READ_DEADLINE_SECONDS = 30.0
+UI_JSON_MAX_DEPTH = 64
 UI_JOB_DEADLINE_SECONDS = 24 * 60 * 60
 COMMIT_MESSAGE_MAX_BODY_BYTES = 2 * 1024 * 1024
 DEFAULT_DEV_FRONTEND_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173"}
@@ -177,16 +192,27 @@ def _optional_datetime_query(query: dict[str, list[str]], name: str) -> datetime
 
 def _optional_body_int(body: dict[str, Any], name: str) -> int | None:
     value = body.get(name)
-    if value in {None, ""}:
+    if value is None or value == "":
         return None
+    if type(value) not in {str, int}:
+        raise ValueError(f"{name} must be an integer")
     return int(str(value))
 
 
 def _optional_body_str(body: dict[str, Any], name: str) -> str | None:
     value = body.get(name)
-    if value in {None, ""}:
+    if value is None or value == "":
         return None
-    return str(value)
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
+    return value
+
+
+def _finite_json_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Request body numbers must be finite")
+    return number
 
 
 def sync_workflow_schedules(data_dir: Path, scheduler: WorkflowScheduler) -> None:
@@ -283,10 +309,17 @@ class GoferUiServer(ThreadingHTTPServer):
     async def _device_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
         """Use the desktop's provider, resource and swarm services for shared turns."""
         workflow = dict(options.get("workflow") or {})
+        if workflow.get("organizationRun"):
+            async with aclosing(stream_workflow_chat(**options)) as stream:
+                async for event in stream:
+                    yield event
+            return
         config = workflow.get("remSwarmAccess") or {}
         project = workflow.get("projectRoot")
         if config.get("enabled") is not True or not project:
-            async with aclosing(stream_workflow_chat(**options)) as stream:
+            async with aclosing(
+                self.organizations.rem_stream(stream_workflow_chat, **options)
+            ) as stream:
                 async for event in stream:
                     yield event
             return
@@ -306,7 +339,10 @@ class GoferUiServer(ThreadingHTTPServer):
             ] + [{"name": "swarm", "type": "http", "url": url}]
             workflow["remResources"] = resources
             async with aclosing(
-                stream_workflow_chat(**{**options, "workflow": workflow, "trusted_swarm_url": url})
+                self.organizations.rem_stream(
+                    stream_workflow_chat,
+                    **{**options, "workflow": workflow, "trusted_swarm_url": url},
+                )
             ) as stream:
                 async for event in stream:
                     yield event
@@ -325,6 +361,7 @@ class GoferUiServer(ThreadingHTTPServer):
         self.resource_limits = resource_limits or bundle_resource_limits_from_env()
         self.chat_steering = ChatSteering(data_dir)
         self.chat_jobs = ChatJobs(data_dir, UI_MAX_EXPENSIVE_REQUESTS)
+        self.generation_jobs = GenerationJobs(data_dir)
         self.provider_auth = ProviderAuthSessions()
         # Optional device dependencies must not prevent normal local UI startup.
         self.devices: Any = None
@@ -367,9 +404,18 @@ class GoferUiServer(ThreadingHTTPServer):
         self._continuous_thread: threading.Thread | None = None
         self.swarms = SwarmManager(
             data_dir,
+            stream=self._swarm_chat_source,
             resource_limits=self.resource_limits,
             authorize_workspace=self._authorize_swarm_workspace,
             max_concurrency=int(os.environ.get("GOFER_SWARM_MAX_CONCURRENCY", "8")),
+        )
+
+        self.organizations = OrganizationManager(
+            data_dir,
+            stream=self._employee_chat_source,
+            swarms=self.swarms,
+            fleet=self.devices,
+            enabled=os.environ.get("RATICODE_EXPERIMENTAL_ORGANIZATIONS") == "1",
         )
 
         if self.devices is not None:
@@ -380,6 +426,82 @@ class GoferUiServer(ThreadingHTTPServer):
                 self.resource_limits,
                 source=self._device_chat_source,
             )
+
+    async def _swarm_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
+        from gofer.ui.organization_operations import resolve_secrets
+
+        workflow = dict(options.get("workflow") or {})
+        scope = workflow.get("organizationRun")
+        if scope:
+            org = self.organizations.store.get("", scope["organizationId"])
+            if org["runtime"]["state"] != "running" or not any(
+                t["claim"] == scope["parentRunId"] for t in org["runtime"]["tasks"]
+            ):
+                raise ValueError("Organization revoked this swarm run")
+            employee = next(e for e in org["config"]["employees"] if e["id"] == scope["employeeId"])
+            resources = copy.deepcopy(workflow.get("remResources") or {})
+            values = resolve_secrets(org, employee, resources)
+            with self.organizations._lock:
+                self.organizations._secret_values.setdefault(scope["parentRunId"], []).extend(
+                    values
+                )
+            workflow["remResources"] = resources
+        async with aclosing(stream_workflow_chat(**{**options, "workflow": workflow})) as stream:
+            async for event in stream:
+                yield self.organizations._clean(event) if scope else event
+
+    async def _employee_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
+        from gofer.ui.device_tools import stream_with_fleet_tools
+        from gofer.ui.rem_threads import stream_with_thread_tools
+
+        workflow = dict(options["workflow"])
+        project = Path(workflow["projectRoot"])
+        workspace_paths = workflow.pop("organizationWorkspacePaths", [str(project)])
+        workspace_grants = {}
+        for value in workspace_paths:
+            path = Path(value)
+            if not path.is_dir() or str(path.resolve()) != value:
+                raise ValueError("An organization workspace moved or is no longer available")
+            workspace_grants[value] = self.path_grants.register(path)
+        with self.swarms.rem_session(
+            project,
+            read_only=True,
+            workspace_grants=workspace_grants,
+        ) as url:
+            resources = dict(workflow.get("remResources") or {})
+            resources["mcpServers"] = [
+                s for s in resources.get("mcpServers", []) if s["name"] != "swarm"
+            ] + [{"name": "swarm", "type": "http", "url": url}]
+            workflow["remResources"] = resources
+            workflow["remThreads"] = {
+                "projects": [
+                    {"root": value, "name": Path(value).name, "grantId": grant}
+                    for value, grant in workspace_grants.items()
+                ]
+            }
+
+            async def fleet_source(**kwargs: Any) -> AsyncGenerator[dict[str, Any], None]:
+                async with aclosing(
+                    stream_with_fleet_tools(
+                        stream_workflow_chat, self.devices, read_only_override=True, **kwargs
+                    )
+                ) as stream:
+                    async for event in stream:
+                        yield event
+
+            async with aclosing(
+                stream_with_thread_tools(
+                    fleet_source,
+                    **{
+                        **options,
+                        "workflow": workflow,
+                        "trusted_swarm_url": url,
+                        "resource_limits": self.resource_limits,
+                    },
+                )
+            ) as stream:
+                async for event in stream:
+                    yield event
 
     def _authorize_swarm_workspace(self, path: Path, grant_id: str | None) -> None:
         canonical = _canonical_path_for_containment(path)
@@ -393,6 +515,12 @@ class GoferUiServer(ThreadingHTTPServer):
             )
 
     def server_close(self) -> None:
+        generation_jobs = getattr(self, "generation_jobs", None)
+        if generation_jobs is not None:
+            generation_jobs.close()
+        organizations = getattr(self, "organizations", None)
+        if organizations is not None:
+            organizations.close()
         devices = getattr(self, "devices", None)
         if devices is not None:
             devices.close()
@@ -635,10 +763,34 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Too many active requests; retry shortly"}, status=503)
                 return
         try:
+            if parsed.path == "/api/organizations":
+                self._dispatch_organization_request(method)
+                return
+            if parsed.path.startswith("/api/organization-webhooks/") and method == "POST":
+                if not self.server.organizations.enabled:
+                    self._send_json({"error": "Experimental organizations is disabled"}, status=403)
+                    return
+                from gofer.ui.organization_webhooks import receive
+
+                parts = parsed.path.removeprefix("/api/organization-webhooks/").split("/")
+                if len(parts) != 2 or not all(parts):
+                    raise ValueError("Invalid organization webhook URL")
+                self._read_json(limit=65536)
+                try:
+                    receipt = receive(
+                        self.server.organizations, parts[0], parts[1], self.headers, self._raw_body
+                    )
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=403)
+                    return
+                self._send_json(receipt, status=202)
+                return
             if parsed.path == "/api/swarms" or parsed.path.startswith("/api/swarms/"):
                 self._dispatch_swarm_request(method)
                 return
             getattr(self, f"_dispatch_{method}")()
+        except OrganizationConflict as exc:
+            self._send_json({"error": str(exc)}, status=409)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             self._send_json({"error": str(exc)}, status=400)
         except TimeoutError:
@@ -646,6 +798,119 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         finally:
             if acquired and slots is not None:
                 slots.release()
+
+    def _dispatch_organization_request(self, method: str) -> None:
+        if method == "OPTIONS":
+            self._dispatch_OPTIONS()
+            return
+        if method not in {"GET", "POST"}:
+            self._send_json({"error": "Method not allowed"}, status=405)
+            return
+        if (
+            method == "GET"
+            and _optional_query(parse_qs(urlparse(self.path).query), "action") == "availability"
+        ):
+            self._send_json(
+                {"result": {"enabled": self.server.organizations.enabled, "experimental": True}}
+            )
+            return
+        if not self.server.organizations.enabled:
+            self._send_json({"error": "Experimental organizations is disabled"}, status=403)
+            return
+        query = parse_qs(urlparse(self.path).query)
+        body = self._read_json(limit=24 * 1024 * 1024) if method == "POST" else {}
+        project = body.get("projectRoot") or _optional_query(query, "projectRoot")
+        project = project or ""
+        if not isinstance(project, str) or (project and not Path(project).is_absolute()):
+            raise ValueError("Project folder must be an absolute path")
+        action = body.get("action") or _optional_query(query, "action") or "list"
+        read_actions = {
+            "list",
+            "read",
+            "history",
+            "events",
+            "export",
+            "help",
+            "providers",
+        } | READ_OPERATIONS
+        if method == "GET" and action not in read_actions:
+            raise ValueError("Mutations require POST")
+        if method == "POST" and project:
+            try:
+                self._assert_bundle_path_allowed(
+                    Path(project), body.get("grantId"), must_exist=True
+                )
+            except WorkflowBundleError as exc:
+                self._send_json({"error": str(exc)}, status=403)
+                return
+        params = body.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError("Expected params object")
+        if action in {"import", "import_preview"}:
+            if params.get("path"):
+                try:
+                    root = self._assert_bundle_path_allowed(
+                        Path(params["path"]), params.get("grantId"), must_exist=True
+                    )
+                except WorkflowBundleError as exc:
+                    self._send_json({"error": str(exc)}, status=403)
+                    return
+                params = {
+                    **{key: value for key, value in params.items() if key != "path"},
+                    "files": read_directory(root),
+                }
+        if action in {"create", "configure"} and isinstance(params.get("config"), dict):
+            self._validate_second_brain(
+                {"workflow": {"remSecondBrain": params["config"].get("remSecondBrain", {})}}
+            )
+        if action in {"create", "configure"} and isinstance(params.get("config"), dict):
+            oid = body.get("organizationId") or _optional_query(query, "organizationId")
+            if action == "configure" and not isinstance(oid, str):
+                raise ValueError("organizationId is required")
+            current = (
+                self.server.organizations.store.get(project, str(oid))["config"]
+                if action == "configure"
+                else {}
+            )
+            previous = set(current.get("projectRoots", [])) | {
+                p["workspacePath"] for p in current.get("projects", []) if p.get("workspacePath")
+            }
+            paths = list(params["config"].get("projectRoots", [])) + [
+                p["workspacePath"]
+                for p in params["config"].get("projects", [])
+                if p.get("workspacePath")
+            ]
+            for path in paths:
+                if path in previous:
+                    continue
+                try:
+                    resolved = self._assert_bundle_path_allowed(
+                        Path(path),
+                        body.get("workspaceGrants", {}).get(path),
+                        must_exist=True,
+                    )
+                except WorkflowBundleError as exc:
+                    self._send_json({"error": str(exc)}, status=403)
+                    return
+                if not resolved.is_dir():
+                    raise ValueError("Organization workspaces must be directories")
+        result = self.server.organizations.call(
+            str(Path(project).resolve()) if project else "",
+            "user",
+            {
+                "action": action,
+                "organizationId": body.get("organizationId")
+                or _optional_query(query, "organizationId"),
+                "params": params
+                if method == "POST"
+                else {
+                    key: values[0]
+                    for key, values in query.items()
+                    if key not in {"action", "projectRoot", "organizationId"}
+                },
+            },
+        )
+        self._send_json({"result": result})
 
     def _dispatch_swarm_request(self, method: str) -> None:
         if method == "OPTIONS":
@@ -759,10 +1024,36 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
 
+        if parsed.path == "/api/generation-jobs":
+            query = parse_qs(parsed.query)
+            try:
+                kind = query.get("kind", ["theme"])[0]
+                root = ""
+                if kind == "commit":
+                    root = str(
+                        self._assert_bundle_path_allowed(
+                            Path(query.get("projectRoot", [""])[0]),
+                            query.get("grantId", [None])[0],
+                            must_exist=True,
+                        )
+                    )
+                self._send_json(
+                    {
+                        "jobs": self.server.generation_jobs.list(
+                            kind,
+                            root,
+                            query.get("branch", [""])[0],
+                        ),
+                    }
+                )
+            except (ValueError, OSError, WorkflowBundleError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
         if parsed.path == "/api/desktop/trusted-roots":
             secret = getattr(self.server, "path_grant_secret", "")
             supplied = self.headers.get("X-Gofer-Desktop-Grant-Secret", "")
-            if not secret or not hmac.compare_digest(secret, supplied):
+            if not secret or not hmac.compare_digest(secret.encode(), supplied.encode()):
                 self._send_json({"error": "Desktop authentication required"}, status=403)
                 return
             self._send_json({"roots": list(getattr(self.server, "trusted_project_roots", ()))})
@@ -890,7 +1181,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/provider/commit-settings":
-            self._send_json(commit_message_preference())
+            from gofer.core.commit_message_format import DEFAULT_COMMIT_MESSAGE_TEMPLATE
+
+            self._send_json(
+                {**commit_message_preference(), "defaultTemplate": DEFAULT_COMMIT_MESSAGE_TEMPLATE}
+            )
             return
 
         if parsed.path == "/api/provider/capabilities":
@@ -907,6 +1202,33 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(provider_capability_service().snapshot_payload())
             else:
                 self._send_json(provider_capabilities_payload(refresh=refresh))
+            return
+
+        if parsed.path == "/api/usage/credentials":
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(
+                    usage_credentials_payload(
+                        query.get("provider", [""])[0],
+                        query.get("profile", [None])[0],
+                        data_dir=self._request_data_dir(query),
+                    )
+                )
+            except (UsageCredentialError, ValueError):
+                self._send_json({"error": "Invalid usage reporting account."}, status=400)
+            return
+
+        if parsed.path == "/api/usage/overview":
+            query = parse_qs(parsed.query)
+            try:
+                self._send_json(
+                    usage_overview(
+                        self._request_data_dir(query),
+                        days=int(query.get("days", ["30"])[0]),
+                    )
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
             return
 
         if parsed.path == "/api/provider/profiles":
@@ -1094,6 +1416,43 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/usage/credentials":
+            query = parse_qs(parsed.query)
+            try:
+                body = self._read_json(limit=64 * 1024)
+                if not isinstance(body, dict):
+                    raise UsageCredentialError("Expected reporting settings.")
+                self._send_json(
+                    save_usage_credentials(
+                        body.get("provider", ""),
+                        body.get("profile"),
+                        body.get("values", {}),
+                        body.get("remove", []),
+                        data_dir=self._request_data_dir(query),
+                    )
+                )
+            except UsageCredentialError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            except (ValueError, json.JSONDecodeError):
+                self._send_json({"error": "Invalid reporting settings."}, status=400)
+            return
+
+        if parsed.path == "/api/usage/refresh":
+            query = parse_qs(parsed.query)
+            try:
+                self._read_json()
+                self._send_json(
+                    self._run_async(
+                        refresh_usage(
+                            self._request_data_dir(query),
+                            days=int(query.get("days", ["30"])[0]),
+                        )
+                    )
+                )
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
         if parsed.path == "/api/devices":
             if self.server.devices is None:
                 self._send_json({"error": "Device service dependencies unavailable"}, status=503)
@@ -1192,7 +1551,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             except (ValueError, OSError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
-            self._send_json({"saved": True})
+            self._send_json({"saved": True, **commit_message_preference()})
             return
 
         if parsed.path == "/api/provider/settings":
@@ -1688,6 +2047,44 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 return
             self._sync_schedules()
             self._send_json(payload)
+            return
+
+        if parsed.path in {"/api/generation-jobs", "/api/generation-jobs/dismiss"}:
+            try:
+                body = self._read_json(limit=CHAT_ATTACHMENT_MAX_TOTAL_BYTES * 2)
+                if parsed.path.endswith("/dismiss"):
+                    self.server.generation_jobs.dismiss(str(body.get("id", "")))
+                    self._send_json({"ok": True})
+                    return
+                root = None
+                if body.get("kind") == "commit":
+                    root = self._assert_bundle_path_allowed(
+                        Path(str(body.get("projectRoot", ""))),
+                        body.get("grantId"),
+                        must_exist=True,
+                    )
+                self._send_json(
+                    self.server.generation_jobs.start(str(body.get("kind", "")), body, root),
+                    status=202,
+                )
+            except (ValueError, OSError, WorkflowBundleError, subprocess.SubprocessError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/report-themes/generate":
+            from gofer.ui.report_theme_generation import generate_report_theme
+
+            try:
+                body = self._read_json(limit=CHAT_ATTACHMENT_MAX_TOTAL_BYTES * 2)
+                if "application/x-ndjson" in self.headers.get("Accept", ""):
+                    self._send_stream_headers()
+                    asyncio.run(self._stream_report_theme(body))
+                else:
+                    self._send_json(asyncio.run(generate_report_theme(body)))
+            except (ValueError, ChatProviderError, OSError, TimeoutError) as exc:
+                self._send_json(
+                    {"error": str(exc) or "Rem could not generate the theme."}, status=400
+                )
             return
 
         if parsed.path == "/api/chat/commit-message":
@@ -2392,6 +2789,32 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         finally:
             events.close()
 
+    async def _stream_report_theme(self, body: dict[str, Any]) -> None:
+        from gofer.ui.report_theme_generation import generate_report_theme
+
+        cancel_event = threading.Event()
+        task = asyncio.create_task(
+            generate_report_theme(body, self._write_stream_event, cancel_event)
+        )
+        try:
+            while not task.done():
+                # Keep quiet generations connected and observe cancelled requests.
+                await asyncio.wait({task}, timeout=1)
+                self._check_discovery_cancelled()
+                if not task.done():
+                    self._write_stream_event({"type": "heartbeat"})
+            self._write_stream_event({"type": "final", "theme": task.result()})
+        except (BrokenPipeError, ConnectionResetError, DiscoveryCancelled):
+            pass
+        except Exception as exc:  # noqa: BLE001
+            self._write_stream_event(
+                {"type": "error", "error": str(exc) or "Rem could not generate the theme."}
+            )
+        finally:
+            cancel_event.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _stream_chat_response(
         self,
         body: dict[str, Any],
@@ -2425,10 +2848,29 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 else stream_workflow_chat
             )
 
+            async def organization_source(
+                **org_options: Any,
+            ) -> AsyncGenerator[dict[str, Any], None]:
+                manager = getattr(self.server, "organizations", None)
+                source = (
+                    manager.rem_stream(
+                        factory,
+                        actor=f"Rem:{body.get('conversationId', 'conversation')}",
+                        management_read_only=options.get("permission_mode")
+                        in {"read-only", "plan"},
+                        **org_options,
+                    )
+                    if manager is not None
+                    else factory(**org_options)
+                )
+                async with aclosing(source) as stream:
+                    async for event in stream:
+                        yield event
+
             async def fleet_source(**fleet_options: Any) -> AsyncGenerator[dict[str, Any], None]:
                 async with aclosing(
                     stream_with_fleet_tools(
-                        factory, getattr(self.server, "devices", None), **fleet_options
+                        organization_source, getattr(self.server, "devices", None), **fleet_options
                     )
                 ) as fleet_stream:
                     async for event in fleet_stream:
@@ -2576,8 +3018,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 "Retry your message to renew folder access. If it keeps failing, "
                 "reselect the folder in Settings > Rem or restart Raticode."
             ) from exc
-        if config.get("format", "md") not in {"md", "html"}:
-            raise ValueError("Choose Markdown or HTML for Second Brain reports.")
+        if config.get("format", "md") not in {"md", "html", "slides", "pdf"}:
+            raise ValueError("Choose Markdown, HTML, Slides, or PDF for reports.")
 
     def _assert_bundle_path_allowed(
         self,
@@ -2610,9 +3052,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(server, GoferUiServer):
             raise ValueError("Desktop path grants are unavailable")
         secret = server.path_grant_secret
-        if not secret or not hmac.compare_digest(
-            self.headers.get("X-Gofer-Desktop-Grant-Secret", ""), secret
-        ):
+        supplied = self.headers.get("X-Gofer-Desktop-Grant-Secret", "")
+        if not secret or not hmac.compare_digest(supplied.encode(), secret.encode()):
             raise ValueError("Desktop path grant registration is unauthorized")
         target_path = str(body.get("path") or "").strip()
         grant_id = str(body.get("grantId") or "").strip()
@@ -2645,11 +3086,28 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             )
         with self._read_deadline():
             raw_body = self.rfile.read(content_length)
+        self._raw_body = raw_body
         if len(raw_body) != content_length:
             raise json.JSONDecodeError("Incomplete request body", "", 0)
-        payload = json.loads(raw_body.decode("utf-8") or "{}")
+        try:
+            payload = json.loads(
+                raw_body.decode("utf-8") or "{}",
+                parse_float=_finite_json_number,
+                parse_constant=_finite_json_number,
+            )
+        except RecursionError:
+            raise json.JSONDecodeError("Request body nesting is too deep", "", 0) from None
         if not isinstance(payload, dict):
             raise WorkflowCreateError("Request body must be a JSON object")
+        pending: list[tuple[object, int]] = [(payload, 0)]
+        while pending:
+            item, depth = pending.pop()
+            if depth > UI_JSON_MAX_DEPTH:
+                raise json.JSONDecodeError("Request body nesting is too deep", "", 0)
+            if isinstance(item, dict):
+                pending.extend((value, depth + 1) for value in item.values())
+            elif isinstance(item, list):
+                pending.extend((value, depth + 1) for value in item)
         return payload
 
     def _send_json(self, payload: Any, status: int = 200) -> None:
@@ -2789,7 +3247,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         authorization = getattr(self, "headers", {}).get("Authorization", "")
         if supplied is None and authorization.startswith("Bearer "):
             supplied = authorization.removeprefix("Bearer ").strip()
-        return bool(expected and supplied and hmac.compare_digest(supplied, expected))
+        return bool(
+            expected and supplied and hmac.compare_digest(supplied.encode(), expected.encode())
+        )
 
     def _authorize_ui_request(self, method: str, path: str) -> bool:
         if not _requires_ui_api_auth(method, path) or self._has_ui_api_token():
@@ -2986,6 +3446,8 @@ def _default_allowed_origins() -> set[str]:
 
 
 def _requires_ui_api_auth(method: str, path: str) -> bool:
+    if method == "POST" and path.startswith("/api/organization-webhooks/"):
+        return False  # Routine HMAC authentication is mandatory in its receiver.
     if method == "OPTIONS" or (method == "GET" and path == "/api/health"):
         return False
     # Webhooks have a workflow-specific token verified by trigger/replay handlers.
@@ -3032,10 +3494,11 @@ def _is_path_inside(child: Path, root: Path) -> bool:
 @contextmanager
 def _bundle_path_from_body(body: dict[str, Any]) -> Iterator[Path | None]:
     if body.get("bundleContent"):
-        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as temp_file:
-            temp_file.write(base64.b64decode(str(body["bundleContent"])))
-            temp_path = Path(temp_file.name)
+        temp_file = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        temp_path = Path(temp_file.name)
         try:
+            with temp_file:
+                temp_file.write(base64.b64decode(str(body["bundleContent"]), validate=True))
             yield temp_path
         finally:
             temp_path.unlink(missing_ok=True)

@@ -48,6 +48,21 @@ These are additive MCP mechanisms. Other provider-configured servers or plugins 
 
 Cursor uses a temporary plugin containing `.cursor-plugin/plugin.json` and `.mcp.json`, supplied through `--plugin-dir`. Its loader maps entries to `plugin-PLUGIN-SERVER` identifiers and supports HTTP, stdio and `enabledTools`.
 
+The plugin lives in a named subdirectory of the private invocation directory.
+Cursor's extension loader rejects shallow paths such as `/tmp/raticode-provider-*`
+and derives the plugin identity from the directory basename. That basename must
+match the manifest name and the MCP permission grants. Otherwise selected servers
+either disappear from discovery or their tool calls are denied. The enclosing
+temporary directory still owns cleanup after the provider exits.
+
+Live checks on 2026-09-28 reproduced missing Second Brain tools with Cursor
+`2026.09.26-dd393fe` using the previous layout. With the corrected layout, the
+same CLI discovered Second Brain and successfully called `rules`, `search`, and
+`read_note`. OpenCode `1.18.31` connected and successfully called `search` and
+`read_note` without adapter changes. Both checks used a disposable knowledge
+folder and disabled shell/web resources. They did not exercise the packaged
+desktop UI or native Windows/macOS installations.
+
 A private `CURSOR_CONFIG_DIR/cli-config.json` supplies permission allow/deny arrays. `--disable-project-configs` prevents `.cursor/cli.json` from replacing those arrays. The source-backed private `--allowed-tools` option selects protocol tool names, excluding shell and web tool kinds when disabled. Unlike `--exclude-tools`, this option is not guarded by the inspected exclude-tools feature flag. It also excludes provider subagent tools from this selected set. The allowlist includes `get_mcp_tools_tool_call`, which Cursor requires for deferred MCP discovery even with no selected servers. Omitting it causes `Required tool GET_MCP_TOOLS not found in allTools`; individual MCP execution grants remain unchanged. Exact plugin tool grants use `Mcp(plugin-PLUGIN-SERVER:TOOL)`. No broad `--force` or `--approve-mcps` grant is used.
 
 Cursor accepts any build version without a date allowlist or version probe. Resource startup checks help for Cursor identity and the required `--plugin-dir` capability. Private options remain version-sensitive; actual CLI failures are reported by the adapter. Every Cursor invocation passes `--trust` for the working directory selected in Raticode, including project and Global Rem threads. This does not enable `--yolo` or override selected tool permissions. Normal authenticated Cursor mode supports user-local plugins; local/Bedrock mode does not, and the documented local-mode environment switches are rejected. The private config does not relocate the credential backend: Linux credentials use XDG configuration, macOS uses the home directory/keychain. Raticode does not read or copy those credentials. Existing account-specific soft CLI settings are not copied into the private config.

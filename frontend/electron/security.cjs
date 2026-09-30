@@ -288,7 +288,7 @@ function isPathInsideAnyRoot(candidate, roots, { mustExist = false } = {}) {
 
 function isPathInside(child, root) {
   const relative = path.relative(root, child);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 function realpathExisting(targetPath) {

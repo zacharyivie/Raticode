@@ -608,7 +608,7 @@ def _http_network_target_valid(
         return PreflightFailure(
             "RATTISH_PREFLIGHT_NETWORK_POLICY",
             str(exc),
-            {"url": configuration["url"]},
+            {"url": exc.url},
         )
     return None
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { REPORT_THEMES } from "../lib/settings";
+import ReportThemeSettings from "./ReportThemeSettings.jsx";
 
 export default function DeveloperSettings() {
   const [info, setInfo] = useState(null);
@@ -27,7 +27,7 @@ export default function DeveloperSettings() {
   </div>;
 }
 
-export function RemMemorySettings({ value, onChange }) {
+export function RemMemorySettings({ value, onChange, providerState, audioInputDeviceId }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const bridge = window.goferDesktop?.rem;
@@ -57,10 +57,8 @@ export function RemMemorySettings({ value, onChange }) {
       <p className="my-2 break-all text-xs text-muted">{value.secondBrainRoot || "Choose a knowledge folder"}</p>
       <button type="button" className={buttonClass} disabled={!bridge || busy} onClick={() => void choose("secondBrainRoot")}>Choose Second Brain folder</button>
       <label className="mt-3 flex items-center gap-2 text-xs"><input type="checkbox" checked={value.secondBrainEnabled} disabled={!bridge || busy || !value.secondBrainRoot} onChange={(event) => void commit("secondBrainEnabled", event.target.checked)} />Enable Second Brain</label>
-      <label className="mt-3 flex items-center gap-2 text-xs">Generated notes and reports<select aria-label="Second Brain report format" className="rounded border border-line bg-white p-1" value={value.secondBrainFormat} disabled={!bridge || busy} onChange={(event) => void commit("secondBrainFormat", event.target.value)}><option value="md">Markdown</option><option value="html">HTML</option></select></label>
-      <label className="mt-3 flex items-center gap-2 text-xs">HTML report theme<select aria-label="Second Brain HTML theme" className="rounded border border-line bg-white p-1" value={value.secondBrainTheme || "auto"} disabled={!bridge || busy} onChange={(event) => void commit("secondBrainTheme", event.target.value)}>{REPORT_THEMES.map((theme) => <option key={theme.id} value={theme.id}>{theme.label}</option>)}</select></label>
-      <p className="mt-1 text-xs text-muted">Guides the design of new HTML reports. Each report keeps its own styling; existing reports stay as authored.</p>
     </div>
+    <ReportThemeSettings audioInputDeviceId={audioInputDeviceId} value={value} onChange={onChange} providerState={providerState} />
     {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
   </div>;
 }

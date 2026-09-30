@@ -1,3 +1,4 @@
+import { DEFAULT_REPORT_THEMES, normalizeReportThemes, reportOutputFormat } from "./reportThemes.js";
 import brandCompat from "./brandCompat.js";
 import { cloneJson } from "./jsonValue.js";
 import { DEFAULT_REM_RESOURCES, snapshotRemResources } from "./remResources.js";
@@ -145,7 +146,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     model: "",
     provider: "codex",
   },
-  memory: { archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" },
+  memory: { reportFormat: "md", reportThemes: DEFAULT_REPORT_THEMES, archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" },
   layout: {
     assistantPaneWidth: 380,
     bottomPanelHeight: 300,
@@ -190,7 +191,7 @@ export function normalizeAppSettings(value = {}) {
   settings.assistant.avatarAnimated = settings.assistant.avatarAnimated !== false;
   settings.assistant.resources = snapshotRemResources(settings.assistant.resources);
   settings.general.autosave = settings.general.autosave !== false;
-  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["workflows", "files", "search", "source-control"], value?.general?.defaultView === "code" ? "files" : "workflows");
+  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["workflows", "files", "search", "source-control", "organizations"], value?.general?.defaultView === "code" ? "files" : "workflows");
   // Retain the old field for older installations reading these settings.
   settings.general.defaultView = settings.general.initialActivity === "workflows" ? "graph" : "code";
   settings.general.executionMode = enumValue(settings.general.executionMode, ["local", "remote"], "local");
@@ -218,6 +219,8 @@ export function normalizeAppSettings(value = {}) {
   settings.terminal.fontSize = boundedNumber(settings.terminal.fontSize, 8, 28, 12.5);
   settings.terminal.lineHeight = boundedNumber(settings.terminal.lineHeight, 1, 2, 1.25);
   settings.terminal.scrollback = boundedNumber(settings.terminal.scrollback, 100, 100000, 5000);
+  settings.memory.reportThemes = normalizeReportThemes(value?.memory?.reportThemes, value?.memory?.secondBrainTheme);
+  settings.memory.reportFormat = reportOutputFormat(value?.memory);
   settings.memory.secondBrainEnabled = settings.memory.secondBrainEnabled === true;
   settings.memory.secondBrainTheme = enumValue(settings.memory.secondBrainTheme, REPORT_THEMES.map((theme) => theme.id), "auto");
   settings.memory.secondBrainFormat = enumValue(settings.memory.secondBrainFormat, ["md", "html"], "md");

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import os
 import signal
 import threading
@@ -25,11 +26,17 @@ class ProcessError(Exception):
         super().__init__(f"Process exited with code {returncode}: {stderr[:200]}")
 
 
-def build_subprocess_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
-    """Build an env for user subprocesses without packaged-app library leaks."""
-    env = dict(os.environ)
+def build_subprocess_env(
+    overrides: dict[str, str] | None = None, *, inherit_parent: bool = True
+) -> dict[str, str]:
+    """Build a child env without desktop credentials or packaged-app library leaks."""
+    env = dict(os.environ) if inherit_parent else {}
     _sanitize_packaged_runtime_env(env)
     env.update(overrides or {})
+    # These credentials authorize Studio and desktop path grants, not child
+    # providers or workflow commands. Strip them even from a copied parent env.
+    for name in ("GOFER_UI_API_TOKEN", "GOFER_DESKTOP_GRANT_SECRET"):
+        env.pop(name, None)
     return env
 
 
@@ -157,13 +164,21 @@ async def stream_subprocess(
     async def _stream(process: anyio.abc.Process) -> AsyncIterator[ProcessStreamEvent]:
         deadline = time.monotonic() + timeout if timeout is not None else None
 
-        if process.stdin is not None:
-            if stdin:
-                await process.stdin.send(stdin)
-            await process.stdin.aclose()
+        async def write_stdin() -> None:
+            if process.stdin is None:
+                return
+            try:
+                if stdin:
+                    await process.stdin.send(stdin)
+                await process.stdin.aclose()
+            except (BrokenPipeError, anyio.BrokenResourceError):
+                # The child may reject the request or exit before reading it.
+                # Preserve its exit status and stderr instead of failing the reader.
+                pass
 
         send, receive = anyio.create_memory_object_stream[ProcessStreamEvent](100)
         stream_done_count = 0
+        output_done = anyio.Event()
         exited = False
         returncode: int | None = None
 
@@ -223,6 +238,7 @@ async def stream_subprocess(
                     }
                 )
                 return
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while True:
                 try:
                     chunk = await stream.receive()
@@ -233,11 +249,24 @@ async def stream_subprocess(
                 bounded = await bounded_chunk(chunk)
                 if bounded is None:
                     continue
+                text = decoder.decode(bounded)
+                if not text:
+                    continue
                 await send.send(
                     {
                         "type": "chunk",
                         "stream": stream_name,
-                        "text": bounded.decode(errors="replace"),
+                        "text": text,
+                        "returncode": None,
+                    }
+                )
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                await send.send(
+                    {
+                        "type": "chunk",
+                        "stream": stream_name,
+                        "text": tail,
                         "returncode": None,
                     }
                 )
@@ -254,7 +283,9 @@ async def stream_subprocess(
             nonlocal returncode
             stopped = False
             timed_out = False
-            while process.returncode is None:
+            # A child can retain the pipes after its parent exits. Keep Stop and
+            # timeout active until both the process and its output have finished.
+            while process.returncode is None or stream_done_count < 2:
                 if cancel_event is not None and cancel_event.is_set():
                     stopped = True
                     await _terminate_process_tree(process)
@@ -263,8 +294,12 @@ async def stream_subprocess(
                     timed_out = True
                     await _terminate_process_tree(process)
                     break
-                with anyio.move_on_after(0.1):
-                    await process.wait()
+                if process.returncode is None:
+                    with anyio.move_on_after(0.1):
+                        await process.wait()
+                else:
+                    with anyio.move_on_after(0.1):
+                        await output_done.wait()
             await process.wait()
             returncode = process.returncode if process.returncode is not None else 130
             if timed_out:
@@ -288,10 +323,15 @@ async def stream_subprocess(
             tg.start_soon(read_stream, "stdout", process.stdout)
             tg.start_soon(read_stream, "stderr", process.stderr)
             tg.start_soon(wait_for_process)
+            # Drain both output pipes and watch cancellation while feeding input.
+            # Otherwise a full pipe can prevent Stop and timeout from taking effect.
+            tg.start_soon(write_stdin)
             async with receive:
                 async for event in receive:
                     if event["type"] == "exit" and event["stream"] in {"stdout", "stderr"}:
                         stream_done_count += 1
+                        if stream_done_count >= 2:
+                            output_done.set()
                     elif event["type"] == "exit" and event["stream"] is None:
                         exited = True
                     else:
@@ -314,14 +354,16 @@ async def stream_subprocess(
         env=merged_env,
         start_new_session=True,
     )
+    completed = False
     try:
         async for event in _stream(process):
             yield event
+        completed = True
     finally:
         # Cancellation must settle the whole process group before the owning
         # workflow can report Stopped. Cleanup must survive its cancelled scope.
         with anyio.CancelScope(shield=True):
-            if process.returncode is None:
+            if not completed or process.returncode is None:
                 await _terminate_process_tree(process)
             await process.aclose()
 
@@ -343,7 +385,11 @@ async def _terminate_process_tree(process: Any) -> None:
 
     with anyio.move_on_after(2):
         await process.wait()
-    if process.returncode is not None:
+    # A reaped POSIX group leader does not mean its descendants have exited.
+    # Escalate against the group even when the leader accepted SIGTERM.
+    if process.returncode is not None and (
+        os.name == "nt" or getattr(process, "pid", None) is None
+    ):
         return
 
     if os.name != "nt":
@@ -354,7 +400,8 @@ async def _terminate_process_tree(process: Any) -> None:
             except ProcessLookupError:
                 pass
             except OSError:
-                process.kill()
+                if process.returncode is None:
+                    process.kill()
         else:
             process.kill()
     else:

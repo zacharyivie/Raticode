@@ -1,11 +1,58 @@
 """Commit drafting must not give providers the normal coding permissions."""
 
+import shlex
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from gofer.ui import commit_message
+
+
+async def test_staged_diff_stays_inside_selected_subfolder(tmp_path: Path) -> None:
+    from gofer.ui.generation_jobs import git
+
+    git(tmp_path, "init", "-b", "main")
+    project = tmp_path / "selected-project"
+    project.mkdir()
+    (project / "change.txt").write_text("selected change\n")
+    (tmp_path / "private.txt").write_text("private sibling change\n")
+    git(tmp_path, "add", ".")
+
+    diff = await commit_message._read_staged_diff(project)
+    assert "selected change" in diff
+    assert "private sibling change" not in diff
+    assert "private.txt" not in diff
+
+
+async def test_commit_snapshot_and_diff_ignore_executable_filesystem_monitor(
+    tmp_path: Path,
+) -> None:
+    from gofer.ui.generation_jobs import commit_snapshot, git
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-b", "main")
+    (root / "change.txt").write_text("staged change\n")
+    git(root, "add", ".")
+    marker = tmp_path / "monitor-ran"
+    monitor = tmp_path / "monitor.py"
+    monitor.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran')\n"
+        "print('token\\0', end='')\n"
+    )
+    command = " ".join(
+        shlex.quote(value.replace("\\", "/")) for value in (sys.executable, str(monitor))
+    )
+    git(root, "config", "core.fsmonitor", command)
+    snapshot = commit_snapshot(root)
+    assert not marker.exists(), "commit snapshot executed a repository monitor"
+    assert snapshot["tree"] == git(root, "write-tree")
+    diff = await commit_message._read_staged_diff(root)
+    assert not marker.exists(), "commit diff executed a repository monitor"
+    assert "+staged change" in diff
 
 
 def test_commit_commands_restrict_provider_permissions(tmp_path: Path) -> None:
@@ -33,7 +80,8 @@ async def test_generation_uses_temporary_directory_and_validates_result(
         return_value=(
             0,
             '{"type":"item.completed","item":'
-            '{"type":"agent_message","text":"fix: show resolved files"}}',
+            '{"type":"agent_message","text":"fix: show resolved files'
+            '\\n\\n - Show resolved files"}}',
             "",
         )
     )
@@ -41,17 +89,23 @@ async def test_generation_uses_temporary_directory_and_validates_result(
     result = await commit_message.generate_commit_message(
         provider="codex", model="cli-default", diff="+resolved"
     )
-    assert result == {"message": "fix: show resolved files"}
+    assert result == {"message": "fix: show resolved files\n\n - Show resolved files"}
     directory = run.call_args.kwargs["cwd"]
     assert not directory.exists()
     assert run.call_args.kwargs["timeout"] == 150
     assert run.call_args.kwargs["stdin"].decode().endswith('{"staged_diff": "+resolved"}')
+    assert (
+        "one line high level executive summary of changes. "
+        "Only absolutely necessary technical terms; no jargon."
+    ) in run.call_args.kwargs["stdin"].decode()
     run.return_value = (
         0,
         '{"type":"item.completed","item":{"type":"agent_message","text":"Here is a message"}}',
         "",
     )
-    with pytest.raises(commit_message.ChatProviderError, match="Conventional Commit"):
+    with pytest.raises(
+        commit_message.ChatProviderError, match="commit message matching the template"
+    ):
         await commit_message.generate_commit_message(
             provider="codex", model="cli-default", diff="+resolved"
         )
@@ -79,11 +133,15 @@ async def test_large_commit_uses_captured_diff_outside_project(
         if command[0] == "git":
             assert command == [
                 "git",
+                "-c",
+                "core.fsmonitor=false",
                 "diff",
                 "--cached",
                 "--no-ext-diff",
                 "--no-textconv",
                 "--no-color",
+                "--",
+                ".",
             ]
             assert kwargs["cwd"] == tmp_path
             return 0, diff, ""
@@ -93,7 +151,9 @@ async def test_large_commit_uses_captured_diff_outside_project(
     run = AsyncMock(side_effect=execute)
     monkeypatch.setattr(commit_message, "run_subprocess", run)
     monkeypatch.setattr(
-        commit_message, "_provider_final_message", lambda *_: "feat: update project"
+        commit_message,
+        "_provider_final_message",
+        lambda *_: "feat: update project\n\n - Update project",
     )
     await commit_message.generate_commit_message(
         provider=provider, model="selected-model", effort="high", diff=diff, project_root=tmp_path
@@ -163,14 +223,24 @@ async def test_format_retry_uses_same_index_snapshot(monkeypatch, tmp_path, prov
         if command[0] == "git":
             return 0, "+original staged change", ""
         attempts.append((kwargs["cwd"] / "staged-diff.txt").read_text())
-        return 0, "invalid" if len(attempts) == 1 else "fix: use original changes", ""
+        return (
+            0,
+            "invalid"
+            if len(attempts) == 1
+            else "fix: use original changes\n\n - Use original changes",
+            "",
+        )
 
     run = AsyncMock(side_effect=execute)
     monkeypatch.setattr(commit_message, "run_subprocess", run)
     monkeypatch.setattr(
         commit_message,
         "_provider_final_message",
-        lambda *_: "invalid" if len(attempts) == 1 else "fix: use original changes",
+        lambda *_: (
+            "invalid"
+            if len(attempts) == 1
+            else "fix: use original changes\n\n - Use original changes"
+        ),
     )
     assert await commit_message.generate_commit_message(
         provider=provider,
@@ -178,7 +248,7 @@ async def test_format_retry_uses_same_index_snapshot(monkeypatch, tmp_path, prov
         diff="",
         project_root=tmp_path,
         inspect_staged=True,
-    ) == {"message": "fix: use original changes"}
+    ) == {"message": "fix: use original changes\n\n - Use original changes"}
     assert attempts == ["+original staged change", "+original staged change"]
     assert sum(call.args[0][0] == "git" for call in run.call_args_list) == 1
 
@@ -191,12 +261,14 @@ async def test_explicit_inspection_omits_diff(
     run = AsyncMock(return_value=(0, "+staged change", ""))
     monkeypatch.setattr(commit_message, "run_subprocess", run)
     monkeypatch.setattr(
-        commit_message, "_provider_final_message", lambda *_: "fix: handle large commits"
+        commit_message,
+        "_provider_final_message",
+        lambda *_: "fix: handle large commits\n\n - Handle large commits",
     )
     result = await commit_message.generate_commit_message(
         provider="codex", model="cli-default", diff="", project_root=tmp_path, inspect_staged=True
     )
-    assert result == {"message": "fix: handle large commits"}
+    assert result == {"message": "fix: handle large commits\n\n - Handle large commits"}
     assert run.call_args_list[0].kwargs["cwd"] == tmp_path
     assert run.call_args.kwargs["cwd"] != tmp_path
 
@@ -239,7 +311,8 @@ async def test_cli_commit_drafting_reads_only_supplied_diff(
             assert "Write(*)" in config["permissions"]["deny"]
             return (
                 0,
-                '{"type":"result","subtype":"success","result":"fix: handle staged files"}',
+                '{"type":"result","subtype":"success","result":"fix: handle staged files'
+                '\\n\\n - Handle staged files"}',
                 "",
             )
         if provider == "opencode":
@@ -248,11 +321,16 @@ async def test_cli_commit_drafting_reads_only_supplied_diff(
             permissions = json.loads(env["OPENCODE_PERMISSION"])
             assert permissions["*"] == "deny" and permissions["read"] == "allow"
             assert "edit" not in permissions and "bash" not in permissions
-            return 0, '{"type":"text","part":{"text":"fix: handle staged files"}}', ""
+            return (
+                0,
+                '{"type":"text","part":{"text":"fix: handle staged files'
+                '\\n\\n - Handle staged files"}}',
+                "",
+            )
         assert command[command.index("--available-tools") + 1] == "view"
         assert "--disable-builtin-mcps" in command
         assert "--allow-all-tools" not in command
-        return 0, "fix: handle staged files\n", ""
+        return 0, "fix: handle staged files\n\n - Handle staged files\n", ""
 
     monkeypatch.setattr(commit_message, "run_subprocess", run)
     result = await commit_message.generate_commit_message(
@@ -262,7 +340,7 @@ async def test_cli_commit_drafting_reads_only_supplied_diff(
         project_root=tmp_path,
         inspect_staged=inspect_staged,
     )
-    assert result == {"message": "fix: handle staged files"}
+    assert result == {"message": "fix: handle staged files\n\n - Handle staged files"}
     validate.assert_awaited_once_with(provider, "selected-model", None)
     # Oversized supplied diffs also read the current index, never truncate argv.
     assert len(calls) == (2 if inspect_staged or diff_repeats == 25000 else 1)
@@ -313,16 +391,16 @@ async def test_cli_commit_rejects_truncated_index_diff(
 @pytest.mark.parametrize(
     "wrapped",
     [
-        "```text\nfix(ui): align indicators\n\nPreserve keyboard focus.\n```",
-        "Here is the commit message:\n\n```gitcommit\nfix(ui): align indicators\n\n"
-        "Preserve keyboard focus.\n```\n\nThis covers the change.",
-        "\x1b[32mfix(ui): align indicators\r\n\r\nPreserve keyboard focus.\x1b[0m",
-        '"fix(ui): align indicators\n\nPreserve keyboard focus."',
+        "```text\nfix: align indicators\n\n - Preserve keyboard focus.\n```",
+        "Here is the commit message:\n\n```gitcommit\nfix: align indicators\n\n"
+        " - Preserve keyboard focus.\n```\n\nThis covers the change.",
+        "\x1b[32mfix: align indicators\r\n\r\n - Preserve keyboard focus.\x1b[0m",
+        '"fix: align indicators\n\n - Preserve keyboard focus."',
     ],
 )
 def test_commit_normalization_preserves_body(wrapped: str) -> None:
     assert commit_message._validated_message(wrapped) == {
-        "message": "fix(ui): align indicators\n\nPreserve keyboard focus."
+        "message": "fix: align indicators\n\n - Preserve keyboard focus."
     }
 
 
@@ -359,7 +437,9 @@ async def test_commit_retries_format_once_and_uses_final_response(
             else command[-1]
         )
         answer = (
-            "I reviewed the diff." if len(prompts) == 1 else "```\nfix: handle staged changes\n```"
+            "I reviewed the diff."
+            if len(prompts) == 1
+            else "```\nfix: handle staged changes\n\n - Handle staged changes\n```"
         )
         if provider == "copilot":
             return 0, answer, ""
@@ -379,7 +459,7 @@ async def test_commit_retries_format_once_and_uses_final_response(
         provider=provider,
         model="cli-default",
         diff="+change",
-    ) == {"message": "fix: handle staged changes"}
+    ) == {"message": "fix: handle staged changes\n\n - Handle staged changes"}
     assert len(prompts) == 2
     assert "previous response" in prompts[1]
 
@@ -423,7 +503,11 @@ async def test_native_commit_uses_selected_model_and_permissions(
         assert directory != tmp_path
         assert (directory / "staged-diff.txt").read_text() == "+change"
         yield {"type": "thought", "text": "Inspecting"}
-        yield {"type": "final", "message": {"body": "fix: handle changes"}, "exitCode": 0}
+        yield {
+            "type": "final",
+            "message": {"body": "fix: handle changes\n\n - Handle changes"},
+            "exitCode": 0,
+        }
 
     monkeypatch.setattr(
         commit_message, "stream_acp" if provider == "grok" else "stream_antigravity", stream
@@ -437,7 +521,7 @@ async def test_native_commit_uses_selected_model_and_permissions(
         inspect_staged=inspect_staged,
         project_root=tmp_path,
     )
-    assert result == {"message": "fix: handle changes"}
+    assert result == {"message": "fix: handle changes\n\n - Handle changes"}
     validate.assert_awaited_once_with(provider, "selected-model", "high")
     assert all(not directory.exists() for directory in directories)
     assert run.await_count == int(inspect_staged)
@@ -492,13 +576,15 @@ async def test_dedicated_commit_selection_overrides_active_rem_and_resets_effort
     save_commit_message_preference({"provider": provider, "model": "commit-model"})
     validate = AsyncMock()
     run = AsyncMock(return_value=(0, "", ""))
-    cli = AsyncMock(return_value="fix: use commit model")
+    cli = AsyncMock(return_value="fix: use commit model\n\n - Use commit model")
     monkeypatch.setattr(commit_message, "validate_provider_selection_async", validate)
     monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
     monkeypatch.setattr(commit_message, "run_subprocess", run)
     monkeypatch.setattr(commit_message, "_generate_cli_commit", cli)
     monkeypatch.setattr(
-        commit_message, "_provider_final_message", lambda *_: "fix: use commit model"
+        commit_message,
+        "_provider_final_message",
+        lambda *_: "fix: use commit model\n\n - Use commit model",
     )
     result = await commit_message.generate_commit_message(
         provider="cursor",
@@ -507,7 +593,7 @@ async def test_dedicated_commit_selection_overrides_active_rem_and_resets_effort
         permission_mode="default",
         diff="+change",
     )
-    assert result == {"message": "fix: use commit model"}
+    assert result == {"message": "fix: use commit model\n\n - Use commit model"}
     validate.assert_awaited_once_with(provider, "commit-model", None)
     if provider in {"codex", "claude_code"}:
         command = run.call_args.args[0]
@@ -536,3 +622,107 @@ async def test_dedicated_commit_selection_reports_unusable_settings(changes, err
         await commit_message.generate_commit_message(
             provider="cursor", model="chat", diff="+change"
         )
+
+
+@pytest.mark.parametrize("count", [1, 7, 8, 9])
+def test_default_commit_template_enforces_change_limit(count: int) -> None:
+    message = "feat: add preferences\n\n" + "\n".join(
+        f" - Explain change {i}" for i in range(1, count + 1)
+    )
+    if count <= 8:
+        assert commit_message._validated_message(message) == {"message": message}
+    else:
+        with pytest.raises(commit_message.ChatProviderError, match="1 to 8"):
+            commit_message._validated_message(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "fix: summary only",
+        "docs: update docs\n\n - Explain the setting",
+        "fix: missing bullet\n\nDescribe a change without a bullet",
+        "fix: wrap a change\n\n - A change\nwith a continuation",
+    ],
+)
+def test_default_commit_template_rejects_wrong_structure(message: str) -> None:
+    with pytest.raises(commit_message.ChatProviderError):
+        commit_message._validated_message(message)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider", ["codex", "claude_code", "cursor", "copilot", "opencode", "grok", "antigravity"]
+)
+async def test_custom_template_reaches_every_commit_provider(monkeypatch, provider) -> None:
+    import json
+
+    from gofer.core.provider_preferences import save_commit_message_preference
+
+    template = "Summary: one line\n\n* One change per line"
+    save_commit_message_preference({"template": template})
+    answer = "Summary: handle settings\n\n* Keep the user's format"
+    prompts = []
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
+
+    async def run(command, **kwargs):
+        prompt = kwargs.get("stdin", b"").decode()
+        if not prompt:
+            prompt = command[-1] if provider == "opencode" else command[command.index("-p") + 1]
+        prompts.append(prompt)
+        if provider == "copilot":
+            return 0, answer, ""
+        if provider == "opencode":
+            return 0, json.dumps({"type": "text", "part": {"text": answer}}), ""
+        if provider == "cursor":
+            return 0, json.dumps({"type": "result", "subtype": "success", "result": answer}), ""
+        return 0, "", ""
+
+    async def stream(*args, **kwargs):
+        prompts.append(args[1] if provider == "grok" else args[0])
+        yield {"type": "final", "message": {"body": answer}, "exitCode": 0}
+
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    monkeypatch.setattr(commit_message, "_provider_final_message", lambda *_: answer)
+    monkeypatch.setattr(commit_message, "stream_acp", stream)
+    monkeypatch.setattr(commit_message, "stream_antigravity", stream)
+    result = await commit_message.generate_commit_message(
+        provider=provider, model="cli-default", diff="+change", permission_mode="cli-managed"
+    )
+    assert result == {"message": answer}
+    assert len(prompts) == 1
+    assert template in prompts[0]
+    assert "never more than 8" in prompts[0]
+    assert "body only when useful" not in prompts[0]
+    too_many = "Summary: changes\n\n" + "\n".join(f"* Change {i}" for i in range(9))
+    with pytest.raises(commit_message.ChatProviderError, match="1 to 8"):
+        commit_message._validated_message(too_many, template=template)
+
+
+@pytest.mark.asyncio
+async def test_large_background_diff_never_rereads_live_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(commit_message, "resolve_provider_executable", lambda _: "/bin/provider")
+    diff = "+captured snapshot\n" * 25000
+
+    async def run(command: list[str], **kwargs: object) -> tuple[int, str, str]:
+        assert command[0] != "git"
+        directory = kwargs["cwd"]
+        assert isinstance(directory, Path)
+        assert (directory / "staged-diff.txt").read_text() == diff
+        return 0, "", ""
+
+    monkeypatch.setattr(commit_message, "run_subprocess", run)
+    monkeypatch.setattr(
+        commit_message,
+        "_provider_final_message",
+        lambda *_: "fix: capture staged changes\n\n - Preserve the original branch snapshot",
+    )
+    result = await commit_message.generate_commit_message(
+        provider="codex",
+        model="cli-default",
+        diff=diff,
+        captured_diff=True,
+    )
+    assert result["message"].startswith("fix: capture staged changes")

@@ -1,3 +1,5 @@
+import { startGenerationJob } from "../lib/generationJobs.js";
+import { generateReportTheme, reportThemeContext, normalizeReportThemes } from "../lib/reportThemes.js";
 import { orderDeviceMessages, startDeviceWorkspaceSync } from "../lib/deviceWorkspaceSync.js";
 import { fetchChatTurn } from "../lib/chatTransport.js";
 import { pathKey, samePath, pathWithin, uniquePaths, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
@@ -18,7 +20,7 @@ import { generateConventionalCommit } from "../lib/commit-message.js";
 import RemResources, { DEFAULT_REM_RESOURCES, remResourceError } from "../components/RemResources.jsx";
 import { snapshotRemResources } from "../lib/remResources.js";
 import RemAvatar from "../components/RemAvatar.jsx";
-import { copyForkAttachments, forkThreadHistory } from "../lib/forkThread.js";
+import { copyForkAttachments, forkThreadHistory, isForkableMessage } from "../lib/forkThread.js";
 import { lazy, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -59,6 +61,7 @@ import {
 import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
 const DagCanvas = lazy(() => import("../components/DagCanvas.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
+const OrganizationWorkspace = lazy(() => import("../components/OrganizationWorkspace.jsx"));
 const SwarmWorkspace = lazy(() => import("../components/SwarmWorkspace.jsx"));
 const CodeFileExplorer = lazy(() => import("../components/CodeFileExplorer.jsx"));
 const CodeWorkspace = lazy(() => import("../components/CodeWorkspace.jsx"));
@@ -310,7 +313,7 @@ export default function App() {
     const bridge = window.goferDesktop?.rem;
     if (!bridge) return;
     void bridge.settings().then((memory) => {
-      setSettings((current) => ({ ...current, memory: { ...current.memory, ...memory } }));
+      setSettings((current) => ({ ...current, memory: { ...current.memory, ...memory, reportThemes: normalizeReportThemes(memory.reportThemes ?? (memory.secondBrainTheme ? undefined : current.memory.reportThemes), memory.secondBrainTheme) } }));
     }).catch(reportArchiveError);
   }, []);
   useEffect(() => {
@@ -347,6 +350,7 @@ export default function App() {
   const activeProjectRootRef = useRef(activeProjectRoot);
   activeProjectRootRef.current = activeProjectRoot;
   const [selectedSwarm, setSelectedSwarm] = useState(null);
+  const [selectedOrganization, setSelectedOrganization] = useState(null);
   const [studioView, setStudioView] = useState(initialStudioSession.view || settings.general.defaultView);
   const [, setCodeEditorOpened] = useState(
     (initialStudioSession.view || settings.general.defaultView) === "code",
@@ -906,6 +910,7 @@ export default function App() {
   function openWorkflowGraph(target) {
     if (!target?.id) return;
     setSelectedSwarm(null);
+    setSelectedOrganization(null);
     const path = `workflow-graph:${encodeURIComponent(target.id)}`;
     setWorkflowTabs(current => ({ ...current, [path]: { kind: "workflow", workflowId: target.id,
       name: target.name, sourcePath: target.sourcePath, projectRoot: target.projectRoot, contextLabel: target.projectRoot } }));
@@ -942,6 +947,7 @@ export default function App() {
 
   function activateEditorPath(path) {
     setSelectedSwarm(null);
+    setSelectedOrganization(null);
     setActiveCodePath(path);
     const target = workflowTabs[path] ? workflows.find(item => item.id === workflowTabs[path].workflowId)
       : workflows.find(item => samePath(item.sourcePath, path));
@@ -959,6 +965,7 @@ export default function App() {
   function openCodeFile(path, options = {}) {
     if (!path) return;
     setSelectedSwarm(null);
+    setSelectedOrganization(null);
     const currentPreview = previewCodePathRef.current;
     const next = nextCodeFileOpenState(
       codeOpenPaths,
@@ -2066,8 +2073,8 @@ export default function App() {
           ? current.nodeOutputsMaxBytes
           : (payload.log?.nodeOutputsMaxBytes ?? null),
         usageSummary: silent ? current.usageSummary : (payload.log?.usageSummary ?? null),
-        runEvents: silent ? current.runEvents : (payload.log?.runEvents ?? []),
-        runNodes: silent ? current.runNodes : (payload.log?.runNodes ?? {}),
+        runEvents: payload.log?.runEvents ?? (silent ? current.runEvents : []),
+        runNodes: payload.log?.runNodes ?? (silent ? current.runNodes : {}),
         selectedRunId: runId,
         workflowId,
         graphSnapshot: silent ? current.graphSnapshot : payload.log?.graphSnapshot ?? null,
@@ -3630,7 +3637,9 @@ export default function App() {
         onDuplicateWorkflow={duplicateWorkflow}
         onCodeFileOpen={(...args) => { openCodeFile(...args); closeCompactPane(); }}
         selectedSwarmId={samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? selectedSwarm.id : null}
-        onOpenSwarm={(id, agentId) => { setSelectedSwarm({ id, agentId, projectRoot: swarmProjectRoot }); closeCompactPane(); }}
+        onOpenOrganization={(id) => { setSelectedOrganization({ id }); setSelectedSwarm(null); closeCompactPane(); }}
+        selectedOrganizationId={selectedOrganization ? selectedOrganization.id : null}
+        onOpenSwarm={(id, agentId) => { setSelectedOrganization(null); setSelectedSwarm({ id, agentId, projectRoot: swarmProjectRoot }); closeCompactPane(); }}
         activeCodePath={activeCodePath}
         onCloseCodeFile={closeActiveCodeFile}
         onCodeFilesystemChange={handleCodeFilesystemChange}
@@ -3669,8 +3678,9 @@ export default function App() {
                 <strong>Draft recovery: </strong>{rattishEditorState.recoveryWarning}
               </div>
             ) : null}
+        {selectedOrganization ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading organization...</p>}><OrganizationWorkspace key={selectedOrganization.id} rootPath={swarmProjectRoot} projectOptions={recentProjectRoots} organizationId={selectedOrganization.id} defaults={settings.assistant} memorySettings={settings.memory} onSelect={id => setSelectedOrganization({ id })} onClose={() => setSelectedOrganization(null)} /></Suspense> : null}
         {samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace projectPaths={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots).map(root => pathValue(lastWorktreeByProject, root) || root)} selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
-        <div className={`${samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
+        <div className={`${samePath(selectedSwarm?.projectRoot, swarmProjectRoot) || selectedOrganization ? "hidden" : "flex"} min-h-0 flex-1 flex-col`}>
             {!workflowTabs[activeCodePath] && (activeCodePath || sidebarActivity !== "workflows") && topBarNotice?.message ? (
               <div role={topBarNotice.type === "error" ? "alert" : "status"} className="shrink-0 border-b border-line bg-surface px-3 py-2 text-xs text-ink break-words">
                 {topBarNotice.message}
@@ -3678,7 +3688,7 @@ export default function App() {
             ) : null}
             <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading editor...</p>}>
             <CodeWorkspace
-              active={!samePath(selectedSwarm?.projectRoot, swarmProjectRoot)}
+              active={!samePath(selectedSwarm?.projectRoot, swarmProjectRoot) && !selectedOrganization}
               activePath={activeCodePath}
               browserTabs={browserTabs}
               navigationRequest={codeNavigationRequest}
@@ -4473,6 +4483,8 @@ export function WorkflowSidebar({
   onCodeFileOpen,
   onOpenSwarm,
   selectedSwarmId,
+  onOpenOrganization,
+  selectedOrganizationId,
   onCloseCodeFile,
   onCodeFilesystemChange,
   onCreate,
@@ -4659,6 +4671,8 @@ export function WorkflowSidebar({
             onFilesystemChange={onCodeFilesystemChange}
             onCloseActiveFile={onCloseCodeFile}
             onOpenFile={onCodeFileOpen}
+            onOpenOrganization={onOpenOrganization}
+            selectedOrganizationId={selectedOrganizationId}
             onOpenSwarm={onOpenSwarm}
             selectedSwarmId={selectedSwarmId}
             onSelectProject={onSelectProject}
@@ -4917,7 +4931,7 @@ export function loadRecentCodePaths(storage = globalThis.window?.localStorage) {
 
 export function rememberRecentFile(current = [], path = "") {
   const nextPath = typeof path === "string" ? path.trim() : "";
-  if (!nextPath || nextPath.startsWith("raticode-browser:")) return current;
+  if (!nextPath || /^(raticode-browser:|raticode-commit-diff:)/.test(nextPath)) return current;
   return [nextPath, ...current.filter((candidate) => candidate !== nextPath)].slice(0, 8);
 }
 
@@ -5057,7 +5071,7 @@ export function scopeChatThreadToProject(
 
 export function editorFileReferences(paths = [], workflowTabs = {}) {
   return [...new Set(paths.map((path) => workflowTabs[path]?.sourcePath || path)
-    .filter((path) => path && !/^(workflow-graph:|raticode-browser:|browser:)/.test(path)))];
+    .filter((path) => path && !/^(workflow-graph:|raticode-browser:|browser:|raticode-commit-diff:)/.test(path)))];
 }
 
 export function chatWorkflowContextForThread(thread, workflows = [], openFiles = []) {
@@ -6003,6 +6017,7 @@ export function ChatPane({
   const providerCapability = providers.find(item => item.id === providerId);
   const permissionOptions = providerPermissionOptions(providerId, providerCapability);
   const [threads, setThreads] = useState([]);
+  const [renamingThread, setRenamingThread] = useState(null);
   const [launchedThreadId, setLaunchedThreadId] = useState(null);
   const forkInProgressRef = useRef(false);
   const [forkStatus, setForkStatus] = useState("");
@@ -6417,7 +6432,7 @@ export function ChatPane({
   }, []);
 
   useEffect(() => {
-    if (!conversationMenuOpen) return undefined;
+    if (!conversationMenuOpen || renamingThread) return undefined;
 
     function handlePointerDown(event) {
       if (conversationMenuRef.current?.contains(event.target)) return;
@@ -6426,7 +6441,7 @@ export function ChatPane({
 
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, [conversationMenuOpen]);
+  }, [conversationMenuOpen, renamingThread]);
 
   useEffect(() => {
     if (!scopeMenuOpen) return undefined;
@@ -6449,10 +6464,13 @@ export function ChatPane({
   }, [scopeMenuOpen]);
 
   async function sendMessage(editedMessage = null, options = {}) {
+    const sourceMessages = options.targetThread
+      ? conversationCacheRef.current.get(options.targetThread.id)
+      : messages;
     const editedMessageIndex = editedMessage
-      ? messages.findIndex((message) => message.id === editedMessage.id && message.role === "user")
+      ? sourceMessages.findIndex((message) => message.id === editedMessage.id && message.role === "user")
       : -1;
-    const originalMessage = editedMessageIndex >= 0 ? messages[editedMessageIndex] : null;
+    const originalMessage = editedMessageIndex >= 0 ? sourceMessages[editedMessageIndex] : null;
     const text = originalMessage ? String(editedMessage.body ?? "").trim() : options.text ?? draft.trim();
     const selectedAttachments = originalMessage || options.targetThread ? [] : attachments;
     const hasMessageAttachments = Boolean(
@@ -6516,8 +6534,8 @@ export function ChatPane({
     }
     const titleSource = text || `Attached ${messageAttachments.map((item) => item.name).join(", ")}`;
     const targetThreadTitle =
-      activeThread?.title && activeThread.title !== "New thread"
-        ? activeThread.title
+      targetThread.title && (targetThread.titleCustomized || targetThread.title !== "New thread")
+        ? targetThread.title
         : threadTitleFromMessage(titleSource);
     deletedChatThreadIdsRef.current.delete(targetThreadId);
 
@@ -6530,8 +6548,8 @@ export function ChatPane({
           attachments: messageAttachments,
         };
     const nextMessages = originalMessage
-      ? [...messages.slice(0, editedMessageIndex), userMessage]
-      : [...(options.targetThread ? [] : messages), userMessage];
+      ? [...sourceMessages.slice(0, editedMessageIndex), userMessage]
+      : [...sourceMessages, userMessage];
     updateThreadMessages(targetThreadId, nextMessages);
     setThreads(current => bumpChatThread(current, targetThreadId));
     updateThreadTitleFromMessage(targetThreadId, titleSource);
@@ -6625,7 +6643,8 @@ export function ChatPane({
                 })),
               } : {}),
             },
-            remSecondBrain: { enabled: memorySettings.secondBrainEnabled, root: memorySettings.secondBrainRoot, format: memorySettings.secondBrainFormat, theme: memorySettings.secondBrainTheme, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(memorySettings.secondBrainRoot) },
+            remReportTheme: reportThemeContext(memorySettings),
+            remSecondBrain: { enabled: memorySettings.secondBrainEnabled, root: memorySettings.secondBrainRoot, format: memorySettings.secondBrainFormat, grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(memorySettings.secondBrainRoot) },
             remResources: turnResources,
             id: `workflow-assistant:${targetThreadId}`,
             chatThreadId: targetThreadId,
@@ -6956,7 +6975,13 @@ export function ChatPane({
         openThread(fork.thread.id);
         setContextFocusRequest(current => current + 1);
       }
-      setForkStatus("Thread forked. Continue from here.");
+      const selectedMessage = fork.messages.at(-1);
+      if (selectedMessage.role === "user") {
+        setForkStatus("Thread forked. Sending your message to Rem.");
+        void sendMessage(selectedMessage, { targetThread: fork.thread });
+      } else {
+        setForkStatus("Thread forked. Continue from here.");
+      }
     } catch (error) {
       setForkStatus(`Could not fork thread: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -7042,10 +7067,27 @@ export function ChatPane({
     const receive = event => {
       const request = event.detail;
       if (!request || request.signal?.aborted) return;
+      request.handled = true;
+      if (request.background) {
+        startGenerationJob("commit", { projectRoot: request.projectRoot, branch: request.branch }, { provider: providerId, model, effort, permissionMode }).then(request.resolve, request.reject);
+        return;
+      }
       generateConventionalCommit({ provider: providerId, model, effort, permissionMode, diff: request.diff, projectRoot: request.projectRoot, inspectStaged: request.inspectStaged, signal: request.signal }).then(request.resolve, request.reject);
     };
     window.addEventListener("gofer:rem-commit-message", receive);
     return () => window.removeEventListener("gofer:rem-commit-message", receive);
+  }, [providerId, model, effort, permissionMode]);
+
+  useEffect(() => {
+    const receive = event => {
+      const request = event.detail;
+      if (!request || request.signal?.aborted) return;
+      request.handled = true;
+      const selection = { provider: providerId, model, effort, permissionMode };
+      (request.background ? startGenerationJob("theme", request, selection) : generateReportTheme(request, selection)).then(request.resolve, request.reject);
+    };
+    window.addEventListener("gofer:rem-report-theme", receive);
+    return () => window.removeEventListener("gofer:rem-report-theme", receive);
   }, [providerId, model, effort, permissionMode]);
 
   // Apply context after the thread activation effect clears the previous draft.
@@ -7108,7 +7150,6 @@ export function ChatPane({
     return buildChatItems(displayHistory).map(item => {
       if (item.type === "thought-group") {
         return <ThoughtGroup
-          onFork={forkMessageAction}
           key={item.id}
           expanded={expandedThoughtGroups[item.id] !== false}
           groupId={item.id}
@@ -7124,6 +7165,7 @@ export function ChatPane({
       return <div key={item.message.id} data-thread-search-match={isMatch || undefined} tabIndex={isMatch ? -1 : undefined}>
         <ForkableMessage
           onFork={forkMessageAction}
+          canFork={isForkableMessage(history.find(message => message.id === item.message.id))}
           message={item.message}
           onOpenLink={openScopedMarkdownLink}
           sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
@@ -7202,7 +7244,7 @@ export function ChatPane({
         thread.id === threadId
           ? {
               ...thread,
-              title: thread.title === "New thread" ? threadTitleFromMessage(message) : thread.title,
+              title: !thread.titleCustomized && thread.title === "New thread" ? threadTitleFromMessage(message) : thread.title,
             }
           : thread,
       );
@@ -7224,6 +7266,13 @@ export function ChatPane({
 
   function pinThread(threadId, pinned) {
     updateThreadOrganization(threadId, { pinned, archived: false });
+  }
+
+  function renameThread(threadId, title) {
+    const name = title.trim();
+    if (!name) return;
+    updateThreadOrganization(threadId, { title: name, titleCustomized: true });
+    setRenamingThread(null);
   }
 
   async function deleteThread(threadId) {
@@ -7443,6 +7492,7 @@ export function ChatPane({
                 activeThreadId={activeThreadId}
                 onArchive={archiveThread}
                 onPin={pinThread}
+                onRename={setRenamingThread}
                 onDelete={deleteThread}
                 onOpen={openThread}
               />
@@ -7452,6 +7502,11 @@ export function ChatPane({
       </div>
 
       {forkStatus ? <p role="status" className="border-b border-line px-3.5 py-2 text-xs text-muted">{forkStatus}</p> : null}
+      {renamingThread ? <ThreadRenameDialog
+        thread={renamingThread}
+        onClose={() => setRenamingThread(null)}
+        onRename={renameThread}
+      /> : null}
       {threadSearchOpen ? <ThreadSearch repository={repository} loadThreads={loadAllChatThreads} onOpen={openThread} onClose={closeThreadSearch} /> : null}
 
       {activeSearchTarget ? <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3.5 py-2 text-xs text-muted">
@@ -7490,6 +7545,7 @@ export function ChatPane({
                 activeThreadId={activeThreadId}
                 onArchive={archiveThread}
                 onPin={pinThread}
+                onRename={setRenamingThread}
                 onDelete={deleteThread}
                 onOpen={openThread}
               />
@@ -7514,7 +7570,6 @@ export function ChatPane({
             {conversationItems.map((item) =>
               item.type === "thought-group" ? (
                 <ThoughtGroup
-                  onFork={forkMessageAction}
                   key={item.id}
                   expanded={expandedThoughtGroups[item.id] !== false}
                   onOpenLink={openScopedMarkdownLink}
@@ -7670,7 +7725,36 @@ export function ThreadSections({ threads, ...props }) {
   </>;
 }
 
-function ThreadActions({ thread, onPin, onDelete }) {
+function ThreadRenameDialog({ thread, onClose, onRename }) {
+  const [name, setName] = useState(thread.title);
+  return <Dialog
+    title="Rename Thread"
+    onClose={onClose}
+    overlayClassName="fixed inset-0 z-[95] grid place-items-center bg-slate-950/25 px-4"
+    panelClassName="w-full max-w-sm rounded-lg border border-line bg-white p-4 shadow-panel"
+  >
+    <form onSubmit={event => { event.preventDefault(); if (name.trim()) onRename(thread.id, name); }}>
+      <h3 className="mb-3 text-sm font-semibold text-strong">Rename Thread</h3>
+      <label className="mb-1 block text-xs text-muted" htmlFor="rem-thread-name">Thread name</label>
+      <input
+        id="rem-thread-name"
+        aria-label="Thread name"
+        data-dialog-initial-focus
+        maxLength={160}
+        className="h-10 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none focus:border-teal-500"
+        value={name}
+        onChange={event => setName(event.target.value)}
+        onFocus={event => event.target.select?.()}
+      />
+      <div className="mt-4 flex justify-end gap-2">
+        <button type="button" className="h-9 rounded-lg border border-line px-3 text-sm hover:bg-slate-50" onClick={onClose}>Cancel</button>
+        <button type="submit" disabled={!name.trim()} className="h-9 rounded-lg bg-brand px-3 text-sm font-medium text-white disabled:opacity-60">Save</button>
+      </div>
+    </form>
+  </Dialog>;
+}
+
+function ThreadActions({ thread, onPin, onRename, onDelete }) {
   const [open, setOpen] = useState(false);
   const root = useRef(null);
   const trigger = useRef(null);
@@ -7690,6 +7774,8 @@ function ThreadActions({ thread, onPin, onDelete }) {
       type="button" onClick={() => setOpen(value => !value)}><MoreVertical aria-hidden="true" size={15} /></button>
     {open ? <div aria-label={`Actions for ${thread.title}`} className="absolute right-0 top-8 z-50 w-36 rounded-lg border border-line bg-white p-1 shadow-panel">
       <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-ink hover:bg-slate-50"
+        onClick={() => { setOpen(false); trigger.current?.focus(); onRename?.(thread); }}>Rename Thread</button>
+      <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-ink hover:bg-slate-50"
         onClick={() => { setOpen(false); trigger.current?.focus(); onPin?.(thread.id, !thread.pinned); }}>{thread.pinned ? "Unpin thread" : "Pin thread"}</button>
       <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-red-600 hover:bg-red-50"
         onClick={() => { setOpen(false); trigger.current?.focus(); onDelete(thread.id); }}>Delete thread</button>
@@ -7697,7 +7783,7 @@ function ThreadActions({ thread, onPin, onDelete }) {
   </div>;
 }
 
-export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry }) {
+export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onRename, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry }) {
   const [visibleCount, setVisibleCount] = useState(pageSize);
   const sortedThreads = [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
   if (threads.length) {
@@ -7737,7 +7823,7 @@ export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThrea
                 onClick={() => onArchive?.(thread.id)}>
                 <Archive aria-hidden="true" size={15} />
               </button>}
-              <ThreadActions thread={thread} onPin={onPin} onDelete={onDelete} />
+              <ThreadActions thread={thread} onPin={onPin} onRename={onRename} onDelete={onDelete} />
             </div>
           ))}
           {totalCount > visibleCount ? (
@@ -7799,9 +7885,9 @@ function ForkButton({ messageId, onFork }) {
     onClick={() => void onFork(messageId)}><GitBranch aria-hidden="true" size={12} /><span>Fork</span></button> : null;
 }
 
-const ForkableMessage = memo(function ForkableMessage({ onFork, ...props }) {
+const ForkableMessage = memo(function ForkableMessage({ onFork, canFork, ...props }) {
   return <div><ChatMessageBubble {...props} />
-    {!props.message.running ? <div className="flex justify-end"><ForkButton messageId={props.message.id} onFork={onFork} /></div> : null}
+    {(canFork ?? isForkableMessage(props.message)) ? <div className="flex justify-end"><ForkButton messageId={props.message.id} onFork={onFork} /></div> : null}
   </div>;
 });
 
@@ -8153,7 +8239,7 @@ export function MarkdownMessage({ compact = false, inverse = false, onOpenLink, 
   );
 }
 
-const ThoughtGroup = memo(function ThoughtGroup({ onFork, groupId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
+const ThoughtGroup = memo(function ThoughtGroup({ groupId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
   const trace = useMemo(() => buildThoughtTrace(thoughts), [thoughts]);
   const count = trace.length;
   const match = thoughts.find(thought => String(thought.id) === String(searchMessageId));
@@ -8225,8 +8311,6 @@ const ThoughtGroup = memo(function ThoughtGroup({ onFork, groupId, expanded, onO
                       <MarkdownMessage compact sourcePath={sourcePath} onOpenLink={onOpenLink} value={entry.body} />
                     </div>
                   ) : null}
-                  <div className="flex justify-end"><ForkButton onFork={onFork}
-                    messageId={thoughts.findLast(thought => entry.id ? String(thought.trace?.id) === entry.id : thought.id === entry.key)?.id} /></div>
                 </div>
               ))}
             </div>

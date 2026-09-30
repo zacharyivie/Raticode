@@ -110,7 +110,7 @@ from gofer.ui.api import (
 from gofer.ui.chat import delete_workflow_chat_prompt
 from gofer.utils.paths import get_data_dir
 from gofer.utils.registry import find_workflow
-from gofer.utils.run_state import request_workflow_stop, workflow_stop_path
+from gofer.utils.run_state import clear_workflow_stop, request_workflow_stop, workflow_stop_path
 
 app = typer.Typer(help="Manage and run workflows", no_args_is_help=True)
 recipe_app = typer.Typer(help="Create common workflow patterns", no_args_is_help=True)
@@ -3034,7 +3034,7 @@ def rm(
     path.unlink()
     shutil.rmtree(cleanup_base / "logs" / wf.config.id, ignore_errors=True)
     shutil.rmtree(cleanup_base / "agent-memory" / wf.config.id, ignore_errors=True)
-    workflow_stop_path(wf.config.id, cleanup_base).unlink(missing_ok=True)
+    clear_workflow_stop(wf.config.id, cleanup_base)
     delete_workflow_chat_prompt(cleanup_base, wf.config.id)
     console.print(f"[green]Deleted[/green] {path}")
 

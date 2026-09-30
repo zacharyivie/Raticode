@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from gofer.utils.atomic_output import open_binary_input
 from gofer.utils.process import build_subprocess_env
 
 
@@ -27,6 +28,8 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
     result = subprocess.run(
         [
             "git",
+            "-c",
+            "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",
             "-c",
@@ -38,7 +41,7 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
             *args,
         ],
         cwd=root,
-        env=env,
+        env=build_subprocess_env(env, inherit_parent=env is None),
         capture_output=True,
         text=True,
         timeout=30,
@@ -235,7 +238,11 @@ def cleanup_run(workspace: dict[str, Any], attempts: list[dict[str, Any]]) -> di
         git(path, "bundle", "create", str(bundle), "HEAD")
         git(path, "bundle", "verify", str(bundle))
         patch = subprocess.run(
-            ["git", "diff", "--binary", "HEAD"], cwd=path, capture_output=True, check=True
+            ["git", "-c", "core.fsmonitor=false", "diff", "--binary", "HEAD"],
+            cwd=path,
+            env=build_subprocess_env(),
+            capture_output=True,
+            check=True,
         ).stdout
         (archive / "working.patch").write_bytes(patch)
         files = git(path, "ls-files", "-z", "--modified", "--others").split("\0")
@@ -328,8 +335,14 @@ def artifacts(root: Path, paths: Any) -> list[dict[str, str]]:
         path = (root / name).resolve()
         if not path.is_relative_to(root.resolve()) or not path.is_file():
             raise ValueError(f"Artifact is missing or outside the workspace: {name}")
-        with path.open("rb") as source:
-            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        try:
+            with open_binary_input(path) as source:
+                hasher = hashlib.sha256()
+                for chunk in iter(lambda: source.read(64 * 1024), b""):
+                    hasher.update(chunk)
+                digest = hasher.hexdigest()
+        except OSError as exc:
+            raise ValueError(f"Artifact changed or cannot be read safely: {name}") from exc
         result.append({"path": name, "sha256": digest})
     return result
 
@@ -356,22 +369,49 @@ def run_checks(
                     start_new_session=True,
                 )
                 try:
-                    deadline = time.monotonic() + 120
-                    while process.poll() is None:
-                        if (
-                            (cancel and cancel.is_set())
-                            or time.monotonic() >= deadline
-                            or log.stat().st_size > 16 * 1024 * 1024
-                        ):
-                            raise subprocess.TimeoutExpired(argv, 120)
-                        time.sleep(0.05)
+                    try:
+                        deadline = time.monotonic() + 120
+                        while process.poll() is None:
+                            if (
+                                (cancel and cancel.is_set())
+                                or time.monotonic() >= deadline
+                                or log.stat().st_size > 16 * 1024 * 1024
+                            ):
+                                raise subprocess.TimeoutExpired(argv, 120)
+                            time.sleep(0.05)
+                    finally:
+                        # A finished group leader can leave children writing to
+                        # the log or workspace. Settle them before reporting a result.
+                        if os.name == "posix":
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        elif process.poll() is None:
+                            try:
+                                subprocess.run(
+                                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                    env=build_subprocess_env(),
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=5,
+                                    check=False,
+                                )
+                            except (OSError, subprocess.TimeoutExpired):
+                                pass
+                            if process.poll() is None:
+                                process.kill()
+                        process.wait()
+                    # Fast commands may exit between polls. Check the final log
+                    # size and cancellation state as well as the running process.
+                    if (
+                        (cancel and cancel.is_set())
+                        or time.monotonic() >= deadline
+                        or log.stat().st_size > 16 * 1024 * 1024
+                    ):
+                        raise subprocess.TimeoutExpired(argv, 120)
                     code = process.returncode
                 except subprocess.TimeoutExpired:
-                    if os.name == "posix":
-                        os.killpg(process.pid, signal.SIGKILL)
-                    else:
-                        process.kill()
-                    process.wait()
                     if log.stat().st_size > 16 * 1024 * 1024:
                         output.seek(16 * 1024 * 1024)
                         output.truncate()

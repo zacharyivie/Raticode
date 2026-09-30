@@ -7,6 +7,7 @@ import platform
 import socket
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import closing, contextmanager
@@ -39,6 +40,7 @@ RunStatus = Literal[
 ]
 
 RUNNER_STALE_AFTER_SECONDS = 60
+RUNNER_HEARTBEAT_INTERVAL_SECONDS = 10
 
 _SUBSCRIPTIONS = {
     "claude_code": ClaudeCodeSubscription(),
@@ -224,9 +226,16 @@ class RunnerQueueStore:
                 SET last_seen_at = ?,
                     status = COALESCE(?, status),
                     current_run_id = ?
-                WHERE id = ?
+                WHERE id = ? AND (current_run_id IS NULL OR current_run_id = ?)
                 """,
-                (now, status, current_run_id, runner_id),
+                (now, status, current_run_id, runner_id, current_run_id),
+            )
+
+    def heartbeat_run(self, run_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE runners SET last_seen_at = ? WHERE current_run_id = ?",
+                (_now(), run_id),
             )
 
     def get_runner(self, runner_id: str) -> RunnerRecord | None:
@@ -267,7 +276,7 @@ class RunnerQueueStore:
                 (
                     run_id,
                     workflow_id,
-                    str(workflow_path),
+                    str(workflow_path.resolve()),
                     priority,
                     trigger,
                     _dump_json(parameters or {}),
@@ -306,11 +315,17 @@ class RunnerQueueStore:
         return [_run_from_row(row) for row in rows]
 
     def claim_next(self, runner_id: str) -> QueuedRun | None:
-        runner = self.get_runner(runner_id)
-        if runner is None:
-            raise ValueError(f"Runner '{runner_id}' is not registered")
-        now = _now()
         with self._connect() as conn:
+            # Serialize selection and ownership changes across worker processes.
+            # A conditional run update alone does not protect the runner record.
+            conn.execute("BEGIN IMMEDIATE")
+            runner_row = conn.execute("SELECT * FROM runners WHERE id = ?", (runner_id,)).fetchone()
+            if runner_row is None:
+                raise ValueError(f"Runner '{runner_id}' is not registered")
+            runner = _runner_from_row(runner_row)
+            if runner.current_run_id is not None:
+                return None
+            now = _now()
             rows = conn.execute(
                 """
                 SELECT * FROM runs
@@ -332,7 +347,7 @@ class RunnerQueueStore:
                         (message, now, queued.id),
                     )
                     continue
-                conn.execute(
+                claimed = conn.execute(
                     """
                     UPDATE runs
                     SET status = 'running',
@@ -344,6 +359,8 @@ class RunnerQueueStore:
                     """,
                     (runner_id, now, now, queued.id),
                 )
+                if claimed.rowcount != 1:
+                    continue
                 conn.execute(
                     """
                     UPDATE runners
@@ -354,25 +371,31 @@ class RunnerQueueStore:
                     """,
                     (queued.id, now, runner_id),
                 )
-                return self.get_run(queued.id)
+                # Read through this transaction, not a second connection that
+                # still sees the pre-claim snapshot until the commit below.
+                return _run_from_row(
+                    conn.execute("SELECT * FROM runs WHERE id = ?", (queued.id,)).fetchone()
+                )
         return None
 
     def cancel_run(self, run_id: str) -> QueuedRun:
-        run = self.get_run(run_id)
-        if run is None:
-            raise ValueError(f"Queued run '{run_id}' not found")
-        now = _now()
-        if run.status == "queued":
-            status: RunStatus = "canceled"
-            finished_at: str | None = now
-            message = "Canceled before dispatch"
-        elif run.status in {"running", "cancel_requested"}:
-            status = "cancel_requested"
-            finished_at = run.finished_at
-            message = "Cancel requested"
-        else:
-            return run
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Queued run '{run_id}' not found")
+            run = _run_from_row(row)
+            now = _now()
+            if run.status == "queued":
+                status: RunStatus = "canceled"
+                finished_at: str | None = now
+                message = "Canceled before dispatch"
+            elif run.status in {"running", "cancel_requested"}:
+                status = "cancel_requested"
+                finished_at = run.finished_at
+                message = "Cancel requested"
+            else:
+                return run
             conn.execute(
                 """
                 UPDATE runs
@@ -381,7 +404,9 @@ class RunnerQueueStore:
                 """,
                 (status, message, now, finished_at, run_id),
             )
-        return self.get_run(run_id)  # type: ignore[return-value]
+            return _run_from_row(
+                conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            )
 
     def run_cancel_requested(self, run_id: str) -> bool:
         run = self.get_run(run_id)
@@ -395,12 +420,16 @@ class RunnerQueueStore:
         message: str | None = None,
         run_log_path: Path | None = None,
     ) -> QueuedRun:
-        run = self.get_run(run_id)
-        if run is None:
-            raise ValueError(f"Queued run '{run_id}' not found")
-        now = _now()
-        final_status: RunStatus = "canceled" if self.run_cancel_requested(run_id) else status
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Queued run '{run_id}' not found")
+            run = _run_from_row(row)
+            now = _now()
+            final_status: RunStatus = (
+                "canceled" if run.status in {"cancel_requested", "canceled"} else status
+            )
             conn.execute(
                 """
                 UPDATE runs
@@ -427,11 +456,13 @@ class RunnerQueueStore:
                     SET status = 'idle',
                         current_run_id = NULL,
                         last_seen_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND current_run_id = ?
                     """,
-                    (now, run.runner_id),
+                    (now, run.runner_id, run_id),
                 )
-        return self.get_run(run_id)  # type: ignore[return-value]
+            return _run_from_row(
+                conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            )
 
     def mark_lost_runs(self) -> None:
         stale_before = (
@@ -439,6 +470,7 @@ class RunnerQueueStore:
         ).isoformat()
         now = _now()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             stale_runner_rows = conn.execute(
                 """
                 SELECT id FROM runners
@@ -533,7 +565,7 @@ async def execute_queued_run(
     )
     monitor.start()
     try:
-        if cancel_event.is_set():
+        if cancel_event.is_set() or store.run_cancel_requested(queued_run.id):
             return store.finish_run(queued_run.id, "canceled")
         workflow_path = Path(queued_run.workflow_path)
         workflow = AgenticWorkflow.from_file(workflow_path)
@@ -576,6 +608,7 @@ def run_worker_once(
 ) -> QueuedRun | None:
     queued = store.claim_next(runner_id)
     if queued is None:
+        # Another worker with this ID may still own a run. Do not clear it.
         store.heartbeat(runner_id, status="idle", current_run_id=None)
         return None
     return asyncio.run(execute_queued_run(store, queued, data_dir=data_dir))
@@ -587,10 +620,14 @@ def _monitor_cancel_request(
     cancel_event: threading.Event,
     stop_monitor: threading.Event,
 ) -> None:
+    next_heartbeat = 0.0
     while not stop_monitor.wait(0.2):
         if store.run_cancel_requested(run_id):
             cancel_event.set()
-            return
+        instant = time.monotonic()
+        if instant >= next_heartbeat:
+            store.heartbeat_run(run_id)
+            next_heartbeat = instant + RUNNER_HEARTBEAT_INTERVAL_SECONDS
 
 
 def _now() -> str:

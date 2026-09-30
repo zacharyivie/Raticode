@@ -1,3 +1,5 @@
+import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
+import "monaco-editor/esm/vs/language/json/monaco.contribution";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
 import "monaco-editor/esm/vs/basic-languages/monaco.contribution";
@@ -21,8 +23,8 @@ import "monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperation
 if (typeof self !== "undefined") {
   self.MonacoEnvironment = {
     ...self.MonacoEnvironment,
-    getWorker() {
-      return new EditorWorker();
+    getWorker(_moduleId, label) {
+      return label === "json" ? new JsonWorker() : new EditorWorker();
     },
   };
 }

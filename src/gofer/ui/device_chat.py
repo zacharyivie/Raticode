@@ -95,7 +95,14 @@ class DeviceWork(Protocol):
 
     def runnable(self, peer: str, request_id: str) -> bool: ...
 
-    def complete(self, peer: str, request_id: str, text: str, error: str | None = None) -> None: ...
+    def complete(
+        self,
+        peer: str,
+        request_id: str,
+        text: str,
+        error: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None: ...
 
 
 class DeviceChatBridge:
@@ -160,7 +167,11 @@ class DeviceChatBridge:
     def _complete(self, request: dict[str, Any], text: str, error: str | None) -> None:
         try:
             self.application.complete(
-                request["peer"], request["event"]["request_id"], text, error=error
+                request["peer"],
+                request["event"]["request_id"],
+                text,
+                error=error,
+                **({"usage": request["usage"]} if "usage" in request else {}),
             )
         except (ValueError, OSError, sqlite3.Error):
             # Revoked peers may no longer receive a result. The persisted running
@@ -238,6 +249,11 @@ class DeviceChatBridge:
                 terminal = False
 
                 async def provider_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
+                    if event.get("payload", {}).get("organization"):
+                        options["workflow"] = {
+                            **options.get("workflow", {}),
+                            "organizationRun": event["payload"]["organization"],
+                        }
                     original = self.source(**options)
                     try:
                         async for output in original:
@@ -251,7 +267,9 @@ class DeviceChatBridge:
                     wrapped = stream_with_fleet_tools(
                         provider_source,
                         self.fleet_control,
-                        read_only_override=None
+                        read_only_override=True
+                        if event.get("payload", {}).get("organization")
+                        else None
                         if context.get("desktop_parity")
                         else context.get("fleet_execute") is not True,
                         file_scope=(request["peer"], event["thread_id"], event["request_id"]),
@@ -266,6 +284,10 @@ class DeviceChatBridge:
                 from gofer.ui.rem_threads import stream_with_thread_tools
 
                 async def thread_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
+                    if event.get("payload", {}).get("organization"):
+                        async for output in fleet_source(**options):
+                            yield output
+                        return
                     async for output in stream_with_thread_tools(fleet_source, **options):
                         if output.get("type") == "project-scope":
                             select = getattr(self.application, "select_project", None)
@@ -292,6 +314,21 @@ class DeviceChatBridge:
                 )
                 try:
                     async for output in source:
+                        if isinstance(output.get("usage"), dict):
+                            from gofer.subscriptions.usage import normalize_usage
+
+                            request["usage"] = {
+                                key: value
+                                for key, value in normalize_usage(provider, output["usage"]).items()
+                                if key
+                                in {
+                                    "cost_usd",
+                                    "total_cost_usd",
+                                    "total_tokens",
+                                    "input_tokens",
+                                    "output_tokens",
+                                }
+                            }
                         kind = output.get("type")
                         if kind == "final":
                             body = output.get("message", {}).get("body", "")

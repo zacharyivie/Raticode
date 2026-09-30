@@ -205,9 +205,9 @@ async function run() {
   windowRef.webContents.focus();
   await waitFor(() => evaluate(() => Boolean(document.querySelector('[aria-label="Project sidebar views"]'))));
   await waitFor(() => evaluate(() => window.innerWidth >= 1000));
-  await check('Graph/Code toggle removed and five activities exposed', async () => {
+  await check('Graph/Code toggle removed and six activities exposed', async () => {
     assert.equal(await evaluate(() => Boolean(document.querySelector('[aria-label="Studio view"]'))), false);
-    assert.deepEqual(await evaluate(() => [...document.querySelectorAll('[aria-label="Project sidebar views"] [role="tab"]')].map(el => el.getAttribute('aria-label')).sort()), ['File explorer', 'Search', 'Source control', 'Swarms', 'Workflows'].sort());
+    assert.deepEqual(await evaluate(() => [...document.querySelectorAll('[aria-label="Project sidebar views"] [role="tab"]')].map(el => el.getAttribute('aria-label')).sort()), ['File explorer', 'Organizations', 'Search', 'Source control', 'Swarms', 'Workflows'].sort());
   });
   await check('Two workflow graphs open as persistent editor tabs', async () => {
     await openWorkflow('Atlas review');

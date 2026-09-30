@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import ipaddress
 import re
 import threading
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+from gofer.core.http import read_response_bytes
 from gofer.devices.framing import Frame, FrameError, strict_json
 
 MAX_LINE = 16384
@@ -146,17 +148,21 @@ class NtfyRelay:
                 if response.status != 200:
                     raise RelayError("relay_http")
                 if frame is not None:
-                    if len(response.read(MAX_LINE + 1)) > MAX_LINE:
+                    if len(read_response_bytes(response, MAX_LINE)) > MAX_LINE:
                         raise RelayError("relay_response_limit")
                     return []
-                total = 0
+                # Read complete HTTP framing before returning any messages.
+                # HTTPResponse.readline() can hide truncated chunk terminators.
+                raw_body = read_response_bytes(response, MAX_POLL_BYTES)
+                if len(raw_body) > MAX_POLL_BYTES:
+                    raise RelayError("relay_response_limit")
+                lines = io.BytesIO(raw_body)
                 messages: list[RelayMessage] = []
                 while True:
-                    line = response.readline(MAX_LINE + 1)
+                    line = lines.readline(MAX_LINE + 1)
                     if not line:
                         return messages
-                    total += len(line)
-                    if len(line) > MAX_LINE or total > MAX_POLL_BYTES:
+                    if len(line) > MAX_LINE:
                         raise RelayError("relay_response_limit")
                     value = strict_json(line, limit=MAX_LINE)
                     if value.get("event") in ("open", "keepalive"):

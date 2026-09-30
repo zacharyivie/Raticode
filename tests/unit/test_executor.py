@@ -1578,6 +1578,25 @@ async def test_agent_successor_nodes_from_same_parent_run_concurrently(tmp_path:
     assert elapsed < 0.95
 
 
+async def test_stop_marker_cleanup_does_not_follow_linked_parent(tmp_path: Path) -> None:
+    wf = _make_workflow("stop-marker-links")
+    wf.add_operation(GraphNode(node_id="start", operation=StartOperation(type=OperationType.START)))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    private = outside / "stop-marker-links.stop"
+    private.write_bytes(b"private contents")
+    (tmp_path / "run-state").symlink_to(outside, target_is_directory=True)
+
+    await WorkflowExecutor(
+        wf,
+        {},
+        log_base_dir=tmp_path / "logs",
+        stop_file=workflow_stop_path(wf.config.id, tmp_path),
+    ).run()
+
+    assert private.read_bytes() == b"private contents"
+
+
 async def test_stop_marker_interrupts_running_workflow(tmp_path: Path) -> None:
     wf = _make_workflow("stop-marker")
     wf.add_operation(_bash_node("sleep", "sleep 5"))
@@ -2353,6 +2372,88 @@ async def test_move_file_destination_exists_without_overwrite_fails(tmp_path: Pa
     assert "already exists" in result.node_outputs["move"].output
     assert source.read_text() == "new"
     assert destination.read_text() == "old"
+
+
+@pytest.mark.parametrize("operation_type", [OperationType.COPY_FILE, OperationType.MOVE_FILE])
+@pytest.mark.parametrize("destination_kind", ["same", "ancestor", "descendant", "missing-source"])
+async def test_transfer_rejects_unsafe_paths_before_changing_files(
+    tmp_path: Path, operation_type: OperationType, destination_kind: str
+) -> None:
+    source = tmp_path / "parent" / "source"
+    source.mkdir(parents=True)
+    content = source / "contents.txt"
+    content.write_text("keep source", encoding="utf-8")
+    sibling = source.parent / "sibling.txt"
+    sibling.write_text("keep sibling", encoding="utf-8")
+    destination = {
+        "same": source,
+        "ancestor": source.parent,
+        "descendant": source / "child",
+        "missing-source": sibling,
+    }[destination_kind]
+    operation_class = (
+        CopyFileOperation if operation_type == OperationType.COPY_FILE else MoveFileOperation
+    )
+    wf = _make_workflow()
+    wf.add_operation(
+        GraphNode(
+            node_id="transfer",
+            operation=operation_class(
+                type=operation_type,
+                source_path=tmp_path / "missing"
+                if destination_kind == "missing-source"
+                else source,
+                destination_path=destination,
+                overwrite=True,
+            ),
+        )
+    )
+
+    result = await WorkflowExecutor(wf, {}, log_base_dir=tmp_path / "logs").run()
+
+    assert not result.success
+    assert content.read_text(encoding="utf-8") == "keep source"
+    assert sibling.read_text(encoding="utf-8") == "keep sibling"
+    assert not (source / "child").exists()
+
+
+@pytest.mark.parametrize("operation_type", [OperationType.COPY_FILE, OperationType.MOVE_FILE])
+async def test_transfer_cannot_remove_a_parent_containing_a_symlink_source(
+    tmp_path: Path, operation_type: OperationType
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    target = tmp_path / "target.txt"
+    target.write_text("target", encoding="utf-8")
+    source = parent / "source"
+    try:
+        source.symlink_to(target)
+    except OSError:
+        pytest.skip("Symlinks are unavailable")
+    sibling = parent / "sibling.txt"
+    sibling.write_text("keep sibling", encoding="utf-8")
+    operation_class = (
+        CopyFileOperation if operation_type == OperationType.COPY_FILE else MoveFileOperation
+    )
+    wf = _make_workflow()
+    wf.add_operation(
+        GraphNode(
+            node_id="transfer",
+            operation=operation_class(
+                type=operation_type,
+                source_path=source,
+                destination_path=parent,
+                overwrite=True,
+            ),
+        )
+    )
+
+    result = await WorkflowExecutor(wf, {}, log_base_dir=tmp_path / "logs").run()
+
+    assert not result.success
+    assert source.is_symlink()
+    assert sibling.read_text(encoding="utf-8") == "keep sibling"
+    assert target.read_text(encoding="utf-8") == "target"
 
 
 async def test_delete_file_missing_ok_controls_missing_path(tmp_path: Path) -> None:
@@ -5219,6 +5320,50 @@ async def test_http_request_masks_secret_fields_in_raw_request_body(
     log_text = result.log_path.read_text()
     assert "cleartext-secret" not in log_text
     assert '\\"password\\": \\"***\\"' in log_text
+
+
+async def test_http_request_masks_secrets_echoed_in_object_keys(tmp_path: Path) -> None:
+    http = FakeHttpClient(
+        [HttpResponse(200, {}, b'{"opaque-314": [{"opaque-314": "safe"}]}')]
+    )
+    wf = _make_workflow()
+    wf.add_operation(
+        GraphNode(
+            node_id="api",
+            operation=HttpRequestOperation(
+                type=OperationType.HTTP_REQUEST,
+                method="POST",
+                url="https://api.example.test/login",
+                json={"password": "opaque-314"},
+                response_mode="json",
+            ),
+        )
+    )
+
+    result = await WorkflowExecutor(
+        wf, {}, log_base_dir=tmp_path / "logs", http_client=http
+    ).run()
+
+    assert result.success
+    assert result.node_outputs["api"].data["json"] == {"***": [{"***": "safe"}]}
+    assert "opaque-314" not in json.dumps(result.node_outputs["api"].data)
+    assert result.log_path is not None
+    assert "opaque-314" not in result.log_path.read_text()
+
+
+@pytest.mark.parametrize("key", ["opaque-314", "prefix-opaque-314", "opaque-314-suffix"])
+def test_checkpoint_detects_secrets_redacted_from_nested_object_keys(key: str) -> None:
+    output = {"items": [{key: "safe"}]}
+    masked = executor_module._mask_known_secret_values(output, {"opaque-314"})
+
+    assert masked == {"items": [{key.replace("opaque-314", "***"): "safe"}]}
+    assert WorkflowExecutor._contains_redacted_snapshot_value(masked)
+    assert not WorkflowExecutor._contains_redacted_snapshot_value(output)
+
+
+def test_checkpoint_detects_secrets_redacted_inside_text() -> None:
+    assert WorkflowExecutor._contains_redacted_snapshot_value({"items": ["prefix-***-suffix"]})
+    assert not WorkflowExecutor._contains_redacted_snapshot_value({"items": ["safe"]})
 
 
 async def test_http_request_masks_secret_fields_in_text_response_preview(

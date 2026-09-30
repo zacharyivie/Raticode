@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import importlib.metadata
 import json
+import locale
 import os
 import re
 import secrets as stdlib_secrets
@@ -100,6 +101,7 @@ from gofer.core.resources import (
     ResourceLimitError,
     ResourceLimits,
     byte_len,
+    read_bytes_limited,
     read_text_limited,
     require_limit,
     truncate_text_bytes,
@@ -131,7 +133,7 @@ from gofer.subscriptions.base import Subscription
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
-from gofer.utils.run_state import clear_workflow_stop, workflow_run_stop_path
+from gofer.utils.run_state import clear_stop_marker, clear_workflow_stop, workflow_run_stop_path
 
 log = get_logger(__name__)
 AGENT_MEMORY_COMPACT_CHAR_LIMIT = 32_000
@@ -415,7 +417,8 @@ def _mask_http_value(
         masked: dict[str, object] = {}
         for key, item in value.items():
             child_path = f"{path}.{key}" if path else str(key)
-            masked[str(key)] = (
+            masked_key = _replace_known_secrets(str(key), secret_values or set())
+            masked[masked_key] = (
                 "***"
                 if _is_sensitive_field(child_path, configured)
                 else _mask_http_value(item, configured, child_path, secret_values)
@@ -528,7 +531,10 @@ def _mask_known_secret_values(value: object, secret_values: set[str]) -> object:
         return _replace_known_secrets(value, secret_values)
     if isinstance(value, dict):
         return {
-            str(key): _mask_known_secret_values(item, secret_values) for key, item in value.items()
+            _replace_known_secrets(str(key), secret_values): _mask_known_secret_values(
+                item, secret_values
+            )
+            for key, item in value.items()
         }
     if isinstance(value, list):
         return [_mask_known_secret_values(item, secret_values) for item in value]
@@ -625,7 +631,25 @@ def _prepare_destination(path: Path, create_dirs: bool, overwrite: bool) -> None
         raise FileExistsError(f"{path} already exists")
 
 
+def _validate_transfer_paths(source: Path, destination: Path) -> None:
+    if not source.exists() and not source.is_symlink():
+        raise FileNotFoundError(source)
+    source_entry = source.parent.resolve() / source.name
+    destination_entry = destination.parent.resolve() / destination.name
+    resolved_source = source.resolve()
+    resolved_destination = destination.resolve()
+    if source_entry == destination_entry or resolved_source == resolved_destination:
+        raise ValueError("Source and destination must be different.")
+    if source_entry.is_relative_to(destination_entry) or resolved_source.is_relative_to(
+        resolved_destination
+    ):
+        raise ValueError("Destination cannot contain the source.")
+    if source.is_dir() and resolved_destination.is_relative_to(resolved_source):
+        raise ValueError("A directory cannot be copied or moved inside itself.")
+
+
 def _copy_path(source: Path, destination: Path, create_dirs: bool, overwrite: bool) -> None:
+    _validate_transfer_paths(source, destination)
     _prepare_destination(destination, create_dirs, overwrite)
     if source.is_dir():
         shutil.copytree(source, destination, dirs_exist_ok=overwrite)
@@ -634,6 +658,7 @@ def _copy_path(source: Path, destination: Path, create_dirs: bool, overwrite: bo
 
 
 def _move_path(source: Path, destination: Path, create_dirs: bool, overwrite: bool) -> None:
+    _validate_transfer_paths(source, destination)
     _prepare_destination(destination, create_dirs, overwrite)
     if destination.exists():
         _remove_path(destination, recursive=True)
@@ -1143,14 +1168,25 @@ def _resolve_fan_items(
                         require_path_access(p, "read")
                     size = p.stat().st_size
                     require_limit(size, limits.max_file_read_bytes, f"{p} size")
-                    aggregate_bytes += size
-                    if aggregate_bytes > limits.max_aggregate_read_bytes:
+                    if aggregate_bytes + size > limits.max_aggregate_read_bytes:
                         raise ResourceLimitError(
                             "directory fan-out content exceeded aggregate limit "
                             f"{limits.max_aggregate_read_bytes} bytes "
-                            f"(got {aggregate_bytes} bytes)"
+                            f"(got {aggregate_bytes + size} bytes)"
                         )
-                    entry["file_content"] = p.read_text(errors="replace")
+                    data = read_bytes_limited(
+                        p,
+                        max_bytes=min(
+                            limits.max_file_read_bytes,
+                            limits.max_aggregate_read_bytes - aggregate_bytes,
+                        ),
+                    )
+                    aggregate_bytes += len(data)
+                    entry["file_content"] = (
+                        data.decode(locale.getpreferredencoding(False), errors="replace")
+                        .replace("\r\n", "\n")
+                        .replace("\r", "\n")
+                    )
                 items.append(entry)
         return sorted(items, key=lambda item: str(item.get("path", "")))
     if isinstance(source, TriggerEventsFanSource):
@@ -1184,14 +1220,25 @@ def _resolve_fan_items(
                 if file_path.exists() and file_path.is_file():
                     size = file_path.stat().st_size
                     require_limit(size, limits.max_file_read_bytes, f"{file_path} size")
-                    aggregate_bytes += size
-                    if aggregate_bytes > limits.max_aggregate_read_bytes:
+                    if aggregate_bytes + size > limits.max_aggregate_read_bytes:
                         raise ResourceLimitError(
                             "trigger-event fan-out content exceeded aggregate limit "
                             f"{limits.max_aggregate_read_bytes} bytes "
-                            f"(got {aggregate_bytes} bytes)"
+                            f"(got {aggregate_bytes + size} bytes)"
                         )
-                    item["file_content"] = file_path.read_text(errors="replace")
+                    data = read_bytes_limited(
+                        file_path,
+                        max_bytes=min(
+                            limits.max_file_read_bytes,
+                            limits.max_aggregate_read_bytes - aggregate_bytes,
+                        ),
+                    )
+                    aggregate_bytes += len(data)
+                    item["file_content"] = (
+                        data.decode(locale.getpreferredencoding(False), errors="replace")
+                        .replace("\r\n", "\n")
+                        .replace("\r", "\n")
+                    )
             items.append(item)
         return items
     if isinstance(source, InfiniteFanSource):
@@ -3245,11 +3292,13 @@ class WorkflowExecutor:
 
     @staticmethod
     def _contains_redacted_snapshot_value(value: object) -> bool:
-        if value == "***":
-            return True
+        if isinstance(value, str):
+            return "***" in value
         if isinstance(value, dict):
             return any(
-                WorkflowExecutor._contains_redacted_snapshot_value(item) for item in value.values()
+                WorkflowExecutor._contains_redacted_snapshot_value(key)
+                or WorkflowExecutor._contains_redacted_snapshot_value(item)
+                for key, item in value.items()
             )
         if isinstance(value, list):
             return any(WorkflowExecutor._contains_redacted_snapshot_value(item) for item in value)
@@ -3860,7 +3909,7 @@ class WorkflowExecutor:
                     + ". Set GOFER_SECRET_<NAME> or <NAME> before running."
                 )
         if self._stop_file is not None:
-            self._stop_file.unlink(missing_ok=True)
+            clear_stop_marker(self._stop_file)
         else:
             data_dir = self._log_base_dir.parent if self._log_base_dir is not None else None
             clear_workflow_stop(self._workflow.config.id, data_dir)
@@ -3881,7 +3930,7 @@ class WorkflowExecutor:
                 run_log.path.name,
                 data_dir,
             )
-            self._run_stop_file.unlink(missing_ok=True)
+            clear_stop_marker(self._run_stop_file)
         graph = self._workflow.graph
         ctx = self._load_resume_state(graph)
         start = time.monotonic()
@@ -4328,7 +4377,7 @@ class WorkflowExecutor:
                 monitor.join(timeout=1)
             if self._stop_file is not None:
                 if self._run_stop_file is not None:
-                    self._run_stop_file.unlink(missing_ok=True)
+                    clear_stop_marker(self._run_stop_file)
 
     async def resume_from_approval(self, request: ApprovalRequest) -> ExecutionResult | None:
         claimed = self._approval_store.claim_resume(

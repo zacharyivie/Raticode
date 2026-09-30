@@ -13,8 +13,10 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from gofer.subscriptions.usage import normalize_usage
 from gofer.utils.process import (
     _terminate_process_tree,
+    build_subprocess_env,
     env_with_executable_on_path,
     stream_subprocess,
 )
@@ -176,7 +178,7 @@ async def stream_codex_turn(
     process = await asyncio.create_subprocess_exec(
         *_app_server_command(command),
         cwd=cwd,
-        env=env_with_executable_on_path(command[0]),
+        env=build_subprocess_env(env_with_executable_on_path(command[0])),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -222,6 +224,7 @@ async def stream_codex_turn(
     canceller = asyncio.create_task(watch_cancel())
     turn_requested = False
     fallback = False
+    usage: dict[str, Any] = {}
     try:
         await transport.request(
             "initialize",
@@ -256,10 +259,27 @@ async def stream_codex_turn(
                 yield _event(
                     {"type": method.replace("/", "."), "item": _exec_item(payload["item"])}
                 )
+            elif method == "thread/tokenUsage/updated":
+                if (
+                    payload.get("threadId") != control.thread_id
+                    or payload.get("turnId") != control.turn_id
+                ):
+                    continue
+                token_usage = payload.get("tokenUsage")
+                total = token_usage.get("total") if isinstance(token_usage, dict) else None
+                if isinstance(total, dict):
+                    # Every invocation creates a fresh thread and starts one turn.
+                    # Its cumulative total includes all tool-use model requests;
+                    # `last` covers only the most recent request. Replace snapshots.
+                    usage = {**normalize_usage("codex", total), "partial": True}
+                    yield _event({"type": "turn.usage", "usage": usage})
             elif method == "turn/completed":
                 control.turn_id = None
                 turn = payload.get("turn") or {}
                 status = turn.get("status")
+                if usage:
+                    usage["partial"] = status != "completed"
+                    yield _event({"type": "turn.completed", "usage": usage})
                 if status != "completed":
                     yield {
                         "type": "chunk",

@@ -58,6 +58,25 @@ Publish lets you choose an existing remote for a branch without an upstream. Git
 credential helper handles authentication. Remote actions time out after two minutes.
 Raticode never force-pushes or discards changes to switch branches.
 
+In Settings → Providers → Commit messages, edit the message template used by the
+generate button and by Rem when writing commits in chat. The setting applies across
+providers and models. It saves when you leave the field; clear it or choose Reset commit
+template to restore the default. Provider and model choices are saved separately.
+
+The default uses one of `fix`, `feat`, `test`, or `chore` for the subject, followed by
+a blank line and one to eight plain, one-line change bullets ordered by importance:
+
+```text
+feat: add configurable commit messages
+
+ - Save the message template in settings
+ - Apply the template to Rem commit drafts and chat
+```
+
+Custom templates can change the subject and bullet format. Keep at most eight change
+bullets, combining related changes when necessary. Generated drafts are checked before
+they fill the commit box; Rem receives the same format instructions for chat commits.
+
 If Git blocks a switch because changes would be overwritten, Source Control offers
 Stash and switch. This includes untracked files and leaves the stash saved. Apply latest
 stash restores it on the branch you choose and keeps the stash as a backup, including
@@ -114,7 +133,7 @@ leaves existing archive files untouched.
 ## Second Brain
 
 Settings > Memory also configures Second Brain independently of the conversation archive.
-Choose its knowledge folder, select Markdown or HTML for generated reports, and enable it.
+Choose its knowledge folder and enable it. Report output is configured separately below it.
 The folder is added to recent projects. Disabling the feature removes its tools from
 subsequent Rem turns; a turn already in progress keeps its original configuration.
 
@@ -131,15 +150,54 @@ node_modules, symlinked files, and files larger than 2 MB are excluded. The root
 up to 10,000 notes. `save_note` creates new files and refuses overwrites, so revisions need
 a new filename. Tools cannot read or write outside the chosen root.
 
-### Second Brain reports and tool access
+### Report themes
 
-Settings > Memory > Second Brain includes System, Light, Dark, Sepia, Vaporwave,
-Steam, Carbon, Botanical, Blueprint, Arcade, Sakura, Deep Sea, Solarpunk, Noir,
-Candy Lab, and Cosmic HTML report themes. Each provides palette, typography, and
-composition guidance. The selection supplies design guidance in the chat prompt and the
-Second Brain MCP initialization instructions and `rules` tool. System asks the
-agent to design coordinated light and dark palettes that follow device appearance.
-Theme changes apply to subsequent report generation requests.
+Settings > Memory has separate **Second Brain** and **Report themes** sections.
+Report themes work with Second Brain off, and Second Brain works with theme guidance off.
+The horizontally scrolling gallery shows labeled document examples for System, Light,
+Dark, Sepia, Vaporwave, Steam, Carbon, Botanical, Blueprint, Arcade, Sakura, Deep Sea,
+Solarpunk, Noir, Candy Lab, and Cosmic. Existing theme selections migrate automatically.
+System asks Rem to design coordinated light and dark palettes that follow device appearance.
+Theme changes apply to subsequent HTML reports, slides, and PDFs wherever they are saved, without changing
+an explicitly requested output format.
+
+The **Report output** selector offers Markdown, HTML, Slides, and PDF. Existing Markdown
+and HTML preferences migrate automatically. Output works with Second Brain disabled and
+with theme guidance disabled. Settings apply to the next Rem turn, including paired-device
+turns; an explicit format request in chat overrides the default.
+
+Slides are a single HTML file with embedded styling and assets. Rem writes one
+`section.slide` per slide. Raticode adds a 16:9 landscape presentation layout, Previous
+and Next buttons, arrow-key and Home/End navigation, a slide count, and fullscreen.
+Printing includes every slide, one per landscape page.
+
+For PDF, Rem supplies standalone HTML with `section.page` elements for deliberate page
+breaks. The desktop app renders it to PDF using its bundled Chromium, with A4 portrait
+defaults, print backgrounds, and CSS pagination. Headings stay with their following
+content, while figures and table rows avoid page splits. Long sections can flow onto
+additional pages. Rendering disables scripts, network access, and local resource loading;
+images and fonts must be embedded. No separate PDF package is required.
+
+The native `reports.save_report` tool saves files relative to the active project, even
+without shell access. It accepts an optional `format` override. Second Brain's `save_note`
+uses the same writer inside its knowledge folder. Both keep existing files. PDF saves
+return the actual `.pdf` link and also retain a `.pdf.html` source for reading and knowledge
+search. PDF rendering requires a running desktop app; failure does not create a fake PDF.
+
+Choose **New theme** to open the composer directly below the button. Describe a design,
+use dictation, or attach reference files with the paperclip, paste, or drag and drop.
+Pasted text of 16 KB or more becomes a text attachment. Attach up to five files,
+20 MB per file and 40 MB total, using the same limits as Rem chat. Dictation uses the
+microphone selected in Settings > Devices. Press Enter or the **Generate preview**
+button to request a standalone demo and reusable design instructions. Rename it and choose **Save theme** to add it to the gallery and select it.
+Unaccepted previews are not saved. Custom themes persist with desktop Memory settings.
+Preview documents run in sandboxed frames with scripts and remote assets disabled.
+
+Generation uses the current Rem provider, model, and reasoning effort. Expand
+**Theme generation settings** to select a dedicated provider, model, and effort.
+Screenshot references currently require Codex or Claude Code, matching the supported
+image adapters. Text descriptions work with all supported Rem providers.
+The selected theme's design instructions are supplied separately from knowledge tools.
 
 Agents author standalone reports with their own embedded CSS. Guidance encourages
 expressive typography, deliberate composition, and diagrams or visual evidence
@@ -147,6 +205,8 @@ suited to the findings. Themes set palette and mood without prescribing a templa
 `save_note` preserves authored content, and the desktop reader adds no report CSS.
 Existing files are not restyled or rewritten. Reports saved by the earlier shared
 stylesheet implementation retain that embedded CSS until explicitly revised.
+
+### Second Brain tool access
 
 When Second Brain is enabled, Rem's Codex adapter grants `rules`, `search`,
 `read_note`, and `save_note` for the app-provided MCP server in that invocation.

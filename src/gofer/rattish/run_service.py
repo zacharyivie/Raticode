@@ -42,6 +42,7 @@ from gofer.rattish.workflow_runtime import (
     execute_workflow,
 )
 from gofer.subscriptions.base import Subscription
+from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.paths import get_data_dir
 
 RUN_ARTIFACT_VERSION = 1
@@ -135,6 +136,7 @@ async def run_rattish_file(
         )
 
         execution: WorkflowExecutionResult | None = None
+        live: dict[str, Any] | None = None
         input_error: RuntimeErrorInfo | None = None
         stopped = False
         if deployment.ready:
@@ -158,6 +160,16 @@ async def run_rattish_file(
                 if on_started is not None:
                     on_started(RattishRunResult(live, path, compiled, deployment))
 
+                def publish_node_event(event: dict[str, Any], record: NodeRunRecord | None) -> None:
+                    assert live is not None
+                    live["events"].append({"sequence": len(live["events"]) + 1, **event})
+                    if record is not None:
+                        live["runs"].append(_node_run_document(record))
+                        if record.result.outcome == "success":
+                            live["latest_node_outputs"][record.node_id] = record.result.output
+                    live["duration_ms"] = round((time.monotonic() - started_clock) * 1000)
+                    _write_json_atomic(path, live)
+
                 async def watch_stop(scope: anyio.CancelScope) -> None:
                     while cancel_event is not None and not cancel_event.is_set():
                         await anyio.sleep(0.05)
@@ -177,6 +189,7 @@ async def run_rattish_file(
                             data_dir=resolved_data_dir,
                             notification_adapter=notification_adapter,
                             run_id=run_id,
+                            on_node_event=publish_node_event,
                         )
                     group.cancel_scope.cancel()
                 stopped = execution is None and cancel_event is not None and cancel_event.is_set()
@@ -205,6 +218,20 @@ async def run_rattish_file(
             finished_at=finished_at,
             duration_ms=round((time.monotonic() - started_clock) * 1000),
         )
+        if live is not None:
+            # Keep the observed event order and completed work even after cancellation.
+            document["events"] = [
+                *live["events"],
+                {
+                    "sequence": len(live["events"]) + 1,
+                    "type": "workflow_completed",
+                    "at": finished_at,
+                    "status": status,
+                },
+            ]
+            if execution is None:
+                document["runs"] = live["runs"]
+                document["latest_node_outputs"] = live["latest_node_outputs"]
         path = _run_path(
             resolved_data_dir,
             compiled.ir["workflow"]["id"],
@@ -350,14 +377,8 @@ def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
         Draft202012Validator(schema).validate(document)
     except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
         raise RattishRunArtifactError(f"Invalid Rattish run artifact: {exc}") from exc
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_bytes(canonical_json_bytes(document) + b"\n")
-        os.replace(temporary, path)
+        with atomic_binary_output(path) as output:
+            output.write(canonical_json_bytes(document) + b"\n")
     except (OSError, TypeError, ValueError) as exc:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise RattishRunArtifactError(f"Could not publish Rattish run artifact: {exc}") from exc

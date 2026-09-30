@@ -6,6 +6,7 @@ const { createHash } = require("node:crypto");
 const { Worker, isMainThread, parentPort, workerData } = require("node:worker_threads");
 const run = promisify(execFile);
 const digest = (buffer) => createHash("sha256").update(buffer).digest("hex");
+const safeFiles = require("./safe-files.cjs");
 const excluded = new Set([".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next"]);
 
 function compileRegex(source, flags, field) {
@@ -35,7 +36,7 @@ async function scanProject(root, options = {}) {
   const deadline = Date.now() + 10000;
   let candidates;
   try {
-    const { stdout } = await run("git", ["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."], { timeout: 3000, maxBuffer: 8 * 1024 * 1024 });
+    const { stdout } = await run("git", ["-c", "core.fsmonitor=false", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."], { timeout: 3000, maxBuffer: 8 * 1024 * 1024 });
     candidates = [...new Set(stdout.split("\0").filter(Boolean))].sort();
   } catch {
     candidates = [];
@@ -65,10 +66,7 @@ async function scanProject(root, options = {}) {
     try {
       // Do not follow symlinks, including links in parent directories.
       if (await fs.realpath(target) !== target) return {};
-      const stat = await fs.stat(target);
-      if (!stat.isFile()) return {};
-      if (stat.size > 2 * 1024 * 1024) { return { skipped: true }; }
-      const buffer = await fs.readFile(target);
+      const buffer = await safeFiles.readFile(target, { maxBytes: 2 * 1024 * 1024 });
       if (buffer.includes(0) || !Buffer.from(buffer.toString("utf8")).equals(buffer)) return {};
       if (buffer.length > 2 * 1024 * 1024) return { skipped: true };
       return { buffer, target };
@@ -140,6 +138,7 @@ async function replaceProject(root, options = {}) {
       await require("./safe-files.cjs").writeFile(file.path, file.content, {
         expectedHash: file.hash,
         digest,
+        maxBytes: 2 * 1024 * 1024,
         authorize: (target) => {
           const relative = path.relative(root, target);
           if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("File is outside the project.");

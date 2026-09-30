@@ -1,0 +1,83 @@
+.settings-popover {
+  --settings-control-bg: rgb(var(--color-surface));
+  --settings-control-hover: rgb(var(--color-canvas));
+  --settings-select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2362635f' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+.dark .settings-popover {
+  --settings-control-bg: #18181b;
+  --settings-control-hover: #222225;
+  --settings-select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239d9da5' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+/* Keep native keyboard and menu behavior; share the treatment across every panel. */
+.settings-popover select:not([multiple]),
+.settings-popover select[multiple] {
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid rgb(var(--color-line));
+  border-radius: 6px;
+  background-color: var(--settings-control-bg);
+  color: rgb(var(--color-ink));
+  font-size: 12px;
+  line-height: 18px;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.settings-popover select:not([multiple]) {
+  appearance: none;
+  height: 32px;
+  padding: 6px 32px 6px 10px;
+  background-image: var(--settings-select-arrow);
+  background-position: right 9px center;
+  background-repeat: no-repeat;
+  background-size: 14px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.settings-popover select[multiple] {
+  padding: 4px;
+}
+
+.settings-popover select:not(:disabled):hover {
+  border-color: rgb(var(--color-muted));
+  background-color: var(--settings-control-hover);
+}
+
+.settings-popover select:focus-visible {
+  border-color: rgb(var(--color-brand));
+  outline: 2px solid rgb(var(--color-brand));
+  outline-offset: 2px;
+}
+
+.settings-popover select:disabled {
+  background-color: var(--settings-control-bg);
+  color: rgb(var(--color-muted));
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.settings-popover select option,
+.settings-popover select optgroup {
+  background-color: var(--settings-control-bg);
+  color: rgb(var(--color-ink));
+}
+
+.settings-popover select[multiple] option {
+  padding: 5px 6px;
+  border-radius: 3px;
+}
+
+.settings-popover select option:checked {
+  background-color: rgb(var(--color-menu-active));
+  color: rgb(var(--color-ink));
+}
+
+@media (forced-colors: active) {
+  .settings-popover select:not([multiple]) {
+    appearance: auto;
+    background-image: none;
+    padding-right: 10px;
+  }
+}

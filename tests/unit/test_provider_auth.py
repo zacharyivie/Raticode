@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from gofer.core import provider_auth as auth
+from gofer.core.provider_capabilities import _is_cursor_agent
 
 
 @pytest.fixture
@@ -27,10 +28,14 @@ def test_browser_login_uses_provider_cli_and_same_config(login, monkeypatch, pro
     sessions, process, spawn = login
     monkeypatch.setenv("XDG_CONFIG_HOME", "/isolated/config")
     monkeypatch.setenv("NO_OPEN_BROWSER", "1")
+    monkeypatch.setenv("GOFER_UI_API_TOKEN", "desktop-api-token")
+    monkeypatch.setenv("GOFER_DESKTOP_GRANT_SECRET", "desktop-grant-secret")
     assert sessions.start(provider) == {"status": "pending"}
     assert spawn.call_args.args[0] == ["/test/provider", *auth.BROWSER_LOGIN_COMMANDS[provider]]
     assert spawn.call_args.kwargs["env"]["XDG_CONFIG_HOME"] == "/isolated/config"
     assert "NO_OPEN_BROWSER" not in spawn.call_args.kwargs["env"]
+    assert "GOFER_UI_API_TOKEN" not in spawn.call_args.kwargs["env"]
+    assert "GOFER_DESKTOP_GRANT_SECRET" not in spawn.call_args.kwargs["env"]
     assert spawn.call_args.kwargs["stdout"] == subprocess.DEVNULL
     sessions.start(provider)
     assert spawn.call_count == 1
@@ -74,3 +79,17 @@ def test_unknown_and_missing_providers_never_spawn(login, monkeypatch):
     with pytest.raises(ValueError):
         sessions.start("cursor")
     spawn.assert_not_called()
+
+
+def test_provider_discovery_excludes_desktop_credentials(monkeypatch):
+    monkeypatch.setenv("GOFER_UI_API_TOKEN", "desktop-api-token")
+    monkeypatch.setenv("GOFER_DESKTOP_GRANT_SECRET", "desktop-grant-secret")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/isolated/config")
+    probe = MagicMock(return_value=subprocess.CompletedProcess([], 0, "Start the Cursor Agent"))
+    monkeypatch.setattr(subprocess, "run", probe)
+
+    assert _is_cursor_agent("/test/provider")
+    env = probe.call_args.kwargs["env"]
+    assert env["XDG_CONFIG_HOME"] == "/isolated/config"
+    assert "GOFER_UI_API_TOKEN" not in env
+    assert "GOFER_DESKTOP_GRANT_SECRET" not in env

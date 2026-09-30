@@ -62,3 +62,63 @@ def test_failure_is_saved_and_incomplete_journal_is_reported(tmp_path):
     events = list(jobs.events("thread", "interrupted"))
     assert events[-1]["type"] == "error"
     assert "Backend stopped" in events[-1]["error"]
+
+
+@pytest.mark.parametrize("failure", ["constructor", "start"])
+def test_failed_worker_launch_releases_capacity_and_saves_error(tmp_path, monkeypatch, failure):
+    jobs = ChatJobs(tmp_path, max_active=1)
+    invoked = threading.Event()
+    handles = []
+    original_open = type(tmp_path).open
+
+    def record_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("Cannot start another thread")
+
+    with monkeypatch.context() as launch_patch:
+        launch_patch.setattr(type(tmp_path), "open", record_open)
+        if failure == "constructor":
+            launch_patch.setattr(threading, "Thread", fail)
+        else:
+            launch_patch.setattr(threading.Thread, "start", fail)
+        with pytest.raises(ValueError, match="Could not start Rem turn"):
+            jobs.start("thread", "failed", lambda emit: invoked.set())
+
+    assert not invoked.is_set()
+    assert all(handle.closed for handle in handles)
+    assert jobs.active_snapshot() == []
+    assert list(jobs.events("thread", "failed")) == [
+        {"type": "error", "error": "Could not start Rem turn", "sequence": 1}
+    ]
+    # Keep failed receipts immutable, but permit another turn in the conversation.
+    with pytest.raises(FileExistsError):
+        jobs.start("thread", "failed", lambda emit: invoked.set())
+    jobs.start("thread", "retry", lambda emit: emit({"type": "final", "message": {"body": "ok"}}))
+    assert list(jobs.events("thread", "retry"))[0]["type"] == "final"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        b'{"type":"final","sequence":2',
+        b'{"text":"unfinished \xf0\x9f',
+        b'{"type":"final","sequence":2}',
+    ],
+)
+def test_replay_after_crash_preserves_committed_records(tmp_path, tail):
+    path = tmp_path / "chat-jobs" / "thread" / "turn.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"type":"thought","sequence":1,"text":"saved"}\n' + tail)
+
+    jobs = ChatJobs(tmp_path)
+    events = list(jobs.events("thread", "turn"))
+    assert events[0] == {"type": "thought", "sequence": 1, "text": "saved"}
+    assert len(events) == 2
+    assert events[1]["type"] == "error"
+    assert "Backend stopped" in events[1]["error"]
+    assert jobs.snapshot("thread", "turn") == events[:1]
+    assert list(jobs.events("thread", "turn", after=1)) == events[1:]

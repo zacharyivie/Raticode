@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -32,6 +34,22 @@ from gofer.ui.api import (
 )
 
 
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("resolved", [False, True])
+def test_provider_timeouts_must_be_finite_and_positive(timeout, resolved) -> None:
+    with pytest.raises(ValueError, match="timeout"):
+        if resolved:
+            ResolvedProviderSettings(subscription="codex", timeout=timeout)
+        else:
+            ProviderProfile(name="limited", subscription="codex", timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", [None, 0.1, 45])
+def test_provider_timeouts_allow_defaults_and_positive_values(timeout) -> None:
+    assert ProviderProfile(name="limited", subscription="codex", timeout=timeout).timeout == timeout
+    assert ResolvedProviderSettings(subscription="codex", timeout=timeout).timeout == timeout
+
+
 def test_provider_profile_serialization_round_trips(tmp_path: Path) -> None:
     save_provider_profiles(
         {
@@ -58,6 +76,59 @@ def test_provider_profile_serialization_round_trips(tmp_path: Path) -> None:
     assert loaded["fast"].effort == "low"
     assert loaded["fast"].timeout == 45
     assert loaded["fast"].extra_args == ["--flag"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file permission semantics")
+def test_provider_profile_store_keeps_legacy_credentials_private(tmp_path: Path) -> None:
+    path = tmp_path / "provider-profiles.json"
+    path.write_text('{"profiles": {}}')
+    path.chmod(0o644)
+    save_provider_profiles(
+        {"legacy": ProviderProfile(name="legacy", subscription="codex", env={"TOKEN": "private"})},
+        tmp_path,
+    )
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert load_provider_profiles(tmp_path)["legacy"].env["TOKEN"] == "private"
+
+
+@pytest.mark.parametrize("link_type", ["symlink", "hardlink"])
+def test_provider_profile_save_does_not_follow_destination_links(
+    tmp_path: Path, link_type: str
+) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text("keep this file")
+    destination = tmp_path / "provider-profiles.json"
+    if link_type == "symlink":
+        destination.symlink_to(outside)
+    else:
+        destination.hardlink_to(outside)
+    save_provider_profiles({"fast": ProviderProfile(name="fast", subscription="codex")}, tmp_path)
+    assert outside.read_text() == "keep this file"
+    assert not (tmp_path / "provider-profiles.json").is_symlink()
+    assert "fast" in load_provider_profiles(tmp_path)
+
+
+def test_provider_profile_save_supports_relocated_data_directory(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    root.mkdir()
+    link = tmp_path / "relocated"
+    link.symlink_to(root, target_is_directory=True)
+    save_provider_profiles({"fast": ProviderProfile(name="fast", subscription="codex")}, link)
+    assert "fast" in load_provider_profiles(link)
+    assert (root / "provider-profiles.json").is_file()
+
+
+def test_failed_provider_profile_save_preserves_previous_store(tmp_path: Path, monkeypatch) -> None:
+    save_provider_profiles({"old": ProviderProfile(name="old", subscription="codex")}, tmp_path)
+
+    def fail_sync(descriptor: int) -> None:
+        raise OSError("disk failure")
+
+    monkeypatch.setattr("gofer.utils.atomic_output.os.fsync", fail_sync)
+    with pytest.raises(OSError, match="disk failure"):
+        save_provider_profiles({"new": ProviderProfile(name="new", subscription="codex")}, tmp_path)
+    assert set(load_provider_profiles(tmp_path)) == {"old"}
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_direct_provider_profile_serialization_round_trips(tmp_path: Path) -> None:

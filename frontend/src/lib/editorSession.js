@@ -1,5 +1,5 @@
 export const EDITOR_SESSION_KEY = 'raticode.editorSession.v2';
-const activities = ['workflows', 'files', 'search', 'source-control'];
+const activities = ['workflows', 'files', 'search', 'source-control', 'organizations'];
 const isBrowserPath = path => path.startsWith('raticode-browser:') || path.startsWith('browser:');
 export function loadEditorSession(storage = globalThis.window?.localStorage) {
   try {

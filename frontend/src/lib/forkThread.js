@@ -1,5 +1,11 @@
 import { apiUrl } from "./api.js";
 
+export function isForkableMessage(message) {
+  if (!message || message.running) return false;
+  return (message.role === "user" && !message.kind)
+    || (message.role === "assistant" && (!message.kind || message.kind === "final"));
+}
+
 export async function copyForkAttachments(sourceThreadId, threadId, messages, fetchImpl = fetch) {
   const attachments = [...new Map(messages.flatMap(message => message.attachments || [])
     .map(attachment => [attachment.storageName, attachment])).values()];
@@ -18,6 +24,9 @@ export async function copyForkAttachments(sourceThreadId, threadId, messages, fe
 export function forkThreadHistory(parent, history, throughId, newId, now = new Date().toISOString()) {
   const boundary = history.findIndex(message => message.id === throughId);
   if (boundary < 0) throw new Error("This message is no longer available to fork.");
+  if (!isForkableMessage(history[boundary])) {
+    throw new Error("Fork from a user message or a final reply.");
+  }
   const messages = structuredClone(history.slice(0, boundary + 1));
   for (const message of messages) {
     message.running = false;

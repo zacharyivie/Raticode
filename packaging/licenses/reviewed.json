@@ -786,6 +786,10 @@
       "license": "BSD-3-Clause",
       "version": "0.2.3"
     },
+    "pyyaml": {
+      "license": "MIT",
+      "version": "6.0.3"
+    },
     "questionary": {
       "license": "MIT",
       "version": "2.1.1"

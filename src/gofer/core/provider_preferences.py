@@ -9,6 +9,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from gofer.core.commit_message_format import (
+    DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    MAX_COMMIT_TEMPLATE_LENGTH,
+)
 from gofer.utils.paths import get_data_dir
 
 _lock = threading.RLock()
@@ -65,13 +69,34 @@ def save_provider_preference(provider: str, changes: dict[str, Any]) -> None:
 
 
 def commit_message_preference() -> dict[str, Any]:
-    return provider_preference("commitMessage")
+    return {
+        "autoCommit": False,
+        "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+        **provider_preference("commitMessage"),
+    }
 
 
 def save_commit_message_preference(changes: dict[str, Any]) -> None:
     from gofer.core.provider_capabilities import PROVIDER_BINARIES
 
-    if set(changes) != {"provider", "model"}:
+    if not changes or set(changes) - {"provider", "model", "template", "autoCommit"}:
+        raise ValueError("Unknown commit message setting")
+    changes = dict(changes)
+    if "autoCommit" in changes and not isinstance(changes["autoCommit"], bool):
+        raise ValueError("Auto commit must be a boolean")
+    if "template" in changes:
+        template = changes["template"]
+        if not isinstance(template, str) or len(template) > MAX_COMMIT_TEMPLATE_LENGTH:
+            raise ValueError(
+                "Commit template must be a string of at most "
+                f"{MAX_COMMIT_TEMPLATE_LENGTH} characters"
+            )
+        changes["template"] = template if template.strip() else DEFAULT_COMMIT_MESSAGE_TEMPLATE
+    selection = set(changes) & {"provider", "model"}
+    if not selection:
+        _save_preference("commitMessage", changes)
+        return
+    if selection != {"provider", "model"}:
         raise ValueError("Choose a commit provider and model")
     provider, model = changes["provider"], changes["model"]
     if not isinstance(provider, str) or (provider and provider not in PROVIDER_BINARIES):
@@ -81,7 +106,7 @@ def save_commit_message_preference(changes: dict[str, Any]) -> None:
     model = model.strip()
     if provider and model in provider_preference(provider).get("deniedModels", []):
         raise ValueError("Allow this model before selecting it for commit messages")
-    _save_preference("commitMessage", {"provider": provider, "model": model})
+    _save_preference("commitMessage", {**changes, "provider": provider, "model": model})
 
 
 def _save_preference(key: str, changes: dict[str, Any]) -> None:

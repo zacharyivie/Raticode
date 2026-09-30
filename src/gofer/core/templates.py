@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -240,6 +241,9 @@ def _code_review_template(
     workflow_name: str,
 ) -> tuple[AgenticWorkflow, dict[str, str]]:
     prompt_path = f"prompts/{workflow_id}/code-review.md"
+    # Values expanded from the environment stay data, including shell syntax.
+    # bash-command uses PowerShell on Windows and Bash on other platforms.
+    diff_ref = "$env:GOFER_DIFF_REF" if sys.platform == "win32" else "$GOFER_DIFF_REF"
     wf = AgenticWorkflow(
         _workflow_config(
             workflow_id,
@@ -263,7 +267,10 @@ def _code_review_template(
             pipe_output=True,
             operation=BashCommandOperation(
                 type=OperationType.BASH_COMMAND,
-                command="git diff {{params.diff_ref}}",
+                command=(
+                    f'git diff --no-ext-diff --no-textconv --end-of-options "{diff_ref}" --'
+                ),
+                env={"GOFER_DIFF_REF": "{{params.diff_ref}}"},
                 working_dir=Path("."),
             ),
         )

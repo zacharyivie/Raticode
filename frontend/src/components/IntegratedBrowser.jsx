@@ -37,7 +37,6 @@ export default function IntegratedBrowser({
   const initialOpenBrowserBindingRef = useRef(openBrowserBinding);
   const onCloseRef = useRef(onClose);
   const onCycleTabRef = useRef(onCycleTab);
-  const onModeChangeRef = useRef(onModeChange);
   const onNewTabRef = useRef(onNewTab);
   const onStateChangeRef = useRef(onStateChange);
   const containerRef = useRef(null);
@@ -61,7 +60,6 @@ export default function IntegratedBrowser({
     activeRef.current = active;
     onCloseRef.current = onClose;
     onCycleTabRef.current = onCycleTab;
-    onModeChangeRef.current = onModeChange;
     onNewTabRef.current = onNewTab;
     onStateChangeRef.current = onStateChange;
   }, [active, onClose, onCycleTab, onModeChange, onNewTab, onStateChange]);
@@ -95,7 +93,6 @@ export default function IntegratedBrowser({
       if (command?.action === "next-tab") onCycleTabRef.current?.(1);
       if (command?.action === "previous-tab") onCycleTabRef.current?.(-1);
       if (command?.action === "new-tab") onNewTabRef.current?.();
-      if (command?.action === "edit-local-html") onModeChangeRef.current?.("edit");
     });
     bridge.create({
       applicationKeybindings: initialApplicationKeybindingsRef.current,
@@ -258,7 +255,7 @@ export default function IntegratedBrowser({
           </div>
         </form>
         <BrowserButton
-          disabled={!/^https?:/i.test(state.url ?? "")}
+          disabled={!state.canOpenExternal}
           label="Open in default browser"
           onClick={() => run("openExternal")}
         ><ExternalLink size={14} /></BrowserButton>

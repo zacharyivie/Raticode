@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-from gofer.utils.atomic_output import open_binary_input
+from gofer.utils.atomic_output import (
+    atomic_binary_output,
+    open_binary_input,
+    unlink_without_links,
+)
 
 CHAT_ATTACHMENT_MAX_COUNT = 5
 CHAT_ATTACHMENT_MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -108,25 +112,29 @@ def store_chat_attachments(
             raise ChatMediaError("Attachments cannot exceed 40 MB in one message.")
         decoded.append((name, media_type, content))
 
-    target_dir = attachment_thread_dir(data_dir, thread_id)
-    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target_dir = attachment_thread_dir(data_dir.resolve(), thread_id)
     attachments: list[dict[str, Any]] = []
-    for name, media_type, content in decoded:
-        attachment_id = uuid.uuid4().hex
-        storage_name = f"{attachment_id}-{name}"
-        path = target_dir / storage_name
-        path.write_bytes(content)
-        if os.name != "nt":
-            path.chmod(0o600)
-        attachments.append(
-            {
-                "id": attachment_id,
-                "name": name,
-                "size": len(content),
-                "type": media_type,
-                "storageName": storage_name,
-            }
-        )
+    created: list[Path] = []
+    try:
+        for name, media_type, content in decoded:
+            attachment_id = uuid.uuid4().hex
+            storage_name = f"{attachment_id}-{name}"
+            path = target_dir / storage_name
+            with atomic_binary_output(path, exclusive=True) as output:
+                output.write(content)
+            created.append(path)
+            attachments.append(
+                {
+                    "id": attachment_id,
+                    "name": name,
+                    "size": len(content),
+                    "type": media_type,
+                    "storageName": storage_name,
+                }
+            )
+    except OSError as exc:
+        _remove_created_attachments(created)
+        raise ChatMediaError("Attachments could not be saved safely. Retry the upload.") from exc
     return {"attachments": attachments}
 
 
@@ -139,11 +147,14 @@ def resolve_chat_attachment(
     storage_name = str(attachment.get("storageName") or "")
     if not re.fullmatch(r"[0-9a-f]{32}-[^/\\]+", storage_name):
         raise ChatMediaError("An attached file reference is invalid.")
-    root = attachment_thread_dir(data_dir, _safe_identifier(thread_id, "thread")).resolve()
-    path = (root / storage_name).resolve()
-    if path.parent != root or not path.is_file():
+    root = attachment_thread_dir(data_dir.resolve(), _safe_identifier(thread_id, "thread"))
+    path = root / storage_name
+    try:
+        with open_binary_input(path):
+            pass
+    except OSError as exc:
         name = attachment.get("name", "file")
-        raise ChatMediaError(f"Attached file is no longer available: {name}")
+        raise ChatMediaError(f"Attached file is no longer available: {name}") from exc
     return path
 
 
@@ -161,27 +172,34 @@ def copy_chat_attachments(payload: dict[str, Any], data_dir: Path) -> dict[str, 
         if not isinstance(attachment, dict):
             raise ChatMediaError("Each attachment must be a file object.")
         paths.append(resolve_chat_attachment(attachment, data_dir=data_dir, thread_id=source_id))
-    if any(path.stat().st_size > CHAT_ATTACHMENT_MAX_FILE_BYTES for path in paths):
-        raise ChatMediaError("An attachment is larger than 20 MB.")
-    target = attachment_thread_dir(data_dir, target_id)
-    target.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if target.is_symlink():
-        raise ChatMediaError("Invalid attachment destination.")
+    target = attachment_thread_dir(data_dir.resolve(), target_id)
     created: list[Path] = []
     try:
         for source in paths:
+            with open_binary_input(source) as input_file:
+                content = input_file.read(CHAT_ATTACHMENT_MAX_FILE_BYTES + 1)
+            if len(content) > CHAT_ATTACHMENT_MAX_FILE_BYTES:
+                raise ChatMediaError("An attachment is larger than 20 MB.")
             destination = target / source.name
-            with destination.open("xb") as output:
-                created.append(destination)
-                if os.name != "nt":
-                    destination.chmod(0o600)
-                with source.open("rb") as input_file:
-                    shutil.copyfileobj(input_file, output)
-    except OSError:
-        for destination in created:
-            destination.unlink(missing_ok=True)
+            with atomic_binary_output(destination, exclusive=True) as output:
+                output.write(content)
+            created.append(destination)
+    except ChatMediaError:
+        _remove_created_attachments(created)
         raise
+    except OSError as exc:
+        _remove_created_attachments(created)
+        raise ChatMediaError("Attachments could not be copied safely. Retry the fork.") from exc
     return {"copied": True}
+
+
+def _remove_created_attachments(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            unlink_without_links(path)
+        except OSError:
+            # A removed or replaced parent must not redirect rollback elsewhere.
+            pass
 
 
 def attachment_thread_dir(data_dir: Path, thread_id: str) -> Path:

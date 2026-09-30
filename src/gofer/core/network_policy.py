@@ -45,7 +45,7 @@ def validate_http_request_url(
     allowlist: Iterable[str] = (),
     resolver: AddressResolver | None = None,
 ) -> NetworkPolicyResult:
-    parsed = urllib.parse.urlsplit(url)
+    parsed = parse_http_request_url(url)
     safe_url = _safe_url_for_error(parsed)
     scheme = parsed.scheme.lower()
     if scheme not in {"http", "https"}:
@@ -90,7 +90,7 @@ def resolve_http_request_target(
     allowlist: Iterable[str] = (),
     resolver: AddressResolver | None = None,
 ) -> NetworkPolicyTarget:
-    parsed = urllib.parse.urlsplit(url)
+    parsed = parse_http_request_url(url)
     result = validate_http_request_url(url, allowlist=allowlist, resolver=resolver)
     port = result.port or (80 if parsed.scheme.lower() == "http" else 443)
     normalized_host = _normalize_host(result.host)
@@ -188,7 +188,9 @@ def _validate_address(
 def _address_is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return (
         address.is_loopback
-        or address.is_private
+        # Shared address space (100.64.0.0/10) is neither private nor global.
+        # It can route to internal carrier/VPN services and needs explicit consent.
+        or not address.is_global
         or address.is_link_local
         or address.is_multicast
         or address.is_reserved
@@ -196,12 +198,30 @@ def _address_is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) 
     )
 
 
+def parse_http_request_url(url: str) -> urllib.parse.SplitResult:
+    """Parse HTTP URL components without leaking malformed authority text."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        # Authority validation is lazy in urllib. Force it before diagnostics or
+        # DNS lookup, whose ValueErrors otherwise quote untrusted credential text.
+        parsed.hostname
+        parsed.port
+    except ValueError:
+        raise NetworkPolicyViolation("invalid URL authority", "<invalid-url>") from None
+    return parsed
+
+
 def _safe_url_for_error(parsed: urllib.parse.SplitResult) -> str:
-    netloc = parsed.hostname or parsed.netloc or "<missing-host>"
+    # A malformed authority may contain userinfo even without a hostname.
+    # Never use the raw netloc in diagnostics, which may reach run logs.
+    netloc = parsed.hostname or "<missing-host>"
+    if ":" in netloc:
+        netloc = f"[{netloc}]"
     if parsed.port is not None:
         netloc = f"{netloc}:{parsed.port}"
-    path = parsed.path or "/"
-    return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
+    # Webhooks and other APIs also put credentials in path segments. The origin
+    # is sufficient to identify the blocked destination in diagnostics.
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, "/", "", ""))
 
 
 def _normalize_host(host: str) -> str:

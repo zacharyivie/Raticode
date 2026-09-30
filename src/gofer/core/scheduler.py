@@ -32,6 +32,7 @@ def _run_workflow(workflow_id: str, workflow_path: str, subscriptions: dict[str,
     from gofer.subscriptions.claude_code import ClaudeCodeSubscription
     from gofer.subscriptions.cli_providers import CliSubscription
     from gofer.subscriptions.codex import CodexSubscription
+    from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
 
     runtime_subscriptions = subscriptions or {
         "claude_code": ClaudeCodeSubscription(),
@@ -39,6 +40,8 @@ def _run_workflow(workflow_id: str, workflow_path: str, subscriptions: dict[str,
         **{provider: CliSubscription(provider) for provider in ("cursor", "copilot", "opencode")},
         "antigravity": AntigravitySubscription(),
         "grok": AcpSubscription("grok"),
+        "openai_api": OpenAiApiSubscription(),
+        "anthropic_api": AnthropicApiSubscription(),
     }
 
     async def _exec() -> None:

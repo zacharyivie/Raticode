@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from gofer.cli.main import app
+from gofer.core.executor import WorkflowExecutor
+from gofer.core.operations import BashCommandOperation
 from gofer.core.templates import (
     create_workflow_from_template,
     list_workflow_templates,
@@ -12,6 +16,91 @@ from gofer.core.templates import (
 )
 from gofer.core.workflow import AgenticWorkflow
 from gofer.ui.api import create_workflow_payload, list_workflow_templates_payload
+from tests.conftest import FakeSubscription
+
+
+@pytest.fixture
+def review_repository(tmp_path: Path) -> Path:
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True, capture_output=True, timeout=10
+        )
+
+    git("init")
+    git("config", "user.name", "Template test")
+    git("config", "user.email", "template@example.test")
+    git("config", "commit.gpgsign", "false")
+    (tmp_path / "example.txt").write_text("before\n")
+    git("add", "example.txt")
+    git("commit", "-m", "Initial")
+    (tmp_path / "example.txt").write_text("after\n")
+    git("commit", "-am", "Change")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "HEAD; echo compromised > injected.txt",
+        "HEAD\necho compromised > injected.txt",
+        "$(echo compromised > injected.txt)",
+        "`echo compromised > injected.txt`",
+        "--output=injected.txt",
+    ],
+)
+async def test_code_review_template_rejects_shell_and_git_option_injection(
+    review_repository: Path, reference: str
+) -> None:
+    template = create_workflow_from_template("code-review", review_repository)
+    provider = FakeSubscription()
+    result = await WorkflowExecutor(
+        template.workflow, {"codex": provider}, workflow_path=template.path
+    ).with_parameters({"diff_ref": reference}).run()
+
+    assert not result.success
+    assert not (review_repository / "injected.txt").exists()
+    assert not provider.calls
+
+
+async def test_code_review_template_preserves_revision_ranges(
+    review_repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", "raticode-unavailable-external-diff")
+    (review_repository / ".gitattributes").write_text("example.txt diff=review\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(review_repository),
+            "config",
+            "diff.review.textconv",
+            "raticode-unavailable-textconv",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+    template = create_workflow_from_template("code-review", review_repository)
+    provider = FakeSubscription()
+    result = await WorkflowExecutor(
+        template.workflow, {"codex": provider}, workflow_path=template.path
+    ).with_parameters({"diff_ref": "HEAD~1..HEAD"}).run()
+
+    assert result.success
+    assert "-before" in result.node_outputs["collect-diff"].output
+    assert "+after" in result.node_outputs["collect-diff"].output
+    assert len(provider.calls) == 1
+
+
+def test_code_review_template_uses_powershell_environment_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gofer.core.templates.sys.platform", "win32")
+    template = create_workflow_from_template("code-review", tmp_path)
+    operation = template.workflow.graph.nodes_in_order()[0].operation
+    assert isinstance(operation, BashCommandOperation)
+    assert '"$env:GOFER_DIFF_REF"' in operation.command
+    assert operation.env == {"GOFER_DIFF_REF": "{{params.diff_ref}}"}
 
 
 def test_all_workflow_templates_generate_valid_workflows(tmp_path: Path) -> None:

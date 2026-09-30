@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -27,7 +27,7 @@ from gofer.core.antigravity_models import split_antigravity_model
 from gofer.core.cursor_models import split_cursor_model
 from gofer.core.provider_permissions import CLAUDE_PERMISSION_MODES, CODEX_PERMISSION_MODES
 from gofer.core.provider_preferences import provider_preference
-from gofer.utils.process import env_with_executable_on_path, run_subprocess
+from gofer.utils.process import build_subprocess_env, env_with_executable_on_path, run_subprocess
 
 ProviderId = Literal["codex", "claude_code", "cursor", "copilot", "opencode", "antigravity", "grok"]
 CLI_PROVIDERS: tuple[ProviderId, ...] = (
@@ -440,13 +440,17 @@ class ProviderCapabilityService:
     """Host-scoped, thread-safe catalog cache for UI and execution validation."""
 
     def __init__(self) -> None:
+        additional: tuple[ProviderId, ...] = (
+            "cursor",
+            "copilot",
+            "opencode",
+            "antigravity",
+            "grok",
+        )
         self._probes: dict[ProviderId, ProviderCapabilityProbe] = {
             "codex": CodexCapabilityProbe(),
             "claude_code": ClaudeCodeCapabilityProbe(),
-            **{
-                cast(ProviderId, provider): AdditionalCliCapabilityProbe(cast(ProviderId, provider))
-                for provider in ("cursor", "copilot", "opencode", "antigravity", "grok")
-            },
+            **{provider: AdditionalCliCapabilityProbe(provider) for provider in additional},
         }
         self._cache: dict[_CacheKey, _CacheEntry] = {}
         self._inflight: dict[_CacheKey, threading.Event] = {}
@@ -920,7 +924,7 @@ def _is_cursor_agent(executable: str) -> bool:
             capture_output=True,
             text=True,
             timeout=DISCOVERY_TIMEOUT_SECONDS,
-            env={**os.environ, **env_with_executable_on_path(executable)},
+            env=build_subprocess_env(env_with_executable_on_path(executable)),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

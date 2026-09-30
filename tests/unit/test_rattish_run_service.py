@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections import Counter
 from pathlib import Path
 
 import anyio
 import pytest
 
-from gofer.rattish.run_service import run_rattish_file
+from gofer.rattish.run_service import RattishRunArtifactError, _write_json_atomic, run_rattish_file
 from gofer.rattish.runtime import HandlerResult, NodeHandlerRegistry, RuntimeErrorInfo
 from gofer.rattish.workspaces import create_registered_workflow
 from gofer.ui.api import (
@@ -141,6 +142,7 @@ async def test_run_service_compiles_preflights_executes_and_persists_result(
     assert result.document["runs"][0]["duration_ms"] >= 0
     assert [event["type"] for event in result.document["events"]] == [
         "workflow_started",
+        "node_started",
         "node_completed",
         "workflow_completed",
     ]
@@ -160,6 +162,27 @@ async def test_registered_workflow_run_is_stored_in_its_workspace(tmp_path: Path
     assert result.ok
     assert result.path.parent == workflow.workflow_root / "logs"
     assert not (data_dir / "radish" / "runs" / workflow.workflow_id).exists()
+    if os.name != "nt":
+        assert stat.S_IMODE(result.path.stat().st_mode) == 0o600
+
+
+@pytest.mark.anyio
+async def test_run_artifact_publication_refuses_linked_log_directory(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(_bash_source(), encoding="utf-8")
+    result = await run_rattish_file(source, data_dir=tmp_path / "data")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / result.path.name
+    sentinel.write_bytes(b"private")
+    result.path.parent.rename(tmp_path / "original-logs")
+    result.path.parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RattishRunArtifactError, match="Could not publish"):
+        _write_json_atomic(result.path, result.document)
+
+    assert sentinel.read_bytes() == b"private"
+    assert list(outside.iterdir()) == [sentinel]
 
 
 @pytest.mark.anyio
@@ -519,3 +542,8 @@ Node slow:
 
     assert timed_out.status == "failed"
     assert timed_out.document["error"]["code"] == "RATTISH_TIMEOUT"
+    payload = workflow_run_log_payload(
+        timed_out.document["workflow"]["id"], timed_out.document["run_id"], tmp_path / "app-data"
+    )
+    assert payload["runNodes"]["slow"]["status"] == "stopped"
+    assert any(event["type"] == "node_stopped" for event in payload["runEvents"])

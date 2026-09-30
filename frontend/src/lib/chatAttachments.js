@@ -48,14 +48,18 @@ export function readChatAttachments(fileList, existingAttachments = []) {
   return { attachments, error: [...new Set(errors)].join(" ") };
 }
 
-export async function uploadChatAttachments(attachments, threadId, fetchImpl = fetch) {
-  const pending = attachments.filter((attachment) => attachment.file);
-  if (!pending.length) return attachments;
-  const files = await Promise.all(pending.map(async (attachment) => ({
+export async function encodeChatAttachments(attachments) {
+  return Promise.all(attachments.map(async (attachment) => ({
     data: arrayBufferToBase64(await fileArrayBuffer(attachment.file)),
     name: attachment.name,
     type: attachment.type,
   })));
+}
+
+export async function uploadChatAttachments(attachments, threadId, fetchImpl = fetch) {
+  const pending = attachments.filter((attachment) => attachment.file);
+  if (!pending.length) return attachments;
+  const files = await encodeChatAttachments(pending);
   const response = await fetchImpl(apiUrl("/chat/attachments"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -1,3 +1,4 @@
+import { normalizeReportThemes, reportOutputFormat, REPORT_FORMATS } from "./report-themes.js";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
@@ -9,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 const { restoreShellPath } = require("./shell-path.cjs");
+const { startReportPdfService } = require("./report-pdf.cjs");
 const shellPathReady = restoreShellPath();
 const {
   app,
@@ -53,6 +55,7 @@ const {
   browserContentZoomFactor,
   browserLoadUrl,
   browserSessionShortcutAction,
+  canOpenInExternalBrowser,
   normalizeBrowserUrl,
 } = require("./browser-utils.cjs");
 const { searchProject, replaceProject } = require("./project-search.cjs");
@@ -109,6 +112,7 @@ const isSmokeTest = process.env.GOFER_ELECTRON_SMOKE_TEST === "1";
 let backendReady;
 let backgroundTray;
 let backendProcess;
+let reportPdfService;
 let backendLogStream;
 const desktopGrantSecret = crypto.randomBytes(32).toString("hex");
 const expectedBackendStops = new WeakSet();
@@ -312,6 +316,7 @@ function startBackend(port = 0) {
       cwd: repoRoot,
       env: {
         ...process.env,
+        ...reportPdfService?.env,
         GOFER_DESKTOP_GRANT_SECRET: desktopGrantSecret,
         GOFER_UI_EMIT_READY_TOKEN: "1",
       },
@@ -574,7 +579,10 @@ app.whenReady().then(async () => {
   try {
     createBackgroundTray();
     const backendPort = await allocateBackendPort();
-    backendReady = shellPathReady.then(() => startBackend(backendPort));
+    backendReady = shellPathReady.then(async () => {
+      reportPdfService = await startReportPdfService({ BrowserWindow, session });
+      return startBackend(backendPort);
+    });
     // Handlers await readiness; neither Python nor terminal setup gates first paint.
     createWindow(process.env.GOFER_API_BASE_URL || process.env.VITE_API_BASE_URL || `http://127.0.0.1:${backendPort}`);
     void startTerminalEditorServer().catch(error => applicationLog.write("error", "terminal", error.message));
@@ -875,7 +883,7 @@ function browserAction(event, options = {}) {
       break;
     case "open-external": {
       const url = contents.getURL();
-      if (isSafeExternalUrl(url)) void runBrowserOperation(session, () => shell.openExternal(url));
+      if (canOpenInExternalBrowser(url)) void runBrowserOperation(session, () => shell.openExternal(url));
       break;
     }
     case "reload":
@@ -999,13 +1007,6 @@ function configureBrowserSession(session) {
       emitBrowserCommand(session, "text-zoom", { reset: true });
     }
   });
-  if (session.grantId) {
-    contents.on("before-mouse-event", (event, mouse) => {
-      if (mouse.type !== "mouseDown" || mouse.button !== "left" || mouse.clickCount !== 2) return;
-      event.preventDefault();
-      emitBrowserCommand(session, "edit-local-html");
-    });
-  }
   contents.setWindowOpenHandler(({ url }) => {
     if ((session.grantId || session.localNavigation) && /^file:/i.test(contents.getURL())) {
       openBrowserLink(session, url);
@@ -1096,6 +1097,7 @@ function browserSessionState(session, fallbackUrl = "") {
       return {
         canGoBack: false,
         canGoForward: false,
+        canOpenExternal: false,
         clientId: session.clientId,
         error: session.error || "Browser view is unavailable.",
         favicon: session.favicon || "",
@@ -1109,6 +1111,7 @@ function browserSessionState(session, fallbackUrl = "") {
       ready: false,
       canGoBack: false,
       canGoForward: false,
+      canOpenExternal: false,
       clientId: session.clientId,
       error: session.error,
       favicon: session.favicon || "",
@@ -1121,6 +1124,7 @@ function browserSessionState(session, fallbackUrl = "") {
   const currentUrl = contents.getURL() || fallback;
   return {
     ready: true,
+    canOpenExternal: canOpenInExternalBrowser(currentUrl),
     canGoBack: contents.navigationHistory.canGoBack(),
     canGoForward: contents.navigationHistory.canGoForward(),
     clientId: session.clientId,
@@ -2049,14 +2053,10 @@ async function readTextFile(_event, options = {}) {
   }
 
   const targetPath = resolveWorkflowSource(options.targetPath, options.grantId);
-  const stat = await fs.promises.stat(targetPath);
-  if (!stat.isFile()) {
-    throw new Error(`Path is not a file: ${targetPath}`);
-  }
-  if (stat.size > 2 * 1024 * 1024) {
-    throw new Error("File is too large to edit in Raticode.");
-  }
-  const content = await fs.promises.readFile(targetPath);
+  const content = await safeFiles.readFile(targetPath, { maxBytes: 2 * 1024 * 1024 }).catch(error => {
+    if (error.code === "ERR_FILE_TOO_LARGE") throw new Error("File is too large to edit in Raticode.");
+    throw error;
+  });
   if (content.includes(0)) {
     throw new Error("Binary files cannot be opened in the code editor.");
   }
@@ -2074,14 +2074,12 @@ async function readBinaryPreview(_event, options = {}) {
     grantId: options.grantId,
     mustExist: true,
   });
-  const stat = await fs.promises.stat(targetPath);
-  if (!stat.isFile()) throw new Error(`Path is not a file: ${targetPath}`);
-  if (stat.size > 25 * 1024 * 1024) {
-    throw new Error("File is too large to preview in Raticode.");
-  }
   const mimeType = imageMimeType(targetPath);
   if (!mimeType) throw new Error("This file type does not have an image preview.");
-  const content = await fs.promises.readFile(targetPath);
+  const content = await safeFiles.readFile(targetPath, { maxBytes: 25 * 1024 * 1024 }).catch(error => {
+    if (error.code === "ERR_FILE_TOO_LARGE") throw new Error("File is too large to preview in Raticode.");
+    throw error;
+  });
   return {
     dataUrl: `data:${mimeType};base64,${content.toString("base64")}`,
     ...pathHandle(targetPath),
@@ -2198,12 +2196,15 @@ function rendererLog(_event, { message } = {}) {
   applicationLog?.write("error", "renderer", String(message || ""));
 }
 function remSettings() {
-  try { return JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "rem-settings.json"), "utf8")); }
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "rem-settings.json"), "utf8"));
+    return { ...config, reportFormat: reportOutputFormat(config) };
+  }
   catch (error) { if (error.code !== "ENOENT") throw error; return { archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" }; }
 }
 async function configureRem(_event, options = {}) {
   const config = remSettings();
-  if (options.key === "reset") Object.assign(config, { archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" });
+  if (options.key === "reset") Object.assign(config, { reportFormat: "md", reportThemes: normalizeReportThemes(null), archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" });
   else if (["archiveFolder", "secondBrainRoot"].includes(options.key)) {
     const folder = options.value ? getIpcSecurity().resolveDesktopPath(options.value, { mustExist: true }) : "";
     if (folder && !(await fs.promises.stat(folder)).isDirectory()) throw new Error("Choose a folder.");
@@ -2211,7 +2212,9 @@ async function configureRem(_event, options = {}) {
   } else if (options.key === "secondBrainEnabled") {
     if (options.value && !config.secondBrainRoot) throw new Error("Choose a Second Brain folder first.");
     config.secondBrainEnabled = options.value === true;
-  } else if (options.key === "secondBrainFormat" && ["md", "html"].includes(options.value)) config.secondBrainFormat = options.value;
+  } else if (options.key === "reportFormat" && REPORT_FORMATS.includes(options.value)) config.reportFormat = options.value;
+  else if (options.key === "secondBrainFormat" && ["md", "html"].includes(options.value)) config.secondBrainFormat = options.value;
+  else if (options.key === "reportThemes") config.reportThemes = normalizeReportThemes(options.value);
   else if (options.key === "secondBrainTheme" && REPORT_THEMES.includes(options.value)) config.secondBrainTheme = options.value;
   else throw new Error("Unknown Rem setting.");
   if (!config.secondBrainRoot) config.secondBrainEnabled = false;

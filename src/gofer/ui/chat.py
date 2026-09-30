@@ -51,6 +51,7 @@ from gofer.core.provider_capabilities import (
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_preferences import provider_preference
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
+from gofer.core.usage_ledger import track_chat_usage
 from gofer.rattish.artifacts import (
     RattishArtifactError,
     rattish_assistant_skill_path,
@@ -69,6 +70,8 @@ from gofer.subscriptions.cli_providers import (
 )
 from gofer.ui.chat_media import ChatMediaError, resolve_chat_attachment
 from gofer.ui.codex_steering import CodexTurnControl, stream_codex_turn
+from gofer.ui.report_outputs import with_report_outputs
+from gofer.ui.report_themes import report_theme_rules
 from gofer.ui.second_brain import second_brain_rules, with_second_brain
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links, open_binary_input
 from gofer.utils.logging import get_logger
@@ -1012,6 +1015,7 @@ async def run_workflow_chat(
     permission_mode: str | None = None,
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
+    trusted_organization_url: str | None = None,
 ) -> dict[str, Any]:
     if provider in ADDITIONAL_PROVIDERS | ACP_PROVIDERS | {"antigravity"}:
         source = stream_workflow_chat(
@@ -1026,6 +1030,7 @@ async def run_workflow_chat(
             permission_mode=permission_mode,
             trusted_swarm_url=trusted_swarm_url,
             trusted_rem_threads_url=trusted_rem_threads_url,
+            trusted_organization_url=trusted_organization_url,
         )
         try:
             async for event in source:
@@ -1086,6 +1091,7 @@ async def run_workflow_chat(
     resolved_working_dir.mkdir(parents=True, exist_ok=True)
     gofer_cli_path = ensure_local_gofer_cli(resolved_data_dir)
     workflow = with_second_brain(workflow, gofer_cli_path)
+    workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
     messages, _ = await _compact_chat_messages_if_needed(
         provider=provider,
         model=model,
@@ -1133,10 +1139,15 @@ async def run_workflow_chat(
         permission_mode=permission_mode,
         trusted_swarm_url=trusted_swarm_url,
         trusted_rem_threads_url=trusted_rem_threads_url,
+        trusted_organization_url=trusted_organization_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
+        mcp_only=((workflow or {}).get("remThreads") or {}).get("global") is True,
         second_brain_cli_path=(
             gofer_cli_path
-            if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+            if (
+                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+                or ((workflow or {}).get("remReportTheme") or {}).get("format")
+            )
             else None
         ),
     )
@@ -1166,6 +1177,7 @@ async def run_workflow_chat(
     }
 
 
+@track_chat_usage
 async def stream_workflow_chat(
     provider: str,
     model: str,
@@ -1181,7 +1193,9 @@ async def stream_workflow_chat(
     agent_instructions: str | None = None,
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
+    trusted_organization_url: str | None = None,
     unlimited_output: bool = False,
+    include_agent_messages: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     turn_started_at = monotonic()
     if cancel_event is not None and cancel_event.is_set():
@@ -1233,6 +1247,7 @@ async def stream_workflow_chat(
     resolved_working_dir.mkdir(parents=True, exist_ok=True)
     gofer_cli_path = ensure_local_gofer_cli(resolved_data_dir)
     workflow = with_second_brain(workflow, gofer_cli_path)
+    workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
     messages, compacted = await _compact_chat_messages_if_needed(
         provider=provider,
         model=model,
@@ -1292,10 +1307,15 @@ async def stream_workflow_chat(
         permission_mode=permission_mode,
         trusted_swarm_url=trusted_swarm_url,
         trusted_rem_threads_url=trusted_rem_threads_url,
+        trusted_organization_url=trusted_organization_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
+        mcp_only=((workflow or {}).get("remThreads") or {}).get("global") is True,
         second_brain_cli_path=(
             gofer_cli_path
-            if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+            if (
+                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+                or ((workflow or {}).get("remReportTheme") or {}).get("format")
+            )
             else None
         ),
     )
@@ -1331,12 +1351,12 @@ async def stream_workflow_chat(
         return changes
 
     def turn_metadata() -> dict[str, Any]:
-        from gofer.subscriptions.base import _usage_metadata_from_payloads
+        from gofer.subscriptions.usage import provider_payload_usage
 
         turn_edits.finish()
         completed_at = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         return {
-            "usage": _usage_metadata_from_payloads(provider_payloads) or None,
+            "usage": provider_payload_usage(provider, provider_payloads) or None,
             "sessionId": next(
                 (
                     str(p.get("session_id") or p.get("thread_id"))
@@ -1361,13 +1381,18 @@ async def stream_workflow_chat(
             return
         # Stream traces immediately; retain only terminal text and usage metadata.
         # Long swarm turns must not accumulate every command and protocol event.
-        from gofer.subscriptions.base import _usage_metadata_from_payloads
+        from gofer.subscriptions.usage import provider_payload_usage
 
         previous = provider_payloads[0] if provider_payloads else {}
         usage = dict(previous.get("usage") or {})
-        usage.update(_usage_metadata_from_payloads([payload]))
+        usage.update(provider_payload_usage(provider, [payload]))
+        if payload.get("type") == "result" and isinstance(payload.get("usage"), dict):
+            usage.pop("partial", None)
         provider_payloads[:] = [
             {
+                "type": payload.get("type")
+                if payload.get("type") == "result"
+                else previous.get("type"),
                 "usage": usage,
                 "session_id": payload.get("session_id")
                 or payload.get("thread_id")
@@ -1382,6 +1407,19 @@ async def stream_workflow_chat(
             chunks[:] = [("".join(chunks) + text)[-65536:]]
         else:
             chunks.append(text)
+
+    def live_usage() -> dict[str, Any] | None:
+        from gofer.subscriptions.usage import provider_payload_usage
+
+        usage = provider_payload_usage(provider, provider_payloads)
+        if not any(key in usage for key in ("input_tokens", "output_tokens", "quota_windows")):
+            return None
+        return {
+            "type": "usage",
+            "provider": provider,
+            "model": model,
+            "usage": {**usage, "partial": True},
+        }
 
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
@@ -1401,7 +1439,10 @@ async def stream_workflow_chat(
             max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
             trusted_swarm_url=trusted_swarm_url,
             second_brain_cli_path=gofer_cli_path
-            if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+            if (
+                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+                or ((workflow or {}).get("remReportTheme") or {}).get("format")
+            )
             else None,
         )
         try:
@@ -1428,7 +1469,10 @@ async def stream_workflow_chat(
             max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
             trusted_swarm_url=trusted_swarm_url,
             second_brain_cli_path=gofer_cli_path
-            if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+            if (
+                ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+                or ((workflow or {}).get("remReportTheme") or {}).get("format")
+            )
             else None,
         )
         try:
@@ -1455,7 +1499,10 @@ async def stream_workflow_chat(
                 trusted_swarm_url=trusted_swarm_url,
                 extra_paths=_unique_existing_directories([resolved_data_dir, *extra_paths]),
                 second_brain_cli_path=gofer_cli_path
-                if ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+                if (
+                    ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
+                    or ((workflow or {}).get("remReportTheme") or {}).get("format")
+                )
                 else None,
             ) as (new_command, child_env):
                 source = stream_cli(
@@ -1524,7 +1571,14 @@ async def stream_workflow_chat(
                     payload = _json_object(line)
                     if payload is not None:
                         remember_payload(payload)
-                        for trace in _provider_trace_entries(provider, payload, claude_trace_state):
+                        if usage_event := live_usage():
+                            yield usage_event
+                        for trace in _provider_trace_entries(
+                            provider,
+                            payload,
+                            claude_trace_state,
+                            include_agent_messages=include_agent_messages,
+                        ):
                             turn_edits.observe(trace)
                             yield {
                                 "type": "thought",
@@ -1557,7 +1611,14 @@ async def stream_workflow_chat(
                 payload = _json_object(pending)
                 if payload is not None:
                     remember_payload(payload)
-                    for trace in _provider_trace_entries(provider, payload, claude_trace_state):
+                    if usage_event := live_usage():
+                        yield usage_event
+                    for trace in _provider_trace_entries(
+                        provider,
+                        payload,
+                        claude_trace_state,
+                        include_agent_messages=include_agent_messages,
+                    ):
                         turn_edits.observe(trace)
                         yield {
                             "type": "thought",
@@ -1635,9 +1696,16 @@ def _provider_trace_entries(
     provider: str,
     payload: dict[str, Any],
     claude_state: _ClaudeTraceState | None = None,
+    *,
+    include_agent_messages: bool = False,
 ) -> list[dict[str, Any]]:
     if provider == "claude_code":
         return _claude_trace_entries(payload, claude_state)
+    item = payload.get("item")
+    if include_agent_messages and isinstance(item, dict) and item.get("type") == "agent_message":
+        body = _provider_final_message(provider, [payload])
+        if body:
+            return [{"kind": "summary", "title": "Message", "body": body}]
     return _codex_trace_entries(payload)
 
 
@@ -1926,19 +1994,20 @@ def _codex_trace_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _provider_final_message(provider: str, payloads: list[dict[str, Any]]) -> str | None:
+    # Final answers may contain structured output. Trace display limits corrupt it.
     if provider == "claude_code":
         for payload in reversed(payloads):
             result = payload.get("result")
             if isinstance(result, str) and result.strip():
                 return result
-            text = _message_text(payload.get("message"))
+            text = _message_text(payload.get("message"), limit=None)
             if text:
                 return text
         return None
     for payload in reversed(payloads):
         item = payload.get("item")
         if isinstance(item, dict) and item.get("type") == "agent_message":
-            text = _trace_value(item.get("text") or item.get("content"))
+            text = _trace_value(item.get("text") or item.get("content"), limit=None)
             if text:
                 return text
         result = payload.get("result")
@@ -1956,7 +2025,7 @@ def _provider_error_message(payloads: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _message_text(message: Any) -> str | None:
+def _message_text(message: Any, limit: int | None = 8_000) -> str | None:
     if not isinstance(message, dict):
         return None
     content = message.get("content")
@@ -1967,37 +2036,37 @@ def _message_text(message: Any) -> str | None:
         for block in content
         if isinstance(block, dict)
         and block.get("type") == "text"
-        and (text := _trace_text(block.get("text")))
+        and (text := _trace_text(block.get("text"), limit=limit))
     ]
     return "\n".join(texts) if texts else None
 
 
-def _trace_value(value: Any) -> str | None:
+def _trace_value(value: Any, limit: int | None = 8_000) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        return _trace_text(value)
+        return _trace_text(value, limit=limit)
     if isinstance(value, list):
         if all(isinstance(item, str) for item in value):
-            return _trace_text("\n".join(value))
+            return _trace_text("\n".join(value), limit=limit)
         text_parts = [
             text
             for item in value
-            if isinstance(item, dict) and (text := _trace_text(item.get("text")))
+            if isinstance(item, dict) and (text := _trace_text(item.get("text"), limit=limit))
         ]
         if text_parts:
             return "\n".join(text_parts)
     try:
-        return _trace_text(json.dumps(value, ensure_ascii=False, indent=2))
+        return _trace_text(json.dumps(value, ensure_ascii=False, indent=2), limit=limit)
     except (TypeError, ValueError):
-        return _trace_text(str(value))
+        return _trace_text(str(value), limit=limit)
 
 
-def _trace_text(value: Any, limit: int = 8_000) -> str | None:
+def _trace_text(value: Any, limit: int | None = 8_000) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
-    return text if len(text) <= limit else f"{text[:limit].rstrip()}\n…"
+    return text if limit is None or len(text) <= limit else f"{text[:limit].rstrip()}\n…"
 
 
 def _first_line(value: str | None) -> str | None:
@@ -2319,6 +2388,8 @@ def _build_chat_command(
     permission_mode: str | None = None,
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
+    trusted_organization_url: str | None = None,
+    mcp_only: bool = False,
 ) -> list[str]:
     if provider == "antigravity":
         if image_paths:
@@ -2387,6 +2458,21 @@ def _build_chat_command(
             command.append(f"--image={path}")
         if resources is not None:
             command += resource_cli_args(provider, resources, working_dir)
+            if second_brain_cli_path is not None and any(
+                server.enabled
+                and server.name == "reports"
+                and server.type == "stdio"
+                and server.command == str(second_brain_cli_path)
+                and server.args[:2] == ["ui", "reports"]
+                for server in resources.mcpServers
+            ):
+                report_server = codex_mcp_server_names(resources, working_dir)["reports"]
+                command += [
+                    "-c",
+                    f'mcp_servers.{report_server}.enabled_tools=["save_report"]',
+                    "-c",
+                    f'mcp_servers.{report_server}.tools.save_report.approval_mode="approve"',
+                ]
             # Only the server installed by with_second_brain gets this session grant.
             if second_brain_cli_path is not None and any(
                 server.enabled
@@ -2419,6 +2505,17 @@ def _build_chat_command(
                     f'mcp_servers.{swarm_name}.enabled_tools=["swarm_action"]',
                     "-c",
                     f'mcp_servers.{swarm_name}.tools.swarm_action.approval_mode="approve"',
+                ]
+            if trusted_organization_url is not None and any(
+                server.enabled and server.name == "organizations"
+                and server.type == "http" and server.url == trusted_organization_url
+                for server in resources.mcpServers
+            ):
+                org_server = codex_mcp_server_names(resources, working_dir)["organizations"]
+                command += [
+                    "-c", f'mcp_servers.{org_server}.enabled_tools=["organization_action"]',
+                    "-c",
+                    f'mcp_servers.{org_server}.tools.organization_action.approval_mode="approve"',
                 ]
             if trusted_rem_threads_url is not None and any(
                 server.enabled
@@ -2465,6 +2562,14 @@ def _build_chat_command(
     trusted_gofer_cli = local_gofer_cli_path(data_dir)
     if trusted_gofer_cli.is_file():
         allowed_tools.append(f"Bash({trusted_gofer_cli} *)")
+    if mcp_only:
+        # Global management does not grant access to native file-editing tools.
+        # Replace resource_cli_args' built-in tool list, preserving MCP tools.
+        if "--tools" in command:
+            command[command.index("--tools") + 1] = ""
+        else:
+            command += ["--tools", ""]
+        allowed_tools = [tool for tool in allowed_tools if tool.startswith("mcp__")]
     command += ["--allowedTools", *allowed_tools]
     for path in trusted_paths:
         command += ["--add-dir", str(path)]
@@ -2738,6 +2843,11 @@ async def _summarize_chat_messages(
         data_dir=data_dir,
         working_dir=working_dir,
     )
+    from gofer.core.usage_ledger import record_invocation
+    from gofer.subscriptions.usage import provider_payload_usage
+
+    usage_metadata: dict[str, Any] = {}
+    usage_status = "failed"
     try:
         returncode, stdout, stderr = await run_subprocess(
             command,
@@ -2747,8 +2857,25 @@ async def _summarize_chat_messages(
             cancel_event=cancel_event,
             max_output_bytes=limits.max_subprocess_output_bytes,
         )
+        usage_status = "completed" if returncode == 0 else "failed"
+        if provider in ADDITIONAL_PROVIDERS:
+            usage_output = CliOutput(provider)
+            usage_output.feed(stdout)
+            usage_output.finish(returncode, stderr)
+            usage_metadata = usage_output.usage
+        else:
+            usage_metadata = provider_payload_usage(provider, _json_payloads(stdout))
     except OSError:
         return _fallback_chat_summary(messages)
+    finally:
+        record_invocation(
+            invocation_id=uuid.uuid4().hex,
+            provider=provider,
+            model=model,
+            metadata=usage_metadata,
+            data_dir=data_dir,
+            status="cancelled" if cancel_event and cancel_event.is_set() else usage_status,
+        )
     if returncode != 0:
         return _fallback_chat_summary(messages)
     if provider in ADDITIONAL_PROVIDERS:
@@ -2802,6 +2929,10 @@ def build_chat_prompt(
     gofer_cli_path: Path | None = None,
     agent_instructions: str | None = None,
 ) -> str:
+    from gofer.core.commit_message_format import commit_message_instructions
+    from gofer.core.provider_preferences import commit_message_preference
+
+    commit_instructions = commit_message_instructions(commit_message_preference()["template"])
     try:
         skill_index = (
             "Raticode workflow-builder: author and validate Rattish workflows. "
@@ -2823,8 +2954,10 @@ def build_chat_prompt(
     brain_rules = (
         second_brain_rules(
             Path(brain_config["root"]),
-            brain_config.get("format", "md"),
-            brain_config.get("theme", "auto"),
+            ((workflow or {}).get("remReportTheme") or {}).get(
+                "format", brain_config.get("format", "md")
+            ),
+            "none" if "remReportTheme" in (workflow or {}) else brain_config.get("theme", "auto"),
         )
         if brain_config.get("enabled") is True
         else ""
@@ -2842,6 +2975,8 @@ thread and remain the same when the provider or model changes.
 Selected provider: {provider}
 Requested model: {model}
 
+{commit_instructions}
+
 {cli_context}
 
 {docs_context}
@@ -2850,6 +2985,7 @@ Resource index. Read relevant skill files on demand; do not load the entire cata
 {skill_index}
 Additional resources: {resource_index(resources)}
 {brain_rules}
+{report_theme_rules((workflow or {}).get("remReportTheme"))}
 Use the provider's tool discovery to retrieve MCP tool schemas only when needed.
 
 When the user asks you to create or change a workflow, edit its `workflow.rattish` and related
@@ -2935,6 +3071,8 @@ def _compact_all_workflows_context(context: dict[str, Any]) -> str:
             f"- {item['name']}: {item['root']}"
             for item in (context.get("remThreads") or {}).get("projects", [])
         )
+    if context.get("remOrganizationInstructions"):
+        lines.append(str(context["remOrganizationInstructions"]))
     lines.append("Open files:")
     open_files = context.get("openFiles") or []
     paths = [path for path in open_files if isinstance(path, str) and path]

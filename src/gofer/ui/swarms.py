@@ -660,11 +660,18 @@ class SwarmManager:
         task: str,
         *,
         workspace_grants: dict[str, str] | None = None,
+        organization_scope: dict[str, Any] | None = None,
+        expected_configuration: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(task, str) or not task.strip():
             raise SwarmError("A nonempty run task is required")
         with self._lock:
             swarm = self._get(project_root, swarm_id)
+            if (
+                expected_configuration is not None
+                and self._configuration(swarm) != expected_configuration
+            ):
+                raise SwarmError("Swarm configuration changed before launch; review and retry")
             if any(
                 a["swarmId"] == swarm_id for a in [*self._active.values(), *self._checks.values()]
             ):
@@ -706,6 +713,9 @@ class SwarmManager:
             # Persist each destination before any provider can run. If preparation
             # fails, retain the successful worktrees and their review paths.
             run = swarm["run"]
+            if organization_scope:
+                run["organization"] = copy.deepcopy(organization_scope)
+                run["configuration"]["maxConcurrency"] = 1
             run["state"] = "paused"
             self._save(swarm)
             try:
@@ -749,6 +759,8 @@ class SwarmManager:
             elif action == "pause" and run["state"] == "running":
                 run["state"] = "paused"
             elif action == "resume" and run["state"] in {"paused", "stopped"}:
+                if run.get("organization"):
+                    raise SwarmError("Resume managed work through its organization task")
                 if run.get("cleanup") or swarm_id in self._terminal:
                     raise SwarmError(
                         "This run has been cleaned up. Start a new run from its parent branch."
@@ -2500,7 +2512,10 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             with self._lock:
                 swarm = self._get(root, swarm_id)
                 run_id = swarm["run"]["id"]
-                diagnose = swarm["run"].get("idleDiagnosis", {}).get("state") == "pending"
+                diagnose = (
+                    not swarm["run"].get("organization")
+                    and swarm["run"].get("idleDiagnosis", {}).get("state") == "pending"
+                )
                 actor = self._orchestrator(swarm)
                 cancel = threading.Event()
                 if diagnose:
@@ -2625,6 +2640,13 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     busy = {
                         a["agentId"] for a in self._active.values() if a["swarmId"] == swarm["id"]
                     }
+                    scope = run.get("organization")
+                    if scope and run["turnCount"] >= scope["turnLimit"] and not busy:
+                        run.update(
+                            state="paused", pauseReason="Organization turn reservation exhausted"
+                        )
+                        self._save(swarm)
+                        continue
                     if self._recover_idle(swarm):
                         continue
                     if time.time() >= run["nextCheckAt"]:
@@ -2824,6 +2846,21 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 run = swarm["run"]
                 if run["state"] != "running" or cancel.is_set():
                     return
+                if scope := run.get("organization"):
+                    from gofer.ui.organization_execution import swarm_usage
+
+                    cost = swarm_usage(run).get("cost_usd")
+                    if run["turnCount"] >= scope["turnLimit"] or (
+                        scope.get("budgetUsd") is not None
+                        and run["turnCount"]
+                        and (cost is None or cost >= scope["budgetUsd"])
+                    ):
+                        run.update(
+                            state="paused",
+                            pauseReason="Organization reservation exhausted or cost unavailable",
+                        )
+                        self._save(swarm)
+                        return
                 agent = next(a for a in run["configuration"]["agents"] if a["id"] == agent_id)
                 eligible = [
                     m
@@ -3020,6 +3057,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     "id": f"swarm-{swarm_id}-{agent_id}",
                     "projectRoot": str(working_dir),
                     "remResources": resources,
+                    **({"organizationRun": run["organization"]} if run.get("organization") else {}),
                 },
                 working_dir=working_dir,
                 data_dir=self.data_dir,

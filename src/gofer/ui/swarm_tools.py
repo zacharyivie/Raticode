@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
+import socket
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 MAX_REQUEST_BYTES = 1024 * 1024
+MCP_JSON_MAX_DEPTH = 64
+REQUEST_READ_DEADLINE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -28,7 +31,7 @@ class SwarmToolServer:
     The callback owns authorization for the bound agent, run, and current state.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_request_bytes: int = MAX_REQUEST_BYTES) -> None:
         self._lock = threading.Lock()
         self._grants: dict[str, _Grant] = {}
         self._slots = threading.BoundedSemaphore(8)
@@ -40,12 +43,38 @@ class SwarmToolServer:
                 self.request.settimeout(5)
                 super().setup()
 
+            def handle_one_request(self) -> None:
+                # Socket timeouts only bound inactivity. A fixed deadline also
+                # releases connection slots when headers or bodies trickle in.
+                def expire() -> None:
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+                self._read_timer = threading.Timer(REQUEST_READ_DEADLINE_SECONDS, expire)
+                self._read_timer.daemon = True
+                self._read_timer.start()
+                try:
+                    super().handle_one_request()
+                except (
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionResetError,
+                    TimeoutError,
+                ):
+                    return
+                finally:
+                    self._read_timer.cancel()
+
             def log_message(self, format: str, *args: Any) -> None:
                 # Request paths contain short-lived capabilities.
                 return
 
             def respond(self, status: int, value: dict[str, Any] | None = None) -> None:
-                data = json.dumps(value, ensure_ascii=False).encode() if value is not None else b""
+                # Preserve all JSON strings, including escaped lone surrogates,
+                # without attempting to encode those code points as UTF-8.
+                data = json.dumps(value).encode() if value is not None else b""
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
@@ -84,15 +113,37 @@ class SwarmToolServer:
                         return
                     try:
                         length = int(lengths[0])
-                        if length < 0 or length > MAX_REQUEST_BYTES:
+                        if length < 0 or length > max_request_bytes:
                             self.respond(413)
                             return
-                        request = json.loads(self.rfile.read(length))
-                    except (ValueError, UnicodeError):
+                        body = self.rfile.read(length)
+                        # Tool callbacks may legitimately take longer than the
+                        # request read budget. Their execution is not timed here.
+                        self._read_timer.cancel()
+                        if len(body) != length:
+                            self.respond(400)
+                            return
+                        request = json.loads(body)
+                        pending: list[tuple[Any, int]] = [(request, 0)]
+                        while pending:
+                            item, depth = pending.pop()
+                            if depth > MCP_JSON_MAX_DEPTH:
+                                raise ValueError("MCP request nesting is too deep")
+                            if isinstance(item, dict):
+                                pending.extend((value, depth + 1) for value in item.values())
+                            elif isinstance(item, list):
+                                pending.extend((value, depth + 1) for value in item)
+                    except (ValueError, UnicodeError, RecursionError):
                         self.respond(400)
                         return
                     if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
                         self.respond(400)
+                        return
+                    # Reading a slow body may outlive the turn or server. Admit
+                    # the complete request only while its original grant is live.
+                    # Already-dispatched callbacks retain their own state checks.
+                    if owner._grant(self.path) is not grant:
+                        self.respond(401)
                         return
                     if "id" not in request:
                         self.respond(202)

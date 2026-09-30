@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 _PROFILE_KEYWORDS = {
     "$schema",
@@ -49,10 +51,10 @@ def schema_accepts_schema(destination: Mapping[str, Any], source: Mapping[str, A
             for branch in destination_any_of
         )
     if "const" in source:
-        return bool(Draft202012Validator(destination).is_valid(source["const"]))
+        return instance_matches_schema(destination, source["const"])
     source_enum = source.get("enum")
     if isinstance(source_enum, list):
-        return all(Draft202012Validator(destination).is_valid(value) for value in source_enum)
+        return all(instance_matches_schema(destination, value) for value in source_enum)
 
     destination_types = _types(destination)
     source_types = _types(source)
@@ -85,7 +87,10 @@ def schema_accepts_schema(destination: Mapping[str, Any], source: Mapping[str, A
 
 
 def instance_matches_schema(schema: Mapping[str, Any], value: Any) -> bool:
-    return bool(Draft202012Validator(schema).is_valid(value))
+    try:
+        return bool(Draft202012Validator(schema, registry=Registry()).is_valid(value))
+    except (Unresolvable, RecursionError):
+        return False
 
 
 def unsupported_profile_paths(

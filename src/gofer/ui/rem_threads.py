@@ -12,9 +12,10 @@ from uuid import uuid4
 from gofer.ui.swarm_tools import SwarmToolServer
 
 INSTRUCTIONS = """Rem thread tools are available. Open projects are listed below.
-In global scope, select_project before doing project work. Choose the project from the
-user's request; ask when ambiguous. After selecting, end this turn immediately without
-editing: Raticode will continue the same request in that project's working directory.
+Organizations are global: use organization_action directly to manage them, without
+selecting a project. In global scope, select_project before doing project file work.
+Choose the project from the user's request; ask when ambiguous. After selecting, end this
+turn immediately without editing. Raticode continues the request in that project's directory.
 Use start_thread only when the user explicitly asks to create/start a separate or new
 thread. Never create a thread merely to delegate ordinary work. Copy the requested task
 accurately into message. The new thread inherits this thread's provider, model, permissions,
@@ -24,6 +25,8 @@ A tool receipt means the action is queued; Raticode applies it when this turn fi
 
 
 def thread_tools(global_scope: bool, projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not projects:
+        return []
     root = {"type": "string", "enum": [project["root"] for project in projects]}
     tools = [
         {
@@ -49,6 +52,9 @@ def thread_tools(global_scope: bool, projects: list[dict[str, Any]]) -> list[dic
             {
                 "name": "select_project",
                 "description": "Select this global thread's project before editing.",
+                # Claude Code's plan mode, used for global turns, rejects MCP tools
+                # unless they declare that they leave the workspace unchanged.
+                "annotations": {"readOnlyHint": True},
                 "inputSchema": {
                     "type": "object",
                     "properties": {"projectRoot": root},
@@ -123,10 +129,7 @@ async def stream_with_thread_tools(
 ) -> AsyncGenerator[dict[str, Any], None]:
     workflow = dict(kwargs.get("workflow") or {})
     config = workflow.get("remThreads") or {}
-    if not config.get("projects"):
-        if config.get("global"):
-            yield {"type": "error", "error": "Open a project before starting a global Rem thread."}
-            return
+    if not config.get("projects") and not config.get("global"):
         async with aclosing(source(**kwargs)) as stream:
             async for event in stream:
                 yield event
@@ -159,8 +162,10 @@ async def stream_with_thread_tools(
                 "mcpServers": [resources["mcpServers"][-1]],
             }
         initial = {**kwargs, "workflow": workflow, "trusted_rem_threads_url": url}
-        if actions.global_scope and kwargs.get("provider") in {"codex", "claude_code"}:
-            initial["permission_mode"] = "read-only" if kwargs["provider"] == "codex" else "plan"
+        if actions.global_scope and kwargs.get("provider") == "codex":
+            initial["permission_mode"] = "read-only"
+        # Claude global turns have no native tools (see _build_chat_command).
+        # Keep the user's permission mode so global management MCP writes work.
         pending_final = None
         async with aclosing(source(**initial)) as stream:
             async for event in stream:

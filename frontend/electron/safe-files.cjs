@@ -7,6 +7,23 @@ function sameFile(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+async function readBounded(handle, stat, maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("A finite read size limit is required.");
+  const tooLarge = () => Object.assign(new Error("File exceeds the read size limit."), { code: "ERR_FILE_TOO_LARGE" });
+  if (stat.size > maxBytes) throw tooLarge();
+  const chunks = [];
+  let total = 0;
+  while (total <= maxBytes) {
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+    if (!bytesRead) break;
+    total += bytesRead;
+    if (total > maxBytes) throw tooLarge();
+    chunks.push(buffer.subarray(0, bytesRead));
+  }
+  return Buffer.concat(chunks, total);
+}
+
 // Keep the parent descriptor open throughout each mutation. Linux's descriptor
 // namespace makes child lookup relative to that directory even if it is renamed.
 async function withDirectory(directory, authorize, operation) {
@@ -33,7 +50,36 @@ async function withDirectory(directory, authorize, operation) {
   } finally { await handle.close(); }
 }
 
-async function writeFile(target, content, { authorize = () => {}, exclusive = false, expectedHash, digest } = {}) {
+// Read only the already-authorized canonical path. Never resolve a replacement
+// link into a new input, and enforce the limit on bytes read as well as stat size.
+async function readFile(target, { maxBytes, authorize = () => {} }) {
+  const canonical = path.resolve(target);
+  const parentPath = path.dirname(canonical);
+  const check = (candidate) => {
+    if (candidate !== canonical && candidate !== parentPath) throw new Error("File path changed during read.");
+    authorize(candidate);
+  };
+  check(realpathForContainment(canonical));
+  return withDirectory(parentPath, check, async (parent, verify) => {
+    const anchored = path.join(parent, path.basename(canonical));
+    const handle = await fsp.open(anchored, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+    try {
+      const stat = await handle.stat();
+      const verifyFile = async () => {
+        await verify();
+        const entry = await fsp.lstat(anchored);
+        if (!stat.isFile() || entry.isSymbolicLink() || !sameFile(stat, entry)) throw new Error("Cannot read a linked or replaced file.");
+        if (process.platform === "linux") check(await fsp.realpath(`/proc/self/fd/${handle.fd}`));
+      };
+      await verifyFile();
+      const content = await readBounded(handle, stat, maxBytes);
+      await verifyFile();
+      return content;
+    } finally { await handle.close(); }
+  });
+}
+
+async function writeFile(target, content, { authorize = () => {}, exclusive = false, expectedHash, digest, maxBytes } = {}) {
   const canonical = realpathForContainment(target);
   authorize(canonical);
   return withDirectory(path.dirname(canonical), authorize, async (parent, verify) => {
@@ -57,7 +103,7 @@ async function writeFile(target, content, { authorize = () => {}, exclusive = fa
       }
       await verify();
       if (process.platform === "linux") authorize(await fsp.realpath(`/proc/self/fd/${handle.fd}`));
-      if (expectedHash && digest(await handle.readFile()) !== expectedHash) throw new Error("File changed since the search. Refresh the results.");
+      if (expectedHash && digest(await readBounded(handle, stat, maxBytes)) !== expectedHash) throw new Error("File changed since the search. Refresh the results.");
       const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
       let offset = 0;
       while (offset < bytes.length) {
@@ -90,8 +136,14 @@ async function createDirectory(target, authorize, { mode = 0o777 } = {}) {
 
 async function copyPath(source, destination, { authorizeSource, authorizeDestination }) {
   const sourceRoot = realpathForContainment(source);
+  const destinationRoot = realpathForContainment(destination);
   authorizeSource(sourceRoot);
-  authorizeDestination(realpathForContainment(destination));
+  const authorizeCopyDestination = (target) => {
+    // Check later directory resolutions too, in case an ancestor becomes a link.
+    if (isPathInside(target, sourceRoot)) throw new Error("Cannot copy a directory into itself.");
+    authorizeDestination(target);
+  };
+  authorizeCopyDestination(destinationRoot);
   async function copy(currentSource, currentDestination) {
     const stat = await fsp.lstat(currentSource);
     if (stat.isSymbolicLink()) {
@@ -101,12 +153,12 @@ async function copyPath(source, destination, { authorizeSource, authorizeDestina
       authorizeSource(resolved);
       const newTarget = path.resolve(path.dirname(currentDestination), link);
       authorizeDestination(realpathForContainment(newTarget));
-      await withDirectory(path.dirname(currentDestination), authorizeDestination, async (parent, verify) => {
+      await withDirectory(path.dirname(currentDestination), authorizeCopyDestination, async (parent, verify) => {
         await verify();
         await fsp.symlink(link, path.join(parent, path.basename(currentDestination)), process.platform === "win32" && (await fsp.stat(currentSource)).isDirectory() ? "junction" : undefined);
       });
     } else if (stat.isDirectory()) {
-      await createDirectory(currentDestination, authorizeDestination, { mode: stat.mode & 0o777 });
+      await createDirectory(currentDestination, authorizeCopyDestination, { mode: stat.mode & 0o777 });
       await withDirectory(currentSource, authorizeSource, async (parent, verify) => {
         for (const entry of await fsp.readdir(parent)) {
           await verify();
@@ -115,12 +167,15 @@ async function copyPath(source, destination, { authorizeSource, authorizeDestina
       });
     } else if (stat.isFile()) {
       await withDirectory(path.dirname(currentSource), authorizeSource, async (parent, verify) => {
-        const handle = await fsp.open(path.join(parent, path.basename(currentSource)), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+        // A regular file can become a FIFO after lstat. Do not block before the
+        // descriptor identity/type check has a chance to reject its replacement.
+        const handle = await fsp.open(path.join(parent, path.basename(currentSource)), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
         try {
           await verify();
-          if (!sameFile(stat, await handle.stat())) throw new Error("Source changed while copying.");
+          const opened = await handle.stat();
+          if (!opened.isFile() || !sameFile(stat, opened)) throw new Error("Source changed while copying.");
           // Stream large files using a bounded buffer; destination stays pinned.
-          await withDirectory(path.dirname(currentDestination), authorizeDestination, async (destinationParent, verifyDestination) => {
+          await withDirectory(path.dirname(currentDestination), authorizeCopyDestination, async (destinationParent, verifyDestination) => {
             const output = await fsp.open(path.join(destinationParent, path.basename(currentDestination)), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), stat.mode & 0o777);
             try {
               await verifyDestination();
@@ -137,8 +192,7 @@ async function copyPath(source, destination, { authorizeSource, authorizeDestina
       });
     } else throw new Error("Only ordinary files and directories can be copied.");
   }
-  if (isPathInside(destination, sourceRoot)) throw new Error("Cannot copy a directory into itself.");
-  await copy(sourceRoot, destination);
+  await copy(sourceRoot, destinationRoot);
 }
 
 async function renamePath(source, destination, authorize) {
@@ -154,4 +208,4 @@ async function renamePath(source, destination, authorize) {
   });
 }
 
-module.exports = { copyPath, createDirectory, renamePath, withDirectory, writeFile };
+module.exports = { copyPath, createDirectory, readFile, renamePath, withDirectory, writeFile };

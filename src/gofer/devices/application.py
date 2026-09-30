@@ -19,10 +19,11 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from gofer.devices.files import CHUNK, DeviceFiles
+from gofer.devices.organization_jobs import event_schema
 from gofer.devices.registry import DeviceRegistry, PairingError, device_id
 
 _SCHEMA = json.loads((Path(__file__).parent / "protocol/v2/event.schema.json").read_text())
-_VALIDATOR = Draft202012Validator(_SCHEMA)
+_VALIDATOR = Draft202012Validator(event_schema(_SCHEMA))
 OUTBOX_EVENTS = 10000
 OUTBOX_BYTES = 64 * 1024 * 1024
 RETAIN_ACKNOWLEDGED = 400
@@ -74,6 +75,9 @@ class DeviceApplication:
                 PRIMARY KEY(peer,id));
               CREATE TABLE IF NOT EXISTS device_remote_requests (
                 peer TEXT NOT NULL, request TEXT NOT NULL,event BLOB NOT NULL,state TEXT NOT NULL,
+                PRIMARY KEY(peer,request));
+              CREATE TABLE IF NOT EXISTS device_remote_cancels (
+                peer TEXT NOT NULL, request TEXT NOT NULL, event BLOB NOT NULL,
                 PRIMARY KEY(peer,request));
               CREATE TABLE IF NOT EXISTS device_remote_results (
                 peer TEXT NOT NULL, id TEXT NOT NULL,event BLOB NOT NULL,
@@ -157,6 +161,7 @@ class DeviceApplication:
                 "device_chunk_receipts",
                 "device_file_sends",
                 "device_remote_requests",
+                "device_remote_cancels",
                 "device_remote_results",
                 "device_outbox",
                 "device_files",
@@ -215,13 +220,7 @@ class DeviceApplication:
             "type": kind,
             "payload": payload,
         }
-        sequence = db.execute(
-            "SELECT MAX(value)+1 FROM (SELECT COALESCE(MAX(sequence),0) AS value FROM "
-            "device_outbox WHERE peer=? UNION ALL SELECT value FROM device_sequences "
-            "WHERE peer=?)",
-            (peer, peer),
-        ).fetchone()[0]
-        db.execute("INSERT OR REPLACE INTO device_sequences VALUES (?,?)", (peer, sequence))
+        sequence = self._next_outbound_sequence(peer)
         event["sequence"] = sequence
         _VALIDATOR.validate(event)
         encoded = self._encode(peer, event)
@@ -590,10 +589,7 @@ class DeviceApplication:
                     return [self._emit(peer, event, "file.status", status)]
                 if kind == "file.cancel":
                     self.files.cancel(peer, event["thread_id"], payload["file_id"])
-                    db.execute(
-                        "DELETE FROM device_file_sends WHERE peer=? AND id=?",
-                        (peer, payload["file_id"]),
-                    )
+                    self._finish_file_send(peer, event["thread_id"], payload["file_id"])
                     return [
                         self._emit(
                             peer,
@@ -612,7 +608,15 @@ class DeviceApplication:
                         (peer, payload["file_id"], event["thread_id"], event["request_id"]),
                     )
                     return [self._file_chunk(peer, event, payload["file_id"], 0)]
-                if payload["state"] in ("receiving", "available"):
+                sending = db.execute(
+                    "SELECT * FROM device_file_sends WHERE peer=? AND id=? AND thread=?",
+                    (peer, payload["file_id"], event["thread_id"]),
+                ).fetchone()
+                # Status is an acknowledgment, not a request for another status.
+                # Check its thread before pruning any pending chunks or receipts.
+                if sending is None:
+                    return []
+                if payload["state"] == "receiving":
                     db.execute(
                         "DELETE FROM device_outbox WHERE peer=? AND sequence IN (SELECT sequence "
                         "FROM device_chunk_receipts WHERE peer=? AND id=? AND end_offset<=?)",
@@ -622,20 +626,12 @@ class DeviceApplication:
                         "DELETE FROM device_chunk_receipts WHERE peer=? AND id=? AND end_offset<=?",
                         (peer, payload["file_id"], payload["received_size"]),
                     )
-                sending = db.execute(
-                    "SELECT * FROM device_file_sends WHERE peer=? AND id=? AND thread=?",
-                    (peer, payload["file_id"], event["thread_id"]),
-                ).fetchone()
-                if sending is not None and payload["state"] == "receiving":
                     return [
                         self._file_chunk(peer, event, payload["file_id"], payload["received_size"])
                     ]
-                if sending is not None and payload["state"] in ("available", "cancelled", "failed"):
-                    db.execute(
-                        "DELETE FROM device_file_sends WHERE peer=? AND id=?",
-                        (peer, payload["file_id"]),
-                    )
-                return [self._emit(peer, event, "file.status", payload)]
+                if payload["state"] in ("available", "cancelled", "failed"):
+                    self._finish_file_send(peer, event["thread_id"], payload["file_id"])
+                return []
             if kind in ("job.get", "job.cancel"):
                 work = db.execute(
                     "SELECT w.* FROM device_job_ids j JOIN device_work w ON w.peer=j.peer "
@@ -972,7 +968,14 @@ class DeviceApplication:
                 is not None
             )
 
-    def complete(self, peer: str, request_id: str, text: str, error: str | None = None) -> None:
+    def complete(
+        self,
+        peer: str,
+        request_id: str,
+        text: str,
+        error: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
         with self.registry.transaction():
             self._trusted(peer)
             row = self.registry.db.execute(
@@ -980,6 +983,19 @@ class DeviceApplication:
             ).fetchone()
             if row is not None and row["state"] == "cancelled":
                 event = self._decode(peer, row["event"])
+                if event["type"] == "job.submit" and event["payload"].get("organization"):
+                    self._emit(
+                        peer,
+                        event,
+                        "job.status",
+                        {
+                            "job_id": event["payload"]["job_id"],
+                            "state": "cancelled",
+                            "revision": 2,
+                            "detail": "Managed job stopped after cancellation",
+                            **({"usage": usage} if usage is not None else {}),
+                        },
+                    )
                 self._status(peer, event, "cancelled", "Rem stopped after cancellation")
                 return
             if row is None or row["state"] != "running":
@@ -1067,6 +1083,11 @@ class DeviceApplication:
                         "state": state,
                         "revision": 2,
                         "detail": "Target Rem finished",
+                        **(
+                            {"usage": usage}
+                            if usage is not None and event["payload"].get("organization")
+                            else {}
+                        ),
                     },
                 )
             self._status(
@@ -1106,6 +1127,7 @@ class DeviceApplication:
                         kind == "job.submit"
                         and (
                             old["payload"]["project_id"] != body.get("project_id")
+                            or old["payload"].get("organization") != body.get("organization")
                             or old["payload"]["expected_policy_revision"]
                             != body.get("policy_revision", 1)
                         )
@@ -1118,6 +1140,7 @@ class DeviceApplication:
             ).fetchone()[0]
             if sequence >= 100000:
                 raise PairingError("remote_request_quota")
+            sequence = self._next_outbound_sequence(peer)
             kind = body.get("kind", "chat.submit")
             payload = {"text": body.get("text", ""), "attachment_ids": []}
             if kind == "fleet.request":
@@ -1130,6 +1153,7 @@ class DeviceApplication:
                     "resource_ids": [],
                     "intent": body.get("text", ""),
                     "expected_policy_revision": body.get("policy_revision", 1),
+                    **({"organization": body["organization"]} if body.get("organization") else {}),
                 }
             event = {
                 "version": 2,
@@ -1204,6 +1228,46 @@ class DeviceApplication:
                 "UPDATE peers SET last_seen=? WHERE device_id=?", (self.registry.clock(), peer)
             )
 
+    def _next_outbound_sequence(self, peer: str) -> int:
+        db = self.registry.db
+        sequence = db.execute(
+            "SELECT MAX(value)+1 FROM (SELECT COALESCE(MAX(sequence),0) AS value FROM "
+            "device_outbox WHERE peer=? UNION ALL SELECT value FROM device_sequences "
+            "WHERE peer=? UNION ALL SELECT COUNT(*) FROM device_remote_requests WHERE peer=?)",
+            (peer, peer, peer),
+        ).fetchone()[0]
+        db.execute("INSERT OR REPLACE INTO device_sequences VALUES (?,?)", (peer, sequence))
+        return int(sequence)
+
+    def cancel_remote(self, peer: str, request_id: str) -> dict[str, Any]:
+        with self.registry.transaction():
+            self._trusted(peer)
+            existing = self.registry.db.execute(
+                "SELECT event FROM device_remote_cancels WHERE peer=? AND request=?",
+                (peer, request_id),
+            ).fetchone()
+            if existing:
+                return self._decode(peer, existing[0])
+            row = self.registry.db.execute(
+                "SELECT event FROM device_remote_requests WHERE peer=? AND request=?",
+                (peer, request_id),
+            ).fetchone()
+            if row is None:
+                raise PairingError("request_unavailable")
+            event = self._decode(peer, row[0])
+            cancellation = {
+                **event,
+                "id": str(uuid5(NAMESPACE_URL, "raticode-cancel:" + request_id)),
+                "type": "request.cancel",
+                "payload": {"reason": "Organization execution stopped"},
+                "sequence": self._next_outbound_sequence(peer),
+            }
+            self.registry.db.execute(
+                "INSERT INTO device_remote_cancels VALUES (?,?,?)",
+                (peer, request_id, self._encode(peer, cancellation)),
+            )
+            return cancellation
+
     def remote_status(self, peer: str, request_id: str) -> dict[str, Any]:
         with self.registry.lock:
             self._trusted(peer)
@@ -1222,6 +1286,25 @@ class DeviceApplication:
                 "request_id": request_id,
                 "events": [event for event in events if event["request_id"] == request_id],
             }
+
+    def _finish_file_send(self, peer: str, thread: str, identifier: str) -> None:
+        db = self.registry.db
+        if (
+            db.execute(
+                "SELECT 1 FROM device_file_sends WHERE peer=? AND id=? AND thread=?",
+                (peer, identifier, thread),
+            ).fetchone()
+            is None
+        ):
+            return
+        # A finished or cancelled transfer must not replay queued chunks on reconnect.
+        db.execute(
+            "DELETE FROM device_outbox WHERE peer=? AND sequence IN "
+            "(SELECT sequence FROM device_chunk_receipts WHERE peer=? AND id=?)",
+            (peer, peer, identifier),
+        )
+        db.execute("DELETE FROM device_chunk_receipts WHERE peer=? AND id=?", (peer, identifier))
+        db.execute("DELETE FROM device_file_sends WHERE peer=? AND id=?", (peer, identifier))
 
     def _file_chunk(
         self, peer: str, event: dict[str, Any], identifier: str, offset: int
@@ -1407,7 +1490,16 @@ class DeviceApplication:
 
     def queued_remote(self) -> list[tuple[str, dict[str, Any]]]:
         with self.registry.lock:
-            return [
+            cancellations = [
+                (row["peer"], self._decode(row["peer"], row["event"]))
+                for row in self.registry.db.execute(
+                    "SELECT c.* FROM device_remote_cancels c JOIN device_remote_requests r "
+                    "ON c.peer=r.peer AND c.request=r.request JOIN peers p ON p.device_id=c.peer "
+                    "WHERE p.state='active' AND r.state NOT IN "
+                    "('completed','cancelled','failed','rejected') LIMIT 4"
+                )
+            ]
+            return cancellations + [
                 (row["peer"], self._decode(row["peer"], row["event"]))
                 for row in self.registry.db.execute(
                     "SELECT r.* FROM device_remote_requests r JOIN peers p ON "

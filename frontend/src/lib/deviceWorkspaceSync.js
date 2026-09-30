@@ -1,3 +1,4 @@
+import { reportThemeContext } from "./reportThemes.js";
 import { apiUrl } from "./api.js";
 import { inspectThreadScopes, threadIsArchived } from "./threadActivity.js";
 import { conversationRepository } from "./conversationRepository.js";
@@ -163,8 +164,9 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
             remSwarmAccess: { enabled: assistant.swarmAccessEnabled !== false,
               grantId: workspace.pathGrantForApi(metadata.projectRoot),
               workspaceGrants: Object.fromEntries(projects.filter(p => p.grantId).map(p => [p.root, p.grantId])) },
+            remReportTheme: reportThemeContext(memory),
             remSecondBrain: { enabled: memory.secondBrainEnabled === true, root: memory.secondBrainRoot,
-              format: memory.secondBrainFormat, theme: memory.secondBrainTheme,
+              format: memory.secondBrainFormat,
               grantId: workspace.pathGrantForApi(memory.secondBrainRoot) },
           };
           const mobileGroup = metadata.pinned && !metadata.archived ? "pinned" : threadIsArchived(metadata, scopes.missingRoots, scopes.branches) ? "archived" : "active";

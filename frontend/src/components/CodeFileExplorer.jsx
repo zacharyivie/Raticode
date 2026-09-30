@@ -1,9 +1,12 @@
+import { dismissGenerationJob, latestGenerationJob, jobIsRunning } from "../lib/generationJobs.js";
 import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath } from "../lib/workspacePaths.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
+import { commitDiffPath } from "../lib/commitDiff.js";
 import RemActionIcon from "./RemActionIcon.jsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Search,
+  Building2,
   Waypoints,
   ArrowDown,
   ArrowUp,
@@ -31,6 +34,7 @@ import {
 } from "lucide-react";
 import GitIntegrationControls from "./GitIntegrationControls.jsx";
 import WorktreeContextMenu, { historyOperations, integrationOperations } from "./WorktreeContextMenu.jsx";
+import OrganizationSidebar from "./OrganizationSidebar.jsx";
 import SwarmSidebar from "./SwarmSidebar.jsx";
 import RatSwarmIcon from "./RatSwarmIcon.jsx";
 import ProjectSearch from "./ProjectSearch.jsx";
@@ -54,6 +58,8 @@ export default function CodeFileExplorer({
   workflow,
   onOpenSwarm,
   selectedSwarmId,
+  onOpenOrganization,
+  selectedOrganizationId,
   onFilesystemChange,
   onCloseActiveFile,
   onOpenFile,
@@ -97,8 +103,58 @@ export default function CodeFileExplorer({
   const [worktreeStartPoint, setWorktreeStartPoint] = useState("");
   const [generatingMessage, setGeneratingMessage] = useState(false);
   const generationRef = useRef(null);
-  useEffect(() => () => generationRef.current?.abort(), [rootPath]);
   const [commitMessage, setCommitMessage] = useState("");
+  const commitJobRef = useRef(null);
+  const draftKey = JSON.stringify([sourceControl.root || rootPath, sourceControl.branch || ""]);
+  const draftKeyRef = useRef(draftKey);
+  draftKeyRef.current = draftKey;
+  const [loadingCommitJob, setLoadingCommitJob] = useState(true);
+  useEffect(() => {
+    if (sourceControlRoot !== rootPath || !sourceControl.active) return;
+    let active = true;
+    commitJobRef.current = null; setGeneratingMessage(false); setLoadingCommitJob(true);
+    let saved;
+    try { saved = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
+    setCommitMessage(saved?.message || ""); setGitNotice(""); setGitError("");
+    const stop = startPolling(async () => {
+      try {
+        const job = await latestGenerationJob("commit", sourceControl.root || rootPath, sourceControl.branch || "");
+        if (!active) return;
+        setLoadingCommitJob(false);
+        setGeneratingMessage(jobIsRunning(job));
+        if (!job || (commitJobRef.current?.id === job.id && commitJobRef.current?.status === job.status)) return;
+        commitJobRef.current = job;
+        if (job.error) setGitError(job.error);
+        if (job.result?.commit) {
+          setGitNotice(`Auto-committed ${job.result.commit.slice(0, 8)} on ${job.branch}.`);
+          let current;
+          try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
+          if (current?.jobId !== job.id) {
+            const message = current?.pendingJobId === job.id && current.message !== current.generationDraft ? current.message : "";
+            setCommitMessage(message);
+            window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ jobId: job.id, message }));
+          }
+        }
+        else if (job.result?.message) {
+          let current;
+          try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
+          if (current?.jobId !== job.id) {
+            const message = current?.pendingJobId === job.id && current.message !== current.generationDraft ? current.message : job.result.message;
+            setCommitMessage(message);
+            window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ jobId: job.id, message }));
+          }
+          setGitNotice("Rem's commit message is ready.");
+        }
+      } catch (cause) { if (active) { setLoadingCommitJob(false); setGitError(cause.message); } }
+    }, { immediate: true });
+    return () => { active = false; stop(); };
+  }, [draftKey, rootPath, sourceControlRoot, sourceControl.active, sourceControl.root, sourceControl.branch]);
+  function editCommitMessage(message) {
+    setCommitMessage(message);
+    let current;
+    try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${draftKey}`) || "null"); } catch { /* No stored draft. */ }
+    window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ ...current, message }));
+  }
   const [gitNotice, setGitNotice] = useState("");
   const [blockedBranch, setBlockedBranch] = useState("");
   const [remote, setRemote] = useState("");
@@ -202,6 +258,10 @@ export default function CodeFileExplorer({
   async function historyAction(kind) {
     const { hash } = historyMenu;
     setHistoryMenu(null);
+    if (kind === "commit-diff") {
+      onOpenFile?.(commitDiffPath(rootPath, hash));
+      return;
+    }
     if (kind === "worktree-commit") {
       setWorktreeStartPoint(hash); setWorktreeCreateBranch(true); setWorktreeBranch(""); setWorktreeFolder(""); setWorktreeFormOpen(true); setSourceTab("branches"); return;
     }
@@ -212,33 +272,27 @@ export default function CodeFileExplorer({
   }
 
   async function generateCommitMessage() {
-    if (generatingMessage || gitBusy || !stagedCount) return;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => { if (currentRootRef.current === rootPath) setGitError("Rem timed out. Try generating again."); controller.abort(); }, 180000);
-    generationRef.current = controller;
-    const draft = commitMessage;
+    if (generationRef.current || generatingMessage || loadingCommitJob || gitBusy || !stagedCount) return;
+    const key = draftKey;
+    generationRef.current = key;
     setGeneratingMessage(true); setGitError("");
     try {
-      const snapshot = await window.goferDesktop.workspace.gitRepoAction(rootPath, "staged-diff");
-      if (snapshot?.error || (!snapshot?.diff && !snapshot?.inspectStaged)) throw new Error(snapshot?.error || "No staged diff available.");
-      if (controller.signal.aborted) return;
-      const message = await new Promise((resolve, reject) => {
-        const cancel = () => reject(new Error("Generation cancelled."));
-        controller.signal.addEventListener("abort", cancel, { once: true });
-        window.dispatchEvent(new CustomEvent("gofer:rem-commit-message", { detail: { projectRoot: rootPath, diff: snapshot.diff, inspectStaged: snapshot.inspectStaged, signal: controller.signal, resolve, reject } }));
+      const job = await new Promise((resolve, reject) => {
+        const detail = { background: true, projectRoot: rootPath, branch: sourceControl.branch, resolve, reject, handled: false };
+        window.dispatchEvent(new CustomEvent("gofer:rem-commit-message", { detail }));
+        if (!detail.handled) reject(new Error("Open Rem to generate a commit message."));
       });
-      if (controller.signal.aborted || currentRootRef.current !== rootPath) return;
-      const current = await window.goferDesktop.workspace.gitRepoAction(rootPath, "staged-diff");
-      if (controller.signal.aborted || currentRootRef.current !== rootPath) return;
-      if (current?.error || current?.tree !== snapshot.tree) throw new Error("Staged changes changed. Generate a new message.");
-      setCommitMessage(value => value === draft ? message : value);
-      setGitNotice("Rem generated a message. Your edits to an existing draft are preserved.");
-    } catch (cause) { if (!controller.signal.aborted && currentRootRef.current === rootPath) setGitError(cause.message); }
-    finally { clearTimeout(timeout); if (generationRef.current === controller) { generationRef.current = null; setGeneratingMessage(false); } }
+      let current;
+      try { current = JSON.parse(window.localStorage.getItem(`rem-commit-draft:${key}`) || "null"); } catch { /* No stored draft. */ }
+      window.localStorage.setItem(`rem-commit-draft:${key}`, JSON.stringify({ ...current, message: current?.message ?? commitMessage, pendingJobId: job.id, generationDraft: commitMessage }));
+      if (draftKeyRef.current === key) setGitNotice("Rem is generating in the background. You can switch branches or close the window.");
+    } catch (cause) { if (draftKeyRef.current === key) { setGitError(cause.message); setGeneratingMessage(false); } }
+    finally { if (generationRef.current === key) generationRef.current = null; }
   }
 
   async function changeSourceControl(action, value) {
-    if (gitStatusPending || gitOperationRef.current || gitOperationBusy || (pendingStagingRef.current && action !== "commit") || (action === "commit" && (!commitMessage.trim() || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")))) return;
+    if (action === "commit" && (generationRef.current || generatingMessage || loadingCommitJob)) return;
+    if (gitStatusPending || gitOperationRef.current || gitOperationBusy || (pendingStagingRef.current && action !== "commit") || (action === "commit" && (!value?.trim() || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")))) return;
     const changesWorkingTree = (["switch", "stash-switch", "stash-apply", "pull", "reset-soft", "reset-hard", "detach-commit", "branch-commit"].includes(action) || /^(merge|rebase)-/.test(action)) || action.startsWith("revert");
     if ((changesWorkingTree || action === "stage") && hasUnsavedCodeChanges(rootPath)) {
       setGitError("Save your unsaved editor changes before changing the Git working tree.");
@@ -324,7 +378,13 @@ export default function CodeFileExplorer({
       setBlockedBranch(result.switchBlocked ? result.requestedBranch : "");
       setGitNotice(result.notice || (action === "commit" ? "Committed staged changes." : ""));
       if (result.switchBlocked) return;
-      if (action === "commit") setCommitMessage("");
+      if (action === "commit") {
+        setCommitMessage(""); window.localStorage.removeItem(`rem-commit-draft:${draftKey}`);
+        if (commitJobRef.current) {
+          try { await dismissGenerationJob(commitJobRef.current.id); }
+          catch { setGitNotice("Committed staged changes. Could not clear the saved draft."); }
+        }
+      }
       setSourceControl(result);
       await Promise.all([refreshTree(), loadGitPanels()]);
       onFilesystemChange?.({ type: "git", rootPath });
@@ -860,6 +920,7 @@ export default function CodeFileExplorer({
           { id: "search", label: "Search", icon: Search },
           { id: "source-control", label: "Source control", icon: GitBranch },
           { id: "swarms", label: "Swarms", icon: RatSwarmIcon },
+          { id: "organizations", label: "Organizations", icon: Building2 },
         ].map(({ id, label, icon: Icon }) => (
           <button
             key={id}
@@ -876,7 +937,7 @@ export default function CodeFileExplorer({
             onKeyDown={(event) => {
               if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
               event.preventDefault();
-              const views = [...(workflowsContent !== undefined ? ["workflows"] : []), "files", "search", "source-control", "swarms"];
+              const views = [...(workflowsContent !== undefined ? ["workflows"] : []), "files", "search", "source-control", "swarms", "organizations"];
               const next = event.key === "Home" ? views[0] : event.key === "End" ? views.at(-1) : views[(views.indexOf(id) + (event.key === "ArrowDown" ? 1 : views.length - 1)) % views.length];
               setSidebarView(next);
               setContextMenu(null);
@@ -898,6 +959,7 @@ export default function CodeFileExplorer({
           <div className="min-h-0 flex-1 overflow-y-auto px-2">{workflowsContent}</div>
         </div>
       ) : null}
+      <OrganizationSidebar active={sidebarView === "organizations"} selectedId={selectedOrganizationId} onSelect={onOpenOrganization} />
       <SwarmSidebar key={`swarms:${rootPath}`} rootPath={rootPath} active={sidebarView === "swarms"} selectedId={selectedSwarmId} onSelect={onOpenSwarm} />
       <ProjectSearch key={rootPath} rootPath={rootPath} active={sidebarView === "search"} focusRequest={searchFocusRequest} onOpenFile={onOpenFile} disabled={gitBusy} onBusy={setGitBusy} onReplace={() => { void refreshTree(); onFilesystemChange?.({ type: "git", rootPath }); }} />
       <div id="sidebar-panel-files" role="tabpanel" aria-labelledby="sidebar-tab-files" hidden={sidebarView !== "files"} className={`min-h-0 min-w-0 flex-1 flex-col ${sidebarView === "files" ? "flex" : "hidden"}`}>
@@ -1317,10 +1379,10 @@ export default function CodeFileExplorer({
                 <form className="scm-composer shrink-0 space-y-2 border-t border-line bg-slate-50 p-3" onSubmit={(event) => { event.preventDefault(); void changeSourceControl("commit", commitMessage); }}>
                   <label className="block text-xs font-semibold" htmlFor="scm-commit-message">Commit message</label>
                   <div className="relative">
-                  <button type="button" aria-label="Generate commit message with Rem" aria-busy={generatingMessage} title={generatingMessage ? "Rem is drafting your commit message" : "Generate a commit message with Rem"} className="rem-action-button absolute right-1 top-1 grid h-8 w-8 place-items-center rounded border border-line bg-canvas text-ink hover:text-brand focus-visible:outline-brand disabled:opacity-40" disabled={gitBusy || generatingMessage || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")} onClick={() => void generateCommitMessage()}><RemActionIcon /><span className="sr-only">{generatingMessage ? "Generating…" : "Generate with Rem"}</span></button>
-                  <textarea id="scm-commit-message" aria-label="Commit message" placeholder="Describe your changes…" rows={2} className="scm-commit-message w-full pr-11 resize-none rounded border border-line bg-white px-2 py-1 text-xs focus-visible:outline" value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && commitMessage.trim() && !gitOperationBusy && stagedCount) { event.preventDefault(); void changeSourceControl("commit", commitMessage); } }} />
+                  <button type="button" aria-label="Generate commit message with Rem" aria-busy={generatingMessage} title={generatingMessage ? "Rem is drafting your commit message" : "Generate a commit message with Rem"} className="rem-action-button absolute right-1 top-1 grid h-8 w-8 place-items-center rounded border border-line bg-canvas text-ink hover:text-brand focus-visible:outline-brand disabled:opacity-40" disabled={gitBusy || loadingCommitJob || generatingMessage || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")} onClick={() => void generateCommitMessage()}><RemActionIcon /><span className="sr-only">{generatingMessage ? "Generating…" : "Generate with Rem"}</span></button>
+                  <textarea id="scm-commit-message" aria-label="Commit message" placeholder="Describe your changes…" rows={2} className="scm-commit-message w-full pr-11 resize-none rounded border border-line bg-white px-2 py-1 text-xs focus-visible:outline" value={commitMessage} onChange={(event) => editCommitMessage(event.target.value)} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && commitMessage.trim() && !gitOperationBusy && stagedCount) { event.preventDefault(); void changeSourceControl("commit", commitMessage); } }} />
                   </div>
-                  <button type="submit" className="h-8 w-full rounded bg-brand text-[11px] font-semibold text-white disabled:opacity-40" disabled={gitStatusPending || gitOperationBusy || !commitMessage.trim() || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")}>{gitOperationBusy ? "Working…" : `Commit ${stagedCount} staged file${stagedCount === 1 ? "" : "s"}`}</button>
+                  <button type="submit" className="h-8 w-full rounded bg-brand text-[11px] font-semibold text-white disabled:opacity-40" disabled={loadingCommitJob || generatingMessage || gitStatusPending || gitOperationBusy || !commitMessage.trim() || !stagedCount || sourceControl.entries.some(entry => entry.status === "!")}>{gitOperationBusy ? "Working…" : `Commit ${stagedCount} staged file${stagedCount === 1 ? "" : "s"}`}</button>
                   <p className="text-[11px] text-muted">Only staged files will be committed. Unresolved conflicts block commits.</p>
                 </form>
 

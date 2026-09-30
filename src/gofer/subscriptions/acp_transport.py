@@ -60,8 +60,10 @@ class AcpTransport:
         max_output_bytes: int | None,
         request_handler: RequestHandler | None,
         content_length_framing: bool = False,
+        allow_missing_jsonrpc: bool = False,
     ) -> None:
         self._content_length_framing = content_length_framing
+        self._allow_missing_jsonrpc = allow_missing_jsonrpc
         self.process = process
         self.stderr = ""
         self._limit = max_output_bytes
@@ -210,7 +212,10 @@ class AcpTransport:
                         raise AcpTransportError("Invalid JSON-RPC header terminator")
                     line = await self.process.stdout.readexactly(size)
                 message = json.loads(line)
-                if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                if not isinstance(message, dict) or (
+                    message.get("jsonrpc") != "2.0"
+                    and not (self._allow_missing_jsonrpc and "jsonrpc" not in message)
+                ):
                     raise AcpTransportError("ACP emitted an invalid JSON-RPC object")
                 if "method" in message:
                     if not isinstance(message["method"], str) or not isinstance(
@@ -311,6 +316,7 @@ async def open_acp_transport(
     max_output_bytes: int | None = 2_000_000,
     request_handler: RequestHandler | None = None,
     content_length_framing: bool = False,
+    allow_missing_jsonrpc: bool = False,
 ) -> AsyncIterator[AcpTransport]:
     if (
         not command
@@ -346,6 +352,7 @@ async def open_acp_transport(
         max_output_bytes=max_output_bytes,
         request_handler=request_handler,
         content_length_framing=content_length_framing,
+        allow_missing_jsonrpc=allow_missing_jsonrpc,
     )
     transport._tasks = [
         asyncio.create_task(transport._read()),

@@ -24,6 +24,7 @@ from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.subscriptions.acp_config import acp_session_config
 from gofer.subscriptions.acp_providers import require_acp_permissions
 from gofer.subscriptions.base import Subscription
+from gofer.subscriptions.usage import track_invocation
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
 
 
@@ -222,6 +223,8 @@ async def stream_antigravity(
 
 
 class AntigravitySubscription(Subscription):
+    provider = "antigravity"
+
     def is_available(self) -> bool:
         return resolve_provider_executable("antigravity") is not None
 
@@ -245,6 +248,7 @@ class AntigravitySubscription(Subscription):
             permission_mode=provider_settings.approval_mode if provider_settings else None,
         )
 
+    @track_invocation
     async def execute(
         self,
         prompt: str,

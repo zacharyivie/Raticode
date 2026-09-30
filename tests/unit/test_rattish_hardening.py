@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -579,6 +580,49 @@ Node inspect:
         assert "RATTISH_REFERENCE_ROOT_REMOVED" in diagnostic_codes(source, tmp_path)
 
 
+@pytest.mark.anyio
+async def test_secret_redaction_covers_overlapping_values_and_object_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SHORT_TOKEN", "private")
+    monkeypatch.setenv("LONG_TOKEN", "private-suffix")
+    ir = compile_source(
+        """Rattish: 1
+Workflow:
+  name: secret redaction
+Node inspect:
+  type: bash-command
+  command: inspect
+  with:
+    a-short: secret["SHORT_TOKEN"]
+    b-long: secret["LONG_TOKEN"]
+""",
+        tmp_path,
+    )
+
+    async def handler(node, context, bindings):
+        secret = bindings.local["b-long"]
+        return HandlerResult(
+            False,
+            {"stdout": secret, "stderr": "", "exit_code": 1, secret: [{secret: secret}]},
+            RuntimeErrorInfo("command", "TEST_SECRET", secret, {secret: secret}),
+        )
+
+    result = await execute_node(
+        ir, "inspect", handlers=NodeHandlerRegistry({"raticode.bash_command": handler})
+    )
+
+    assert result.output == {
+        "stdout": "[REDACTED]",
+        "stderr": "",
+        "exit_code": 1,
+        "[REDACTED]": [{"[REDACTED]": "[REDACTED]"}],
+    }
+    assert result.error is not None
+    assert result.error.message == "[REDACTED]"
+    assert result.error.details == {"[REDACTED]": "[REDACTED]"}
+
+
 def test_nested_contract_defaults_are_materialized(tmp_path: Path) -> None:
     ir = compile_source(
         """Rattish: 1
@@ -945,6 +989,132 @@ Node request:
         )
 
 
+@pytest.mark.parametrize("keyword", ["$ref", "$dynamicRef", "$recursiveRef"])
+@pytest.mark.parametrize("owner", ["node-output", "workflow-input", "workflow-output-source"])
+def test_ir_loader_rejects_external_schema_references_before_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keyword: str, owner: str
+) -> None:
+    ir = compile_source(
+        """Rattish: 1
+Workflow:
+  name: Schema boundary
+  inputs:
+    value:
+      schema: {"type": "string"}
+      default: value
+  outputs:
+    value:
+      from: input.value
+      schema: {"type": "string"}
+Node run:
+  type: bash-command
+  command: echo ok
+""",
+        tmp_path,
+    )
+    document = json.loads(json.dumps(ir))
+    malicious_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        keyword: "http://127.0.0.1/private/schema.json",
+    }
+    if owner == "node-output":
+        document["nodes"][0]["output"]["schema"] = malicious_schema
+    elif owner == "workflow-input":
+        document["workflow"]["inputs"][0]["schema"] = malicious_schema
+    else:
+        document["workflow"]["outputs"][0]["source"]["schema"] = malicious_schema
+    schema = json.loads((RATTISH_ROOT / "schemas" / "ir.schema.json").read_text())
+    calls = []
+
+    def retrieve(request):
+        calls.append(request)
+        raise AssertionError("IR validation must not retrieve external schemas")
+
+    monkeypatch.setattr(urllib.request, "urlopen", retrieve)
+    with pytest.raises(InvalidRattishIrError, match="Only local JSON Schema"):
+        load_ir(document, schema)
+    assert not calls
+
+
+@pytest.mark.parametrize("boundary", ["instance", "const", "enum", "workflow-input"])
+@pytest.mark.parametrize("scheme", ["http", "file"])
+def test_schema_checks_never_retrieve_local_refs_under_external_ids(monkeypatch, boundary, scheme):
+    calls = []
+
+    def retrieve(request):
+        calls.append(request)
+        raise AssertionError("Schema checks must not retrieve external resources")
+
+    monkeypatch.setattr(urllib.request, "urlopen", retrieve)
+    schema = {
+        "$defs": {"result": {"type": "string"}},
+        "properties": {
+            "result": {"$id": f"{scheme}://localhost/private/schema.json", "$ref": "#/$defs/result"}
+        },
+    }
+    value = {"result": "value"}
+    if boundary == "instance":
+        assert not instance_matches_schema(schema, value)
+    elif boundary == "const":
+        assert not schema_accepts_schema(schema, {"const": value})
+    elif boundary == "enum":
+        assert not schema_accepts_schema(schema, {"enum": [value]})
+    else:
+        ir = {
+            "workflow": {
+                "inputs": [{"name": "value", "schema": schema, "default": {"present": False}}]
+            }
+        }
+        with pytest.raises(
+            rattish_runtime.InvalidRattishWorkflowInputError, match="resolved locally"
+        ):
+            rattish_runtime._prepare_workflow_inputs(ir, {"value": value})
+    assert not calls
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scheme", ["http", "file"])
+async def test_node_output_validation_never_retrieves_scoped_schema_refs(
+    tmp_path, monkeypatch, scheme
+):
+    ir = compile_source(
+        """Rattish: 1
+Workflow:
+  name: Output boundary
+Node run:
+  type: bash-command
+  command: echo ok
+""",
+        tmp_path,
+    )
+    node = json.loads(json.dumps(ir["nodes"][0]))
+    node["output"]["schema"] = {
+        "$defs": {"result": {"type": "string"}},
+        "properties": {
+            "result": {"$id": f"{scheme}://localhost/private/schema.json", "$ref": "#/$defs/result"}
+        },
+    }
+    monkeypatch.setattr(rattish_runtime, "_find_node", lambda *args: node)
+    calls = []
+
+    def retrieve(request):
+        calls.append(request)
+        raise AssertionError("Output validation must not retrieve external resources")
+
+    monkeypatch.setattr(urllib.request, "urlopen", retrieve)
+
+    async def handler(*args):
+        return HandlerResult(True, {"result": "value"})
+
+    result = await execute_node(
+        ir, "run", handlers=NodeHandlerRegistry({"raticode.bash_command": handler})
+    )
+    assert result.outcome == "failure"
+    assert result.error is not None
+    assert result.error.code == "RATTISH_RUNTIME_OUTPUT_INVALID"
+    assert not calls
+
+
 def test_ir_loader_requires_matching_provider_contracts(tmp_path: Path) -> None:
     compiler = RattishCompiler.from_paths(
         schema_root=RATTISH_ROOT / "schemas",
@@ -999,15 +1169,15 @@ Node index:
 """,
         tmp_path,
     )
-    original_read = rattish_runtime.read_text_limited
+    original_read = rattish_runtime.read_bytes_limited
     source_reads: list[Path] = []
 
-    def recording_read(path: Path, **kwargs: Any) -> str:
+    def recording_read(path: Path, **kwargs: Any) -> bytes:
         if path == source_file:
             source_reads.append(path)
         return original_read(path, **kwargs)
 
-    monkeypatch.setattr(rattish_runtime, "read_text_limited", recording_read)
+    monkeypatch.setattr(rattish_runtime, "read_bytes_limited", recording_read)
 
     first = await execute_node(ir, "index", data_dir=tmp_path / "data")
     source_reads.clear()
@@ -1069,15 +1239,15 @@ Node index:
     assert validated.output["status"] == "stale"
     assert index_path.read_bytes() == before_validate
 
-    original_read = rattish_runtime.read_text_limited
+    original_read = rattish_runtime.read_bytes_limited
     full_reads: list[Path] = []
 
-    def recording_read(path: Path, **kwargs: Any) -> str:
+    def recording_read(path: Path, **kwargs: Any) -> bytes:
         if path == second_path:
             full_reads.append(path)
         return original_read(path, **kwargs)
 
-    monkeypatch.setattr(rattish_runtime, "read_text_limited", recording_read)
+    monkeypatch.setattr(rattish_runtime, "read_bytes_limited", recording_read)
     rebuilt = await execute_node(vector_ir("full"), "index")
     assert rebuilt.output["status"] == "updated"
     assert full_reads == [second_path]

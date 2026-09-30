@@ -1,0 +1,11 @@
+[Unit]
+Description=Raticode daily bug and security fixes
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/doonk/Projects/Raticode/Raticode
+Environment="PATH=/home/doonk/.nvm/versions/node/v26.3.0/bin:/home/doonk/Projects/Raticode/Raticode/.venv/bin:/home/doonk/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/doonk/Projects/.gofer-trusted-bin/gof rattish run /home/doonk/Projects/Raticode/Raticode/.raticode/daily-bug-fixes/workflow.rattish --format json
+TimeoutStartSec=infinity
+Restart=no
+UMask=0077

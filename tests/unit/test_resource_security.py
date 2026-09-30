@@ -39,6 +39,7 @@ def test_http_response_budget(monkeypatch, declared):
         def getresponse(self):
             return SimpleNamespace(
                 status=200,
+                length=9 if declared else None,
                 read1=read1,
                 headers={"Content-Length": "9"} if declared else {},
             )

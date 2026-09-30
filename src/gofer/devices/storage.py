@@ -31,7 +31,8 @@ class SecretStore(Protocol):
 
 
 class OSSecretStore:
-    def __init__(self) -> None:
+    def __init__(self, *, service: str = "Raticode devices v2") -> None:
+        self._service = service
         try:
             # Select explicitly, ignoring user-configured plaintext/chainer backends.
             if sys.platform == "darwin":
@@ -51,7 +52,7 @@ class OSSecretStore:
 
     def get(self, account: str) -> str | None:
         try:
-            result = self._backend.get_password("Raticode devices v2", account)
+            result = self._backend.get_password(self._service, account)
             if result is not None and not isinstance(result, str):
                 raise StorageError("protected_store_invalid")
             return result
@@ -60,7 +61,7 @@ class OSSecretStore:
 
     def put(self, account: str, value: str) -> None:
         try:
-            self._backend.set_password("Raticode devices v2", account, value)
+            self._backend.set_password(self._service, account, value)
             if self.get(account) != value:
                 raise StorageError("protected_store_write_failed")
         except Exception:

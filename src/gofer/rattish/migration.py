@@ -24,9 +24,15 @@ def migrate_source(path: Path) -> Path:
             return target
         raise
     except FileExistsError:
-        if not path.exists():
-            return target
-        if target.is_symlink() or not os.path.samefile(path, target):
+        try:
+            same_file = not target.is_symlink() and os.path.samefile(path, target)
+        except FileNotFoundError:
+            # A concurrent migration can unlink the source during samefile's stat.
+            # Only accept completion if an ordinary destination still exists.
+            if not path.exists() and not target.is_symlink() and target.is_file():
+                return target
+            raise
+        if not same_file:
             raise FileExistsError(
                 f"Cannot migrate {path}: {target} already exists. Keep or rename one of the files."
             ) from None

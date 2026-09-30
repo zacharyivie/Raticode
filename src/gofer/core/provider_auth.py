@@ -13,7 +13,7 @@ from gofer.core.provider_capabilities import (
     ProviderId,
     resolve_provider_executable,
 )
-from gofer.utils.process import env_with_executable_on_path
+from gofer.utils.process import build_subprocess_env, env_with_executable_on_path
 
 LOGIN_TIMEOUT_SECONDS = 300
 
@@ -33,7 +33,7 @@ class ProviderAuthSessions:
             executable = resolve_provider_executable(cast(ProviderId, provider))
             if not executable:
                 raise ValueError("Install and enable this provider before signing in.")
-            env = {**os.environ, **env_with_executable_on_path(executable)}
+            env = build_subprocess_env(env_with_executable_on_path(executable))
             env.pop("NO_OPEN_BROWSER", None)
             process = subprocess.Popen(
                 [executable, *BROWSER_LOGIN_COMMANDS[provider]],

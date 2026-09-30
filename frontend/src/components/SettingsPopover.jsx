@@ -9,17 +9,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Brain,
+  ChartNoAxesCombined,
   Code2,
   Command,
   Globe2,
   LayoutPanelLeft,
-  Mic,
   MonitorCog,
   Palette,
+  PcCase,
   PlugZap,
   RotateCcw,
   Search,
-  Smartphone,
   Terminal,
   Wrench,
   X,
@@ -28,7 +28,10 @@ import {
 import DeveloperSettings, { RemMemorySettings } from "./DeveloperSettings.jsx";
 import RemResources from "./RemResources.jsx";
 import ProviderSettings from "./ProviderSettings.jsx";
+import CommitMessageSettings from "./CommitMessageSettings.jsx";
+import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
+import "./SettingsPopover.css";
 import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
 import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevices.js";
 import {
@@ -41,13 +44,13 @@ import {
 
 const CATEGORIES = [
   { id: "general", label: "General", icon: MonitorCog },
-  { id: "devices", label: "Devices", icon: Mic },
-  { id: "paired-devices", label: "Paired devices", icon: Smartphone },
+  { id: "devices", label: "Devices", icon: PcCase },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "editor", label: "Editor", icon: Code2 },
   { id: "browser", label: "Browser", icon: Globe2 },
   { id: "terminal", label: "Terminal", icon: Terminal },
   { id: "providers", label: "Providers", icon: PlugZap },
+  { id: "usage", label: "Usage", icon: ChartNoAxesCombined },
   { id: "assistant", label: "Rem", icon: Bot },
   { id: "memory", label: "Memory", icon: Brain },
   { id: "developer", label: "Developer", icon: Wrench },
@@ -91,6 +94,19 @@ export default function SettingsPopover({
     };
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return undefined;
+    const revealCategory = () => {
+      if (window.innerWidth <= 600) panelRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    };
+    const frame = window.requestAnimationFrame(revealCategory);
+    window.addEventListener("resize", revealCategory);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", revealCategory);
+    };
+  }, [category, open]);
+
   const matchingCategories = useMemo(
     () => settingsCategoriesForQuery(query),
     [query],
@@ -101,15 +117,15 @@ export default function SettingsPopover({
     <section
       ref={panelRef}
       aria-label="Application settings"
-      className="fixed right-3 top-[58px] z-[120] flex h-[min(650px,calc(100vh-72px))] w-[min(780px,calc(100vw-24px))] min-h-[420px] overflow-hidden rounded-xl border border-line bg-white text-ink shadow-panel"
+      className="settings-popover fixed right-3 top-[58px] z-[120] flex h-[min(650px,calc(100vh-72px))] w-[min(780px,calc(100vw-24px))] min-h-0 overflow-hidden rounded-xl border border-line bg-white text-ink shadow-panel max-[600px]:flex-col"
       role="dialog"
     >
-      <aside className="flex w-44 shrink-0 flex-col border-r border-line bg-slate-50 p-2">
-        <div className="px-2 pb-2 pt-1">
+      <aside className="flex w-44 shrink-0 flex-col border-r border-line bg-slate-50 p-2 max-[600px]:w-full max-[600px]:border-r-0 max-[600px]:border-b">
+        <div className="px-2 pb-2 pt-1 max-[600px]:hidden">
           <p className="text-sm font-semibold">Settings</p>
           <p className="mt-0.5 text-[10px] text-muted">Saved on this device</p>
         </div>
-        <nav aria-label="Settings categories" className="min-h-0 overflow-y-auto space-y-0.5">
+        <nav aria-label="Settings categories" className="min-h-0 overflow-y-auto space-y-0.5 max-[600px]:flex max-[600px]:gap-1 max-[600px]:space-y-0 max-[600px]:overflow-x-auto">
           {CATEGORIES.map((item) => {
             const Icon = item.icon;
             const active = item.id === category;
@@ -117,7 +133,7 @@ export default function SettingsPopover({
               <button
                 key={item.id}
                 aria-current={active ? "page" : undefined}
-                className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition ${
+                className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs transition max-[600px]:w-auto max-[600px]:shrink-0 ${
                   active ? "bg-slate-100 font-semibold text-ink" : "text-muted hover:bg-slate-100 hover:text-ink"
                 }`}
                 type="button"
@@ -132,7 +148,7 @@ export default function SettingsPopover({
             );
           })}
         </nav>
-        <div className="mt-auto border-t border-line pt-2">
+        <div className="mt-auto border-t border-line pt-2 max-[600px]:hidden">
           <button
             className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-muted transition hover:bg-slate-100 hover:text-ink"
             type="button"
@@ -144,7 +160,7 @@ export default function SettingsPopover({
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
           <Search aria-hidden="true" className="text-muted" size={14} />
           <input
@@ -163,7 +179,7 @@ export default function SettingsPopover({
           ><X aria-hidden="true" size={14} /></button>
         </div>
 
-        <div className="workflow-scrollbar min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4">
+        <div className="workflow-scrollbar min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4 max-[600px]:px-3">
           {query ? (
             matchingCategories.length ? matchingCategories.map((categoryId) => (
               <SettingsCategory
@@ -219,16 +235,16 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     element: <SettingRow key={key} label={label} description={description}>{element}</SettingRow>,
     searchText: `${label} ${description}`,
   });
-  if (category === "paired-devices") return [{ searchText: "Paired devices phone mobile desktop pairing QR trust revoke", element: <PairedDevices key="paired-devices" /> }];
-  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied commit messages", element: <ProviderSettings key="providers" providerState={providerState} /> }];
+  if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied", element: <ProviderSettings key="providers" providerState={providerState} /> }];
+  if (category === "usage") return [{ searchText: "Usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh", element: <UsageDashboard key="usage" /> }];
   if (category === "developer") return [{ searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> }];
-  if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown", element: <RemMemorySettings key="memory" value={settings.memory} onChange={onChange} /> }];
+  if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown theme gallery generation provider model effort screenshot", element: <RemMemorySettings audioInputDeviceId={settings.devices.audioInputId} key="memory" value={settings.memory} onChange={onChange} providerState={providerState} /> }];
   if (category === "general") return [
     row("dataDir", "Application data directory", "Stores global Raticode state, run artifacts, and registries.", (
       <PathControl value={appControls.dataDir} onChoose={appControls.onChooseDataDirectory} />
     )),
     row("initialActivity", "Initial sidebar", "Shown on first launch or when the last sidebar cannot be restored.", (
-      <SelectControl value={settings.general.initialActivity} onChange={(value) => onChange("general.initialActivity", value)} options={[["workflows", "Workflows"], ["files", "Files"], ["search", "Search"], ["source-control", "Source control"]]} />
+      <SelectControl value={settings.general.initialActivity} onChange={(value) => onChange("general.initialActivity", value)} options={[["workflows", "Workflows"], ["files", "Files"], ["search", "Search"], ["source-control", "Source control"], ["organizations", "Organizations"]]} />
     )),
     row("autosave", "Autosave files", "Save file edits after a short delay.", (
       <SwitchControl checked={settings.general.autosave} onChange={(value) => onChange("general.autosave", value)} />
@@ -255,6 +271,10 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
         onChange={(value) => onChange("devices.audioInputId", value)}
       />
     )),
+    {
+      searchText: "Devices paired devices phone mobile desktop pairing QR trust revoke",
+      element: <div key="paired-devices" className="pt-4"><PairedDevices /></div>,
+    },
   ];
   if (category === "editor") return [
     row("fontSize", "Font size", "Text size in Rattish and regular code editors.", <NumberControl value={settings.editor.fontSize} min={10} max={24} suffix="px" onCommit={(value) => onChange("editor.fontSize", value)} />),
@@ -297,6 +317,7 @@ function assistantRows(settings, onChange, row, providerState) {
     ?? models.find((item) => item.id === provider?.defaultModel)
     ?? models[0];
   return [
+    { searchText: "Rem commit messages provider model auto commit changes template format", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
     row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
     row("avatar", "Show Rem avatar", "Show Rem on the chat welcome screen.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
     row("avatarAnimation", "Animate Rem", "Greet you when the pane opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
@@ -740,13 +761,14 @@ export function settingsCategoriesForQuery(query) {
 function categoryKeywords(category) {
   return {
     general: "startup default workspace run target update queue local data directory storage artifacts autosave files",
-    devices: "microphone mic audio input device recording transcription test signal level",
+    devices: "microphone mic audio input device recording transcription test signal level paired devices phone mobile desktop pairing qr trust revoke",
     appearance: "theme dark light system motion animation",
     editor: "font line tab wrap minimap autosave markdown html preview code",
     browser: "homepage new tab search engine url web",
     terminal: "font line cursor blink scrollback shell",
     providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
-    assistant: "default scope current directory global projects rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
+    usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
+    assistant: "commit messages auto commit template format default scope current directory global projects rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
     developer: "developer diagnostics logs logging app data storage version backend restart tools",
     layout: "width pane sidebar panel inspector",

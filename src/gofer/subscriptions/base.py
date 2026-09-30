@@ -13,10 +13,12 @@ from gofer.core.agent import AgentResult
 from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.core.thoughts import summarize_thought
+from gofer.subscriptions.usage import track_invocation
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
 
 
 class Subscription(ABC):
+    @track_invocation
     async def execute(
         self,
         prompt: str,

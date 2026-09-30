@@ -149,7 +149,7 @@ def _page(items: list[Any], params: dict[str, Any]) -> dict[str, Any]:
 def _run_summary(run: dict[str, Any] | None) -> dict[str, Any] | None:
     if run is None:
         return None
-    result = {
+    result: dict[str, Any] = {
         key: run[key]
         for key in (
             "id",

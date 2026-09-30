@@ -10,7 +10,12 @@ import pytest
 import gofer.ui.api as api
 from gofer.rattish.editor import source_revision
 from gofer.rattish.run_service import run_rattish_file
-from gofer.rattish.runtime import HandlerResult, NodeHandlerRegistry
+from gofer.rattish.runtime import (
+    DEFAULT_NODE_HANDLERS,
+    HandlerResult,
+    NodeHandlerRegistry,
+    RuntimeErrorInfo,
+)
 from gofer.rattish.workspaces import create_registered_workflow
 
 
@@ -64,6 +69,164 @@ def setup_workflow(tmp_path: Path):
         encoding="utf-8",
     )
     return base, workflow
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ending", ["passed", "failed", "stopped"])
+async def test_live_progress_survives_completion_failure_and_stop(
+    tmp_path: Path, ending: str
+) -> None:
+    base, workflow = setup_workflow(tmp_path)
+    workflow.entrypoint.write_text(
+        "Rattish: 1\nWorkflow:\n  name: Live progress\n"
+        "Node first:\n  type: bash-command\n  command: fake\n  to: work\n"
+        "Node work:\n  type: bash-command\n  command: fake\n  needs: first\n"
+    )
+    release, working = anyio.Event(), anyio.Event()
+    cancel = threading.Event()
+    final = {}
+    run_id = "live-progress"
+
+    async def handler(node, context, bindings):
+        if node["id"] == "work":
+            working.set()
+            await release.wait()
+            if ending == "failed":
+                return HandlerResult(
+                    False,
+                    {"stdout": "", "stderr": "broken command", "exit_code": 7},
+                    RuntimeErrorInfo("command", "RATTISH_TEST_FAILURE", "broken command"),
+                )
+        return HandlerResult(True, {"stdout": node["id"], "stderr": "", "exit_code": 0})
+
+    async def execute():
+        result = await run_rattish_file(
+            workflow.entrypoint,
+            data_dir=base,
+            run_id=run_id,
+            cancel_event=cancel,
+            handlers=NodeHandlerRegistry({"raticode.bash_command": handler}),
+        )
+        final.update(result.document)
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(execute)
+            await working.wait()
+            try:
+                latest = api.latest_workflow_log_payload(workflow.workflow_id, base)
+                selected = api.workflow_run_log_payload(
+                    workflow.workflow_id, run_id, base, include_details=False
+                )
+                events = api.workflow_run_events_payload(workflow.workflow_id, run_id, base)
+                assert latest["runEvents"] == selected["runEvents"] == events["runEvents"]
+                assert latest["runNodes"] == selected["runNodes"] == events["runNodes"]
+                assert latest["runNodes"]["first"]["status"] == "success"
+                assert latest["nodeOutputs"]["first"]["data"]["stdout"] == "first"
+                assert latest["runNodes"]["work"]["status"] == "started"
+                assert latest["runNodes"]["work"]["finishedAt"] is None
+                assert latest["runEvents"][-1]["message"] == "Activation 1 started."
+                assert latest["runEvents"][-1]["activationLineageId"] == "root"
+                if ending == "stopped":
+                    cancel.set()
+            finally:
+                if ending != "stopped":
+                    release.set()
+
+    assert final["status"] == ending
+    assert final["latest_node_outputs"]["first"]["stdout"] == "first"
+    payload = api.workflow_run_log_payload(workflow.workflow_id, run_id, base)
+    assert payload["runNodes"]["first"]["status"] == "success"
+    assert (
+        payload["runNodes"]["work"]["status"]
+        == {"passed": "success", "failed": "error", "stopped": "stopped"}[ending]
+    )
+    assert [event["sequence"] for event in final["events"]] == list(
+        range(1, len(final["events"]) + 1)
+    )
+    if ending == "failed":
+        assert payload["runEvents"][-2]["message"] == "broken command"
+    if ending == "stopped":
+        assert payload["runEvents"][-1]["status"] == "stopped"
+
+
+@pytest.mark.anyio
+async def test_concurrent_loop_progress_keeps_running_activation_and_retry_attempts(
+    tmp_path: Path,
+) -> None:
+    base, workflow = setup_workflow(tmp_path)
+    workflow.entrypoint.write_text("""Rattish: 1
+Workflow:
+  name: Concurrent progress
+Node loop:
+  type: loop
+  source: {"type": "count", "count": 2, "max-concurrency": 2}
+  to: work
+Node work:
+  type: bash-command
+  command: fake
+  max-concurrency: 2
+  retry-count: 1
+  retry-delay: 1ms
+  needs: loop
+""")
+    release = anyio.Event()
+    attempts: dict[int, int] = {}
+    final = {}
+    run_id = "loop-progress"
+
+    async def handler(node, context, bindings):
+        index = context.node_outputs["loop"]["index"]
+        attempts[index] = attempts.get(index, 0) + 1
+        if index == 0:
+            await release.wait()
+        elif attempts[index] == 1:
+            return HandlerResult(
+                False, {}, RuntimeErrorInfo("command", "RATTISH_TEST_RETRY", "try again")
+            )
+        return HandlerResult(True, {"stdout": str(index), "stderr": "", "exit_code": 0})
+
+    handlers = NodeHandlerRegistry(
+        {
+            "raticode.loop": DEFAULT_NODE_HANDLERS.require("raticode.loop"),
+            "raticode.bash_command": handler,
+        }
+    )
+
+    async def execute():
+        result = await run_rattish_file(
+            workflow.entrypoint, data_dir=base, run_id=run_id, handlers=handlers
+        )
+        final.update(result.document)
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            group.start_soon(execute)
+            try:
+                while True:
+                    await anyio.sleep(0.01)
+                    payload = api.latest_workflow_log_payload(workflow.workflow_id, base)
+                    if any(
+                        e["nodeId"] == "work" and e["status"] == "completed"
+                        for e in payload["runEvents"]
+                    ):
+                        break
+                assert payload["runNodes"]["work"]["status"] == "started"
+                work_events = [e for e in payload["runEvents"] if e["nodeId"] == "work"]
+                assert work_events[-1]["status"] == "completed"
+                assert work_events[-1]["fanOutItem"] == {"index": 1}
+                assert work_events[-1]["attempt"] == 2
+                assert work_events[-1]["runNumber"] == 2
+                assert any(e["status"] == "retried" for e in work_events)
+            finally:
+                release.set()
+    assert final["status"] == "passed"
+    payload = api.workflow_run_log_payload(workflow.workflow_id, run_id, base)
+    assert payload["runNodes"]["work"]["status"] == "success"
+    assert len(payload["runNodes"]["work"]["attempts"]) == 2
+    finished_attempts = payload["runNodes"]["work"]["attempts"]
+    assert finished_attempts[0]["attempt"] == 2
+    assert finished_attempts[0]["fanOutItem"] == {"index": 1}
 
 
 @pytest.mark.anyio

@@ -3,7 +3,193 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
-## 0.3.7 - Unreleased
+## 0.3.8 - Unreleased
+
+Changes since the `v0.3.7` tag.
+
+### Added
+
+- Provider usage dashboard with recorded tokens, costs, subscription windows and
+  explicit unknown coverage. Optional reporting credentials for Claude, Cursor,
+  OpenAI and Anthropic stay in the OS credential store, separate from inference.
+- Read-only, side-by-side commit diffs with text search, next/previous match
+  navigation, highlighting, and include/exclude file filters.
+- Independent report themes with AI-generated previews, reference images,
+  configurable generation settings and streamed progress. Reports can use
+  Markdown, standalone HTML, slides or desktop-rendered PDF.
+- Background commit-message and report-theme generation that survives navigation.
+  Optional auto-commit uses the captured staged snapshot, preserves later edits,
+  runs Git hooks and refuses to overwrite a branch that moved during generation.
+- Rename Rem threads and configure a shared commit-message template for drafts
+  and chat commits. Fork user messages or final replies; replay a forked user
+  message in its new thread.
+- Experimental organizations with persistent Rem employees, reporting charts,
+  teams, project ownership, initiatives, tasks, approvals, independent review,
+  routines, usage limits, configuration history and operational backups.
+  Optional managed execution supports swarms, paired desktops, HTTPS gateways
+  and explicitly authorized Rattish workflows.
+
+### Changed
+
+- Organizations is disabled by default. Quit and relaunch Raticode with
+  `RATICODE_EXPERIMENTAL_ORGANIZATIONS=1` to opt in. The backend blocks management,
+  new execution and routine webhooks while disabled, and omits organization tools
+  from Rem. Existing data is preserved; recovery still attempts to stop earlier
+  authorized jobs. The sidebar explains experimental access.
+- Combine microphone and pairing controls under Settings > Devices. Improve
+  select controls and move commit-message preferences into their own editor.
+- Use plain bullets in default commit messages. Preserve authored report themes
+  and full-page backgrounds in PDF output.
+
+### Fixed
+
+- Prevent competing runners from claiming and executing the same queued workflow.
+  Keep active runner ownership and heartbeat updates through long jobs and
+  cancellation, and preserve terminal status when completion races with Stop.
+- Pass CLI runner inputs to the executor, validate them before enqueueing, and
+  retain absolute workflow paths when the worker uses another working directory.
+- Keep revision inputs in new code review templates from executing shell commands
+  or injecting Git options, and disable external diff and text conversion commands.
+- Preserve all organization template tasks and their recurring intervals when
+  task IDs normalize to the same export filename.
+- Keep credentials out of malformed HTTP header, method and URL path errors
+  recorded in workflow failures and notification diagnostics.
+- Keep MCP tools available after requests with deeply nested JSON or escaped
+  lone Unicode surrogates, rejecting excessive nesting before invoking tools.
+- Keep credentials out of HTTP network-policy failure details and malformed URL
+  errors, and handle malformed HTTP authorities without crashing compilation.
+- Save provider profiles atomically with private file permissions, preserving
+  existing profiles on write failure and preventing writes through file links.
+- Keep Stop, timeout and task-cancellation cleanup active when a subprocess parent
+  exits while its children still hold output pipes open.
+- Reject workflow bundles with case-colliding paths or file/directory conflicts
+  before extraction, and prevent exports that would produce those bundles.
+- Export files with timestamps outside ZIP's supported range by clamping archive
+  timestamps to 1980–2107 without changing the original files.
+- Keep Stop and timeout active while sending large prompts to provider processes,
+  drain output concurrently, and retain provider errors when input closes early.
+- Preserve Unicode characters split across subprocess output reads.
+- Stop remaining POSIX child processes even when their parent exits before them.
+- Allow concurrent atomic saves to create the same new output folder without
+  failing one save, while still rejecting replaced files and symbolic links.
+- Honor stop requests in direct OpenAI and Anthropic API calls. Skip requests
+  already stopped, close active HTTP connections on stop and return a stopped
+  result instead of accepting a response that arrived during cancellation.
+- Accept files and folders whose names begin with two dots inside approved paths.
+  Reject copying a folder into such a descendant before creating recursive copies.
+- Restore selected MCP tools, including Second Brain, in Cursor by nesting the
+  temporary plugin folder and matching its directory name to its permission grants.
+- Stop acknowledging device file-status acknowledgments, and remove queued chunks
+  when a transfer finishes or is cancelled so reconnects do not resend them.
+- Reject incomplete device-relay responses and handle broken chunk framing
+  through the relay's existing retry and session-recovery path.
+- Reject incomplete local MCP request bodies before invoking a tool, even when
+  the received fragment is valid JSON.
+- Reject incomplete HTTP bodies in usage reporting, remote organization job
+  receipts, package downloads and PDF rendering. Truncated PDF responses return
+  a recoverable report-tool error without publishing partial files.
+- Reject files replaced by named pipes during desktop copying without hanging
+  while waiting for a pipe writer.
+- Recover conversation archives after an interrupted journal write, retaining
+  complete history and removing only the unfinished final record before retrying.
+- Keep Second Brain and report tools available after malformed MCP tool calls,
+  returning an invalid-parameters response instead of terminating the server.
+- Reject truncated HTTP responses instead of treating partial content as a
+  successful request. Accept bodyless HEAD and 304 responses whose Content-Length
+  describes a representation larger than the response limit.
+- Reject Windows drive paths, alternate data streams, device names and ambiguous
+  path spellings in workflow bundles before extraction. Export rejects filenames
+  that cannot safely round-trip across supported platforms.
+- Preserve executable script permissions when importing workflow bundles on
+  POSIX systems, without restoring setuid, setgid or sticky bits.
+- Refuse workflow export inputs replaced by symbolic links after the folder scan,
+  preventing unrelated local files from entering a shared bundle.
+- Publish the selected Git branch even when a tag has the same name, and set its
+  upstream without pushing the tag.
+- Preserve local branch names when a tag has the same name, keeping branch
+  selection and merge/rebase previews available.
+- Reject organization evidence files replaced by symlinks and bound reads to
+  10 MB. Workflow previews compile the same bytes used for their source hash.
+- Preserve worktree folder names containing newlines in the worktree list and
+  merge/rebase destination lookup.
+- Handle concurrent legacy workflow migration when another caller removes the
+  old filename during the identity check, preserving the migrated source.
+- Ignore malformed background-generation records during startup so a damaged job
+  cannot prevent the backend from opening or hide valid saved results.
+- Preserve commit diff editors and focus while search and file filters change.
+- Stop managed swarms when a launch reply is lost or authorization is revoked
+  immediately after launch. Do not submit a remote job already cancelled during
+  setup.
+- Reconcile interrupted remote organization jobs in the background so unreachable
+  gateways cannot block backend startup.
+- Include the new Rem actions, commit diff, usage, report theme/output and
+  organization browser regressions in release source validation.
+- Add the reviewed MIT license entry for locked PyYAML 6.0.3, allowing the
+  third-party notice collector to complete.
+
+### Security
+
+- Reject swarm artifact files replaced by symbolic links or named pipes after
+  validation, keeping verification inside the workspace and avoiding blocked reads.
+- Redact complete URL credentials in desktop logs, including passwords containing
+  `@`, uppercase HTTP schemes, and username-only URLs.
+- Guard working-tree diff previews and conflict-marker reads against replaced
+  symbolic links and named pipes, and enforce their 16 MB limit while reading.
+- Redact complete Basic and Bearer credentials and quoted secrets in desktop
+  logs, including token punctuation, spaces and escaped quotes.
+- Recheck organization workflow source reads at launch without following links,
+  enforce the 10 MB limit and verify the preview's source hash before compilation.
+- Scope device file acknowledgments and cancellation to the transfer's authorized
+  thread before removing pending chunks or stopping a send.
+- Apply a fixed five-second request-read deadline to local Rem and swarm tool
+  connections. Slow header or body trickles can no longer hold their connection
+  slots indefinitely; dispatched tool calls retain their existing execution time.
+- Recheck turn-scoped tool authorization after reading a request body. Requests
+  delayed until after token revocation or server shutdown can no longer invoke
+  Rem, fleet, swarm or organization tools with the expired grant.
+- Bound search-and-replace verification reads to 2 MB, including files that grow
+  after search or after the replacement size check, before changing any content.
+- Reject attachment directory swaps during conversation archiving and bound
+  actual attachment reads to 20 MB, including files that grow after their size check.
+- Require an explicit HTTP network allowlist entry for non-public shared addresses
+  in 100.64.0.0/10, including DNS results and IPv4-mapped IPv6 addresses, preventing
+  unapproved requests to services reachable through carrier or VPN routes.
+- Reject file and directory links swapped during project search, text editing and
+  image previews. Bound actual reads to 2 MB for search/text and 25 MB for images,
+  including files that grow after their size check.
+- Store uploaded and forked chat attachments atomically without following storage
+  directory links. Refuse swapped source links, bound fork reads to 20 MB per file,
+  and prevent failure cleanup from following a replaced destination directory.
+- Disable Git text converters in editor line, merge, rebase and stash previews.
+  Read-only previews now show raw changes without invoking configured converters
+  that could execute commands or hide changed lines.
+- Validate saved generation-job IDs against their filenames before recovery.
+  Read job records without following symlinks and publish private files atomically,
+  preventing cached IDs or predictable temporary links from redirecting writes.
+- Keep staged-diff reads inside the selected project folder. Background commit
+  generation requires opening the repository root before capturing all staged
+  changes, preventing a subfolder request from silently expanding its scope.
+- Refuse symlink swaps during organization package reads and enforce the byte
+  limit on actual content, including files that grow after their size check.
+  Write cached organization skills atomically without following destination links.
+- Compare the checked swarm configuration again under the launch lock. A concurrent
+  change to permissions, resources or other settings now rejects the launch.
+- Restrict external browser links to HTTP and HTTPS. Render PDFs in an isolated
+  Chromium session with scripts, navigation, permissions and external requests
+  disabled; require a private token for the local rendering service.
+- Align Claude Code plan-mode tools and commit-diff handling with read-only
+  permission constraints.
+
+### Release limitations
+
+- Organizations remains experimental. Live gateway interoperability, provider
+  behavior and paired-desktop execution need release-package validation. Budget
+  enforcement depends on reported usage and cannot sandbox native provider children.
+- Native installer/update checks on Windows and macOS remain part of candidate
+  review. Refresh Arch package checksums from the actual 0.3.8 artifacts before
+  distributing those package recipes. See `docs/releasing.md`.
+
+## 0.3.7 - 2026-09-24
 
 Changes since the `v0.3.6` tag.
 

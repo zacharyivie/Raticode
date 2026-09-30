@@ -14,6 +14,7 @@ from rich.table import Table
 from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.workflow import AgenticWorkflow
 from gofer.utils.paths import get_data_dir
+from gofer.utils.process import build_subprocess_env
 
 app = typer.Typer(help="Manage workflow schedules", no_args_is_help=True)
 console = Console()
@@ -128,6 +129,7 @@ def start(
 
     proc = subprocess.Popen(
         cmd,
+        env=build_subprocess_env(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

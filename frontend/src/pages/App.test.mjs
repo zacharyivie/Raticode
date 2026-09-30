@@ -193,6 +193,8 @@ test("settings dropdown exposes useful app categories and searchable commands", 
   assert.match(markup, /Saved on this device/);
   assert.match(markup, /General/);
   assert.match(markup, /Devices/);
+  assert.match(markup, /lucide-pc-case/);
+  assert.doesNotMatch(markup, /Paired devices/);
   assert.match(markup, /Keybindings/);
   assert.match(markup, /Initial sidebar/);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("autosave"), ["general", "editor"]);
@@ -201,6 +203,9 @@ test("settings dropdown exposes useful app categories and searchable commands", 
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("toggle Rem"), ["keybindings"]);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("data directory"), ["general"]);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("microphone"), ["devices"]);
+  for (const query of ["paired devices", "phone", "pairing", "QR", "revoke"]) {
+    assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery(query), ["devices"]);
+  }
 });
 
 test("studio session persists the selected project, workflow, and editor", () => {
@@ -389,6 +394,8 @@ test("device settings select and test a microphone with a live input meter", asy
 
   await dom.click(dom.byText("Devices"));
   await dom.flush();
+  assert.ok(dom.byLabel("Paired devices"));
+  assert.match(dom.text(), /Set up device pairing/);
   const deviceSelect = dom.byLabel("Microphone input device");
   await dom.change(deviceSelect, "studio-mic");
   await dom.click(dom.byLabel("Test microphone"));
@@ -2162,6 +2169,9 @@ test("Code file explorer renders live Git file states and omits deleted files", 
 test("code workspace maps common project files to Monaco languages", () => {
   assert.equal(codeWorkspaceModule.languageForPath("/repo/src/app.py"), "python");
   assert.equal(codeWorkspaceModule.languageForPath("/repo/src/app.tsx"), "typescript");
+  assert.equal(codeWorkspaceModule.languageForPath("C:\\repo\\main.cjs"), "javascript");
+  assert.equal(codeWorkspaceModule.languageForPath("/repo/main.mts"), "typescript");
+  assert.equal(codeWorkspaceModule.languageForPath("/repo/config.jsonc"), "json");
   assert.equal(codeWorkspaceModule.languageForPath("/repo/workflow.metadata.json"), "json");
   assert.equal(codeWorkspaceModule.languageForPath("/repo/Dockerfile"), "dockerfile");
   assert.equal(codeWorkspaceModule.languageForPath("/repo/.env"), "plaintext");
@@ -2741,7 +2751,7 @@ test("browser addresses normalize dev servers, websites, and searches", () => {
   assert.equal(browserShortcutAction({ control: true, key: "t", type: "keyDown" }, "linux"), "");
   assert.equal(browserShortcutAction({ control: true, key: "Tab", type: "keyDown" }, "linux"), "next-tab");
   assert.equal(browserShortcutAction({ control: true, key: "Tab", shift: true, type: "keyDown" }, "linux"), "previous-tab");
-  for (const action of ["close", "edit-local-html", "focus-location", "new-tab", "next-tab", "previous-tab"]) {
+  for (const action of ["close", "focus-location", "new-tab", "next-tab", "previous-tab"]) {
     assert.equal(browserCommandRequiresOwnerFocus(action), true, action);
   }
   for (const action of ["back", "open-browser", "reload", "text-zoom"]) {
@@ -7120,6 +7130,28 @@ test("DagCanvas edits named structured-output schemas without mounting an eager 
   await dom.unmount();
 });
 
+test("DagCanvas uses live node summaries across running, completed and failed activations", async () => {
+  const workflow = workflowFixture({ id: "live-status", name: "Live status" });
+  let update;
+  function LiveCanvas() {
+    const [logState, setLogState] = React.useState({
+      runNodes: { step: { status: "started" } },
+      runEvents: [{ nodeId: "step", status: "completed", message: "Other iteration finished" }],
+    });
+    update = setLogState;
+    return React.createElement(DagCanvasHarness, { workflow, logState, onWorkflowChange() {} });
+  }
+  const dom = await mountReact(React.createElement(LiveCanvas), createFetchMock([]));
+  try {
+    await dom.flush();
+    assert.equal(directText(dom.byTitle("started")), "running");
+    for (const status of ["success", "error", "stopped", "disconnected"]) {
+      await React.act(async () => update({ runNodes: { step: { status } }, runEvents: [] }));
+      assert.ok(dom.byTitle(status));
+    }
+  } finally { await dom.unmount(); }
+});
+
 test("DagCanvas renders structured run timeline and selected node details", async () => {
   const workflow = workflowFixture({ id: "timeline", name: "Timeline", label: "Run command" });
   const logState = {
@@ -7671,7 +7703,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
     shortHash: "a1b2c3",
     subject: "Ship it",
   }]);
-  assert.deepEqual(parseGitWorktrees("worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /repo-feature\nHEAD def\ndetached\n\n"), [
+  assert.deepEqual(parseGitWorktrees("worktree /repo\0HEAD abc\0branch refs/heads/main\0\0worktree /repo-feature\0HEAD def\0detached\0\0"), [
     { bare: false, branch: "main", detached: false, head: "abc", locked: false, path: "/repo", prunable: false },
     { bare: false, branch: "", detached: true, head: "def", locked: false, path: "/repo-feature", prunable: false },
   ]);
@@ -7733,13 +7765,13 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
       if (args.includes("rev-parse")) return `${existingWorktreePath}\n`;
       if (args.includes("prune")) throw new Error("read-only Git metadata");
       if (args.includes("list")) {
-        return `worktree ${existingWorktreePath}\nHEAD abc\nbranch refs/heads/main\n\nworktree /workspace/missing\nHEAD def\nbranch refs/heads/dev\nprunable gitdir file points to non-existent location\n\n`;
+        return `worktree ${existingWorktreePath}\0HEAD abc\0branch refs/heads/main\0\0worktree /workspace/missing\0HEAD def\0branch refs/heads/dev\0prunable gitdir file points to non-existent location\0\0`;
       }
       return "";
     },
   });
   assert.deepEqual(worktreeCalls[1], [
-    "-C", existingWorktreePath, "worktree", "list", "--porcelain",
+    "-C", existingWorktreePath, "worktree", "list", "--porcelain", "-z",
   ]);
   assert.deepEqual(listedWorktrees.worktrees, [{
     bare: false,
@@ -8161,8 +8193,8 @@ test("Electron integrated browser uses locked-down webview guests", () => {
   assert.match(source, /guestContents\.setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)/);
   assert.match(source, /guest\.hostWebContents !== event\.sender/);
   assert.match(source, /guest\.getType\(\) !== "webview"/);
-  assert.match(source, /before-mouse-event/);
-  assert.match(source, /edit-local-html/);
+  assert.doesNotMatch(source, /edit-local-html/);
+  assert.doesNotMatch(componentSource, /edit-local-html/);
   assert.match(source, /closeBrowserSession/);
   assert.match(source, /gofer:browser-open-file/);
   assert.match(source, /event\.senderFrame !== contents\.mainFrame/);
@@ -10280,7 +10312,7 @@ class TestElement extends TestNode {
     this.nodeName = tagName.toUpperCase();
     this.nodeType = 1;
     this.ownerDocument = ownerDocument;
-    this.style = {};
+    this.style = { setProperty(name, value) { this[name] = value; }, removeProperty(name) { delete this[name]; } };
     this.tagName = tagName.toUpperCase();
     this.value = "";
   }
@@ -10762,7 +10794,7 @@ test("report themes survive settings persistence and appear in the picker", asyn
     const settings = settingsModule.updateSetting(settingsModule.DEFAULT_APP_SETTINGS, "memory.secondBrainTheme", id);
     settingsModule.saveAppSettings(settings, storage);
     assert.equal(settingsModule.loadAppSettings(storage).memory.secondBrainTheme, id);
-    assert.ok(markup.includes(`value="${id}"`), label);
+    assert.ok(markup.includes(`aria-label="${label}"`), label);
   }
   assert.equal(settingsModule.normalizeAppSettings({ memory: { secondBrainTheme: "unknown" } }).memory.secondBrainTheme, "auto");
 });
@@ -11912,6 +11944,87 @@ test("Conventional Commit generation uses the restricted endpoint and rejects in
   } finally { globalThis.fetch = previousFetch; }
 });
 
+test("commit history opens a reusable editor diff tab and keeps it out of file references", async () => {
+  const { commitDiffPath, parseCommitDiffPath } = await import("../lib/commitDiff.js");
+  const hash = "a".repeat(40), root = "/repo with spaces", calls = [];
+  const diffPath = commitDiffPath(root, hash);
+  const otherPath = commitDiffPath("C:\\other repo", hash);
+  assert.deepEqual(parseCommitDiffPath(otherPath), { projectRoot: "C:\\other repo", hash });
+  assert.notEqual(diffPath, otherPath);
+  assert.equal(parseCommitDiffPath("raticode-commit-diff:%invalid:" + hash), null);
+  assert.deepEqual(appModule.rememberRecentFile(["/repo/file.txt"], diffPath), ["/repo/file.txt"]);
+  assert.deepEqual(appModule.editorFileReferences([diffPath, "/repo/file.txt"]), ["/repo/file.txt"]);
+  const workspace = {
+    trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => ({ active: true, branch: "main", branches: ["main"], entries: [] }),
+    gitHistory: async () => ({ active: true, commits: [{ hash, shortHash: "aaaaaaaa", subject: "Historic change" }] }),
+    gitWorktrees: async () => ({ active: true, worktrees: [] }),
+    gitRepoAction: async (projectRoot, action, value) => {
+      calls.push({ projectRoot, action, value });
+      return { hash, subject: "Historic change", parentHash: "b".repeat(40), files: [] };
+    },
+    readFile: async () => { assert.fail("Commit diff tabs must not read working files"); },
+  };
+  function Harness() {
+    const [paths, setPaths] = React.useState([]);
+    const [activePath, setActivePath] = React.useState("");
+    return React.createElement(React.Fragment, null,
+      React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: root }, onOpenFile: path => {
+        setPaths(current => appModule.nextCodeFileOpenState(current, "", path, false).openPaths);
+        setActivePath(path);
+      } }),
+      React.createElement(codeWorkspaceModule.default, {
+        active: true, openPaths: paths, activePath, theme: "light",
+        onActivePathChange: setActivePath,
+        onClosePath: path => { setPaths(current => current.filter(item => item !== path)); setActivePath(""); },
+      }),
+    );
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { desktop: { workspace } });
+  const confirm = window.confirm;
+  window.confirm = () => { assert.fail("Reading a diff should not ask to change the repository"); };
+  try {
+    window.innerWidth = 1024; window.innerHeight = 768;
+    await dom.click(dom.byLabel("Source control")); await dom.click(dom.byText("History")); await dom.flush();
+    const open = async () => {
+      const rowButton = allElements(document.body).find(el => el.getAttribute("aria-expanded") !== null && el.textContent.includes("Historic change"));
+      await dom.pointer(rowButton.parentNode.parentNode, "onContextMenu", { target: rowButton, clientX: 50, clientY: 50 });
+      await dom.click(allElements(document.body).find(el => el.getAttribute("data-operation") === "commit-diff")); await dom.flush();
+    };
+    await open();
+    assert.ok(dom.byLabel("Commit diff aaaaaaaa"));
+    assert.match(dom.text(), /bbbbbbbb → aaaaaaaa · First parent · Read only/);
+    assert.match(dom.text(), /No changes in this commit/);
+    assert.deepEqual(calls, [{ projectRoot: root, action: "commit-diff", value: { hash } }]);
+    await open();
+    assert.equal(allElements(document.body).filter(el => el.getAttribute("role") === "tab" && el.textContent.includes("Diff aaaaaaaa")).length, 1);
+    assert.equal(calls.length, 1);
+    await dom.click(dom.byLabel("Close Diff aaaaaaaa"));
+    assert.equal(allElements(document.body).some(el => el.getAttribute("aria-label") === "Commit diff aaaaaaaa"), false);
+  } finally { window.confirm = confirm; await dom.unmount(); }
+});
+
+test("commit diff tabs report read failures and retry", async () => {
+  const { commitDiffPath } = await import("../lib/commitDiff.js");
+  const hash = "a".repeat(40), diffPath = commitDiffPath("/repo", hash);
+  let fail = true;
+  const workspace = { gitRepoAction: async () => {
+    if (fail) return { error: "Commit is no longer available." };
+    return { hash, subject: "Initial commit", parentHash: "", files: [] };
+  } };
+  const dom = await mountReact(React.createElement(codeWorkspaceModule.default, {
+    active: true, openPaths: [diffPath], activePath: diffPath, theme: "light",
+  }), createFetchMock([]), { desktop: { workspace } });
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /Commit is no longer available/);
+    fail = false;
+    await dom.click(dom.byText("Retry commit diff")); await dom.flush();
+    assert.match(dom.text(), /Empty tree → aaaaaaaa · Initial commit · Read only/);
+    assert.doesNotMatch(dom.text(), /Commit is no longer available/);
+  } finally { await dom.unmount(); }
+});
+
 test("commit history menu requests resets and prepopulates a worktree at the selected commit", async () => {
   const hash = "a".repeat(40), calls = [];
   const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
@@ -11948,39 +12061,43 @@ test("commit history menu requests resets and prepopulates a worktree at the sel
   } finally { window.confirm = confirm; await dom.unmount(); }
 });
 
-test("Rem commit button uses staged diff, preserves typed drafts, and rejects stale index results", async () => {
-  let tree = "tree-1", pending, inspectStaged = false;
-  const calls = [];
-  const snapshot = { active: true, branch: "main", branches: ["main"], entries: [{ path: "note", status: "M", staged: true, unstaged: true }] };
-  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => snapshot,
-    gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [] }),
-    gitRepoAction: async (_root, action) => { calls.push(action); return inspectStaged ? { tree, inspectStaged: true } : { tree, diff: "+staged-only" }; },
-  };
-  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
-  window.dispatchEvent = event => { if (event.type === "gofer:rem-commit-message") pending = event.detail; return true; };
-  try {
+test("Rem commit jobs survive leaving the explorer and restore branch-specific drafts", async () => {
+  const jobs = {};
+  let branch = "main", count = 0;
+  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => ({ active: true, branch, branches: ["main", "feature"], entries: [{ path: "note", status: "M", staged: true }] }),
+    gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [] }) };
+  const fetchMock = createFetchMock([url => url.startsWith("/api/generation-jobs?") ? { ok: true, json: async () => ({ jobs: jobs[new URLSearchParams(url.split("?")[1]).get("branch")] ? [jobs[new URLSearchParams(url.split("?")[1]).get("branch")]] : [] }) } : null]);
+  const mount = () => mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), fetchMock, { desktop: { workspace } });
+  let dom = await mount();
+  const start = async () => {
+    window.dispatchEvent = event => {
+      if (event.type === "gofer:rem-commit-message") {
+        assert.equal(event.detail.background, true);
+        assert.equal(event.detail.branch, branch);
+        event.detail.handled = true;
+        jobs[branch] = { id: String(++count), status: "running", branch };
+        event.detail.resolve(jobs[branch]);
+      }
+    };
     await dom.click(dom.byLabel("Source control")); await dom.flush();
     await dom.click(dom.byLabel("Generate commit message with Rem")); await dom.flush();
-    assert.equal(pending.diff, "+staged-only");
-    await React.act(async () => pending.resolve("fix: expose working edits")); await dom.flush();
-    assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: expose working edits");
-    await dom.click(dom.byLabel("Generate commit message with Rem")); await dom.flush();
-    await dom.change(dom.byLabel("Commit message"), "fix: my edited draft");
-    await React.act(async () => pending.resolve("fix: generated replacement")); await dom.flush();
-    assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: my edited draft");
-    await dom.click(dom.byLabel("Generate commit message with Rem")); await dom.flush();
-    tree = "tree-2";
-    await React.act(async () => pending.resolve("feat: outdated message")); await dom.flush();
-    assert.match(dom.text(), /Staged changes changed/);
-    assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: my edited draft");
-    inspectStaged = true;
-    await dom.click(dom.byLabel("Generate commit message with Rem")); await dom.flush();
-    assert.equal(pending.inspectStaged, true);
-    assert.equal(pending.diff, undefined);
-    assert.equal(pending.projectRoot, "/repo");
-    await React.act(async () => pending.resolve("fix: summarize large changes")); await dom.flush();
-    assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: summarize large changes");
-    assert.ok(calls.every(action => action === "staged-diff"));
+  };
+  try {
+    await start();
+    await dom.unmount(); branch = "feature"; dom = await mount();
+    await start();
+    assert.equal(jobs.main.status, "running");
+    assert.equal(jobs.feature.status, "running");
+    await dom.unmount();
+    jobs.main = { ...jobs.main, status: "completed", result: { message: "fix: main result" } };
+    jobs.feature = { ...jobs.feature, status: "completed", result: { message: "fix: feature result" } };
+    branch = "main"; dom = await mount();
+    await dom.click(dom.byLabel("Source control")); await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: main result");
+    await dom.unmount(); branch = "feature"; dom = await mount();
+    await dom.click(dom.byLabel("Source control")); await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: feature result");
   } finally { await dom.unmount(); }
 });
 
@@ -12868,6 +12985,36 @@ test("restored run tabs show the executed graph and return explicitly to the cur
   } finally { await dom.unmount(); }
 });
 
+test("selected run polling refreshes canvas statuses and timeline events", async () => {
+  const workflow = workflowFixture({ id: "live-selected", name: "Live selected", label: "Work" });
+  const graphPath = "workflow-graph:live-selected";
+  let completed = false;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflow])),
+    (url) => String(url).includes("/logs/live-run?") ? { ok: true, json: async () => ({ log: {
+      graphSnapshot: workflow, logText: "Live log", runNodes: { step: { status: completed ? "success" : "started" } },
+      runEvents: [{ nodeId: "step", status: completed ? "completed" : "started", message: completed ? "Work finished live" : "Work started live" }],
+    } }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: {
+    'raticode.editorSession.v2': JSON.stringify({ version: 2, paths: [graphPath], activePath: graphPath,
+      workflowTabs: { [graphPath]: { workflowId: workflow.id, name: workflow.name, projectRoot: workflow.projectRoot } },
+      pinnedRun: { workflowId: workflow.id, runId: "live-run" } }),
+  } });
+  try {
+    await dom.flush();
+    assert.ok(dom.byTitle("started"));
+    await dom.click(dom.ancestor(dom.byText("Run Timeline"), "BUTTON"));
+    assert.match(dom.text(), /Work started live/);
+    completed = true;
+    await dom.flush(3000);
+    await dom.flush();
+    assert.ok(dom.byTitle("success"));
+    assert.match(dom.text(), /Work finished live/);
+    assert.ok(fetchMock.calls.some(call => String(call.url).includes("details=0")));
+  } finally { await dom.unmount(); }
+});
+
 test("Rattish background submissions bind the reviewed source revision and preserve synchronous defaults", () => {
   const request = appModule.workflowRunRequest("demo", { background: true, expectedRevision: "reviewed-revision", parameters: { name: "Ada" } });
   assert.deepEqual(JSON.parse(request.options.body), { dryRun: false, triggerContext: {}, background: true, expectedRevision: "reviewed-revision", inputs: { name: "Ada" } });
@@ -13213,6 +13360,87 @@ test("Rem archives, pins and confirms deletion with persisted organization", asy
     assert.equal(appModule.chatThreadIndex().length, 0);
     assert.equal(fetchMock.calls.some(call => call.options?.method === "DELETE"), true);
   } finally { window.confirm = previousConfirm; await dom.unmount(); }
+});
+
+for (const organization of [{}, { pinned: true }, { archived: true }]) {
+  test(`Rem renames ${organization.pinned ? "pinned" : organization.archived ? "archived" : "active"} threads and persists custom names`, async () => {
+    const thread = { id: "rename", title: "Original name", updatedAt: new Date().toISOString(), projectRoot: "/repo", ...organization };
+    const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]);
+    let dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
+      storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
+    });
+    try {
+      await dom.flush();
+      if (thread.archived) await dom.click(dom.byText("Archived threads"));
+      await dom.click(dom.byTitle("Thread options"));
+      await dom.click(dom.byText("Rename Thread"));
+      const input = dom.byLabel("Thread name");
+      assert.equal(document.activeElement, input);
+      assert.equal(reactProps(input).value, thread.title);
+      await dom.focus(input);
+      await dom.change(input, "");
+      assert.equal(reactProps(input).value, "");
+      assert.equal(reactProps(dom.byText("Save")).disabled, true);
+      await dom.change(input, "   ");
+      await dom.pointer(dom.ancestor(input, "FORM"), "onSubmit");
+      assert.equal(appModule.loadChatThread(thread.id).title, thread.title);
+      await dom.change(input, "  Release planning  ");
+      await dom.blur(input);
+      assert.equal(reactProps(input).value, "  Release planning  ");
+      assert.equal(appModule.loadChatThread(thread.id).title, thread.title);
+      await dom.pointer(dom.ancestor(input, "FORM"), "onSubmit");
+      await dom.flush();
+      const saved = appModule.loadChatThread(thread.id);
+      assert.deepEqual(saved, { ...thread, title: "Release planning", titleCustomized: true });
+      assert.match(dom.text(), /Release planning/);
+      assert.equal(allElements(dom.container).some(el => el.getAttribute?.("role") === "dialog"), false);
+      const storage = {
+        "gofer-flow-chat-threads": window.localStorage.getItem("gofer-flow-chat-threads"),
+        [`gofer-flow-chat-thread-meta:${thread.id}`]: window.localStorage.getItem(`gofer-flow-chat-thread-meta:${thread.id}`),
+      };
+      await dom.unmount();
+      dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
+      await dom.flush();
+      if (thread.archived) await dom.click(dom.byText("Archived threads"));
+      assert.match(dom.text(), /Release planning/);
+      assert.equal(appModule.loadChatThread(thread.id).titleCustomized, true);
+    } finally { await dom.unmount(); }
+  });
+}
+
+test("Rem cancels thread renames and keeps a custom New thread title after sending", async () => {
+  const thread = { id: "rename-cancel", title: "Original name", updatedAt: new Date().toISOString(), projectRoot: "/repo" };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, {
+    storage: { "gofer-flow-chat-threads": JSON.stringify([thread]) },
+  });
+  try {
+    await dom.flush();
+    for (const cancel of ["Cancel", "Escape"]) {
+      await dom.click(dom.byTitle("Thread options"));
+      await dom.click(dom.byText("Rename Thread"));
+      await dom.change(dom.byLabel("Thread name"), "Discard this name");
+      if (cancel === "Escape") await dom.dispatchWindow("keydown", { key: "Escape" });
+      else await dom.click(dom.byText("Cancel"));
+      assert.equal(appModule.loadChatThread(thread.id).title, thread.title);
+      assert.equal(document.activeElement, dom.byTitle("Thread options"));
+    }
+    await dom.click(dom.ancestor(dom.byText(thread.title), "BUTTON"));
+    await dom.click(dom.byTitle("Active threads"));
+    await dom.click(dom.byTitle("Thread options"));
+    await dom.click(dom.byText("Rename Thread"));
+    await dom.change(dom.byLabel("Thread name"), "New thread");
+    await dom.pointer(dom.ancestor(dom.byLabel("Thread name"), "FORM"), "onSubmit");
+    await dom.change(dom.first("textarea"), "This message must not replace my custom title");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    assert.equal(appModule.loadChatThread(thread.id).title, "New thread");
+    const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
+    assert.equal(request.conversationId, thread.id);
+  } finally { await dom.unmount(); }
 });
 
 test("Rem loads old pinned threads from the index above active threads after restart", async () => {
@@ -14987,7 +15215,12 @@ test("forking an earlier message preserves the original and sends only the copie
   const parent = { id: "fork-parent", title: "Original debugging", projectRoot: "/repo", projectName: "repo", provider: "codex", model: "cli-default", effort: "", resources: { shell: true, web: false, skills: [], mcpServers: [] }, permissionsByProvider: { codex: "workspace-write" }, updatedAt: new Date().toISOString() };
   const history = [
     { id: "first", role: "user", body: "First question" },
-    { id: "answer", role: "assistant", body: "First answer" },
+    { id: "thought", role: "assistant", kind: "thought", body: "Checking the files", groupId: "trace" },
+    { id: "tool", role: "assistant", kind: "thought", body: "Read file", groupId: "trace", trace: { id: "read", kind: "tool", title: "Read file", status: "complete" } },
+    { id: "status", role: "system", kind: "system", body: "Context compacted" },
+    { id: "error", role: "assistant", kind: "error", body: "Earlier error" },
+    { id: "answer", role: "assistant", kind: "final", body: "First answer" },
+    { id: "summary", role: "assistant", kind: "turn-summary", body: "", durationMs: 1000 },
     { id: "later", role: "user", body: "Later question" },
     { id: "future", role: "assistant", body: "Future answer" },
   ];
@@ -15003,7 +15236,7 @@ test("forking an earlier message preserves the original and sends only the copie
   try {
     await dom.click(dom.ancestor(dom.byText(parent.title), "BUTTON")); await dom.flush();
     const forks = allElements(dom.container).filter(element => element.getAttribute("aria-label") === "Fork thread from here");
-    assert.equal(forks.length, 4);
+    assert.equal(forks.length, 4, dom.text());
     await dom.click(forks[1]); await dom.flush();
     const child = appModule.loadChatThreads().find(thread => thread.forkedFromThreadId === parent.id);
     assert.ok(child);
@@ -15017,10 +15250,56 @@ test("forking an earlier message preserves the original and sends only the copie
     await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
     assert.equal(request.conversationId, child.id);
-    assert.deepEqual(request.messages.map(message => message.body), ["First question", "First answer", "Explore another approach"]);
+    assert.deepEqual(request.messages.map(message => message.body), ["First question", "Checking the files", "Read file", "Context compacted", "First answer", "Explore another approach"]);
     assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread:fork-parent")), history);
   } finally { await dom.unmount(); }
 });
+
+for (const body of ["Repeat this question", ""]) {
+  test(`forking a user message automatically sends it once with earlier context and attachments: ${body || "attachment only"}`, async () => {
+    const parent = { id: "replay-parent", title: "Original", updatedAt: new Date().toISOString(), projectRoot: "/repo", provider: "codex", model: "cli-default", resources: { shell: true, web: false, skills: [], mcpServers: [] }, permissionsByProvider: { codex: "workspace-write" } };
+    const attachment = { id: "file", name: "context.txt", type: "text/plain", size: 7, storageName: "stored-context.txt" };
+    const history = [
+      { id: "first", role: "user", body: "Earlier question" },
+      { id: "answer", role: "assistant", kind: "final", body: "Earlier answer" },
+      { id: "selected", role: "user", body, attachments: [attachment] },
+      { id: "future", role: "assistant", kind: "final", body: "Do not include this answer" },
+    ];
+    const fetchMock = createFetchMock([
+      jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+      jsonResponse("/api/chat/attachments/copy", { attachments: [attachment] }, { method: "POST" }),
+      url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"New fork reply"}}\n'])(url) : null,
+    ]);
+    const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage: {
+      "gofer-flow-chat-threads": JSON.stringify([parent]),
+      "gofer-flow-chat-thread-meta:replay-parent": JSON.stringify(parent),
+      "gofer-flow-chat-thread:replay-parent": JSON.stringify(history),
+    } });
+    try {
+      await dom.click(dom.ancestor(dom.byText(parent.title), "BUTTON")); await dom.flush();
+      const forks = allElements(dom.container).filter(element => element.getAttribute("aria-label") === "Fork thread from here");
+      await dom.click(forks[2]); await dom.flush();
+      const child = appModule.loadChatThreads().find(thread => thread.forkedFromThreadId === parent.id);
+      assert.ok(child);
+      assert.equal(child.forkedFromMessageId, "selected");
+      const calls = fetchMock.calls.filter(call => call.url === "/api/chat/stream");
+      assert.equal(calls.length, 1);
+      const request = JSON.parse(calls[0].options.body);
+      assert.equal(request.conversationId, child.id);
+      assert.equal(request.provider, parent.provider);
+      assert.equal(request.permissionMode, "workspace-write");
+      assert.deepEqual(request.messages.map(message => message.body), ["Earlier question", "Earlier answer", body]);
+      assert.deepEqual(request.messages.at(-1).attachments, [attachment]);
+      const copy = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/attachments/copy").options.body);
+      assert.deepEqual(copy, { sourceThreadId: parent.id, threadId: child.id, attachments: [attachment] });
+      assert.match(dom.text(), /New fork reply/);
+      assert.doesNotMatch(dom.text(), /Do not include this answer/);
+      assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread:replay-parent")), history);
+      const childHistory = JSON.parse(window.localStorage.getItem(`gofer-flow-chat-thread:${child.id}`));
+      assert.equal(childHistory.filter(message => message.id === "selected").length, 1);
+    } finally { await dom.unmount(); }
+  });
+}
 
 test("thread order changes on user submission and completion, never streamed thoughts or history saves", async () => {
   const first = controlledStreamResponse([
@@ -15147,7 +15426,7 @@ test("provider model access moves models both ways, persists, and hides denied c
 });
 
 test("dedicated commit provider and model persist independently, report failures, and reset", async () => {
-  const settings = await viteServer.ssrLoadModule("/src/components/ProviderSettings.jsx");
+  const settings = await viteServer.ssrLoadModule("/src/components/CommitMessageSettings.jsx");
   let stored = {};
   let failSave = false;
   const providerState = { loading: false, refresh() {}, capabilities: [
@@ -15163,7 +15442,7 @@ test("dedicated commit provider and model persist independently, report failures
     }
     return { ok: true, json: async () => stored };
   }]);
-  let dom = await mountReact(React.createElement(settings.default, { providerState }), fetchMock);
+  let dom = await mountReact(React.createElement(settings.default, { capabilities: providerState.capabilities }), fetchMock);
   try {
     await dom.flush();
     await dom.change(dom.byLabel("Commit message provider"), "codex"); await dom.flush();
@@ -15171,7 +15450,7 @@ test("dedicated commit provider and model persist independently, report failures
     await dom.change(dom.byLabel("Commit message model"), "astra"); await dom.flush();
     assert.deepEqual(stored, { provider: "codex", model: "astra" });
     await dom.unmount();
-    dom = await mountReact(React.createElement(settings.default, { providerState }), fetchMock);
+    dom = await mountReact(React.createElement(settings.default, { capabilities: providerState.capabilities }), fetchMock);
     await dom.flush();
     assert.equal(reactProps(dom.byLabel("Commit message model")).value, "astra");
     assert.doesNotMatch(textOf(dom.byLabel("Commit message model")), /denied/);
@@ -15183,5 +15462,201 @@ test("dedicated commit provider and model persist independently, report failures
     await dom.change(dom.byLabel("Commit message provider"), ""); await dom.flush();
     assert.deepEqual(stored, { provider: "", model: "" });
     assert.ok(!allElements(dom.container).some(el => el.getAttribute?.("aria-label") === "Commit message model"));
+  } finally { await dom.unmount(); }
+});
+
+test("commit template drafts survive clear and type, persist on blur, and reset independently", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/CommitMessageSettings.jsx");
+  const defaultTemplate = "fix | feat | test | chore: one line high level executive summary of changes. Only absolutely necessary technical terms; no jargon.\n\n - one line summary of most important change\n - one line summary of second most important change\n - ...\n - one line summary of last important change";
+  let stored = { provider: "codex", model: "sol", template: defaultTemplate };
+  let failSave = false;
+  const providerState = { loading: false, refresh() {}, capabilities: [
+    { id: "codex", displayName: "Codex", enabled: true, available: true, discoveryStatus: "ready", defaultModel: "sol", models: [{ id: "sol", displayName: "Sol" }] },
+  ] };
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url !== "/api/provider/commit-settings") return null;
+    if (options?.method === "POST") {
+      if (failSave) return { ok: false, json: async () => ({ error: "Template could not be saved" }) };
+      const changes = JSON.parse(options.body);
+      stored = { ...stored, ...changes };
+      if (!stored.template.trim()) stored.template = defaultTemplate;
+      return { ok: true, json: async () => ({ saved: true, ...stored }) };
+    }
+    return { ok: true, json: async () => ({ ...stored, defaultTemplate }) };
+  }]);
+  let dom = await mountReact(React.createElement(settings.default, { capabilities: providerState.capabilities }), fetchMock);
+  try {
+    await dom.flush();
+    let field = dom.byLabel("Commit message template");
+    assert.equal(reactProps(field).value, defaultTemplate);
+    await dom.focus(field);
+    await dom.change(field, "");
+    assert.equal(reactProps(field).value, "");
+    assert.equal(stored.template, defaultTemplate);
+    const custom = "Summary: changes\n\n * One change per line\n";
+    await dom.change(field, custom);
+    assert.equal(reactProps(field).value, custom);
+    assert.equal(stored.template, defaultTemplate, "typing must not persist or normalize drafts");
+    await dom.blur(field); await dom.flush();
+    assert.equal(stored.template, custom);
+    assert.equal(stored.model, "sol");
+    await dom.change(dom.byLabel("Commit message provider"), ""); await dom.flush();
+    assert.equal(stored.template, custom, "model preferences must not replace the template");
+    await dom.unmount();
+    dom = await mountReact(React.createElement(settings.default, { capabilities: providerState.capabilities }), fetchMock);
+    await dom.flush();
+    field = dom.byLabel("Commit message template");
+    assert.equal(reactProps(field).value, custom);
+    failSave = true;
+    await dom.focus(field);
+    await dom.change(field, "A revised template");
+    await dom.blur(field); await dom.flush();
+    assert.match(dom.text(), /Template could not be saved/);
+    assert.equal(reactProps(field).value, "A revised template");
+    assert.equal(stored.template, custom);
+    failSave = false;
+    await dom.click(dom.byText("Reset commit template")); await dom.flush();
+    assert.equal(stored.template, defaultTemplate);
+    assert.equal(reactProps(field).value, defaultTemplate);
+    await dom.focus(field);
+    await dom.change(field, custom);
+    await dom.blur(field); await dom.flush();
+    await dom.focus(field);
+    await dom.change(field, "");
+    assert.equal(reactProps(field).value, "");
+    await dom.blur(field); await dom.flush();
+    assert.equal(reactProps(field).value, defaultTemplate);
+  } finally { await dom.unmount(); }
+});
+
+
+test("report theme drafts preview before saving and work without Second Brain", async () => {
+  const { default: ReportThemeSettings } = await viteServer.ssrLoadModule("/src/components/ReportThemeSettings.jsx");
+  const changes = [];
+  let config = { secondBrainEnabled: false };
+  function Settings() {
+    const [value, setValue] = React.useState(config);
+    return React.createElement(ReportThemeSettings, { value, onChange: (key, next) => { changes.push([key, next]); config = { ...value, reportThemes: next }; setValue(config); } });
+  }
+  const dom = await mountReact(React.createElement(Settings), createFetchMock([]));
+  const receive = event => { event.detail.handled = true; event.detail.resolve({ id: "theme-preview", status: "completed", description: "Ocean journal", result: { label: "Ocean", instructions: "Navy ink", html: "<html><body>Ocean demo</body></html>" } }); };
+  window.dispatchEvent = receive;
+  try {
+    await dom.click(dom.byText("+ New theme"));
+    await dom.change(dom.byLabel("Theme description"), "Ocean journal");
+    await dom.click(dom.byLabel("Generate preview"));
+    await dom.flush();
+    assert.equal(changes.length, 0);
+    const preview = dom.allByTitle("New report theme preview")[0];
+    assert.ok(preview);
+    assert.equal(preview.getAttribute("sandbox"), "");
+    const name = dom.byLabel("Theme name");
+    await dom.focus(name); await dom.change(name, "");
+    assert.equal(name.value, "");
+    await dom.change(name, "Marine journal"); await dom.blur(name);
+    await dom.click(dom.byText("Save theme")); await dom.flush();
+    assert.equal(changes.length, 1);
+    assert.equal(config.reportThemes.custom[0].label, "Marine journal");
+    assert.equal(config.reportThemes.selected, config.reportThemes.custom[0].id);
+    assert.equal(config.secondBrainEnabled, false);
+    assert.ok(dom.byLabel("Marine journal"));
+  } finally { window.removeEventListener("gofer:rem-report-theme", receive); await dom.unmount(); }
+});
+
+for (const scenario of ["success", "disabled", "edited", "generation-error", "commit-error"]) {
+  test(`background commit result: ${scenario}`, async () => {
+    let job = null;
+    const snapshot = { active: true, branch: "main", branches: ["main"], entries: [{ path: "note", status: "M", staged: true }] };
+    const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => snapshot,
+      gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [] }),
+      gitRepoAction: async () => assert.fail("The renderer must not auto-commit"),
+    };
+    const fetchMock = createFetchMock([url => url.startsWith("/api/generation-jobs?")
+      ? { ok: true, json: async () => ({ jobs: job ? [job] : [] }) } : null]);
+    let dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), fetchMock, { desktop: { workspace } });
+    window.dispatchEvent = event => {
+      if (event.type !== "gofer:rem-commit-message") return;
+      event.detail.handled = true;
+      job = { id: "commit-job", status: "running", branch: "main" };
+      event.detail.resolve(job);
+    };
+    try {
+      await dom.click(dom.byLabel("Source control")); await dom.flush();
+      await dom.click(dom.byLabel("Generate commit message with Rem")); await dom.flush();
+      if (scenario === "edited") await dom.change(dom.byLabel("Commit message"), "My draft");
+      job = { ...job, status: scenario === "generation-error" ? "failed" : scenario === "commit-error" ? "needs_review" : "completed",
+        error: scenario === "generation-error" ? "Generation failed" : scenario === "commit-error" ? "Commit hook failed" : "",
+        ...(scenario === "generation-error" ? {} : { result: { message: "fix: generated message", ...(scenario === "success" ? { commit: "abcd1234" } : {}) } }) };
+      await dom.flush(2000); await dom.flush();
+      if (scenario === "success") {
+        assert.equal(reactProps(dom.byLabel("Commit message")).value, "");
+        assert.match(dom.text(), /Auto-committed abcd1234 on main/);
+        await dom.change(dom.byLabel("Commit message"), "My next commit draft");
+        const key = 'rem-commit-draft:["/repo","main"]';
+        const storage = { [key]: window.localStorage.getItem(key) };
+        await dom.unmount();
+        dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), fetchMock, { desktop: { workspace }, storage });
+        await dom.click(dom.byLabel("Source control")); await dom.flush();
+        assert.equal(reactProps(dom.byLabel("Commit message")).value, "My next commit draft");
+      }
+      if (scenario === "disabled" || scenario === "commit-error") assert.equal(reactProps(dom.byLabel("Commit message")).value, "fix: generated message");
+      if (scenario === "edited") assert.equal(reactProps(dom.byLabel("Commit message")).value, "My draft");
+      if (scenario === "generation-error") assert.match(dom.text(), /Generation failed/);
+      if (scenario === "commit-error") assert.match(dom.text(), /Commit hook failed/);
+    } finally { await dom.unmount(); }
+  });
+}
+
+test("theme jobs restore their prompt, progress and completed preview after remount", async () => {
+  const { default: ReportThemeSettings } = await viteServer.ssrLoadModule("/src/components/ReportThemeSettings.jsx");
+  let job = { id: "theme-job", status: "running", description: "Ocean journal", progress: "Drawing the diagram" };
+  const fetchMock = createFetchMock([url => url.startsWith("/api/generation-jobs?") ? { ok: true, json: async () => ({ jobs: [job] }) } : null]);
+  const mount = () => mountReact(React.createElement(ReportThemeSettings, { value: {}, onChange() {} }), fetchMock);
+  let dom = await mount();
+  try {
+    await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Theme description")).value, "Ocean journal");
+    assert.match(dom.text(), /Drawing the diagram/);
+    await dom.click(dom.byText("Continue in background"));
+    job = { ...job, progress: "Choosing typography", updatedAt: 1 };
+    await dom.flush(2000);
+    assert.ok(!allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Theme description"));
+    await dom.unmount();
+    job = { ...job, status: "completed", result: { label: "Ocean", instructions: "Navy", html: "<html>Preview</html>" }, updatedAt: 2 };
+    dom = await mount(); await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Theme description")).value, "Ocean journal");
+    assert.match(dom.text(), /Theme generated successfully/);
+    assert.ok(dom.allByTitle("New report theme preview")[0]);
+  } finally { await dom.unmount(); }
+});
+
+test("auto commit checkbox persists and keeps its saved value on failure", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/CommitMessageSettings.jsx");
+  let stored = {}, fail = false;
+  const fetchMock = createFetchMock([(url, options) => {
+    if (url !== "/api/provider/commit-settings") return null;
+    if (options.method === "POST") {
+      if (fail) return { ok: false, json: async () => ({ error: "Save failed" }) };
+      stored = { ...stored, ...JSON.parse(options.body) };
+    }
+    return { ok: true, json: async () => stored };
+  }]);
+  const props = { capabilities: [] };
+  let dom = await mountReact(React.createElement(settings.default, props), fetchMock);
+  try {
+    await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Auto commit changes")).checked, false);
+    await React.act(async () => reactProps(dom.byLabel("Auto commit changes")).onChange({ target: { checked: true } }));
+    await dom.flush();
+    assert.deepEqual(stored, { autoCommit: true });
+    await dom.unmount();
+    dom = await mountReact(React.createElement(settings.default, props), fetchMock);
+    await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Auto commit changes")).checked, true);
+    fail = true;
+    await React.act(async () => reactProps(dom.byLabel("Auto commit changes")).onChange({ target: { checked: false } }));
+    await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Auto commit changes")).checked, true);
+    assert.match(dom.text(), /Save failed/);
   } finally { await dom.unmount(); }
 });

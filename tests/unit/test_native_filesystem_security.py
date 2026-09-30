@@ -13,6 +13,7 @@ from gofer.utils.atomic_output import (
     mkdir_without_links,
     open_binary_input,
     scandir_without_links,
+    unlink_without_links,
 )
 
 
@@ -39,6 +40,8 @@ def test_windows_junction_ancestors_cannot_redirect_file_operations(tmp_path: Pa
                 pytest.fail("Junction must not authorize enumeration")
         with pytest.raises(OSError):
             mkdir_without_links(junction / "created")
+        with pytest.raises(OSError):
+            unlink_without_links(junction / "note")
         assert sorted(path.name for path in outside.iterdir()) == ["note"]
         assert (outside / "note").read_bytes() == b"private"
     finally:

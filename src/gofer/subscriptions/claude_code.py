@@ -9,6 +9,18 @@ from gofer.subscriptions.base import Subscription
 
 
 class ClaudeCodeSubscription(Subscription):
+    provider = "claude_code"
+
+    def _parse_provider_output(self, stdout: str, stderr: str) -> tuple[str, dict[str, object]]:
+        from gofer.subscriptions.base import _json_payloads, _message_from_payloads
+        from gofer.subscriptions.usage import provider_payload_usage
+
+        payloads = _json_payloads(stdout) + _json_payloads(stderr)
+        return (
+            _message_from_payloads(payloads) or stdout or stderr,
+            provider_payload_usage("claude_code", payloads),
+        )
+
     def _build_command(
         self,
         prompt: str,

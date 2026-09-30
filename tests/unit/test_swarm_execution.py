@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from gofer.ui import swarm_workspaces
 from gofer.ui.swarm_workspaces import (
     cleanup_accepted_attempt,
     cleanup_completed_turn,
@@ -142,6 +148,105 @@ def test_checks_do_not_inherit_packaged_app_libraries(tmp_path, monkeypatch, ori
     )
     results = run_checks(tmp_path, [[sys.executable, "-c", script]], tmp_path / "logs")
     assert results[0]["exitCode"] == 0
+
+
+def test_fast_check_cannot_bypass_log_limit(tmp_path, monkeypatch):
+    launch = subprocess.Popen
+
+    def completed_process(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        process.wait(timeout=5)
+        return process
+
+    monkeypatch.setattr("gofer.ui.swarm_workspaces.subprocess.Popen", completed_process)
+    script = "import sys; sys.stdout.buffer.write(b'x' * (16 * 1024 * 1024 + 1))"
+    results = run_checks(tmp_path, [[sys.executable, "-c", script]], tmp_path / "logs")
+    assert results[0]["exitCode"] != 0
+    log = Path(results[0]["logPath"])
+    assert log.stat().st_size < 16 * 1024 * 1024 + 100
+    assert b"exceeded" in log.read_bytes()[-100:]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group cleanup")
+def test_completed_check_terminates_descendants(tmp_path):
+    child_pid = tmp_path / "child.pid"
+    marker = tmp_path / "orphan-wrote.txt"
+    child = (
+        "from pathlib import Path; import os, time; "
+        f"Path({str(child_pid)!r}).write_text(str(os.getpid())); "
+        "time.sleep(0.5); "
+        f"Path({str(marker)!r}).write_text('still running'); time.sleep(30)"
+    )
+    parent = (
+        "import subprocess, sys, time; from pathlib import Path; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        f"pid_file = Path({str(child_pid)!r})\n"
+        "while not pid_file.exists(): time.sleep(0.01)\n"
+    )
+    try:
+        results = run_checks(tmp_path, [[sys.executable, "-c", parent]], tmp_path / "logs")
+        assert results[0]["exitCode"] == 0
+        time.sleep(0.7)
+        assert not marker.exists(), "A completed check left a child running"
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("taskkill_fails", [False, True])
+def test_windows_check_cancel_stops_tree_and_preserves_log(tmp_path, monkeypatch, taskkill_fails):
+    cancel = threading.Event()
+    calls: list[Any] = []
+
+    class Process:
+        pid = 1234
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            calls.append("kill")
+            self.returncode = -1
+
+        def wait(self):
+            assert self.returncode is not None
+            return self.returncode
+
+    process = Process()
+
+    def launch(*args, **kwargs):
+        kwargs["stdout"].write(b"check output\n")
+        kwargs["stdout"].flush()
+        cancel.set()
+        return process
+
+    def taskkill(argv, **kwargs):
+        calls.append(argv)
+        assert "GOFER_UI_API_TOKEN" not in kwargs["env"]
+        assert "GOFER_DESKTOP_GRANT_SECRET" not in kwargs["env"]
+        if taskkill_fails:
+            raise OSError("taskkill unavailable")
+        process.returncode = -1
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setenv("GOFER_UI_API_TOKEN", "desktop-api-secret")
+    monkeypatch.setenv("GOFER_DESKTOP_GRANT_SECRET", "desktop-grant-secret")
+    monkeypatch.setattr(swarm_workspaces, "os", SimpleNamespace(name="nt", SEEK_END=os.SEEK_END))
+    monkeypatch.setattr(swarm_workspaces.subprocess, "Popen", launch)
+    monkeypatch.setattr(swarm_workspaces.subprocess, "run", taskkill)
+    results = run_checks(tmp_path, [["fake-check"]], tmp_path / "logs", cancel=cancel)
+    expected: list[Any] = [["taskkill", "/PID", "1234", "/T", "/F"]]
+    if taskkill_fails:
+        expected.append("kill")
+    assert calls == expected
+    assert results[0]["exitCode"] != 0
+    content = Path(results[0]["logPath"]).read_text()
+    assert content.startswith("check output\n")
+    assert content.endswith("Check cancelled or exceeded the 120s / 16MiB limit.\n")
 
 
 def team(manager: SwarmManager, root: Path, **settings: Any) -> str:

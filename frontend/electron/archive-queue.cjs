@@ -27,7 +27,8 @@ function createArchiveQueue({ createWorker = () => new Worker(path.join(__dirnam
   function start() {
     if (active || !pending.length) return drained();
     if (!worker) {
-      worker = createWorker();
+      try { worker = createWorker(); }
+      catch (error) { fail(error); return; }
       worker.on("message", (message) => {
         if (!active || message.id !== active.id) return;
         const completed = active;

@@ -1,16 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyForkAttachments, forkThreadHistory } from "./forkThread.js";
+import { copyForkAttachments, forkThreadHistory, isForkableMessage } from "./forkThread.js";
 
 test("forks include exactly the selected prefix and independently inherit settings", () => {
   const parent = { id: "parent", title: "Debug", provider: "cursor", model: "chosen", effort: "high",
     projectRoot: "/repo", projectBranch: "feature", scopeMode: "project", archived: true, pinned: true,
     resources: { shell: false }, permissionsByProvider: { cursor: "restricted" }, sessionId: "do-not-resume" };
   const history = [{ id: "a", role: "user", body: "original", attachments: [{ id: "file" }] },
-    { id: "b", role: "assistant", kind: "turn-summary", changes: { undoable: true, changing: true, files: [] } },
+    { id: "summary", role: "assistant", kind: "turn-summary", changes: { undoable: true, changing: true, files: [] } },
+    { id: "b", role: "assistant", kind: "final", body: "Answer" },
     { id: "c", role: "assistant", body: "future" }];
   const fork = forkThreadHistory(parent, history, "b", "child");
-  assert.deepEqual(fork.messages.map(message => message.id), ["a", "b"]);
+  assert.deepEqual(fork.messages.map(message => message.id), ["a", "summary", "b"]);
   assert.equal(fork.thread.provider, "cursor");
   assert.equal(fork.thread.projectBranch, "feature");
   assert.equal(fork.thread.sessionId, undefined);
@@ -24,6 +25,28 @@ test("forks include exactly the selected prefix and independently inherit settin
   assert.equal(parent.resources.shell, false);
   assert.equal(history[1].changes.undoable, true);
   assert.throws(() => forkThreadHistory(parent, history, "missing", "child"), /no longer available/);
+});
+
+test("only user messages and final replies can be fork boundaries", () => {
+  for (const message of [
+    { role: "user", body: "Question" },
+    { role: "user", body: "", attachments: [{ storageName: "image.png" }] },
+    { role: "assistant", body: "Legacy final" },
+    { role: "assistant", kind: "final", body: "Final" },
+  ]) assert.equal(isForkableMessage(message), true);
+  for (const message of [
+    { role: "assistant", kind: "thought" },
+    { role: "assistant", kind: "thought", trace: { kind: "tool" } },
+    { role: "assistant", kind: "turn-summary" },
+    { role: "assistant", kind: "error" },
+    { role: "assistant", kind: "memory" },
+    { role: "assistant", kind: "search-source" },
+    { role: "system", body: "Status" },
+    { role: "assistant", kind: "final", running: true },
+  ]) {
+    assert.equal(isForkableMessage(message), false);
+    assert.throws(() => forkThreadHistory({ id: "parent" }, [{ ...message, id: "blocked" }], "blocked", "child"), /user message or a final reply/);
+  }
 });
 
 test("forks copy only included attachments, deduplicate references, and surface failures", async () => {

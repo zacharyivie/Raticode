@@ -14,7 +14,17 @@ build/
 math problems/
 
 # Raticode Workflows
+.worktrees/
 .raticode/*
+!.raticode/daily-bug-fixes/
+.raticode/daily-bug-fixes/*
+!.raticode/daily-bug-fixes/workflow.rattish
+!.raticode/daily-bug-fixes/workflow.metadata.json
+!.raticode/daily-bug-fixes/.raticodeignore
+!.raticode/daily-bug-fixes/git_steps.py
+!.raticode/daily-bug-fixes/test_git_steps.py
+!.raticode/daily-bug-fixes/raticode-daily-bug-fixes.service
+!.raticode/daily-bug-fixes/raticode-daily-bug-fixes.timer
 !.raticode/daily-todo-implementation/
 .raticode/daily-todo-implementation/*
 !.raticode/daily-todo-implementation/workflow.rattish

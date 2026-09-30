@@ -2,6 +2,74 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Commit review controls share the editor palette and stay above its scroll area. */
+.commit-diff-header { container-type: inline-size; }
+.commit-diff-tools { padding: 0 16px 10px; }
+.commit-diff-search,
+.commit-diff-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid rgb(var(--color-line));
+  border-radius: 6px;
+  background: rgb(var(--color-ink) / .025);
+}
+.commit-diff-search { padding: 0 10px; }
+.commit-diff-search:focus-within,
+.commit-diff-filter:focus-within {
+  border-color: rgb(var(--color-brand));
+  box-shadow: 0 0 0 2px rgb(var(--color-brand) / .12);
+}
+.commit-diff-tools input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 0;
+  background: transparent;
+  color: rgb(var(--color-ink));
+}
+.commit-diff-tools input:focus-visible { outline: none !important; }
+.commit-diff-tools input::placeholder { color: rgb(var(--color-muted)); opacity: .85; }
+.commit-diff-search button { display: grid; place-items: center; padding: 4px; border-radius: 3px; color: rgb(var(--color-muted)); }
+.commit-diff-search button:hover { background: rgb(var(--color-ink) / .08); color: rgb(var(--color-ink)); }
+.commit-diff-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.commit-diff-filter { gap: 10px; padding: 0 10px; }
+.commit-diff-filter > span { color: rgb(var(--color-muted)); font-size: 11px; }
+.commit-diff-filter input { padding: 6px 0; }
+.commit-diff-filter.is-active > span { color: rgb(var(--color-ink)); font-weight: 600; }
+.commit-diff-filter-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; padding-top: 8px; color: rgb(var(--color-muted)); font-size: 11px; }
+.commit-diff-count,
+.commit-diff-reset { display: inline-flex; align-items: center; gap: 5px; }
+.commit-diff-count { font-variant-numeric: tabular-nums; }
+.commit-diff-reset { margin-left: auto; padding: 2px 4px; border-radius: 3px; }
+.commit-diff-reset:hover:not(:disabled) { color: rgb(var(--color-ink)); background: rgb(var(--color-ink) / .06); }
+.commit-diff-reset:disabled { opacity: .4; }
+.commit-diff-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 48px 20px; text-align: center; font-size: 12px; }
+.commit-diff-empty h3 { font-size: 14px; font-weight: 600; }
+.commit-diff-empty p { color: rgb(var(--color-muted)); }
+.commit-diff-empty button { margin-top: 4px; padding: 6px 10px; border: 1px solid rgb(var(--color-line)); border-radius: 5px; }
+.commit-diff-empty button:hover { border-color: rgb(var(--color-brand)); }
+.commit-diff { --commit-match-color: #f5cc65; --commit-match-ink: #302400; }
+.dark .commit-diff { --commit-match-color: #e9bc51; --commit-match-ink: #211b0b; }
+.commit-diff .commit-diff-match { background: var(--commit-match-color); color: var(--commit-match-ink) !important; border-radius: 2px; box-shadow: 0 0 0 1px #997000; }
+.commit-diff .commit-diff-current-match,
+.commit-diff mark.is-current { outline: 2px solid var(--commit-match-color); outline-offset: 2px; }
+.commit-diff-match-count { flex-shrink: 0; color: rgb(var(--color-muted)); font-variant-numeric: tabular-nums; font-size: 11px; white-space: nowrap; }
+.commit-diff-search button { flex-shrink: 0; }
+.commit-diff-search button:disabled { opacity: .35; }
+.commit-diff-scroll { scrollbar-gutter: stable; }
+.commit-diff-scroll::-webkit-scrollbar { width: 12px; }
+.commit-diff-overview { position: absolute; top: 0; bottom: 0; right: 0; width: 12px; pointer-events: none; overflow: hidden; }
+.commit-diff-overview i { position: absolute; right: 1px; width: 10px; height: 3px; background: var(--commit-match-color); }
+.commit-diff-overview i.is-current { height: 5px; box-shadow: inset 0 0 0 1px var(--commit-match-ink); }
+@container (max-width: 620px) {
+  .commit-diff-filter-hint { order: 3; flex-basis: 100%; }
+}
+@container (max-width: 420px) {
+  .commit-diff-filters { grid-template-columns: 1fr; }
+  .commit-diff-tools { padding-right: 12px; padding-left: 12px; }
+}
+
 /* Keep matched text legible on both the indigo user bubble and neutral replies. */
 ::highlight(rem-thread-match) {
   background-color: var(--thread-match-bg);

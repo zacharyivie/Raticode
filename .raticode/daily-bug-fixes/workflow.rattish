@@ -1,0 +1,80 @@
+rattish: 1
+
+workflow:
+  name: Daily bug fixes
+  max-runs: 60
+
+node create-worktree:
+  type: bash-command
+  start: true
+  command: python3 .raticode/daily-bug-fixes/git_steps.py create
+  to: scan-loop
+
+node scan-loop:
+  type: loop
+  source: {"count": 25, "fail-fast": true, "max-concurrency": 1, "type": "count"}
+  needs: create-worktree
+  to: scan-and-fix
+
+node scan-and-fix:
+  type: agent
+  provider: codex
+  effort: high
+  memory: "none"
+  working-dir: "{{worktree}}"
+  max-runs: 25
+  prompt: |
+    I'm getting ready to cut a release for Raticode. Do a last minute scan of the codebase. Find and fix anything that needs fixing last minute. Look for bugs and security issues.
+  with:
+    worktree: node.create-worktree.output.stdout
+  needs: scan-loop
+  to: commit-pass
+  model: "gpt-6.1-sol"
+node commit-pass:
+  type: bash-command
+  max-runs: 25
+  command: python3 .raticode/daily-bug-fixes/git_steps.py commit-pass
+  with:
+    worktree: node.create-worktree.output.stdout
+    scan-index: node.scan-loop.output.index
+  needs: scan-and-fix
+  to: soft-reset when node.commit-pass.output.stdout == "all-complete"
+
+node soft-reset:
+  type: bash-command
+  command: python3 .raticode/daily-bug-fixes/git_steps.py soft-reset
+  with:
+    worktree: node.create-worktree.output.stdout
+  needs: commit-pass
+  to: summarize-fixes
+
+node summarize-fixes:
+  type: agent
+  provider: codex
+  model: gpt-6-astra
+  effort: high
+  memory: "none"
+  working-dir: "{{worktree}}"
+  prompt: |
+    The workflow has completed 25 sequential bug and security scans and soft-reset
+    their temporary commits. Inspect the entire staged diff with git diff --cached
+    and generate a succinct commit message describing the actual bug fixes and
+    security patches. Use a short imperative subject and, only if needed, a brief
+    body identifying the main changes. Do not invent fixes. If there are no changes,
+    say that the release scans found no changes to commit. Do not edit files, stage,
+    unstage, commit, reset, or switch branches. Return JSON with a single string
+    field named message.
+  output-schema: {"additionalProperties": false, "properties": {"message": {"minLength": 1, "type": "string"}}, "required": ["message"], "type": "object"}
+  with:
+    worktree: node.create-worktree.output.stdout
+  needs: soft-reset
+  to: commit-all-fixes
+
+node commit-all-fixes:
+  type: bash-command
+  command: python3 .raticode/daily-bug-fixes/git_steps.py final-commit
+  with:
+    worktree: node.create-worktree.output.stdout
+    commit-message: node.summarize-fixes.output.message
+  needs: summarize-fixes
+  finish: pass

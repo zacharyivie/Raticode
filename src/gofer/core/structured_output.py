@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import SchemaError, ValidationError  # type: ignore[import-untyped]
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 if TYPE_CHECKING:
     from gofer.core.workflow import AgenticWorkflow
@@ -30,6 +33,7 @@ class OutputFieldOperator(StrEnum):
 
 
 MISSING = object()
+STRUCTURED_OUTPUT_MAX_DEPTH = 64
 
 
 def resolve_output_schema(
@@ -53,29 +57,33 @@ def validate_schema(schema: dict[str, Any]) -> None:
         Draft202012Validator.check_schema(schema)
     except SchemaError as exc:
         raise StructuredOutputError(f"Invalid JSON Schema: {exc.message}") from exc
-    for reference in _schema_references(schema):
+    except RecursionError:
+        raise StructuredOutputError("JSON Schema nesting is too deep") from None
+    for keyword, reference in _schema_references(schema):
         if not reference.startswith("#"):
             raise StructuredOutputError(
-                "Only local JSON Schema $ref values are supported for portable "
+                f"Only local JSON Schema {keyword} values are supported for portable "
                 f"structured outputs; got {reference!r}"
             )
         if _resolve_local_json_pointer(schema, reference) is None:
             raise StructuredOutputError(
-                f"JSON Schema $ref {reference!r} does not resolve within the schema"
+                f"JSON Schema {keyword} {reference!r} does not resolve within the schema"
             )
 
 
-def _schema_references(value: Any) -> list[str]:
-    references: list[str] = []
-    if isinstance(value, dict):
-        reference = value.get("$ref")
-        if isinstance(reference, str):
-            references.append(reference)
-        for child in value.values():
-            references.extend(_schema_references(child))
-    elif isinstance(value, list):
-        for child in value:
-            references.extend(_schema_references(child))
+def _schema_references(value: Any) -> list[tuple[str, str]]:
+    references: list[tuple[str, str]] = []
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            for keyword in ("$ref", "$dynamicRef", "$recursiveRef"):
+                reference = item.get(keyword)
+                if isinstance(reference, str):
+                    references.append((keyword, reference))
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
     return references
 
 
@@ -88,20 +96,50 @@ def structured_output_instruction(schema: dict[str, Any]) -> str:
 
 
 def parse_and_validate_output(text: str, schema: dict[str, Any]) -> Any:
+    # Recheck at the runtime boundary, including callers with directly supplied IR.
+    validate_schema(schema)
+
+    def finite_number(raw: str) -> float:
+        number = float(raw)
+        if not math.isfinite(number):
+            raise StructuredOutputError("Structured output numbers must be finite")
+        return number
+
     try:
-        value = json.loads(text)
+        value = json.loads(text, parse_float=finite_number, parse_constant=finite_number)
     except json.JSONDecodeError as exc:
         raise StructuredOutputError(
             f"Structured output is not valid JSON at line {exc.lineno}, "
             f"column {exc.colno}: {exc.msg}"
         ) from exc
+    except StructuredOutputError:
+        raise
+    except ValueError as exc:
+        raise StructuredOutputError(f"Structured output is not valid JSON: {exc}") from exc
+    except RecursionError:
+        raise StructuredOutputError("Structured output nesting is too deep") from None
+    pending: list[tuple[Any, int]] = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        if depth > STRUCTURED_OUTPUT_MAX_DEPTH:
+            raise StructuredOutputError("Structured output nesting is too deep")
+        if isinstance(item, dict):
+            pending.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
     try:
-        Draft202012Validator(schema).validate(value)
+        # An empty registry has no retrieval callback. Schema validation must
+        # never make HTTP requests or read file URLs, even after dialect changes.
+        Draft202012Validator(schema, registry=Registry()).validate(value)
     except ValidationError as exc:
         path = ".".join(str(part) for part in exc.absolute_path) or "$"
         raise StructuredOutputError(
             f"Structured output violates the schema at {path}: {exc.message}"
         ) from exc
+    except Unresolvable:
+        raise StructuredOutputError("JSON Schema reference cannot be resolved locally") from None
+    except RecursionError:
+        raise StructuredOutputError("JSON Schema validation exceeded its recursion limit") from None
     return value
 
 
@@ -398,7 +436,10 @@ def _intersect_json_types(left: set[str], right: set[str]) -> set[str]:
 
 
 def _value_matches_schema(value: Any, schema: dict[str, Any]) -> bool:
-    return bool(Draft202012Validator(schema).is_valid(value))
+    try:
+        return bool(Draft202012Validator(schema, registry=Registry()).is_valid(value))
+    except (Unresolvable, RecursionError):
+        return False
 
 
 def _value_matches_schema_type(value: Any, schema_type: Any) -> bool:

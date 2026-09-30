@@ -6,13 +6,13 @@ Provider sandboxes remain in place; agents never need writable shared Git metada
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from gofer.ui.swarm_workspaces import git
+from gofer.utils.process import build_subprocess_env
 
 
 def permissions(value: Any = None) -> dict[str, bool]:
@@ -57,7 +57,9 @@ def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -
             or re.fullmatch(r"raticode/swarm/[^/]+/attempt/[^/]+", branch)):
         raise ValueError("Managed Git requires an isolated swarm assignment branch")
     # Do not inherit a caller's alternate index, Git directory or config injection.
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env = {
+        key: value for key, value in build_subprocess_env().items() if not key.startswith("GIT_")
+    }
     env.update(GIT_TERMINAL_PROMPT="0", GIT_LITERAL_PATHSPECS="1")
     if git(root, "branch", "--show-current", env=env) != branch:
         raise ValueError("Assignment branch changed; refusing Git operation")
@@ -111,7 +113,7 @@ def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -
                 "--recurse-submodules=no",
                 remote,
                 f"HEAD:refs/heads/{branch}",
-                env=env,
+                env=build_subprocess_env(env, inherit_parent=False),
             )
         else:
             # gh receives an explicit repository, head and base; no interactive prompts.
@@ -149,7 +151,7 @@ def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -
                     _text(payload, "body", 16000),
                 ],
                 cwd=root,
-                env=env,
+                env=build_subprocess_env(env, inherit_parent=False),
                 capture_output=True,
                 text=True,
                 timeout=30,

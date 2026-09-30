@@ -146,7 +146,7 @@ test('search clamps concurrent reads to four even for an oversized request', asy
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../project-search.cjs'), 'utf8'), {
     module, process, Buffer,
-    require: name => name === 'node:fs/promises' ? io : name === 'node:child_process' ? {
+    require: name => name === 'node:fs/promises' || name === './safe-files.cjs' ? io : name === 'node:child_process' ? {
       execFile: (_command, _args, _options, callback) => callback(null, { stdout: Array.from({ length: 20 }, (_, i) => `${i}.txt`).join('\0') }),
     } : require(name),
   });

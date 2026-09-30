@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -11,9 +14,105 @@ from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.rattish.artifacts import compile_rattish_file
 from gofer.rattish.diagnostics import RattishCompileError
 from gofer.rattish.preflight import run_preflight
+from gofer.rattish.runtime import (
+    RuntimeContext,
+    _agent_memory_path,
+    _load_agent_memory,
+    _remember_agent_result,
+)
 from gofer.rattish.workflow_runtime import execute_workflow
 from gofer.rattish.workspaces import create_registered_workflow
 from gofer.subscriptions.base import Subscription
+
+
+@pytest.fixture
+def memory_context(tmp_path: Path) -> RuntimeContext:
+    return RuntimeContext(
+        project_root=tmp_path,
+        workflow_id="memory-test",
+        run_id="run-test",
+        workflow_inputs={},
+        trigger_events=(),
+        node_outputs={},
+        data_dir=tmp_path / "data",
+    )
+
+
+def test_persistent_agent_memory_round_trip_is_private(memory_context: RuntimeContext) -> None:
+    result = AgentResult(
+        agent_id="review",
+        success=True,
+        output="answer",
+        exit_code=0,
+        duration_seconds=0,
+        current_prompt="question",
+    )
+    _remember_agent_result("review", "all", result, memory_context)
+    assert _load_agent_memory("review", "all", memory_context) == [
+        {"role": "user", "body": "question"},
+        {"role": "assistant", "body": "answer"},
+    ]
+    path = _agent_memory_path("review", memory_context)
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert list(path.parent.glob(".*.tmp")) == []
+
+
+@pytest.mark.parametrize("link_parent", [False, True])
+def test_persistent_agent_memory_refuses_links(
+    memory_context: RuntimeContext,
+    tmp_path: Path,
+    link_parent: bool,
+) -> None:
+    path = _agent_memory_path("review", memory_context)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    private = outside / "review.json"
+    original = json.dumps([{"role": "user", "body": "private history"}])
+    private.write_text(original)
+    path.parent.parent.mkdir(parents=True)
+    if link_parent:
+        path.parent.symlink_to(outside, target_is_directory=True)
+    else:
+        path.parent.mkdir()
+        path.symlink_to(private)
+    assert _load_agent_memory("review", "all", memory_context) == []
+    result = AgentResult(
+        agent_id="review",
+        success=True,
+        output="answer",
+        exit_code=0,
+        duration_seconds=0,
+    )
+    if link_parent:
+        with pytest.raises(OSError):
+            _remember_agent_result("review", "all", result, memory_context)
+    else:
+        _remember_agent_result("review", "all", result, memory_context)
+        assert not path.is_symlink()
+    assert private.read_text() == original
+
+
+@pytest.mark.parametrize(
+    ("payload", "limit"),
+    [
+        (json.dumps([{"role": "user", "body": "private" * 20}]).encode(), 64),
+        (b"[" * 20000 + b"]" * 20000, 50000),
+    ],
+    ids=["oversized", "deep"],
+)
+def test_persistent_agent_memory_ignores_oversized_or_deep_json(
+    memory_context: RuntimeContext,
+    payload: bytes,
+    limit: int,
+) -> None:
+    from dataclasses import replace
+
+    path = _agent_memory_path("review", memory_context)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
+    context = replace(memory_context, max_file_read_bytes=limit)
+    assert _load_agent_memory("review", "all", context) == []
 
 
 class FakeAgentSubscription(Subscription):

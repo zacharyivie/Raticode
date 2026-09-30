@@ -26,6 +26,7 @@ from gofer.subscriptions.acp_session import initialize_session, prompt_session, 
 from gofer.subscriptions.acp_transport import AcpTransportError, RequestHandler, open_acp_transport
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.grok_identity import grok_build_version
+from gofer.subscriptions.usage import normalize_usage, track_invocation
 
 ACP_PROVIDERS = {"grok"}
 
@@ -118,6 +119,20 @@ async def stream_acp(
             source = prompt_session(rpc, session, prompt, timeout=timeout)
             try:
                 async for event in source:
+                    if event.get("type") in {"final", "error"}:
+                        # This adapter creates a fresh session for every invocation,
+                        # so the cumulative session snapshot is exactly this call.
+                        try:
+                            usage_response = await rpc.request(
+                                "_x.ai/session/usage", {"sessionId": session}, timeout=3
+                            )
+                            raw_usage = usage_response.get("usage")
+                            if isinstance(raw_usage, dict):
+                                event["usage"] = normalize_usage(provider, raw_usage)
+                        except (AcpTransportError, TimeoutError, OSError):
+                            # Older CLIs do not expose the extension. Missing usage
+                            # must not invalidate an otherwise completed response.
+                            pass
                     yield event
             finally:
                 close = getattr(source, "aclose", None)
@@ -155,6 +170,7 @@ class AcpSubscription(Subscription):
     def is_available(self) -> bool:
         return resolve_provider_executable(cast(ProviderId, self.provider)) is not None
 
+    @track_invocation
     async def execute(
         self,
         prompt: str,
@@ -212,4 +228,5 @@ class AcpSubscription(Subscription):
             exit_code=final["exitCode"],
             duration_seconds=time.monotonic() - started,
             thoughts=thoughts,
+            usage_metadata=final.get("usage", {}),
         )

@@ -135,6 +135,7 @@ from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
 from gofer.ui.chat import delete_workflow_chat_prompt, workflow_chat_prompt_path
+from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.brand_compat import LEGACY_WORKSPACE_DIRECTORIES
 from gofer.utils.paths import get_data_dir
 from gofer.utils.run_state import (
@@ -692,13 +693,8 @@ def _read_index_document(path: Path) -> dict[str, Any]:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, default=str, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    os.replace(tmp_path, path)
+    with atomic_binary_output(path) as output:
+        output.write(json.dumps(payload, default=str, indent=2, sort_keys=True).encode("utf-8"))
 
 
 def _read_workflow_index(base: Path) -> dict[str, Any]:
@@ -2289,10 +2285,8 @@ def _sorted_run_log_paths(log_dir: Path, *, reverse: bool) -> list[Path]:
 
 def _write_run_trigger_payload(log_path: Path, payload: dict[str, Any]) -> None:
     try:
-        _run_trigger_path(log_path).write_text(
-            json.dumps(payload, default=str),
-            encoding="utf-8",
-        )
+        with atomic_binary_output(_run_trigger_path(log_path)) as output:
+            output.write(json.dumps(payload, default=str).encode("utf-8"))
     except OSError:
         return
 
@@ -2325,10 +2319,8 @@ def _write_run_node_outputs_payload(
         "nodeOutputsTruncated": node_outputs_truncated,
         "nodeOutputsMaxBytes": limits.max_api_log_response_bytes,
     }
-    _run_node_outputs_path(log_path).write_text(
-        json.dumps(payload, default=str),
-        encoding="utf-8",
-    )
+    with atomic_binary_output(_run_node_outputs_path(log_path)) as output:
+        output.write(json.dumps(payload, default=str).encode("utf-8"))
 
 
 def _read_run_node_outputs_payload(log_path: Path) -> dict[str, Any]:
@@ -2406,13 +2398,20 @@ def _authorize_webhook_trigger(config: WebhookTriggerConfig, token: str | None) 
         raise WorkflowTriggerError(
             f"Webhook trigger '{config.id}' has no authentication configured"
         )
-    if not hmac.compare_digest(token or "", expected_token):
+    if not hmac.compare_digest((token or "").encode("utf-8"), expected_token.encode("utf-8")):
         raise WorkflowTriggerError("Unauthorized webhook trigger request")
 
 
 def _normalize_trigger_headers(headers: dict[str, Any]) -> dict[str, str]:
     normalized: dict[str, str] = {}
-    sensitive_headers = {"authorization", "x_gofer_webhook_token"}
+    sensitive_headers = {
+        "authorization",
+        "proxy_authorization",
+        "cookie",
+        "x_gofer_webhook_token",
+        "x_gofer_ui_token",
+        "x_gofer_desktop_grant_secret",
+    }
     for key, value in headers.items():
         header_key = str(key).strip().lower().replace("-", "_")
         if not header_key or header_key in sensitive_headers:
@@ -2961,10 +2960,9 @@ def _workflow_terminal_event(events: list[Any]) -> dict[str, Any]:
 
 def _write_run_summary_payload(base: Path, workflow_id: str, log_path: Path) -> None:
     try:
-        _run_summary_path(log_path).write_text(
-            json.dumps(_log_run_summary(base, workflow_id, log_path), default=str),
-            encoding="utf-8",
-        )
+        payload = _log_run_summary(base, workflow_id, log_path)
+        with atomic_binary_output(_run_summary_path(log_path)) as output:
+            output.write(json.dumps(payload, default=str).encode("utf-8"))
     except OSError:
         return
     _upsert_run_index(base, workflow_id, log_path)
@@ -3425,6 +3423,8 @@ def workflow_run_log_payload(
                 "startedAt": document.get("started_at"),
                 "status": payload["status"],
                 "logText": payload["logText"],
+                "runEvents": payload["runEvents"],
+                "runNodes": payload["runNodes"],
             }
         return payload
     limits = _workflow_resource_limits(workflow_id, base)
@@ -5104,6 +5104,13 @@ def _rattish_run_graph_snapshot(document: Mapping[str, Any]) -> dict[str, Any] |
 
 
 def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dict[str, Any]:
+    run_events = _rattish_ui_events(document)
+    completed_events = {
+        (event["nodeId"], event["runNumber"]): event
+        for event in run_events
+        if event["type"] == "node_completed"
+    }
+    ui_status = _rattish_ui_run_status(document)
     node_outputs = {
         node_id: {
             "success": True,
@@ -5115,6 +5122,7 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
     run_nodes: dict[str, dict[str, Any]] = {}
     for record in document["runs"]:
         node_id = record["node_id"]
+        completed_event = completed_events.get((node_id, record["run_number"]), {})
         output = record["output"]
         error = record["error"]
         success = record["outcome"] != "failure"
@@ -5131,6 +5139,7 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
             "error": error_message,
         }
         duration_ms = record["duration_ms"]
+        previous_attempts = run_nodes.get(node_id, {}).get("attempts", [])
         run_nodes[node_id] = {
             "nodeId": node_id,
             "status": "error" if not success else "success",
@@ -5145,31 +5154,60 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
             "activationLineageId": record["activation_lineage_id"],
             "activationGroupId": record["activation_group_id"],
             "attempts": [
+                *previous_attempts,
                 {
-                    "attempt": 1,
+                    "attempt": completed_event.get("attempt", 1),
                     "runNumber": record["run_number"],
+                    "fanOutItem": completed_event.get("fanOutItem"),
                     "durationSeconds": duration_ms / 1000,
                     "exitCode": exit_code,
                     "output": output_text,
                     "stdout": stdout,
                     "stderr": stderr,
                     "error": error_message,
-                }
+                },
             ],
             "data": {"message": error_message},
         }
+    active: dict[tuple[str, int], dict[str, Any]] = {}
+    for event in run_events:
+        node_id = event["nodeId"]
+        if node_id == "workflow":
+            continue
+        key = (node_id, event["runNumber"])
+        if event["status"] in {"started", "retried"}:
+            active[key] = event
+        else:
+            active.pop(key, None)
+        if event["status"] == "stopped" and run_nodes.get(node_id, {}).get("status") != "error":
+            run_nodes.setdefault(node_id, {"nodeId": node_id, "attempts": []}).update(
+                status="stopped", finishedAt=event["occurredAt"]
+            )
+    for (node_id, _), event in active.items():
+        run_nodes.setdefault(node_id, {"nodeId": node_id, "attempts": []}).update(
+            status=event["status"]
+            if ui_status == "running"
+            else ("disconnected" if ui_status == "disconnected" else "stopped"),
+            startedAt=event["occurredAt"],
+            finishedAt=None,
+            durationMs=None,
+            durationSeconds=None,
+            runNumber=event["runNumber"],
+            activationLineageId=event["activationLineageId"],
+            activationGroupId=event["activationGroupId"],
+        )
     return {
         "workflowId": document["workflow"]["id"],
         "runId": document["run_id"],
         "success": None
         if document["status"] in {"running", "interrupted"}
         else document["status"] == "passed",
-        "status": _rattish_ui_run_status(document),
+        "status": ui_status,
         "logPath": str(path),
         "logText": json.dumps(document, ensure_ascii=False, indent=2, default=str),
         "nodeOutputs": node_outputs,
         "runNodes": run_nodes,
-        "runEvents": _rattish_ui_events(document),
+        "runEvents": run_events,
         "outputs": document["outputs"],
         "diagnostics": document["diagnostics"],
         "error": document["error"],
@@ -5180,6 +5218,14 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
 
 def _rattish_event_message(event: Mapping[str, Any]) -> str:
     event_type = str(event.get("type") or "event")
+    if event.get("message"):
+        return str(event["message"])
+    if event_type == "node_started":
+        return f"Activation {event.get('run_number')} started."
+    if event_type == "node_retried":
+        return f"Activation {event.get('run_number')} retrying."
+    if event_type == "node_stopped":
+        return f"Activation {event.get('run_number')} stopped."
     if event_type == "node_completed":
         return f"Activation {event.get('run_number')} {event.get('outcome')}."
     if event_type == "workflow_completed":
@@ -5192,18 +5238,32 @@ def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
         (record["node_id"], record["run_number"]): record for record in document.get("runs", [])
     }
     result: list[dict[str, Any]] = []
+    attempts: dict[tuple[str | None, int | None], int] = {}
     for event in document["events"]:
-        record = runs.get((event.get("node_id"), event.get("run_number")))
+        key = (event.get("node_id"), event.get("run_number"))
+        record = runs.get(key)
+        if event.get("attempt") is not None:
+            attempts[key] = event["attempt"]
+        group_id = event.get("activation_group_id") or (
+            record.get("activation_group_id") if record else None
+        )
+        iteration = re.findall(r":iteration:(\d+)", group_id or "")
         result.append(
             {
                 "sequence": event["sequence"],
                 "type": event["type"],
                 "occurredAt": event["at"],
                 "nodeId": event.get("node_id") or "workflow",
-                "attempt": event.get("run_number"),
+                "attempt": attempts.get(key, 1) if event.get("node_id") else None,
+                "runNumber": event.get("run_number"),
+                "fanOutItem": {"index": int(iteration[-1])} if iteration else None,
                 "outcome": event.get("outcome"),
                 "status": (
-                    "completed"
+                    "retried"
+                    if event["type"] == "node_retried"
+                    else "stopped"
+                    if event["type"] == "node_stopped" or event.get("status") == "stopped"
+                    else "completed"
                     if event.get("outcome") in {"success", "allowed_failure"}
                     else "failed"
                     if event.get("outcome") == "failure"
@@ -5214,9 +5274,12 @@ def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
                     else "started"
                 ),
                 "message": _rattish_event_message(event),
-                "activationLineageId": record.get("activation_lineage_id") if record else None,
-                "activationGroupId": record.get("activation_group_id") if record else None,
-                "durationMs": record.get("duration_ms") if record else None,
+                "activationLineageId": event.get("activation_lineage_id")
+                or (record.get("activation_lineage_id") if record else None),
+                "activationGroupId": group_id,
+                "durationMs": record.get("duration_ms")
+                if record and event["type"] == "node_completed"
+                else None,
             }
         )
     return result

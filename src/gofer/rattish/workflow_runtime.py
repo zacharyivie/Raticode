@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +56,9 @@ class WorkflowExecutionResult:
     error: RuntimeErrorInfo | None = None
 
 
+NodeEventCallback = Callable[[dict[str, Any], NodeRunRecord | None], None]
+
+
 @dataclass(frozen=True, slots=True)
 class _Activation:
     group_id: str
@@ -99,6 +102,7 @@ class _WorkflowScheduler:
         subscriptions: Mapping[str, Subscription],
         data_dir: Path,
         notification_adapter: NotificationAdapter | None,
+        on_node_event: NodeEventCallback | None,
     ) -> None:
         self.ir = ir
         self.nodes = {node["id"]: node for node in ir["nodes"]}
@@ -109,6 +113,7 @@ class _WorkflowScheduler:
         self.subscriptions = subscriptions
         self.data_dir = data_dir
         self.notification_adapter = notification_adapter
+        self.on_node_event = on_node_event
         self.agent_run_memory: dict[str, list[dict[str, str]]] = {}
         self.lineage_id = "root"
         self.run_id = uuid.uuid4().hex
@@ -254,11 +259,46 @@ class _WorkflowScheduler:
         node = self.nodes[node_id]
         started_at = datetime.now(UTC).isoformat()
         started_clock = time.monotonic()
-        result: NodeExecutionResult | None = None
+        try:
+            result = await self._run_attempts(
+                node, activation, run_number, node_outputs, node_statuses, node_errors
+            )
+        except anyio.get_cancelled_exc_class():
+            self._emit_node_event("node_stopped", node_id, activation, run_number)
+            raise
+        finished_at = datetime.now(UTC).isoformat()
+        await send.send(
+            _Completion(
+                activation,
+                NodeRunRecord(
+                    node_id,
+                    run_number,
+                    activation.lineage_id,
+                    activation.group_id,
+                    started_at,
+                    finished_at,
+                    round((time.monotonic() - started_clock) * 1000),
+                    result,
+                ),
+            )
+        )
+
+    async def _run_attempts(
+        self,
+        node: Mapping[str, Any],
+        activation: _Activation,
+        run_number: int,
+        node_outputs: Mapping[str, Any],
+        node_statuses: Mapping[str, str],
+        node_errors: Mapping[str, Mapping[str, Any]],
+    ) -> NodeExecutionResult:
         for attempt in range(node["execution"]["retry_count"] + 1):
+            self._emit_node_event(
+                "node_started", node["id"], activation, run_number, attempt=attempt + 1
+            )
             result = await execute_node(
                 self.ir,
-                node_id,
+                node["id"],
                 workflow_inputs=self.workflow_inputs,
                 trigger_events=self.trigger_events,
                 node_outputs=node_outputs,
@@ -273,27 +313,42 @@ class _WorkflowScheduler:
                 run_id=self.run_id,
             )
             if result.outcome == "success" or attempt == node["execution"]["retry_count"]:
-                break
+                return result
+            self._emit_node_event(
+                "node_retried",
+                node["id"],
+                activation,
+                run_number,
+                attempt=attempt + 1,
+                message=result.error.message if result.error else "Node failed; retrying.",
+            )
             delay_ms = node["execution"]["retry_delay_ms"]
             if delay_ms:
                 await anyio.sleep(delay_ms / 1000)
-        assert result is not None
-        finished_at = datetime.now(UTC).isoformat()
-        await send.send(
-            _Completion(
-                activation,
-                NodeRunRecord(
-                    node_id,
-                    run_number,
-                    (activation.lineage_id),
-                    activation.group_id,
-                    started_at,
-                    finished_at,
-                    round((time.monotonic() - started_clock) * 1000),
-                    result,
-                ),
+        raise AssertionError("An activation must execute at least one attempt.")
+
+    def _emit_node_event(
+        self,
+        event_type: str,
+        node_id: str,
+        activation: _Activation,
+        run_number: int,
+        record: NodeRunRecord | None = None,
+        **details: Any,
+    ) -> None:
+        if self.on_node_event is not None:
+            self.on_node_event(
+                {
+                    "type": event_type,
+                    "at": record.finished_at if record else datetime.now(UTC).isoformat(),
+                    "node_id": node_id,
+                    "run_number": run_number,
+                    "activation_lineage_id": activation.lineage_id,
+                    "activation_group_id": activation.group_id,
+                    **details,
+                },
+                record,
             )
-        )
 
     def _process_completion(self, completion: _Completion) -> None:
         record = completion.record
@@ -305,6 +360,15 @@ class _WorkflowScheduler:
         lineage_errors = self.errors_by_lineage.setdefault(lineage_id, {})
         self.running_groups[node_id].discard(completion.activation.group_id)
         self.records.append(record)
+        self._emit_node_event(
+            "node_completed",
+            node_id,
+            completion.activation,
+            record.run_number,
+            record,
+            outcome=result.outcome,
+            message=result.error.message if result.error else "",
+        )
         if result.outcome == "success":
             self.latest_outputs[node_id] = result.output
             self.latest_statuses[node_id] = "success"
@@ -655,6 +719,7 @@ async def execute_workflow(
     data_dir: Path | None = None,
     notification_adapter: NotificationAdapter | None = None,
     run_id: str | None = None,
+    on_node_event: NodeEventCallback | None = None,
 ) -> WorkflowExecutionResult:
     """Execute one validated Rattish IR workflow using routed activation semantics."""
     _require_validated_ir(ir)
@@ -682,6 +747,7 @@ async def execute_workflow(
         subscriptions if subscriptions is not None else default_provider_subscriptions(),
         data_dir or get_data_dir(),
         notification_adapter,
+        on_node_event,
     )
     if run_id is not None:
         scheduler.run_id = run_id

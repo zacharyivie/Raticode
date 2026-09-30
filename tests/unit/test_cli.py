@@ -5,6 +5,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from gofer.cli.main import app
@@ -597,6 +598,92 @@ message = "ok"
     assert "completed" in start_result.output
     assert status_result.exit_code == 0, status_result.output
     assert "completed" in status_result.output
+
+
+def test_runner_cli_preserves_parameters_through_execution(tmp_path: Path) -> None:
+    from gofer.core.runner import RunnerQueueStore
+
+    workflow = tmp_path / "parameterized.toml"
+    workflow.write_text("""
+[workflow]
+id = "parameterized"
+name = "Parameterized"
+
+[workflow.inputs.customer]
+type = "string"
+required = true
+
+[[nodes]]
+id = "start"
+type = "pass"
+message = "{{inputs.customer}}"
+""")
+    queue_result = runner.invoke(
+        app,
+        [
+            "runner",
+            "queue",
+            str(workflow),
+            "--param",
+            "customer=release-test",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    assert queue_result.exit_code == 0, queue_result.output
+
+    start_result = runner.invoke(
+        app,
+        [
+            "runner",
+            "start",
+            "--id",
+            "worker",
+            "--once",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+    assert start_result.exit_code == 0, start_result.output
+    queued = RunnerQueueStore(tmp_path).list_runs()[0]
+    assert queued.status == "completed", queued.message
+    assert "release-test" in Path(queued.run_log_path).read_text()
+
+
+def test_runner_cli_rejects_invalid_parameters_before_enqueue(tmp_path: Path) -> None:
+    from gofer.core.runner import RunnerQueueStore
+
+    workflow = tmp_path / "parameterized.toml"
+    workflow.write_text("""
+[workflow]
+id = "parameterized"
+name = "Parameterized"
+
+[workflow.inputs.count]
+type = "number"
+required = true
+
+[[nodes]]
+id = "start"
+type = "pass"
+message = "ok"
+""")
+    result = runner.invoke(
+        app,
+        [
+            "runner",
+            "queue",
+            str(workflow),
+            "--param",
+            "count=invalid",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "count" in result.output
+    assert RunnerQueueStore(tmp_path).list_runs() == []
 
 
 def test_workflow_validate_uses_data_dir_provider_profiles(tmp_path: Path) -> None:
@@ -2099,7 +2186,8 @@ command = "echo hello"
     assert (data_dir / "import-me.toml").exists()
 
 
-def test_workflow_rm_cleans_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("linked_state", [False, True])
+def test_workflow_rm_cleans_state(tmp_path: Path, linked_state: bool) -> None:
     result = runner.invoke(
         app, ["workflow", "create", "--name", "Clean Me", "--output", str(tmp_path)]
     )
@@ -2114,7 +2202,12 @@ def test_workflow_rm_cleans_state(tmp_path: Path) -> None:
     chat_path.parent.mkdir(parents=True)
     chat_path.write_text("old chat\n")
     stop_path = workflow_stop_path("clean-me", tmp_path)
-    stop_path.parent.mkdir(parents=True)
+    if linked_state:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        stop_path.parent.symlink_to(outside, target_is_directory=True)
+    else:
+        stop_path.parent.mkdir(parents=True)
     stop_path.write_text("stop\n")
 
     result = runner.invoke(
@@ -2126,7 +2219,11 @@ def test_workflow_rm_cleans_state(tmp_path: Path) -> None:
     assert not log_dir.exists()
     assert not memory_dir.exists()
     assert not chat_path.exists()
-    assert not stop_path.exists()
+    if linked_state:
+        assert stop_path.read_text() == "stop\n"
+        assert stop_path.parent.is_symlink()
+    else:
+        assert not stop_path.exists()
 
 
 def test_workflow_logs_commands(tmp_path: Path) -> None:

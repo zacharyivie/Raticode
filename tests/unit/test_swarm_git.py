@@ -1,6 +1,8 @@
 """Managed Git works across worktrees without widening provider sandboxes."""
 
+import shlex
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -52,6 +54,25 @@ def test_local_stage_commit_preserves_user_index_and_disables_hooks(
     assert (root / "code.txt").read_text() == "original\n"
 
 
+def test_managed_status_ignores_executable_filesystem_monitor(assignment, tmp_path):
+    root, workspace = assignment
+    marker = tmp_path / "monitor-ran"
+    monitor = tmp_path / "monitor.py"
+    monitor.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran')\n"
+        "print('token\\0', end='')\n"
+    )
+    command = " ".join(
+        shlex.quote(value.replace("\\", "/")) for value in (sys.executable, str(monitor))
+    )
+    git(root, "config", "core.fsmonitor", command)
+    (Path(workspace["path"]) / "code.txt").write_text("changed\n")
+    result = swarm_git.execute(workspace, None, {"operation": "status"})
+    assert not marker.exists(), "managed status executed the repository filesystem monitor"
+    assert "code.txt" in result["output"]
+
+
 @pytest.mark.parametrize("operation", ["stage", "commit", "push", "create_pr"])
 def test_disabled_permissions_reject_before_launch(assignment, operation):
     _, workspace = assignment
@@ -80,14 +101,21 @@ def test_remote_opt_in_publishes_only_assignment_branch(assignment, tmp_path):
     assert git(remote, "for-each-ref", "--format=%(refname)") == f"refs/heads/{workspace['branch']}"
 
 
-def test_pr_opt_in_uses_explicit_repository_and_literal_body(assignment):
+def test_pr_opt_in_uses_explicit_repository_and_literal_body(assignment, monkeypatch):
     root, workspace = assignment
     git(root, "remote", "add", "origin", "git@github.com:example/project.git")
     real_run = subprocess.run
     calls = []
+    monkeypatch.setenv("GOFER_UI_API_TOKEN", "desktop-api-secret")
+    monkeypatch.setenv("GOFER_DESKTOP_GRANT_SECRET", "desktop-grant-secret")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIexample")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "")
 
     def run(argv, **kwargs):
         if argv[0] == "gh":
+            assert "GOFER_UI_API_TOKEN" not in kwargs["env"]
+            assert "GOFER_DESKTOP_GRANT_SECRET" not in kwargs["env"]
+            assert "LD_LIBRARY_PATH" not in kwargs["env"]
             calls.append(argv)
             return subprocess.CompletedProcess(
                 argv, 0, "https://github.com/example/project/pull/1\n", ""

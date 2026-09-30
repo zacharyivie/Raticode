@@ -11,7 +11,7 @@ from typing import Protocol
 
 import anyio
 
-from gofer.core.network_policy import resolve_http_request_target
+from gofer.core.network_policy import parse_http_request_url, resolve_http_request_target
 
 HTTP_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
 
@@ -93,11 +93,11 @@ class UrllibHttpClient:
             raise ValueError("HTTP timeout must be positive")
         control = control or _RequestControl()
         deadline = time.monotonic() + request.timeout_seconds
-        parsed = urllib.parse.urlsplit(request.url)
         target = resolve_http_request_target(
             request.url,
             allowlist=request.network_allowlist,
         )
+        parsed = urllib.parse.urlsplit(request.url)
         path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         headers = dict(request.headers)
         if parsed.scheme.lower() == "https":
@@ -119,24 +119,28 @@ class UrllibHttpClient:
         timer.daemon = True
         timer.start()
         try:
-            conn.request(
-                request.method.upper(),
-                path,
-                body=request.body,
-                headers=headers,
-            )
+            try:
+                conn.request(
+                    request.method.upper(),
+                    path,
+                    body=request.body,
+                    headers=headers,
+                )
+            except http.client.InvalidURL:
+                # The stdlib quotes invalid paths in these errors.
+                # Paths and headers can contain credentials even without a
+                # declared secret reference, and callers persist error messages.
+                raise http.client.InvalidURL("Invalid HTTP request URL path") from None
+            except ValueError:
+                # Also covers invalid methods, header names/values and encoding.
+                raise ValueError("Invalid HTTP request method, headers or encoding") from None
             control.transport = getattr(conn, "sock", None)
             response = conn.getresponse()
             response_headers = dict(response.headers.items())
-            declared = next(
-                (
-                    value
-                    for key, value in response_headers.items()
-                    if key.lower() == "content-length"
-                ),
-                None,
-            )
-            if declared is not None and int(declared) > HTTP_RESPONSE_MAX_BYTES:
+            # The parser accounts for HEAD, bodyless statuses and chunked framing.
+            # Content-Length alone may describe a representation we will not read.
+            remaining = response.length
+            if remaining is not None and remaining > HTTP_RESPONSE_MAX_BYTES:
                 raise ValueError("HTTP response exceeds the 16 MiB response limit")
             body = bytearray()
             while True:
@@ -144,6 +148,10 @@ class UrllibHttpClient:
                     raise TimeoutError("HTTP request deadline exceeded or request cancelled")
                 chunk = response.read1(min(64 * 1024, HTTP_RESPONSE_MAX_BYTES + 1 - len(body)))
                 if not chunk:
+                    # read1 deliberately tolerates EOF before Content-Length,
+                    # unlike read(). Do not pass that partial body to the workflow.
+                    if response.length:
+                        raise http.client.IncompleteRead(bytes(body), response.length)
                     break
                 body.extend(chunk)
                 if len(body) > HTTP_RESPONSE_MAX_BYTES:
@@ -204,10 +212,28 @@ class _PolicyHttpsConnection(http.client.HTTPSConnection):
         self.sock.do_handshake()
 
 
+def read_response_bytes(response: http.client.HTTPResponse, max_bytes: int) -> bytes:
+    """Read at most limit + 1 bytes, rejecting an incomplete HTTP body.
+
+    Callers retain their own size-limit errors when the extra byte is present.
+    Bounded HTTPResponse.read() tolerates early EOF with Content-Length, so
+    check the parser's remaining length before accepting an in-limit body.
+    """
+    try:
+        data = response.read(max_bytes + 1)
+    except http.client.IncompleteRead:
+        # Keep framing errors recoverable by UI/MCP callers without exposing
+        # partial response contents, which may contain private account data.
+        raise ValueError("Incomplete HTTP response") from None
+    if len(data) <= max_bytes and getattr(response, "length", None):
+        raise ValueError("Incomplete HTTP response")
+    return data
+
+
 def append_query_params(url: str, params: dict[str, str]) -> str:
     if not params:
         return url
-    parsed = urllib.parse.urlsplit(url)
+    parsed = parse_http_request_url(url)
     query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     query_pairs.extend((key, value) for key, value in params.items())
     return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query_pairs)))

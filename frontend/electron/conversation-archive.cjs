@@ -5,7 +5,39 @@ const attachmentHashes = new Map();
 const archiveIndexes = new Map();
 const completedArchives = new Map();
 const MAX_CACHED_ATTACHMENTS = 1024;
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
+
+function readAttachment(source, expected) {
+  const fd = fs.openSync(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  try {
+    const opened = fs.fstatSync(fd);
+    const verify = () => {
+      const entry = fs.lstatSync(source);
+      if (!opened.isFile() || opened.dev !== expected.dev || opened.ino !== expected.ino
+        || entry.isSymbolicLink() || entry.dev !== opened.dev || entry.ino !== opened.ino
+        || fs.realpathSync(source) !== source
+        || (process.platform === "linux" && fs.realpathSync(`/proc/self/fd/${fd}`) !== source)) {
+        throw new Error("Attachment changed while archiving.");
+      }
+    };
+    verify();
+    const tooLarge = () => new Error("Archive attachment exceeds 20 MB.");
+    if (opened.size > MAX_ATTACHMENT_BYTES) throw tooLarge();
+    const chunks = [];
+    let total = 0;
+    while (total <= MAX_ATTACHMENT_BYTES) {
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_ATTACHMENT_BYTES + 1 - total));
+      const count = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (!count) break;
+      total += count;
+      if (total > MAX_ATTACHMENT_BYTES) throw tooLarge();
+      chunks.push(buffer.subarray(0, count));
+    }
+    verify();
+    return Buffer.concat(chunks, total);
+  } finally { fs.closeSync(fd); }
+}
 
 function assertNoSymlink(file) {
   try { if (fs.lstatSync(file).isSymbolicLink()) throw new Error("Archive files must not be symbolic links."); }
@@ -57,10 +89,17 @@ function archiveConversation(root, thread, messages, { dataDir = "", deleted = f
   const snapshotPath = safeArchivePath(root, path.join("threads", `${id}.json`));
   let previous = readJson(snapshotPath, { messages: [] });
   const recovering = fs.existsSync(journal) && fs.statSync(journal).size !== previous.journalBytes;
+  let recoveredBytes;
+  let recoverySize;
   if (recovering) {
     const restored = new Map();
     previous = { messages: [], sequence: 0 };
-    const lines = fs.readFileSync(journal, "utf8").split("\n");
+    const bytes = fs.readFileSync(journal);
+    recoverySize = bytes.length;
+    // Every committed record ends in a newline. A crash can leave part of the
+    // next record, including a partial UTF-8 character. Only replay whole lines.
+    recoveredBytes = bytes.lastIndexOf(10) + 1;
+    const lines = bytes.subarray(0, recoveredBytes).toString("utf8").split("\n");
     for (const line of lines) {
       if (!line) continue;
       const record = JSON.parse(line);
@@ -91,13 +130,7 @@ function archiveConversation(root, thread, messages, { dataDir = "", deleted = f
       const cached = attachmentHashes.get(key);
       let relative = cached?.fingerprint === fingerprint ? cached.relative : "";
       if (!relative || !fs.existsSync(safeArchivePath(root, relative))) {
-        const fd = fs.openSync(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-        let bytes;
-        try {
-          const opened = fs.fstatSync(fd);
-          if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error("Attachment changed while archiving.");
-          bytes = fs.readFileSync(fd);
-        } finally { fs.closeSync(fd); }
+        const bytes = readAttachment(source, stat);
         relative = path.join("attachments", hash(bytes) + path.extname(source));
         const target = safeArchivePath(root, relative);
         fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -146,7 +179,11 @@ function archiveConversation(root, thread, messages, { dataDir = "", deleted = f
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.nlink !== 1) throw new Error("Archive journal must be an ordinary unlinked file.");
-    if (encoded) { fs.writeFileSync(fd, encoded); fs.fsyncSync(fd); }
+    if (recovering && stat.size !== recoverySize) throw new Error("Archive journal changed during recovery. Retry the action.");
+    const repairTail = recovering && recoveredBytes < recoverySize;
+    if (repairTail) fs.ftruncateSync(fd, recoveredBytes);
+    if (encoded) fs.writeFileSync(fd, encoded);
+    if (encoded || repairTail) fs.fsyncSync(fd);
   } finally { fs.closeSync(fd); }
   const journalBytes = fs.statSync(journal).size;
   atomicJson(snapshotPath, { version: 1, thread, messages: archivedMessages, deleted, sequence, updatedAt: now, journalBytes });

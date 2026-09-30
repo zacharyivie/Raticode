@@ -32,6 +32,7 @@ window.fetch = async (url, options) => {
 };
 const parent = {id:"parent",title:"Debug provider discovery",projectRoot:"/repo",projectName:"Raticode",provider:"codex",model:"cli-default",resources:{shell:true,web:false,skills:[],mcpServers:[]},permissionsByProvider:{codex:"default"},updatedAt:new Date().toISOString()};
 const history = Array.from({length:120},(_,i)=>({id:"m"+i,role:i%2?"assistant":"user",body:"History message "+i}));
+history[99] = {id:"m99",role:"assistant",kind:"thought",body:"Source-only fork thought",groupId:"trace",trace:{id:"read",kind:"tool",title:"Read",status:"complete"}};
 const repository = conversationRepository();
 await repository.save(parent.id,history);
 persistChatThreads([parent]);
@@ -76,6 +77,7 @@ async function main() {
   await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.includes('Debug provider discovery')).click()");
   await wait("document.querySelector('[data-message-id=\"m100\"]')");
   assert.equal(await evaluate("!!document.querySelector('[data-message-id=\"m0\"]')"),false);
+  assert.equal(await evaluate("document.querySelector('[data-message-id^=\"thought-group-\"]').querySelectorAll('[aria-label=\"Fork thread from here\"]').length"),0);
   await evaluate("document.querySelector('[data-message-id=\"m100\"]').parentElement.querySelector('[aria-label=\"Fork thread from here\"]').click()");
   await wait("window.loadThreads().some(thread=>thread.forkedFromMessageId === 'm100') && document.body.innerText.includes('Thread forked.')");
   const copied = await evaluate("(async()=>{const thread=window.loadThreads().find(t=>t.forkedFromMessageId==='m100');return {thread,messages:await window.repository.all(thread.id),original:await window.repository.all('parent')};})()");
@@ -83,14 +85,25 @@ async function main() {
   assert.equal(copied.messages[0].body,"History message 0");
   assert.equal(copied.messages.at(-1).id,"m100");
   fs.writeFileSync(path.join(artifact,"forked-history.png"),(await win.webContents.capturePage()).toPNG());
-  await draft("Try another approach"); enter([]);
   await wait("window.requests.length === 2");
   const sent = await evaluate("window.requests[1]");
   assert.equal(sent.conversationId,copied.thread.id);
-  assert.equal(sent.messages.length,102);
+  assert.equal(sent.messages.length,101);
+  assert.equal(sent.messages.at(-1).body,"History message 100");
+  assert.equal(sent.messages.filter(message=>message.body === "History message 100").length,1);
   assert.ok(!sent.messages.some(message=>message.body==='History message 101'));
+  await wait("document.body.innerText.includes('Mock reply') && !document.querySelector('[aria-label=\"Stop Rem\"]')");
+  await draft("Try another approach"); enter([]);
+  await wait("window.requests.length === 3");
+  assert.equal(await evaluate("window.requests[2].messages.at(-1).body"),"Try another approach");
+  await evaluate("document.querySelector('button[aria-label=\"Search threads\"]').click()");
+  await evaluate(`(() => { const input=document.querySelector('input[aria-label="Search all thread history"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,"Source-only fork thought"); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+  await wait("document.querySelector('[aria-label=\"Thread search results\"] button')");
+  await evaluate("document.querySelector('[aria-label=\"Thread search results\"] button').click()");
+  await wait("document.querySelector('[data-thread-search-match]')?.textContent.includes('Source-only fork thought')");
+  assert.equal(await evaluate("document.querySelector('[data-thread-search-match]').querySelectorAll('[aria-label=\"Fork thread from here\"]').length"),0);
   assert.deepEqual(errors,[]);
-  console.log("Rem browser checks passed: background launch, running state, cleared input, unloaded history fork, independent continuation.");
+  console.log("Rem browser checks passed: background launch, running state, cleared input, unloaded history fork, automatic user replay, independent continuation, thought search without fork actions.");
 }
 main().then(()=>finish()).catch(error=>finish(error));
 async function finish(error) { clearTimeout(timer); win?.destroy(); await vite?.close(); if(error) console.error(error); app.exit(error?1:0); }

@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import lzma
+import os
 import shutil
 import stat
 import tempfile
+import time
 import zipfile
+import zlib
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -20,7 +26,7 @@ from gofer.rattish.workspaces import (
     find_registered_workflow,
     install_registered_workflow,
 )
-from gofer.utils.atomic_output import atomic_binary_output
+from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
 from gofer.utils.brand_compat import (
     LEGACY_BUNDLE_FORMATS,
     LEGACY_WORKFLOW_IGNORES,
@@ -29,6 +35,15 @@ from gofer.utils.brand_compat import (
 BUNDLE_EXTENSION = ".raticode"
 BUNDLE_MANIFEST = "raticode.bundle.json"
 BUNDLE_VERSION = 1
+_WINDOWS_DEVICES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CONIN$",
+    "CONOUT$",
+    *(f"{prefix}{number}" for prefix in ("COM", "LPT") for number in "123456789¹²³"),
+}
 
 
 class RattishBundleError(ValueError):
@@ -77,6 +92,7 @@ def export_rattish_bundle(
         if path.is_symlink():
             raise RattishBundleError(f"Workflow bundle cannot include symbolic link: {relative}")
         if path.is_file():
+            _validate_bundle_path(relative)
             files.append(
                 (path, WORKFLOW_IGNORE if relative in LEGACY_WORKFLOW_IGNORES else relative)
             )
@@ -85,6 +101,7 @@ def export_rattish_bundle(
         raise RattishBundleError(f"{WORKFLOW_IGNORE} excludes required {WORKFLOW_ENTRYPOINT}")
     if included.intersection({BUNDLE_MANIFEST, *LEGACY_BUNDLE_FORMATS}):
         raise RattishBundleError(f"Workflow contains reserved bundle file {BUNDLE_MANIFEST}")
+    _validate_bundle_path_collisions([BUNDLE_MANIFEST, *included])
 
     preview = RattishBundlePreview(workflow.workflow_id, workflow.name, tuple(sorted(included)))
     manifest = {
@@ -99,7 +116,21 @@ def export_rattish_bundle(
             with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr(BUNDLE_MANIFEST, json.dumps(manifest, indent=2) + "\n")
                 for source, relative in files:
-                    archive.write(source, relative)
+                    with open_binary_input(source) as input_file:
+                        metadata = os.fstat(input_file.fileno())
+                        # ZIP's DOS timestamp cannot represent dates outside this
+                        # range. Clamp archive metadata without touching the source.
+                        timestamp = time.localtime(metadata.st_mtime)[:6]
+                        if timestamp[0] < 1980:
+                            timestamp = (1980, 1, 1, 0, 0, 0)
+                        elif timestamp[0] > 2107:
+                            timestamp = (2107, 12, 31, 23, 59, 58)
+                        info = zipfile.ZipInfo(relative, timestamp)
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        info.external_attr = metadata.st_mode << 16
+                        info.file_size = metadata.st_size
+                        with archive.open(info, "w") as target:
+                            shutil.copyfileobj(input_file, target, 1024 * 1024)
     except (OSError, zipfile.BadZipFile) as exc:
         raise RattishBundleError(f"Could not export workflow bundle: {exc}") from exc
     return preview
@@ -111,15 +142,19 @@ def preview_rattish_bundle(
     limits: ResourceLimits = DEFAULT_RESOURCE_LIMITS,
 ) -> RattishBundlePreview:
     with _open_validated_bundle(bundle_path, limits) as archive:
-        manifest = _read_manifest(archive, limits)
-        manifest_name = _manifest_name(archive)
-        names = tuple(sorted(name for name in archive.namelist() if name != manifest_name))
-        declared = tuple(sorted(manifest["files"]))
-        if names != declared:
-            raise RattishBundleError("Bundle file list does not match its manifest")
-        if WORKFLOW_ENTRYPOINT not in names and "workflow.rad" not in names:
-            raise RattishBundleError(f"Bundle is missing required {WORKFLOW_ENTRYPOINT}")
-        return RattishBundlePreview(manifest["workflowId"], manifest["workflowName"], names)
+        return _preview_archive(archive, limits)
+
+
+def _preview_archive(archive: zipfile.ZipFile, limits: ResourceLimits) -> RattishBundlePreview:
+    manifest = _read_manifest(archive, limits)
+    manifest_name = _manifest_name(archive)
+    names = tuple(sorted(name for name in archive.namelist() if name != manifest_name))
+    declared = tuple(sorted(manifest["files"]))
+    if names != declared:
+        raise RattishBundleError("Bundle file list does not match its manifest")
+    if WORKFLOW_ENTRYPOINT not in names and "workflow.rad" not in names:
+        raise RattishBundleError(f"Bundle is missing required {WORKFLOW_ENTRYPOINT}")
+    return RattishBundlePreview(manifest["workflowId"], manifest["workflowName"], names)
 
 
 def import_rattish_bundle(
@@ -129,17 +164,32 @@ def import_rattish_bundle(
     registry_dir: Path,
     limits: ResourceLimits = DEFAULT_RESOURCE_LIMITS,
 ) -> RegisteredWorkflow:
-    preview = preview_rattish_bundle(bundle_path, limits=limits)
+    with _open_validated_bundle(bundle_path, limits) as archive:
+        preview = _preview_archive(archive, limits)
+        return _install_archive(archive, preview, project_root, registry_dir)
+
+
+def _install_archive(
+    archive: zipfile.ZipFile,
+    preview: RattishBundlePreview,
+    project_root: Path,
+    registry_dir: Path,
+) -> RegisteredWorkflow:
     staging_parent = Path(tempfile.mkdtemp(prefix="raticode-import-"))
     staged_root = staging_parent / "workflow"
     staged_root.mkdir()
     try:
-        with _open_validated_bundle(bundle_path, limits) as archive:
-            for name in preview.files:
-                destination = staged_root / PurePosixPath(name)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(name) as source, destination.open("wb") as target:
-                    shutil.copyfileobj(source, target)
+        for name in preview.files:
+            info = archive.getinfo(name)
+            destination = staged_root / PurePosixPath(name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(name) as source, destination.open("wb") as target:
+                shutil.copyfileobj(source, target)
+                # Keep scripts executable, but never restore setuid/setgid
+                # or sticky bits supplied by an archive.
+                mode = info.external_attr >> 16
+                if os.name != "nt" and info.create_system == 3 and stat.S_ISREG(mode):
+                    os.fchmod(target.fileno(), mode & 0o777)
         return install_registered_workflow(
             project_root,
             staged_root,
@@ -214,52 +264,97 @@ def _match_path_parts(path: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
     )
 
 
+def _validate_bundle_path(name: str) -> None:
+    """Require one portable relative spelling before joining a native path."""
+    safe = PurePosixPath(name)
+    if (
+        not name
+        or not safe.parts
+        or safe.is_absolute()
+        or ".." in safe.parts
+        or safe.as_posix() != name
+        or any(character in name for character in '\\:<>"|?*')
+        or any(ord(character) < 32 for character in name)
+        or any(
+            part.endswith((".", " "))
+            or part.partition(".")[0].rstrip(" ").upper() in _WINDOWS_DEVICES
+            for part in safe.parts
+        )
+    ):
+        raise RattishBundleError(f"Unsafe workflow bundle path: {name}")
+
+
+@contextmanager
 def _open_validated_bundle(
     bundle_path: Path,
     limits: ResourceLimits,
-) -> zipfile.ZipFile:
+) -> Iterator[zipfile.ZipFile]:
     path = bundle_path.expanduser().resolve()
     try:
-        if path.stat().st_size > limits.max_bundle_compressed_bytes:
-            raise RattishBundleError("Workflow bundle exceeds the compressed size limit")
-        archive = zipfile.ZipFile(path)
-    except (OSError, zipfile.BadZipFile) as exc:
+        with open_binary_input(path) as source:
+            if os.fstat(source.fileno()).st_size > limits.max_bundle_compressed_bytes:
+                raise RattishBundleError("Workflow bundle exceeds the compressed size limit")
+            with zipfile.ZipFile(source) as archive:
+                _validate_archive(archive, limits)
+                yield archive
+    except (OSError, zipfile.BadZipFile, EOFError, zlib.error, lzma.LZMAError) as exc:
         raise RattishBundleError(f"Invalid .raticode bundle: {exc}") from exc
+
+
+def _validate_archive(archive: zipfile.ZipFile, limits: ResourceLimits) -> None:
     infos = archive.infolist()
-    try:
-        if len(infos) > limits.max_bundle_entries:
-            raise RattishBundleError("Workflow bundle contains too many files")
-        names: set[str] = set()
-        total = 0
-        for info in infos:
-            name = info.filename
-            safe = PurePosixPath(name)
-            if (
-                not name
-                or name.endswith("/")
-                or safe.is_absolute()
-                or ".." in safe.parts
-                or "\\" in name
-                or name in names
-            ):
-                raise RattishBundleError(f"Unsafe workflow bundle path: {name}")
-            if stat.S_ISLNK(info.external_attr >> 16):
-                raise RattishBundleError(f"Workflow bundle contains symbolic link: {name}")
-            if info.file_size > limits.max_bundle_entry_bytes:
-                raise RattishBundleError(f"Workflow bundle file exceeds size limit: {name}")
-            total += info.file_size
-            if total > limits.max_bundle_total_uncompressed_bytes:
-                raise RattishBundleError("Workflow bundle exceeds the expanded size limit")
-            if (
-                info.compress_size
-                and info.file_size / info.compress_size > limits.max_bundle_compression_ratio
-            ):
-                raise RattishBundleError(f"Workflow bundle compression ratio is unsafe: {name}")
-            names.add(name)
-        return archive
-    except Exception:
-        archive.close()
-        raise
+    if len(infos) > limits.max_bundle_entries:
+        raise RattishBundleError("Workflow bundle contains too many files")
+    _validate_bundle_path_collisions(info.filename for info in infos)
+    names: set[str] = set()
+    total = 0
+    for info in infos:
+        name = info.filename
+        _validate_bundle_path(name)
+        if info.orig_filename != name or name in names:
+            raise RattishBundleError(f"Unsafe workflow bundle path: {name}")
+        if stat.S_ISLNK(info.external_attr >> 16):
+            raise RattishBundleError(f"Workflow bundle contains symbolic link: {name}")
+        if info.flag_bits & (0x01 | 0x40):
+            raise RattishBundleError(f"Workflow bundle contains encrypted file: {name}")
+        if info.flag_bits & 0x20:
+            raise RattishBundleError(f"Workflow bundle contains unsupported patched file: {name}")
+        if info.compress_type not in {
+            zipfile.ZIP_STORED,
+            zipfile.ZIP_DEFLATED,
+        }:
+            # ZipExtFile's BZIP2/LZMA paths decompress without an output limit,
+            # so forged size headers can bypass the expanded-size checks.
+            raise RattishBundleError(f"Workflow bundle uses unsupported compression: {name}")
+        if info.file_size > limits.max_bundle_entry_bytes:
+            raise RattishBundleError(f"Workflow bundle file exceeds size limit: {name}")
+        total += info.file_size
+        if total > limits.max_bundle_total_uncompressed_bytes:
+            raise RattishBundleError("Workflow bundle exceeds the expanded size limit")
+        if (
+            info.compress_size
+            and info.file_size / info.compress_size > limits.max_bundle_compression_ratio
+        ):
+            raise RattishBundleError(f"Workflow bundle compression ratio is unsafe: {name}")
+        names.add(name)
+
+
+def _validate_bundle_path_collisions(names: Iterable[str]) -> None:
+    """Keep files and implied directories distinct on case-insensitive filesystems."""
+    spellings: dict[str, str] = {}
+    files: set[str] = set()
+    directories: set[str] = set()
+    for name in names:
+        _validate_bundle_path(name)
+        parts = PurePosixPath(name).parts
+        for length in range(1, len(parts) + 1):
+            spelling = "/".join(parts[:length])
+            key = spelling.casefold()
+            previous = spellings.setdefault(key, spelling)
+            is_file = length == len(parts)
+            if previous != spelling or key in files or (is_file and key in directories):
+                raise RattishBundleError(f"Colliding workflow bundle paths: {previous}, {name}")
+            (files if is_file else directories).add(key)
 
 
 def _manifest_name(archive: zipfile.ZipFile) -> str:
@@ -275,9 +370,19 @@ def _read_manifest(archive: zipfile.ZipFile, limits: ResourceLimits) -> dict[str
         info = archive.getinfo(manifest_name)
         if info.file_size > limits.max_bundle_metadata_bytes:
             raise RattishBundleError("Workflow bundle manifest exceeds the size limit")
-        manifest = json.loads(archive.read(info).decode("utf-8"))
-    except (KeyError, UnicodeError, json.JSONDecodeError) as exc:
+        with archive.open(info) as source:
+            manifest = json.loads(source.read(info.file_size + 1).decode("utf-8"))
+    except (KeyError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise RattishBundleError("Workflow bundle has no valid manifest") from exc
+    pending: list[tuple[Any, int]] = [(manifest, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > 64:
+            raise RattishBundleError("Workflow bundle manifest nesting is too deep")
+        if isinstance(value, dict):
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value)
     if (
         not isinstance(manifest, dict)
         or manifest.get("format") != (LEGACY_BUNDLE_FORMATS.get(manifest_name, "raticode-workflow"))

@@ -3343,18 +3343,17 @@ function formatWorkflowRunLog(result) {
 function getNodeStatuses(nodes, runResult, logText, runNodes = {}, runEvents = []) {
   const statuses = {};
 
-  for (const [nodeId, nodeRun] of Object.entries(runNodes ?? {})) {
-    const status = normalizeRunStatus(nodeRun?.status);
-    if (status) {
-      statuses[nodeId] = status;
-    }
-  }
-
   for (const event of runEvents ?? []) {
     const status = normalizeRunStatus(event?.status);
     if (event?.nodeId && event.nodeId !== "workflow" && status) {
       statuses[event.nodeId] = status;
     }
+  }
+
+  // The run summary accounts for concurrent activations of the same node.
+  for (const [nodeId, nodeRun] of Object.entries(runNodes ?? {})) {
+    const status = normalizeRunStatus(nodeRun?.status);
+    if (status) statuses[nodeId] = status === "success" && nodeRun?.data?.reused ? "reused" : status;
   }
 
   if (runResult?.nodeOutputs) {
@@ -3380,6 +3379,7 @@ function getNodeStatuses(nodes, runResult, logText, runNodes = {}, runEvents = [
 }
 
 function normalizeRunStatus(status) {
+  if (["running", "success", "error", "disconnected"].includes(status)) return status;
   if (["queued", "started", "retried"].includes(status)) return status;
   if (status === "completed") return "success";
   if (status === "failed") return "error";
@@ -4875,7 +4875,7 @@ function NodeStatusBadge({ status }) {
         title={status}
       >
         <Loader2 size={10} className="animate-spin text-blue-600 dark:text-sky-300" />
-        {status === "running" ? "run" : status}
+        {status === "retried" ? "retrying" : "running"}
       </span>
     );
   }
@@ -4897,6 +4897,7 @@ function NodeStatusBadge({ status }) {
     stopped: "border-amber-200 bg-amber-50 text-amber-700",
     skipped: "border-slate-200 bg-slate-50 text-slate-500",
     reused: "border-teal-200 bg-teal-50 text-teal-700",
+    disconnected: "border-slate-200 bg-slate-50 text-slate-500",
   }[status];
 
   return (

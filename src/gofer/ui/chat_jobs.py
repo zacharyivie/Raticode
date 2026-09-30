@@ -47,8 +47,8 @@ class ChatJobs:
 
             def emit(event: dict[str, Any]) -> None:
                 nonlocal sequence
-                sequence += 1
                 with self._condition:
+                    sequence += 1
                     handle.write(json.dumps({**event, "sequence": sequence}) + "\n")
                     handle.flush()
                     self._condition.notify_all()
@@ -58,12 +58,33 @@ class ChatJobs:
             except Exception as exc:  # noqa: BLE001
                 emit({"type": "error", "error": str(exc)})
             finally:
-                handle.close()
-                with self._condition:
-                    self._active.discard(key)
-                    self._condition.notify_all()
+                try:
+                    handle.close()
+                finally:
+                    with self._condition:
+                        self._active.discard(key)
+                        self._condition.notify_all()
 
-        threading.Thread(target=worker, name=f"rem-{turn_id}", daemon=True).start()
+        try:
+            threading.Thread(target=worker, name=f"rem-{turn_id}", daemon=True).start()
+        except Exception as exc:
+            # A failed launch must release the conversation and capacity, and
+            # leave a terminal receipt for clients that reconnect to this turn.
+            with self._condition:
+                try:
+                    handle.write(
+                        json.dumps(
+                            {"type": "error", "error": "Could not start Rem turn", "sequence": 1}
+                        )
+                        + "\n"
+                    )
+                finally:
+                    try:
+                        handle.close()
+                    finally:
+                        self._active.discard(key)
+                        self._condition.notify_all()
+            raise ValueError("Could not start Rem turn") from exc
 
     def events(
         self, conversation_id: str, turn_id: str, after: int = 0
@@ -72,7 +93,9 @@ class ChatJobs:
         if after < 0:
             raise ValueError("after must be nonnegative")
         # Open before returning the iterator so missing turns fail before HTTP headers.
-        handle = path.open(encoding="utf-8")
+        # Read records as bytes so an interrupted UTF-8 write cannot prevent
+        # replay of earlier, fully committed records.
+        handle = path.open("rb")
 
         def follow() -> Generator[dict[str, Any], None, None]:
             terminal = False
@@ -85,6 +108,9 @@ class ChatJobs:
                                 break
                             self._condition.wait(timeout=1)
                             continue
+                        if not line.endswith(b"\n"):
+                            terminal = False
+                            break
                     event = json.loads(line)
                     terminal = event.get("type") in {"final", "error", "stopped"}
                     if event["sequence"] > after:
@@ -112,8 +138,8 @@ class ChatJobs:
         """
         try:
             with self._condition:
-                with self._path(conversation_id, turn_id).open(encoding="utf-8") as handle:
-                    return [json.loads(line) for line in handle if line.endswith("\n")]
+                with self._path(conversation_id, turn_id).open("rb") as handle:
+                    return [json.loads(line) for line in handle if line.endswith(b"\n")]
         except FileNotFoundError:
             return []
 

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import re
+import shutil
+import stat
+import time
 import tomllib
 import urllib.parse
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
@@ -14,9 +19,14 @@ from typing import Any, cast
 import tomli_w
 
 from gofer.core.operations import SubflowOperation
+from gofer.core.references import parse_exact_reference
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
 from gofer.core.workflow import AgenticWorkflow, WebhookTriggerConfig, validate_workflow_id
-from gofer.utils.atomic_output import atomic_binary_output
+from gofer.utils.atomic_output import (
+    atomic_binary_output,
+    open_binary_input,
+    scandir_without_links,
+)
 
 BUNDLE_FORMAT_VERSION = 1
 MANIFEST_PATH = "manifest.json"
@@ -27,10 +37,22 @@ SECRET_TOKEN_PATTERN = re.compile(
     r"\{\{\s*secret\.([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}|secret:([A-Za-z_][A-Za-z0-9_.-]*)"
 )
 SENSITIVE_FIELD_NAMES = {
+    "access-key",
+    "access_key",
+    "apikey",
+    "auth",
     "authorization",
+    "credential",
+    "credentials",
     "cookie",
+    "set-cookie",
+    "proxy-authorization",
     "x-api-key",
+    "x_api_key",
     "api-key",
+    "api_key",
+    "passwd",
+    "private_key",
     "token",
     "password",
     "secret",
@@ -93,7 +115,36 @@ class BundleManifest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BundleManifest:
-        workflow = data.get("workflow") or {}
+        if not isinstance(data, dict) or not isinstance(data.get("workflow", {}), dict):
+            raise BundleError("Bundle manifest and workflow metadata must be objects")
+        pending: list[tuple[Any, int]] = [(data, 0)]
+        while pending:
+            value, depth = pending.pop()
+            if depth > 64:
+                raise BundleError("Bundle manifest nesting is too deep")
+            if isinstance(value, dict):
+                pending.extend((item, depth + 1) for item in value.values())
+            elif isinstance(value, list):
+                pending.extend((item, depth + 1) for item in value)
+        if type(data.get("formatVersion", 0)) is not int:
+            raise BundleError("Bundle manifest formatVersion must be an integer")
+        for key in (
+            "includedPaths",
+            "requiredSecrets",
+            "providerAssumptions",
+            "triggers",
+            "externalRequirements",
+        ):
+            items = data.get(key, [])
+            if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+                raise BundleError(f"Bundle manifest {key} must be a list of objects")
+        for item in data.get("includedPaths", []):
+            if any(
+                not isinstance(item.get(key), str) or not item[key]
+                for key in ("path", "archivePath")
+            ):
+                raise BundleError("Bundle manifest includedPaths entries need path and archivePath")
+        workflow = data.get("workflow", {})
         return cls(
             format_version=int(data.get("formatVersion", 0)),
             workflow_id=str(workflow.get("id") or ""),
@@ -209,18 +260,56 @@ def export_workflow_bundle(
             archive.writestr(MANIFEST_PATH, json.dumps(manifest.to_dict(), indent=2) + "\n")
             archive.writestr(WORKFLOW_PATH, tomli_w.dumps(sanitized))
             for item in included:
-                if item.source.is_dir():
-                    for file_path in sorted(
-                        path for path in item.source.rglob("*") if path.is_file()
-                    ):
+                if item.kind == "subflow":
+                    child = _sanitized_workflow_data(_read_workflow_toml(item.source))
+                    archive.writestr(item.archive_path, tomli_w.dumps(child))
+                elif item.source.is_dir():
+                    for file_path in _bundle_asset_paths(item.source):
                         rel = file_path.relative_to(item.source).as_posix()
-                        archive.writestr(
+                        _write_bundle_asset(
+                            archive,
+                            file_path,
                             _safe_archive_join(item.archive_path, rel),
-                            file_path.read_bytes(),
                         )
                 else:
-                    archive.write(item.source, item.archive_path)
+                    _write_bundle_asset(archive, item.source, item.archive_path)
     return manifest
+
+
+def _bundle_asset_paths(source: Path) -> Iterator[Path]:
+    """Enumerate ordinary assets without traversing links or special files."""
+    try:
+        metadata = source.lstat()
+        if stat.S_ISREG(metadata.st_mode):
+            yield source
+        elif stat.S_ISDIR(metadata.st_mode):
+            with scandir_without_links(source) as entries:
+                names = sorted(entry.name for entry in entries)
+            for name in names:
+                yield from _bundle_asset_paths(source / name)
+        else:
+            raise BundleError(f"Bundle asset must be an ordinary file or directory: {source}")
+    except OSError as exc:
+        raise BundleError(f"Could not read bundle asset: {source}") from exc
+
+
+def _write_bundle_asset(archive: zipfile.ZipFile, source: Path, archive_path: str) -> None:
+    try:
+        with open_binary_input(source) as input_file:
+            metadata = os.fstat(input_file.fileno())
+            timestamp = time.localtime(metadata.st_mtime)[:6]
+            if timestamp[0] < 1980:
+                timestamp = (1980, 1, 1, 0, 0, 0)
+            elif timestamp[0] > 2107:
+                timestamp = (2107, 12, 31, 23, 59, 58)
+            info = zipfile.ZipInfo(archive_path, timestamp)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = metadata.st_mode << 16
+            info.file_size = metadata.st_size
+            with archive.open(info, "w") as target:
+                shutil.copyfileobj(input_file, target, 1024 * 1024)
+    except OSError as exc:
+        raise BundleError(f"Could not read bundle asset: {source}") from exc
 
 
 def preview_workflow_bundle(
@@ -277,8 +366,8 @@ def import_workflow_bundle(
                         target_rel,
                         nested.as_posix() if nested is not None else None,
                     )
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    payload = archive.read(name)
+                    with archive.open(name) as source:
+                        payload = source.read(validated.info_by_name[name].file_size + 1)
                     destination_rel = (
                         _safe_archive_join(
                             target_rel,
@@ -297,11 +386,23 @@ def import_workflow_bundle(
                             rewritten_components,
                             destination_rel,
                         )
-                    destination.write_bytes(payload)
-        plan.workflow_path.parent.mkdir(parents=True, exist_ok=True)
-        plan.workflow_path.write_bytes(tomli_w.dumps(workflow_data).encode())
+                    _write_imported_file(destination, payload)
+        _write_imported_file(plan.workflow_path, tomli_w.dumps(workflow_data).encode())
     AgenticWorkflow.from_file(plan.workflow_path).validate(plan.workflow_path, base)
     return plan
+
+
+def _write_imported_file(destination: Path, payload: bytes) -> None:
+    try:
+        mode = destination.lstat().st_mode
+    except FileNotFoundError:
+        mode = 0
+    with atomic_binary_output(destination) as output:
+        output.write(payload)
+        # Replacement must retain executable bits on existing ordinary assets,
+        # without following a planted link or restoring special permission bits.
+        if os.name != "nt" and stat.S_ISREG(mode):
+            os.fchmod(output.fileno(), stat.S_IMODE(mode) & 0o777)
 
 
 def _build_import_plan(
@@ -315,9 +416,12 @@ def _build_import_plan(
         raise BundleError(f"{bundle_path} not found")
     with zipfile.ZipFile(bundle_path) as archive:
         validated = _validate_archive_entries(archive, limits)
-        manifest = BundleManifest.from_dict(
-            json.loads(_read_archive_text(archive, MANIFEST_PATH, validated, limits))
-        )
+        try:
+            manifest = BundleManifest.from_dict(
+                json.loads(_read_archive_text(archive, MANIFEST_PATH, validated, limits))
+            )
+        except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+            raise BundleError("Bundle has no valid manifest") from exc
         if manifest.format_version != BUNDLE_FORMAT_VERSION:
             raise BundleError(f"Unsupported bundle format version {manifest.format_version}")
         raw = tomllib.loads(_read_archive_text(archive, WORKFLOW_PATH, validated, limits))
@@ -687,6 +791,10 @@ def _collect_bundle_paths(
                 owner=owner,
             )
             return
+        if workflow_rel in included and included[workflow_rel].kind == "subflow":
+            # Another node can also use this file as a script or prompt. Keep
+            # its workflow classification so export still strips credentials.
+            return
         included[workflow_rel] = BundlePath(
             source=source,
             workflow_path=workflow_rel,
@@ -885,15 +993,17 @@ def _required_secrets(
     for match in SECRET_TOKEN_PATTERN.finditer(json.dumps(data, sort_keys=True)):
         add(match.group(1) or match.group(2), "workflow.toml")
     for item in included:
-        if item.source.is_dir():
-            paths = [path for path in item.source.rglob("*") if path.is_file()]
-        else:
-            paths = [item.source]
-        for path in paths:
+        if item.kind == "subflow":
+            for name in _required_env_secret_names(_read_workflow_toml(item.source)):
+                add(name, item.workflow_path)
+        for path in _bundle_asset_paths(item.source):
             try:
-                text = path.read_text(encoding="utf-8")
+                with open_binary_input(path) as input_file:
+                    text = input_file.read().decode("utf-8")
             except UnicodeDecodeError:
                 continue
+            except OSError as exc:
+                raise BundleError(f"Could not read bundle asset: {path}") from exc
             for match in SECRET_TOKEN_PATTERN.finditer(text):
                 add(match.group(1) or match.group(2), item.workflow_path)
     for trigger in workflow.config.webhooks.values():
@@ -1061,7 +1171,53 @@ def _sanitized_workflow_data(data: dict[str, Any]) -> dict[str, Any]:
     _sanitize_http_request_nodes(copied)
     _sanitize_notification_nodes(copied)
     _sanitize_env_maps(copied)
+    _sanitize_workflow_scope_secrets(copied)
     return cast(dict[str, Any], copied)
+
+
+def _sanitize_workflow_scope_secrets(data: dict[str, Any]) -> None:
+    def is_reference(value: object) -> bool:
+        return isinstance(value, str) and (
+            _is_secret_reference_only(value)
+            or (value.strip().startswith("{{") and parse_exact_reference(value) is not None)
+        )
+
+    def sanitize_declarations(declarations: object, field: str) -> set[str]:
+        names: set[str] = set()
+        if not isinstance(declarations, dict):
+            return names
+        for name, declaration in declarations.items():
+            if not isinstance(declaration, dict):
+                continue
+            if declaration.get("secret") is True or declaration.get("type") == "secret":
+                names.add(name)
+                if field in declaration and not is_reference(declaration[field]):
+                    # Omit literals rather than introduce a mask that fails numeric,
+                    # boolean, or constrained input validation after import.
+                    declaration.pop(field)
+        return names
+
+    workflow = data.get("workflow", {})
+    if isinstance(workflow, dict):
+        names = sanitize_declarations(workflow.get("inputs"), "default")
+        names |= sanitize_declarations(workflow.get("parameters"), "default")
+        sanitize_declarations(workflow.get("variables"), "initial")
+        triggers = [workflow.get("schedule"), workflow.get("watch")]
+        webhooks = workflow.get("webhooks")
+        if isinstance(webhooks, dict):
+            triggers.extend(webhooks.values())
+        for trigger in triggers:
+            if not isinstance(trigger, dict):
+                continue
+            for field in ("inputs", "params", "input_bindings"):
+                values = trigger.get(field)
+                if isinstance(values, dict):
+                    for name in names & values.keys():
+                        if not is_reference(values[name]):
+                            values.pop(name)
+    component = data.get("component")
+    if isinstance(component, dict):
+        sanitize_declarations(component.get("inputs"), "default")
 
 
 def _required_env_secret_names(data: dict[str, Any]) -> set[str]:
@@ -1070,7 +1226,7 @@ def _required_env_secret_names(data: dict[str, Any]) -> set[str]:
         for key, value in env.items():
             env_name = str(key)
             env_value = str(value)
-            if _is_sensitive_env_name(env_name) and not _contains_secret_reference(env_value):
+            if _is_sensitive_env_name(env_name) and not _is_secret_reference_only(env_value):
                 names.add(env_name)
     return names
 
@@ -1080,7 +1236,7 @@ def _sanitize_env_maps(data: dict[str, Any]) -> None:
         for key, value in list(env.items()):
             env_name = str(key)
             env_value = str(value)
-            if _is_sensitive_env_name(env_name) and not _contains_secret_reference(env_value):
+            if _is_sensitive_env_name(env_name) and not _is_secret_reference_only(env_value):
                 env[env_name] = MASKED_SECRET_VALUE
 
 
@@ -1181,6 +1337,9 @@ def _collect_http_secret_values(node: dict[str, Any], configured: set[str]) -> s
         if _is_sensitive_http_field("url", configured):
             values.update(_collect_plain_leaf_strings(url))
         parsed = urllib.parse.urlsplit(url)
+        for credential in (parsed.username, parsed.password):
+            if credential:
+                values.update({credential, urllib.parse.unquote(credential)})
         for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
             if _is_sensitive_http_field(key, configured):
                 values.update(_collect_plain_leaf_strings(value))
@@ -1270,8 +1429,10 @@ def _sanitize_http_url(url: str, configured: set[str], secret_values: set[str]) 
         )
         for key, value in query_pairs
     ]
+    # URL userinfo is a credential even when no secret_fields were configured.
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
     sanitized = urllib.parse.urlunsplit(
-        parsed._replace(query=urllib.parse.urlencode(sanitized_pairs))
+        parsed._replace(netloc=netloc, query=urllib.parse.urlencode(sanitized_pairs))
     )
     return _sanitize_http_string(sanitized, secret_values)
 
@@ -1433,8 +1594,11 @@ def _resolve_workflow_with_path(
 
 
 def _read_workflow_toml(path: Path) -> dict[str, Any]:
-    with path.open("rb") as fh:
-        return tomllib.load(fh)
+    try:
+        with open_binary_input(path) as fh:
+            return tomllib.load(fh)
+    except OSError as exc:
+        raise BundleError(f"Could not read workflow source: {path}") from exc
 
 
 def _available_workflow_id(workflow_id: str, base: Path) -> str:
@@ -1476,6 +1640,11 @@ def _validate_archive_entries(
     total_compressed = 0
     for info in infos:
         _safe_relative_path(info.filename)
+        if info.flag_bits & (0x01 | 0x20 | 0x40):
+            raise BundleError("Bundle contains an encrypted or patched archive entry")
+        if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            # BZIP2/LZMA decompress without bounded output inside ZipExtFile.
+            raise BundleError("Bundle uses unsupported compression")
         if info.is_dir():
             if info.file_size or info.compress_size:
                 raise BundleError("Bundle directory entry contains file data")
@@ -1533,7 +1702,9 @@ def _read_archive_text(
             f"{limits.max_bundle_metadata_bytes} bytes "
             f"(got {info.file_size} bytes)"
         )
-    data = archive.read(path)
+    # Bound decompression even when a member lies about its expanded size.
+    with archive.open(path) as source:
+        data = source.read(info.file_size + 1)
     if len(data) > limits.max_bundle_metadata_bytes:
         raise BundleError(
             f"Bundle {path} size exceeded metadata limit "

@@ -30,6 +30,7 @@ from gofer.core.provider_capabilities import (
 from gofer.core.provider_profiles import ResolvedProviderSettings, validate_provider_settings
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.subscriptions.base import Subscription
+from gofer.subscriptions.usage import normalize_usage, track_invocation
 from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
 
 ADDITIONAL_PROVIDERS = {"cursor", "copilot", "opencode"}
@@ -45,6 +46,8 @@ class CliOutput:
     buffer: str = ""
     records: int = 0
     seen_parts: set[str] = field(default_factory=set)
+    usage: dict[str, Any] = field(default_factory=dict)
+    usage_parts: set[tuple[str, str, str]] = field(default_factory=set)
 
     def feed(self, chunk: str) -> list[str]:
         if self.provider == "copilot":
@@ -132,6 +135,36 @@ class CliOutput:
                     if isinstance(data, dict) and data.get("message")
                     else "OpenCode reported an error"
                 )
+            elif kind == "step_finish":
+                part = payload.get("part")
+                if isinstance(part, dict) and isinstance(part.get("tokens"), dict):
+                    # Each part is a completed model call. Replayed parts must not
+                    # count twice, and steps with missing identity cannot be deduped.
+                    identity = (
+                        str(part.get("sessionID") or self.session_id or ""),
+                        str(part.get("messageID") or ""),
+                        str(part.get("id") or ""),
+                    )
+                    if not identity[2]:
+                        self.usage["partial"] = True
+                    if identity[2] and identity not in self.usage_parts:
+                        self.usage_parts.add(identity)
+                        native = normalize_usage("opencode", part["tokens"])
+                        if not all(key in native for key in ("input_tokens", "output_tokens")):
+                            self.usage["partial"] = True
+                        for key in (
+                            "input_tokens",
+                            "output_tokens",
+                            "total_tokens",
+                            "cache_read_tokens",
+                            "cache_write_tokens",
+                            "reasoning_tokens",
+                        ):
+                            value = native.get(key)
+                            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                                self.usage[key] = self.usage.get(key, 0) + value
+                        if self.usage:
+                            self.usage["source"] = "provider_metadata"
             # step_finish describes one model step; only process exit ends a run.
         self.text += text
         return text
@@ -262,7 +295,13 @@ def cli_invocation(
                 else:
                     grants[alias] = ["*"]
             if provider == "cursor":
-                root = Path(directory)
+                # Cursor rejects plugin roots with fewer than three path
+                # components, including /tmp/raticode-provider-*. Keep the
+                # plugin inside our private invocation directory.
+                # Extension plugins also derive their identity from the folder
+                # name. Match the manifest and the exact MCP permission grants.
+                root = Path(directory) / alias_prefix
+                root.mkdir()
                 (root / ".cursor-plugin").mkdir()
                 (root / ".cursor-plugin/plugin.json").write_text(
                     json.dumps({"name": alias_prefix, "version": "1.0.0"})
@@ -432,6 +471,7 @@ async def stream_cli(
                     "error": output.error,
                     "message": {"role": "assistant", "body": output.text},
                     "sessionId": output.session_id,
+                    "usage": output.usage,
                     "exitCode": code if code else (1 if output.error else 0),
                 }
                 return
@@ -475,6 +515,7 @@ class CliSubscription(Subscription):
     def is_available(self) -> bool:
         return resolve_provider_executable(cast(ProviderId, self.provider)) is not None
 
+    @track_invocation
     async def execute(
         self,
         prompt: str,
@@ -529,4 +570,5 @@ class CliSubscription(Subscription):
             exit_code=final["exitCode"],
             duration_seconds=time.monotonic() - start,
             thoughts=thoughts,
+            usage_metadata=final.get("usage", {}),
         )

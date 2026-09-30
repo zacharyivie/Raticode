@@ -77,11 +77,15 @@
         "properties": {
           "sequence": {"type": "integer", "minimum": 1},
           "type": {
-            "enum": ["workflow_started", "node_completed", "workflow_completed"]
+            "enum": ["workflow_started", "node_started", "node_retried", "node_stopped", "node_completed", "workflow_completed"]
           },
           "at": {"type": "string", "format": "date-time"},
           "node_id": {"type": "string", "minLength": 1},
           "run_number": {"type": "integer", "minimum": 1},
+          "attempt": {"type": "integer", "minimum": 1},
+          "activation_lineage_id": {"type": "string", "minLength": 1},
+          "activation_group_id": {"type": "string", "minLength": 1},
+          "message": {"type": "string"},
           "outcome": {"enum": ["success", "allowed_failure", "failure"]},
           "status": {
             "enum": ["passed", "failed", "preflight_failed", "invalid_inputs", "running", "stopped", "interrupted"]

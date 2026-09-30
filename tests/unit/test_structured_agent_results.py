@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -168,12 +170,86 @@ def test_unconstrained_field_rejects_type_specific_predicates(
     assert issue == f"{operator.value} requires the field schema to declare a usable type"
 
 
-def test_external_schema_refs_are_rejected_as_unsupported_portable_subset() -> None:
+@pytest.mark.parametrize("keyword", ["$ref", "$dynamicRef", "$recursiveRef"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_external_schema_refs_are_rejected_as_unsupported_portable_subset(
+    keyword: str, nested: bool
+) -> None:
+    schema: dict[str, object] = {keyword: "https://example.test/result.schema.json"}
+    if nested:
+        schema = {"properties": {"result": schema}}
     with pytest.raises(StructuredOutputError, match="Only local JSON Schema.*supported"):
-        resolve_output_schema(
-            {"$ref": "https://example.test/result.schema.json"},
-            {},
-        )
+        resolve_output_schema(schema, {})
+
+
+@pytest.mark.parametrize("keyword", ["$ref", "$dynamicRef", "$recursiveRef"])
+@pytest.mark.parametrize("scheme", ["http", "file"])
+def test_output_validation_never_retrieves_external_schemas(monkeypatch, keyword, scheme):
+    calls = []
+
+    def retrieve(request):
+        calls.append(request)
+        raise AssertionError("Schema validation must not retrieve external resources")
+
+    monkeypatch.setattr(urllib.request, "urlopen", retrieve)
+    schema = {"properties": {"result": {keyword: f"{scheme}://localhost/private/schema.json"}}}
+    with pytest.raises(StructuredOutputError, match="Only local JSON Schema.*supported"):
+        parse_and_validate_output('{"result":"value"}', schema)
+    assert not calls
+
+
+@pytest.mark.parametrize("keyword", ["$ref", "$dynamicRef"])
+def test_output_validation_preserves_local_schema_references(keyword):
+    schema = {keyword: "#/$defs/result", "$defs": {"result": {"type": "string"}}}
+    assert parse_and_validate_output('"value"', schema) == "value"
+    with pytest.raises(StructuredOutputError, match="not of type 'string'"):
+        parse_and_validate_output("42", schema)
+
+
+@pytest.mark.parametrize("scheme", ["http", "file"])
+def test_local_reference_under_external_schema_id_never_retrieves_resources(monkeypatch, scheme):
+    calls = []
+
+    def retrieve(request):
+        calls.append(request)
+        raise AssertionError("Schema validation must not retrieve external resources")
+
+    monkeypatch.setattr(urllib.request, "urlopen", retrieve)
+    schema = {
+        "$defs": {"result": {"type": "string"}},
+        "properties": {
+            "result": {"$id": f"{scheme}://localhost/private/schema.json", "$ref": "#/$defs/result"}
+        },
+    }
+    with pytest.raises(StructuredOutputError, match="cannot be resolved locally"):
+        parse_and_validate_output('{"result":"value"}', schema)
+    assert not calls
+
+
+@pytest.mark.parametrize("raw", ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"])
+def test_structured_output_rejects_nonfinite_numbers(raw):
+    with pytest.raises(StructuredOutputError, match="finite"):
+        parse_and_validate_output(f'{{"score":{raw}}}', {"type": "object"})
+
+
+def test_structured_output_preserves_finite_numbers_and_literal_constant_strings():
+    value = {"score": 1.5, "count": 123, "label": "NaN Infinity"}
+    assert parse_and_validate_output(json.dumps(value), {"type": "object"}) == value
+
+
+def test_deep_structured_output_returns_a_recoverable_error():
+    with pytest.raises(StructuredOutputError, match="nesting"):
+        parse_and_validate_output("[" * 2000 + "0" + "]" * 2000, {"type": "array"})
+
+
+def test_recursive_schema_returns_a_recoverable_error():
+    with pytest.raises(StructuredOutputError, match="recursion"):
+        parse_and_validate_output('"value"', {"$ref": "#"})
+
+
+def test_oversized_integer_returns_a_recoverable_error():
+    with pytest.raises(StructuredOutputError, match="not valid JSON"):
+        parse_and_validate_output("1" * 5000, {"type": "integer"})
 
 
 def test_ref_schema_field_predicate_validates() -> None:

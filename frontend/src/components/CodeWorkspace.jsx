@@ -1,8 +1,12 @@
+import { languageForPath } from "../lib/editorLanguage.js";
+export { languageForPath } from "../lib/editorLanguage.js";
 import { pathWithin, pathMatchesChange } from "../lib/workspacePaths.js";
 import { resolveMarkdownLinkPath } from "../lib/fileLinks.js";
 export { resolveMarkdownLinkPath, markdownFileLinkTarget, filePathFromMarkdownUrl, resolveMarkdownFileLinkTarget, resolveMarkdownFileTarget } from "../lib/fileLinks.js";
 import { reconcileEditorLifetimes, closeEditorLifetimes, acceptsEditorState, retainOpenEditorStates } from "../lib/editorStateLifetime.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
+import { parseCommitDiffPath } from "../lib/commitDiff.js";
+import CommitDiff from "./CommitDiff.jsx";
 import { installRemActions } from "../lib/editorRem.js";
 import { installConflictControls } from "../lib/mergeConflicts.js";
 import {
@@ -114,7 +118,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   const [splitActivePath, setSplitActivePath] = useState("");
   const sourcePath = workflow?.sourcePath ?? "";
   const currentPath = activePath || openPaths[0] || "";
-  const localOpenPaths = openPaths.filter((path) => !browserTabs[path] && !workflowTabs[path]);
+  const localOpenPaths = openPaths.filter((path) => !browserTabs[path] && !workflowTabs[path] && !parseCommitDiffPath(path));
   const splitPaths = useMemo(
     () => (splitGroup ? splitGroup.paths.filter((path) => openPaths.includes(path)) : []),
     [openPaths, splitGroup],
@@ -212,7 +216,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     setTabMenu(null);
   }
 
-  const currentVirtualDocument = Boolean(browserTabs[currentPath] || workflowTabs[currentPath]);
+  const currentVirtualDocument = Boolean(browserTabs[currentPath] || workflowTabs[currentPath] || parseCommitDiffPath(currentPath));
   useEffect(() => {
     if (!currentPath || currentVirtualDocument) {
       onActiveDocumentStateChange?.(null);
@@ -454,6 +458,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       >
         {paths.map((path) => {
           const graphTab = workflowTabs[path];
+          const commitDiff = parseCommitDiffPath(path);
           const browserTab = browserTabs[path];
           const workflowTab = workflowTabs[path];
           const browserViewState = browserViewStates[path];
@@ -462,9 +467,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           const isRattish = !browserTab && !graphTab && path === sourcePath;
           const dirty = workflowTab ? workflowTab.dirty : rattishDocuments[path] ? (rattishDocuments[path].dirty ?? rattishDocuments[path].document?.dirty) : isRattish ? rattishDirty : fileStates[path]?.dirty;
           const preview = !browserTab && !workflowTab && path === previewPath;
-          const folderLabel = workflowTab ? workflowTab.contextLabel || fileName(workflowTab.projectRoot || "") : browserTab ? "" : duplicateTabFolder(path, localOpenPaths);
+          const folderLabel = commitDiff ? fileName(commitDiff.projectRoot) : workflowTab ? workflowTab.contextLabel || fileName(workflowTab.projectRoot || "") : browserTab ? "" : duplicateTabFolder(path, localOpenPaths);
           const label = workflowTab?.name || codeTabLabel(path, tabMetadata);
-          const title = workflowTab ? [label, workflowTab.sourcePath, workflowTab.statusLabel].filter(Boolean).join("\n") : tabMetadata
+          const title = commitDiff ? `${label}\n${commitDiff.projectRoot}\n${commitDiff.hash}` : workflowTab ? [label, workflowTab.sourcePath, workflowTab.statusLabel].filter(Boolean).join("\n") : tabMetadata
             ? [label, tabMetadata.url].filter(Boolean).join("\n")
             : path;
           return (
@@ -540,7 +545,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         entries={paths.map((path) => {
           const tab = workflowTabs[path];
           const browser = browserTabs[path];
-          const projectRoot = tab?.projectRoot || rattishDocuments[path]?.document?.projectRoot || (!browser && projectRoots.find(root => pathWithin(path, root))) || "";
+          const projectRoot = parseCommitDiffPath(path)?.projectRoot || tab?.projectRoot || rattishDocuments[path]?.document?.projectRoot || (!browser && projectRoots.find(root => pathWithin(path, root))) || "";
           return { path, tab, browser, projectRoot, label: tab?.name || codeTabLabel(path, browserViewTabMetadata(browser, browserViewStates[path])) };
         })}
         onActivate={onActivePathChange}
@@ -551,6 +556,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
 
   function renderDocuments(paths) {
     return paths.map((path) => {
+      const commitDiff = parseCommitDiffPath(path);
       const workflowTab = workflowTabs[path];
       const pathDocument = rattishDocuments[path]?.document ?? (path === sourcePath ? rattishDocument : null);
       const isRattishDocument = Boolean(rattishDocuments[path]) || path === sourcePath;
@@ -576,7 +582,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           className={`flex min-h-0 min-w-0 overflow-hidden flex-col ${selected ? "visible z-10" : "invisible z-0 pointer-events-none"} ${splitGroup && column === 2 ? "border-l border-line" : ""}`}
           style={{ gridColumn: column, gridRow: 2, contentVisibility: selected ? "visible" : "hidden" }}
         >
-          {workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
+          {commitDiff ? <CommitDiff {...commitDiff} theme={theme} editorSettings={settings.editor} /> : workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
             <PreviewBrowser
               active={active && currentPath === path}
               applicationKeybindings={settings.keybindings}
@@ -1545,6 +1551,29 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     });
   }, [active, editing]);
 
+  const diffButton = gitBaseline?.changed ? (
+    <button
+      aria-label={diffMode ? "Hide file diff" : "Show file diff"}
+      aria-pressed={diffMode}
+      className={`z-20 inline-flex h-8 items-center gap-1.5 rounded-md border border-line px-2.5 text-[11px] font-semibold shadow-sm transition ${
+        html ? "" : `absolute top-3 ${markdown || svg ? "right-20" : "right-4"}`
+      } ${
+        diffMode
+          ? "bg-brand text-white"
+          : "bg-white text-ink hover:bg-slate-50 dark:bg-[#252526] dark:hover:bg-[#333337]"
+      }`}
+      title={diffMode ? "Hide file diff" : "Compare with HEAD"}
+      type="button"
+      onClick={() => {
+        if (!diffMode && !editing) onModeChange?.("edit");
+        setDiffMode((current) => !current);
+      }}
+    >
+      <GitCompareArrows aria-hidden="true" size={13} />
+      Diff
+    </button>
+  ) : null;
+
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-white" aria-label={`${fileName(path)} editor`}>
       <div className="relative min-h-0 flex-1">
@@ -1572,7 +1601,9 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
           />
         ) : null}
         {html ? (
-          <div className="absolute right-4 top-3 z-20">
+          // The labelled HTML toggle is wider than the icon toggles, so Diff flows beside it.
+          <div className="absolute right-4 top-3 z-20 flex items-center gap-2">
+            {diffButton}
             <HtmlModeToggle editing={editing} onModeChange={onModeChange} />
           </div>
         ) : null}
@@ -1584,28 +1615,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
             onModeChange={onModeChange}
           />
         ) : null}
-        {gitBaseline?.changed ? (
-          <button
-            aria-label={diffMode ? "Hide file diff" : "Show file diff"}
-            aria-pressed={diffMode}
-            className={`absolute top-3 z-20 inline-flex h-8 items-center gap-1.5 rounded-md border border-line px-2.5 text-[11px] font-semibold shadow-sm transition ${
-              markdown || html || svg ? "right-20" : "right-4"
-            } ${
-              diffMode
-                ? "bg-brand text-white"
-                : "bg-white text-ink hover:bg-slate-50 dark:bg-[#252526] dark:hover:bg-[#333337]"
-            }`}
-            title={diffMode ? "Hide file diff" : "Compare with HEAD"}
-            type="button"
-            onClick={() => {
-              if (!diffMode && !editing) onModeChange?.("edit");
-              setDiffMode((current) => !current);
-            }}
-          >
-            <GitCompareArrows aria-hidden="true" size={13} />
-            Diff
-          </button>
-        ) : null}
+        {html ? null : diffButton}
         {state.loading ? (
           <div className="absolute inset-0 z-10 grid place-items-center bg-white/90 text-sm text-muted dark:bg-[#19191b]/90">
             <span className="flex items-center gap-2"><Loader2 className="animate-spin" size={16} />Opening {fileName(path)}</span>
@@ -1935,6 +1945,7 @@ function FileTypeIcon({ browserTab, path }) {
   const favicon = browserTabFavicon(browserTab);
   const [faviconFailed, setFaviconFailed] = useState(false);
   useEffect(() => setFaviconFailed(false), [favicon]);
+  if (parseCommitDiffPath(path)) return <GitCompareArrows aria-hidden="true" className="shrink-0 text-brand" size={14} />;
   if (browserTab && favicon && !faviconFailed) {
     return (
       <img
@@ -1952,25 +1963,6 @@ function FileTypeIcon({ browserTab, path }) {
   return <FileText aria-hidden="true" className="shrink-0 text-muted" size={14} />;
 }
 
-export function languageForPath(path) {
-  const name = fileName(path).toLowerCase();
-  const extension = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
-  const languages = {
-    ".bash": "shell", ".c": "c", ".cc": "cpp", ".cpp": "cpp", ".cs": "csharp",
-    ".css": "css", ".go": "go", ".h": "c", ".hpp": "cpp", ".html": "html",
-    ".ini": "ini", ".java": "java", ".js": "javascript", ".json": "json",
-    ".jsx": "javascript", ".markdown": "markdown", ".md": "markdown",
-    ".mdown": "markdown", ".mjs": "javascript", ".mkd": "markdown", ".php": "php",
-    ".ps1": "powershell", ".py": "python", ".rb": "ruby", ".rs": "rust",
-    ".rattish": "rattish",
-    ".rad": "rattish",
-    ".scss": "scss", ".sh": "shell", ".sql": "sql", ".svg": "xml", ".toml": "ini",
-    ".ts": "typescript", ".tsx": "typescript", ".txt": "plaintext", ".xml": "xml",
-    ".yaml": "yaml", ".yml": "yaml", ".zsh": "shell",
-  };
-  if (name === "dockerfile") return "dockerfile";
-  return languages[extension] ?? "plaintext";
-}
 
 export function isMarkdownPath(path) {
   return languageForPath(path) === "markdown";
@@ -2034,6 +2026,8 @@ export function browserViewTabMetadata(browserTab, viewState) {
 }
 
 export function codeTabLabel(path, browserTab) {
+  const commitDiff = parseCommitDiffPath(path);
+  if (commitDiff) return `Diff ${commitDiff.hash.slice(0, 8)}`;
   return browserTab ? browserTabLabel(browserTab) : fileName(path);
 }
 

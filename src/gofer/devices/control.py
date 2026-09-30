@@ -237,7 +237,7 @@ class DeviceControl:
                 return self.application.remote_status(
                     str(body.get("device_id", "")), str(body.get("request_id", ""))
                 )
-            if action == "send":
+            if action in {"send", "cancel_work"}:
                 assert self.application is not None
                 peer = str(body.get("device_id", ""))
                 endpoint = self.registry.endpoint(peer)
@@ -246,8 +246,12 @@ class DeviceControl:
                     and not ipaddress.ip_address(endpoint["host"]).is_loopback
                 ):
                     raise PairingError("experimental_network_opt_in_required")
-                event = self.application.queue_remote(peer, body)
-                key = (peer, event["request_id"])
+                event = (
+                    self.application.cancel_remote(peer, str(body.get("request_id", "")))
+                    if action == "cancel_work"
+                    else self.application.queue_remote(peer, body)
+                )
+                key = (peer, event["request_id"] + (":cancel" if action == "cancel_work" else ""))
                 if key not in self.remote_tasks or self.remote_tasks[key].done():
                     app = self.application
                     self.remote_tasks[key] = asyncio.run_coroutine_threadsafe(

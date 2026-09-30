@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import ssl
+from unittest.mock import MagicMock
+
 import pytest
 
 from gofer.core.approvals import (
     DesktopNotificationAdapter,
     MultiChannelNotificationAdapter,
     Notification,
+    _send_email_sync,
 )
 from gofer.core.http import HttpRequest, HttpResponse
 from gofer.core.operations import HttpRetryPolicy
@@ -48,6 +52,81 @@ async def test_multi_channel_notification_adapter_retries_webhook_status() -> No
     assert request.url == "https://hooks.example.test/services/token"
     assert request.timeout_seconds == 2
     assert b"*Done*\\nComplete" in (request.body or b"")
+
+
+@pytest.mark.parametrize("starttls", [True, False])
+def test_email_notification_verifies_tls_before_authentication(monkeypatch, starttls) -> None:
+    smtp = MagicMock()
+    smtp.__enter__.return_value = smtp
+    monkeypatch.setattr("gofer.core.approvals.smtplib.SMTP", lambda *args, **kwargs: smtp)
+
+    _send_email_sync(
+        Notification(
+            title="Done",
+            body="Complete",
+            channel="email",
+            email_from="sender@example.com",
+            email_to=["recipient@example.com"],
+            smtp_host="smtp.example.com",
+            smtp_username="sender",
+            smtp_password="credential",
+            smtp_starttls=starttls,
+        )
+    )
+
+    if starttls:
+        context = smtp.starttls.call_args.kwargs["context"]
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+        assert [call[0] for call in smtp.method_calls] == ["starttls", "login", "send_message"]
+    else:
+        smtp.starttls.assert_not_called()
+    smtp.login.assert_called_once_with("sender", "credential")
+    message = smtp.send_message.call_args.args[0]
+    assert message["To"] == "recipient@example.com"
+    assert message.get_content().strip() == "Complete"
+
+
+def test_email_notification_does_not_send_credentials_after_tls_failure(monkeypatch) -> None:
+    smtp = MagicMock()
+    smtp.__enter__.return_value = smtp
+    smtp.starttls.side_effect = ssl.SSLCertVerificationError("Untrusted SMTP certificate")
+    monkeypatch.setattr("gofer.core.approvals.smtplib.SMTP", lambda *args, **kwargs: smtp)
+
+    with pytest.raises(ssl.SSLCertVerificationError, match="Untrusted SMTP certificate"):
+        _send_email_sync(
+            Notification(
+                title="Done",
+                body="Complete",
+                channel="email",
+                email_from="sender@example.com",
+                email_to=["recipient@example.com"],
+                smtp_host="smtp.example.com",
+                smtp_username="sender",
+                smtp_password="credential",
+            )
+        )
+
+    smtp.login.assert_not_called()
+    smtp.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_linux_notification_treats_text_as_positional_arguments(monkeypatch) -> None:
+    calls = []
+
+    async def fake_run_subprocess(cmd, **kwargs):
+        calls.append(cmd)
+        return 0, "", ""
+
+    monkeypatch.setattr("gofer.core.approvals.sys.platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr("gofer.core.approvals.shutil.which", lambda _binary: "/bin/notify-send")
+    monkeypatch.setattr("gofer.core.approvals.run_subprocess", fake_run_subprocess)
+
+    await DesktopNotificationAdapter().send(Notification(title="--help", body="--version"))
+
+    assert calls == [["/bin/notify-send", "-u", "normal", "--", "--help", "--version"]]
 
 
 @pytest.mark.asyncio

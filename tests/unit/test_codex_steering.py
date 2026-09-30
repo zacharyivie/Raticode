@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -11,6 +12,104 @@ import pytest
 
 from gofer.ui.chat import build_chat_prompt
 from gofer.ui.codex_steering import CodexTurnControl, stream_codex_turn
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("absolute_command", [False, True])
+async def test_steering_preserves_provider_environment_without_desktop_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, absolute_command: bool
+) -> None:
+    executable_dir = tmp_path / "node" / "bin"
+    command = str(executable_dir / "codex") if absolute_command else "codex"
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-config"))
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-key")
+    monkeypatch.setenv("GOFER_UI_API_TOKEN", "desktop-api-token")
+    monkeypatch.setenv("GOFER_DESKTOP_GRANT_SECRET", "desktop-grant-secret")
+    captured: dict[str, Any] = {}
+
+    class SpawnIntercepted(Exception):
+        pass
+
+    async def spawn(*args: str, **kwargs: Any) -> asyncio.subprocess.Process:
+        captured.update(kwargs["env"])
+        raise SpawnIntercepted
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(SpawnIntercepted):
+        async for _ in stream_codex_turn(
+            [command, "exec", "prompt"],
+            control=CodexTurnControl(),
+            cwd=tmp_path,
+            cancel_event=None,
+            max_output_bytes=100_000,
+        ):
+            pass
+
+    assert captured["HOME"] == os.environ["HOME"]
+    assert captured["CODEX_HOME"] == str(tmp_path / "codex-config")
+    assert captured["OPENAI_API_KEY"] == "provider-key"
+    assert "GOFER_UI_API_TOKEN" not in captured
+    assert "GOFER_DESKTOP_GRANT_SECRET" not in captured
+    if absolute_command:
+        assert captured["PATH"].split(os.pathsep)[0] == str(executable_dir)
+    else:
+        assert captured["PATH"] == os.environ["PATH"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "interrupted"])
+async def test_usage_preserves_fresh_thread_cumulative_totals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
+) -> None:
+    from gofer.subscriptions.usage import provider_payload_usage
+
+    script = tmp_path / "usage_server.py"
+    script.write_text("""import json, sys
+def send(value): print(json.dumps(value), flush=True)
+for line in sys.stdin:
+ message=json.loads(line)
+ method=message['method']
+ if method=='initialized': continue
+ result={}
+ if method=='thread/start': result={'thread': {'id':'fresh-thread'}}
+ if method=='turn/start': result={'turn': {'id':'turn-1'}}
+ send({'id':message['id'], 'result':result})
+ if method=='turn/start':
+  for thread, total in [('fresh-thread',10),('fresh-thread',35),('child-thread',900)]:
+   send({'method':'thread/tokenUsage/updated','params':{
+    'threadId':thread,'turnId':'turn-1','tokenUsage':{
+      'last':{'inputTokens':2,'outputTokens':1,'totalTokens':3},
+      'total':{'inputTokens':total,'outputTokens':5,'totalTokens':total+5,
+       'cachedInputTokens':7,'reasoningOutputTokens':2}}}})
+  send({'method':'turn/completed','params':{
+   'threadId':'fresh-thread','turn':{'id':'turn-1','status':sys.argv[1]}}})
+""")
+    spawn = asyncio.create_subprocess_exec
+
+    async def fake_spawn(*args: str, **kwargs: Any) -> asyncio.subprocess.Process:
+        return await spawn(sys.executable, str(script), status, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    events = [
+        event
+        async for event in stream_codex_turn(
+            [sys.executable, "exec", "--sandbox", "read-only", "prompt"],
+            control=CodexTurnControl(),
+            cwd=tmp_path,
+            cancel_event=None,
+            max_output_bytes=100_000,
+        )
+    ]
+    payloads = [json.loads(event["text"]) for event in events if event.get("stream") == "stdout"]
+    assert [payload["usage"]["input_tokens"] for payload in payloads] == [10, 35, 35]
+    usage = provider_payload_usage("codex", payloads)
+    assert usage["input_tokens"] == 35
+    assert usage["output_tokens"] == 5
+    assert usage["total_tokens"] == 40
+    assert usage["cache_read_tokens"] == 7
+    assert usage["reasoning_tokens"] == 2
+    assert usage["partial"] is (status != "completed")
+    assert events[-1]["returncode"] == (0 if status == "completed" else 1)
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ import pytest
 
 from gofer.core import provider_capabilities as capabilities
 from gofer.core import provider_preferences as preferences
+from gofer.core.commit_message_format import DEFAULT_COMMIT_MESSAGE_TEMPLATE
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.ui import chat
 
@@ -165,7 +166,11 @@ def test_commit_model_preference_roundtrip_and_validation() -> None:
     selection = {"provider": "codex", "model": "sol"}
     preferences.save_commit_message_preference(selection)
     preferences.save_provider_preference("codex", {"deniedModels": ["astra"]})
-    assert preferences.commit_message_preference() == selection
+    assert preferences.commit_message_preference() == {
+        **selection,
+        "autoCommit": False,
+        "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    }
     for invalid in [
         {"provider": "codex", "model": "astra"},
         {"provider": "unknown", "model": "sol"},
@@ -176,6 +181,70 @@ def test_commit_model_preference_roundtrip_and_validation() -> None:
     ]:
         with pytest.raises(ValueError):
             preferences.save_commit_message_preference(invalid)
-        assert preferences.commit_message_preference() == selection
+        assert preferences.commit_message_preference() == {
+            **selection,
+            "autoCommit": False,
+            "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+        }
     preferences.save_commit_message_preference({"provider": "", "model": ""})
-    assert preferences.commit_message_preference() == {"provider": "", "model": ""}
+    assert preferences.commit_message_preference() == {
+        "provider": "",
+        "model": "",
+        "autoCommit": False,
+        "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    }
+
+
+def test_commit_template_migrates_old_preferences_and_preserves_model_selection() -> None:
+    preferences.save_commit_message_preference({"provider": "codex", "model": "sol"})
+    assert preferences.commit_message_preference()["template"] == DEFAULT_COMMIT_MESSAGE_TEMPLATE
+    template = "Summary: changes\n\n* A change\n"
+    preferences.save_commit_message_preference({"template": template})
+    assert preferences.commit_message_preference() == {
+        "provider": "codex",
+        "model": "sol",
+        "autoCommit": False,
+        "template": template,
+    }
+    preferences.save_commit_message_preference({"provider": "cursor", "model": "auto"})
+    assert preferences.commit_message_preference()["template"] == template
+    for invalid in (None, 42, "x" * 4001):
+        with pytest.raises(ValueError, match="Commit template"):
+            preferences.save_commit_message_preference({"template": invalid})
+        assert preferences.commit_message_preference()["template"] == template
+    preferences.save_commit_message_preference({"template": " \n"})
+    assert preferences.commit_message_preference() == {
+        "provider": "cursor",
+        "model": "auto",
+        "autoCommit": False,
+        "template": DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    }
+
+
+@pytest.mark.parametrize("provider", capabilities.CLI_PROVIDERS)
+def test_rem_chat_uses_current_commit_template_across_providers(provider: str) -> None:
+    messages = [{"role": "user", "body": "Commit my changes"}]
+    assert DEFAULT_COMMIT_MESSAGE_TEMPLATE in chat.build_chat_prompt(
+        provider, "auto", messages, None
+    )
+    template = "Summary: changes\n\n* A change"
+    preferences.save_commit_message_preference({"template": template})
+    prompt = chat.build_chat_prompt(provider, "auto", messages, None)
+    assert template in prompt
+    assert "never more than 8" in prompt
+    assert DEFAULT_COMMIT_MESSAGE_TEMPLATE not in prompt
+
+
+def test_auto_commit_preference_defaults_off_and_requires_boolean() -> None:
+    assert preferences.commit_message_preference()["autoCommit"] is False
+    preferences.save_commit_message_preference({"autoCommit": True})
+    preferences.save_commit_message_preference({"provider": "codex", "model": "sol"})
+    assert preferences.commit_message_preference()["autoCommit"] is True
+    invalid: object
+    for invalid in (None, 0, 1, "true", []):
+        with pytest.raises(ValueError, match="Auto commit must be a boolean"):
+            preferences.save_commit_message_preference({"autoCommit": invalid})
+        assert preferences.commit_message_preference()["autoCommit"] is True
+    preferences.save_commit_message_preference({"autoCommit": False})
+    assert preferences.commit_message_preference()["autoCommit"] is False
+    assert preferences.commit_message_preference()["model"] == "sol"

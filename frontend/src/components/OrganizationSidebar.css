@@ -1,0 +1,22 @@
+.org-sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; font-size: 12px; border-bottom: 1px solid rgb(var(--color-line)); }
+.org-sidebar-heading > div { display: flex; gap: 2px; }
+.org-sidebar-heading button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 4px; color: rgb(var(--color-muted)); }
+.org-sidebar button:hover:not(:disabled) { background: rgb(var(--color-ink) / .07); }
+.org-sidebar button:disabled { opacity: .45; }
+.org-sidebar button:focus-visible { outline: 2px solid currentColor; outline-offset: -3px; }
+.org-sidebar-list { min-height: 0; overflow-y: auto; padding: 6px; }
+.org-sidebar-list > button { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; padding: 12px 9px; border-radius: 5px; margin-bottom: 3px; border: 1px solid transparent; }
+.org-sidebar-list > button[aria-current] { background: rgb(var(--color-ink) / .09); border-color: rgb(var(--color-ink) / .12); }
+.org-sidebar-list > button > svg { flex-shrink: 0; margin-top: 2px; color: rgb(var(--color-muted)); }
+.org-sidebar-list > button > span { min-width: 0; flex: 1; }
+.org-sidebar-list strong { display: block; font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.org-sidebar-list small { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; font-size: 10px; color: rgb(var(--color-muted)); margin-top: 5px; }
+.org-sidebar-list small > span:first-of-type { text-transform: capitalize; }
+.org-sidebar-list small > span:last-child { margin-left: auto; }
+.org-sidebar-list i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.org-sidebar-list i[data-state=running] { background: #65bc99; }
+.org-sidebar-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; padding: 20px 14px; color: rgb(var(--color-muted)); font-size: 12px; line-height: 1.7; }
+.org-sidebar-empty button { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid rgb(var(--color-line)); border-radius: 4px; color: rgb(var(--color-ink)); }
+.org-sidebar-hint, .org-sidebar-error { padding: 14px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.org-sidebar-hint { color: rgb(var(--color-muted)); }
+.org-sidebar-error { color: #eb9f9b; }

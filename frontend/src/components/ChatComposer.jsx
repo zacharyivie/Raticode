@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { FileText, Loader2, Mic, Paperclip, Send, Square, X } from "lucide-react";
 
 import {
@@ -13,6 +13,9 @@ import { PROVIDER_PERMISSIONS, defaultPermissionMode } from "../lib/providerPerm
 import { audioInputConstraints } from "../lib/audioDevices.js";
 
 export default function ChatComposer({
+  inputLabel,
+  placeholder,
+  sendLabel = "Send message",
   attachments = [],
   attachmentError = "",
   audioInputDeviceId = "default",
@@ -35,6 +38,7 @@ export default function ChatComposer({
   permissionOptions = PROVIDER_PERMISSIONS[provider] || [["default", "CLI default"]],
   onPermissionModeChange = () => {},
 }) {
+  const errorId = useId();
   const fileInputRef = useRef(null);
   const recorderRef = useRef(null);
   const microphoneStreamRef = useRef(null);
@@ -185,10 +189,11 @@ export default function ChatComposer({
         ) : null}
         <textarea
           ref={textareaRef}
-          aria-describedby={error ? "chat-composer-error" : undefined}
+          aria-label={inputLabel}
+          aria-describedby={error ? errorId : undefined}
           className="block min-h-14 max-h-32 w-full resize-none bg-transparent px-3 pb-1 pt-3 text-sm leading-5 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-muted"
           readOnly={transcribing || transcriptionPending}
-          placeholder={sending ? "Steer Rem while it works" : attachments.length ? "Add a note about the attached file" : "Message this workflow"}
+          placeholder={placeholder ?? (sending ? "Steer Rem while it works" : attachments.length ? "Add a note about the attached file" : "Message this workflow")}
           rows={2}
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
@@ -275,7 +280,7 @@ export default function ChatComposer({
             onClick={onSteer}
           >{steeringPending ? "Submitting…" : "Steer"}</button> : null}
           <button
-            aria-label={sending ? "Stop Rem" : "Send message"}
+            aria-label={sending ? "Stop Rem" : sendLabel}
             className={`grid h-9 w-9 place-items-center rounded-[10px] transition disabled:cursor-not-allowed disabled:opacity-60 ${
               sending
                 ? "border border-line bg-white text-red-600 hover:border-red-200 hover:bg-red-50"
@@ -286,7 +291,7 @@ export default function ChatComposer({
               || transcribing
               || transcriptionPending
             }
-            title={sending ? "Stop Rem" : "Send message"}
+            title={sending ? "Stop Rem" : sendLabel}
             type="button"
             onClick={sending ? onStop : onSend}
           >
@@ -298,7 +303,7 @@ export default function ChatComposer({
           </button>
         </div>
       </div>
-      {error ? <p id="chat-composer-error" className="mt-1.5 px-1 text-[10px] text-red-600">{error}</p> : null}
+      {error ? <p id={errorId} className="mt-1.5 px-1 text-[10px] text-red-600">{error}</p> : null}
       <p className="mt-1.5 overflow-x-auto whitespace-nowrap px-1 text-[10px] text-muted">{sending ? "Enter to steer · Stop cancels the response" : shortcutHint}</p>
     </>
   );

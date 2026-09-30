@@ -2,6 +2,18 @@ const { pathToFileURL } = require("node:url");
 const legacyBrand = require("./brand-compat.json");
 const RATICODE_HOME_URL = "raticode://home";
 
+// Only documents may leave the embedded browser through a local file URL.
+// Do not let this action launch arbitrary local programs via their OS association.
+function canOpenInExternalBrowser(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol)
+      || (url.protocol === "file:" && /\.html?$/i.test(decodeURIComponent(url.pathname)));
+  } catch {
+    return false;
+  }
+}
+
 function normalizeBrowserUrl(value) {
   let input = String(value ?? "").trim();
   if (/^file\/\//i.test(input)) input = input.replace(/^file/i, "file:");
@@ -121,7 +133,6 @@ function browserSessionShortcutAction(
 function browserCommandRequiresOwnerFocus(action) {
   return [
     "close",
-    "edit-local-html",
     "focus-location",
     "new-tab",
     "next-tab",
@@ -308,6 +319,7 @@ function browserInputCode(input) {
 }
 
 module.exports = {
+  canOpenInExternalBrowser,
   RATICODE_HOME_URL,
   browserApplicationShortcutAction,
   browserCommandRequiresOwnerFocus,

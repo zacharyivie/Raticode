@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Raticode daily bug fixes at midnight New York time
+
+[Timer]
+OnCalendar=*-*-* 00:00:00 America/New_York
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit=raticode-daily-bug-fixes.service
+
+[Install]
+WantedBy=timers.target

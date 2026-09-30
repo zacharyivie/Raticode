@@ -17,6 +17,7 @@ function harness(t) {
   const crashes = [];
   const logs = [];
   const context = {
+    reportPdfService: { env: { RATICODE_REPORT_PDF_URL: 'http://127.0.0.1:1234/pdf', RATICODE_REPORT_PDF_TOKEN: 'pdf-test-token' } },
     backendPathGrants: { reset() {} },
     process: { env: {}, stderr: { write() {} } },
     console: { log() {} },
@@ -27,7 +28,10 @@ function harness(t) {
     repoRoot: '/app', desktopGrantSecret: 'test-secret',
     getBackendCommand: () => ({ command: 'test-backend', args: [] }),
     getGoferDataDir: () => '/data',
-    spawn: () => child,
+    spawn: (_command, _args, options) => {
+      assert.equal(options.env.RATICODE_REPORT_PDF_TOKEN, 'pdf-test-token');
+      return child;
+    },
     createBackendLogStream: () => null,
     closeBackendLogStream() {},
     writeBackendLog: line => logs.push(line),

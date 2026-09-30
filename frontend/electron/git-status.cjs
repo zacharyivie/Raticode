@@ -1,6 +1,7 @@
 const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const safeFiles = require("./safe-files.cjs");
 
 const GIT_OUTPUT_LIMIT = 16 * 1024 * 1024;
 
@@ -21,7 +22,7 @@ function isGitRead(args) {
   return ["status", "rev-parse", "for-each-ref", "rev-list", "show", "diff", "log", "check-ref-format"].includes(command)
     || (command === "branch" && subcommand === "--show-current")
     || (command === "remote" && !subcommand)
-    || (command === "stash" && subcommand === "list")
+    || (command === "stash" && ["list", "show"].includes(subcommand))
     || (command === "worktree" && subcommand === "list");
 }
 
@@ -35,7 +36,7 @@ async function readSlowMetadata(projectRoot, branch, runner, options) {
   const generation = gitReadGeneration;
   const pending = (async () => {
     const [refs, remoteNames, stashes] = await Promise.allSettled([
-      runner(["-C", projectRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]),
+      runner(["-C", projectRoot, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"]),
       runner(["-C", projectRoot, "remote"]),
       runner(["-C", projectRoot, "stash", "list", "--format=%gd"]),
     ]);
@@ -88,7 +89,7 @@ async function readGitBranches(projectRoot, options = {}) {
   const pending = (async () => {
     const { root } = await repositoryLocation(projectRoot, runner);
     const [refs, current] = await Promise.all([
-      runner(["-C", root, "for-each-ref", "--format=%(refname:short)", "refs/heads/"]),
+      runner(["-C", root, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/"]),
       runner(["-C", root, "branch", "--show-current"]),
     ]);
     return { active: true, root, branch: String(current).trim(), branches: String(refs).trim().split("\n").filter(Boolean) };
@@ -121,7 +122,9 @@ function runGit(args, options = {}) {
   return new Promise((resolve, reject) => {
     execFileImpl(
       "git",
-      args,
+      // Status/index reads can execute core.fsmonitor even with optional locks
+      // disabled. Automatic refreshes must inspect files without running it.
+      mutates ? args : ["-c", "core.fsmonitor=false", ...args],
       {
         cwd: options.cwd,
         encoding: options.encoding || "utf8",
@@ -230,7 +233,7 @@ async function changeGitFile(projectRoot, relativePath, action, options = {}) {
   if (entry.status === "!" && action !== "stage") throw new Error("Resolve this conflict and stage the result, or abort the merge or rebase.");
   if (action === "stage") {
     if (entry.status === "!" && fs.existsSync(path.resolve(projectRoot, entry.path))) {
-      const content = await fs.promises.readFile(path.resolve(projectRoot, entry.path), "utf8");
+      const content = (await safeFiles.readFile(path.resolve(projectRoot, entry.path), { maxBytes: GIT_OUTPUT_LIMIT })).toString("utf8");
       if (/^(<{7}|={7}|>{7})(?: |$)/m.test(content)) throw new Error("Remove the conflict markers before marking this file resolved.");
     }
     await git("add", "--", ...literalPaths);
@@ -281,6 +284,42 @@ async function gitRepositoryAction(projectRoot, action, value = "", options = {}
   }
   const runner = options.runGit || runGit;
   const git = (...args) => runner(["-C", projectRoot, ...args]);
+  if (action === "commit-diff") {
+    if (!value || !/^[0-9a-f]{40,64}$/.test(value.hash)) throw new Error("Choose a valid commit.");
+    const metadata = String(await git("show", "--no-patch", "--format=%H%x00%P%x00%s", `${value.hash}^{commit}`, "--"));
+    const [hash, parents, subject] = metadata.trimEnd().split("\0");
+    const parentHash = parents.split(" ")[0] || "";
+    try {
+      // NUL-delimited raw records preserve tabs, newlines and non-ASCII filenames.
+      // Blob IDs read exactly these revisions, without consulting the index or worktree.
+      const raw = String(await git("show", "--format=", "--raw", "-z", "--no-abbrev", "--root", "--diff-merges=first-parent", "--find-renames", "--no-ext-diff", "--no-textconv", "--no-color", hash, "--"));
+      const records = raw.split("\0");
+      const files = [];
+      let totalBytes = 0;
+      const readBlob = async (oid, mode) => {
+        if (/^0+$/.test(oid)) return "";
+        if (mode === "160000") return `Subproject commit ${oid}\n`;
+        const content = String(await git("show", "--no-ext-diff", "--no-textconv", oid, "--"));
+        totalBytes += Buffer.byteLength(content);
+        if (totalBytes > GIT_OUTPUT_LIMIT) throw Object.assign(new Error("Commit content exceeds limit"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+        return content;
+      };
+      for (let index = 0; index < records.length && records[index];) {
+        const [oldMode, newMode, oldOid, newOid, status] = records[index++].trim().slice(1).split(" ");
+        const oldPath = records[index++];
+        const newPath = /^[RC]/.test(status) ? records[index++] : oldPath;
+        const [original, modified] = await Promise.all([readBlob(oldOid, oldMode), readBlob(newOid, newMode)]);
+        const binary = original.includes("\0") || modified.includes("\0");
+        files.push({ oldPath, path: newPath, status: status[0], oldMode, newMode, binary,
+          submodule: oldMode === "160000" || newMode === "160000",
+          original: binary ? null : original, modified: binary ? null : modified });
+      }
+      return { hash, parentHash, subject, files };
+    } catch (error) {
+      if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw new Error("This commit diff is too large to display in the editor.");
+      throw error;
+    }
+  }
   if (["staged-diff", "reset-soft", "reset-hard", "detach-commit", "branch-commit"].includes(action)) {
     const root = String(await git("rev-parse", "--show-toplevel")).trim();
     if (path.resolve(root) !== path.resolve(projectRoot)) throw new Error("Open the repository root to review all affected changes first.");
@@ -341,7 +380,7 @@ async function gitRepositoryAction(projectRoot, action, value = "", options = {}
     if (!snapshot.branch) throw new Error("Switch to a branch before publishing.");
     const remotes = String(await git("remote")).trim().split("\n").filter(Boolean);
     if (!remotes.includes(value)) throw new Error("Choose an existing remote.");
-    await git("push", "--set-upstream", value, snapshot.branch);
+    await git("push", "--set-upstream", "--", value, `refs/heads/${snapshot.branch}:refs/heads/${snapshot.branch}`);
   } else if (action === "stash-switch") {
     const snapshot = await readGitStatus(projectRoot, { ...options, forceMetadata: true });
     if (!snapshot.branches?.includes(value) || value.startsWith("-")) throw new Error("Choose an existing local branch.");
@@ -405,7 +444,8 @@ async function readGitHistory(projectRoot, options = {}) {
 function parseGitWorktrees(output = "") {
   const worktrees = [];
   let current = null;
-  for (const line of String(output).split("\n")) {
+  // Porcelain -z keeps newlines in paths and lock reasons inside their field.
+  for (const line of String(output).split("\0")) {
     if (!line) {
       if (current?.path) worktrees.push(current);
       current = null;
@@ -441,7 +481,7 @@ async function readGitWorktrees(projectRoot, options = {}) {
     const key = `${gitReadGeneration}:${repository}`;
     let pending = reads.get(key);
     if (!pending) {
-      pending = Promise.resolve().then(() => runner(["-C", root, "worktree", "list", "--porcelain"]))
+      pending = Promise.resolve().then(() => runner(["-C", root, "worktree", "list", "--porcelain", "-z"]))
         .finally(() => { if (reads.get(key) === pending) reads.delete(key); });
       reads.set(key, pending);
     }
@@ -557,13 +597,11 @@ async function readGitFileBaseline(targetPath, options = {}) {
       (async () => {
         if (group === "staged") return readVersion(`:${relativePath}`);
         if (deleted) return Buffer.alloc(0);
-        const stat = await fs.promises.stat(targetPath);
-        if (stat.size > GIT_OUTPUT_LIMIT) throw new Error("File is too large to compare.");
-        return fs.promises.readFile(targetPath);
+        return safeFiles.readFile(targetPath, { maxBytes: GIT_OUTPUT_LIMIT });
       })(),
       (async () => {
         try {
-          return String(await git("diff", ...(group === "staged" ? ["--cached"] : group === "unstaged" ? [] : ["HEAD"]), "--no-color", "--no-ext-diff", "--unified=0", "--", `:(literal)${relativePath}`));
+          return String(await git("diff", ...(group === "staged" ? ["--cached"] : group === "unstaged" ? [] : ["HEAD"]), "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0", "--", `:(literal)${relativePath}`));
         } catch { return ""; /* New repository. */ }
       })(),
     ]);

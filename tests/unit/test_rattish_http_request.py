@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from gofer.core.http import HttpRequest, HttpResponse
+from gofer.core.http import HttpRequest, HttpResponse, UrllibHttpClient
 from gofer.rattish.compiler import CompileContext, RattishCompiler
 from gofer.rattish.diagnostics import RattishCompileError
 from gofer.rattish.preflight import run_preflight
@@ -156,16 +156,95 @@ Node call:
     assert result.diagnostics[0].details["field"] == "headers.Authorization"
 
 
-def test_http_request_preflight_blocks_local_network_targets(tmp_path: Path) -> None:
-    source = """Rattish: 1
+@pytest.mark.parametrize("host", ["127.0.0.1", "100.64.0.1", "[::ffff:100.64.0.1]"])
+def test_http_request_preflight_blocks_local_network_targets(tmp_path: Path, host: str) -> None:
+    source = f"""Rattish: 1
 Workflow:
   name: Unsafe HTTP request
 Node call:
   type: http-request
-  url: http://127.0.0.1/admin
+  url: http://{host}/admin
 """
 
     result = run_preflight(compile_source(source, tmp_path), data_dir=tmp_path / "data")
 
     assert not result.ready
     assert [item.code for item in result.diagnostics] == ["RATTISH_PREFLIGHT_NETWORK_POLICY"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://alice:private-password@127.0.0.1/private-path?token=private-query",
+        "https://alice:private-password@example.test:private-port/?token=private-query",
+        "https://alice:private-password@[private-address]/?token=private-query",
+    ],
+)
+@pytest.mark.anyio
+async def test_http_policy_failure_redacts_preflight_and_runtime_details(
+    tmp_path: Path, url: str
+) -> None:
+    source = f"""Rattish: 1
+Workflow:
+  name: Private request
+Node call:
+  type: http-request
+  url: {json.dumps(url)}
+  params: {{"search": "value"}}
+"""
+    ir = compile_source(source, tmp_path)
+    preflight = run_preflight(ir, data_dir=tmp_path / "data")
+    assert not preflight.ready
+    assert preflight.diagnostics[0].code == "RATTISH_PREFLIGHT_NETWORK_POLICY"
+    assert "private-" not in str(preflight.diagnostics[0])
+    assert "alice" not in str(preflight.diagnostics[0].details)
+
+    client = RecordingHttpClient([])
+    result = await execute_node(ir, "call", http_client=client)
+    assert result.outcome == "failure"
+    assert result.error is not None
+    assert result.error.code == "RATTISH_HTTP_NETWORK_POLICY"
+    assert "private-" not in str(result.error)
+    assert "alice" not in str(result.error)
+    assert client.requests == []
+
+
+@pytest.mark.parametrize(
+    "url,headers",
+    [
+        ("https://1.1.1.1/private-path invalid?token=private-token", {}),
+        ("https://1.1.1.1/", {"Authorization": "Bearer private-token\rBAD"}),
+    ],
+)
+@pytest.mark.anyio
+async def test_http_transport_failure_never_records_invalid_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str, headers: dict[str, str]
+) -> None:
+    source = f"""Rattish: 1
+Workflow:
+  name: Private malformed request
+Node call:
+  type: http-request
+  url: {json.dumps(url)}
+  headers: {json.dumps(headers)}
+"""
+
+    def unexpected_connection(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Invalid request must be rejected before connecting")
+
+    class InlineHttpClient(UrllibHttpClient):
+        async def send(self, request: HttpRequest) -> HttpResponse:
+            # Exercise the real request serializer without worker-thread I/O.
+            # Malformed requests must fail before any connection is opened.
+            return self._send_sync(request)
+
+    monkeypatch.setattr("gofer.core.http.socket.create_connection", unexpected_connection)
+    result = await execute_node(
+        compile_source(source, tmp_path), "call", http_client=InlineHttpClient()
+    )
+    assert result.outcome == "failure"
+    assert result.error is not None
+    assert result.error.code == "RATTISH_HTTP_TRANSPORT_ERROR"
+    assert "Invalid HTTP request" in str(result.error)
+    assert "private-" not in str(result.error)
+    assert not result.output

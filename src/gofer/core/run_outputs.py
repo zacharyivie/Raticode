@@ -4,6 +4,7 @@ import json
 from typing import Any, cast
 
 from gofer.core.operations import OperationType
+from gofer.utils.atomic_output import atomic_binary_output
 
 RUN_NODE_OUTPUTS_SUFFIX = ".outputs.json"
 
@@ -23,10 +24,8 @@ def write_run_node_outputs_payload(result: Any, limits: Any) -> None:
         "nodeOutputsTruncated": False,
         "nodeOutputsMaxBytes": limits.max_api_log_response_bytes,
     }
-    result.log_path.with_suffix(RUN_NODE_OUTPUTS_SUFFIX).write_text(
-        json.dumps(payload, default=str),
-        encoding="utf-8",
-    )
+    with atomic_binary_output(result.log_path.with_suffix(RUN_NODE_OUTPUTS_SUFFIX)) as output:
+        output.write(json.dumps(payload, default=str).encode("utf-8"))
 
 
 def run_sidecar_node_output_contract(output: Any) -> dict[str, object]:

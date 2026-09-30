@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 
+from gofer.devices import files as files_module
 from gofer.devices.files import DeviceFiles
 from gofer.devices.registry import DeviceRegistry, PairingError
 
@@ -88,6 +89,31 @@ def test_duplicate_chunk_and_conflict(files):
         files.receive("peer", "thread", chunk(value, b"xyz", eof=False))
     with pytest.raises(PairingError, match="offset"), files.registry.transaction():
         files.receive("peer", "thread", chunk(value, b"def", offset=4))
+
+
+def test_small_chunks_have_a_shared_storage_quota(files, monkeypatch):
+    monkeypatch.setattr(files_module, "MAX_CHUNKS", 2)
+    first = offer(files, b"abc")
+    second = offer(files, b"def")
+    with files.registry.transaction():
+        files.offer("peer", "thread", first)
+        files.offer("other", "thread", second)
+        files.receive("peer", "thread", chunk(first, b"a", eof=False))
+        files.receive("other", "thread", chunk(second, b"d", eof=False))
+        # Retransmissions must still be acknowledged when the quota is full.
+        assert files.receive("peer", "thread", chunk(first, b"a", eof=False))["received_size"] == 1
+    with pytest.raises(PairingError, match="file_quota"), files.registry.transaction():
+        files.receive("peer", "thread", chunk(first, b"b", offset=1, eof=False))
+    assert files.registry.db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0] == 2
+    with files.registry.transaction():
+        status = files.receive("peer", "thread", chunk(first, b"bc", offset=1))
+    assert status["state"] == "available"
+    assert files.content("peer", "thread", first["file_id"])[1] == b"abc"
+    assert files.registry.db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0] == 1
+    with files.registry.transaction():
+        files.receive("other", "thread", chunk(second, b"e", offset=1, eof=False))
+        files.cancel("other", "thread", second["file_id"])
+    assert files.registry.db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0] == 0
 
 
 def test_truncation_and_bad_digest_never_expose(files):

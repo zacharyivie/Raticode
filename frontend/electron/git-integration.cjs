@@ -26,7 +26,7 @@ async function integrationAction(root, action, value = {}, options = {}) {
     if (!stash) throw new Error('This stash is no longer available. Refresh the stash list.');
     if (action === 'stash-drop') { await git('stash', 'drop', stash.ref); return readGitStatus(root, options); }
     if (action === 'stash-preview') {
-      const diff = String(await git('stash', 'show', '--include-untracked', '--patch', '--binary', '--no-ext-diff', '--no-color', stash.hash));
+      const diff = String(await git('stash', 'show', '--include-untracked', '--patch', '--binary', '--no-ext-diff', '--no-textconv', '--no-color', stash.hash));
       if (snapshot.entries.length || snapshot.operation) return { diff, blocked: true, notice: 'Commit or stash current changes and finish any active merge or rebase before checking whether this stash applies cleanly.' };
       return preview(root, await git('rev-parse', 'HEAD'), ['stash', 'apply', '--index', stash.hash], diff, run);
     }
@@ -50,7 +50,7 @@ async function integrationAction(root, action, value = {}, options = {}) {
   const strategy = value.strategy || 'merge';
   const flags = { merge: [], squash: ['--squash'], 'ff-only': ['--ff-only'], 'no-ff': ['--no-ff'] }[strategy];
   if (!flags) throw new Error('Unknown merge strategy.');
-  const worktrees = parseGitWorktrees(await git('worktree', 'list', '--porcelain'));
+  const worktrees = parseGitWorktrees(await git('worktree', 'list', '--porcelain', '-z'));
   const destination = worktrees.find(w => w.branch === (rebase ? source : target));
   const destinationRoot = destination?.path || root;
   await options.authorizeTarget?.(destinationRoot);
@@ -61,7 +61,7 @@ async function integrationAction(root, action, value = {}, options = {}) {
   if (sourceRoot && (await readGitStatus(sourceRoot, options)).entries.length) throw new Error('Commit or stash changes in the source worktree first. Only committed changes can be merged.');
   const sourceHash = String(await git('rev-parse', `refs/heads/${source}`)).trim();
   const targetHash = String(await git('rev-parse', `refs/heads/${target}`)).trim();
-  const diff = String(await git('diff', '--no-ext-diff', '--no-color', `${targetHash}...${sourceHash}`));
+  const diff = String(await git('diff', '--no-ext-diff', '--no-textconv', '--no-color', `${targetHash}...${sourceHash}`, '--'));
   if (action.endsWith('-preview')) return { ...await preview(root, rebase ? sourceHash : targetHash,
     rebase ? ['rebase', targetHash] : ['merge', '--no-commit', ...flags, sourceHash], diff, run), sourceHash, targetHash, destinationRoot };
   if (value.sourceHash !== sourceHash || value.targetHash !== targetHash) throw new Error('A branch changed since the preview. Preview again before proceeding.');
@@ -85,7 +85,7 @@ async function preview(root, head, command, diff, run) {
   const temp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'raticode-git-preview-'));
   try {
     await run(['clone', '--shared', '--no-checkout', '--', root, temp]);
-    const git = (...args) => run(['-C', temp, '-c', 'user.name=Raticode preview', '-c', 'user.email=preview@localhost', '-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=/dev/null', ...args]);
+    const git = (...args) => run(['-C', temp, '-c', 'core.fsmonitor=false', '-c', 'user.name=Raticode preview', '-c', 'user.email=preview@localhost', '-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=/dev/null', ...args]);
     await git('checkout', '--detach', String(head).trim());
     let failure = '';
     try { await git(...command); } catch (error) { failure = String(error.stderr || error.message); }

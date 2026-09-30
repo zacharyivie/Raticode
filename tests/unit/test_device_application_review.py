@@ -162,6 +162,36 @@ def test_outbound_request_id_conflict_does_not_silently_reuse_old_work(
         app.queue_remote(peer, request | {"text": "different operation"})
 
 
+def test_remote_cancel_is_durable_idempotent_and_uses_fresh_sequence(app_peer):
+    app, peer = app_peer
+    request = {"request_id": str(uuid4()), "thread_id": str(uuid4()), "text": "bounded work"}
+    original = app.queue_remote(peer, request)
+    cancel = app.cancel_remote(peer, request["request_id"])
+    assert cancel["sequence"] > original["sequence"]
+    assert cancel["request_id"] == original["request_id"]
+    assert app.cancel_remote(peer, request["request_id"]) == cancel
+    other = app.queue_remote(peer, request | {"request_id": str(uuid4())})
+    assert other["sequence"] > cancel["sequence"]
+    assert (peer, cancel) in app.queued_remote()
+
+
+def test_managed_job_extension_preserves_lineage_and_reports_usage(app_peer):
+    app, peer = app_peer
+    thread = str(uuid4())
+    context = {"provider": "codex", "model": "cli-default", "project_id": str(uuid4())}
+    app.authorize(peer, thread, context)
+    request = job(app, thread, context, 0, str(uuid4()))
+    lineage = {"organizationId": str(uuid4()), "taskId": str(uuid4()), "parentRunId": str(uuid4())}
+    request["payload"]["organization"] = lineage
+    app.handle(peer, request)
+    app.rem_ready = lambda: True
+    claimed = app.claim()
+    assert claimed["event"]["payload"]["organization"] == lineage
+    app.complete(peer, request["request_id"], "result", usage={"cost_usd": 0.3, "total_tokens": 20})
+    statuses = [e for e in app.pending(peer) if e["type"] == "job.status"]
+    assert statuses[-1]["payload"]["usage"]["cost_usd"] == 0.3
+
+
 def test_incremental_sync_always_has_correlated_response(
     app_peer: tuple[DeviceApplication, str],
 ) -> None:

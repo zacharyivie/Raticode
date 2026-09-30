@@ -116,6 +116,8 @@ def resource_cli_args(
                     f"command={json.dumps(server.command)}",
                     f"args={json.dumps(server.args)}",
                 ]
+                if server.name in {"reports", "second_brain"}:
+                    fields += ['env_vars=["RATICODE_REPORT_PDF_URL","RATICODE_REPORT_PDF_TOKEN"]']
             else:
                 fields += [f"url={json.dumps(server.url)}"]
             args += ["-c", f"mcp_servers.{server_names[server.name]}={{" + ",".join(fields) + "}"]

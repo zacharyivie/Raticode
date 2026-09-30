@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import sys
-import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from typing import Any, Literal, cast
 import anyio
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 from gofer.core.agent import Agent, AgentConfig, AgentResult
 from gofer.core.approvals import (
@@ -39,7 +42,7 @@ from gofer.core.provider_profiles import (
     resolve_provider_settings,
     validate_provider_settings,
 )
-from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, read_text_limited
+from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, read_bytes_limited, read_text_limited
 from gofer.core.structured_output import (
     StructuredOutputError,
     parse_and_validate_output,
@@ -63,6 +66,7 @@ from gofer.rattish.provider_runtime import (
 )
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
 from gofer.subscriptions.base import Subscription
+from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links, open_binary_input
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
 
@@ -406,9 +410,17 @@ async def execute_node(
         )
 
     if handled.success:
-        validation_error = next(
-            Draft202012Validator(node["output"]["schema"]).iter_errors(handled.output), None
-        )
+        try:
+            validation_error = next(
+                Draft202012Validator(node["output"]["schema"], registry=Registry()).iter_errors(
+                    handled.output
+                ),
+                None,
+            )
+        except (Unresolvable, RecursionError):
+            validation_error = ValidationError(
+                "Output schema cannot be resolved locally or is recursive"
+            )
         if validation_error is not None:
             handled = HandlerResult(
                 False,
@@ -772,8 +784,12 @@ def _load_agent_memory(node_id: str, mode: str, context: RuntimeContext) -> list
         return []
     path = _agent_memory_path(node_id, context)
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        with open_binary_input(path) as source:
+            payload = source.read(context.max_file_read_bytes + 1)
+        if len(payload) > context.max_file_read_bytes:
+            return []
+        document = json.loads(payload)
+    except (OSError, UnicodeError, ValueError, RecursionError):
         return []
     if not isinstance(document, list):
         return []
@@ -799,10 +815,8 @@ def _remember_agent_result(
         context.agent_run_memory[node_id] = turns
         return
     path = _agent_memory_path(node_id, context)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(turns, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    with atomic_binary_output(path) as output:
+        output.write((json.dumps(turns, indent=2) + "\n").encode("utf-8"))
 
 
 async def _http_request_handler(
@@ -817,15 +831,15 @@ async def _http_request_handler(
         raise ValueError("HTTP headers and params must be objects.")
     headers = {str(key): str(value) for key, value in headers_value.items()}
     params = {str(key): str(value) for key, value in params_value.items()}
-    url = append_query_params(url, params)
     allowlist = [str(value) for value in configuration["network_allowlist"]]
     try:
+        url = append_query_params(url, params)
         validate_http_request_url(url, allowlist=allowlist)
     except NetworkPolicyViolation as exc:
         return HandlerResult(
             False,
             {},
-            RuntimeErrorInfo("network", "RATTISH_HTTP_NETWORK_POLICY", str(exc), {"url": url}),
+            RuntimeErrorInfo("network", "RATTISH_HTTP_NETWORK_POLICY", str(exc), {"url": exc.url}),
         )
 
     json_payload = _binding_or_configuration(bindings, configuration, "json")
@@ -1228,17 +1242,22 @@ async def _local_vectorize_handler(
         if source_path.is_dir()
         else iter([source_path])
     )
-    files = sorted(path for path in iterator if path.is_file())
-    if len(files) > DEFAULT_RESOURCE_LIMITS.max_files_scanned:
-        raise ValueError(
-            "local-vectorize scanned file limit exceeded: "
-            f"{len(files)} > {DEFAULT_RESOURCE_LIMITS.max_files_scanned}"
-        )
+    files: list[Path] = []
+    for scanned, path in enumerate(iterator, 1):
+        if scanned > DEFAULT_RESOURCE_LIMITS.max_files_scanned:
+            raise ValueError("local-vectorize scanned path limit exceeded.")
+        if path.is_file():
+            files.append(path)
+    files.sort()
     mode = configuration["mode"]
     existing_document: Mapping[str, Any] | None = None
     if index_path.exists():
         try:
-            loaded = json.loads(index_path.read_text(encoding="utf-8"))
+            loaded = json.loads(
+                read_text_limited(
+                    index_path, max_bytes=DEFAULT_RESOURCE_LIMITS.max_vector_index_bytes
+                )
+            )
             if isinstance(loaded, Mapping):
                 existing_document = loaded
         except json.JSONDecodeError:
@@ -1277,14 +1296,17 @@ async def _local_vectorize_handler(
         ):
             entries.extend(json.loads(json.dumps(reusable)))
             continue
-        aggregate_bytes += stat.st_size
-        if aggregate_bytes > DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes:
+        if aggregate_bytes + stat.st_size > DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes:
             raise ValueError("local-vectorize aggregate input limit exceeded.")
-        text = read_text_limited(
+        data = read_bytes_limited(
             path,
-            max_bytes=context.max_file_read_bytes,
-            encoding=configuration["encoding"],
+            max_bytes=min(
+                context.max_file_read_bytes,
+                DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes - aggregate_bytes,
+            ),
         )
+        aggregate_bytes += len(data)
+        text = data.decode(configuration["encoding"]).replace("\r\n", "\n").replace("\r", "\n")
         start = 0
         chunk_number = 0
         while start < len(text) or (not text and chunk_number == 0):
@@ -1394,15 +1416,32 @@ async def _local_search_handler(
 def _tabular_loop_items(path: Path, context: RuntimeContext) -> list[dict[str, Any]]:
     if path.stat().st_size > context.max_file_read_bytes:
         raise ValueError("Loop tabular source exceeds the per-file read limit.")
+    items: list[dict[str, Any]] = []
+    aggregate_bytes = 0
+
+    def append_item(item: dict[str, Any]) -> None:
+        nonlocal aggregate_bytes
+        if len(items) >= DEFAULT_RESOURCE_LIMITS.max_fanout_items:
+            raise ValueError("Loop tabular source exceeds the fan-out item limit.")
+        row_bytes = len(json.dumps(item, default=str).encode("utf-8"))
+        if row_bytes > context.max_file_read_bytes:
+            raise ValueError("Loop tabular row exceeds the per-file read limit.")
+        aggregate_bytes += row_bytes
+        if aggregate_bytes > DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes:
+            raise ValueError("Loop tabular content exceeds the aggregate read limit.")
+        items.append(item)
+
     if path.suffix.lower() == ".jsonl":
-        items = [
-            dict(json.loads(line))
-            for line in read_text_limited(path, max_bytes=context.max_file_read_bytes).splitlines()
-            if line.strip()
-        ]
+        for line in read_text_limited(path, max_bytes=context.max_file_read_bytes).splitlines():
+            if line.strip():
+                if len(items) >= DEFAULT_RESOURCE_LIMITS.max_fanout_items:
+                    raise ValueError("Loop tabular source exceeds the fan-out item limit.")
+                append_item(dict(json.loads(line)))
     elif path.suffix.lower() == ".csv":
-        with path.open(newline="", encoding="utf-8") as stream:
-            items = [dict(row) for row in csv.DictReader(stream)]
+        text = read_bytes_limited(path, max_bytes=context.max_file_read_bytes).decode("utf-8")
+        with io.StringIO(text, newline="") as stream:
+            for row in csv.DictReader(stream):
+                append_item(dict(row))
     elif path.suffix.lower() == ".xlsx":
         try:
             import openpyxl
@@ -1412,14 +1451,13 @@ def _tabular_loop_items(path: Path, context: RuntimeContext) -> list[dict[str, A
         try:
             sheet = workbook.active
             rows = sheet.iter_rows(values_only=True)
-            headers = [str(value) for value in next(rows)]
-            items = [dict(zip(headers, row, strict=False)) for row in rows]
+            headers = [str(value) for value in next(rows, ())]
+            for row in rows:
+                append_item(dict(zip(headers, row, strict=False)))
         finally:
             workbook.close()
     else:
         raise ValueError("Loop tabular sources support .jsonl, .csv, and .xlsx files.")
-    if len(items) > DEFAULT_RESOURCE_LIMITS.max_fanout_items:
-        raise ValueError("Loop tabular source exceeds the fan-out item limit.")
     return items
 
 
@@ -1430,6 +1468,22 @@ async def _loop_handler(
     source = node["configuration"]["source"]
     source_type = source["type"]
     items: list[dict[str, Any]]
+    aggregate_bytes = 0
+
+    def read_content(path: Path) -> str:
+        nonlocal aggregate_bytes
+        if aggregate_bytes + path.stat().st_size > DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes:
+            raise ValueError("Loop content exceeds the aggregate read limit.")
+        data = read_bytes_limited(
+            path,
+            max_bytes=min(
+                context.max_file_read_bytes,
+                DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes - aggregate_bytes,
+            ),
+        )
+        aggregate_bytes += len(data)
+        return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
     if source_type == "count":
         if source["count"] > DEFAULT_RESOURCE_LIMITS.max_fanout_items:
             raise ValueError("Loop count exceeds the fan-out item limit.")
@@ -1443,25 +1497,26 @@ async def _loop_handler(
         with os.scandir(root):
             pass
         items = []
-        paths = sorted(item for item in root.glob(source["glob"]) if item.is_file())
-        if len(paths) > DEFAULT_RESOURCE_LIMITS.max_fanout_items:
-            raise ValueError("Loop directory source exceeds the fan-out item limit.")
-        aggregate_bytes = 0
-        for path in paths:
+        paths: list[Path] = []
+        for scanned, path in enumerate(root.glob(source["glob"]), 1):
+            if scanned > DEFAULT_RESOURCE_LIMITS.max_files_scanned:
+                raise ValueError("Loop directory source exceeds the scanned path limit.")
+            if path.is_file():
+                if len(paths) >= DEFAULT_RESOURCE_LIMITS.max_fanout_items:
+                    raise ValueError("Loop directory source exceeds the fan-out item limit.")
+                paths.append(path)
+        for path in sorted(paths):
             item: dict[str, Any] = {
                 "path": str(path),
                 "name": path.name,
                 "directory": str(path.parent),
             }
             if source["include_content"]:
-                aggregate_bytes += path.stat().st_size
-                if aggregate_bytes > DEFAULT_RESOURCE_LIMITS.max_aggregate_read_bytes:
-                    raise ValueError("Loop directory content exceeds the aggregate read limit.")
-                item["file_content"] = read_text_limited(
-                    path, max_bytes=context.max_file_read_bytes
-                )
+                item["file_content"] = read_content(path)
             items.append(item)
     elif source_type == "trigger-events":
+        if len(context.trigger_events) > DEFAULT_RESOURCE_LIMITS.max_fanout_items:
+            raise ValueError("Loop trigger events exceed the fan-out item limit.")
         items = []
         for index, value in enumerate(context.trigger_events):
             item = dict(value)
@@ -1471,9 +1526,7 @@ async def _loop_handler(
             if source["include_content"] and isinstance(event_path, str):
                 path = project_path(context.project_root, event_path)
                 if path.is_file():
-                    item["file_content"] = read_text_limited(
-                        path, max_bytes=context.max_file_read_bytes
-                    )
+                    item["file_content"] = read_content(path)
             items.append(item)
     elif source_type == "infinite":
         items = []
@@ -1693,20 +1746,10 @@ async def _prompt_file_handler(
     if not output_path.parent.exists():
         if not configuration["create_dirs"]:
             raise FileNotFoundError(output_path.parent)
-        output_path.parent.mkdir(parents=True)
+        mkdir_without_links(output_path.parent)
     encoded = rendered.encode(configuration["encoding"])
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{output_path.name}.", dir=output_path.parent
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_name, output_path)
-    except Exception:
-        Path(temporary_name).unlink(missing_ok=True)
-        raise
+    with atomic_binary_output(output_path, exclusive=not configuration["overwrite"]) as stream:
+        stream.write(encoded)
     return HandlerResult(
         True,
         {
@@ -1733,26 +1776,27 @@ async def _write_file_handler(
     if not path.parent.exists():
         if not configuration["create_dirs"]:
             raise FileNotFoundError(path.parent)
-        path.parent.mkdir(parents=True)
+        mkdir_without_links(path.parent)
     content = (
         bindings.stdin.decode("utf-8") if bindings.stdin is not None else configuration["content"]
     )
     encoded = content.encode(configuration["encoding"])
     if configuration["append"]:
-        with path.open("ab") as stream:
+        flags = (
+            os.O_WRONLY
+            | os.O_APPEND
+            | os.O_CREAT
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        with os.fdopen(os.open(path, flags, 0o666), "ab") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise OSError(f"{path} is not an ordinary file")
             stream.write(encoded)
         action = "appended" if existed else "created"
     else:
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_name, path)
-        except Exception:
-            Path(temporary_name).unlink(missing_ok=True)
-            raise
+        with atomic_binary_output(path, exclusive=not configuration["overwrite"]) as stream:
+            stream.write(encoded)
         action = "replaced" if existed else "created"
     return HandlerResult(
         True,
@@ -1788,6 +1832,8 @@ def _copy_or_move(node: Mapping[str, Any], context: RuntimeContext, *, move: boo
         raise FileNotFoundError(source)
     if source == destination:
         raise ValueError("Source and destination must be different.")
+    if source.is_relative_to(destination):
+        raise ValueError("Destination cannot contain the source.")
     if kind == "directory" and destination.is_relative_to(source):
         raise ValueError("A directory cannot be copied or moved inside itself.")
     if destination.exists() or destination.is_symlink():
@@ -1982,13 +2028,16 @@ def _resolve_bindings(node: Mapping[str, Any], context: RuntimeContext) -> Resol
 def _redact_sensitive(value: Any, sensitive_values: tuple[str, ...]) -> Any:
     if isinstance(value, str):
         redacted = value
-        for secret in sensitive_values:
+        for secret in sorted((item for item in sensitive_values if item), key=len, reverse=True):
             redacted = redacted.replace(secret, "[REDACTED]")
         return redacted
     if isinstance(value, list):
         return [_redact_sensitive(item, sensitive_values) for item in value]
     if isinstance(value, Mapping):
-        return {str(key): _redact_sensitive(item, sensitive_values) for key, item in value.items()}
+        return {
+            _redact_sensitive(str(key), sensitive_values): _redact_sensitive(item, sensitive_values)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -2140,7 +2189,17 @@ def _prepare_workflow_inputs(ir: Mapping[str, Any], supplied: Mapping[str, Any])
                 )
             else:
                 continue
-        error = next(Draft202012Validator(declaration["schema"]).iter_errors(prepared[name]), None)
+        try:
+            error = next(
+                Draft202012Validator(declaration["schema"], registry=Registry()).iter_errors(
+                    prepared[name]
+                ),
+                None,
+            )
+        except (Unresolvable, RecursionError):
+            raise InvalidRattishWorkflowInputError(
+                f"Workflow input {name!r} schema cannot be resolved locally or is recursive."
+            ) from None
         if error is not None:
             raise InvalidRattishWorkflowInputError(
                 f"Workflow input {name!r} is invalid: {error.message}"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1234,7 +1235,7 @@ def test_field_editor_rendering_scrolls_cursor_into_view(
     app._cursor = 19
     monkeypatch.setattr(
         "gofer.cli.tui_editor.shutil.get_terminal_size",
-        lambda fallback: SimpleNamespace(columns=80, lines=8),
+        lambda fallback: os.terminal_size((80, 8)),
     )
 
     rendered = app._get_formatted_text()

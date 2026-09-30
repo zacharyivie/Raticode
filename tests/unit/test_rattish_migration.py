@@ -148,9 +148,51 @@ def test_import_migrates_legacy_bundle_entrypoint(tmp_path: Path) -> None:
 def test_concurrent_discovery_can_migrate_the_same_file(tmp_path: Path) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
-    old = tmp_path / 'workflow.rad'
+    old = tmp_path / "workflow.rad"
     old.write_text(LEGACY_SOURCE)
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: migrate_source(old), range(32)))
-    assert all(path == old.with_suffix('.rattish') for path in results)
+    assert all(path == old.with_suffix(".rattish") for path in results)
     assert results[0].read_text() == LEGACY_SOURCE
+
+
+def test_concurrent_migration_finishes_during_identity_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    old = tmp_path / "workflow.rad"
+    new = old.with_suffix(".rattish")
+    old.write_text(LEGACY_SOURCE)
+    os.link(old, new)
+    samefile = os.path.samefile
+
+    def finish_migration(first: Path, second: Path) -> bool:
+        # Another discovery completes after the existence check, before stat.
+        old.unlink()
+        return samefile(first, second)
+
+    monkeypatch.setattr(os.path, "samefile", finish_migration)
+    assert migrate_source(old) == new
+    assert new.read_text() == LEGACY_SOURCE
+
+
+def test_disappearing_migration_target_does_not_remove_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    old = tmp_path / "workflow.rad"
+    new = old.with_suffix(".rattish")
+    old.write_text(LEGACY_SOURCE)
+    os.link(old, new)
+    samefile = os.path.samefile
+
+    def remove_target(first: Path, second: Path) -> bool:
+        new.unlink()
+        return samefile(first, second)
+
+    monkeypatch.setattr(os.path, "samefile", remove_target)
+    with pytest.raises(FileNotFoundError):
+        migrate_source(old)
+    assert old.read_text() == LEGACY_SOURCE

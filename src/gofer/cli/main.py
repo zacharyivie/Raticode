@@ -89,6 +89,17 @@ def serve_ui(
     serve(host=host, port=port, data_dir=data_dir)
 
 
+@ui_app.command("reports", hidden=True)
+def reports(
+    root: Path = typer.Option(..., "--root"),
+    report_format: str = typer.Option("html", "--report-format"),
+) -> None:
+    """Serve native report output tools over MCP stdio."""
+    from gofer.ui.report_outputs import serve_reports
+
+    serve_reports(root, report_format)
+
+
 @app.command("licenses")
 def export_licenses(
     output: Path = typer.Option(

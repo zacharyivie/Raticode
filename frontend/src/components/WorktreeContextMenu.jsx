@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 export const integrationOperations = [["merge", "Merge"], ["squash", "Squash merge"], ["ff-only", "Fast-forward only"], ["no-ff", "Merge with a merge commit"], ["rebase", "Rebase"]];
-export const historyOperations = [["reset-soft", "Soft reset"], ["reset-hard", "Hard reset"], ["branch-commit", "Checkout new branch here"], ["worktree-commit", "Create worktree here"], ["detach-commit", "Detach at commit"]];
+export const historyOperations = [["commit-diff", "Open commit diff"], ["reset-soft", "Soft reset"], ["reset-hard", "Hard reset"], ["branch-commit", "Checkout new branch here"], ["worktree-commit", "Create worktree here"], ["detach-commit", "Detach at commit"]];
 
 export default function WorktreeContextMenu({ source, x, y, trigger, disabled, onClose, onSelect, operations = integrationOperations }) {
   const [keyboardNavigation, setKeyboardNavigation] = useState(false);

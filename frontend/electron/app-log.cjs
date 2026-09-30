@@ -5,9 +5,14 @@ function redactLog(value) {
   // ANSI color sequences start with the ESC control character.
   // eslint-disable-next-line no-control-regex
   return String(value).replace(/\x1b\[[0-9;]*m/g, "")
-    .replace(/(bearer\s+)[\w.-]+/gi, "$1[redacted]")
-    .replace(/((?:api[_-]?key|apiToken|access[_-]?token|password|secret|authorization)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[redacted]")
-    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/g, "$1[redacted]@")
+    // HTTP token68 credentials can contain +, /, ~ and trailing = padding.
+    .replace(/(bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, "$1[redacted]")
+    .replace(/(authorization["']?\s*[:=]\s*["']?basic\s+)[A-Za-z0-9._~+/-]+=*/gi, "$1[redacted]")
+    // Consume the entire quoted value, including escaped quotes and spaces.
+    .replace(/((?:api[_-]?key|token|password|secret|authorization)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*(?:"|\\?$)|'(?:\\.|[^'\\])*(?:'|\\?$)|[^\s,"'}]+)/gi, "$1[redacted]")
+    // The last @ in the authority separates userinfo from the host. Passwords
+    // can contain earlier @ characters, and URL schemes are case insensitive.
+    .replace(/(https?:\/\/)[^\s/?#"'<>]*@/gi, "$1[redacted]@")
     .slice(0, 32768);
 }
 

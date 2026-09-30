@@ -17,6 +17,10 @@ def project_path(project_root: Path, authored: str) -> Path:
     candidate = Path(normalize_project_path(authored)).expanduser()
     # Preserve the final component so operations on symlinks retain their semantics.
     path = candidate if candidate.is_absolute() else project_root.resolve() / candidate
+    # A final parent traversal is a directory reference, not a link entry.
+    # Normalize it before transfer/delete handlers compare containment.
+    if path.name == "..":
+        return path.resolve()
     return path.parent.resolve() / path.name
 
 

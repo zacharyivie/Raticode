@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -128,3 +130,55 @@ def test_scandir_refuses_parent_symlinks(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         with scandir_without_links(tmp_path / "linked/nested"):
             pytest.fail("must not enumerate through a symlink")
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="POSIX directory descriptors")
+def test_atomic_outputs_can_create_the_same_parent_concurrently(tmp_path, monkeypatch):
+    mkdir = os.mkdir
+    ready = Barrier(2)
+
+    def concurrent_mkdir(path, mode=0o777, *, dir_fd=None):
+        if path == "shared":
+            # Both writers observed a missing parent before either creates it.
+            ready.wait(timeout=5)
+        return mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", concurrent_mkdir)
+
+    def write(name):
+        with atomic_binary_output(tmp_path / "shared" / name, exclusive=True) as output:
+            output.write(name.encode())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(write, "first")
+        second = pool.submit(write, "second")
+        first.result(timeout=10)
+        second.result(timeout=10)
+    assert {file.name: file.read_bytes() for file in (tmp_path / "shared").iterdir()} == {
+        "first": b"first",
+        "second": b"second",
+    }
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="POSIX directory descriptors")
+@pytest.mark.parametrize("kind", ["file", "symlink"])
+def test_atomic_output_rejects_non_directory_created_during_mkdir(tmp_path, monkeypatch, kind):
+    mkdir = os.mkdir
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    def replaced_mkdir(path, mode=0o777, *, dir_fd=None):
+        if path == "shared":
+            if kind == "symlink":
+                os.symlink(outside, path, dir_fd=dir_fd)
+            else:
+                (tmp_path / "shared").write_bytes(b"concurrent file")
+        return mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", replaced_mkdir)
+    with pytest.raises(OSError):
+        with atomic_binary_output(tmp_path / "shared" / "note"):
+            pytest.fail("must reject a concurrently created file or symlink")
+    assert not list(outside.iterdir())
+    if kind == "file":
+        assert (tmp_path / "shared").read_bytes() == b"concurrent file"

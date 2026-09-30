@@ -16,6 +16,9 @@ from gofer.devices.registry import DeviceRegistry, PairingError
 MAX_FILE = 10 * 1024 * 1024
 MAX_TOTAL = 50 * 1024 * 1024
 CHUNK = 16 * 1024
+# Byte quotas alone allow millions of one-byte rows, each with encryption and
+# SQLite overhead. Normal 16 KiB chunks need at most 3200 rows for MAX_TOTAL.
+MAX_CHUNKS = 8192
 
 
 class DeviceFiles:
@@ -130,6 +133,13 @@ class DeviceFiles:
             or (not raw and not payload["eof"])
         ):
             raise PairingError("file_chunk_offset")
+        # A final chunk is verified and removes the buffered rows in this same
+        # transaction. Permit it so completed transfers can release a full quota.
+        if not payload["eof"] and (
+            self.registry.db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0]
+            >= MAX_CHUNKS
+        ):
+            raise PairingError("file_quota")
         self.registry.db.execute(
             "INSERT INTO device_file_chunks VALUES (?,?,?,?)",
             (peer, identifier, offset, self._seal(peer, identifier, raw)),

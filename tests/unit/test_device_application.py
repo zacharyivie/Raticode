@@ -288,14 +288,134 @@ def test_acknowledged_chunks_pruned_without_reusing_sequence(application):
             "INSERT INTO device_chunk_receipts VALUES (?,?,?,?)",
             (peer, file_id, first["sequence"], 5),
         )
+        app.registry.db.execute(
+            "INSERT INTO device_file_sends VALUES (?,?,?,?)",
+            (peer, file_id, request["thread_id"], request["request_id"]),
+        )
     status = event(
         "file.status",
         thread_id=request["thread_id"],
         payload={"file_id": file_id, "state": "available", "received_size": 5},
     )
-    response = app.handle(peer, status)
+    assert app.handle(peer, status) == []
+    request["sequence"] = 1
+    response = app.handle(peer, request)
     assert response[0]["sequence"] > first["sequence"]
     assert all(e["id"] != first["id"] for e in app.pending(peer))
+
+
+@pytest.fixture
+def outgoing_file(application):
+    import base64
+    import hashlib
+
+    app, peer = application
+    file_id = str(uuid4())
+    request = event("file.request", payload={"file_id": file_id})
+    grant(app, peer, request)
+    data = b"hello"
+    with app.registry.transaction():
+        app.files.offer(
+            peer,
+            request["thread_id"],
+            {
+                "file_id": file_id,
+                "name": "note.txt",
+                "mime": "text/plain",
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "expires_at": int(app.registry.clock()) + 300,
+            },
+        )
+        app.files.receive(
+            peer,
+            request["thread_id"],
+            {
+                "file_id": file_id,
+                "offset": 0,
+                "data": base64.urlsafe_b64encode(data).rstrip(b"=").decode(),
+                "eof": True,
+            },
+        )
+    sent = app.handle(peer, request)[0]
+    assert sent["type"] == "file.chunk"
+    return app, peer, request, sent
+
+
+@pytest.mark.parametrize("state", ["available", "cancelled", "failed"])
+def test_terminal_file_status_does_not_generate_another_status(outgoing_file, state):
+    app, peer, request, sent = outgoing_file
+    status = event(
+        "file.status",
+        sequence=1,
+        thread_id=request["thread_id"],
+        payload={"file_id": request["payload"]["file_id"], "state": state, "received_size": 5},
+    )
+    assert app.handle(peer, status) == []
+    assert not app.registry.db.execute("SELECT 1 FROM device_file_sends").fetchone()
+    assert all(item["type"] != "file.status" for item in app.pending(peer))
+    assert all(item["id"] != sent["id"] for item in app.pending(peer))
+    assert not app.registry.db.execute("SELECT 1 FROM device_chunk_receipts").fetchone()
+    # A retry carrying a new event ID also ends without an acknowledgment of an ack.
+    assert app.handle(peer, status | {"id": str(uuid4()), "sequence": 2}) == []
+
+
+def test_file_cancel_removes_pending_chunks(outgoing_file):
+    app, peer, request, sent = outgoing_file
+    response = app.handle(
+        peer,
+        event(
+            "file.cancel",
+            sequence=1,
+            thread_id=request["thread_id"],
+            payload=request["payload"],
+        ),
+    )
+    assert response[0]["payload"]["state"] == "cancelled"
+    assert not app.registry.db.execute("SELECT 1 FROM device_file_sends").fetchone()
+    assert not app.registry.db.execute("SELECT 1 FROM device_chunk_receipts").fetchone()
+    assert all(item["id"] != sent["id"] for item in app.pending(peer))
+    with pytest.raises(PairingError, match="file_unavailable"):
+        app.files.content(peer, request["thread_id"], request["payload"]["file_id"])
+
+
+@pytest.mark.parametrize("kind", ["file.status", "file.cancel"])
+def test_other_thread_cannot_acknowledge_or_cancel_file_send(outgoing_file, kind):
+    app, peer, request, sent = outgoing_file
+    payload = {"file_id": request["payload"]["file_id"]}
+    if kind == "file.status":
+        payload.update(state="available", received_size=5)
+    other = event(kind, sequence=1, payload=payload)
+    grant(app, peer, other)
+    app.handle(peer, other)
+    assert app.registry.db.execute("SELECT 1 FROM device_file_sends").fetchone()
+    assert app.registry.db.execute("SELECT 1 FROM device_chunk_receipts").fetchone()
+    assert any(item["id"] == sent["id"] for item in app.pending(peer))
+    assert app.files.content(peer, request["thread_id"], payload["file_id"])[1] == b"hello"
+
+
+def test_receiving_file_status_still_resumes_from_acknowledged_offset(outgoing_file):
+    app, peer, request, _ = outgoing_file
+    response = app.handle(
+        peer,
+        event(
+            "file.status",
+            sequence=1,
+            thread_id=request["thread_id"],
+            payload={
+                "file_id": request["payload"]["file_id"],
+                "state": "receiving",
+                "received_size": 2,
+            },
+        ),
+    )
+    assert response[0]["type"] == "file.chunk"
+    assert response[0]["payload"] == {
+        "file_id": request["payload"]["file_id"],
+        "offset": 2,
+        "data": "bGxv",
+        "eof": True,
+    }
 
 
 def test_provider_history_survives_outbox_retention(application):
