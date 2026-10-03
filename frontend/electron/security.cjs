@@ -164,7 +164,9 @@ function createIpcSecurity({
     }
     const resolve = desktop ? resolveDesktopPath : resolveAllowedPath;
     const parent = resolve(directory, { grantId, mustExist: true });
-    return resolve(path.join(parent, cleanName), { grantId, mustExist: false });
+    const child = path.join(parent, cleanName);
+    resolve(child, { grantId, mustExist: false });
+    return child;
   }
 
   function resolvePickerPath(currentPath, { grantId = "" } = {}) {
@@ -303,8 +305,8 @@ function realpathExisting(targetPath) {
 }
 
 function realpathForContainment(targetPath) {
-  // existsSync follows links, so it hides broken links. Only ENOENT from lstat
-  // may represent a missing component; a link must resolve or fail closed.
+  // existsSync follows links, so it hides broken links. Missing components and
+  // former directories replaced by files are absent. Links must resolve or fail closed.
   const missingSegments = [];
   let current = path.resolve(targetPath);
   while (true) {
@@ -312,7 +314,7 @@ function realpathForContainment(targetPath) {
       fs.lstatSync(current);
       return path.resolve(realpathExisting(current), ...missingSegments);
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (!["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
       const parent = path.dirname(current);
       if (parent === current) throw error;
       missingSegments.unshift(path.basename(current));

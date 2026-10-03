@@ -9,11 +9,13 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
+const { unixTerminalShell } = require("./terminal-shell.cjs");
 const { restoreShellPath } = require("./shell-path.cjs");
 const { startReportPdfService } = require("./report-pdf.cjs");
 const shellPathReady = restoreShellPath();
 const {
   app,
+  clipboard,
   BrowserWindow,
   Menu,
   Tray,
@@ -22,8 +24,12 @@ const {
   ipcMain,
   shell,
   session,
+  protocol,
   webContents,
 } = require("electron");
+protocol.registerSchemesAsPrivileged([{ scheme: "raticode-media", privileges: { standard: true, secure: true, stream: true } }]);
+const { createMediaPreviews } = require("./media-preview.cjs");
+const mediaPreviews = createMediaPreviews();
 const { autoUpdater } = require("electron-updater");
 const { raticodeReleaseSigning } = require("../package.json");
 const pty = require("node-pty");
@@ -105,7 +111,7 @@ const BACKEND_READY_PREFIX = "GOFER_UI_READY ";
 const ELECTRON_READY_MESSAGE = "GOFER_ELECTRON_READY";
 const BACKEND_EXECUTABLE_NAME = process.platform === "win32" ? "gof.exe" : "gof";
 const LATEST_RELEASE_URL =
-  "https://api.github.com/repos/zacharyivie/gofer-flow/releases/latest";
+  "https://api.github.com/repos/zacharyivie/Raticode/releases/latest";
 const isProduction =
   app.isPackaged || process.env.GOFER_ELECTRON_MODE === "production";
 const isSmokeTest = process.env.GOFER_ELECTRON_SMOKE_TEST === "1";
@@ -561,11 +567,14 @@ function createBackendErrorWindow(error, { title = "Raticode backend did not sta
 }
 
 app.whenReady().then(async () => {
+  protocol.handle("raticode-media", request => mediaPreviews.handle(request));
   applicationLog = createAppLog(app.getPath("logs"));
   applicationLog.write("info", "desktop", `Starting Raticode ${app.getVersion()} on ${process.platform} ${process.arch}`);
   process.on("uncaughtExceptionMonitor", (error) => applicationLog.emergency(error.stack || error.message));
   process.on("unhandledRejection", (error) => applicationLog.write("error", "desktop", error?.stack || error));
   app.on("web-contents-created", (_event, contents) => {
+    contents.once("destroyed", () => mediaPreviews.closeOwner(contents.id));
+    contents.on("render-process-gone", () => mediaPreviews.closeOwner(contents.id));
     contents.on("console-message", (details) => {
       if (contents !== mainWindow?.webContents && contents !== backendErrorWindow?.webContents) return;
       const { level, message } = details;
@@ -573,7 +582,20 @@ app.whenReady().then(async () => {
     });
   });
   app.on("render-process-gone", (_event, _contents, details) => applicationLog.write("error", "renderer", JSON.stringify(details)));
-  Menu.setApplicationMenu(null);
+  Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([
+    { role: "appMenu" },
+    { role: "editMenu" },
+    { label: "View", submenu: [
+      { role: "togglefullscreen" },
+      { label: "Find in Page", accelerator: "Command+F", registerAccelerator: false,
+        click: () => {
+          const active = [...browserSessions.values()].find(item => browserSessionContents(item)?.isFocused());
+          if (active) emitBrowserCommand(active, "find");
+          else mainWindow?.webContents.send("gofer:browser-command", { action: "editor-find" });
+        } },
+    ] },
+    { role: "windowMenu" },
+  ]) : null);
   setupIpcHandlers();
   setupAutoUpdater();
   try {
@@ -629,7 +651,41 @@ function createBackgroundTray() {
 
 app.on("second-instance", showMainWindow);
 
+let lifecycleApproved = false;
+let lifecyclePending = null;
+let lifecycleOwnerId = 0;
+function completeLifecycle(event, { requestId, approved, ready } = {}) {
+  if (requestId === "renderer-ready") { lifecycleOwnerId = ready === true ? event.sender.id : 0; return true; }
+  if (!lifecyclePending || lifecyclePending.requestId !== requestId || lifecyclePending.ownerId !== event.sender.id) return false;
+  lifecyclePending.resolve(approved === true);
+  lifecyclePending = null;
+  return true;
+}
+function prepareLifecycle(reason) {
+  if (!mainWindow || mainWindow.isDestroyed() || isSmokeTest || lifecycleOwnerId !== mainWindow.webContents.id) return Promise.resolve(true);
+  if (lifecyclePending) return lifecyclePending.promise;
+  const requestId = crypto.randomUUID();
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  lifecyclePending = { requestId, ownerId: mainWindow.webContents.id, resolve, promise };
+  showMainWindow();
+  mainWindow.webContents.send("gofer:prepare-lifecycle", { requestId, reason });
+  // A crashed/unresponsive renderer must not silently approve losing drafts.
+  const owner = mainWindow.webContents;
+  const cancel = () => {
+    if (lifecyclePending?.requestId === requestId) { lifecyclePending.resolve(false); lifecyclePending = null; }
+  };
+  owner.once("destroyed", cancel);
+  return promise.finally(() => owner.removeListener("destroyed", cancel));
+}
 app.on("before-quit", (event) => {
+  if (!lifecycleApproved && mainWindow && !mainWindow.isDestroyed() && !isSmokeTest) {
+    event.preventDefault();
+    void prepareLifecycle("quit Raticode").then(approved => {
+      if (approved) { lifecycleApproved = true; app.quit(); }
+    });
+    return;
+  }
   isQuitting = true;
   if (!archivesDrained) {
     event.preventDefault();
@@ -677,6 +733,14 @@ function setupIpcHandlers() {
     isProduction,
   });
   registerIpcHandlers(ipcMain, {
+    completeLifecycle,
+    readClipboard: () => clipboard.readText(),
+    editFocused: (event, { action } = {}) => {
+      const method = { undo: "undo", redo: "redo", cut: "cut", copy: "copy", paste: "paste", selectAll: "selectAll" }[action];
+      if (!method) throw new Error("Unknown editing action.");
+      event.sender[method]();
+      return true;
+    },
     developerInfo,
     developerAction,
     rendererLog,
@@ -685,6 +749,7 @@ function setupIpcHandlers() {
     archiveRem,
     checkForUpdates,
     copyPath,
+    movePath,
     browserAction,
     browserOwnerZoom,
     createBrowser,
@@ -723,6 +788,8 @@ function setupIpcHandlers() {
     missingRecentFiles: (_event, options = {}) => missingRecentFiles(options.paths),
     missingThreadRoots: (_event, options = {}) => missingThreadRoots(options.paths),
     readBinaryPreview,
+    openMediaPreview: (event, options = {}) => mediaPreviews.open(resolveExactPath(options.targetPath, { grantId: options.grantId, mustExist: true }), event.sender.id),
+    closeMediaPreview: (event, options = {}) => mediaPreviews.close(options.id, event.sender.id),
     readTextFile,
     resizeTerminal,
     renamePath,
@@ -886,6 +953,17 @@ function browserAction(event, options = {}) {
       if (canOpenInExternalBrowser(url)) void runBrowserOperation(session, () => shell.openExternal(url));
       break;
     }
+    case "find": {
+      const text = typeof options.text === "string" ? options.text.slice(0, 2048) : "";
+      if (!text) { contents.stopFindInPage("clearSelection"); session.findResult = null; session.findRequestId = null; }
+      else session.findRequestId = contents.findInPage(text, { forward: options.forward !== false, findNext: options.newSearch !== false });
+      break;
+    }
+    case "stop-find":
+      contents.stopFindInPage("clearSelection");
+      session.findResult = null;
+      session.findRequestId = null;
+      break;
     case "reload":
       contents.reload();
       break;
@@ -911,8 +989,15 @@ async function runBrowserOperation(session, operation) {
 function configureBrowserSession(session) {
   const contents = session.contents;
   const update = () => emitBrowserState(session);
+  contents.on("found-in-page", (_event, result) => {
+    if (result.requestId !== session.findRequestId) return;
+    session.findResult = { matches: result.matches, activeMatchOrdinal: result.activeMatchOrdinal, finalUpdate: result.finalUpdate };
+    update();
+  });
   contents.on("did-start-loading", () => {
     session.error = "";
+    session.findResult = null;
+    session.findRequestId = null;
     update();
   });
   contents.on("did-stop-loading", update);
@@ -969,6 +1054,7 @@ function configureBrowserSession(session) {
     }
     if ([
       "focus-location",
+      "find",
       "close",
       "next-tab",
       "previous-tab",
@@ -1124,6 +1210,7 @@ function browserSessionState(session, fallbackUrl = "") {
   const currentUrl = contents.getURL() || fallback;
   return {
     ready: true,
+    findResult: session.findResult || null,
     canOpenExternal: canOpenInExternalBrowser(currentUrl),
     canGoBack: contents.navigationHistory.canGoBack(),
     canGoForward: contents.navigationHistory.canGoForward(),
@@ -1235,7 +1322,7 @@ async function createTerminal(event, options = {}) {
     throw new Error(`Terminal directory is not a folder: ${cwd}`);
   }
 
-  const [shell, editorCommand] = await Promise.all([terminalShell(), terminalEditorCommand()]);
+  const [shell, editorCommand] = await Promise.all([terminalShell(options.shell), terminalEditorCommand()]);
   if (event.sender.isDestroyed()) throw new Error("Terminal owner was closed.");
   const id = crypto.randomUUID();
   const editorToken = crypto.randomBytes(32).toString("hex");
@@ -1466,7 +1553,7 @@ function ownedTerminalSession(event, id) {
   return session;
 }
 
-async function terminalShell() {
+async function terminalShell(choice = "system") {
   if (process.platform === "win32") {
     return {
       args: ["-NoLogo", "-NoExit", "-Command", powershellIntegrationCommand()],
@@ -1480,17 +1567,19 @@ async function terminalShell() {
       label: "PowerShell",
     };
   }
+  const selected = await unixTerminalShell({ choice, directory: path.join(app.getPath("userData"), "shell-integration") });
+  if (selected.label !== "bash") return selected;
   const integrationPath = await bashIntegrationPath();
   if (integrationPath) {
     return {
-      args: ["--rcfile", integrationPath],
-      command: "/bin/bash",
+      args: ["--rcfile", integrationPath, "-i"],
+      command: selected.command,
       label: "bash",
     };
   }
   return {
-    args: [],
-    command: "/bin/bash",
+    args: ["-il"],
+    command: selected.command,
     env: {
       PROMPT_COMMAND: [
         "printf '\\033]633;P;Cwd=%s\\007' \"$PWD\"",
@@ -1628,11 +1717,7 @@ function setupAutoUpdater() {
     });
     if (installUpdateAfterDownload) {
       installUpdateAfterDownload = false;
-      setImmediate(() => {
-        isQuitting = true;
-        stopBackend();
-        autoUpdater.quitAndInstall(false, true);
-      });
+      setImmediate(() => { void installDownloadedUpdate().catch(error => setUpdateState({ error: error.message })); });
     }
   });
   autoUpdater.on("error", (error) => {
@@ -1695,10 +1780,12 @@ async function downloadAndInstallUpdate() {
   return getUpdateState();
 }
 
-function installDownloadedUpdate() {
+async function installDownloadedUpdate() {
   if (!supportsAutoUpdates()) {
     return getUpdateState();
   }
+  if (!await prepareLifecycle("install the update")) return getUpdateState();
+  lifecycleApproved = true;
   isQuitting = true;
   stopBackend();
   autoUpdater.quitAndInstall(false, true);
@@ -1706,7 +1793,7 @@ function installDownloadedUpdate() {
 }
 
 async function openUpdateRelease() {
-  await shell.openExternal("https://github.com/zacharyivie/gofer-flow/releases/latest");
+  await shell.openExternal("https://github.com/zacharyivie/Raticode/releases/latest");
   return { opened: true };
 }
 
@@ -1811,9 +1898,10 @@ function macInstallerUrl(release) {
   if (process.platform !== "darwin") return "";
   const version = normalizeVersion(release.tag_name);
   const name = `Raticode-${version}-${process.arch}.dmg`;
-  const expected = `https://github.com/zacharyivie/gofer-flow/releases/download/${encodeURIComponent(release.tag_name)}/${name}`;
+  const trustedUrls = ["Raticode", "gofer-flow"].map(repository =>
+    `https://github.com/zacharyivie/${repository}/releases/download/${encodeURIComponent(release.tag_name)}/${name}`);
   const asset = Array.isArray(release.assets) && release.assets.find((item) => item.name === name);
-  return asset?.browser_download_url === expected ? expected : "";
+  return trustedUrls.includes(asset?.browser_download_url) ? asset.browser_download_url : "";
 }
 
 function isNoPublishedVersionsError(error) {
@@ -1977,18 +2065,33 @@ async function copyPath(_event, options = {}) {
     grantId: options.sourceGrantId,
     mustExist: true,
   });
-  const destinationPath = resolveExactPath(options.destinationPath, {
-    grantId: options.destinationGrantId,
-  });
+  const destinationPath = options.replace === true
+    ? path.join(resolveExactPath(path.dirname(options.destinationPath), { grantId: options.destinationGrantId, mustExist: true }), path.basename(options.destinationPath))
+    : resolveExactPath(options.destinationPath, { grantId: options.destinationGrantId });
   if (!fs.existsSync(sourcePath)) {
     throw new Error(`Path does not exist: ${sourcePath}`);
   }
-  if (fs.existsSync(destinationPath)) {
+  if (fs.existsSync(destinationPath) && options.replace !== true) {
     throw new Error(`Destination already exists: ${destinationPath}`);
   }
   await safeFiles.copyPath(sourcePath, destinationPath, {
+    replace: options.replace === true,
     authorizeSource: (target) => resolveExactPath(target, { grantId: options.sourceGrantId, mustExist: true }),
     authorizeDestination: (target) => resolveExactPath(target, { grantId: options.destinationGrantId }),
+  });
+  return pathHandle(destinationPath);
+}
+
+async function movePath(_event, options = {}) {
+  if (!options.sourcePath || typeof options.sourcePath !== "string" || !options.destinationPath || typeof options.destinationPath !== "string") throw new Error("Source and destination paths are required.");
+  const sourcePath = resolveExactPath(options.sourcePath, { grantId: options.sourceGrantId, mustExist: true });
+  const destinationPath = options.replace === true
+    ? path.join(resolveExactPath(path.dirname(options.destinationPath), { grantId: options.destinationGrantId, mustExist: true }), path.basename(options.destinationPath))
+    : resolveExactPath(options.destinationPath, { grantId: options.destinationGrantId });
+  await safeFiles.movePath(sourcePath, destinationPath, {
+    replace: options.replace === true,
+    authorizeSource: target => resolveExactPath(target, { grantId: options.sourceGrantId, mustExist: true }),
+    authorizeDestination: target => resolveExactPath(target, { grantId: options.destinationGrantId }),
   });
   return pathHandle(destinationPath);
 }
@@ -2028,9 +2131,6 @@ async function renamePath(_event, options = {}) {
     throw new Error(`Path does not exist: ${sourcePath}`);
   }
   const destinationPath = resolveNewChildPath(path.dirname(sourcePath), options.name, options.grantId);
-  if (fs.existsSync(destinationPath)) {
-    throw new Error(`Destination already exists: ${destinationPath}`);
-  }
   await safeFiles.renamePath(sourcePath, destinationPath, (target) => resolveExactPath(target, { grantId: options.grantId }));
   return pathHandle(destinationPath);
 }
@@ -2053,10 +2153,16 @@ async function readTextFile(_event, options = {}) {
   }
 
   const targetPath = resolveWorkflowSource(options.targetPath, options.grantId);
-  const content = await safeFiles.readFile(targetPath, { maxBytes: 2 * 1024 * 1024 }).catch(error => {
+  let content;
+  try {
+    content = await safeFiles.readFile(targetPath, { maxBytes: 2 * 1024 * 1024 });
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes(error.code || error.cause?.code)) {
+      return { content: null, missing: true, path: targetPath };
+    }
     if (error.code === "ERR_FILE_TOO_LARGE") throw new Error("File is too large to edit in Raticode.");
     throw error;
-  });
+  }
   if (content.includes(0)) {
     throw new Error("Binary files cannot be opened in the code editor.");
   }
@@ -2117,6 +2223,7 @@ async function setDataDir(_event, options = {}) {
     throw new Error("A data directory path is required.");
   }
 
+  if (!await prepareLifecycle("change the data directory")) return { dataDir: getGoferDataDir(), cancelled: true };
   selectedDataDir = resolveExactPath(options.dataDir, {
     grantId: options.grantId,
     mustExist: true,
@@ -2125,7 +2232,7 @@ async function setDataDir(_event, options = {}) {
   fs.mkdirSync(selectedDataDir, { recursive: true });
   getIpcSecurity().grantPath(selectedDataDir);
   writePersistedDataDir(selectedDataDir);
-  await restartBackend();
+  await replaceBackendWindow();
   return { dataDir: selectedDataDir };
 }
 
@@ -2284,7 +2391,7 @@ async function gitFileBaseline(_event, options = {}) {
 async function gitHistory(_event, options = {}) {
   try {
     const projectRoot = await resolveGitProjectDirectory(options);
-    return await readGitHistory(projectRoot);
+    return await readGitHistory(projectRoot, { ref: options.ref, refs: options.refs, limit: options.limit });
   } catch (error) {
     if (["ENOENT", "ENOTDIR"].includes(error.code || error.cause?.code)) {
       return { active: false, commits: [], missing: true };
@@ -2518,6 +2625,11 @@ function getIpcSecurity() {
 }
 
 async function restartBackend() {
+  if (!await prepareLifecycle("restart the backend")) return { cancelled: true };
+  return replaceBackendWindow();
+}
+
+async function replaceBackendWindow() {
   stopBackend();
   try {
     backendReady = startBackend();

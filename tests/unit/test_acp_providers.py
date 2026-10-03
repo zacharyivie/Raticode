@@ -317,16 +317,217 @@ async def test_grok_stream_wires_session_scoped_mcp_permissions(protocol, tmp_pa
     events = [
         event
         async for event in stream_acp(
-            "grok", "Read the note", cwd=tmp_path,
-            permission_mode="cli-managed", resources=resources,
+            "grok",
+            "Read the note",
+            cwd=tmp_path,
+            permission_mode="cli-managed",
+            resources=resources,
         )
     ]
     assert events[-1]["type"] == "final"
     answer = next(
-        json.loads(line) for line in protocol.read_text().splitlines()
+        json.loads(line)
+        for line in protocol.read_text().splitlines()
         if json.loads(line).get("id") == "permission-1"
     )
     assert answer["result"] == {
         "outcome": {"outcome": "selected", "optionId": "one-time"}
-        if identity == "granted" else {"outcome": "cancelled"}
+        if identity == "granted"
+        else {"outcome": "cancelled"}
     }
+
+
+async def test_rem_grok_delivers_verified_attachment_as_acp_image(protocol, tmp_path, monkeypatch):
+    import base64
+
+    from gofer.ui import chat
+    from gofer.ui.chat_media import store_chat_attachments
+
+    data_dir = tmp_path / "data"
+    image_data = b"test image bytes"
+    attachments = store_chat_attachments(
+        {
+            "threadId": "thread-1",
+            "files": [
+                {
+                    "name": "screen.png",
+                    "type": "image/png",
+                    "data": base64.b64encode(image_data).decode(),
+                }
+            ],
+        },
+        data_dir,
+    )["attachments"]
+    monkeypatch.setattr(chat, "resolve_provider_executable", lambda p: sys.executable)
+    monkeypatch.setattr(chat, "ensure_local_gofer_cli", lambda data: tmp_path / "gof")
+    events = [
+        event
+        async for event in chat.stream_workflow_chat(
+            "grok",
+            "cli-default",
+            [{"role": "user", "body": "Inspect screenshot", "attachments": attachments}],
+            {"chatThreadId": "thread-1"},
+            working_dir=tmp_path,
+            data_dir=data_dir,
+            permission_mode="cli-managed",
+        )
+    ]
+    assert events[-1]["type"] == "final"
+    requests = [json.loads(line) for line in protocol.read_text().splitlines()]
+    content = next(r["params"]["prompt"] for r in requests if r["method"] == "session/prompt")
+    assert "Inspect screenshot" in content[0]["text"]
+    assert content[1] == {
+        "type": "image",
+        "mimeType": "image/png",
+        "data": base64.b64encode(image_data).decode(),
+    }
+
+
+async def test_rem_grok_loads_session_and_discards_replay_with_per_turn_usage(
+    protocol, tmp_path, monkeypatch
+):
+    from gofer.ui import chat
+    from gofer.ui.chat_sessions import with_chat_session
+
+    script = tmp_path / "provider.py"
+    script.write_text(
+        script.read_text()
+        .replace("'agentCapabilities':{}", "'agentCapabilities':{'loadSession':True}")
+        .replace("for line in sys.stdin:", "prompted=False\nfor line in sys.stdin:")
+        .replace(
+            "elif method=='session/prompt':", "elif method=='session/prompt':\n  prompted=True"
+        )
+        .replace(
+            "elif method=='session/set_model': result={}",
+            """elif method=='session/set_model': result={}
+ elif method=='session/load':
+  update={'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'OLD REPLAY'}}
+  params={'sessionId':'fresh','update':update}
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':params}),flush=True)
+  result={}
+ elif method=='_x.ai/session/usage':
+  result={'usage':{'input_tokens':700 if prompted else 400,
+                   'output_tokens':100 if prompted else 50,
+                   'costUsdTicks':7000 if prompted else 4000}}
+""",
+        )
+    )
+    monkeypatch.setattr(chat, "resolve_provider_executable", lambda _: "grok")
+    monkeypatch.setattr(chat, "ensure_local_gofer_cli", lambda _: None)
+    monkeypatch.setattr(chat, "with_second_brain", lambda w, *a: w)
+    monkeypatch.setattr(chat, "with_report_outputs", lambda w, *a: w)
+    messages = [{"role": "user", "body": "Remember the original goal"}]
+    options = dict(
+        provider="grok",
+        model="cli-default",
+        workflow=None,
+        conversation_id="grok-thread",
+        working_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        permission_mode="cli-managed",
+    )
+    first = [e async for e in chat.stream_workflow_chat(messages=messages, **options)]
+
+    # Exercise a provider round trip through the same persisted Rem registry.
+    @with_chat_session
+    async def foreign_turn(
+        provider, messages, workflow, conversation_id, working_dir, data_dir, _session=None
+    ):
+        yield {"type": "final", "sessionId": "codex-native"}
+
+    messages += [{"role": "assistant", "body": "Done"}, {"role": "user", "body": "Foreign request"}]
+    _ = [
+        e
+        async for e in foreign_turn(
+            provider="codex",
+            messages=messages,
+            workflow=None,
+            conversation_id=options["conversation_id"],
+            working_dir=tmp_path,
+            data_dir=tmp_path / "data",
+        )
+    ]
+    messages += [{"role": "assistant", "body": "Foreign tool output and reply"}]
+    second = [
+        e
+        async for e in chat.stream_workflow_chat(
+            messages=messages + [{"role": "user", "body": "Continue"}],
+            **options,
+        )
+    ]
+    assert first[-1]["sessionId"] == second[-1]["sessionId"] == "fresh"
+    assert second[-1]["message"]["body"] == "Done"
+    assert second[-1]["usage"]["input_tokens"] == 300
+    assert second[-1]["usage"]["output_tokens"] == 50
+    assert second[-1]["usage"]["cost_usd"] == pytest.approx(0.0000003)
+    requests = [json.loads(line) for line in protocol.read_text().splitlines()]
+    methods = [r["method"] for r in requests]
+    assert methods.count("session/new") == methods.count("session/load") == 1
+    prompts = [
+        r["params"]["prompt"][0]["text"] for r in requests if r["method"] == "session/prompt"
+    ]
+    assert "original goal" not in prompts[1] and "Continue" in prompts[1]
+    assert "Foreign request" in prompts[1] and "Foreign tool output and reply" in prompts[1]
+    assert second[-1]["sessionResumed"] is True
+
+
+async def test_acp_resume_requires_advertised_capability(protocol, tmp_path):
+    from gofer.subscriptions.acp_transport import AcpTransportError
+
+    with pytest.raises(AcpTransportError, match="cannot load"):
+        _ = [
+            e
+            async for e in stream_acp(
+                "grok",
+                "Do not replay",
+                cwd=tmp_path,
+                permission_mode="cli-managed",
+                session_id="fresh",
+            )
+        ]
+    assert all(
+        json.loads(line)["method"] != "session/prompt" for line in protocol.read_text().splitlines()
+    )
+
+
+async def test_acp_prefers_resume_when_advertised(protocol, tmp_path):
+    import base64
+
+    script = tmp_path / "provider.py"
+    script.write_text(
+        script.read_text()
+        .replace(
+            "'agentCapabilities':{}", "'agentCapabilities':{'sessionCapabilities':{'resume':{}}}"
+        )
+        .replace(
+            "elif method=='session/new': result={'sessionId':'fresh'}",
+            "elif method=='session/resume': result={}\n "
+            "elif method=='_x.ai/session/usage': result={'usage':{}}",
+        )
+    )
+    image = tmp_path / "screen.png"
+    image.write_bytes(b"resumed turn image")
+    events = [
+        e
+        async for e in stream_acp(
+            "grok",
+            "Next only",
+            cwd=tmp_path,
+            permission_mode="cli-managed",
+            session_id="fresh",
+            image_paths=[image],
+        )
+    ]
+    assert events[-1]["message"]["body"] == "Done"
+    requests = [json.loads(line) for line in protocol.read_text().splitlines()]
+    assert any(r["method"] == "session/resume" for r in requests)
+    assert all(r["method"] not in {"session/new", "session/load"} for r in requests)
+    content = next(r["params"]["prompt"] for r in requests if r["method"] == "session/prompt")
+    assert content == [
+        {"type": "text", "text": "Next only"},
+        {
+            "type": "image",
+            "mimeType": "image/png",
+            "data": base64.b64encode(image.read_bytes()).decode(),
+        },
+    ]

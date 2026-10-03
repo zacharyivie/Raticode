@@ -578,6 +578,7 @@ test("Rem edit paths preserve the filename and open in the scoped code editor", 
   await dom.change(dom.first("textarea"), "Edit the workflow");
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
+  await dom.click(dom.ancestor(dom.byText("Show thoughts"), "BUTTON"));
   const editDisclosure = dom.ancestor(dom.byText("Editing files"), "BUTTON");
   await dom.click(editDisclosure);
   const pathLink = dom.byLabel(
@@ -1880,9 +1881,9 @@ test("Code file explorer creates, copies, pastes, reveals, renames, and trashes 
   await contextMenu(dom.byText("docs"));
   await dom.click(menuAction("Paste"));
   await dom.flush();
-  assert.deepEqual(calls.at(-1), ["copy", "/workspace/gofer-flow/README.md", "/workspace/gofer-flow/docs/README copy.md"]);
+  assert.deepEqual(calls.at(-1), ["copy", "/workspace/gofer-flow/README.md", "/workspace/gofer-flow/docs/README.md"]);
 
-  await contextMenu(dom.byText("README.md"));
+  await contextMenu(dom.byTitle("/workspace/gofer-flow/README.md"));
   await dom.click(menuAction("Open in file explorer"));
   assert.deepEqual(calls.at(-1), ["reveal", "/workspace/gofer-flow/README.md"]);
 
@@ -5216,6 +5217,8 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
   assert.match(dom.text(), /Explain this workflow/);
+  assert.match(dom.text(), /Show thoughts/);
+  await dom.click(dom.ancestor(dom.byText("Show thoughts"), "BUTTON"));
   assert.match(dom.text(), /Hide thoughts/);
   assert.match(dom.text(), /Inspecting graph/);
   const thoughtGroup = dom.byText("Hide thoughts").parentNode.parentNode;
@@ -5400,6 +5403,76 @@ test("ACP text deltas update one thought, preserve whitespace, and remove duplic
     const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
     assert.equal(saved.filter(message => message.kind === "thought").length, 0);
     assert.equal(saved.filter(message => message.kind === "final" && message.body === body).length, 1);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem recovery keeps partial output once, shows status, and keeps Stop available", async () => {
+  const controlled = controlledStreamResponse([
+    JSON.stringify({ type: "thought", text: "Completed part", deltaStreamId: "attempt-1" }) + "\n",
+    JSON.stringify({ type: "recovery", message: "Cursor response interrupted. Resuming, attempt 1 of 2.", partial: { body: "Completed part" } }) + "\n",
+    JSON.stringify({ type: "final", message: { body: "Task finished" } }) + "\n",
+  ]);
+  let threadId;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "cursor", displayName: "Cursor", available: true, models: [] }] }),
+    (url, options) => {
+      if (url !== "/api/chat/stream") return null;
+      threadId = JSON.parse(options.body).conversationId;
+      return controlled.response(url);
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Complete the task");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    controlled.releaseNext(); await dom.flush();
+    controlled.releaseNext(); await dom.flush();
+    assert.ok(dom.byTitle("Stop Rem"));
+    assert.match(dom.text(), /Resuming, attempt 1 of 2/);
+    assert.match(dom.text(), /Partial response/);
+    const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+    assert.equal(saved.filter(message => message.body === "Completed part").length, 1);
+    assert.equal(saved.filter(message => message.kind === "error").length, 0);
+    controlled.releaseNext(); await dom.flush();
+    assert.match(dom.text(), /Task finished/);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem retains an interrupted answer and Resume task continues the same conversation", async () => {
+  let threadId;
+  let requests = 0;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "cursor", displayName: "Cursor", available: true, models: [] }] }),
+    (url, options) => {
+      if (url !== "/api/chat/stream") return null;
+      requests += 1;
+      const body = JSON.parse(options.body);
+      if (requests === 1) threadId = body.conversationId;
+      else {
+        assert.equal(body.conversationId, threadId);
+        assert.match(body.messages.at(-1).body, /Inspect completed work/);
+      }
+      return streamResponse([JSON.stringify(requests === 1
+        ? { type: "error", error: "Provider emitted malformed JSON content", message: { body: "Partial answer" }, resumeAvailable: true }
+        : { type: "final", message: { body: "Resumed task complete" } }) + "\n"])(url);
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Complete the task");
+    await dom.click(dom.byTitle("Send message")); await dom.flush();
+    assert.match(dom.text(), /Partial answer/);
+    assert.match(dom.text(), /Partial response/);
+    await dom.click(dom.ancestor(dom.byText("Resume task"), "BUTTON")); await dom.flush();
+    assert.equal(requests, 2);
+    assert.match(dom.text(), /Resumed task complete/);
+    const saved = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(threadId)));
+    assert.equal(saved.filter(message => message.body === "Partial answer").length, 1);
   } finally { await dom.unmount(); }
 });
 
@@ -7691,7 +7764,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
     readGitWorktrees,
     removeGitWorktree,
   } = require("../../electron/git-status.cjs");
-  assert.deepEqual(parseGitHistory("\0abc\x1fa1b2c3\x1fAda\x1f2026-08-31T12:00:00Z\x1fShip it\x1fShip it\n\nFull details.\n\x1fHEAD -> main\n12\t3\tapp.js\n-\t-\timage.png\n5\t0\ttest.js\n"), [{
+  assert.deepEqual(parseGitHistory("\0abc\x1fa1b2c3\x1fAda\x1f2026-08-31T12:00:00Z\x1fShip it\x1fShip it\n\nFull details.\n\x1fHEAD -> main\x1fparent123\n12\t3\tapp.js\n-\t-\timage.png\n5\t0\ttest.js\n"), [{
     author: "Ada",
     authoredAt: "2026-08-31T12:00:00Z",
     binaryFiles: 1,
@@ -7700,6 +7773,7 @@ test("Git porcelain status maps tracked, untracked, deleted, and renamed files",
     insertions: 17,
     message: "Ship it\n\nFull details.",
     refs: "HEAD -> main",
+    parents: ["parent123"],
     shortHash: "a1b2c3",
     subject: "Ship it",
   }]);
@@ -8028,7 +8102,7 @@ test("commit history refreshes in the background and rows expand on click", asyn
   const sourceControlButton = dom.byLabel("Source control");
   await dom.click(sourceControlButton);
   await dom.flush();
-  assert.equal(historyCalls, 1);
+  assert.equal(historyCalls, 0);
   assert.doesNotMatch(dom.text(), /\b1 commits\b/);
 
   await dom.click(dom.byText("Branches"));
@@ -9233,11 +9307,14 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
   assert.deepEqual(Object.keys(exposed.goferDesktop).sort(), [
     "apiSession",
     "appearance",
+    "clipboard",
     "dataDirectory",
     "developer",
+    "editFocused",
     "getDataDir",
     "getDroppedFilePath",
     "grantDroppedPath",
+    "onPrepareLifecycle",
     "rem",
     "textFiles",
     "workspace",
@@ -9263,6 +9340,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "listDirectory",
     "missingRecentFiles",
     "missingThreadRoots",
+    "movePath",
     "openPath",
     "pathGrantForApi",
     "removeWorktree",
@@ -9274,13 +9352,14 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "selectPath",
     "trustProjectRoot",
   ]);
-  assert.deepEqual(Object.keys(exposed.goferDesktop.textFiles).sort(), ["read", "readPreview", "write"]);
+  assert.deepEqual(Object.keys(exposed.goferDesktop.textFiles).sort(), ["closePreview", "openPreview", "read", "readPreview", "write"]);
   assert.deepEqual(Object.keys(exposed.goferDesktop.dataDirectory).sort(), ["choose", "get"]);
   assert.deepEqual(Object.keys(exposed.goferBrowser).sort(), [
     "adopt",
     "back",
     "close",
     "create",
+    "find",
     "focus",
     "forward",
     "navigate",
@@ -9294,6 +9373,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "reload",
     "setPreferences",
     "stop",
+    "stopFind",
   ]);
   assert.deepEqual(Object.keys(exposed.goferUpdates).sort(), [
     "check",
@@ -9340,8 +9420,14 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
   });
   assert.deepEqual(toPlainObject(await exposed.goferDesktop.workspace.copyPath({ sourcePath: "/a", destinationPath: 9 })), {
     channel: "gofer:copy-path",
-    payload: { destinationGrantId: "", sourcePath: "/a", sourceGrantId: "", destinationPath: "" },
+    payload: { destinationGrantId: "", sourcePath: "/a", sourceGrantId: "", destinationPath: "", replace: false },
   });
+  for (const operation of ["copy", "move"]) {
+    assert.deepEqual(toPlainObject(await exposed.goferDesktop.workspace[`${operation}Path`]({ sourcePath: "/a", destinationPath: "/b", replace: true })), {
+      channel: `gofer:${operation}-path`,
+      payload: { destinationGrantId: "", sourcePath: "/a", sourceGrantId: "", destinationPath: "/b", replace: true },
+    });
+  }
   assert.equal(
     await exposed.goferDesktop.grantDroppedPath({ path: "/outside/file.txt" }),
     "/outside/file.txt",
@@ -9357,6 +9443,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
       cwd: "/outside/ungranted",
       grantId: "",
       rows: 40,
+      shell: "system",
     },
   });
   assert.deepEqual(toPlainObject(await exposed.goferTerminal.write("terminal-1", "pwd\r")), {
@@ -10191,6 +10278,10 @@ function installTestDom() {
     Node: TestNode,
     SVGElement: TestElement,
     addEventListener: (...args) => documentObject.addEventListener(...args),
+    dispatchEvent: event => {
+      for (const listener of documentObject.listeners[event.type] ?? []) listener(event);
+      return true;
+    },
     clearInterval: (id) => clearTimer(timers, id),
     clearTimeout: (id) => clearTimer(timers, id),
     getComputedStyle: () => ({}),
@@ -11794,16 +11885,17 @@ test("source control exposes conflicts and locks parent controls during integrat
   await dom.click(dom.byTitle("code.py")); assert.deepEqual(opened[0], ["/repo/code.py", { diff: true, gitGroup: "unstaged" }]);
   assert.equal(reactProps(dom.byText("Continue merge")).disabled, true);
   await dom.click(dom.byText("Branches")); await dom.click(dom.byLabel("Integrate feature worktree"));
-  await dom.change(dom.byLabel("Target branch"), "main"); await dom.click(dom.byText("Preview merge"));
+  await dom.flush();
   assert.equal(reactProps(dom.byLabel("Remove feature worktree")).disabled, true);
   await React.act(async () => { finishPreview({ diff: "+new", conflicts: ["code.py"], notice: "1 file will conflict." }); });
   assert.equal(reactProps(dom.byLabel("Remove feature worktree")).disabled, false);
-  assert.match(dom.text(), /1 file will conflict/); assert.ok(dom.byText("Merge branch"));
+  assert.match(dom.text(), /Conflicts found in merge to main. Continue anyway/); assert.ok(dom.byLabel("Merge"));
+  assert.throws(() => dom.byLabel("Preview diff"));
   const previousConfirm = window.confirm;
-  window.confirm = () => true;
+  window.confirm = () => assert.fail("Branch integration must not ask for another confirmation");
   window.dispatchEvent = () => true;
   try {
-    await dom.click(dom.byText("Merge branch"));
+    await dom.click(dom.byLabel("Merge"));
     await React.act(async () => { finishPreview({ ...snapshot, destinationRoot: "/feature", destinationStatus: snapshot, conflicts: ["code.py"], notice: "Merge paused. Resolve the files marked !." }); });
     await dom.flush();
     assert.deepEqual(selected, ["/feature"]);
@@ -11814,7 +11906,7 @@ test("source control exposes conflicts and locks parent controls during integrat
   await dom.unmount();
 });
 
-test("worktree context menus list operations and defer target selection without Git mutations", async () => {
+test("worktree context menus preview each selected operation without Git mutations", async () => {
   const calls = [];
   const workspace = {
     trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
@@ -11848,9 +11940,10 @@ test("worktree context menus list operations and defer target selection without 
       await dom.click(operation);
       assert.equal(menu("Actions for feature"), undefined);
       assert.equal(reactProps(dom.byLabel("Integration operation")).value, kind);
-      assert.equal(reactProps(dom.byLabel("Target branch")).value, "");
-      await dom.change(dom.byLabel("Target branch"), "main");
-      await dom.click(dom.byText(`Preview ${kind}`));
+      assert.equal(reactProps(dom.byLabel("Target branch")).value, "main");
+      await dom.flush();
+      assert.match(dom.text(), /No conflicts, safe to/);
+      assert.throws(() => dom.byLabel("Preview diff"));
       assert.deepEqual(calls.at(-1), { root: "/repo", action: `${kind === "rebase" ? "rebase" : "merge"}-preview`, value: { source: "feature", target: "main", ...(["merge", "rebase"].includes(kind) ? {} : { strategy: kind }) } });
     }
     assert.ok(calls.every(call => call.action === "stash-list" || call.action.endsWith("-preview")));
@@ -12601,7 +12694,8 @@ test("Branches lists inactive branches without checkout and offers deletion and 
     assert.equal(allElements(menu()).filter(el => el.tagName === 'BUTTON').length, 7);
     await dom.click(allElements(menu()).find(el => el.getAttribute('data-operation') === 'rebase'));
     assert.equal(reactProps(dom.byLabel('Integration operation')).value, 'rebase');
-    assert.deepEqual(calls, []);
+    assert.deepEqual(calls, [['rebase-preview', { source: 'feature', target: 'main' }]]);
+    calls.length = 0;
     await dom.click(dom.byLabel('Actions for branch feature'));
     await dom.click(allElements(menu()).find(el => el.getAttribute('data-operation') === 'worktree-branch'));
     assert.equal(calls.length, 1); assert.deepEqual(selected, []);
@@ -14737,6 +14831,86 @@ test("new thread resource defaults enable tools without overriding saved restric
     { shell: false, web: false, skills: [], mcpServers: [] });
 });
 
+test("an existing Codex thread sends edited tools, skills and MCP to steering and later messages", async () => {
+  const chunks = ["", ""];
+  const stream = controlledStreamResponse(chunks);
+  let initial, receipt;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    (url, options) => {
+      if (url === "/api/chat/stream") {
+        if (initial) return streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url);
+        initial = JSON.parse(options.body);
+        chunks[0] = JSON.stringify({ type: "turn", turnId: initial.turnId, generation: 0 }) + "\n";
+        return stream.response(url);
+      }
+      if (url === "/api/chat/steer") {
+        receipt = { ...JSON.parse(options.body), status: "interrupting", provider: "codex" };
+        return { ok: true, json: async () => ({ receipt }) };
+      }
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    width: 380, assistantDefaults: { provider: "codex", resources: { shell: false, web: false, skills: [], mcpServers: [] } },
+  }), fetchMock);
+  const checkbox = label => allElements(dom.byText(label)).find(el => el.tagName === "INPUT");
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "Research this topic");
+    await dom.click(dom.byTitle("Send message")); await dom.flush();
+    stream.releaseNext(); await dom.flush();
+    assert.equal(initial.workflow.remResources.web, false);
+    await dom.click(dom.byText("Thread tools, skills & MCP"));
+    assert.match(dom.text(), /Tool changes apply when you send your next instruction/);
+    await dom.change(checkbox("Search the web"), true);
+    await dom.change(checkbox("Run commands"), true);
+    await dom.click(dom.byExactText("Add skill"));
+    await dom.change(dom.first("textarea"), "Search now");
+    await dom.click(dom.byLabel("Steer Rem")); await dom.flush();
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/steer").length, 0);
+    assert.equal(dom.first("textarea").value, "Search now");
+    const field = dom.byLabel("Skill 1 path");
+    await dom.focus(field); await dom.change(field, "/old"); await dom.change(field, "");
+    assert.equal(field.value, "");
+    await dom.change(field, "/skills/research"); await dom.blur(field);
+    await dom.click(dom.byExactText("Add MCP server"));
+    const commit = async (label, value) => { const input = dom.byLabel(label); await dom.focus(input); await dom.change(input, value); await dom.blur(input); };
+    await commit("Server 1 name", "docs");
+    await dom.change(dom.byLabel("Server 1 connection"), "stdio");
+    await commit("Server 1 executable", "/tools/docs");
+    await commit("Server 1 arguments", "--root\n/path with spaces");
+    await dom.click(dom.byLabel("Steer Rem")); await dom.flush();
+    assert.equal(receipt.resources.web, true);
+    assert.equal(receipt.resources.shell, true);
+    assert.deepEqual(receipt.resources.skills, [{ path: "/skills/research", enabled: true }]);
+    assert.deepEqual(receipt.resources.mcpServers[0].args, ["--root", "/path with spaces"]);
+    assert.equal(initial.workflow.remResources.web, false);
+    chunks[1] = JSON.stringify({ type: "turn", turnId: initial.turnId, generation: 1 }) + "\n"
+      + JSON.stringify({ type: "final", turnId: initial.turnId, generation: 1, message: { body: "Searched" } }) + "\n";
+    stream.releaseNext(); await dom.flush();
+    assert.match(dom.text(), /Tool changes apply to your next message/);
+    const composer = allElements(dom.container).find(node => node.getAttribute("data-chat-composer") !== null);
+    await dom.change(allElements(composer).find(node => node.tagName === "TEXTAREA"), "Follow up");
+    await dom.click(dom.byTitle("Send message")); await dom.flush();
+    const followup = JSON.parse(fetchMock.calls.filter(call => call.url === "/api/chat/stream").at(-1).options.body);
+    assert.equal(followup.conversationId, initial.conversationId);
+    assert.deepEqual(followup.workflow.remResources, receipt.resources);
+    assert.deepEqual(appModule.loadChatThreads().find(thread => thread.id === initial.conversationId).resources, receipt.resources);
+  } finally { await dom.unmount(); }
+});
+
+test("the resource menu reports backend size limits before starting a provider", async () => {
+  const { remResourceError } = await viteServer.ssrLoadModule("/src/components/RemResources.jsx");
+  for (const [resources, message] of [
+    [{ skills: [{ path: "x".repeat(4097) }] }, /4096/],
+    [{ skills: Array.from({ length: 101 }, () => ({ path: "/skill" })) }, /100 skills/],
+    [{ mcpServers: [{ name: "docs", url: `https://example.com/${"x".repeat(2048)}` }] }, /2048/],
+    [{ mcpServers: [{ name: "docs", type: "stdio", command: "x".repeat(4097) }] }, /4096/],
+    [{ mcpServers: [{ name: "docs", type: "stdio", command: "/tool", args: Array(101).fill("arg") }] }, /100 arguments/],
+  ]) assert.match(remResourceError(resources), message);
+});
+
 test("background first turn captures tools, skills, MCP and permissions before any thread is opened", async () => {
   const grant = createDeferred();
   const resources = {
@@ -14882,6 +15056,8 @@ test("global Rem scope becomes the selected project before the final response", 
   }), fetchMock);
   await dom.flush();
   assert.ok(dom.byLabel("Scoped to Global. Change project scope"));
+  assert.match(dom.text(), /Global scope keeps selected web search, skills and MCP servers/);
+  assert.match(dom.text(), /Codex keeps your command setting under Read Only here; your project permission choice applies after selecting a project/);
   await dom.change(dom.first("textarea"), "Fix the mobile app");
   await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
   const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
@@ -14889,9 +15065,37 @@ test("global Rem scope becomes the selected project before the final response", 
   assert.equal(request.workflow.remThreads.global, true);
   assert.deepEqual(request.workflow.remThreads.projects.map(project => project.root).sort(), ["/projects/desktop", "/projects/mobile"]);
   assert.ok(dom.byLabel("Scoped to Mobile. Change project scope"));
+  assert.doesNotMatch(dom.text(), /Codex keeps your command setting under Read Only here/);
   await dom.click(dom.byLabel("Back to active threads"));
   assert.ok(dom.byLabel("Scoped to Global. Change project scope"));
   await dom.unmount();
+});
+
+test("global research sends selected web, skill and MCP settings with the saved project permissions", async () => {
+  const resources = { shell: true, web: true, skills: [{ path: "/skills/research", enabled: true }], mcpServers: [{ name: "docs", url: "https://example.com/mcp", enabled: true }] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Research complete"}}\n'])(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    activeProjectRoot: "/projects/desktop", recentProjectRoots: ["/projects/desktop"],
+    assistantDefaults: { defaultScope: "global", resources }, workflows: [], width: 380,
+  }), fetchMock);
+  try {
+    await dom.flush();
+    await dom.change(dom.byLabel("Rem permissions"), "danger-full-access");
+    await dom.click(dom.byText("New thread tools, skills & MCP"));
+    assert.equal(dom.byLabel("Skill 1 path").value, "/skills/research");
+    assert.match(dom.text(), /Codex keeps your command setting under Read Only here; your project permission choice applies after selecting a project/);
+    await dom.change(dom.first("textarea"), "Research coding dashboards");
+    await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
+    const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
+    assert.equal(request.workflow.remThreads.global, true);
+    assert.deepEqual(request.workflow.remResources, resources);
+    assert.equal(request.permissionMode, "danger-full-access");
+    assert.equal(dom.byLabel("Rem permissions").value, "danger-full-access");
+    assert.match(dom.text(), /Codex keeps your command setting under Read Only here/);
+  } finally { await dom.unmount(); }
 });
 
 test("Rem new-thread events start one scoped child and keep the parent visible", async () => {
@@ -15691,4 +15895,862 @@ test("commit progress updates within one running job and clears after interrupti
     assert.doesNotMatch(dom.text(), /Reading changes|Rem is drafting|Git could not complete/);
     assert.equal(reactProps(dom.byLabel("Generate commit message with Rem")).disabled, false);
   } finally { await dom.unmount(); }
+});
+
+
+test("Rem merges consecutive thought groups and keeps tool identities scoped to their turns", () => {
+  const thought = (id, groupId, status) => ({ id, role: "assistant", kind: "thought", groupId, body: id, trace: { id: "tool-1", kind: "tool", title: "Read", status } });
+  const items = appModule.buildChatItems([
+    thought("first", "one", "running"), thought("result", "one", "complete"),
+    { id: "hidden", role: "assistant", kind: "memory", body: "hidden" },
+    thought("second", "two", "running"),
+    { id: "legacy", role: "assistant", kind: "thought", body: "Old thought" },
+    { id: "system", role: "system", body: "Context updated" },
+    { id: "reply", role: "assistant", kind: "final", body: "Done" },
+  ]);
+  assert.equal(items.filter(item => item.type === "thought-group").length, 1);
+  assert.equal(items[0].thoughts.length, 4);
+  const trace = appModule.buildThoughtTrace(items[0].thoughts);
+  assert.equal(trace.length, 3);
+  assert.equal(trace[0].status, "complete");
+  assert.equal(trace[1].status, "running");
+  assert.equal(new Set(trace.map(item => item.key)).size, 3);
+  assert.equal(items[0].replyId, "reply");
+  assert.equal(appModule.isThoughtGroupExpanded(items[0], {}), false);
+  assert.equal(appModule.isThoughtGroupExpanded(items[0], {}, false), true);
+});
+
+for (const provider of ["codex", "claude_code", "cursor", "copilot", "opencode", "grok"]) {
+  test(`Rem accepts pasted images for ${provider}`, async () => {
+    const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider } }), createFetchMock([
+      jsonResponse("/api/provider/capabilities", { providers: [{ id: provider, displayName: provider, available: true, models: [], supportsImages: true }] }),
+    ]));
+    try {
+      const pane = allElements(dom.container).find(node => node.getAttribute?.("data-chat-pane") === "true");
+      await dom.pointer(pane, "onPaste", { clipboardData: { items: [{ kind: "file", getAsFile: () => ({ name: "pasted.png", size: 12, type: "image/png" }) }] } });
+      assert.match(dom.text(), /pasted\.png/);
+      assert.doesNotMatch(dom.text(), /can't accept images/);
+    } finally { await dom.unmount(); }
+  });
+}
+
+test("Rem rejects unsupported pasted images in the attachment area and dismisses the warning", async () => {
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider: "antigravity" } }), createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "antigravity", displayName: "Antigravity", available: true, models: [], supportsImages: false }] }),
+  ]));
+  const originalSet = window.setTimeout, originalClear = window.clearTimeout;
+  let dismiss;
+  window.setTimeout = (callback, delay) => delay === chatAttachmentsModule.CHAT_IMAGE_WARNING_MS ? (dismiss = callback, -99) : originalSet(callback, delay);
+  window.clearTimeout = id => { if (id !== -99) originalClear(id); };
+  try {
+    const pane = allElements(dom.container).find(node => node.getAttribute?.("data-chat-pane") === "true");
+    await dom.pointer(pane, "onPaste", { clipboardData: { items: [
+      { kind: "file", getAsFile: () => ({ name: "rejected.png", size: 12, type: "image/png" }) },
+      { kind: "file", getAsFile: () => ({ name: "kept.txt", size: 12, type: "text/plain" }) },
+    ] } });
+    assert.doesNotMatch(dom.text(), /rejected\.png/);
+    assert.match(dom.text(), /kept\.txt/);
+    const warning = dom.byText("Antigravity can't accept images with this selection.");
+    assert.ok(dom.ancestor(warning, element => element.getAttribute?.("data-chat-composer") !== null));
+    assert.equal(warning.getAttribute("role"), "status");
+    assert.equal(typeof dismiss, "function");
+    await React.act(async () => dismiss());
+    assert.doesNotMatch(dom.text(), /can't accept images/);
+    assert.match(dom.text(), /kept\.txt/);
+  } finally { await dom.unmount(); window.setTimeout = originalSet; window.clearTimeout = originalClear; }
+});
+
+test("Rem respects model vision opt-outs", () => {
+  const capability = { supportsImages: true, defaultModel: "text", models: [{ id: "text", supportsImages: false }, { id: "vision", supportsImages: true }] };
+  assert.equal(chatAttachmentsModule.providerSupportsChatImages("copilot", capability, "text"), false);
+  assert.equal(chatAttachmentsModule.providerSupportsChatImages("copilot", capability, "cli-default"), false);
+  assert.equal(chatAttachmentsModule.providerSupportsChatImages("copilot", capability, ""), false);
+  assert.equal(chatAttachmentsModule.providerSupportsChatImages("copilot", capability, "vision"), true);
+  assert.equal(chatAttachmentsModule.isChatImage({ name: "screen.PNG", type: "" }), true);
+});
+
+for (const autoHideThoughts of [true, false]) {
+  test(`Rem auto-hide thoughts is ${autoHideThoughts ? "on" : "off"} when a reply arrives`, async () => {
+    const stream = controlledStreamResponse([
+      '{"type":"thought","text":"Inspecting the screenshot"}\n',
+      '{"type":"final","message":{"body":"Finished checking"}}\n',
+    ]);
+    const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { autoHideThoughts } }), createFetchMock([
+      jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
+      url => url === "/api/chat/stream" ? stream.response(url) : null,
+    ]));
+    try {
+      await dom.change(dom.first("textarea"), "Inspect this");
+      await dom.click(dom.byTitle("Send message"));
+      stream.releaseNext(); await dom.flush();
+      assert.match(dom.text(), /Hide thoughts/);
+      // A manual expansion during execution must still collapse at completion.
+      await dom.click(dom.ancestor(dom.byText("Hide thoughts"), "BUTTON"));
+      await dom.click(dom.ancestor(dom.byText("Show thoughts"), "BUTTON"));
+      stream.releaseNext(); await dom.flush();
+      assert.match(dom.text(), /Finished checking/);
+      assert.match(dom.text(), autoHideThoughts ? /Show thoughts/ : /Hide thoughts/);
+      if (autoHideThoughts) {
+        assert.doesNotMatch(dom.text(), /Inspecting the screenshot/);
+        await dom.click(dom.ancestor(dom.byText("Show thoughts"), "BUTTON"));
+        assert.match(dom.text(), /Inspecting the screenshot/);
+        await dom.change(dom.first("textarea"), "A new draft");
+        assert.match(dom.text(), /Hide thoughts/);
+      }
+    } finally { await dom.unmount(); }
+  });
+}
+
+test("Rem thought and web defaults survive existing settings and preserve opt-outs", () => {
+  const defaults = settingsModule.normalizeAppSettings({ assistant: { provider: "cursor" } });
+  assert.equal(defaults.assistant.autoHideThoughts, true);
+  assert.equal(defaults.assistant.resources.web, true);
+  const storage = createStorage();
+  settingsModule.saveAppSettings({ assistant: { autoHideThoughts: false, resources: { web: false } } }, storage);
+  const loaded = settingsModule.loadAppSettings(storage);
+  assert.equal(loaded.assistant.autoHideThoughts, false);
+  assert.equal(loaded.assistant.resources.web, false);
+});
+
+
+test("switching Rem to a provider without images removes queued images and preserves text files", async () => {
+  const providers = ["codex", "antigravity"].map(id => ({ id, displayName: id, available: true, models: [], supportsImages: id === "codex" }));
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), createFetchMock([jsonResponse("/api/provider/capabilities", { providers })]));
+  try {
+    const pane = allElements(dom.container).find(node => node.getAttribute?.("data-chat-pane") === "true");
+    await dom.pointer(pane, "onPaste", { clipboardData: { files: [
+      { name: "queued.png", size: 12, type: "image/png" },
+      { name: "context.txt", size: 12, type: "text/plain" },
+    ] } });
+    assert.match(dom.text(), /queued\.png/);
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "provider"));
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("role") === "option" && textOf(el).startsWith("antigravity")));
+    assert.doesNotMatch(dom.text(), /queued\.png/);
+    assert.match(dom.text(), /context\.txt/);
+    assert.match(dom.text(), /can't accept images/);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem settings expose the auto-hide thoughts switch and save its value", async () => {
+  const changes = [];
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange: (key, value) => changes.push([key, value]), onClose() {}, onResetAll() {},
+  }), createFetchMock([]));
+  try {
+    const label = dom.byText("Auto-hide thoughts");
+    const row = dom.ancestor(label, el => allElements(el).some(node => node.getAttribute?.("role") === "switch"));
+    const control = allElements(row).find(el => el.getAttribute?.("role") === "switch");
+    assert.equal(control.getAttribute("aria-checked"), "true");
+    await dom.click(control);
+    assert.deepEqual(changes, [["assistant.autoHideThoughts", false]]);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem starts a fresh provider session only for an explicit edit and resend", () => {
+  const request = { provider: "codex", model: "cli-default", messages: [], workflow: {}, conversationId: "thread", turnId: "turn" };
+  assert.equal(appModule.chatStreamRequestBody(request).resetSession, undefined);
+  assert.equal(appModule.chatStreamRequestBody({ ...request, resetSession: false }).resetSession, undefined);
+  assert.equal(appModule.chatStreamRequestBody({ ...request, resetSession: true }).resetSession, true);
+});
+
+test("Rem keeps all eight turns in the UI, storage and archive across Codex Cursor Codex", async () => {
+  const { archiveConversation } = require("../../electron/conversation-archive.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rem-provider-roundtrip-"));
+  let archiveId;
+  let turn = 0;
+  const providers = ["codex", "cursor"].map(id => ({ id,
+    displayName: id === "codex" ? "Codex" : "Cursor", available: true,
+    discoveryStatus: "ready", defaultModel: "cli-default", models: [{ id: "cli-default" }],
+  }));
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers }),
+    (url, options) => {
+      if (url !== "/api/chat/stream") return null;
+      turn += 1;
+      return streamResponse([
+        ...(turn === 4 || turn === 6 ? [JSON.stringify({ type: "compaction",
+          scope: "provider-handoff", message: "Compacting Rem context for provider handoff" }) + "\n"] : []),
+        JSON.stringify({ type: "thought", text: `Tool evidence ${turn}` }) + "\n",
+        JSON.stringify({ type: "final", sessionResumed: turn !== 1 && turn !== 4,
+          sessionId: JSON.parse(options.body).provider + "-native",
+          message: { body: `Reply ${turn}` } }) + "\n",
+      ])(url, options);
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock, {
+    desktop: { rem: { archive: async (thread, messages, deleted) => {
+      const result = archiveConversation(root, thread, messages, { dataDir: root, deleted });
+      archiveId = result.id;
+      return result;
+    } } },
+  });
+  try {
+    await dom.flush();
+    for (let index = 1; index <= 8; index += 1) {
+      if (index === 4 || index === 6) {
+        const name = index === 4 ? "Cursor" : "Codex";
+        await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === "provider"));
+        await dom.click(allElements(dom.container).find(el => el.getAttribute?.("role") === "option" && textOf(el).startsWith(name)));
+        await dom.flush();
+      }
+      await dom.change(dom.first("textarea"), `Request ${index}`);
+      await dom.click(dom.byTitle("Send message")); await dom.flush();
+      const calls = fetchMock.calls.filter(call => call.url === "/api/chat/stream");
+      const request = JSON.parse(calls.at(-1).options.body);
+      assert.equal(request.provider, index >= 4 && index <= 5 ? "cursor" : "codex");
+      assert.equal(request.conversationId, JSON.parse(calls[0].options.body).conversationId);
+      assert.equal(request.resetSession, undefined);
+      assert.equal(request.messages.filter(message => message.role === "user").length, index);
+      assert.equal(window.localStorage.getItem(`${appModule.chatStorageKeyFor(request.conversationId)}:context`), null);
+    }
+    const threadId = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body).conversationId;
+    const repositoryModule = await viteServer.ssrLoadModule("/src/lib/conversationRepository.js");
+    const stored = await repositoryModule.conversationRepository().all(threadId);
+    const archived = JSON.parse(fs.readFileSync(path.join(root, "threads", `${archiveId}.json`), "utf8"));
+    assert.equal(stored.filter(message => message.role === "user").length, 8);
+    assert.deepEqual(archived.messages, stored);
+    const journal = fs.readFileSync(path.join(root, "threads", `${archiveId}.jsonl`), "utf8");
+    for (let index = 1; index <= 8; index += 1) {
+      assert.match(dom.text(), new RegExp(`Request ${index}`));
+      assert.match(dom.text(), new RegExp(`Reply ${index}`));
+      assert.ok(stored.some(message => message.body === `Tool evidence ${index}`));
+      assert.ok(stored.some(message => message.body === `Reply ${index}`));
+      assert.match(journal, new RegExp(`Reply ${index}`));
+    }
+  } finally { await dom.unmount(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("branch previews follow selections, ignore stale results, and hand actual conflicts to Rem", async () => {
+  const { default: Controls } = await viteServer.ssrLoadModule("/src/components/GitIntegrationControls.jsx");
+  const calls = [], pending = [], events = [], selected = [], closed = [];
+  const workspace = { gitRepoAction: async (root, action, value) => {
+    calls.push({ root, action, value });
+    if (action === "stash-list") return { stashes: [] };
+    if (action.endsWith("-preview")) return new Promise(resolve => pending.push(resolve));
+    return { destinationRoot: "/feature", conflicts: ["actual.py"], notice: "Rebase paused" };
+  } };
+  const dom = await mountReact(React.createElement(Controls, {
+    rootPath: "/repo", source: "feature", sourceControl: { branch: "main", branches: ["main", "feature", "release"] }, worktrees: [],
+    onSourceChange: source => closed.push(source), onChanged() {}, onSelectProject: root => selected.push(root),
+  }), createFetchMock([]), { desktop: { workspace } });
+  window.confirm = () => assert.fail("No second confirmation");
+  window.dispatchEvent = event => { events.push(event); return true; };
+  try {
+    assert.equal(pending.length, 1);
+    await dom.change(dom.byLabel("Target branch"), "");
+    assert.doesNotMatch(dom.text(), /Checking for conflicts/);
+    assert.equal(reactProps(dom.byLabel("Merge")).disabled, true);
+    await dom.change(dom.byLabel("Target branch"), "release");
+    await React.act(async () => pending[0]({ notice: "Old result", conflicts: [] }));
+    assert.doesNotMatch(dom.text(), /safe to|Old result/);
+    assert.equal(reactProps(dom.byLabel("Merge")).disabled, true);
+    await React.act(async () => pending[1]({ conflicts: [], sourceHash: "s1", targetHash: "r1" }));
+    assert.match(dom.text(), /No conflicts, safe to merge/);
+    assert.throws(() => dom.byLabel("Resolve conflicts with Rem"));
+    await dom.change(dom.byLabel("Integration operation"), "rebase");
+    assert.equal(reactProps(dom.byLabel("Rebase")).disabled, true);
+    await React.act(async () => pending[2]({ conflicts: ["preview.py"], sourceHash: "s2", targetHash: "r2", destinationRoot: "/feature", diff: "+hidden" }));
+    assert.match(dom.text(), /Conflicts found in rebase to release. Continue anyway/);
+    assert.throws(() => dom.byLabel("Preview diff"));
+    assert.equal(dom.byLabel("Resolve conflicts with Rem").getAttribute("title"), "Resolve conflicts with Rem");
+    await dom.click(dom.byLabel("Resolve conflicts with Rem")); await dom.flush();
+    assert.deepEqual(calls.at(-1), { root: "/repo", action: "rebase-branch", value: { source: "feature", target: "release", sourceHash: "s2", targetHash: "r2" } });
+    assert.deepEqual(selected, ["/feature"]); assert.deepEqual(closed, [""]);
+    assert.deepEqual(events.filter(event => event.type === "gofer:rem-context").map(event => event.detail), [{ mode: "conflicts", projectRoot: "/feature", text: "actual.py" }]);
+  } finally { await dom.unmount(); }
+});
+
+for (const [kind, label] of [["merge", "Merge"], ["squash", "Squash merge"], ["ff-only", "Fast-forward only"], ["no-ff", "Merge with a merge commit"], ["rebase", "Rebase"]]) {
+  test(`branch ${kind} continues directly after an automatic safe preview`, async () => {
+    const { default: Controls } = await viteServer.ssrLoadModule("/src/components/GitIntegrationControls.jsx");
+    const calls = [];
+    const workspace = { gitRepoAction: async (_root, action, value) => {
+      calls.push({ action, value });
+      return action === "stash-list" ? { stashes: [] } : { conflicts: [], sourceHash: "source", targetHash: "target", diff: "+hidden" };
+    } };
+    const dom = await mountReact(React.createElement(Controls, {
+      rootPath: "/repo", source: "feature", request: { kind }, sourceControl: { branch: "main", branches: ["main", "feature"] },
+      worktrees: [], onSourceChange() {}, onChanged() {},
+    }), createFetchMock([]), { desktop: { workspace } });
+    window.confirm = () => assert.fail("No second confirmation"); window.dispatchEvent = () => true;
+    try {
+      await dom.flush();
+      assert.match(dom.text(), /No conflicts, safe to/); assert.throws(() => dom.byLabel("Preview diff"));
+      await dom.click(dom.byLabel(label)); await dom.flush();
+      assert.deepEqual(calls.at(-1), { action: `${kind === "rebase" ? "rebase" : "merge"}-branch`, value: {
+        source: "feature", target: "main", ...(["merge", "rebase"].includes(kind) ? {} : { strategy: kind }), sourceHash: "source", targetHash: "target",
+      } });
+    } finally { await dom.unmount(); }
+  });
+}
+
+test("final answers remove duplicate stream fragments across tools and retain reasoning", () => {
+  const thoughts = [
+    { id: "reason", kind: "thought", groupId: "g", body: "Read the notes", deltaStreamId: "reasoning-answer" },
+    { id: "part-1", kind: "thought", groupId: "g", body: "Hello ", deltaStreamId: "answer" },
+    { id: "tool", kind: "thought", groupId: "g", body: "Read", trace: { kind: "tool", id: "read-1", title: "Read", output: "notes" } },
+    { id: "part-2", kind: "thought", groupId: "g", body: "world", deltaStreamId: "answer" },
+    { id: "other-turn", kind: "thought", groupId: "other", body: "Hello world", deltaStreamId: "answer" },
+  ];
+  assert.deepEqual(appModule.removeTrailingDuplicateOutputThought(thoughts, "Hello world", "g").map(item => item.id), ["reason", "tool", "other-turn"]);
+});
+
+test("editing paste preserves saved attachments and the separate composer draft", async () => {
+  const uploads = [];
+  const chatStream = streamResponse(['{"type":"final","message":{"body":"Done"}}\n']);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url, options) => {
+      if (url !== "/api/chat/attachments") return null;
+      const upload = JSON.parse(options.body); uploads.push(upload);
+      return { ok: true, json: async () => ({ attachments: upload.files.map((file, index) => ({ id: `${uploads.length}-${index}`, name: file.name, size: 3, type: file.type, storageName: file.name })) }) };
+    },
+    url => url === "/api/chat/stream" ? chatStream(url) : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const file = (name, type) => ({ name, type, size: 3, arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer });
+  const clipboard = value => ({ items: [{ kind: "file", getAsFile: () => value }] });
+  try {
+    const pane = allElements(dom.container).find(node => node.getAttribute?.("data-chat-pane") === "true");
+    await dom.pointer(pane, "onPaste", { clipboardData: clipboard(file("old.txt", "text/plain")) });
+    await dom.change(dom.first("textarea"), "Original message");
+    await dom.click(dom.byTitle("Send message")); await dom.flush();
+    await dom.change(dom.first("textarea"), "Next draft");
+    await dom.pointer(pane, "onPaste", { clipboardData: clipboard(file("next.png", "image/png")) });
+    await dom.click(dom.byLabel("Edit message"));
+    let stopped = false;
+    await dom.pointer(dom.byLabel("Edit message text"), "onPaste", {
+      clipboardData: clipboard(file("edited.png", "image/png")), stopPropagation: () => { stopped = true; },
+    });
+    assert.equal(stopped, true);
+    const composer = () => allElements(dom.container).find(node => node.getAttribute?.("data-chat-composer") !== null);
+    assert.doesNotMatch(textOf(composer()), /edited\.png/); assert.match(textOf(composer()), /next\.png/);
+    await dom.change(dom.byLabel("Edit message text"), "Edited message");
+    await dom.click(dom.byText("Send again")); await dom.flush();
+    assert.deepEqual(uploads.map(upload => upload.files.map(file => file.name)), [["old.txt"], ["edited.png"]]);
+    const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream");
+    assert.equal(requests.length, 2);
+    const sent = JSON.parse(requests.at(-1).options.body).messages.at(-1);
+    assert.equal(sent.body, "Edited message"); assert.deepEqual(sent.attachments.map(file => file.name), ["old.txt", "edited.png"]);
+    assert.equal(dom.first("textarea").value, "Next draft"); assert.match(textOf(composer()), /next\.png/);
+    const [thread] = appModule.loadChatThreads();
+    const stored = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(thread.id)));
+    assert.equal(stored.filter(item => item.role === "user").length, 1);
+    assert.deepEqual(stored.find(item => item.role === "user").attachments.map(file => file.name), ["old.txt", "edited.png"]);
+    await dom.click(dom.byLabel("Edit message"));
+    await dom.pointer(dom.byLabel("Edit message text"), "onPaste", { clipboardData: clipboard(file("cancelled.png", "image/png")) });
+    await dom.click(dom.byText("Cancel"));
+    assert.doesNotMatch(dom.text(), /cancelled\.png/); assert.equal(uploads.length, 2);
+  } finally { await dom.unmount(); }
+});
+
+test("auto-commit notices expire after four seconds and polling does not show them again", async () => {
+  const snapshot = { active: true, branch: "main", branches: ["main"], entries: [{ path: "note", status: "M", staged: true }] };
+  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => snapshot,
+    gitHistory: async () => ({ active: true, commits: [] }), gitWorktrees: async () => ({ active: true, worktrees: [] }),
+  };
+  let job = null;
+  const fetchMock = createFetchMock([url => url.startsWith("/api/generation-jobs?") ? { ok: true, json: async () => ({ jobs: job ? [job] : [] }) } : null]);
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), fetchMock, { desktop: { workspace } });
+  const originalSet = window.setTimeout, originalClear = window.clearTimeout;
+  let dismiss, cancelled = false;
+  window.setTimeout = (callback, delay) => delay === 4000 ? (dismiss = callback, -99) : originalSet(callback, delay);
+  window.clearTimeout = id => { if (id === -99) cancelled = true; else originalClear(id); };
+  try {
+    await dom.click(dom.byLabel("Source control")); await dom.flush();
+    job = { id: "completed", status: "completed", branch: "main", result: { commit: "abcd1234", message: "fix: update note" } };
+    await dom.flush(2000); await dom.flush();
+    assert.match(dom.text(), /Auto-committed abcd1234 on main/);
+    assert.equal(typeof dismiss, "function");
+    await React.act(async () => dismiss());
+    assert.doesNotMatch(dom.text(), /Auto-committed/);
+    await dom.flush(2000); await dom.flush();
+    assert.doesNotMatch(dom.text(), /Auto-committed/);
+    assert.equal(cancelled, true);
+  } finally { await dom.unmount(); window.setTimeout = originalSet; window.clearTimeout = originalClear; }
+});
+
+test("Find is configurable and accepts Command+F and Ctrl+F on Mac", () => {
+  const key = { key: "f", code: "KeyF", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
+  const options = { active: true, currentPath: "/repo/app.js", platform: "MacIntel" };
+  assert.ok(settingsModule.KEYBINDING_COMMANDS.some(command => command.id === "editor.find"));
+  for (const modifier of [{ metaKey: true }, { ctrlKey: true }]) {
+    assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, ...modifier }, options), "find");
+    assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, ...modifier, repeat: true }, options), null);
+    assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, ...modifier }, { ...options, active: false }), null);
+    assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, ...modifier }, { ...options, browserActive: true }), null);
+  }
+  const settings = settingsModule.updateSetting(settingsModule.DEFAULT_APP_SETTINGS, "keybindings.editor.find", "Alt+KeyF");
+  assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, altKey: true }, { ...options, settings }), "find");
+  assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, ctrlKey: true }, { ...options, settings }), "suppress-find");
+  const cleared = settingsModule.updateSetting(settings, "keybindings.editor.find", "");
+  assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, metaKey: true }, { ...options, settings: cleared }), "suppress-find");
+  const reassigned = settingsModule.updateSetting(cleared, "keybindings.file.open", "Mod+KeyF");
+  assert.equal(codeWorkspaceModule.codeWorkspaceShortcutAction({ ...key, metaKey: true }, { ...options, settings: reassigned }), null);
+  assert.equal(settingsModule.matchesCommand({ ...key, ctrlKey: true }, settingsModule.DEFAULT_APP_SETTINGS, "editor.find", "Linux"), true);
+});
+
+test("history graph filters commit rows and loads selected remote ancestry", async () => {
+  const refs = [{ id: "refs/heads/main", name: "main", type: "local", current: true }, { id: "refs/remotes/origin/main", name: "origin/main", type: "remote" }];
+  const commits = [
+    { hash: "local", shortHash: "local", subject: "Local changes", author: "Ada", parents: ["base"], labels: [refs[0]], isHead: true },
+    { hash: "remote", shortHash: "remote", subject: "Remote changes", author: "Bob", parents: ["base"], labels: [refs[1]] },
+    { hash: "base", shortHash: "base", subject: "Common ancestor", parents: [], labels: [] },
+  ];
+  const calls = [];
+  const workspace = {
+    async trustProjectRoot() {}, async listDirectory() { return { entries: [] }; },
+    async gitStatus() { return { active: true, entries: [], branch: "main" }; },
+    async gitWorktrees() { return { active: true, worktrees: [] }; },
+    async gitHistory(root, options) { calls.push(options); return { active: true, refs, commits: options.refs?.length === 1 && options.refs[0] === refs[1].id ? commits.slice(1) : commits, hasMore: options.limit === 100 }; },
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/workspace/project" } }), createFetchMock([]), { desktop: { workspace } });
+  await dom.click(dom.byLabel("Source control"));
+  await dom.click(dom.byText("History"));
+  assert.ok(dom.byLabel("Branch history graph"));
+  assert.match(dom.text(), /Local changes.*Remote changes.*Common ancestor/s);
+  const input = dom.byLabel("Filter commit history");
+  input.focus();
+  await dom.change(input, "Ada");
+  assert.doesNotMatch(dom.text(), /Remote changes|Common ancestor/);
+  await dom.change(input, "");
+  await dom.change(input, "origin/main");
+  assert.match(dom.text(), /Remote changes/);
+  assert.doesNotMatch(dom.text(), /Local changes/);
+  input.blur();
+  await dom.change(input, "");
+  await dom.click(dom.byLabel("History branches"));
+  await dom.click(dom.byText("Clear"));
+  await dom.change(dom.byLabel("Remote branch origin/main"), true);
+  await dom.flush();
+  assert.deepEqual(calls.at(-1).refs, [refs[1].id]);
+  assert.doesNotMatch(dom.text(), /Local changes/);
+  await dom.click(dom.byText("Load more history"));
+  await dom.flush();
+  assert.equal(calls.at(-1).limit, 200);
+  assert.deepEqual(calls.at(-1).refs, [refs[1].id]);
+  await dom.change(dom.byLabel("Local branch main"), true);
+  assert.deepEqual(calls.at(-1).refs, [refs[1].id, refs[0].id]);
+  assert.equal(calls.at(-1).limit, 100);
+  assert.match(dom.text(), /Local changes/);
+  await dom.unmount();
+});
+
+
+test("opening History refreshes once even during a worktree load and polling leaves commits alone", async () => {
+  let calls = 0;
+  let finishInitialWorktrees;
+  let worktreeCalls = 0;
+  const workspace = {
+    trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => ({ active: true, entries: [] }),
+    gitWorktrees: () => ++worktreeCalls === 1
+      ? new Promise(resolve => { finishInitialWorktrees = resolve; })
+      : Promise.resolve({ active: true, worktrees: [] }),
+    gitHistory: async () => ({ active: true, commits: [{ hash: `commit-${++calls}`, shortHash: `id-${calls}`, subject: `Commit version ${calls}`, parents: [] }] }),
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
+  try {
+    await dom.click(dom.byLabel("Source control"));
+    assert.equal(calls, 0);
+    await dom.click(dom.byText("History"));
+    assert.equal(calls, 1);
+    assert.match(dom.text(), /Commit version 1/);
+    finishInitialWorktrees({ active: true, worktrees: [] });
+    await dom.flush();
+    await dom.dispatchWindow("focus");
+    await dom.flush(2000);
+    assert.equal(calls, 1);
+    await dom.change(dom.byLabel("Filter commit history"), "Commit");
+    await dom.click(dom.byText("History"));
+    assert.equal(calls, 1);
+    await dom.click(dom.byText("Changes"));
+    await dom.click(dom.byText("History"));
+    assert.equal(calls, 2);
+    assert.match(dom.text(), /Commit version 2/);
+    await dom.click(dom.byLabel("File explorer"));
+    await dom.click(dom.byLabel("Source control"));
+    assert.equal(calls, 3);
+    assert.match(dom.text(), /Commit version 3/);
+  } finally { await dom.unmount(); }
+});
+
+test("history checkboxes select multiple branches and groups and retain choices across tabs", async () => {
+  const calls = [];
+  const refs = [
+    { id: "refs/heads/main", name: "main", type: "local", current: true },
+    { id: "refs/heads/coworker", name: "coworker", type: "local" },
+    { id: "refs/remotes/origin/main", name: "origin/main", type: "remote" },
+    { id: "refs/remotes/origin/coworker", name: "origin/coworker", type: "remote" },
+    { id: "refs/tags/v1", name: "v1", type: "tag" },
+  ];
+  const workspace = {
+    trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => ({ active: true, entries: [] }),
+    gitWorktrees: async () => ({ active: true, worktrees: [] }),
+    gitHistory: async (_root, options) => { calls.push(options); return { active: true, refs, commits: [] }; },
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { sidebarView: "source-control", workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
+  try {
+    await dom.click(dom.byText("History"));
+    await dom.click(dom.byLabel("History branches"));
+    const initialCalls = calls.length;
+    await dom.click(dom.byText("All"));
+    assert.equal(calls.length, initialCalls);
+    assert.doesNotMatch(dom.text(), /Loading history/);
+    for (const [type, label] of [["local", "Local branches"], ["remote", "Remote branches"], ["tag", "Tags"]]) {
+      await dom.click(dom.byText("Clear"));
+      const checkbox = dom.byLabel(label);
+      assert.equal(checkbox.tagName, "INPUT");
+      await dom.change(checkbox, true);
+      await dom.flush();
+      assert.deepEqual(calls.at(-1).refs, refs.filter(ref => ref.type === type).map(ref => ref.id));
+      assert.equal(calls.at(-1).limit, 100);
+    }
+    await dom.click(dom.byText("Clear"));
+    assert.match(dom.text(), /Select branches to show their history/);
+    await dom.change(dom.byLabel("Local branch main"), true);
+    await dom.change(dom.byLabel("Remote branch origin/coworker"), true);
+    const chosen = [refs[0].id, refs[3].id];
+    assert.deepEqual(calls.at(-1).refs, chosen);
+    assert.equal(dom.byLabel("Local branches").indeterminate, true);
+    assert.equal(dom.byLabel("Remote branches").indeterminate, true);
+    await dom.change(dom.byLabel("Local branches"), true);
+    assert.deepEqual(calls.at(-1).refs, [...chosen, refs[1].id]);
+    await dom.change(dom.byLabel("Local branch coworker"), false);
+    assert.deepEqual(calls.at(-1).refs, chosen);
+    await dom.click(dom.byText("Changes"));
+    await dom.click(dom.byText("History"));
+    assert.deepEqual(calls.at(-1).refs, chosen);
+    await dom.click(dom.byLabel("History branches"));
+    await dom.click(dom.byText("All"));
+    assert.equal(calls.at(-1).refs, null);
+    assert.equal(dom.byLabel("Local branches").checked, true);
+    assert.equal(dom.byLabel("Remote branches").checked, true);
+    await dom.change(dom.byLabel("Local branch coworker"), false);
+    assert.deepEqual(calls.at(-1).refs, refs.filter(ref => ref.id !== refs[1].id).map(ref => ref.id));
+  } finally { await dom.unmount(); }
+});
+
+test("deleted open files clear the editor area and Close Tab dismisses them", async () => {
+  const path = "/deleted-worktree/file.png";
+  let exists = true;
+  const closed = [];
+  const dom = await mountReact(React.createElement(codeWorkspaceModule.default, {
+    active: true, activePath: path, openPaths: [path], onClosePath: path => closed.push(path),
+  }), createFetchMock([]), { desktop: {
+    workspace: { getPathInfo: async () => ({ exists }) },
+    textFiles: { readPreview: async () => ({ dataUrl: "data:image/png;base64,iVBORw0KGgo=" }) },
+  } });
+  try {
+    assert.doesNotMatch(dom.text(), /This file doesn't exist anymore/);
+    exists = false;
+    await dom.dispatchWindow("gofer:git-files-changed", { detail: { rootPath: "/deleted-worktree" } });
+    await dom.flush();
+    assert.match(dom.text(), /This file doesn't exist anymore/);
+    assert.doesNotMatch(dom.text(), /old content/);
+    await dom.click(dom.byText("Close Tab"));
+    assert.deepEqual(closed, [path]);
+  } finally { await dom.unmount(); }
+});
+
+test("an initially missing file shows the missing message while inspection errors keep the editor", async () => {
+  for (const missing of [true, false]) {
+    const dom = await mountReact(React.createElement(codeWorkspaceModule.default, {
+      active: true, activePath: "/repo/missing.png", openPaths: ["/repo/missing.png"],
+    }), createFetchMock([]), { desktop: { workspace: {
+      getPathInfo: async () => { if (!missing) throw new Error("EACCES"); return { exists: false }; },
+    } } });
+    try {
+      assert.equal(dom.text().includes("This file doesn't exist anymore"), missing);
+    } finally { await dom.unmount(); }
+  }
+  assert.equal(codeWorkspaceModule.isMissingFileError(new Error("Error invoking remote method: ENOENT: no such file")), true);
+  assert.equal(codeWorkspaceModule.isMissingFileError({ code: "ENOTDIR" }), true);
+  assert.equal(codeWorkspaceModule.isMissingFileError(new Error("EACCES: permission denied")), false);
+});
+
+test("file clipboard survives project switches and supports cut, collision-safe paste and native imports", async () => {
+  const transfers = await viteServer.ssrLoadModule("/src/lib/fileTransfers.js");
+  transfers.setFileClipboard(null);
+  const entries = {
+    "/a": [{ path: "/a/photo.png", name: "photo.png", isFile: true }, { path: "/a/docs", name: "docs", isDirectory: true }],
+    "/b": [], "/a/docs": [],
+  };
+  const calls = [], changes = [];
+  const workspace = {
+    trustProjectRoot: async () => ({}), gitStatus: async () => ({ active: false }),
+    listDirectory: async ({ currentPath }) => ({ entries: entries[currentPath] || [] }),
+    getPathInfo: async () => ({ exists: true, isFile: true }),
+    copyPath: async ({ sourcePath, destinationPath }) => {
+      calls.push(["copy", sourcePath, destinationPath]);
+      entries[path.dirname(destinationPath)].push({ path: destinationPath, name: path.basename(destinationPath), isFile: true });
+    },
+    movePath: async ({ sourcePath, destinationPath }) => {
+      calls.push(["move", sourcePath, destinationPath]);
+      entries[path.dirname(sourcePath)] = entries[path.dirname(sourcePath)].filter(entry => entry.path !== sourcePath);
+      entries[path.dirname(destinationPath)].push({ path: destinationPath, name: path.basename(destinationPath), isFile: true });
+    },
+  };
+  function Fixture() {
+    const [root, setRoot] = React.useState("/a");
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { onClick: () => setRoot(current => current === "/a" ? "/b" : "/a") }, "Switch project"),
+      React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: root }, onFilesystemChange: change => changes.push(change) }));
+  }
+  const dom = await mountReact(React.createElement(Fixture), createFetchMock([]), { desktop: { workspace, getDroppedFilePath: file => `/outside/${file.name}` } });
+  try {
+    await dom.flush();
+    await dom.focus(dom.byTitle("/a/photo.png"));
+    await dom.click(dom.byLabel("Copy selected file"));
+    await dom.click(dom.byText("Switch project")); await dom.flush();
+    await dom.click(dom.byLabel("Paste files")); await dom.flush();
+    assert.deepEqual(calls.at(-1), ["copy", "/a/photo.png", "/b/photo.png"]);
+    await dom.click(dom.byLabel("Paste files")); await dom.flush();
+    assert.match(dom.text(), /photo.png already exists/);
+    await dom.click(dom.byText("Keep both")); await dom.flush();
+    assert.deepEqual(calls.at(-1), ["copy", "/a/photo.png", "/b/photo copy.png"]);
+    await dom.focus(dom.byTitle("/b/photo.png"));
+    dom.byLabel("Project files").querySelectorAll = () => allElements(dom.byLabel("Project files")).filter(element => element.getAttribute?.("role") === "treeitem");
+    await dom.keyDown(dom.byLabel("Project files"), "x", { ctrlKey: true });
+    assert.equal(transfers.getFileClipboard().operation, "move");
+    await dom.click(dom.byText("Switch project")); await dom.flush();
+    await dom.focus(dom.byTitle("/a/docs"));
+    await dom.click(dom.byLabel("Paste files")); await dom.flush();
+    assert.deepEqual(calls.at(-1), ["move", "/b/photo.png", "/a/docs/photo.png"]);
+    assert.equal(transfers.getFileClipboard(), null);
+    assert.equal(changes.at(-1).kind, "rename");
+    const values = new Map();
+    const dataTransfer = { types: [transfers.FILE_DRAG_TYPE], setData: (key, value) => values.set(key, value), getData: key => values.get(key) || "" };
+    await dom.pointer(dom.byTitle("/a/photo.png"), "onDragStart", { dataTransfer });
+    await dom.pointer(dom.byTitle("/a/docs"), "onDrop", { dataTransfer }); await dom.flush();
+    assert.match(dom.text(), /already exists/);
+    await dom.click(dom.byText("Cancel")); await dom.flush();
+    await dom.pointer(dom.byTitle("/a/docs"), "onDrop", { dataTransfer, ctrlKey: true }); await dom.flush();
+    await dom.click(dom.byText("Keep both")); await dom.flush();
+    assert.deepEqual(calls.at(-1), ["copy", "/a/photo.png", "/a/docs/photo copy.png"]);
+    await dom.pointer(dom.byLabel("Project files"), "onDrop", { dataTransfer: { types: ["Files"], files: [{ name: "import.gif" }], getData: () => "" } }); await dom.flush();
+    assert.deepEqual(calls.at(-1), ["copy", "/outside/import.gif", "/a/import.gif"]);
+  } finally { await dom.unmount(); transfers.setFileClipboard(null); }
+});
+
+test("explorer ranges drag together and duplicate decisions apply only to one paste or drop", async () => {
+  const transfers = await viteServer.ssrLoadModule("/src/lib/fileTransfers.js");
+  transfers.setFileClipboard(null);
+  const make = (directory, name) => ({ path: `${directory}/${name}`, name, isFile: true });
+  const entries = { "/repo": [make("/repo", "a.txt"), make("/repo", "b.txt"), make("/repo", "c.txt"), { path: "/repo/dest", name: "dest", isDirectory: true }], "/repo/dest": [make("/repo/dest", "a.txt"), make("/repo/dest", "b.txt")] };
+  const calls = [];
+  const perform = async options => {
+    calls.push(options);
+    const parent = path.dirname(options.destinationPath);
+    entries[parent] = entries[parent].filter(entry => entry.path !== options.destinationPath);
+    entries[parent].push(make(parent, path.basename(options.destinationPath)));
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace: {
+    trustProjectRoot: async () => ({}), gitStatus: async () => ({ active: false }), listDirectory: async ({ currentPath }) => ({ entries: entries[currentPath] || [] }),
+    copyPath: perform, movePath: async options => { await perform(options); entries[path.dirname(options.sourcePath)] = entries[path.dirname(options.sourcePath)].filter(entry => entry.path !== options.sourcePath); },
+  } } });
+  const drag = async name => {
+    const values = new Map();
+    const dataTransfer = { types: [transfers.FILE_DRAG_TYPE], setData: (key, value) => values.set(key, value), getData: key => values.get(key) || "" };
+    await dom.pointer(dom.byTitle(`/repo/${name}`), "onPointerDown");
+    await dom.focus(dom.byTitle(`/repo/${name}`));
+    await dom.pointer(dom.byTitle(`/repo/${name}`), "onDragStart", { dataTransfer });
+    return dataTransfer;
+  };
+  try {
+    await dom.flush();
+    await dom.click(dom.byTitle("/repo/a.txt"));
+    await dom.pointer(dom.byTitle("/repo/c.txt"), "onPointerDown");
+    await dom.focus(dom.byTitle("/repo/c.txt"));
+    await dom.pointer(dom.byTitle("/repo/c.txt"), "onClick", { shiftKey: true });
+    for (const name of ["a.txt", "b.txt", "c.txt"]) assert.equal(dom.byTitle(`/repo/${name}`).getAttribute("aria-selected"), "true");
+    const dataTransfer = await drag("b.txt");
+    assert.deepEqual(JSON.parse(dataTransfer.getData(transfers.FILE_DRAG_TYPE)).map(entry => entry.name), ["a.txt", "b.txt", "c.txt"]);
+    await dom.click(dom.byLabel("Copy selected file"));
+    assert.equal(transfers.getFileClipboard().entries.length, 3);
+    await dom.click(dom.byTitle("/repo/dest"));
+    for (const name of ["a.txt", "b.txt", "c.txt"]) assert.equal(dom.byTitle(`/repo/${name}`).getAttribute("aria-selected"), "false");
+    await dom.click(dom.byLabel("Paste files")); await dom.flush();
+    assert.match(dom.text(), /a.txt already exists/);
+    await dom.change(allElements(dom.container).find(element => element.tagName === "INPUT" && element.getAttribute("type") === "checkbox"), true);
+    await dom.click(dom.byText("Replace file")); await dom.flush();
+    assert.deepEqual(calls.map(call => [path.basename(call.destinationPath), call.replace]), [["a.txt", true], ["b.txt", true], ["c.txt", false]]);
+    assert.equal(dom.text().includes("already exists"), false);
+    await dom.click(dom.byLabel("Paste files")); await dom.flush();
+    assert.match(dom.text(), /a.txt already exists/);
+    await dom.click(dom.byText("Keep both")); await dom.flush();
+    assert.match(dom.text(), /b.txt already exists/);
+    await dom.click(dom.byText("Cancel")); await dom.flush();
+    assert.equal(path.basename(calls.at(-1).destinationPath), "a copy.txt");
+    await dom.pointer(dom.byTitle("/repo/dest"), "onDrop", { dataTransfer }); await dom.flush();
+    await dom.change(allElements(dom.container).find(element => element.tagName === "INPUT" && element.getAttribute("type") === "checkbox"), true);
+    await dom.click(dom.byText("Keep both")); await dom.flush();
+    assert.deepEqual(calls.slice(-3).map(call => path.basename(call.destinationPath)), ["a copy 2.txt", "b copy.txt", "c copy.txt"]);
+    assert.equal(entries["/repo"].some(entry => entry.name === "b.txt"), false);
+  } finally { await dom.unmount(); transfers.setFileClipboard(null); }
+});
+
+test("replacement through an old desktop handler explains that Raticode needs restarting", async () => {
+  const transfers = await viteServer.ssrLoadModule("/src/lib/fileTransfers.js");
+  transfers.setFileClipboard({ path: "/other/file.txt", name: "file.txt", isFile: true, operation: "copy" });
+  const calls = [];
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace: {
+    trustProjectRoot: async () => ({}), gitStatus: async () => ({ active: false }),
+    listDirectory: async () => ({ entries: [{ path: "/repo/file.txt", name: "file.txt", isFile: true }] }),
+    copyPath: async options => { calls.push(options); throw new Error("Error invoking remote method 'gofer:copy-path': Error: Destination already exists."); },
+  } } });
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Paste files")); await dom.flush();
+    await dom.click(dom.byText("Replace file")); await dom.flush();
+    assert.equal(calls[0].replace, true);
+    assert.match(dom.text(), /Restart Raticode to load file replacement support/);
+    assert.doesNotMatch(dom.text(), /Error invoking remote method/);
+  } finally { await dom.unmount(); transfers.setFileClipboard(null); }
+});
+
+for (const scenario of ["keyboard", "context-menu", "partial-failure"]) {
+  test(`explorer confirms and deletes the full selection via ${scenario}`, async () => {
+    const make = name => ({ path: `/repo/${name}`, name, isFile: true });
+    let entries = ["a.txt", "b.txt", "c.txt"].map(make);
+    const calls = [], changes = [], confirmations = [];
+    const dom = await mountReact(React.createElement(codeFileExplorerModule.default, {
+      workflow: { projectRoot: "/repo" }, onFilesystemChange: change => changes.push(change),
+    }), createFetchMock([]), { desktop: { workspace: {
+      trustProjectRoot: async () => ({}), gitStatus: async () => ({ active: false }),
+      listDirectory: async () => ({ entries }),
+      deletePath: async target => {
+        calls.push(target);
+        if (scenario === "partial-failure" && target.endsWith("b.txt")) throw new Error("Trash unavailable");
+        entries = entries.filter(entry => entry.path !== target);
+      },
+    } } });
+    const originalConfirm = window.confirm;
+    let approved = false;
+    window.confirm = message => { confirmations.push(message); return approved; };
+    const remove = async () => {
+      if (scenario === "context-menu") {
+        await dom.pointer(dom.byTitle("/repo/b.txt"), "onContextMenu", { clientX: 10, clientY: 10 });
+        const button = allElements(dom.byLabel("File actions")).find(element => element.tagName === "BUTTON" && textOf(element).startsWith("Delete"));
+        await dom.click(button);
+      } else await dom.keyDown(dom.byLabel("Project files"), "Delete");
+      await dom.flush();
+    };
+    try {
+      await dom.flush();
+      await dom.click(dom.byTitle("/repo/a.txt"));
+      await dom.pointer(dom.byTitle("/repo/c.txt"), "onClick", { shiftKey: true });
+      await remove();
+      assert.deepEqual(confirmations, ["Are you sure you want to delete 3 files?"]);
+      assert.deepEqual(calls, []);
+      for (const name of ["a.txt", "b.txt", "c.txt"]) assert.equal(dom.byTitle(`/repo/${name}`).getAttribute("aria-selected"), "true");
+      approved = true;
+      await remove();
+      assert.equal(confirmations.length, 2);
+      assert.deepEqual(calls, scenario === "partial-failure" ? ["/repo/a.txt", "/repo/b.txt"] : ["/repo/a.txt", "/repo/b.txt", "/repo/c.txt"]);
+      assert.deepEqual(changes.map(change => [change.kind, change.path]), (scenario === "partial-failure" ? ["a.txt"] : ["a.txt", "b.txt", "c.txt"]).map(name => ["delete", `/repo/${name}`]));
+      assert.equal(allElements(dom.container).some(element => element.getAttribute("title") === "/repo/a.txt"), false);
+      if (scenario === "partial-failure") {
+        assert.match(dom.text(), /Trash unavailable/);
+        assert.ok(dom.byTitle("/repo/b.txt")); assert.ok(dom.byTitle("/repo/c.txt"));
+      }
+    } finally { window.confirm = originalConfirm; await dom.unmount(); }
+  });
+}
+
+test("replacing files clears cached destination drafts and notifies open editors", async () => {
+  const sessions = await viteServer.ssrLoadModule("/src/lib/codeEditorSessions.js");
+  const dom = await mountReact(React.createElement("div"), createFetchMock([]));
+  const events = [];
+  const listener = event => events.push(event.detail);
+  window.addEventListener("gofer:code-files-changed", listener);
+  try {
+    sessions.textEditorSessions.set("/repo/file.txt", { content: "old", savedContent: "old" });
+    sessions.textEditorSessions.set("/other/source.txt", { content: "incoming", savedContent: "incoming" });
+    const change = { kind: "copy", path: "/repo/file.txt", sourcePath: "/other/source.txt", replaced: true };
+    codeWorkspaceModule.applyCodeFilesystemChange(change);
+    assert.equal(sessions.textEditorSessions.has("/repo/file.txt"), false);
+    assert.equal(sessions.discardedSessionPaths.has("/repo/file.txt"), true);
+    assert.deepEqual(events, [change]);
+    codeWorkspaceModule.applyCodeFilesystemChange({ ...change, kind: "rename" });
+    assert.equal(sessions.textEditorSessions.get("/repo/file.txt").content, "incoming");
+    assert.equal(sessions.textEditorSessions.has("/other/source.txt"), false);
+  } finally {
+    window.removeEventListener("gofer:code-files-changed", listener);
+    sessions.textEditorSessions.delete("/repo/file.txt");
+    sessions.textEditorSessions.delete("/other/source.txt");
+    sessions.discardedSessionPaths.delete("/repo/file.txt");
+    sessions.discardedSessionPaths.delete("/other/source.txt");
+    await dom.unmount();
+  }
+});
+
+test("workspace file drops open a batch of tabs without entering the tab-reordering path", async () => {
+  const opened = [], reordered = [];
+  const dom = await mountReact(React.createElement(codeWorkspaceModule.default, {
+    active: true, openPaths: [], activePath: "", onDropPaths: paths => opened.push(paths), onOpenPathsChange: paths => reordered.push(paths),
+  }), createFetchMock([]), { desktop: {
+    getDroppedFilePath: file => `/outside/${file.name}`,
+    workspace: { getPathInfo: async () => ({ exists: true, isFile: true }) },
+  } });
+  try {
+    await dom.pointer(dom.byLabel("Code workspace"), "onDropCapture", { dataTransfer: { types: ["Files"], files: [{ name: "one.png" }, { name: "two.mp4" }], getData: () => "" } });
+    assert.deepEqual(opened, [["/outside/one.png", "/outside/two.mp4"]]);
+    assert.deepEqual(reordered, []);
+  } finally { await dom.unmount(); }
+});
+
+test("media previews use streaming URLs, controls and release resources when tabs close", async () => {
+  const released = [];
+  for (const [extension, kind, tag] of [["gif", "image", "IMG"], ["mp4", "video", "VIDEO"], ["mp3", "audio", "AUDIO"]]) {
+    const file = `/media/sample.${extension}`;
+    const dom = await mountReact(React.createElement(codeWorkspaceModule.default, { active: true, activePath: file, openPaths: [file] }), createFetchMock([]), { desktop: {
+      textFiles: { openPreview: async target => ({ id: target, url: `raticode-media://preview/${extension}` }), closePreview: async id => released.push(id), read: async () => assert.fail("Media must not be decoded as text") },
+    } });
+    try {
+      assert.ok(dom.byLabel(`sample.${extension} ${kind} preview`));
+      const element = dom.first(tag);
+      assert.equal(reactProps(element).src, `raticode-media://preview/${extension}`);
+      if (kind !== "image") assert.equal(reactProps(element).controls, true);
+      await dom.pointer(element, "onError");
+      assert.match(dom.text(), kind === "image" ? /could not be displayed/ : /could not be played/);
+      assert.ok(dom.byText("Open in default app"));
+    } finally { await dom.unmount(); }
+    assert.equal(released.at(-1), file);
+  }
+});
+
+test("update notices and upgrade actions share the toolbar group with the check button", async () => {
+  let checks = 0, upgrades = 0;
+  function Toolbar({ updateState, updateNotice }) {
+    window.goferUpdates = { check: async () => ({}) };
+    return React.createElement(appModule.GlobalToolbar, {
+      updateState, updateNotice,
+      onCheckForUpdates: () => checks++, onApplyUpdate: () => upgrades++,
+    });
+  }
+  for (const available of [false, true]) {
+    const message = available ? "Raticode 0.4.0 is available" : "Raticode is up to date";
+    const dom = await mountReact(React.createElement(Toolbar, {
+      updateState: { available, info: { version: "0.4.0" } },
+      updateNotice: { type: "success", message },
+    }), createFetchMock([]));
+    try {
+      const group = dom.byLabel("Application updates");
+      const check = dom.byLabel("Check for updates");
+      assert.equal(check.parentNode, group);
+      assert.equal(dom.byText(message).parentNode, group);
+      assert.equal(dom.byText(message).getAttribute("role"), "status");
+      await dom.click(check);
+      if (available) {
+        const upgrade = dom.byText("Update 0.4.0");
+        assert.equal(upgrade.parentNode, group);
+        await dom.click(upgrade);
+      }
+    } finally { await dom.unmount(); }
+  }
+  assert.equal(checks, 2);
+  assert.equal(upgrades, 1);
 });

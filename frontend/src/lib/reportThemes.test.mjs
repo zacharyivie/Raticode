@@ -1,7 +1,65 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { normalizeAppSettings } from "./settings.js";
-import { normalizeReportThemes, reportThemeContext, reportPreviewDocument, generateReportTheme, reportThemeGenerationSelection } from "./reportThemes.js";
+import { exportReportTheme, importReportTheme, MAX_REPORT_THEME_FILE_BYTES, normalizeReportThemes, reportThemeContext, reportPreviewDocument, generateReportTheme, reportThemeGenerationSelection } from "./reportThemes.js";
+
+const companyTheme = { id: "custom-company", label: "Company / 海", instructions: "Use navy ink and our company colors. 海", html: "<!doctype html><html><body>Company preview 海</body></html>" };
+
+test("theme files round-trip all design content without copying local settings or IDs", () => {
+  const { filename, content } = exportReportTheme({ ...companyTheme, provider: "codex", private: "local-only" });
+  assert.equal(filename, "Company.raticode-theme.json");
+  assert.deepEqual(JSON.parse(content), { format: "raticode-report-theme", version: 1, theme: { label: companyTheme.label, instructions: companyTheme.instructions, html: companyTheme.html } });
+  const current = { enabled: false, selected: companyTheme.id, custom: [companyTheme], generation: { provider: "claude_code", model: "local-model", effort: "high" } };
+  const imported = importReportTheme(content, current);
+  assert.equal(imported.enabled, false);
+  assert.deepEqual(imported.generation, current.generation);
+  assert.deepEqual(imported.custom[0], companyTheme);
+  assert.equal(current.custom.length, 1);
+  assert.notEqual(imported.selected, companyTheme.id);
+  assert.deepEqual(imported.custom[1], { ...companyTheme, id: imported.selected });
+  assert.deepEqual(normalizeReportThemes(imported), imported);
+  const again = importReportTheme("\uFEFF" + content, imported);
+  assert.equal(again.custom.length, 3);
+  assert.notEqual(again.selected, imported.selected);
+});
+
+test("theme imports discard unrelated settings and supplied IDs", () => {
+  const file = JSON.parse(exportReportTheme(companyTheme).content);
+  file.theme.id = "custom-company";
+  file.theme.generation = { provider: "codex" };
+  file.enabled = true;
+  const imported = importReportTheme(JSON.stringify(file), { enabled: false });
+  assert.equal(imported.enabled, false);
+  assert.deepEqual(imported.custom[0], { ...companyTheme, id: imported.selected });
+  assert.deepEqual(imported.generation, { provider: "", model: "", effort: "" });
+});
+
+test("theme files reject malformed JSON, wrong formats, versions, and oversized files", () => {
+  for (const content of ["not json", "null", "[]", "{}", JSON.stringify({ format: "another-app", version: 1, theme: companyTheme }), JSON.stringify({ format: "raticode-report-theme", version: 2, theme: companyTheme })]) {
+    assert.throws(() => importReportTheme(content, {}), /valid JSON|Unsupported theme/);
+  }
+  assert.throws(() => importReportTheme("x".repeat(MAX_REPORT_THEME_FILE_BYTES + 1), {}), /2 MB/);
+  assert.throws(() => importReportTheme("海".repeat(MAX_REPORT_THEME_FILE_BYTES / 2), {}), /2 MB/);
+});
+
+test("theme files require bounded, nonempty names, instructions, and previews", () => {
+  for (const [field, limit] of [["label", 80], ["instructions", 12000], ["html", 200000]]) {
+    for (const value of [undefined, null, 123, "", "   ", "x".repeat(limit + 1)]) {
+      const theme = { ...companyTheme, [field]: value };
+      assert.throws(() => exportReportTheme(theme), /must be nonempty text/);
+      assert.throws(() => importReportTheme(JSON.stringify({ format: "raticode-report-theme", version: 1, theme }), {}), /must be nonempty text/);
+    }
+  }
+  const theme = { ...companyTheme, label: "海".repeat(80), instructions: "海".repeat(12000), html: "海".repeat(200000) };
+  assert.equal(exportReportTheme(theme).filename, "report-theme.raticode-theme.json");
+  assert.equal(importReportTheme(exportReportTheme(theme).content, {}).custom[0].html, theme.html);
+});
+
+test("theme imports reject a full gallery without dropping saved themes", () => {
+  const current = { custom: Array.from({ length: 24 }, (_, index) => ({ ...companyTheme, id: `custom-${index}` })) };
+  assert.throws(() => importReportTheme(exportReportTheme(companyTheme).content, current), /24 custom/);
+  assert.equal(current.custom.length, 24);
+});
 
 test("legacy themes migrate independently of knowledge enablement", () => {
   const settings = normalizeAppSettings({ memory: { secondBrainEnabled: false, secondBrainTheme: "blueprint" } });

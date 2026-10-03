@@ -8,7 +8,11 @@ this layer never authenticates, retries a prompt, or resumes a foreign session.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import mimetypes
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -40,14 +44,84 @@ def session_text(event: dict[str, Any], session_id: str) -> str:
     return text
 
 
+def _session_trace(
+    event: dict[str, Any], tools: dict[str, dict[str, Any]], stream_id: str
+) -> dict[str, Any] | None:
+    # session_text validates the session and update before this is called.
+    if event.get("method") != "session/update":
+        return None
+    update = event["params"]["update"]
+    kind = update.get("sessionUpdate")
+    if kind == "agent_thought_chunk":
+        content = update.get("content")
+        if (
+            isinstance(content, dict)
+            and content.get("type") == "text"
+            and isinstance(content.get("text"), str)
+        ):
+            return {
+                "type": "thought",
+                "text": content["text"],
+                "deltaStreamId": f"reasoning-{stream_id}",
+            }
+    if kind not in {"tool_call", "tool_call_update"}:
+        return None
+    identity = update.get("toolCallId")
+    if not isinstance(identity, str) or not identity:
+        raise AcpTransportError("ACP tool update has no tool identity")
+    previous = tools.get(identity, {})
+    current = {
+        **previous,
+        **{
+            key: value
+            for key, value in update.items()
+            if value is not None and key != "sessionUpdate"
+        },
+    }
+    if current == previous:
+        return None
+    tools[identity] = current
+    title = str(current.get("title") or current.get("name") or "Tool")
+    output = current.get("rawOutput")
+    if output is None:
+        output = "\n".join(
+            item["content"]["text"]
+            for item in current.get("content", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("content"), dict)
+            and item["content"].get("type") == "text"
+            and isinstance(item["content"].get("text"), str)
+        )
+
+    def display(value: Any) -> str:
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+    return {
+        "type": "thought",
+        "text": title,
+        "trace": {
+            "kind": "tool",
+            "id": identity,
+            "title": title,
+            "category": current.get("kind", ""),
+            "status": current.get("status", "pending"),
+            "input": display(current.get("rawInput")),
+            "output": display(output),
+        },
+    }
+
+
 async def initialize_session(
     rpc: AcpTransport,
     params: dict[str, Any],
     *,
     require_http: bool = False,
+    session_id: str | None = None,
     timeout: float = 30,
 ) -> str:
-    """Create a fresh session with existing CLI auth and explicit capabilities."""
+    """Create or restore an owned session with current resources and CLI auth."""
     hello = await rpc.request(
         "initialize",
         {
@@ -63,6 +137,21 @@ async def initialize_session(
     mcp = capabilities.get("mcpCapabilities", {}) if isinstance(capabilities, dict) else {}
     if require_http and (not isinstance(mcp, dict) or mcp.get("http") is not True):
         raise AcpTransportError("Provider does not support per-session HTTP MCP injection")
+    if session_id:
+        session_caps = (
+            capabilities.get("sessionCapabilities", {}) if isinstance(capabilities, dict) else {}
+        )
+        if isinstance(session_caps, dict) and isinstance(session_caps.get("resume"), dict):
+            method = "session/resume"
+        elif isinstance(capabilities, dict) and capabilities.get("loadSession") is True:
+            method = "session/load"
+        else:
+            raise AcpTransportError("Provider cannot load the saved ACP session; update its CLI")
+        await rpc.request(method, {**params, "sessionId": session_id}, timeout=timeout)
+        # ACP load replays history to the client before replying. It is already
+        # in Rem's transcript, and must not become this turn's output.
+        rpc.drain_notifications()
+        return session_id
     session = await rpc.request("session/new", params, timeout=timeout)
     identity = session.get("sessionId")
     if not isinstance(identity, str) or not identity:
@@ -76,15 +165,26 @@ async def prompt_session(
     prompt: str,
     *,
     timeout: float | None = None,
+    image_paths: list[Path] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Consume a single prompt, preserving buffered output before terminal errors."""
     text = ""
     # ACP text updates are deltas, not independent timeline thoughts.
     stream_id = uuid4().hex
+    tools: dict[str, dict[str, Any]] = {}
+    content = [{"type": "text", "text": prompt}]
+    for path in image_paths or []:
+        content.append(
+            {
+                "type": "image",
+                "mimeType": mimetypes.guess_type(path.name)[0] or "image/png",
+                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+            }
+        )
     request = asyncio.create_task(
         rpc.request(
             "session/prompt",
-            {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]},
+            {"sessionId": session_id, "prompt": content},
             timeout=timeout,
         )
     )
@@ -95,7 +195,10 @@ async def prompt_session(
                 notification = asyncio.create_task(rpc.next_notification())
                 await asyncio.wait({request, notification}, return_when=asyncio.FIRST_COMPLETED)
                 if notification.done():
-                    chunk = session_text(notification.result(), session_id)
+                    event = notification.result()
+                    chunk = session_text(event, session_id)
+                    if trace := _session_trace(event, tools, stream_id):
+                        yield trace
                     if chunk:
                         text += chunk
                         yield {"type": "thought", "text": chunk, "deltaStreamId": stream_id}
@@ -109,10 +212,13 @@ async def prompt_session(
             for event in rpc.drain_notifications():
                 try:
                     chunk = session_text(event, session_id)
+                    trace = _session_trace(event, tools, stream_id)
                 except AcpTransportError as exc:
                     if buffered_error is None:
                         buffered_error = exc
                     continue
+                if trace:
+                    yield trace
                 if chunk:
                     text += chunk
                     yield {"type": "thought", "text": chunk, "deltaStreamId": stream_id}
@@ -128,8 +234,11 @@ async def prompt_session(
             for event in rpc.drain_notifications():
                 try:
                     chunk = session_text(event, session_id)
+                    trace = _session_trace(event, tools, stream_id)
                 except AcpTransportError:
                     continue
+                if trace:
+                    yield trace
                 if chunk:
                     text += chunk
                     yield {"type": "thought", "text": chunk, "deltaStreamId": stream_id}

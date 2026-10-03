@@ -454,6 +454,8 @@ test("desktop Git and files work outside agent roots with absent or stale grants
     const history = await mainFunction("gitHistory", context)(null, options);
     assert.equal(history.active, true);
     assert.equal(history.commits.length, 1);
+    assert.equal((await mainFunction("gitHistory", context)(null, { ...options, refs: [] })).commits.length, 0);
+    assert.equal((await mainFunction("gitHistory", context)(null, { ...options, refs: ["refs/heads/main"] })).commits.length, 1);
     assert.equal((await mainFunction("gitWorktrees", context)(null, options)).worktrees.length, 1);
     assert.equal((await mainFunction("listDirectory", context)(null, options)).directory, outside);
     assert.equal((await mainFunction("readTextFile", context)(null, options)).content, "draft");
@@ -583,4 +585,31 @@ test("bounded desktop reads preserve text, image bytes and size errors", async t
   await assert.rejects(text(null, { targetPath: target }), /too large to edit/);
   await fsp.truncate(target, 25 * 1024 * 1024 + 1);
   await assert.rejects(image(null, { targetPath: target }), /too large to preview/);
+});
+
+
+test("text reads return a missing result when a file or its worktree disappears", async (t) => {
+  const { outside, security } = await fixture(t);
+  const directory = path.join(outside, "worktree");
+  await fsp.mkdir(directory);
+  const file = path.join(directory, "open.txt");
+  await fsp.writeFile(file, "Old editor content");
+  const handle = security.grantUserPath(directory);
+  const read = mainFunction("readTextFile", {
+    safeFiles, resolveExactPath: security.resolveAllowedPath,
+    pathHandle: target => ({ path: target }),
+  });
+  const options = { targetPath: file, grantId: handle.grantId };
+  assert.equal((await read(null, options)).content, "Old editor content");
+  await fsp.unlink(file);
+  let result = await read(null, options);
+  assert.equal(result.missing, true);
+  assert.equal(result.content, null);
+  await fsp.rm(directory, { recursive: true });
+  result = await read(null, options);
+  assert.equal(result.missing, true);
+  assert.equal(result.path, file);
+  await fsp.writeFile(directory, "Folder replaced by file");
+  assert.equal((await read(null, options)).missing, true);
+  await assert.rejects(read(null, { targetPath: path.join(outside, "unauthorized.txt") }), /outside/);
 });

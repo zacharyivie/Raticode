@@ -11,13 +11,15 @@ import json
 import tempfile
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from gofer.core.prompt_envelope import AgentResources
 from gofer.subscriptions.acp_transport import RequestHandler
+from gofer.utils.atomic_output import mkdir_without_links
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ def acp_session_config(
     *,
     trusted_swarm_url: str | None = None,
     second_brain_cli_path: Path | None = None,
+    session_dir: Path | None = None,
 ) -> Iterator[AcpSessionConfig]:
     """Caller must close/drain the ACP process before leaving this context."""
     if provider not in {"antigravity", "grok"}:
@@ -42,13 +45,13 @@ def acp_session_config(
     servers: list[dict[str, Any]] = []
     grants: dict[str, set[str]] = {}
     http_servers: dict[str, tuple[str, set[str]]] = {}
-    prefix = "raticode-" + uuid.uuid4().hex
+    prefix = "raticode-" + (session_dir.name if session_dir else uuid.uuid4().hex)
     for server in resources.mcpServers:
         if not server.enabled:
             continue
         # Grok uses double underscores to separate server and tool identities.
         # Keep aliases independent of names that might contain that separator.
-        alias = f"{prefix}-{len(servers)}"
+        alias = f"{prefix}-{sha256(server.name.encode()).hexdigest()[:16]}"
         tools = {"*"}
         if server.name == "swarm":
             if server.type != "http" or not trusted_swarm_url or server.url != trusted_swarm_url:
@@ -72,7 +75,14 @@ def acp_session_config(
         servers.append(entry)
         grants[alias] = tools
     params: dict[str, Any] = {"cwd": str(cwd.resolve()), "mcpServers": servers}
-    with tempfile.TemporaryDirectory(prefix="raticode-acp-") as temporary:
+    if session_dir is not None:
+        mkdir_without_links(session_dir)
+    directory_context = (
+        nullcontext(str(session_dir))
+        if session_dir is not None
+        else tempfile.TemporaryDirectory(prefix="raticode-acp-")
+    )
+    with directory_context as temporary:
         if provider == "grok":
             mcp: dict[str, Any] = {}
             for entry in servers:

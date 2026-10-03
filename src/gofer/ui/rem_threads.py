@@ -153,18 +153,15 @@ async def stream_with_thread_tools(
                 "Perform its task here; do not spawn it again.\n"
             )
         workflow.update(remResources=resources, remThreadInstructions=instructions)
-        # A global turn chooses its working directory before gaining editing tools.
-        if actions.global_scope:
-            workflow["remResources"] = {
-                "shell": False,
-                "web": False,
-                "skills": [],
-                "mcpServers": [resources["mcpServers"][-1]],
-            }
+        # Project selection gates native edits, not research. Codex reads skill
+        # files through its command tool under the read-only sandbox below.
+        # Other enforced adapters use dedicated read tools without commands.
+        if actions.global_scope and kwargs.get("provider") != "codex":
+            workflow["remResources"] = {**resources, "shell": False}
         initial = {**kwargs, "workflow": workflow, "trusted_rem_threads_url": url}
         if actions.global_scope and kwargs.get("provider") == "codex":
             initial["permission_mode"] = "read-only"
-        # Claude global turns have no native tools (see _build_chat_command).
+        # Claude global turns retain read and web tools (see _build_chat_command).
         # Keep the user's permission mode so global management MCP writes work.
         pending_final = None
         async with aclosing(source(**initial)) as stream:

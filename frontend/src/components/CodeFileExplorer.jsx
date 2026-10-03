@@ -1,9 +1,13 @@
+import { filterHistory, layoutHistoryGraph } from "../lib/gitHistoryGraph.js";
+import HistoryBranchFilter from "./HistoryBranchFilter.jsx";
+import GitHistoryLane, { GitHistoryRefs } from "./GitHistoryLane.jsx";
 import { dismissGenerationJob, latestGenerationJob, jobIsRunning } from "../lib/generationJobs.js";
 import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath } from "../lib/workspacePaths.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { commitDiffPath } from "../lib/commitDiff.js";
 import RemActionIcon from "./RemActionIcon.jsx";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { beginFileDrag, containsFileTransfer, droppedFileEntries, getFileClipboard, setFileClipboard, subscribeFileClipboard, transferName, clipboardEntries, topLevelTransferEntries } from "../lib/fileTransfers.js";
 import {
   Search,
   Building2,
@@ -13,6 +17,8 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Scissors,
+  ClipboardPaste,
   FileCode2,
   FileJson2,
   FilePlus2,
@@ -41,7 +47,7 @@ import ProjectSearch from "./ProjectSearch.jsx";
 import { Dialog } from "./Dialog.jsx";
 import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 import { PathNameDialog } from "./PathNameDialog.jsx";
-import { DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
+import { formatKeybinding, DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
 
 export default function CodeFileExplorer({
   activeFilePath = "",
@@ -78,9 +84,35 @@ export default function CodeFileExplorer({
   const [directories, setDirectories] = useState({});
   const [expanded, setExpanded] = useState(() => new Set());
   const [loadingPaths, setLoadingPaths] = useState(() => new Set());
-  const [selectedPath, setSelectedPath] = useState(rootPath);
+  const [selectedPath, updateSelectedPath] = useState(rootPath);
+  const [selectedPaths, setSelectedPaths] = useState(() => new Set([rootPath]));
+  const selectionAnchorRef = useRef(rootPath);
+  const selectedPathsRef = useRef(selectedPaths);
+  selectedPathsRef.current = selectedPaths;
+  const pointerSelectingRef = useRef(false);
+  function setSelectedPath(path) {
+    updateSelectedPath(path);
+    setSelectedPaths(new Set([path]));
+    selectionAnchorRef.current = path;
+  }
+  const [duplicateRequest, setDuplicateRequest] = useState(null);
+  const duplicateResolverRef = useRef(null);
+  function resolveDuplicate(action) {
+    const resolve = duplicateResolverRef.current;
+    duplicateResolverRef.current = null;
+    setDuplicateRequest(null);
+    resolve?.({ action, applyAll: duplicateRequest?.applyAll || false });
+  }
+  useEffect(() => () => {
+    duplicateResolverRef.current?.({ action: "cancel", applyAll: false });
+    duplicateResolverRef.current = null;
+  }, [rootPath]);
+  useEffect(() => { setDuplicateRequest(null); }, [rootPath]);
   const [contextMenu, setContextMenu] = useState(null);
-  const [clipboardEntry, setClipboardEntry] = useState(null);
+  const clipboardEntry = useSyncExternalStore(subscribeFileClipboard, getFileClipboard, getFileClipboard);
+  const [dropDirectory, setDropDirectory] = useState("");
+  const [transferBusy, setTransferBusy] = useState(false);
+  const transferBusyRef = useRef(false);
   const [copiedPath, setCopiedPath] = useState("");
   const [nameRequest, setNameRequest] = useState(null);
   const [error, setError] = useState("");
@@ -121,6 +153,7 @@ export default function CodeFileExplorer({
         const job = await latestGenerationJob("commit", sourceControl.root || rootPath, sourceControl.branch || "");
         if (!active) return;
         setLoadingCommitJob(false);
+        setGitError(current => current.startsWith("Could not check commit-message generation:") ? "" : current);
         setGeneratingMessage(jobIsRunning(job));
         if (!job) { if (!generationRef.current) setGitNotice(""); return; }
         if (jobIsRunning(job)) setGitNotice(job.progress || "Rem is drafting your commit message.");
@@ -161,6 +194,11 @@ export default function CodeFileExplorer({
     window.localStorage.setItem(`rem-commit-draft:${draftKey}`, JSON.stringify({ ...current, message }));
   }
   const [gitNotice, setGitNotice] = useState("");
+  useEffect(() => {
+    if (!gitNotice.startsWith("Auto-committed ")) return;
+    const timer = window.setTimeout(() => setGitNotice(current => current === gitNotice ? "" : current), 4000);
+    return () => window.clearTimeout(timer);
+  }, [gitNotice]);
   const [blockedBranch, setBlockedBranch] = useState("");
   const [remote, setRemote] = useState("");
   const [gitError, setGitError] = useState("");
@@ -182,6 +220,12 @@ export default function CodeFileExplorer({
     return () => window.removeEventListener("keydown", openSearch);
   }, [setSidebarView]);
   const [gitHistory, setGitHistory] = useState({ active: false, commits: [], loading: false });
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyRefs, setHistoryRefs] = useState(null);
+  const [historyLimit, setHistoryLimit] = useState(100);
+  const historySelectionRef = useRef({ refs: historyRefs, limit: historyLimit });
+  historySelectionRef.current = { refs: historyRefs, limit: historyLimit };
+  const historyGraph = useMemo(() => layoutHistoryGraph(filterHistory(gitHistory.commits, historyQuery)), [gitHistory.commits, historyQuery]);
   const [expandedCommits, setExpandedCommits] = useState(() => new Set());
   const [copiedCommitHash, setCopiedCommitHash] = useState("");
   const [worktrees, setWorktrees] = useState({ active: false, items: [], loading: false });
@@ -432,19 +476,21 @@ export default function CodeFileExplorer({
   }, [loadDirectory, loadSourceControlStatus, rootPath]);
 
   const loadGitPanels = useCallback(async ({ includeHistory = true } = {}) => {
-    if (!rootPath || gitPanelsLoadingRef.current?.rootPath === rootPath) return;
-    const request = { rootPath };
+    if (!rootPath || (gitPanelsLoadingRef.current?.rootPath === rootPath
+      && gitPanelsLoadingRef.current?.refs === historyRefs && gitPanelsLoadingRef.current?.limit === historyLimit
+      && (!includeHistory || gitPanelsLoadingRef.current.includeHistory))) return;
+    const request = { rootPath, refs: historyRefs, limit: historyLimit, includeHistory };
     gitPanelsLoadingRef.current = request;
     if (includeHistory) setGitHistory((current) => ({ ...current, loading: true }));
     if (includeHistory) setWorktrees((current) => ({ ...current, loading: true }));
     try {
       const [historyPayload, worktreePayload] = await Promise.all([
-        includeHistory ? window.goferDesktop?.workspace?.gitHistory?.(rootPath) : null,
+        includeHistory ? window.goferDesktop?.workspace?.gitHistory?.(rootPath, { refs: historyRefs, limit: historyLimit }) : null,
         window.goferDesktop?.workspace?.gitWorktrees?.(rootPath),
       ]);
       if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
       if (historyPayload?.error || worktreePayload?.error) throw new Error(historyPayload?.error || worktreePayload.error);
-      if (includeHistory) setGitHistory({ active: Boolean(historyPayload?.active), commits: historyPayload?.commits ?? [], loading: false });
+      if (includeHistory && historySelectionRef.current.refs === historyRefs && historySelectionRef.current.limit === historyLimit) setGitHistory({ ...historyPayload, active: Boolean(historyPayload?.active), commits: historyPayload?.commits ?? [], loading: false });
       setWorktrees({ active: Boolean(worktreePayload?.active), items: worktreePayload?.worktrees ?? [], loading: false });
     } catch (loadError) {
       if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath || loadError?.name === "AbortError") return;
@@ -454,19 +500,22 @@ export default function CodeFileExplorer({
     } finally {
       if (gitPanelsLoadingRef.current === request) gitPanelsLoadingRef.current = null;
     }
-  }, [rootPath]);
+  }, [rootPath, historyRefs, historyLimit]);
 
   useEffect(() => {
     if (sidebarView !== "source-control") return undefined;
-    void loadGitPanels();
+    void loadGitPanels({ includeHistory: sourceTab === "history" });
     return startPolling(() => loadGitPanels({ includeHistory: false }));
-  }, [sidebarView, loadGitPanels]);
+  }, [sidebarView, sourceTab, loadGitPanels]);
 
   useEffect(() => {
+    setHistoryRefs(null);
+    setHistoryLimit(100);
+    setHistoryQuery("");
+    setGitHistory({ active: false, commits: [], loading: false });
     setSelectedPath(rootPath);
     setExpandedCommits(new Set());
     setCopiedCommitHash("");
-    setClipboardEntry(null);
     setContextMenu(null);
     setWorktreeMenu(null);
     setIntegrationSource("");
@@ -481,7 +530,7 @@ export default function CodeFileExplorer({
 
     const request = revealRequestRef.current + 1;
     revealRequestRef.current = request;
-    setSelectedPath(activeFilePath);
+    if (!selectedPathsRef.current.has(activeFilePath)) setSelectedPath(activeFilePath);
     setExpanded((current) => {
       const next = new Set(current);
       for (const directory of ancestorPaths) next.add(directory);
@@ -569,7 +618,6 @@ export default function CodeFileExplorer({
   }, [recentMenuOpen]);
 
   async function toggleDirectory(entry) {
-    setSelectedPath(entry.path);
     if (expanded.has(entry.path)) {
       setExpanded((current) => withoutSetValue(current, entry.path));
       return;
@@ -583,7 +631,7 @@ export default function CodeFileExplorer({
   function showContextMenu(event, entry = null) {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedPath(entry?.path ?? rootPath);
+    if (!entry || !selectedPaths.has(entry.path)) setSelectedPath(entry?.path ?? rootPath);
     setContextMenu({
       ...explorerMenuPosition(event.clientX, event.clientY),
       entry,
@@ -662,62 +710,182 @@ export default function CodeFileExplorer({
     }
   }
 
-  function copyEntry(entry = selectedEntry) {
+  function selectedTransferEntries(entry = selectedEntry) {
+    if (!entry || samePath(entry.path, rootPath)) return [];
+    const entries = selectedPaths.has(entry.path)
+      ? rows.filter(row => selectedPaths.has(row.entry.path)).map(row => row.entry)
+      : [entry];
+    return topLevelTransferEntries(entries.length ? entries : [entry]);
+  }
+
+  function selectTreeEntry(event, entry) {
+    pointerSelectingRef.current = false;
+    const anchor = rows.findIndex(row => samePath(row.entry.path, selectionAnchorRef.current));
+    const target = rows.findIndex(row => samePath(row.entry.path, entry.path));
+    if (event.shiftKey && anchor >= 0 && target >= 0) {
+      setSelectedPaths(new Set(rows.slice(Math.min(anchor, target), Math.max(anchor, target) + 1).map(row => row.entry.path)));
+      updateSelectedPath(entry.path);
+    } else if (event.ctrlKey || event.metaKey) {
+      setSelectedPaths(current => current.has(entry.path) ? withoutSetValue(current, entry.path) : withSetValue(current, entry.path));
+      updateSelectedPath(entry.path);
+      selectionAnchorRef.current = entry.path;
+    } else setSelectedPath(entry.path);
+  }
+
+  function copyEntry(entry = selectedEntry, operation = "copy") {
     setContextMenu(null);
-    if (!entry || samePath(entry.path, rootPath)) return;
-    setClipboardEntry(entry);
+    const entries = selectedTransferEntries(entry);
+    if (!entries.length) return;
+    setFileClipboard({ ...entries[0], entries, operation });
     treeRef.current?.focus();
   }
 
-  async function pasteEntry(directory = selectedDirectory || rootPath) {
-    if (gitBusy) return;
-    setContextMenu(null);
-    if (!clipboardEntry || !directory) return;
-    setError("");
+  async function transferEntries(entries, directory, operation, onTransferred) {
+    if (gitBusy || transferBusyRef.current || !directory) return false;
+    const bridge = window.goferDesktop?.workspace;
+    const transfer = operation === "move" ? bridge?.movePath : bridge?.copyPath;
+    if (!transfer) throw new Error("Restart the desktop app to enable file transfers.");
+    transferBusyRef.current = true;
+    setTransferBusy(true);
+    let completed = true;
+    let batchChoice;
     try {
-      const entries = directories[directory] ?? await loadDirectory(directory);
-      const name = nextCopyName(clipboardEntry.name, new Set(entries.map((entry) => entry.name)));
-      const destinationPath = joinWorkspacePath(directory, name);
-      await window.goferDesktop?.workspace?.copyPath?.({
-        sourcePath: clipboardEntry.path,
-        destinationPath,
-      });
-      setExpanded((current) => withSetValue(current, directory));
-      await loadDirectory(directory, { clearError: false });
-      setSelectedPath(destinationPath);
-      onFilesystemChange?.({
-        isDirectory: clipboardEntry.isDirectory,
-        kind: "copy",
-        path: destinationPath,
-        sourcePath: clipboardEntry.path,
-      });
-      void loadSourceControlStatus();
-    } catch (copyError) {
-      setError(copyError instanceof Error ? copyError.message : "Unable to paste path");
+      const listing = await bridge.listDirectory({ currentPath: directory });
+      const names = new Set((listing.entries || []).map(entry => entry.name));
+      for (const entry of topLevelTransferEntries(entries)) {
+        if (currentRootRef.current !== rootPath) { completed = false; break; }
+        if (hasUnsavedCodeChanges(entry.path)) throw new Error(`Save editor changes in ${entry.name} before transferring it.`);
+        const originalDestination = joinWorkspacePath(directory, entry.name);
+        if (operation === "move" && samePath(entry.path, originalDestination)) continue;
+        // Validate folder ancestry before opening a conflict prompt.
+        transferName(entry, directory, new Set(), operation);
+        let action = "keep-both";
+        if (names.has(entry.name)) {
+          const choice = batchChoice || await new Promise(resolve => {
+            duplicateResolverRef.current = resolve;
+            setDuplicateRequest({ entry, directory, applyAll: false });
+          });
+          if (choice.action === "cancel") { completed = false; break; }
+          if (choice.applyAll) batchChoice = choice;
+          action = choice.action;
+        }
+        const name = transferName(entry, directory, names, operation, action);
+        if (!name) continue;
+        const destinationPath = joinWorkspacePath(directory, name);
+        if (action === "replace" && (samePath(entry.path, destinationPath) || hasUnsavedCodeChanges(destinationPath))) {
+          throw new Error(samePath(entry.path, destinationPath) ? "A file cannot replace itself. Choose Keep both." : `Save editor changes in ${name} before replacing it.`);
+        }
+        try {
+          await transfer({ sourcePath: entry.path, destinationPath, replace: action === "replace" });
+        } catch (cause) {
+          // Vite can update this dialog while Electron still has the old handler
+          // or preload that drops the replacement flag.
+          if (action === "replace" && /destination already exists/i.test(cause.message || "")) {
+            throw new Error("Restart Raticode to load file replacement support, then try again.");
+          }
+          throw cause;
+        }
+        names.add(name);
+        onTransferred?.(entry);
+        if (action === "replace" && currentRootRef.current === rootPath) {
+          discardDirectoryBranch(setDirectories, destinationPath);
+          if (entry.isDirectory && expanded.has(destinationPath)) await loadDirectory(destinationPath, { clearError: false });
+        }
+        onFilesystemChange?.({ isDirectory: entry.isDirectory, kind: operation === "move" ? "rename" : "copy", path: destinationPath, sourcePath: entry.path, replaced: action === "replace" });
+        if (operation === "move" && currentRootRef.current === rootPath) {
+          discardDirectoryBranch(setDirectories, entry.path);
+          const sourceDirectory = parentWorkspacePath(entry.path);
+          if (pathWithin(sourceDirectory, rootPath)) await loadDirectory(sourceDirectory, { clearError: false });
+        }
+        if (currentRootRef.current === rootPath) setSelectedPath(destinationPath);
+      }
+      return completed;
+    } finally {
+      if (currentRootRef.current === rootPath) {
+        setExpanded(current => withSetValue(current, directory));
+        await loadDirectory(directory, { clearError: false });
+        void loadSourceControlStatus();
+      }
+      transferBusyRef.current = false;
+      setTransferBusy(false);
     }
   }
 
-  async function deleteEntry(entry = selectedEntry) {
-    if (gitBusy) return;
+  async function pasteEntry(directory = selectedDirectory || rootPath) {
     setContextMenu(null);
-    if (!entry || samePath(entry.path, rootPath)) return;
-    const kind = entry.isDirectory ? "folder" : "file";
-    if (!window.confirm(`Move ${entry.name} to the trash? This ${kind} can be restored from the operating system trash.`)) return;
+    const entry = getFileClipboard();
+    if (!entry || !directory || gitBusy || transferBusyRef.current) return;
     setError("");
     try {
-      await window.goferDesktop?.workspace?.deletePath?.(entry.path);
-      const parent = parentWorkspacePath(entry.path);
-      discardDirectoryBranch(setDirectories, entry.path);
-      await loadDirectory(parent, { clearError: false });
-      setSelectedPath(parent);
-      onFilesystemChange?.({
-        isDirectory: entry.isDirectory,
-        kind: "delete",
-        path: entry.path,
+      let remaining = clipboardEntries(entry);
+      let currentClipboard = entry;
+      await transferEntries(remaining, directory, entry.operation || "copy", moved => {
+        if (entry.operation !== "move" || getFileClipboard() !== currentClipboard) return;
+        remaining = remaining.filter(item => !samePath(item.path, moved.path));
+        currentClipboard = remaining.length ? { ...remaining[0], entries: remaining, operation: "move" } : null;
+        setFileClipboard(currentClipboard);
       });
-      void loadSourceControlStatus();
+    } catch (cause) { setError(cause.message || "Unable to paste file."); }
+  }
+
+  function dragOverDirectory(event, directory) {
+    if (!containsFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setDropDirectory(directory);
+    event.dataTransfer.dropEffect = Array.from(event.dataTransfer.types).includes("application/x-raticode-files") && !(event.ctrlKey || event.altKey || event.metaKey) ? "move" : "copy";
+  }
+
+  async function dropFiles(event, directory) {
+    if (!containsFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setDropDirectory("");
+    setError("");
+    const copy = event.ctrlKey || event.altKey || event.metaKey;
+    try {
+      const { entries, internal } = await droppedFileEntries(event.dataTransfer);
+      await transferEntries(entries, directory, internal && !copy ? "move" : "copy");
+    } catch (cause) { setError(cause.message || "Unable to drop files."); }
+  }
+
+  async function deleteEntry(entry = selectedEntry) {
+    if (gitBusy || transferBusyRef.current) return;
+    setContextMenu(null);
+    const entries = selectedTransferEntries(entry);
+    if (!entries.length) return;
+    const kind = entry.isDirectory ? "folder" : "file";
+    const message = entries.length > 1
+      ? `Are you sure you want to delete ${entries.length} files?`
+      : `Move ${entry.name} to the trash? This ${kind} can be restored from the operating system trash.`;
+    if (!window.confirm(message)) return;
+    setError("");
+    const parents = new Set();
+    transferBusyRef.current = true;
+    setTransferBusy(true);
+    try {
+      const remove = window.goferDesktop?.workspace?.deletePath;
+      if (!remove) throw new Error("Restart Raticode to enable file deletion.");
+      for (const selected of entries) {
+        if (currentRootRef.current !== rootPath) break;
+        await remove(selected.path);
+        parents.add(parentWorkspacePath(selected.path));
+        if (currentRootRef.current === rootPath) discardDirectoryBranch(setDirectories, selected.path);
+        onFilesystemChange?.({ isDirectory: selected.isDirectory, kind: "delete", path: selected.path });
+      }
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete path");
+      if (currentRootRef.current === rootPath) setError(deleteError instanceof Error ? deleteError.message : "Unable to delete path");
+    } finally {
+      try {
+        if (currentRootRef.current === rootPath && parents.size) {
+          for (const parent of parents) await loadDirectory(parent, { clearError: false });
+          setSelectedPath(parentWorkspacePath(entry.path));
+          void loadSourceControlStatus();
+        }
+      } finally {
+        transferBusyRef.current = false;
+        setTransferBusy(false);
+      }
     }
   }
 
@@ -863,6 +1031,7 @@ export default function CodeFileExplorer({
       }
       setWorktrees({ active: true, items: payload?.worktrees ?? [], loading: false });
       setWorktreeRemoval(null);
+      window.dispatchEvent(new CustomEvent("gofer:git-files-changed", { detail: { rootPath: worktree.path } }));
       onRemoveRecentProject?.(worktree.path);
     } catch (worktreeError) {
       if (currentRootRef.current === rootPath) {
@@ -875,17 +1044,46 @@ export default function CodeFileExplorer({
   }
 
   function handleTreeKeyDown(event) {
+    if (event.target?.matches?.("input, textarea") || event.target?.closest?.('[role="menu"]')) return;
+    if (["ArrowUp", "ArrowDown", "Home", "End", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+      const items = [...treeRef.current.querySelectorAll('[role="treeitem"]')];
+      const index = Math.max(0, items.indexOf(event.target.closest?.('[role="treeitem"]')));
+      const item = items[index];
+      const row = rows.find(row => row.entry.path === item?.dataset?.path);
+      event.preventDefault();
+      if (event.key === "ArrowUp") items[Math.max(0, index - 1)]?.focus();
+      if (event.key === "ArrowDown") items[Math.min(items.length - 1, index + 1)]?.focus();
+      if (event.key === "Home") items[0]?.focus();
+      if (event.key === "End") items.at(-1)?.focus();
+      if (event.key === "ArrowRight") {
+        if (row?.entry.isDirectory && !expanded.has(row.entry.path)) void toggleDirectory(row.entry);
+        else if (!row || row.entry.isDirectory) items[index + 1]?.focus();
+      }
+      if (event.key === "ArrowLeft") {
+        if (row?.entry.isDirectory && expanded.has(row.entry.path)) void toggleDirectory(row.entry);
+        else {
+          const level = Number(item?.getAttribute("aria-level") || 1);
+          for (let parent = index - 1; parent >= 0; parent--) {
+            if (Number(items[parent].getAttribute("aria-level")) < level) { items[parent].focus(); break; }
+          }
+        }
+      }
+      return;
+    }
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && event.key.toLowerCase() === "c") {
       event.preventDefault();
       copyEntry();
+    } else if (modifier && event.key.toLowerCase() === "x") {
+      event.preventDefault();
+      copyEntry(selectedEntry, "move");
     } else if (modifier && event.key.toLowerCase() === "v") {
       event.preventDefault();
       void pasteEntry();
     } else if (event.key === "F2") {
       event.preventDefault();
       requestRename();
-    } else if (event.key === "Delete") {
+    } else if (event.key === "Delete" || (event.key === "Backspace" && /Mac|iPhone|iPad/.test(navigator.platform))) {
       event.preventDefault();
       void deleteEntry();
     } else if (event.key === "Enter" && selectedEntry?.isDirectory) {
@@ -974,6 +1172,9 @@ export default function CodeFileExplorer({
       <div className="flex h-7 items-center justify-between px-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Explorer</span>
         <div className="flex items-center">
+          <button aria-label="Copy selected file" title="Copy selected file" type="button" disabled={!selectedEntry || samePath(selectedEntry.path, rootPath) || transferBusy} className="grid h-6 w-6 place-items-center rounded-md text-muted hover:bg-slate-100 disabled:opacity-40" onClick={() => copyEntry()}><Copy size={13} /></button>
+          <button aria-label="Cut selected file" title="Cut selected file" type="button" disabled={!selectedEntry || samePath(selectedEntry.path, rootPath) || transferBusy} className="grid h-6 w-6 place-items-center rounded-md text-muted hover:bg-slate-100 disabled:opacity-40" onClick={() => copyEntry(selectedEntry, "move")}><Scissors size={13} /></button>
+          <button aria-label="Paste files" title="Paste into selected folder" type="button" disabled={!clipboardEntry || transferBusy || gitBusy} className="grid h-6 w-6 place-items-center rounded-md text-muted hover:bg-slate-100 disabled:opacity-40" onClick={() => void pasteEntry()}><ClipboardPaste size={13} /></button>
           <button
             aria-label="New file"
             className="grid h-6 w-6 place-items-center rounded-md text-muted hover:bg-slate-100 hover:text-ink"
@@ -1013,17 +1214,29 @@ export default function CodeFileExplorer({
       <div
         ref={treeRef}
         aria-label="Project files"
-        className="flex min-h-0 flex-1 flex-col outline-none"
+        className={`flex min-h-0 flex-1 flex-col outline-none ${dropDirectory === rootPath ? "ring-2 ring-inset ring-brand" : ""}`}
         role="tree"
-        tabIndex={0}
+        aria-multiselectable="true"
+        tabIndex={-1}
         onContextMenu={(event) => showContextMenu(event)}
         onKeyDown={handleTreeKeyDown}
+        aria-busy={transferBusy}
+        onCopy={event => { event.preventDefault(); copyEntry(); }}
+        onCut={event => { event.preventDefault(); copyEntry(selectedEntry, "move"); }}
+        onPaste={event => { event.preventDefault(); void pasteEntry(); }}
+        onDragOver={event => dragOverDirectory(event, rootPath)}
+        onDrop={event => void dropFiles(event, rootPath)}
+        onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setDropDirectory(""); }}
       >
         <div ref={recentMenuRef} className="relative z-10 shrink-0 bg-white">
           <button
             aria-expanded={hideProjectSelector ? undefined : recentMenuOpen}
             aria-haspopup={hideProjectSelector ? undefined : "menu"}
             aria-selected={selectedPath === rootPath}
+            aria-level={1}
+            data-path={rootPath}
+            tabIndex={!rows.some(row => row.entry.path === selectedPath) ? 0 : -1}
+            onFocus={() => setSelectedPath(rootPath)}
             className={`flex h-7 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-xs font-semibold ${selectedPath === rootPath ? "bg-indigo-100 text-indigo-700" : "text-ink hover:bg-slate-100"}`}
             role="treeitem"
             title={hideProjectSelector ? rootPath : `${rootPath}\nChoose a recent project`}
@@ -1101,8 +1314,7 @@ export default function CodeFileExplorer({
             {rows.map(({ depth, entry }) => {
               const isExpanded = entry.isDirectory && expanded.has(entry.path);
               const isLoading = loadingPaths.has(entry.path);
-              const selected = normalizeWorkspacePath(selectedPath)
-                === normalizeWorkspacePath(entry.path);
+              const selected = selectedPaths.has(entry.path);
               const active = normalizeWorkspacePath(activeFilePath)
                 === normalizeWorkspacePath(entry.path);
               return (
@@ -1112,17 +1324,37 @@ export default function CodeFileExplorer({
                   aria-current={active ? "page" : undefined}
                   aria-expanded={entry.isDirectory ? isExpanded : undefined}
                   aria-selected={selected}
-                  className={`flex h-7 w-full items-center gap-1.5 rounded-md pr-1.5 text-left text-xs ${selected ? "bg-indigo-100 font-medium text-indigo-700" : "text-ink hover:bg-slate-100"}`}
+                  aria-level={depth + 2}
+                  data-path={entry.path}
+                  tabIndex={samePath(selectedPath, entry.path) ? 0 : -1}
+                  onPointerDown={() => { pointerSelectingRef.current = true; }}
+                  onFocus={() => {
+                    if (pointerSelectingRef.current || selectedPaths.has(entry.path)) updateSelectedPath(entry.path);
+                    else setSelectedPath(entry.path);
+                  }}
+                  className={`flex h-7 w-full items-center gap-1.5 rounded-md pr-1.5 text-left text-xs ${dropDirectory === entry.path ? "ring-2 ring-inset ring-brand " : ""}${clipboardEntry?.operation === "move" && clipboardEntries(clipboardEntry).some(item => samePath(item.path, entry.path)) ? "opacity-50 " : ""}${selected ? "bg-indigo-100 font-medium text-indigo-700" : "text-ink hover:bg-slate-100"}`}
                   role="treeitem"
+                  draggable={!transferBusy && !gitBusy}
+                  onDragStart={event => {
+                    pointerSelectingRef.current = false;
+                    setContextMenu(null);
+                    const entries = selectedTransferEntries(entry);
+                    if (!selectedPaths.has(entry.path)) setSelectedPath(entry.path);
+                    beginFileDrag(event, entries);
+                  }}
+                  onDragEnd={() => setDropDirectory("")}
+                  onDragOver={event => dragOverDirectory(event, entry.isDirectory ? entry.path : parentWorkspacePath(entry.path))}
+                  onDrop={event => void dropFiles(event, entry.isDirectory ? entry.path : parentWorkspacePath(entry.path))}
                   style={{ paddingLeft: `${6 + depth * 12}px` }}
                   title={entry.path}
                   type="button"
-                  onClick={() => {
+                  onClick={event => {
+                    selectTreeEntry(event, entry);
+                    if (event.shiftKey || event.ctrlKey || event.metaKey) return;
                     if (entry.isDirectory) {
                       void toggleDirectory(entry);
                       return;
                     }
-                    setSelectedPath(entry.path);
                     onOpenFile?.(entry.path, { preview: true });
                   }}
                   onDoubleClick={() => !entry.isDirectory && onOpenFile?.(entry.path)}
@@ -1148,9 +1380,10 @@ export default function CodeFileExplorer({
 
       {clipboardEntry ? (
         <div className="mx-1.5 mt-2 flex items-center gap-1.5 rounded-md bg-slate-100 px-2 py-1.5 text-[10px] text-muted">
-          <Copy size={11} />
-          <span className="min-w-0 flex-1 truncate" title={clipboardEntry.path}>Copied {clipboardEntry.name}</span>
-          <button aria-label="Clear copied file" type="button" onClick={() => setClipboardEntry(null)}><X size={11} /></button>
+          <span>{clipboardEntry.operation === "move" ? <Scissors size={11} /> : <Copy size={11} />}</span>
+          <span className="min-w-0 flex-1 truncate" title={clipboardEntry.path}>{clipboardEntry.operation === "move" ? "Cut" : "Copied"} {clipboardEntries(clipboardEntry).length > 1 ? `${clipboardEntries(clipboardEntry).length} files` : clipboardEntry.name}</span>
+          <button aria-label="Paste file into selected folder" disabled={transferBusy || gitBusy} type="button" onClick={() => void pasteEntry()}><ClipboardPaste size={13} /></button>
+          <button aria-label="Clear copied file" type="button" onClick={() => setFileClipboard(null)}><X size={11} /></button>
         </div>
       ) : null}
 
@@ -1305,7 +1538,7 @@ export default function CodeFileExplorer({
               })}
             </section>
 
-                <GitIntegrationControls key={rootPath} rootPath={rootPath} sourceControl={sourceControl} worktrees={worktrees.items} source={integrationSource} request={integrationRequest} onSourceChange={setIntegrationSource} onBusy={(busy) => { gitOperationRef.current = busy; setGitBusy(busy); }} disabled={gitBusy} onSelectProject={onSelectProject} onChanged={async (result) => {
+                <GitIntegrationControls key={JSON.stringify([rootPath, integrationSource, integrationRequest])} rootPath={rootPath} sourceControl={sourceControl} worktrees={worktrees.items} source={integrationSource} request={integrationRequest} onSourceChange={setIntegrationSource} onBusy={(busy) => { gitOperationRef.current = busy; setGitBusy(busy); }} disabled={gitBusy} onSelectProject={onSelectProject} onChanged={async (result) => {
                   if (currentRootRef.current !== rootPath) return;
                   if (result.active) setSourceControl(result);
                   setGitNotice(result.notice || "");
@@ -1330,37 +1563,47 @@ export default function CodeFileExplorer({
                 <RefreshCw className={gitHistory.loading || worktrees.loading ? "animate-spin" : ""} size={12} />
               </button>
             </div>
+            <div className="mb-2 space-y-1.5">
+              <HistoryBranchFilter refs={gitHistory.refs || []} selection={historyRefs} onChange={selection => { if (selection === historyRefs) return; setHistoryRefs(selection); setHistoryLimit(100); setGitHistory(current => ({ ...current, commits: [], loading: true })); }} />
+              <input aria-label="Filter commit history" type="search" placeholder="Filter message, author, branch, or ID" className="h-7 w-full rounded border border-line bg-white px-2 text-[11px] text-ink placeholder:text-muted focus-visible:outline-brand" value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} />
+            </div>
             {gitHistory.loading && !gitHistory.commits.length ? <p className="py-2 text-[11px] text-muted">Loading history...</p> : null}
             {!gitHistory.loading && !gitHistory.active ? <p className="py-2 text-[11px] text-muted">This project is not a Git repository.</p> : null}
-            {!gitHistory.loading && gitHistory.active && !gitHistory.commits.length ? <p className="py-6 text-center text-xs text-muted">No commits yet.</p> : null}
-            {gitHistory.commits.map((commit) => {
+            {!gitHistory.loading && gitHistory.active && !gitHistory.commits.length ? <p className="py-6 text-center text-xs text-muted">{historyRefs?.length === 0 ? "Select branches to show their history." : historyRefs ? "No commits in this selection." : "No commits yet."}</p> : null}
+            {!gitHistory.loading && gitHistory.commits.length > 0 && !historyGraph.rows.length ? <p className="py-4 text-xs text-muted">No loaded commits match. Clear the filter or load more history.</p> : null}
+            <p className="mb-2 text-[10px] leading-4 text-muted">Newer commits are above their ancestors. Lines meet at shared commits.</p>
+            <div role="list" aria-label="Branch history graph" className="scm-history-graph">
+            {historyGraph.rows.map((row) => {
+              const { commit } = row;
               const isExpanded = expandedCommits.has(commit.hash);
               const isCopied = copiedCommitHash === commit.hash;
               return (
-                <div key={commit.hash} onContextMenu={event => openHistoryMenu(event, commit)} onKeyDown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openHistoryMenu(event, commit); }} className={`rounded-md transition-colors ${isExpanded ? "bg-slate-50" : "hover:bg-slate-50"}`}>
-                  <div className="flex items-start rounded-md">
+                <div key={commit.hash} role="listitem" className="scm-history-row">
+                  <GitHistoryLane row={row} width={historyGraph.width} />
+                <div onContextMenu={event => openHistoryMenu(event, commit)} onKeyDown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openHistoryMenu(event, commit); }} className={`min-w-0 flex-1 rounded-md transition-colors ${isExpanded ? "bg-slate-50" : "hover:bg-slate-50"}`}>
+                  <div className="flex items-center rounded-md">
                     <button
                       aria-expanded={isExpanded}
-                      className="flex min-w-0 flex-1 items-start gap-1.5 rounded-md px-1.5 py-1.5 text-left outline-none focus-visible:bg-slate-100"
+                      className="flex min-w-0 flex-1 items-center rounded-md px-1.5 py-1.5 text-left outline-none focus-visible:bg-slate-100"
                       type="button"
                       onClick={() => setExpandedCommits((current) => isExpanded
                         ? withoutSetValue(current, commit.hash)
                         : withSetValue(current, commit.hash))}
                     >
-                      <ChevronDown className={`mt-0.5 shrink-0 text-muted transition-transform ${isExpanded ? "" : "-rotate-90"}`} size={10} />
                       <span className="min-w-0 flex-1">
                         <span className={`block text-[11px] font-medium leading-4 text-ink ${isExpanded ? "whitespace-pre-wrap break-words" : "truncate"}`}>{isExpanded ? (commit.message || commit.subject) : commit.subject}</span>
+                        <GitHistoryRefs commit={commit} />
                         <span className="flex min-w-0 items-center gap-1.5 text-[9px] leading-3 text-muted">
                           <span className="truncate">{commit.author}</span>
                           <span aria-hidden="true">·</span>
                           <span className="shrink-0">{relativeCommitTime(commit.authoredAt)}</span>
+                          <span className="shrink-0 font-mono">{commit.shortHash}</span>
                         </span>
                       </span>
-                      <span className="mt-0.5 shrink-0 font-mono text-[9px] leading-3 text-muted">{commit.shortHash}</span>
                     </button>
                     <button
                       aria-label={isCopied ? `Copied commit ID ${commit.shortHash}` : `Copy commit ID ${commit.shortHash}`}
-                      className="mt-1 grid h-6 w-6 shrink-0 place-items-center rounded text-muted outline-none hover:bg-slate-200 hover:text-ink focus-visible:bg-slate-200 focus-visible:text-ink dark:hover:bg-white/10 dark:focus-visible:bg-white/10"
+                      className="mt-0.5 grid h-6 w-5 shrink-0 self-start place-items-center rounded text-muted outline-none hover:bg-slate-200 hover:text-ink focus-visible:bg-slate-200 focus-visible:text-ink dark:hover:bg-white/10 dark:focus-visible:bg-white/10"
                       title={isCopied ? "Commit ID copied" : "Copy commit ID"}
                       type="button"
                       onClick={() => void copyCommitHash(commit)}
@@ -1369,7 +1612,7 @@ export default function CodeFileExplorer({
                     </button>
                   </div>
                   {isExpanded ? (
-                    <div className="ml-5 border-t border-line/80 px-2 pb-2 pt-1.5 text-[10px]">
+                    <div className="border-t border-line/80 px-1.5 pb-2 pt-1.5 text-[10px]">
                       <div className="flex items-center gap-2 font-mono text-[9px]" aria-label={`${commit.insertions ?? 0} insertions, ${commit.deletions ?? 0} deletions${commit.binaryFiles ? `, ${commit.binaryFiles} binary files without line counts` : ""}`}>
                         {!commit.binaryFiles || commit.insertions || commit.deletions ? <><span className="font-medium text-emerald-600">+{commit.insertions ?? 0}</span><span className="font-medium text-red-600">-{commit.deletions ?? 0}</span></> : null}
                         {commit.binaryFiles ? <span className="text-muted">{commit.binaryFiles} binary {commit.binaryFiles === 1 ? "file" : "files"}</span> : null}
@@ -1377,8 +1620,12 @@ export default function CodeFileExplorer({
                     </div>
                   ) : null}
                 </div>
+                </div>
               );
             })}
+            </div>
+            {gitHistory.hasMore && historyLimit < 5000 ? <button type="button" className="my-2 w-full rounded border border-line py-1 text-[11px] text-muted hover:text-ink disabled:opacity-50" disabled={gitHistory.loading} onClick={() => setHistoryLimit(limit => limit + 100)}>Load more history</button> : null}
+            {gitHistory.hasMore && historyLimit >= 5000 ? <p className="py-2 text-[11px] text-muted">Showing 5,000 commits. Select a branch to narrow history.</p> : null}
 
               </> : null}
             </>}
@@ -1427,12 +1674,13 @@ export default function CodeFileExplorer({
       {historyMenu && sidebarView === "source-control" && sourceTab === "history" ? <WorktreeContextMenu {...historyMenu} operations={historyOperations} disabled={gitBusy} onClose={() => setHistoryMenu(null)} onSelect={kind => void historyAction(kind)} /> : null}
       {contextMenu ? (
         <ExplorerContextMenu
-          canPaste={Boolean(clipboardEntry)}
+          canPaste={Boolean(clipboardEntry) && !transferBusy && !gitBusy}
           entry={contextMenu.entry}
           pathCopied={copiedPath === (contextMenu.entry?.path ?? rootPath)}
           x={contextMenu.x}
           y={contextMenu.y}
           onCopy={() => copyEntry(contextMenu.entry)}
+          onCut={() => copyEntry(contextMenu.entry, "move")}
           onCopyPath={() => copyPath(contextMenu.entry)}
           onCreateFile={() => requestCreate("file", contextMenu.directory)}
           onCreateFolder={() => requestCreate("folder", contextMenu.directory)}
@@ -1442,6 +1690,22 @@ export default function CodeFileExplorer({
           onRefresh={() => loadDirectory(contextMenu.directory || rootPath)}
           onRename={() => requestRename(contextMenu.entry)}
         />
+      ) : null}
+
+      {duplicateRequest ? (
+        <Dialog title={`${duplicateRequest.entry.name} already exists`} onClose={() => resolveDuplicate("cancel")} panelClassName="w-full max-w-md rounded-xl border border-line bg-white p-5 text-ink shadow-panel">
+          <h2 className="break-words text-sm font-semibold">{duplicateRequest.entry.name} already exists</h2>
+          <p className="mt-3 text-xs text-muted">Choose what to do with the duplicate {duplicateRequest.entry.isDirectory ? "folder" : "file"} in <span className="break-all">{duplicateRequest.directory}</span>.</p>
+          <label className="mt-4 flex items-center gap-2 text-xs">
+            <input type="checkbox" checked={duplicateRequest.applyAll} onChange={event => setDuplicateRequest(current => ({ ...current, applyAll: event.target.checked }))} />
+            Do this for all duplicate files
+          </label>
+          <div className="mt-5 flex flex-wrap justify-end gap-2">
+            <button type="button" className="rounded border border-line px-3 py-2 text-xs" onClick={() => resolveDuplicate("keep-both")}>Keep both</button>
+            <button type="button" className="rounded border border-line px-3 py-2 text-xs" onClick={() => resolveDuplicate("replace")}>{duplicateRequest.entry.isDirectory ? "Replace folder" : "Replace file"}</button>
+            <button type="button" className="rounded border border-line px-3 py-2 text-xs" onClick={() => resolveDuplicate("cancel")}>Cancel</button>
+          </div>
+        </Dialog>
       ) : null}
 
       {worktreeRemoval ? (
@@ -1552,6 +1816,7 @@ function ExplorerContextMenu({
   canPaste,
   entry,
   onCopy,
+  onCut,
   onCopyPath,
   onCreateFile,
   onCreateFolder,
@@ -1579,12 +1844,13 @@ function ExplorerContextMenu({
         <>
           <div className="my-1 border-t border-line" />
           <MenuButton icon={PencilLine} label="Rename" shortcut="F2" onClick={onRename} />
-          <MenuButton icon={Copy} label="Copy" shortcut="Ctrl+C" onClick={onCopy} />
+          <MenuButton icon={Copy} label="Copy" shortcut={formatKeybinding("Mod+KeyC")} onClick={onCopy} />
+          <MenuButton icon={Scissors} label="Cut" shortcut={formatKeybinding("Mod+KeyX")} onClick={onCut} />
           <MenuButton danger icon={Trash2} label="Delete" shortcut="Delete" onClick={onDelete} />
         </>
       ) : null}
       <div className="my-1 border-t border-line" />
-      <MenuButton disabled={!canPaste} icon={Copy} label="Paste" shortcut="Ctrl+V" onClick={onPaste} />
+      <MenuButton disabled={!canPaste} icon={Copy} label="Paste" shortcut={formatKeybinding("Mod+KeyV")} onClick={onPaste} />
       <MenuButton icon={FilePlus2} label="New file" onClick={onCreateFile} />
       <MenuButton icon={FolderPlus} label="New folder" onClick={onCreateFolder} />
       <div className="my-1 border-t border-line" />
@@ -1710,7 +1976,7 @@ export function workspaceAncestorPaths(rootPath = "", targetPath = "") {
 
 export function explorerMenuPosition(clientX, clientY, viewportWidth = window.innerWidth, viewportHeight = window.innerHeight) {
   const width = 224;
-  const height = 292;
+  const height = 324;
   const availableWidth = Number.isFinite(viewportWidth) ? viewportWidth : 1024;
   const availableHeight = Number.isFinite(viewportHeight) ? viewportHeight : 768;
   return {

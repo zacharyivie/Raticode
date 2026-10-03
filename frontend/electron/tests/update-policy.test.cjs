@@ -18,6 +18,7 @@ function context(platform, signing, packaged = true, smoke = false) {
     setUpdateState: (patch) => Object.assign(state, patch),
     checkLatestReleaseFallback: async () => { calls.push("manual-check"); return { checking: false }; },
     shell: { openExternal: async (url) => calls.push(url.endsWith(".dmg") ? "mac-installer" : "release-page") },
+    prepareLifecycle: async () => true,
     stopBackend: () => calls.push("stop-backend"),
     autoUpdater: {
       checkForUpdates: async () => calls.push("auto-check"),
@@ -43,7 +44,7 @@ for (const [platform, signing, supported] of [
     assert.equal(sandbox.getUpdateState().supported, supported);
     await sandbox.checkForUpdates();
     await sandbox.downloadAndInstallUpdate();
-    sandbox.installDownloadedUpdate();
+    await sandbox.installDownloadedUpdate();
     assert.deepEqual(calls, supported
       ? ["auto-check", "auto-download", "stop-backend", "auto-install"]
       : ["manual-check", "mac-installer"]);

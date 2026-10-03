@@ -17,6 +17,7 @@ from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_capabilities import ProviderId, resolve_provider_executable
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_profiles import ResolvedProviderSettings, validate_provider_settings
+from gofer.core.usage_ledger import TOKEN_FIELDS
 from gofer.subscriptions.acp_config import (
     acp_session_config,
     deny_acp_permission,
@@ -68,6 +69,9 @@ async def stream_acp(
     max_output_bytes: int | None = None,
     trusted_swarm_url: str | None = None,
     second_brain_cli_path: Path | None = None,
+    image_paths: list[Path] | None = None,
+    session_id: str | None = None,
+    session_dir: Path | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     require_acp_permissions(provider, permission_mode)
     command = acp_command(provider, executable)
@@ -81,6 +85,7 @@ async def stream_acp(
         resources or AgentResources(),
         trusted_swarm_url=trusted_swarm_url,
         second_brain_cli_path=second_brain_cli_path,
+        session_dir=session_dir,
     ) as config:
         if provider == "grok":
             # This process belongs to one turn. Startup injection also works when
@@ -105,7 +110,11 @@ async def stream_acp(
                 raise ValueError(f"{provider} does not support effort selection")
             if selected_effort and (not model or model == "cli-default"):
                 config.params.setdefault("_meta", {})["reasoningEffort"] = selected_effort
-            session = await initialize_session(rpc, config.params)
+            session = (
+                await initialize_session(rpc, config.params, session_id=session_id)
+                if session_id
+                else await initialize_session(rpc, config.params)
+            )
             # Authorize only this session's injected MCP identities and only an
             # offered one-time grant. Native/unknown tool requests remain denied.
             permission_handler = grok_mcp_permission_handler(session, config.grants)
@@ -116,19 +125,35 @@ async def stream_acp(
                 await rpc.request("session/set_model", selection, timeout=30)
             if provider == "grok":
                 await wait_grok_mcp(rpc, session, config.http_servers)
-            source = prompt_session(rpc, session, prompt, timeout=timeout)
+            # Snapshot cumulative usage before a resumed prompt to count only
+            # new work in this turn's ledger entry.
+            previous_usage: dict[str, Any] = {}
+            if session_id:
+                try:
+                    raw = await rpc.request(
+                        "_x.ai/session/usage", {"sessionId": session}, timeout=3
+                    )
+                    previous_usage = normalize_usage(provider, raw.get("usage") or {})
+                except (AcpTransportError, TimeoutError, OSError):
+                    pass
+            yield {"type": "session", "sessionId": session}
+            source = prompt_session(rpc, session, prompt, timeout=timeout, image_paths=image_paths)
             try:
                 async for event in source:
                     if event.get("type") in {"final", "error"}:
-                        # This adapter creates a fresh session for every invocation,
-                        # so the cumulative session snapshot is exactly this call.
+                        # Native usage is cumulative for the provider session.
                         try:
                             usage_response = await rpc.request(
                                 "_x.ai/session/usage", {"sessionId": session}, timeout=3
                             )
                             raw_usage = usage_response.get("usage")
                             if isinstance(raw_usage, dict):
-                                event["usage"] = normalize_usage(provider, raw_usage)
+                                usage = normalize_usage(provider, raw_usage)
+                                if session_id:
+                                    # Without a baseline the cumulative counters
+                                    # cannot be attributed to this prompt.
+                                    usage = _session_usage_delta(usage, previous_usage)
+                                event["usage"] = usage
                         except (AcpTransportError, TimeoutError, OSError):
                             # Older CLIs do not expose the extension. Missing usage
                             # must not invalidate an otherwise completed response.
@@ -138,6 +163,22 @@ async def stream_acp(
                 close = getattr(source, "aclose", None)
                 if close:
                     await close()
+
+
+def _session_usage_delta(total: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    """Subtract normalized counters without retaining cumulative native aliases."""
+    delta: dict[str, Any] = {"source": "provider_metadata"}
+    if total.get("partial") or previous.get("partial"):
+        delta["partial"] = True
+    for key in (*TOKEN_FIELDS, "cost_usd"):
+        if key not in total:
+            continue
+        value, baseline = total[key], previous.get(key)
+        if type(value) in {int, float} and type(baseline) in {int, float} and value >= baseline:
+            delta[key] = value - baseline
+        else:
+            delta["partial"] = True
+    return delta
 
 
 class AcpSubscription(Subscription):

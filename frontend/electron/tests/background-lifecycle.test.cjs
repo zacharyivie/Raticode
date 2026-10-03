@@ -30,7 +30,7 @@ test('cold startup creates the shell while backend and terminal readiness are pe
   const windows = [];
   const context = {
     shellPathReady: new Promise(resolve => { releaseShellPath = resolve; }),
-    BrowserWindow: {}, session: {}, startReportPdfService: async () => ({ env: {} }),
+    BrowserWindow: {}, session: {}, protocol: { handle() {} }, startReportPdfService: async () => ({ env: {} }),
     app: { whenReady: () => ({ then: callback => { readyCallback = callback; } }),
       getPath: () => '/logs', getVersion: () => 'test', on() {} },
     createAppLog: () => ({ write() {}, emergency() {} }),

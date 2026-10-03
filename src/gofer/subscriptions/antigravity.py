@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,9 @@ from gofer.subscriptions.acp_config import acp_session_config
 from gofer.subscriptions.acp_providers import require_acp_permissions
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.usage import track_invocation
+from gofer.utils.atomic_output import mkdir_without_links
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
+from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
 
 
 def antigravity_command(
@@ -59,6 +61,7 @@ def antigravity_workspace(
     *,
     trusted_swarm_url: str | None = None,
     second_brain_cli_path: Path | None = None,
+    session_dir: Path | None = None,
 ) -> Iterator[tuple[Path, list[str]]]:
     """Stage turn MCP servers without modifying project or global configuration.
 
@@ -66,9 +69,16 @@ def antigravity_workspace(
     file, while --add-dir grants access to the actual project. Authentication
     and CLI permission settings continue to come from the user's normal home.
     """
-    if not any(server.enabled for server in resources.mcpServers):
+    if session_dir is None and not any(server.enabled for server in resources.mcpServers):
         yield cwd, []
         return
+    if session_dir is not None:
+        mkdir_without_links(session_dir)
+    directory_context = (
+        nullcontext(str(session_dir))
+        if session_dir is not None
+        else tempfile.TemporaryDirectory(prefix="raticode-antigravity-")
+    )
     # Reuse the provider-independent trusted resource checks and ACP-to-native
     # metadata conversion. Antigravity uses its own native transport.
     with (
@@ -79,11 +89,11 @@ def antigravity_workspace(
             trusted_swarm_url=trusted_swarm_url,
             second_brain_cli_path=second_brain_cli_path,
         ) as config,
-        tempfile.TemporaryDirectory(prefix="raticode-antigravity-") as directory,
+        directory_context as directory,
     ):
         root = Path(directory)
         folder = root / ".agents"
-        folder.mkdir()
+        folder.mkdir(exist_ok=True)
         servers = {}
         selected = [server for server in resources.mcpServers if server.enabled]
         for server, entry in zip(selected, config.params["mcpServers"], strict=True):
@@ -119,18 +129,23 @@ async def stream_antigravity(
     max_output_bytes: int | None = None,
     trusted_swarm_url: str | None = None,
     second_brain_cli_path: Path | None = None,
+    session_id: str | None = None,
+    session_dir: Path | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     command = antigravity_command(
         executable, model=model, effort=effort, permission_mode=permission_mode
     )
+    if session_id:
+        command += ["--conversation", session_id]
     with antigravity_workspace(
         cwd,
         resources or AgentResources(),
         trusted_swarm_url=trusted_swarm_url,
         second_brain_cli_path=second_brain_cli_path,
+        session_dir=session_dir,
     ) as (process_cwd, workspace_args):
         command += workspace_args
-        if workspace_args:
+        if workspace_args and not session_id:
             prompt = (
                 f"The user's project and working directory is {cwd.resolve()}. "
                 "Run project commands there and resolve project paths against it. "
@@ -147,11 +162,13 @@ async def stream_antigravity(
             timeout=timeout,
             cancel_event=cancel_event,
             max_output_bytes=max_output_bytes,
+            protocol_stdout=True,
         )
-        buffer = ""
+        lines = ProtocolLines()
         stderr = ""
         final: dict[str, Any] | None = None
         error: str | None = None
+        parse_error: str | None = None
         code = 1
         seen_steps: set[int] = set()
         try:
@@ -162,9 +179,7 @@ async def stream_antigravity(
                 if event["stream"] == "stderr":
                     stderr = (stderr + event["text"])[-8192:]
                     continue
-                buffer += event["text"]
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
+                for line in lines.feed(event["text"]):
                     if not line.strip():
                         continue
                     try:
@@ -172,13 +187,15 @@ async def stream_antigravity(
                         if not isinstance(record, dict):
                             raise ValueError
                         kind = record.get("event")
+                        if kind == "init" and isinstance(record.get("conversation_id"), str):
+                            yield {"type": "session", "sessionId": record["conversation_id"]}
                         if kind == "result":
                             result = record.get("result")
                             if not isinstance(result, dict) or not isinstance(
                                 result.get("response"), str
                             ):
                                 raise ValueError
-                            final = result
+                            final = {**result, "response": retained_text(result["response"])}
                         elif kind == "step_update":
                             step = record.get("step_update")
                             if not isinstance(step, dict):
@@ -194,20 +211,32 @@ async def stream_antigravity(
                                 seen_steps.add(index)
                                 name = step.get("tool_name")
                                 if isinstance(name, str) and name:
-                                    yield {"type": "thought", "text": name.replace("_", " ")}
+                                    yield {
+                                        "type": "thought",
+                                        "text": name.replace("_", " "),
+                                        "trace": {
+                                            "kind": "tool",
+                                            "id": str(index),
+                                            "title": name.replace("_", " "),
+                                            "status": "completed",
+                                        },
+                                    }
                     except (ValueError, TypeError):
-                        error = "Antigravity emitted malformed stream output"
-            if buffer.strip():
+                        parse_error = "Antigravity emitted malformed stream output"
+            if lines.buffer.strip():
                 # NDJSON requires a complete terminal record, not a truncated tail.
-                error = "Antigravity emitted an incomplete stream record"
-            if not final:
-                error = error or stderr.strip() or "Antigravity ended without a result"
-            elif final.get("status") != "SUCCESS":
-                error = error or str(
-                    final.get("error") or f"Antigravity ended with {final.get('status')}"
-                )
+                parse_error = "Antigravity emitted an incomplete stream record"
+            if final and final.get("status") != "SUCCESS":
+                error = str(final.get("error") or f"Antigravity ended with {final.get('status')}")
             if code:
                 error = error or stderr.strip() or f"Antigravity exited with code {code}"
+            error_kind = "provider" if error else "protocol" if parse_error else None
+            error = error or parse_error
+            if not final and not error:
+                error = stderr.strip() or "Antigravity ended without a result"
+                error_kind = "provider" if stderr.strip() else "incomplete"
+            if cancel_event is not None and cancel_event.is_set():
+                error, error_kind = "Provider turn cancelled", "cancelled"
             yield {
                 "type": "error" if error else "final",
                 "error": error,
@@ -215,7 +244,12 @@ async def stream_antigravity(
                 "sessionId": (final or {}).get("conversation_id"),
                 "usage": (final or {}).get("usage", {}),
                 "exitCode": code or (1 if error else 0),
+                "processExitCode": code,
+                "errorKind": error_kind,
+                "parseError": parse_error,
             }
+        except ProtocolRecordLimitError as exc:
+            yield {"type": "error", "error": str(exc), "errorKind": "protocol_limit", "exitCode": 1}
         finally:
             close = getattr(source, "aclose", None)
             if close is not None:

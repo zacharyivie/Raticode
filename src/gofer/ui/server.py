@@ -1034,9 +1034,14 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         self._assert_bundle_path_allowed(
                             Path(query.get("projectRoot", [""])[0]),
                             query.get("grantId", [None])[0],
-                            must_exist=True,
+                            must_exist=False,
                         )
                     )
+                    # A worktree can disappear after the desktop renews its grant.
+                    # Do not restore jobs or report a polling failure for that root.
+                    if not Path(root).is_dir():
+                        self._send_json({"jobs": []})
+                        return
                 self._send_json(
                     {
                         "jobs": self.server.generation_jobs.list(
@@ -2186,6 +2191,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                             effort=_optional_body_str(body, "effort"),
                             permission_mode=_optional_body_str(body, "permissionMode"),
                             messages=body.get("messages") or [],
+                            conversation_id=body.get("conversationId"),
+                            reset_session=body.get("resetSession") is True,
                             workflow=chat_body.get("workflow"),
                             trusted_swarm_url=swarm_url,
                             data_dir=self._request_data_dir(query),
@@ -2891,6 +2898,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 effort=_optional_body_str(body, "effort"),
                 permission_mode=_optional_body_str(body, "permissionMode"),
                 messages=body.get("messages") or [],
+                conversation_id=body.get("conversationId"),
+                reset_session=body.get("resetSession") is True,
                 workflow=body.get("workflow"),
                 trusted_swarm_url=trusted_swarm_url,
                 data_dir=data_dir,

@@ -53,6 +53,7 @@ function browserShortcutAction(input = {}, platform = process.platform, openBrow
   if (input.control && !input.alt && !input.meta && !input.shift && key === "b") return "project-pane-toggle";
   if (input.control && !input.alt && !input.meta && !input.shift && key === "l") return "assistant-pane-toggle";
   if (input.alt && !input.control && !input.meta && key === "d") return "focus-location";
+  if (primary && !input.alt && !input.shift && key === "f") return "find";
   if (primary && key === "r") return "reload";
   if (primary && key === "w") return "close";
   if (input.control && !input.alt && !input.meta && key === "tab") {
@@ -134,6 +135,7 @@ function browserCommandRequiresOwnerFocus(action) {
   return [
     "close",
     "focus-location",
+    "find",
     "new-tab",
     "next-tab",
     "previous-tab",

@@ -43,7 +43,7 @@ async function scanProject(root, options = {}) {
     async function walk(directory) {
       for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
         if (Date.now() > deadline || candidates.length >= 20000) { result.truncated = true; return; }
-        if (excluded.has(entry.name) || entry.isSymbolicLink()) continue;
+        if (entry.name === ".git" || (!includes.length && excluded.has(entry.name)) || entry.isSymbolicLink()) continue;
         const target = path.join(directory, entry.name);
         if (entry.isDirectory()) await walk(target);
         else if (entry.isFile()) candidates.push(path.relative(root, target));
@@ -57,7 +57,7 @@ async function scanProject(root, options = {}) {
   const concurrency = Number.isInteger(requestedConcurrency) ? Math.max(1, Math.min(4, requestedConcurrency)) : 1;
   async function loadCandidate(relativePath) {
     if (Date.now() > deadline) return {};
-    if (relativePath.split(/[\\/]/).some((part) => excluded.has(part))) return {};
+    if (relativePath.split(/[\\/]/).some((part) => part === ".git" || (!includes.length && excluded.has(part)))) return {};
     if (includes.length && !includes.some((pattern) => pattern.test(relativePath.replace(/\\/g, "/")))) return {};
     if (ignores.some((pattern) => pattern.test(relativePath.replace(/\\/g, "/")))) return {};
     const target = path.resolve(root, relativePath);

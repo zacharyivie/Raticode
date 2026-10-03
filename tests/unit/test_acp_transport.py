@@ -66,6 +66,18 @@ time.sleep(30)
     assert process.returncode is not None
 
 
+async def test_single_oversized_record_is_a_limit_error_and_reaps_child(tmp_path):
+    command = agent(
+        tmp_path,
+        "read()\nsend({'method':'session/update','params':{'text':'x'*10000}})\ntime.sleep(30)\n",
+    )
+    async with open_acp_transport(command, cwd=tmp_path, max_output_bytes=125) as rpc:
+        with pytest.raises(AcpTransportError, match="protocol record exceeded"):
+            await rpc.request("initialize", {})
+        process = rpc.process
+    assert process.returncode is not None
+
+
 async def test_concurrent_requests_correlate_out_of_order_responses(tmp_path):
     command = agent(
         tmp_path,

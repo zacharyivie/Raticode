@@ -8,6 +8,8 @@ The steering list shows accepted, delivered, failed or cancelled receipts with t
 
 Provider, model and permission controls are disabled during a response. The next turn can use another provider while retaining the Raticode conversation and resources. Unavailable saved providers remain selected and report their discovery error instead of silently switching. Raticode does not send provider-native session IDs between providers.
 
+The thread tools, skills and MCP menu remains editable during a response. Its changes apply when the next instruction restarts the response, or on the next ordinary message after completion. Toggling a checkbox alone does not change the running process. Both send and steering validate the current menu before dispatch. Steering retries with unchanged content and settings reuse the request ID; changed settings require a new request ID.
+
 Rem, Swarm setup and Agent-node configuration share the catalog-driven provider/model picker. Providers advertising `supportsCustomModel` also show a custom model ID field. It keeps a local draft while focused and commits on blur or Enter. Empty input restores the selected model on blur. New CLI providers default to `default` permissions; catalog `permissionModes` and `defaultPermissionMode` take precedence. Catalog fixtures alone do not establish backend provider support.
 
 See [the steering API](rem-steering-api.md) for durable receipt, generation, Stop and disconnect semantics.

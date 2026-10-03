@@ -1,8 +1,8 @@
 """Raticode-owned adapters for documented headless CLI protocols.
 
 Cursor wire format: official output reference, accessed 2026-09-16.
-OpenCode wire format: v1.18.31 run.ts. Copilot uses documented text output;
-its SDK events are deliberately not treated as a CLI stdout contract.
+OpenCode wire format: v1.18.31 run.ts. Copilot uses documented silent text
+output; its SDK events are not treated as a CLI stdout contract.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -31,7 +31,9 @@ from gofer.core.provider_profiles import ResolvedProviderSettings, validate_prov
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.subscriptions.base import Subscription
 from gofer.subscriptions.usage import normalize_usage, track_invocation
+from gofer.utils.atomic_output import mkdir_without_links
 from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
+from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
 
 ADDITIONAL_PROVIDERS = {"cursor", "copilot", "opencode"}
 
@@ -42,19 +44,27 @@ class CliOutput:
     text: str = ""
     session_id: str | None = None
     error: str | None = None
+    parse_error: str | None = None
+    error_kind: str | None = None
     completed: bool = False
     buffer: str = ""
     records: int = 0
     seen_parts: set[str] = field(default_factory=set)
     usage: dict[str, Any] = field(default_factory=dict)
     usage_parts: set[tuple[str, str, str]] = field(default_factory=set)
+    answer_text: str = ""
+    stream_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    seen_tool_updates: set[tuple[str, str]] = field(default_factory=set)
+    lines: ProtocolLines = field(default_factory=ProtocolLines)
+    request_id: str | None = None
 
     def feed(self, chunk: str) -> list[str]:
         if self.provider == "copilot":
-            self.text += chunk
+            self.text = retained_text(self.text + chunk)
             return [chunk] if chunk else []
-        lines = (self.buffer + chunk).split("\n")
-        self.buffer = lines.pop()
+        lines = self.lines.feed(chunk)
+        self.buffer = self.lines.buffer
         return [text for line in lines if (text := self._line(line))]
 
     def _line(self, line: str) -> str:
@@ -63,12 +73,14 @@ class CliOutput:
         try:
             payload = json.loads(line)
         except ValueError:
-            self.error = "Provider emitted malformed JSON output"
+            self.parse_error = "Provider emitted malformed JSON output"
             return ""
         if not isinstance(payload, dict):
-            self.error = "Provider emitted a non-object JSON record"
+            self.parse_error = "Provider emitted a non-object JSON record"
             return ""
         kind = payload.get("type")
+        if isinstance(payload.get("request_id"), str):
+            self.request_id = payload["request_id"][:256]
         if kind in {
             "system",
             "assistant",
@@ -78,13 +90,17 @@ class CliOutput:
             "tool_use",
             "step_start",
             "step_finish",
+            "tool_call",
+            "reasoning",
         }:
             self.records += 1
         session = payload.get("session_id" if self.provider == "cursor" else "sessionID")
         if isinstance(session, str) and session:
             if self.session_id and self.session_id != session:
                 self.error = "Provider changed session identity during the turn"
-            self.session_id = session
+                self.error_kind = "session_identity"
+            else:
+                self.session_id = session
         text = ""
         if self.provider == "cursor":
             if kind == "assistant":
@@ -115,6 +131,21 @@ class CliOutput:
                     self.completed = True
                     if not self.text and isinstance(payload.get("result"), str):
                         text = payload["result"]
+            elif kind == "tool_call":
+                call = payload.get("tool_call")
+                if isinstance(call, dict):
+                    function = call.get("function")
+                    if isinstance(function, dict):
+                        name = str(function.get("name") or "Tool")
+                        args = function.get("arguments")
+                        result = function.get("result")
+                    else:
+                        name, detail = next(
+                            ((k, v) for k, v in call.items() if isinstance(v, dict)), ("Tool", {})
+                        )
+                        args, result = detail.get("args"), detail.get("result")
+                    status = "running" if payload.get("subtype") == "started" else "completed"
+                    self._tool(str(payload.get("call_id") or ""), name, args, result, status)
             elif kind == "error":
                 self.error = str(payload.get("message") or "Cursor reported an error")
         else:
@@ -127,6 +158,26 @@ class CliOutput:
                             return ""
                         self.seen_parts.add(identity)
                     text = part["text"]
+            elif kind == "reasoning":
+                part = payload.get("part")
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    identity = part.get("id")
+                    if isinstance(identity, str):
+                        if identity in self.seen_parts:
+                            return ""
+                        self.seen_parts.add(identity)
+                    self.events.append({"type": "thought", "text": part["text"]})
+            elif kind == "tool_use":
+                part = payload.get("part")
+                if isinstance(part, dict) and isinstance(part.get("state"), dict):
+                    state = part["state"]
+                    self._tool(
+                        str(part.get("callID") or part.get("id") or ""),
+                        str(part.get("tool") or "Tool"),
+                        state.get("input"),
+                        state.get("output") or state.get("error"),
+                        str(state.get("status") or "completed"),
+                    )
             elif kind == "error":
                 error = payload.get("error")
                 data = error.get("data") if isinstance(error, dict) else None
@@ -166,8 +217,41 @@ class CliOutput:
                         if self.usage:
                             self.usage["source"] = "provider_metadata"
             # step_finish describes one model step; only process exit ends a run.
-        self.text += text
+        self.text = retained_text(self.text + text)
+        self.answer_text = retained_text(self.answer_text + text)
+        if text:
+            self.events.append({"type": "thought", "text": text, "deltaStreamId": self.stream_id})
         return text
+
+    def _tool(self, identity: str, name: str, args: Any, result: Any, status: str) -> None:
+        key = (identity, status)
+        if identity and key in self.seen_tool_updates:
+            return
+        if identity:
+            self.seen_tool_updates.add(key)
+        # The next assistant segment is the answer after this tool, while the
+        # preceding text remains visible as progress in the thought timeline.
+        if self.provider == "opencode" or status == "running":
+            self.answer_text = ""
+            self.stream_id = uuid.uuid4().hex
+        self.events.append(
+            {
+                "type": "thought",
+                "text": name,
+                "trace": {
+                    "kind": "tool",
+                    "id": identity,
+                    "title": name,
+                    "input": _trace_value(args),
+                    "output": _trace_value(result),
+                    "status": status,
+                },
+            }
+        )
+
+    def drain_events(self) -> list[dict[str, Any]]:
+        events, self.events = self.events, []
+        return events
 
     def finish(self, returncode: int, stderr: str, *, cancelled: bool = False) -> None:
         if self.buffer:
@@ -175,13 +259,30 @@ class CliOutput:
             self.buffer = ""
         if cancelled:
             self.error = "Provider turn cancelled"
+            self.error_kind = "cancelled"
         elif returncode != 0:
             self.error = self.error or stderr.strip() or f"Provider exited with {returncode}"
+            self.error_kind = self.error_kind or "provider"
+        if self.error:
+            self.error_kind = self.error_kind or "provider"
+        elif self.parse_error:
+            self.error = self.parse_error
+            self.error_kind = "protocol"
         elif self.provider == "cursor" and not self.completed:
-            self.error = self.error or "Cursor output ended without a successful result"
+            self.error = "Cursor output ended without a successful result"
+            self.error_kind = "incomplete"
         elif self.provider == "opencode" and not self.records:
             self.error = self.error or "OpenCode returned no protocol records"
+            self.error_kind = "incomplete"
         self.completed = self.error is None
+
+
+def _trace_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return retained_text(
+        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), 8192
+    )
 
 
 def cli_command(
@@ -192,6 +293,7 @@ def cli_command(
     effort: str | None = None,
     executable: str | None = None,
     extra_paths: list[Path] | None = None,
+    image_paths: list[Path] | None = None,
 ) -> list[str]:
     binary = (
         executable
@@ -212,11 +314,18 @@ def cli_command(
         for path in extra_paths or []:
             command += ["--add-dir", str(path)]
     elif provider == "opencode":
-        command = [binary, "run", "--format", "json"]
+        command = [binary, "run", "--format", "json", "--thinking"]
     else:
         raise ValueError(f"Unknown CLI provider '{provider}'")
     if model and model != "cli-default":
         command += ["--model", model]
+    for path in image_paths or []:
+        # Cursor's installed headless parser exposes --image as a hidden flag.
+        flag = {"cursor": "--image", "copilot": "--attachment", "opencode": "--file"}[provider]
+        command.append(f"{flag}={path}")
+    if provider == "opencode" and image_paths:
+        # --file is an array option; end options before the positional prompt.
+        command.append("--")
     command += [prompt] if provider == "opencode" else ["-p", prompt]
     return command
 
@@ -253,13 +362,22 @@ def cli_invocation(
     trusted_swarm_url: str | None = None,
     second_brain_cli_path: Path | None = None,
     extra_paths: list[Path] | None = None,
+    session_dir: Path | None = None,
+    read_only: bool = False,
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """Own additive per-run config through subprocess drain, preserving login stores."""
     child_env = env_with_executable_on_path(command[0], env)
     args = list(command)
-    with tempfile.TemporaryDirectory(prefix="raticode-provider-") as directory:
+    if session_dir is not None:
+        mkdir_without_links(session_dir)
+    directory_context = (
+        nullcontext(str(session_dir))
+        if session_dir is not None
+        else tempfile.TemporaryDirectory(prefix="raticode-provider-")
+    )
+    with directory_context as directory:
         if resources is not None:
-            alias_prefix = "raticode-" + uuid.uuid4().hex
+            alias_prefix = "raticode-" + (session_dir.name if session_dir else uuid.uuid4().hex)
             servers: dict[str, Any] = {}
             grants: dict[str, list[str]] = {}
             for server in resources.mcpServers:
@@ -301,8 +419,8 @@ def cli_invocation(
                 # Extension plugins also derive their identity from the folder
                 # name. Match the manifest and the exact MCP permission grants.
                 root = Path(directory) / alias_prefix
-                root.mkdir()
-                (root / ".cursor-plugin").mkdir()
+                root.mkdir(exist_ok=True)
+                (root / ".cursor-plugin").mkdir(exist_ok=True)
                 (root / ".cursor-plugin/plugin.json").write_text(
                     json.dumps({"name": alias_prefix, "version": "1.0.0"})
                 )
@@ -310,8 +428,8 @@ def cli_invocation(
                     if grants[alias] != ["*"]:
                         entry["enabledTools"] = grants[alias]
                 (root / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
-                allow = ["Read(*)", "Write(*)"]
-                deny = []
+                allow = ["Read(*)"] if read_only else ["Read(*)", "Write(*)"]
+                deny = ["Write(*)"] if read_only else []
                 native_tools = [
                     "read_tool_call",
                     "edit_tool_call",
@@ -327,7 +445,13 @@ def cli_invocation(
                     # when this invocation has no selected MCP servers.
                     "get_mcp_tools_tool_call",
                 ]
-                if resources.shell:
+                if read_only:
+                    native_tools = [
+                        tool
+                        for tool in native_tools
+                        if tool not in {"edit_tool_call", "delete_tool_call"}
+                    ]
+                if resources.shell and not read_only:
                     allow.append("Shell(*)")
                     native_tools += ["shell_tool_call", "write_shell_stdin_tool_call"]
                 else:
@@ -345,7 +469,7 @@ def cli_invocation(
                     for tool in tools:
                         allow.append(f"Mcp(plugin-{alias_prefix}-{alias}:{tool})")
                 config_dir = root / "config"
-                config_dir.mkdir()
+                config_dir.mkdir(exist_ok=True)
                 (config_dir / "cli-config.json").write_text(
                     json.dumps(
                         {
@@ -373,8 +497,12 @@ def cli_invocation(
                 config = Path(directory) / "mcp.json"
                 config.write_text(json.dumps({"mcpServers": servers}))
                 args += ["--additional-mcp-config", "@" + str(config)]
-                args += ["--allow-tool", "read", "--allow-tool", "write"]
-                args += ["--allow-tool" if resources.shell else "--deny-tool", "shell"]
+                args += ["--allow-tool", "read"]
+                args += ["--deny-tool" if read_only else "--allow-tool", "write"]
+                args += [
+                    "--allow-tool" if resources.shell and not read_only else "--deny-tool",
+                    "shell",
+                ]
                 args += ["--allow-tool" if resources.web else "--deny-tool", "url"]
                 for alias, tools in grants.items():
                     for tool in tools:
@@ -391,11 +519,11 @@ def cli_invocation(
                 permission: dict[str, Any] = {
                     "*": "deny",
                     "read": "allow",
-                    "edit": "allow",
+                    "edit": "deny" if read_only else "allow",
                     "glob": "allow",
                     "grep": "allow",
                     "list": "allow",
-                    "bash": "allow" if resources.shell else "deny",
+                    "bash": "allow" if resources.shell and not read_only else "deny",
                     "webfetch": "allow" if resources.web else "deny",
                     "websearch": "allow" if resources.web else "deny",
                 }
@@ -451,6 +579,7 @@ async def stream_cli(
         cancel_event=cancel_event,
         timeout=timeout,
         max_output_bytes=max_output_bytes,
+        protocol_stdout=provider != "copilot",
     )
     try:
         async for event in source:
@@ -458,23 +587,46 @@ async def stream_cli(
                 if event["stream"] == "stderr":
                     stderr += event["text"] or ""
                 else:
-                    for text in output.feed(event["text"] or ""):
-                        # Plain Copilot stdout is the answer, not a reasoning trace.
-                        # Keep exact whitespace and publish it in the final message.
-                        if provider != "copilot":
-                            yield {"type": "thought", "text": text}
+                    output.feed(event["text"] or "")
+                    if output.session_id:
+                        yield {"type": "session", "sessionId": output.session_id}
+                    for trace_event in output.drain_events():
+                        yield trace_event
             else:
                 code = event["returncode"] if event["returncode"] is not None else 1
                 output.finish(code, stderr, cancelled=bool(cancel_event and cancel_event.is_set()))
+                if provider == "copilot" and event.get("output_truncated") and not output.error:
+                    output.error = "Copilot text output exceeded the configured output limit"
+                    output.error_kind = "output_limit"
+                for trace_event in output.drain_events():
+                    yield trace_event
                 yield {
                     "type": "error" if output.error else "final",
                     "error": output.error,
-                    "message": {"role": "assistant", "body": output.text},
+                    "message": {
+                        "role": "assistant",
+                        "body": output.text if provider == "copilot" else output.answer_text,
+                    },
                     "sessionId": output.session_id,
                     "usage": output.usage,
                     "exitCode": code if code else (1 if output.error else 0),
+                    "processExitCode": code,
+                    "errorKind": output.error_kind,
+                    "parseError": output.parse_error,
+                    "retainedOutputTruncated": event.get("output_truncated", False),
+                    "protocolRecords": output.records,
+                    "requestId": output.request_id,
                 }
                 return
+    except ProtocolRecordLimitError as exc:
+        yield {
+            "type": "error",
+            "error": str(exc),
+            "errorKind": "protocol_limit",
+            "message": {"role": "assistant", "body": output.answer_text},
+            "sessionId": output.session_id,
+            "exitCode": 1,
+        }
     finally:
         close = getattr(source, "aclose", None)
         if close is not None:

@@ -2,7 +2,7 @@ import { dismissGenerationJob, latestGenerationJob, jobIsRunning } from "../lib/
 import { startPolling } from "../lib/refresh.js";
 import { useEffect, useRef, useState } from "react";
 import { REPORT_THEMES } from "../lib/settings.js";
-import { normalizeReportThemes, reportOutputFormat, reportPreviewDocument, requestReportTheme } from "../lib/reportThemes.js";
+import { exportReportTheme, importReportTheme, MAX_REPORT_THEME_FILE_BYTES, normalizeReportThemes, reportOutputFormat, reportPreviewDocument, requestReportTheme } from "../lib/reportThemes.js";
 import ChatComposer from "./ChatComposer.jsx";
 import { clipboardAttachmentFiles, encodeChatAttachments, largePasteFile, readChatAttachments, transferContainsFiles } from "../lib/chatAttachments.js";
 import "./ReportThemeSettings.css";
@@ -35,7 +35,11 @@ export default function ReportThemeSettings({ value, onChange, providerState = {
   const [error, setError] = useState("");
   const [progress, setProgress] = useState("");
   const [busy, setBusy] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [savingConfig, setSaving] = useState(false);
+  const [transferring, setTransferring] = useState(false);
+  const [transferStatus, setTransferStatus] = useState("");
+  const saving = savingConfig || transferring;
+  const importInput = useRef(null);
   const jobRef = useRef(null);
   const [loadingJob, setLoadingJob] = useState(true);
   const gallery = useRef(null);
@@ -71,6 +75,7 @@ export default function ReportThemeSettings({ value, onChange, providerState = {
   const provider = providers.find(item => item.id === config.generation.provider);
   const model = provider?.models?.find(item => item.id === config.generation.model);
   const selected = themes.find(theme => theme.id === config.selected);
+  const selectedCustom = config.custom.find(theme => theme.id === config.selected);
   const format = reportOutputFormat(value);
   async function changeFormat(next) {
     setSaving(true); setError("");
@@ -89,6 +94,29 @@ export default function ReportThemeSettings({ value, onChange, providerState = {
       return true;
     } catch (cause) { setError(cause.message); return false; }
     finally { setSaving(false); }
+  }
+  async function importTheme(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || saving) return;
+    setTransferring(true); setError(""); setTransferStatus("");
+    try {
+      if (file.size > MAX_REPORT_THEME_FILE_BYTES) throw new Error("Theme files must be 2 MB or smaller.");
+      const next = importReportTheme(await file.text(), config);
+      if (await commit(next)) setTransferStatus(`Imported "${next.custom.at(-1).label}" and selected it.`);
+    } catch (cause) { setError(cause.message); }
+    finally { setTransferring(false); }
+  }
+  function exportTheme() {
+    setError(""); setTransferStatus("");
+    try {
+      const { filename, content } = exportReportTheme(selectedCustom);
+      const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = filename; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTransferStatus(`Theme file ready to share: ${filename}`);
+    } catch (cause) { setError(cause.message); }
   }
   function generation(patch) { void commit({ ...config, generation: { ...config.generation, ...patch } }); }
   function addAttachments(files) {
@@ -157,6 +185,15 @@ export default function ReportThemeSettings({ value, onChange, providerState = {
       {themes.map(theme => <button key={theme.id} type="button" className="report-theme-choice" aria-label={theme.label} aria-pressed={config.selected === theme.id} disabled={saving} onClick={() => void commit({ ...config, selected: theme.id })}>
         <ThemeDocument theme={theme} /><span className="report-theme-label">{theme.label}{config.selected === theme.id ? <span aria-hidden="true"> ✓</span> : null}</span>
       </button>)}
+    </div>
+    <div className="report-theme-sharing">
+      <div className="report-theme-actions">
+        <button type="button" disabled={saving || config.custom.length >= 24} onClick={() => importInput.current?.click()}>{transferring ? "Importing…" : "Import theme"}</button>
+        {selectedCustom ? <button type="button" disabled={saving} onClick={exportTheme}>Export theme</button> : null}
+      </div>
+      <input ref={importInput} type="file" accept=".json,application/json" aria-label="Import report theme file" hidden onChange={event => void importTheme(event)} />
+      <p className="report-theme-help">Share a custom theme with your team by exporting its theme file. Import a shared file to add and select the theme.</p>
+      {transferStatus ? <p role="status" className="report-theme-transfer-status">{transferStatus}</p> : null}
     </div>
     <details className="report-generation-settings"><summary>Theme generation settings</summary>
       <p className="report-theme-help">Uses the current Rem provider, model, and effort unless you choose an override.</p>

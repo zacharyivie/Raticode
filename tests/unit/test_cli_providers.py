@@ -127,10 +127,28 @@ def test_rem_unsupported_options_fail_instead_of_disappearing(provider, tmp_path
     if provider not in {"cursor", "copilot"}:
         with pytest.raises(ChatProviderError, match="effort"):
             _build_chat_command(provider, "custom", "prompt", effort="high")
-    with pytest.raises(ChatProviderError, match="image"):
-        _build_chat_command(provider, "custom", "prompt", image_paths=[tmp_path / "img.png"])
     with pytest.raises(ValueError, match="permission"):
         _build_chat_command(provider, "custom", "prompt", permission_mode="danger-full-access")
+
+
+@pytest.mark.parametrize(
+    "provider,flag", [("cursor", "--image"), ("copilot", "--attachment"), ("opencode", "--file")]
+)
+def test_rem_delivers_images_using_native_provider_flags(provider, flag, tmp_path):
+    paths = [tmp_path / "image with spaces.png", tmp_path / "other.png"]
+    command = _build_chat_command(provider, "custom", "exact prompt", image_paths=paths)
+    assert all(f"{flag}={path}" in command for path in paths)
+    assert command[-1] == "exact prompt"
+    if provider == "opencode":
+        assert "--thinking" in command
+        assert command[-2] == "--"
+
+
+def test_rem_rejects_images_for_text_only_headless_provider(tmp_path):
+    with pytest.raises(ChatProviderError, match="image attachments are not supported"):
+        _build_chat_command(
+            "antigravity", "cli-default", "prompt", image_paths=[tmp_path / "img.png"]
+        )
 
 
 @pytest.mark.parametrize("effort", ["low", "low-fast", "medium", "medium-fast", "extra-high"])
@@ -187,6 +205,45 @@ def test_copilot_concurrent_configs_cleanup_and_denials():
             assert alias1 not in json.loads(path2.read_text())["mcpServers"]
         assert not path2.exists() and path1.exists()
     assert not path1.exists()
+
+
+@pytest.mark.parametrize("provider", ["cursor", "copilot", "opencode"])
+def test_global_research_allows_web_and_mcp_but_denies_native_commands_and_edits(provider):
+    url = "http://localhost:1234/research"
+    with cli_invocation(
+        provider,
+        [provider],
+        swarm_resources(url, shell=True, web=True),
+        trusted_swarm_url=url,
+        read_only=True,
+    ) as (command, env):
+        if provider == "cursor":
+            root = Path(command[command.index("--plugin-dir") + 1])
+            config = json.loads((root / "config/cli-config.json").read_text())
+            assert config["permissions"]["deny"] == ["Write(*)", "Shell(*)"]
+            assert "WebFetch(*)" in config["permissions"]["allow"]
+            native = command[command.index("--allowed-tools") + 1].split(",")
+            assert "web_search_tool_call" in native
+            assert "get_mcp_tools_tool_call" in native
+            assert not {"edit_tool_call", "delete_tool_call", "shell_tool_call"}.intersection(
+                native
+            )
+        elif provider == "copilot":
+            allow = [command[i + 1] for i, arg in enumerate(command) if arg == "--allow-tool"]
+            deny = [command[i + 1] for i, arg in enumerate(command) if arg == "--deny-tool"]
+            assert {"read", "url"}.issubset(allow)
+            assert {"write", "shell"}.issubset(deny)
+            assert any(tool.endswith("(swarm_action)") for tool in allow)
+        else:
+            permission = json.loads(env["OPENCODE_PERMISSION"])
+            assert permission["edit"] == permission["bash"] == "deny"
+            assert (
+                permission["read"] == permission["websearch"] == permission["webfetch"] == "allow"
+            )
+            assert any(
+                key.endswith("_swarm_action") and value == "allow"
+                for key, value in permission.items()
+            )
 
 
 def test_opencode_config_preserves_auth_environment_and_exact_tool_grants(monkeypatch):
@@ -658,3 +715,97 @@ async def test_copilot_reply_chunks_are_not_thoughts(monkeypatch, tmp_path, exit
     assert len(events) == 1
     assert events[0]["type"] == ("final" if exit_code == 0 else "error")
     assert events[0]["message"]["body"] == "".join(chunks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["cursor", "opencode"])
+@pytest.mark.parametrize("width", [1, 9, 10000])
+async def test_stream_preserves_progress_and_tools_without_repeating_final(
+    monkeypatch, tmp_path, provider, width
+):
+    if provider == "cursor":
+        started = {
+            "type": "tool_call",
+            "subtype": "started",
+            "call_id": "read-1",
+            "tool_call": {"readToolCall": {"args": {"path": "note.txt"}}},
+        }
+        completed = {
+            **started,
+            "subtype": "completed",
+            "tool_call": {
+                "readToolCall": {
+                    "args": {"path": "note.txt"},
+                    "result": {"success": {"content": "notes"}},
+                }
+            },
+        }
+        records = [
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "progress",
+                    "content": [{"type": "text", "text": "Reading notes."}],
+                },
+            },
+            started,
+            started,
+            completed,
+            completed,
+            {
+                "type": "assistant",
+                "message": {"id": "answer-1", "content": [{"type": "text", "text": "Hello "}]},
+            },
+            {
+                "type": "assistant",
+                "message": {"id": "answer-2", "content": [{"type": "text", "text": "world"}]},
+            },
+            {"type": "result", "subtype": "success", "result": "Reading notes.Hello world"},
+        ]
+    else:
+        completed = {
+            "type": "tool_use",
+            "part": {
+                "id": "tool-part",
+                "callID": "read-1",
+                "tool": "read",
+                "state": {"status": "completed", "input": {"path": "note.txt"}, "output": "notes"},
+            },
+        }
+        reasoning = {
+            "type": "reasoning",
+            "part": {"id": "reason-1", "text": "Check the notes first."},
+        }
+        records = [
+            reasoning,
+            reasoning,
+            {"type": "text", "part": {"id": "progress", "text": "Reading notes."}},
+            completed,
+            completed,
+            {"type": "text", "part": {"id": "answer-1", "text": "Hello "}},
+            {"type": "text", "part": {"id": "answer-2", "text": "world"}},
+        ]
+    # Include a terminal line without a newline to exercise the finish drain.
+    stdout = wire(*records).rstrip("\n")
+
+    async def fake(command, **kwargs):
+        for offset in range(0, len(stdout), width):
+            yield {"type": "chunk", "stream": "stdout", "text": stdout[offset : offset + width]}
+        yield {"type": "exit", "returncode": 0}
+
+    monkeypatch.setattr("gofer.subscriptions.cli_providers.stream_subprocess", fake)
+    events = [e async for e in stream_cli([provider], provider, cwd=tmp_path, env={})]
+    assert events[-1]["type"] == "final"
+    assert events[-1]["message"]["body"] == "Hello world"
+    tools = [e["trace"] for e in events if e.get("trace")]
+    assert len(tools) == (2 if provider == "cursor" else 1)
+    assert {tool["id"] for tool in tools} == {"read-1"}
+    assert json.loads(tools[-1]["input"]) == {"path": "note.txt"}
+    assert "notes" in tools[-1]["output"]
+    answer_chunks = [e for e in events if e.get("deltaStreamId") and e["text"] != "Reading notes."]
+    assert "".join(e["text"] for e in answer_chunks) == "Hello world"
+    assert len({e["deltaStreamId"] for e in answer_chunks}) == 1
+    if provider == "opencode":
+        assert [e["text"] for e in events if e.get("text") == "Check the notes first."] == [
+            "Check the notes first."
+        ]

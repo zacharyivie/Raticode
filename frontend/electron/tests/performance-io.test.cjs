@@ -66,6 +66,7 @@ test('normal quit awaits the log drain and repeated quit requests share it', asy
   const gate = new Promise(resolve => { release = resolve; });
   vm.runInNewContext(source.slice(start, end), {
     app: { on: (_name, handler) => { callback = handler; }, quit: () => { quits++; } },
+    lifecycleApproved: true, mainWindow: null, isSmokeTest: false,
     archivesDrained: true, logsDrained: false, logsClosing: false, isQuitting: false,
     applicationLog: { close: () => { closes++; return gate; } },
     closeAllBrowsers() {}, closeTerminalEditorServer() {}, closeAllTerminals() {}, stopBackend() {},
@@ -122,7 +123,7 @@ test('bounded search reads preserve ordering, replacement, limits and binary fil
     const options = { query: 'needle', replacement: 'changed', include: '*.txt' };
     const serial = await scanProject(root, { ...options, readConcurrency: 1 });
     const parallel = await searchProject(root, { ...options, readConcurrency: 4 });
-    assert.deepEqual(parallel, serial); assert.equal(parallel.count, 24); assert.equal(parallel.skipped, 1);
+    assert.deepEqual(parallel, serial); assert.equal(parallel.count, 25); assert.equal(parallel.skipped, 1);
     fs.writeFileSync(path.join(root, '0.txt'), 'needle\n'.repeat(1100));
     const limited = await scanProject(root, { ...options, readConcurrency: 4 });
     assert.equal(limited.count, 1000); assert.equal(limited.truncated, true);

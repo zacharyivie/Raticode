@@ -1,6 +1,25 @@
+import { loadCodeDrafts, saveCodeDrafts } from "./codeDrafts.js";
 import { replacePathPrefix, pathMatchesChange } from "./workspacePaths.js";
 
-export const textEditorSessions = new Map();
+let persistenceTimer;
+class DraftSessions extends Map {
+  set(path, session) { super.set(path, session); this.schedule(); return this; }
+  delete(path) { const deleted = super.delete(path); this.schedule(); return deleted; }
+  clear() { super.clear(); this.schedule(); }
+  schedule() {
+    clearTimeout(persistenceTimer);
+    if (typeof window !== "undefined") persistenceTimer = setTimeout(flushCodeDrafts, 250);
+  }
+}
+export const textEditorSessions = new DraftSessions(loadCodeDrafts());
+export function flushCodeDrafts() {
+  clearTimeout(persistenceTimer);
+  return saveCodeDrafts(textEditorSessions);
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", flushCodeDrafts);
+  window.addEventListener("pagehide", flushCodeDrafts);
+}
 export const discardedSessionPaths = new Set();
 export const FILE_AUTOSAVE_DELAY_MS = 1000;
 
@@ -22,6 +41,14 @@ export function applyCodeFilesystemChange(change) {
     return;
   }
   if (!change?.path) return;
+  if (change.replaced) {
+    for (const path of [...textEditorSessions.keys()]) {
+      if (!pathMatchesChange(path, change.path, true)) continue;
+      textEditorSessions.delete(path);
+      discardedSessionPaths.add(path);
+    }
+    window.dispatchEvent(new CustomEvent("gofer:code-files-changed", { detail: change }));
+  }
   if (change.kind === "create") {
     discardedSessionPaths.delete(change.path);
     textEditorSessions.delete(change.path);

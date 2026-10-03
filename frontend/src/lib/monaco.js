@@ -1,3 +1,12 @@
+import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
+import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
+import "monaco-editor/esm/vs/language/typescript/monaco.contribution";
+import "monaco-editor/esm/vs/language/css/monaco.contribution";
+import "monaco-editor/esm/vs/language/html/monaco.contribution";
+import "monaco-editor/esm/vs/editor/contrib/smartSelect/browser/smartSelect";
+import "monaco-editor/esm/vs/editor/contrib/gotoSymbol/browser/goToCommands";
+import "monaco-editor/esm/vs/editor/contrib/parameterHints/browser/parameterHints";
 import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import "monaco-editor/esm/vs/language/json/monaco.contribution";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
@@ -24,9 +33,35 @@ if (typeof self !== "undefined") {
   self.MonacoEnvironment = {
     ...self.MonacoEnvironment,
     getWorker(_moduleId, label) {
+      if (["javascript", "typescript"].includes(label)) return new TsWorker();
+      if (["css", "scss", "less"].includes(label)) return new CssWorker();
+      if (["html", "handlebars", "razor"].includes(label)) return new HtmlWorker();
       return label === "json" ? new JsonWorker() : new EditorWorker();
     },
   };
+}
+
+export async function prepareLanguageServices(model) {
+  const language = model.getLanguageId();
+  const workerFactory = {
+    typescript: monaco.languages.typescript.getTypeScriptWorker,
+    javascript: monaco.languages.typescript.getJavaScriptWorker,
+    json: monaco.languages.json.getWorker,
+    css: monaco.languages.css.getCSSWorker,
+    scss: monaco.languages.css.getSCSSWorker,
+    less: monaco.languages.css.getLESSWorker,
+    html: monaco.languages.html.getHTMLWorker,
+  }[language];
+  if (workerFactory) {
+    // The encounter-language event may register the mode on the next turn.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try { const worker = await workerFactory(); await worker(model.uri); return; }
+      catch (error) {
+        if (!/not registered/i.test(String(error)) || attempt === 19) throw error;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
+  }
 }
 
 let registered = false;

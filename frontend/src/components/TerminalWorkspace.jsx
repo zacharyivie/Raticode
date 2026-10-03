@@ -5,11 +5,15 @@ import "@xterm/xterm/css/xterm.css";
 import { ChevronDown, FolderPlus, FolderOpen, Pencil, Plus, Terminal as TerminalIcon, Trash2, X } from "lucide-react";
 
 
+import { formatKeybinding, settingBinding } from "../lib/settings.js";
+import { useReducedMotion } from "../lib/useReducedMotion.js";
+
 const { FitAddon } = fitAddonPackage;
 const { Terminal: XTerm } = xtermPackage;
 
 import { projectFolderName, terminalDirectoryFromOsc, terminalProjectGroupId, terminalGroupName, terminalTabGroupId, moveTerminalTabToGroup, terminalTabsAfterDeletingGroup, upsertTerminalGroupDefinition, groupTerminalTabsByProject, shouldCreateInitialTerminal, handleTerminalClipboardShortcut, terminalWordEraseInput, createDisposableTerminalSession, terminalWorkspaceShortcutAction } from "../lib/terminalWorkspace.js";
 export default function TerminalWorkspace({ active, projectRoot, settings, theme, newTerminalRequest = 0 }) {
+  const reduceMotion = useReducedMotion();
   const nextTabRef = useRef(1);
   const nextGroupRef = useRef(1);
   const handledNewTerminalRequestRef = useRef(0);
@@ -85,7 +89,9 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
 
   useLayoutEffect(() => {
     const nextRects = new Map();
-    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion) {
+      for (const element of layoutElementsRef.current.values()) element?.getAnimations?.().forEach(animation => animation.cancel());
+    }
     for (const [key, element] of layoutElementsRef.current) {
       if (!element?.isConnected) continue;
       const nextRect = element.getBoundingClientRect();
@@ -104,7 +110,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
       );
     }
     layoutRectsRef.current = nextRects;
-  }, [collapsedGroups, groupDefinitions, tabs]);
+  }, [collapsedGroups, groupDefinitions, tabs, reduceMotion]);
 
   useEffect(() => {
     const pending = newTerminalRequest - handledNewTerminalRequestRef.current;
@@ -350,7 +356,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
           <button
             aria-label="New terminal"
             className="grid h-6 w-6 shrink-0 place-items-center rounded text-muted transition hover:bg-slate-200/70 hover:text-ink"
-            title="New terminal (Ctrl+T)"
+            title={`New terminal (${formatKeybinding(settingBinding(settings, "terminal.new"))})`}
             type="button"
             onClick={() => addTerminal()}
           >
@@ -485,7 +491,7 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
                         <button
                           aria-label={`Close ${tab.label}`}
                           className="mr-1 grid h-5 w-5 shrink-0 place-items-center rounded text-muted opacity-0 transition hover:bg-slate-200 hover:text-ink focus:opacity-100 group-hover:opacity-100"
-                          title="Close terminal (Ctrl+W)"
+                          title={`Close terminal (${formatKeybinding(settingBinding(settings, "terminal.close"))})`}
                           type="button"
                           onClick={() => closeTab(tab.key)}
                         >
@@ -580,6 +586,9 @@ export default function TerminalWorkspace({ active, projectRoot, settings, theme
 }
 
 function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, settings, tabKey, theme }) {
+  const reduced = useReducedMotion();
+  const reducedRef = useRef(reduced);
+  reducedRef.current = reduced;
   const containerRef = useRef(null);
   const terminalRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -606,12 +615,12 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
   useEffect(() => {
     const terminal = terminalRef.current;
     if (!terminal) return;
-    terminal.options.cursorBlink = settings.terminal.cursorBlink;
+    terminal.options.cursorBlink = settings.terminal.cursorBlink && !reduced;
     terminal.options.fontSize = settings.terminal.fontSize;
     terminal.options.lineHeight = settings.terminal.lineHeight;
     terminal.options.scrollback = settings.terminal.scrollback;
     fitAddonRef.current?.fit();
-  }, [settings.terminal]);
+  }, [settings.terminal, reduced]);
 
   useEffect(() => {
     const bridge = window.goferTerminal;
@@ -622,7 +631,7 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     const terminal = new XTerm({
       allowProposedApi: false,
       convertEol: true,
-      cursorBlink: terminalSettings.cursorBlink,
+      cursorBlink: terminalSettings.cursorBlink && !reducedRef.current,
       cursorStyle: "block",
       fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
       fontSize: terminalSettings.fontSize,
@@ -700,6 +709,7 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
     const sessionLifecycle = createDisposableTerminalSession(bridge, {
       cols: terminal.cols,
       cwd: projectRoot,
+      shell: terminalSettings.shell,
       rows: terminal.rows,
     }, {
       onError(error) {

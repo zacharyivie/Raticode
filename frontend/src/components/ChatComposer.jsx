@@ -18,6 +18,7 @@ export default function ChatComposer({
   sendLabel = "Send message",
   attachments = [],
   attachmentError = "",
+  attachmentWarning = "",
   audioInputDeviceId = "default",
   contextKey = "",
   draft,
@@ -173,6 +174,7 @@ export default function ChatComposer({
         data-chat-composer
         className="overflow-hidden rounded-[14px] border border-line bg-white transition focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/10"
       >
+        {attachmentWarning ? <p role="status" className="px-2.5 pt-2.5 text-[11px] text-amber-700 dark:text-amber-300">{attachmentWarning}</p> : null}
         {attachments.length ? (
           <div className="flex flex-wrap gap-1.5 px-2.5 pt-2.5">
             {attachments.map((attachment) => (
@@ -304,7 +306,7 @@ export default function ChatComposer({
         </div>
       </div>
       {error ? <p id={errorId} className="mt-1.5 px-1 text-[10px] text-red-600">{error}</p> : null}
-      <p className="mt-1.5 overflow-x-auto whitespace-nowrap px-1 text-[10px] text-muted">{sending ? "Enter to steer · Stop cancels the response" : shortcutHint}</p>
+      <p className="mt-1.5 whitespace-normal break-words px-1 text-[9px] leading-snug text-muted">{sending ? "Enter to steer · Stop cancels the response" : shortcutHint}</p>
     </>
   );
 }

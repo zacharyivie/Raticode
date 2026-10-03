@@ -6,6 +6,7 @@ import {
   GitCompareArrows,
   Loader2,
   RefreshCw,
+  Search,
   X,
 } from "lucide-react";
 
@@ -29,6 +30,10 @@ export default function IntegratedBrowser({
   showDiffButton = false,
   showModeToggle = false,
 }) {
+  const findInputRef = useRef(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findError, setFindError] = useState("");
   const addressRef = useRef(null);
   const activeRef = useRef(active);
   const focusLocationOnCreatePendingRef = useRef(focusLocationOnCreate);
@@ -85,6 +90,7 @@ export default function IntegratedBrowser({
     const unsubscribeCommand = bridge.onCommand?.((command) => {
       if (command?.clientId !== clientId) return;
       if (!browserSessionEventMatches(sessionIdRef.current, command)) return;
+      if (command?.action === "find") { setFindOpen(true); window.requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select(); }); }
       if (command?.action === "focus-location") {
         addressRef.current?.focus();
         addressRef.current?.select();
@@ -156,6 +162,7 @@ export default function IntegratedBrowser({
         addressRef.current?.select();
         return;
       }
+      if (action === "find") { setFindOpen(true); window.requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select(); }); return; }
       const id = sessionIdRef.current;
       if (!id || !state.ready || !bridge?.[action]) return;
       void bridge[action](id).catch(() => {});
@@ -194,6 +201,36 @@ export default function IntegratedBrowser({
   useEffect(() => {
     if (webviewRef.current) webviewRef.current.style.pointerEvents = dragActive ? "none" : "";
   }, [dragActive, state.id]);
+
+  useEffect(() => {
+    const open = event => {
+      if (!active || (event.detail?.clientId && event.detail.clientId !== clientId)) return;
+      setFindOpen(true);
+      window.requestAnimationFrame(() => { findInputRef.current?.focus(); findInputRef.current?.select(); });
+    };
+    window.addEventListener("gofer:find-page", open);
+    return () => window.removeEventListener("gofer:find-page", open);
+  }, [active, clientId]);
+
+  useEffect(() => {
+    if (!findOpen || !state.ready) return;
+    const id = sessionIdRef.current;
+    if (!id || !bridge?.find) return;
+    setFindError("");
+    void bridge.find(id, findQuery).catch(error => setFindError(error.message));
+  }, [bridge, findQuery, findOpen, state.ready, state.url]);
+
+  function nextMatch(forward = true) {
+    if (!findQuery || !sessionIdRef.current) return;
+    void bridge.find(sessionIdRef.current, findQuery, { forward, newSearch: false }).catch(error => setFindError(error.message));
+  }
+  function closeFind() {
+    setFindOpen(false);
+    const id = sessionIdRef.current;
+    if (id) void bridge.stopFind?.(id).catch(error => setFindError(error.message));
+    webviewRef.current?.focus();
+    if (id) void bridge.focus?.(id).catch(() => {});
+  }
 
   function run(action) {
     const id = sessionIdRef.current;
@@ -259,6 +296,7 @@ export default function IntegratedBrowser({
           label="Open in default browser"
           onClick={() => run("openExternal")}
         ><ExternalLink size={14} /></BrowserButton>
+        <BrowserButton disabled={!state.ready} label="Find in Page" onClick={() => { setFindOpen(true); window.requestAnimationFrame(() => findInputRef.current?.focus()); }}><Search size={14} /></BrowserButton>
         {showModeToggle ? (
           <>
             {showDiffButton ? (
@@ -270,6 +308,16 @@ export default function IntegratedBrowser({
           </>
         ) : null}
       </div>
+      {findOpen ? <div role="search" aria-label="Find in page" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-slate-50 px-3 py-2">
+        <input ref={findInputRef} aria-label="Find text in page" className="min-w-0 rounded border border-line bg-white px-2 py-1 text-xs" value={findQuery} onChange={event => setFindQuery(event.target.value)} onKeyDown={event => {
+          if (event.key === "Escape") { event.preventDefault(); closeFind(); }
+          if (event.key === "Enter") { event.preventDefault(); nextMatch(!event.shiftKey); }
+        }} />
+        <span role="status" className="text-xs text-muted">{findError || (findQuery ? `${state.findResult?.activeMatchOrdinal || 0} of ${state.findResult?.matches || 0}` : "Enter text to find")}</span>
+        <BrowserButton disabled={!state.findResult?.matches} label="Previous match" onClick={() => nextMatch(false)}><ArrowLeft size={14} /></BrowserButton>
+        <BrowserButton disabled={!state.findResult?.matches} label="Next match" onClick={() => nextMatch()}><ArrowRight size={14} /></BrowserButton>
+        <BrowserButton label="Close page find" onClick={closeFind}><X size={14} /></BrowserButton>
+      </div> : null}
       <div
         ref={containerRef}
         className="relative min-h-0 flex-1 bg-white"
@@ -355,6 +403,7 @@ export function browserChromeShortcutAction(event, platform = "") {
     return "focus-location";
   }
   const primary = platform === "darwin" ? event.metaKey : event.ctrlKey;
+  if (primary && !event.altKey && !event.shiftKey && key === "f") return "find";
   if (primary && !event.altKey && !event.shiftKey && key === "r") return "reload";
   if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && key === "arrowleft") {
     return "back";

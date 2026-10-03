@@ -13,17 +13,43 @@ Pasting at least 16 KiB of text creates a text attachment. Sending uploads it to
 existing thread attachment directory; the prompt contains a local file reference.
 Attachment size limits still apply. Deleting a thread removes its attachments.
 
+Paste, drop, or select images for Codex, Claude Code, Cursor, Copilot, OpenCode,
+and Grok. Copilot models that advertise no vision input reject images in the
+composer. Antigravity's headless protocol accepts text only. Unsupported images
+are left out, with a warning in the attachment area that disappears after four
+seconds. Other files in the same paste or drop are kept.
+
+Consecutive thought messages share one collapsible group, including messages
+from different provider turns. Settings > Rem > Auto-hide thoughts is on by
+default. Thoughts stay open while Rem works and collapse when a reply arrives.
+You can reopen completed groups, or turn off this setting to keep them open.
+
 ## Resources
 
 Settings > Rem sets defaults copied into new threads. In a thread, open
 "Thread tools, skills & MCP" to change command execution, web search, skill folders,
 and HTTP or local stdio MCP servers. Empty or invalid entries must be completed or removed before
 sending. These selections survive provider changes.
+Command execution and web search are enabled by default for new threads.
+Explicitly disabled resources stay disabled.
+
+Global threads retain selected web search, skill references and MCP servers, so
+research does not require selecting a project. Until project selection, Codex
+uses Read Only while retaining the selected command setting to read files such
+as skill instructions. Claude Code, Cursor, Copilot and OpenCode
+retain read/web/MCP tools but disable native commands and file edits. The composer
+explains these effective restrictions; the chosen project permissions take effect
+after selection. Grok and Antigravity still follow CLI-managed permissions.
+Selected MCP tools keep their own permissions, including Second Brain report saving.
 
 Skills are indexed by path and read on demand. Existing provider-installed skills retain
-their native defaults; this list is not a filesystem access boundary. MCP selections
-replace inherited server availability for each launch. Authentication remains with the
-provider CLI. Local programs receive an executable and separate arguments; Raticode does not interpret them as shell commands.
+their native defaults; this list is not a filesystem access boundary. Codex disables
+inherited configured MCP entries before adding the selection, and Claude Code uses
+strict MCP configuration. Cursor, Copilot and OpenCode add private configuration
+with tool grants; provider-native integrations can remain discoverable. Grok and
+Antigravity follow their native CLI policies. Authentication remains with the
+provider CLI. Local programs receive an executable and separate arguments;
+Raticode does not interpret them as shell commands.
 Never put credentials in endpoint URLs.
 
 ## Prompt structure
@@ -31,8 +57,13 @@ Never put credentials in endpoint URLs.
 Rem and Agent nodes share an envelope separating instructions, context, and the request.
 Rem includes a short resource index and installed Rattish paths, instead of the full
 workflow-builder skill. Only the selected workflow includes graph details; other workflows
-have source references and status. The existing compaction process bounds conversation
-history. Prompt construction no longer silently drops all but twelve messages.
+have source references and status. Ordinary messages resume a saved provider-native
+conversation and send only new requests plus changed instructions/context. The provider
+owns compaction for these conversations. Each provider keeps its own session for the
+thread. Returning to it restores that session and adds the intervening providers'
+turns. The UI and conversation archive retain the complete history.
+See [native provider sessions](rem-provider-sessions.md)
+for the continuation mechanisms, reset rules and billing limits.
 
 Native slash-skill invocations keep their original spelling so the provider can dispatch
 them. Usage estimates account for the actual envelope sent to the provider.
@@ -160,6 +191,14 @@ Solarpunk, Noir, Candy Lab, and Cosmic. Existing theme selections migrate automa
 System asks Rem to design coordinated light and dark palettes that follow device appearance.
 Theme changes apply to subsequent HTML reports, slides, and PDFs wherever they are saved, without changing
 an explicitly requested output format.
+
+To share a company theme, select a saved custom theme and choose **Export theme** below
+the gallery. Send the downloaded `.raticode-theme.json` file to your teammates. They can
+choose **Import theme** in the same section to add and select it. The file includes the
+theme name, design instructions, and HTML preview. Provider choices and other settings
+stay local. Imports create a new custom theme, even when its name matches an existing
+theme. Invalid or unsupported files leave saved themes unchanged. Up to 24 custom themes
+can be saved; previews remain isolated with scripts and network access disabled.
 
 The **Report output** selector offers Markdown, HTML, Slides, and PDF. Existing Markdown
 and HTML preferences migrate automatically. Output works with Second Brain disabled and

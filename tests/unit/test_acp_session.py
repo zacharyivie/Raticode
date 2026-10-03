@@ -287,3 +287,55 @@ async def test_grok_readiness_rejects_missing_and_invalid_results(tmp_path, resp
             await wait_grok_mcp(
                 rpc, "s", {server()["name"]: (server()["url"], {"swarm_action"})}, timeout=0.2
             )
+
+
+async def test_prompt_keeps_reasoning_and_tool_updates_separate_from_answer(tmp_path):
+    def event(data: dict[str, Any]) -> dict[str, Any]:
+        return {"method": "session/update", "params": {"sessionId": "s", "update": data}}
+
+    tool = event(
+        {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "read-1",
+            "title": "Read notes",
+            "kind": "read",
+            "status": "pending",
+            "rawInput": {"path": "note.txt"},
+        }
+    )
+    done = event(
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "read-1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "notes"}}],
+        }
+    )
+    records = [
+        event(
+            {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Check "}}
+        ),
+        event(
+            {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "notes."}}
+        ),
+        update("Hello "),
+        tool,
+        tool,
+        done,
+        done,
+        update("world"),
+    ]
+    body = "request = read()\n" + "".join(f"send({record!r})\n" for record in records)
+    body += "send({'id': request['id'], 'result': {'stopReason': 'end_turn'}})\ntime.sleep(30)\n"
+    async with open_acp_transport(fake_agent(tmp_path, body), cwd=tmp_path) as rpc:
+        events = [e async for e in prompt_session(rpc, "s", "hello")]
+    assert events[-1]["type"] == "final"
+    assert events[-1]["message"]["body"] == "Hello world"
+    thoughts = [e for e in events if e.get("deltaStreamId", "").startswith("reasoning-")]
+    assert "".join(e["text"] for e in thoughts) == "Check notes."
+    tools = [e["trace"] for e in events if e.get("trace")]
+    assert len(tools) == 2
+    assert tools[-1]["title"] == "Read notes"
+    assert tools[-1]["status"] == "completed"
+    assert tools[-1]["output"] == "notes"
+    assert json.loads(tools[-1]["input"]) == {"path": "note.txt"}

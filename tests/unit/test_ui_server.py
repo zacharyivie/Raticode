@@ -3505,6 +3505,41 @@ def test_generation_job_routes_require_authentication_and_project_grants(tmp_pat
     assert "outside the approved" in result.text()
     result = _request(tmp_path, "GET", f"/api/generation-jobs?kind=commit&projectRoot={outside}")
     assert result.status == 400
+    outside.rmdir()
+    result = _request(tmp_path, "GET", f"/api/generation-jobs?kind=commit&projectRoot={outside}")
+    assert result.status == 400
+    assert "outside the approved" in result.text()
+
+
+@pytest.mark.parametrize("replaced_by_file", [False, True])
+def test_commit_job_polling_ignores_worktree_removed_after_grant_renewal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced_by_file: bool,
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-worktree"
+    outside.mkdir()
+    server = _fake_server(tmp_path)
+    grant_id = server.path_grants.register(outside)
+    server.generation_jobs.jobs["old-draft"] = {
+        "id": "old-draft", "kind": "commit", "projectRoot": str(outside),
+        "branch": "main", "createdAt": 1, "status": "failed", "error": "Old failure",
+    }
+    monkeypatch.setattr(f"{__name__}._fake_server", lambda *args, **kwargs: server)
+    query = f"kind=commit&projectRoot={quote(str(outside))}&branch=main&grantId={grant_id}"
+    before = _request(tmp_path, "GET", f"/api/generation-jobs?{query}")
+    assert before.status == 200
+    assert cast(dict[str, Any], before.json())["jobs"][0]["id"] == "old-draft"
+    outside.rmdir()
+    if replaced_by_file:
+        outside.write_text("No longer a worktree")
+    after = _request(tmp_path, "GET", f"/api/generation-jobs?{query}")
+    assert after.status == 200
+    assert after.json() == {"jobs": []}
+    if not replaced_by_file:
+        start = _request(tmp_path, "POST", "/api/generation-jobs", body={
+            "kind": "commit", "projectRoot": str(outside), "grantId": grant_id,
+        })
+        assert start.status == 400
+        assert "does not exist" in start.text()
 
 
 def test_generation_job_post_returns_receipt_without_waiting_for_provider(

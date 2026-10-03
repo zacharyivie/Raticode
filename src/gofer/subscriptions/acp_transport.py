@@ -25,6 +25,7 @@ from gofer.utils.process import (
     build_subprocess_env,
     env_with_executable_on_path,
 )
+from gofer.utils.protocol import ProtocolRecordLimitError, read_protocol_line
 
 RequestHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 T = TypeVar("T")
@@ -198,7 +199,7 @@ class AcpTransport:
     async def _read(self) -> None:
         assert self.process.stdout is not None
         try:
-            while line := await self.process.stdout.readline():
+            while line := await read_protocol_line(self.process.stdout, "ACP"):
                 self._check()
                 self._count(len(line))
                 if self._content_length_framing:
@@ -253,6 +254,8 @@ class AcpTransport:
             error = (
                 exc
                 if isinstance(exc, AcpTransportError)
+                else AcpTransportError(str(exc))
+                if isinstance(exc, ProtocolRecordLimitError)
                 else AcpTransportError("ACP emitted malformed or oversized JSON output")
             )
             self._fail(error)

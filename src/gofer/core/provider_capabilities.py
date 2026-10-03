@@ -48,6 +48,10 @@ PROVIDER_BINARIES = {
     "antigravity": "agy",
     "grok": "grok",
 }
+# Providers whose Rem adapters can deliver images to the model.
+IMAGE_ATTACHMENT_PROVIDERS = frozenset(
+    {"codex", "claude_code", "cursor", "copilot", "opencode", "grok"}
+)
 BROWSER_LOGIN_COMMANDS = {
     "cursor": ("login",),
     "codex": ("login",),
@@ -72,6 +76,7 @@ class ModelCapability(BaseModel):
     default_effort: str | None = None
     efforts: list[EffortCapability] = Field(default_factory=list)
     is_default: bool = False
+    supports_images: bool | None = None
 
 
 class ProviderCapability(BaseModel):
@@ -131,6 +136,7 @@ class ProviderCapability(BaseModel):
             "available": self.available,
             "discoveryStatus": self.discovery_status,
             "supportsBrowserLogin": self.id in BROWSER_LOGIN_COMMANDS,
+            "supportsImages": self.id in IMAGE_ATTACHMENT_PROVIDERS,
             "version": self.version,
             "supportsCustomModel": self.supports_custom_model
             or self.id in {"cursor", "copilot", "opencode", "antigravity", "grok"},
@@ -187,6 +193,7 @@ class ProviderCapability(BaseModel):
                         for effort in model.efforts
                     ],
                     "isDefault": model.id == default_model,
+                    "supportsImages": model.supports_images,
                 }
                 for model in self.models
             ],
@@ -1084,6 +1091,13 @@ def _copilot_models_from_catalog(payload: dict[str, Any]) -> list[ModelCapabilit
             ModelCapability(
                 id=model_id,
                 display_name=_nonempty_string(raw.get("name")) or model_id,
+                supports_images=(
+                    raw.get("capabilities", {}).get("supports", {}).get("vision")
+                    if isinstance(raw.get("capabilities"), dict)
+                    and isinstance(raw["capabilities"].get("supports"), dict)
+                    and isinstance(raw["capabilities"]["supports"].get("vision"), bool)
+                    else None
+                ),
                 default_effort=default if default in efforts else None,
                 efforts=[
                     EffortCapability(id=value, display_name=_display_name(value))

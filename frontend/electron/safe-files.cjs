@@ -134,7 +134,8 @@ async function createDirectory(target, authorize, { mode = 0o777 } = {}) {
   });
 }
 
-async function copyPath(source, destination, { authorizeSource, authorizeDestination }) {
+async function copyPath(source, destination, { authorizeSource, authorizeDestination, replace = false }) {
+  if (replace) return replacePath(source, destination, { authorizeSource, authorizeDestination, move: false });
   const sourceRoot = realpathForContainment(source);
   const destinationRoot = realpathForContainment(destination);
   authorizeSource(sourceRoot);
@@ -201,11 +202,138 @@ async function renamePath(source, destination, authorize) {
     const destinationEntry = path.join(parent, path.basename(destination));
     const stat = await fsp.lstat(sourceEntry);
     if (stat.isSymbolicLink()) throw new Error("Cannot rename a symbolic link through the editor.");
-    try { await fsp.lstat(destinationEntry); throw new Error("Destination already exists."); }
+    let destinationStat;
+    try { destinationStat = await fsp.lstat(destinationEntry); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (destinationStat) {
+      // Only the same directory entry under different casing may already exist.
+      // A hard link or distinct case-sensitive entry must never be overwritten.
+      const names = await fsp.readdir(parent);
+      const caseChange = path.basename(source) !== path.basename(destination)
+        && path.basename(source).toLowerCase() === path.basename(destination).toLowerCase()
+        && !names.includes(path.basename(destination));
+      if (!caseChange || destinationStat.isSymbolicLink() || !sameFile(stat, destinationStat)) {
+        throw new Error("Destination already exists.");
+      }
+    }
     await verify();
     await fsp.rename(sourceEntry, destinationEntry);
   });
 }
 
-module.exports = { copyPath, createDirectory, readFile, renamePath, withDirectory, writeFile };
+async function movePath(source, destination, { authorizeSource, authorizeDestination, replace = false }) {
+  if (replace) return replacePath(source, destination, { authorizeSource, authorizeDestination, move: true });
+  const sourceRoot = realpathForContainment(source);
+  const destinationRoot = realpathForContainment(destination);
+  if (sourceRoot === destinationRoot) return;
+  if (isPathInside(destinationRoot, sourceRoot)) throw new Error("Cannot move a directory into itself.");
+  authorizeSource(sourceRoot);
+  authorizeDestination(destinationRoot);
+  return withDirectory(path.dirname(sourceRoot), authorizeSource, async (parent, verifySource) => {
+    const entry = path.join(parent, path.basename(sourceRoot));
+    const stat = await fsp.lstat(entry);
+    if (stat.isSymbolicLink() || !(stat.isDirectory() || stat.isFile())) throw new Error("Only ordinary files and folders can be moved.");
+    return withDirectory(path.dirname(destinationRoot), authorizeDestination, async (targetParent, verifyDestination) => {
+      const target = path.join(targetParent, path.basename(destinationRoot));
+      try { await fsp.lstat(target); throw new Error("Destination already exists."); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      await verifySource();
+      await verifyDestination();
+      if (!sameFile(stat, await fsp.lstat(entry))) throw new Error("Source changed while moving.");
+      try { await fsp.rename(entry, target); }
+      catch (error) {
+        if (error.code !== "EXDEV") throw error;
+        // Across volumes, retain the original until the entire copy succeeds.
+        const beforeCopy = await treeVersion(sourceRoot, authorizeSource);
+        await copyPath(sourceRoot, destinationRoot, { authorizeSource, authorizeDestination });
+        await verifySource();
+        await verifyDestination();
+        if (!sameFile(stat, await fsp.lstat(entry)) || beforeCopy !== await treeVersion(sourceRoot, authorizeSource)) throw new Error("Source changed while moving. The original and copied destination were kept.");
+        await fsp.rm(entry, { recursive: stat.isDirectory() });
+      }
+    });
+  });
+}
+
+// Stage the incoming contents before moving the old destination aside. Keep a
+// backup until installation succeeds, so a failed copy never destroys it.
+async function replacePath(source, destination, { authorizeSource, authorizeDestination, move }) {
+  const sourceRoot = realpathForContainment(source);
+  const destinationRoot = path.join(realpathForContainment(path.dirname(destination)), path.basename(destination));
+  authorizeSource(sourceRoot);
+  authorizeDestination(destinationRoot);
+  if (sourceRoot === destinationRoot) throw new Error("A file cannot replace itself.");
+  if (isPathInside(destinationRoot, sourceRoot) || isPathInside(sourceRoot, destinationRoot)) throw new Error("Cannot replace a folder with itself or one of its descendants.");
+  const sourceStat = await fsp.lstat(sourceRoot);
+  if (!(sourceStat.isFile() || sourceStat.isDirectory()) || sourceStat.isSymbolicLink()) throw new Error("Only ordinary files and folders can replace a destination.");
+  return withDirectory(path.dirname(destinationRoot), authorizeDestination, async (parent, verifyDestination) => {
+    const target = path.join(parent, path.basename(destinationRoot));
+    let original;
+    try { original = await fsp.lstat(target); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (original?.isSymbolicLink() || (original && !(original.isFile() || original.isDirectory()))) throw new Error("Cannot replace a linked or special file.");
+    if (original && sameFile(sourceStat, original)) throw new Error("A file cannot replace itself.");
+    await verifyDestination();
+    const holder = await fsp.mkdtemp(path.join(parent, ".raticode-transfer-"));
+    const holderName = path.basename(holder);
+    // The staging path is a sibling of the final path, so relative links retain
+    // the same depth and interpretation when a copied folder is installed.
+    const stagingName = `${holderName}.incoming`;
+    const staging = path.join(path.dirname(destinationRoot), stagingName);
+    const stagedEntry = path.join(parent, stagingName);
+    const backup = path.join(holder, "original");
+    let backedUp = false, installed = false, preserveBackup = false;
+    try {
+      const version = await treeVersion(sourceRoot, authorizeSource);
+      await copyPath(sourceRoot, staging, { authorizeSource, authorizeDestination });
+      await verifyDestination();
+      if (version !== await treeVersion(sourceRoot, authorizeSource)) throw new Error("Source changed while transferring. Retry the action.");
+      await withDirectory(path.dirname(sourceRoot), authorizeSource, async (sourceParent, verifySource) => {
+        await verifySource();
+        const sourceEntry = path.join(sourceParent, path.basename(sourceRoot));
+        if (!sameFile(sourceStat, await fsp.lstat(sourceEntry))) throw new Error("Source changed while transferring.");
+        let current;
+        try { current = await fsp.lstat(target); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        if (original ? !current || !sameFile(original, current) || original.mtimeMs !== current.mtimeMs || original.size !== current.size : current) throw new Error("Destination changed while transferring. Retry the action.");
+        await verifyDestination();
+        if (original) { await fsp.rename(target, backup); backedUp = true; }
+        try { await fsp.rename(stagedEntry, target); installed = true; }
+        catch (error) {
+          if (backedUp) {
+            try { await fsp.rename(backup, target); backedUp = false; }
+            catch { preserveBackup = true; throw new Error(`Replacement failed. The original is saved in ${path.join(path.dirname(destinationRoot), holderName, "original")}.`); }
+          }
+          throw error;
+        }
+        if (move) {
+          await verifySource();
+          if (version !== await treeVersion(sourceRoot, authorizeSource)) throw new Error("Source changed while moving. The original and copied destination were kept.");
+          await fsp.rm(sourceEntry, { recursive: sourceStat.isDirectory() });
+        }
+      });
+    } finally {
+      // Cleanup uses the pinned parent. A changed directory must not redirect it.
+      await verifyDestination();
+      if (!installed) await fsp.rm(stagedEntry, { recursive: true, force: true });
+      if (!preserveBackup) await fsp.rm(holder, { recursive: true, force: true });
+    }
+  });
+}
+
+async function treeVersion(target, authorize) {
+  authorize(target);
+  const stat = await fsp.lstat(target, { bigint: true });
+  const version = [target, String(stat.dev), String(stat.ino), String(stat.size), String(stat.mtimeNs), String(stat.ctimeNs)];
+  if (stat.isDirectory()) {
+    await withDirectory(target, authorize, async (parent, verify) => {
+      for (const name of (await fsp.readdir(parent)).sort()) {
+        await verify();
+        version.push(await treeVersion(path.join(target, name), authorize));
+      }
+    });
+  }
+  return JSON.stringify(version);
+}
+
+module.exports = { copyPath, createDirectory, movePath, readFile, renamePath, withDirectory, writeFile };

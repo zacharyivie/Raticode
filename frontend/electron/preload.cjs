@@ -129,6 +129,21 @@ async function invokeDesktop(channel, payload = {}) {
 
 contextBridge.exposeInMainWorld("goferDesktop", {
   apiSession: () => invokeDesktop("gofer:api-session"),
+  clipboard: { readText: () => invokeDesktop("gofer:clipboard-read") },
+  editFocused: (action) => invokeDesktop("gofer:edit-focused", { action }),
+  onPrepareLifecycle: (callback) => {
+    const listener = async (_event, request) => {
+      let approved = false;
+      try { approved = await callback(request); } catch { /* Keep the window open. */ }
+      await invokeDesktop("gofer:prepare-lifecycle-result", { requestId: request.requestId, approved });
+    };
+    ipcRenderer.on("gofer:prepare-lifecycle", listener);
+    void invokeDesktop("gofer:prepare-lifecycle-result", { requestId: "renderer-ready", ready: true });
+    return () => {
+      ipcRenderer.removeListener("gofer:prepare-lifecycle", listener);
+      void invokeDesktop("gofer:prepare-lifecycle-result", { requestId: "renderer-ready", ready: false });
+    };
+  },
   developer: {
     info: () => invokeDesktop("gofer:developer-info"),
     action: (action) => invokeDesktop("gofer:developer-action", { action }),
@@ -189,7 +204,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
       gitStatus(projectRoot),
     gitFileBaseline: (targetPath, group) =>
       gitFileBaseline(targetPath, group),
-    gitHistory: (projectRoot) => gitHistory(projectRoot),
+    gitHistory: (projectRoot, options) => gitHistory(projectRoot, options),
     gitWorktrees: (projectRoot) => gitWorktrees(projectRoot),
     addWorktree: (options = {}) => addWorktree(options),
     removeWorktree: (options = {}) => removeWorktree(options),
@@ -200,6 +215,13 @@ contextBridge.exposeInMainWorld("goferDesktop", {
       trustProjectRoot(targetPath),
     copyPath: (options = {}) =>
       copyPath(options),
+    movePath: (options = {}) => invokeDesktop("gofer:move-path", {
+      replace: options.replace === true,
+      sourcePath: typeof options.sourcePath === "string" ? options.sourcePath : "",
+      destinationPath: typeof options.destinationPath === "string" ? options.destinationPath : "",
+      sourceGrantId: grantForPath(options.sourcePath),
+      destinationGrantId: grantForPath(options.destinationPath),
+    }),
     deletePath: (targetPath) =>
       deletePath(targetPath),
     renamePath: (options = {}) =>
@@ -214,6 +236,8 @@ contextBridge.exposeInMainWorld("goferDesktop", {
       selectPath(options),
   },
   textFiles: {
+    openPreview: (targetPath) => invokeDesktop("gofer:open-media-preview", { targetPath: typeof targetPath === "string" ? targetPath : "", grantId: grantForPath(targetPath) }),
+    closePreview: (id) => invokeDesktop("gofer:close-media-preview", { id: typeof id === "string" ? id : "" }),
     readPreview: (targetPath) =>
       readBinaryPreview(targetPath),
     read: (targetPath) =>
@@ -240,6 +264,8 @@ contextBridge.exposeInMainWorld("goferBrowser", {
   back: (id) => browserAction(id, "back"),
   close: (id) => browserAction(id, "close"),
   focus: (id) => browserAction(id, "focus"),
+  find: (id, text, options = {}) => browserAction(id, "find", { text, forward: options.forward !== false, newSearch: options.newSearch !== false }),
+  stopFind: (id) => browserAction(id, "stop-find"),
   forward: (id) => browserAction(id, "forward"),
   navigate: (id, url) => browserAction(id, "navigate", { url }),
   openExternal: (id) => browserAction(id, "open-external"),
@@ -289,6 +315,7 @@ async function createTerminal(options = {}) {
   const requestedCwd = typeof options.cwd === "string" ? options.cwd : "";
   const grantId = grantForPath(requestedCwd);
   return ipcRenderer.invoke("gofer:terminal-create", {
+    shell: typeof options.shell === "string" ? options.shell : "system",
     cols: Number.isFinite(options.cols) ? options.cols : 80,
     cwd: requestedCwd,
     grantId,
@@ -408,8 +435,8 @@ function gitFileBaseline(targetPath, group) {
   });
 }
 
-function gitHistory(projectRoot) {
-  return invokeDesktop("gofer:git-history", { grantId: grantForPath(projectRoot), projectRoot });
+function gitHistory(projectRoot, options = {}) {
+  return invokeDesktop("gofer:git-history", { grantId: grantForPath(projectRoot), projectRoot, ref: options.ref, refs: options.refs, limit: options.limit });
 }
 
 function gitWorktrees(projectRoot) {
@@ -440,6 +467,7 @@ function removeWorktree(options = {}) {
 
 function copyPath(options = {}) {
   return invokeDesktop("gofer:copy-path", {
+    replace: options.replace === true,
     destinationGrantId: grantForPath(options.destinationPath),
     sourcePath:
       typeof options.sourcePath === "string" ? options.sourcePath : "",

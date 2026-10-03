@@ -5,6 +5,41 @@ import { normalizeReportThemes, reportOutputFormat } from "../../electron/report
 export { reportOutputFormat } from "../../electron/report-themes.js";
 export { DEFAULT_REPORT_THEMES, normalizeReportThemes } from "../../electron/report-themes.js";
 
+export const MAX_REPORT_THEME_FILE_BYTES = 2 * 1024 * 1024;
+const REPORT_THEME_FILE_FORMAT = "raticode-report-theme";
+
+function portableTheme(theme) {
+  for (const [field, limit] of [["label", 80], ["instructions", 12000], ["html", 200000]]) {
+    if (typeof theme?.[field] !== "string" || !theme[field].trim() || theme[field].length > limit) {
+      throw new Error(`Theme ${field} must be nonempty text of at most ${limit.toLocaleString("en-US")} characters.`);
+    }
+  }
+  return { label: theme.label, instructions: theme.instructions, html: theme.html };
+}
+
+export function exportReportTheme(theme) {
+  const content = JSON.stringify({ format: REPORT_THEME_FILE_FORMAT, version: 1, theme: portableTheme(theme) }, null, 2) + "\n";
+  const filename = (theme.label.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "report-theme") + ".raticode-theme.json";
+  return { filename, content };
+}
+
+export function importReportTheme(content, current) {
+  if (typeof content !== "string" || new TextEncoder().encode(content).length > MAX_REPORT_THEME_FILE_BYTES) {
+    throw new Error("Theme files must be 2 MB or smaller.");
+  }
+  let file;
+  try { file = JSON.parse(content.replace(/^\uFEFF/, "")); }
+  catch { throw new Error("This file is not valid JSON. Choose a theme exported from Raticode."); }
+  if (file?.format !== REPORT_THEME_FILE_FORMAT || file.version !== 1) {
+    throw new Error("Unsupported theme file. Choose a version 1 report theme exported from Raticode.");
+  }
+  const theme = portableTheme(file.theme);
+  const config = normalizeReportThemes(current);
+  if (config.custom.length >= 24) throw new Error("You can save up to 24 custom report themes.");
+  const imported = { ...theme, id: `custom-${crypto.randomUUID()}` };
+  return { ...config, selected: imported.id, custom: [...config.custom, imported] };
+}
+
 export function reportThemeContext(memory = {}) {
   const config = normalizeReportThemes(memory.reportThemes, memory.secondBrainTheme);
   return { enabled: config.enabled, theme: config.selected, format: reportOutputFormat(memory),

@@ -43,11 +43,13 @@ from gofer.core.prompt_envelope import (
     resource_index,
 )
 from gofer.core.provider_capabilities import (
+    IMAGE_ATTACHMENT_PROVIDERS,
     ProviderCapabilityError,
     provider_capabilities_payload,
     resolve_provider_executable,
     validate_provider_selection_async,
 )
+from gofer.core.provider_context import estimate_tokens, handoff_token_budget, token_chunks
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_preferences import provider_preference
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
@@ -69,6 +71,7 @@ from gofer.subscriptions.cli_providers import (
     stream_cli,
 )
 from gofer.ui.chat_media import ChatMediaError, resolve_chat_attachment
+from gofer.ui.chat_sessions import ChatSession, with_chat_session
 from gofer.ui.codex_steering import CodexTurnControl, stream_codex_turn
 from gofer.ui.report_outputs import with_report_outputs
 from gofer.ui.report_themes import report_theme_rules
@@ -77,6 +80,7 @@ from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links,
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
+from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
 
 ProviderName = Literal[
     "codex", "claude_code", "cursor", "copilot", "opencode", "antigravity", "grok"
@@ -101,6 +105,7 @@ CHAT_CHANGE_IGNORED_DIRECTORIES = {
     ".pytest_cache",
     ".ruff_cache",
     ".venv",
+    ".worktrees",
     "__pycache__",
     "build",
     "dist",
@@ -183,18 +188,32 @@ def _chat_project_root(workflow: dict[str, Any] | None) -> Path | None:
     return resolved if resolved.is_dir() else None
 
 
+def _chat_project_path_in_scope(root: Path, relative: Path) -> bool:
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    candidate = root
+    for part in relative.parts:
+        if part in CHAT_CHANGE_IGNORED_DIRECTORIES:
+            return False
+        candidate /= part
+        if candidate.is_symlink():
+            return False
+        # A linked worktree has a .git file; a nested clone has a directory.
+        # Both belong to a separate checkout, even at a custom location. The
+        # selected root itself may be a worktree and remains in scope.
+        marker = candidate / ".git"
+        if marker.exists() or marker.is_symlink():
+            return False
+    return True
+
+
 def _chat_project_files(root: Path, paths: set[str] | None) -> Iterator[Path | None]:
     starts = [root] if paths is None else [root / relative for relative in sorted(paths)]
     for start in starts:
         relative = start.relative_to(root)
-        if relative.is_absolute() or ".." in relative.parts:
-            continue
         # A directory may have been replaced by a symlink since its event. Do
         # not enumerate outside the project, even if the final file is regular.
-        if any(
-            (root.joinpath(*relative.parts[:index])).is_symlink()
-            for index in range(1, len(relative.parts) + 1)
-        ):
+        if not _chat_project_path_in_scope(root, relative):
             continue
         try:
             info = start.lstat()
@@ -218,11 +237,11 @@ def _chat_project_files(root: Path, paths: set[str] | None) -> Iterator[Path | N
             directory_names[:] = sorted(
                 name
                 for name in directory_names
-                if name not in CHAT_CHANGE_IGNORED_DIRECTORIES
-                and not (Path(directory) / name).is_symlink()
+                if _chat_project_path_in_scope(root, (Path(directory) / name).relative_to(root))
             )
             for name in sorted(file_names):
-                yield Path(directory) / name
+                if name not in CHAT_CHANGE_IGNORED_DIRECTORIES:
+                    yield Path(directory) / name
 
 
 def _capture_chat_project(
@@ -440,11 +459,7 @@ class _ChatProjectTracker:
             relative = path.relative_to(self.root)
         except ValueError:
             return
-        if ".." in relative.parts or any(
-            part in CHAT_CHANGE_IGNORED_DIRECTORIES for part in relative.parts[:-1]
-        ):
-            return
-        if relative.name in CHAT_CHANGE_IGNORED_DIRECTORIES:
+        if not _chat_project_path_in_scope(self.root, relative):
             return
         with self.lock:
             if relative == Path(".") or len(self.pending) >= CHAT_CHANGE_MAX_SCAN_FILES:
@@ -594,7 +609,7 @@ class _ChatTurnEdits:
                         candidate = candidate.relative_to(self.root)
                     except ValueError:
                         continue
-                if ".." not in candidate.parts and candidate != Path("."):
+                if candidate != Path(".") and _chat_project_path_in_scope(self.root, candidate):
                     paths.add(candidate.as_posix())
             if not paths:
                 if declared:
@@ -836,7 +851,9 @@ def _chat_changes_from_snapshots(
         )
         return None, []
     changed_paths = sorted(
-        path for path in before.keys() | after.keys() if before.get(path) != after.get(path)
+        path
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path) and _chat_project_path_in_scope(root, Path(path))
     )
     if not changed_paths:
         return None, []
@@ -950,6 +967,12 @@ def _apply_chat_changes(
     for item in files:
         if not isinstance(item, dict):
             raise ChatChangeError("The saved change set is invalid")
+        stored_path = Path(str(item.get("path") or ""))
+        if not _chat_project_path_in_scope(root, stored_path):
+            raise ChatChangeError(
+                f"Cannot {action} because '{stored_path.as_posix()}' "
+                "is outside this project's edit scope"
+            )
         path = (root / str(item.get("path") or "")).resolve()
         try:
             path.relative_to(root)
@@ -1006,7 +1029,7 @@ def redo_chat_changes(change_set_id: str, data_dir: Path | None = None) -> dict[
 async def run_workflow_chat(
     provider: str,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     workflow: dict[str, Any] | None,
     effort: str | None = None,
     working_dir: Path | None = None,
@@ -1016,8 +1039,14 @@ async def run_workflow_chat(
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
+    conversation_id: str | None = None,
+    reset_session: bool = False,
 ) -> dict[str, Any]:
-    if provider in ADDITIONAL_PROVIDERS | ACP_PROVIDERS | {"antigravity"}:
+    if (
+        conversation_id
+        or (workflow or {}).get("chatThreadId")
+        or provider in ADDITIONAL_PROVIDERS | ACP_PROVIDERS | {"antigravity"}
+    ):
         source = stream_workflow_chat(
             provider,
             model,
@@ -1031,6 +1060,8 @@ async def run_workflow_chat(
             trusted_swarm_url=trusted_swarm_url,
             trusted_rem_threads_url=trusted_rem_threads_url,
             trusted_organization_url=trusted_organization_url,
+            conversation_id=conversation_id,
+            reset_session=reset_session,
         )
         try:
             async for event in source:
@@ -1141,7 +1172,7 @@ async def run_workflow_chat(
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
-        mcp_only=((workflow or {}).get("remThreads") or {}).get("global") is True,
+        global_scope=((workflow or {}).get("remThreads") or {}).get("global") is True,
         second_brain_cli_path=(
             gofer_cli_path
             if (
@@ -1151,6 +1182,20 @@ async def run_workflow_chat(
             else None
         ),
     )
+    protocol = ProtocolLines()
+    parsed_answer: str | None = None
+    parsed_error: str | None = None
+
+    def observe_stdout(chunk: str) -> None:
+        nonlocal parsed_answer, parsed_error
+        for line in protocol.feed(chunk):
+            if payload := _json_object(line):
+                parsed_error = _provider_error_message([payload]) or parsed_error
+                if not _provider_error_message([payload]):
+                    answer = _provider_final_message(provider, [payload])
+                    if answer:
+                        parsed_answer = retained_text(answer)
+
     try:
         returncode, stdout, stderr = await run_subprocess(
             command,
@@ -1158,14 +1203,21 @@ async def run_workflow_chat(
             env=env_with_executable_on_path(binary_path),
             timeout=None,
             max_output_bytes=limits.max_subprocess_output_bytes,
+            on_stdout=observe_stdout,
         )
+    except ProtocolRecordLimitError as exc:
+        raise ChatProviderError(str(exc)) from exc
     except OSError as exc:
         raise ChatProviderError(f"Could not start '{binary}' CLI: {exc}") from exc
 
-    if returncode != 0:
-        raise ChatProviderError(stdout or stderr or f"Provider exited with {returncode}")
+    if protocol.buffer:
+        observe_stdout("\n")
+    if returncode != 0 or parsed_error:
+        raise ChatProviderError(
+            parsed_error or stderr or stdout or f"Provider exited with {returncode}"
+        )
 
-    final_message = _provider_final_message(provider, _json_payloads(stdout))
+    final_message = parsed_answer or _provider_final_message(provider, _json_payloads(stdout))
     return {
         "provider": provider,
         "model": model,
@@ -1177,11 +1229,12 @@ async def run_workflow_chat(
     }
 
 
+@with_chat_session
 @track_chat_usage
 async def stream_workflow_chat(
     provider: str,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     workflow: dict[str, Any] | None,
     effort: str | None = None,
     cancel_event: threading.Event | None = None,
@@ -1196,6 +1249,9 @@ async def stream_workflow_chat(
     trusted_organization_url: str | None = None,
     unlimited_output: bool = False,
     include_agent_messages: bool = False,
+    conversation_id: str | None = None,
+    reset_session: bool = False,
+    _session: ChatSession | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     turn_started_at = monotonic()
     if cancel_event is not None and cancel_event.is_set():
@@ -1248,24 +1304,68 @@ async def stream_workflow_chat(
     gofer_cli_path = ensure_local_gofer_cli(resolved_data_dir)
     workflow = with_second_brain(workflow, gofer_cli_path)
     workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
-    messages, compacted = await _compact_chat_messages_if_needed(
-        provider=provider,
-        model=model,
-        effort=effort,
-        messages=messages,
-        binary_path=binary_path,
-        data_dir=resolved_data_dir,
-        working_dir=resolved_working_dir,
-        limits=limits,
-        cancel_event=cancel_event,
-    )
+    compacted = False
+    if _session is None:
+        messages, compacted = await _compact_chat_messages_if_needed(
+            provider=provider,
+            model=model,
+            effort=effort,
+            messages=messages,
+            binary_path=binary_path,
+            data_dir=resolved_data_dir,
+            working_dir=resolved_working_dir,
+            limits=limits,
+            cancel_event=cancel_event,
+        )
+    elif _session.handoff:
+        # Only compact history being imported from another provider. Keep the
+        # current request and its attachments verbatim, even when very large.
+        latest_user = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("role", "user") == "user"
+            ),
+            len(messages),
+        )
+        # Include the current request and visible instructions/context in the
+        # threshold, but summarize only imported history. Native retained state
+        # and image tokens remain the provider's responsibility.
+        request_prompt = build_chat_prompt(
+            provider=provider,
+            model=model,
+            messages=messages[latest_user:],
+            workflow=workflow,
+            gofer_cli_path=gofer_cli_path,
+            agent_instructions=agent_instructions,
+            session=_session,
+        )
+        history, compacted = await _compact_chat_messages_if_needed(
+            provider=provider,
+            model=model,
+            effort=effort,
+            messages=messages[:latest_user],
+            binary_path=binary_path,
+            data_dir=resolved_data_dir,
+            working_dir=resolved_working_dir,
+            limits=limits,
+            cancel_event=cancel_event,
+            token_budget=handoff_token_budget(provider, model),
+            additional_tokens=estimate_tokens(request_prompt),
+        )
+        messages = [*history, *messages[latest_user:]]
     if cancel_event is not None and cancel_event.is_set():
         return
     if compacted:
         yield {
             "type": "compaction",
-            "message": "Compacting Rem context",
-            "messages": messages,
+            "message": "Compacting Rem context for provider handoff"
+            if _session is not None
+            else "Compacting Rem context",
+            # A native handoff summary belongs to the destination session. A
+            # thread-wide checkpoint would alter user hashes on the next turn
+            # and discard every saved native reference, including dormant ones.
+            **({"scope": "provider-handoff"} if _session is not None else {"messages": messages}),
         }
     try:
         messages, image_paths = _messages_with_attachment_paths(
@@ -1282,6 +1382,7 @@ async def stream_workflow_chat(
         workflow=workflow,
         gofer_cli_path=gofer_cli_path,
         agent_instructions=agent_instructions,
+        session=_session,
     )
     prompt = _prepare_prompt_for_cli(
         provider=provider,
@@ -1309,7 +1410,7 @@ async def stream_workflow_chat(
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
-        mcp_only=((workflow or {}).get("remThreads") or {}).get("global") is True,
+        global_scope=((workflow or {}).get("remThreads") or {}).get("global") is True,
         second_brain_cli_path=(
             gofer_cli_path
             if (
@@ -1319,6 +1420,16 @@ async def stream_workflow_chat(
             else None
         ),
     )
+
+    native_id = _session.native_id if _session else None
+    if native_id and provider == "codex":
+        command[-1:-1] = ["resume", native_id]
+    elif native_id and provider in {"claude_code", "cursor"}:
+        command += ["--resume", native_id]
+    elif native_id and provider == "opencode":
+        command[-1:-1] = ["--session", native_id]
+    elif _session and provider == "copilot":
+        command += ["--session-id", native_id or str(uuid.uuid4())]
 
     project_root = _chat_project_root(workflow)
     project_tracker = _ChatProjectTracker(project_root)
@@ -1376,9 +1487,6 @@ async def stream_workflow_chat(
         }
 
     def remember_payload(payload: dict[str, Any]) -> None:
-        if not unlimited_output:
-            provider_payloads.append(payload)
-            return
         # Stream traces immediately; retain only terminal text and usage metadata.
         # Long swarm turns must not accumulate every command and protocol event.
         from gofer.subscriptions.usage import provider_payload_usage
@@ -1388,6 +1496,8 @@ async def stream_workflow_chat(
         usage.update(provider_payload_usage(provider, [payload]))
         if payload.get("type") == "result" and isinstance(payload.get("usage"), dict):
             usage.pop("partial", None)
+        error = _provider_error_message([payload])
+        answer = None if error else _provider_final_message(provider, [payload])
         provider_payloads[:] = [
             {
                 "type": payload.get("type")
@@ -1397,16 +1507,13 @@ async def stream_workflow_chat(
                 "session_id": payload.get("session_id")
                 or payload.get("thread_id")
                 or previous.get("session_id"),
-                "result": _provider_final_message(provider, [payload]) or previous.get("result"),
-                "error": _provider_error_message([payload]) or previous.get("error"),
+                "result": retained_text(answer) if answer else previous.get("result"),
+                "error": error or previous.get("error"),
             }
         ]
 
     def remember_output(chunks: list[str], text: str) -> None:
-        if unlimited_output:
-            chunks[:] = [("".join(chunks) + text)[-65536:]]
-        else:
-            chunks.append(text)
+        chunks[:] = [("".join(chunks) + text)[-65536:]]
 
     def live_usage() -> dict[str, Any] | None:
         from gofer.subscriptions.usage import provider_payload_usage
@@ -1424,11 +1531,15 @@ async def stream_workflow_chat(
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
     stream_buffers = {"stdout": ""}
+    protocol_lines = ProtocolLines()
+    parse_error: str | None = None
     provider_payloads: list[dict[str, Any]] = []
     claude_trace_state = _ClaudeTraceState() if provider == "claude_code" else None
     if provider == "antigravity":
         agy_source = stream_antigravity(
             prompt,
+            session_id=native_id,
+            session_dir=_session.root / _session.state["generation"] if _session else None,
             cwd=resolved_working_dir,
             model=model,
             effort=effort,
@@ -1459,11 +1570,14 @@ async def stream_workflow_chat(
         acp_source = stream_acp(
             provider,
             prompt,
+            session_id=native_id,
+            session_dir=_session.root / _session.state["generation"] if _session else None,
             cwd=resolved_working_dir,
             model=model,
             effort=effort,
             permission_mode=permission_mode,
             executable=binary_path,
+            image_paths=image_paths,
             resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
             cancel_event=cancel_event,
             max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
@@ -1496,6 +1610,7 @@ async def stream_workflow_chat(
                 provider,
                 command,
                 resources,
+                read_only=((workflow or {}).get("remThreads") or {}).get("global") is True,
                 trusted_swarm_url=trusted_swarm_url,
                 extra_paths=_unique_existing_directories([resolved_data_dir, *extra_paths]),
                 second_brain_cli_path=gofer_cli_path
@@ -1504,6 +1619,11 @@ async def stream_workflow_chat(
                     or ((workflow or {}).get("remReportTheme") or {}).get("format")
                 )
                 else None,
+                **(
+                    {"session_dir": _session.root / _session.state["generation"]}
+                    if _session
+                    else {}
+                ),
             ) as (new_command, child_env):
                 source = stream_cli(
                     new_command,
@@ -1518,6 +1638,8 @@ async def stream_workflow_chat(
                 try:
                     async for event in source:
                         metadata = turn_metadata() if event["type"] in {"final", "error"} else {}
+                        if _session and provider == "copilot" and event["type"] == "final":
+                            event["sessionId"] = command[command.index("--session-id") + 1]
                         yield {
                             **metadata,
                             **event,
@@ -1542,6 +1664,7 @@ async def stream_workflow_chat(
             env=env_with_executable_on_path(binary_path),
             timeout=None,
             max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
+            protocol_stdout=True,
         )
         if steering is not None and provider == "codex":
             provider_stream = stream_codex_turn(
@@ -1564,13 +1687,20 @@ async def stream_workflow_chat(
                     continue
                 else:
                     continue
-                complete_lines, stream_buffers[chunk_stream] = _complete_json_lines(
-                    stream_buffers[chunk_stream], text
-                )
+                complete_lines = protocol_lines.feed(text)
+                stream_buffers[chunk_stream] = protocol_lines.buffer
                 for line in complete_lines:
                     payload = _json_object(line)
+                    if payload is None and line.lstrip().startswith(("{", "[")):
+                        parse_error = "Provider emitted malformed JSON output"
                     if payload is not None:
+                        # Parse the complete record first; bound only retained trace content.
+                        payload = _retained_provider_payload(payload)
                         remember_payload(payload)
+                        if _session and (payload.get("session_id") or payload.get("thread_id")):
+                            _session.observe(
+                                {"sessionId": payload.get("session_id") or payload.get("thread_id")}
+                            )
                         if usage_event := live_usage():
                             yield usage_event
                         for trace in _provider_trace_entries(
@@ -1609,7 +1739,10 @@ async def stream_workflow_chat(
                 if not pending.strip():
                     continue
                 payload = _json_object(pending)
+                if payload is None and pending.lstrip().startswith(("{", "[")):
+                    parse_error = "Provider emitted an incomplete JSON record"
                 if payload is not None:
+                    payload = _retained_provider_payload(payload)
                     remember_payload(payload)
                     if usage_event := live_usage():
                         yield usage_event
@@ -1639,16 +1772,25 @@ async def stream_workflow_chat(
                                     "effort": effort,
                                     "changes": changes,
                                 }
-            if returncode != 0:
+            provider_error = _provider_error_message(provider_payloads)
+            if returncode != 0 or provider_error or parse_error:
                 yield {
                     "type": "error",
                     "provider": provider,
                     "model": model,
                     "effort": effort,
-                    "error": _provider_error_message(provider_payloads)
-                    or stderr
+                    "error": provider_error
+                    or (stderr if returncode else None)
+                    or parse_error
                     or stdout
                     or f"Provider exited with {returncode}",
+                    "errorKind": "provider" if provider_error or returncode else "protocol",
+                    "parseError": parse_error,
+                    "processExitCode": returncode,
+                    "message": {
+                        "role": "assistant",
+                        "body": _provider_final_message(provider, provider_payloads) or "",
+                    },
                     **turn_metadata(),
                 }
                 return
@@ -1666,6 +1808,8 @@ async def stream_workflow_chat(
                 **turn_metadata(),
             }
             return
+    except ProtocolRecordLimitError as exc:
+        yield {"type": "error", "error": str(exc), "errorKind": "protocol_limit", **turn_metadata()}
     except OSError as exc:
         raise ChatProviderError(f"Could not start '{binary}' CLI: {exc}") from exc
     finally:
@@ -1678,6 +1822,17 @@ async def stream_workflow_chat(
 def _complete_json_lines(buffer: str, chunk: str) -> tuple[list[str], str]:
     lines = f"{buffer}{chunk}".split("\n")
     return lines[:-1], lines[-1]
+
+
+def _retained_provider_payload(value: Any) -> Any:
+    """Keep final answers and usage while bounding tool strings after decoding."""
+    if isinstance(value, dict):
+        return {key: _retained_provider_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_retained_provider_payload(item) for item in value]
+    if isinstance(value, str):
+        return retained_text(value)
+    return value
 
 
 def _json_object(value: str) -> dict[str, Any] | None:
@@ -2018,10 +2173,21 @@ def _provider_final_message(provider: str, payloads: list[dict[str, Any]]) -> st
 
 def _provider_error_message(payloads: list[dict[str, Any]]) -> str | None:
     for payload in reversed(payloads):
-        for key in ("error", "message", "result"):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            error = error.get("message")
+        if isinstance(error, str) and error.strip():
+            return error
+        if payload.get("type") not in {"error", "turn.failed"} and not payload.get("is_error"):
+            continue
+        for key in ("message", "result"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 return value
+        errors = payload.get("errors")
+        if isinstance(errors, list) and errors:
+            return "; ".join(str(error) for error in errors)
+        return "Provider reported an unsuccessful response"
     return None
 
 
@@ -2389,13 +2555,11 @@ def _build_chat_command(
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
-    mcp_only: bool = False,
+    global_scope: bool = False,
 ) -> list[str]:
+    if image_paths and provider not in IMAGE_ATTACHMENT_PROVIDERS:
+        raise ChatProviderError(f"{provider} image attachments are not supported by this adapter")
     if provider == "antigravity":
-        if image_paths:
-            raise ChatProviderError(
-                "Antigravity image attachments are not supported by this adapter"
-            )
         return antigravity_command(
             binary_path,
             model=model,
@@ -2407,10 +2571,6 @@ def _build_chat_command(
         # Grok receives effort through ACP session metadata, not argv.
         if provider != "grok" and effort and effort != "cli-default":
             raise ChatProviderError(f"{provider} does not support a separate effort option")
-        if image_paths:
-            raise ChatProviderError(
-                f"{provider} image attachments are not supported by this adapter"
-            )
         return acp_command(provider, binary_path)
     if provider in ADDITIONAL_PROVIDERS:
         provider_permission_args(provider, permission_mode)
@@ -2419,10 +2579,6 @@ def _build_chat_command(
                 f"{provider} does not support a separate effort option; "
                 "use a provider-native model ID"
             )
-        if image_paths:
-            raise ChatProviderError(
-                f"{provider} image attachments are not supported by this adapter"
-            )
         return cli_command(
             provider,
             prompt,
@@ -2430,6 +2586,7 @@ def _build_chat_command(
             effort=effort,
             executable=binary_path,
             extra_paths=extra_paths,
+            image_paths=image_paths,
         )
     if provider == "codex":
         data_dir = data_dir or get_data_dir()
@@ -2507,13 +2664,16 @@ def _build_chat_command(
                     f'mcp_servers.{swarm_name}.tools.swarm_action.approval_mode="approve"',
                 ]
             if trusted_organization_url is not None and any(
-                server.enabled and server.name == "organizations"
-                and server.type == "http" and server.url == trusted_organization_url
+                server.enabled
+                and server.name == "organizations"
+                and server.type == "http"
+                and server.url == trusted_organization_url
                 for server in resources.mcpServers
             ):
                 org_server = codex_mcp_server_names(resources, working_dir)["organizations"]
                 command += [
-                    "-c", f'mcp_servers.{org_server}.enabled_tools=["organization_action"]',
+                    "-c",
+                    f'mcp_servers.{org_server}.enabled_tools=["organization_action"]',
                     "-c",
                     f'mcp_servers.{org_server}.tools.organization_action.approval_mode="approve"',
                 ]
@@ -2562,14 +2722,19 @@ def _build_chat_command(
     trusted_gofer_cli = local_gofer_cli_path(data_dir)
     if trusted_gofer_cli.is_file():
         allowed_tools.append(f"Bash({trusted_gofer_cli} *)")
-    if mcp_only:
-        # Global management does not grant access to native file-editing tools.
-        # Replace resource_cli_args' built-in tool list, preserving MCP tools.
+    if global_scope:
+        # Global research can read skills and use selected web/MCP tools, while
+        # commands and native file edits wait for project selection.
+        allowed_tools = [
+            tool
+            for tool in allowed_tools
+            if tool not in {"Edit", "Write", "Bash"} and not tool.startswith("Bash(")
+        ]
+        native_tools = [tool for tool in allowed_tools if not tool.startswith("mcp__")]
         if "--tools" in command:
-            command[command.index("--tools") + 1] = ""
+            command[command.index("--tools") + 1] = ",".join(native_tools)
         else:
-            command += ["--tools", ""]
-        allowed_tools = [tool for tool in allowed_tools if tool.startswith("mcp__")]
+            command += ["--tools", ",".join(native_tools)]
     command += ["--allowedTools", *allowed_tools]
     for path in trusted_paths:
         command += ["--add-dir", str(path)]
@@ -2675,7 +2840,7 @@ def _prepare_prompt_for_cli(
     provider: str,
     binary_path: str,
     data_dir: Path,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     prompt: str,
     workflow: dict[str, Any] | None,
 ) -> str:
@@ -2721,10 +2886,10 @@ def _uses_windows_command_shim(binary_path: str) -> bool:
     return Path(binary_path.lower()).suffix in {".cmd", ".bat"}
 
 
-def _latest_user_message(messages: list[dict[str, str]]) -> str:
+def _latest_user_message(messages: list[dict[str, Any]]) -> str:
     for message in reversed(messages):
         if message.get("role") == "user":
-            return message.get("body", "")
+            return str(message.get("body") or "")
     return ""
 
 
@@ -2737,14 +2902,24 @@ async def _compact_chat_messages_if_needed(
     provider: str,
     model: str,
     effort: str | None,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     binary_path: str,
     data_dir: Path,
     working_dir: Path,
     limits: ResourceLimits,
     cancel_event: threading.Event | None = None,
+    token_budget: int | None = None,
+    additional_tokens: int = 0,
 ) -> tuple[list[dict[str, str]], bool]:
-    if _messages_size(messages) <= CHAT_COMPACT_CHAR_LIMIT:
+    if not messages:
+        return messages, False
+    if token_budget is None:
+        fits = _messages_size(messages) <= CHAT_COMPACT_CHAR_LIMIT
+        recent_budget = CHAT_COMPACT_CHAR_LIMIT // 2
+    else:
+        fits = estimate_tokens(_messages_transcript(messages)) + additional_tokens <= token_budget
+        recent_budget = max(0, token_budget - additional_tokens) // 2
+    if fits:
         return messages, False
 
     # Preserve a complete source before summarizing, including a single huge tool
@@ -2756,14 +2931,29 @@ async def _compact_chat_messages_if_needed(
     archive.write_text(transcript, encoding="utf-8")
     recent: list[dict[str, str]] = []
     for message in reversed(messages[-CHAT_COMPACT_RECENT_MESSAGES:]):
-        if _messages_size([message, *recent]) > CHAT_COMPACT_CHAR_LIMIT // 2:
+        size = (
+            _messages_size([message, *recent])
+            if token_budget is None
+            else estimate_tokens(_messages_transcript([message, *recent]))
+        )
+        if size > recent_budget:
             break
         recent.insert(0, message)
     older = messages[: len(messages) - len(recent)] if recent else messages
     summaries = []
     source = _messages_transcript(older)
     # Chunking is a compaction target, never a rejection or a prompt-size limit.
-    for offset in range(0, len(source), CHAT_COMPACT_CHAR_LIMIT):
+    # Native summarizer calls get half the destination budget for source text,
+    # leaving room for instructions/output. Keep legacy character chunks intact.
+    chunks = (
+        (
+            source[offset : offset + CHAT_COMPACT_CHAR_LIMIT]
+            for offset in range(0, len(source), CHAT_COMPACT_CHAR_LIMIT)
+        )
+        if token_budget is None
+        else token_chunks(source, max(1, token_budget // 2))
+    )
+    for chunk in chunks:
         if cancel_event is not None and cancel_event.is_set():
             return messages, False
         summaries.append(
@@ -2771,9 +2961,7 @@ async def _compact_chat_messages_if_needed(
                 provider=provider,
                 model=model,
                 effort=effort,
-                messages=[
-                    {"role": "user", "body": source[offset : offset + CHAT_COMPACT_CHAR_LIMIT]}
-                ],
+                messages=[{"role": "user", "body": chunk}],
                 binary_path=binary_path,
                 data_dir=data_dir,
                 working_dir=working_dir,
@@ -2810,7 +2998,7 @@ async def _summarize_chat_messages(
     provider: str,
     model: str,
     effort: str | None,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     binary_path: str,
     data_dir: Path,
     working_dir: Path,
@@ -2887,7 +3075,7 @@ async def _summarize_chat_messages(
     return summary or _fallback_chat_summary(messages)
 
 
-def _messages_size(messages: list[dict[str, str]]) -> int:
+def _messages_size(messages: list[dict[str, Any]]) -> int:
     return sum(len(str(message.get("body", ""))) for message in messages)
 
 
@@ -2904,7 +3092,7 @@ def _limits_from_workflow(
     return ResourceLimits(**{**limits.model_dump(), **raw_limits})
 
 
-def _messages_transcript(messages: list[dict[str, str]]) -> str:
+def _messages_transcript(messages: list[dict[str, Any]]) -> str:
     return "\n\n".join(
         f"{message.get('role', 'user').upper()}:\n{message.get('body', '')}"
         for message in messages
@@ -2912,7 +3100,7 @@ def _messages_transcript(messages: list[dict[str, str]]) -> str:
     )
 
 
-def _fallback_chat_summary(messages: list[dict[str, str]]) -> str:
+def _fallback_chat_summary(messages: list[dict[str, Any]]) -> str:
     transcript = _messages_transcript(messages)
     if len(transcript) <= 12_000:
         return transcript
@@ -2924,10 +3112,11 @@ def _fallback_chat_summary(messages: list[dict[str, str]]) -> str:
 def build_chat_prompt(
     provider: str,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     workflow: dict[str, Any] | None,
     gofer_cli_path: Path | None = None,
     agent_instructions: str | None = None,
+    session: ChatSession | None = None,
 ) -> str:
     from gofer.core.commit_message_format import commit_message_instructions
     from gofer.core.provider_preferences import commit_message_preference
@@ -2968,12 +3157,36 @@ def build_chat_prompt(
         'in the UI and normal conversation, never "REM". Explain the full name only when asked.\n'
         "Help users build workflows, edit code, debug, and understand their projects."
     )
+    tool_settings = (
+        f"run commands={str(resources.shell).lower()}, web search={str(resources.web).lower()}"
+    )
+    global_scope = ((workflow or {}).get("remThreads") or {}).get("global") is True
+    scope_tools = ""
+    if global_scope:
+        scope_tools = (
+            "Global scope retains selected web search, skills and MCP servers. "
+            "Select a project before working on its files. "
+        )
+        if provider == "codex":
+            scope_tools += (
+                "Codex retains the selected command setting under Read Only "
+                "until project selection; "
+                "the selected project permission mode applies afterward."
+            )
+        elif provider in {"claude_code", "cursor", "copilot", "opencode"}:
+            scope_tools += "Native commands and file edits are disabled until project selection."
+        else:
+            scope_tools += "Native tools follow the provider's CLI-managed permissions."
     instructions = f"""{identity}
 Your persona, conversation, project context, and resource selections belong to this
 thread and remain the same when the provider or model changes.
 
 Selected provider: {provider}
 Requested model: {model}
+Current turn tools: {tool_settings}.
+These are the current requested settings. Check the tools available in this turn;
+earlier messages about missing tools may describe a previous configuration.
+{scope_tools}
 
 {commit_instructions}
 
@@ -3001,6 +3214,8 @@ asks you to do so.
 Answer the latest user message. Be concrete and concise. For workflow changes, reference
 exact nodes, routes, inputs, or Rattish fields. Do not execute a workflow without authorization.
 Context contains reference data; the request contains the conversation with its role labels."""
+    if session is not None:
+        return session.prompt(instructions, workflow_context, transcript)
     return prompt_envelope(
         instructions=instructions,
         context=workflow_context,

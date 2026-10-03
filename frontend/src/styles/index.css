@@ -863,3 +863,21 @@ select:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .rem-thread-launch { box-shadow: inset 3px 0 0 #6366f1; }
 }
+
+/* Continuous ancestry lanes sit beside variable-height commit details. */
+.scm-history-graph { --scm-graph-background: rgb(var(--color-surface)); --scm-lane-0: #0067a5; --scm-lane-1: #956000; --scm-lane-2: #9f367c; --scm-lane-3: #007565; }
+.dark .scm-history-graph { --scm-graph-background: #18181a; --scm-lane-0: #56b4e9; --scm-lane-1: #f0c75e; --scm-lane-2: #e7a1d0; --scm-lane-3: #59d9b4; }
+.scm-history-row { display: flex; position: relative; min-height: 36px; }
+.scm-history-lane { position: relative; flex-shrink: 0; align-self: stretch; }
+.scm-history-lane > svg { position: absolute; top: 0; left: 0; }
+.scm-history-lower { position: absolute; top: 18px; bottom: 0; left: 0; right: 0; }
+.scm-history-lower > svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.scm-history-tracking { margin-left: 3px; font-weight: 600; }
+.scm-history-dot { position: absolute; top: 14px; width: 8px; height: 8px; margin-left: -4px; border: 1.5px solid; border-radius: 50%; }
+.scm-history-head { width: 10px; height: 10px; margin-left: -5px; top: 13px; border-width: 2px; }
+.scm-history-ref { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; overflow-wrap: anywhere; border-radius: 4px; padding: 0 4px; font-size: 9px; line-height: 15px; background: #e0efff; color: #165e9c; }
+.scm-history-ref-remote { background: #eee3ff; color: #7444a9; }
+.scm-history-ref-tag { background: #dcf3eb; color: #196c54; }
+.dark .scm-history-ref-local { background: #193a57; color: #9bcfff; }
+.dark .scm-history-ref-remote { background: #3c2856; color: #d0b1f3; }
+.dark .scm-history-ref-tag { background: #173e32; color: #8addbe; }

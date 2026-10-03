@@ -2228,6 +2228,12 @@ export default function DagCanvas({
 
   function handleCanvasWheel(event) {
     event.preventDefault();
+    if (!event.ctrlKey && !event.metaKey) {
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? event.currentTarget.clientHeight : 1;
+      setViewport(current => ({ ...current, x: current.x - event.deltaX * unit, y: current.y - event.deltaY * unit }));
+      return;
+    }
+    if (!event.deltaY) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const pointerX = event.clientX - rect.left;
     const pointerY = event.clientY - rect.top;

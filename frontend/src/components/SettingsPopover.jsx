@@ -37,6 +37,7 @@ import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevice
 import {
   DEFAULT_APP_SETTINGS,
   KEYBINDING_COMMANDS,
+  CHORD_COMMAND_IDS,
   eventToKeybinding,
   formatKeybinding,
   keybindingConflictIds,
@@ -291,6 +292,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("search", "Search URL", "Use {query} where the encoded search terms belong.", <TextControl value={settings.browser.searchUrl} placeholder="https://www.google.com/search?q={query}" onCommit={(value) => onChange("browser.searchUrl", value)} />),
   ];
   if (category === "terminal") return [
+    row("shell", "Shell", "Use your account's login shell, or select bash or zsh for new terminals. Windows uses PowerShell.", <SelectControl value={settings.terminal.shell} onChange={value => onChange("terminal.shell", value)} options={[["system", "System login shell"], ["bash", "bash"], ["zsh", "zsh"]]} />),
     row("fontSize", "Font size", "Text size in new and open terminal sessions.", <NumberControl value={settings.terminal.fontSize} min={8} max={28} step={0.5} suffix="px" onCommit={(value) => onChange("terminal.fontSize", value)} />),
     row("lineHeight", "Line height", "Vertical spacing in terminal sessions.", <NumberControl value={settings.terminal.lineHeight} min={1} max={2} step={0.05} onCommit={(value) => onChange("terminal.lineHeight", value)} />),
     row("cursor", "Blinking cursor", "Animate the terminal cursor while it is ready for input.", <SwitchControl checked={settings.terminal.cursorBlink} onChange={(value) => onChange("terminal.cursorBlink", value)} />),
@@ -320,6 +322,7 @@ function assistantRows(settings, onChange, row, providerState) {
     { searchText: "Rem commit messages provider model auto commit changes template format", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
     row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
     row("avatar", "Show Rem avatar", "Show Rem on the chat welcome screen.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
+    row("autoHideThoughts", "Auto-hide thoughts", "Collapse thoughts when Rem replies. You can reopen them at any time.", <SwitchControl checked={settings.assistant.autoHideThoughts} onChange={(value) => onChange("assistant.autoHideThoughts", value)} />),
     row("avatarAnimation", "Animate Rem", "Greet you when the pane opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
     row("swarmAccess", "Swarm access", "Let Rem manage project teams and runs when asked. Instructions load on demand. Changes apply to the next message.", <SwitchControl checked={settings.assistant.swarmAccessEnabled} onChange={(value) => onChange("assistant.swarmAccessEnabled", value)} />),
     row("resources", "Rem resources", "Defaults copied into new threads. Each thread can change its own selection.", <RemResources value={settings.assistant.resources} onChange={(value) => onChange("assistant.resources", value)} />),
@@ -708,6 +711,7 @@ function KeybindingControl({ binding, command, conflict = "", onChange }) {
             }
             const next = eventToKeybinding(event);
             if (!next) return;
+            if (!CHORD_COMMAND_IDS.has(command.id)) { commit(next); return; }
             window.clearTimeout(chordTimeoutRef.current);
             if (pendingChord) {
               commit(`${pendingChord} ${next}`);

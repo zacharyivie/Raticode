@@ -3,6 +3,18 @@ import { apiUrl } from "./api.js";
 export const CHAT_ATTACHMENT_MAX_COUNT = 5;
 export const CHAT_ATTACHMENT_MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const CHAT_ATTACHMENT_MAX_TOTAL_BYTES = 40 * 1024 * 1024;
+export const CHAT_IMAGE_WARNING_MS = 4000;
+
+export function providerSupportsChatImages(provider, capability, model) {
+  const modelId = !model || model === "cli-default" ? capability?.defaultModel : model;
+  const selectedModel = capability?.models?.find(item => item.id === modelId);
+  if (selectedModel?.supportsImages === false) return false;
+  return capability?.supportsImages ?? ["codex", "claude_code", "cursor", "copilot", "opencode", "grok"].includes(provider);
+}
+
+export function isChatImage(file) {
+  return String(file?.type || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|tiff?|svg|avif|heic)$/i.test(file?.name || "");
+}
 
 export function transferContainsFiles(dataTransfer) {
   return Array.from(dataTransfer?.types ?? []).includes("Files")
@@ -67,7 +79,9 @@ export async function uploadChatAttachments(attachments, threadId, fetchImpl = f
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || `Attachment upload returned ${response.status}`);
-  return payload.attachments ?? [];
+  const uploaded = payload.attachments ?? [];
+  let index = 0;
+  return attachments.map(attachment => attachment.file ? uploaded[index++] : attachment).filter(Boolean);
 }
 
 export async function transcribeAudioBlob(blob, fetchImpl = fetch) {

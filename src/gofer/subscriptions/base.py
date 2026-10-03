@@ -6,6 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.core.thoughts import summarize_thought
 from gofer.subscriptions.usage import track_invocation
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
+from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
 
 
 class Subscription(ABC):
@@ -38,6 +40,33 @@ class Subscription(ABC):
         stderr_chunks: list[str] = []
         thought_chunks: list[str] = []
         returncode = 1
+        protocol = ProtocolLines()
+        final_message: str | None = None
+        protocol_usage: dict[str, object] = {}
+        protocol_error: str | None = None
+        provider_error: str | None = None
+        local_limit_error = False
+
+        def observe_line(line: str) -> None:
+            nonlocal final_message, protocol_error, provider_error
+            payloads = _json_payloads(line)
+            if not payloads:
+                if line.lstrip().startswith(("{", "[")):
+                    protocol_error = "Provider emitted malformed JSON output"
+                return
+            for payload in payloads:
+                if payload.get("type") in {"error", "turn.failed"} or payload.get("is_error"):
+                    error = payload.get("error")
+                    if isinstance(error, dict):
+                        error = error.get("message")
+                    provider_error = str(
+                        error or payload.get("result") or "Provider reported a failed response"
+                    )
+            candidate, metadata = self._parse_provider_output(line, "")
+            protocol_usage.update(metadata)
+            if candidate != line:
+                final_message = retained_text(candidate)
+
         with tempfile.TemporaryDirectory(prefix="gofer-agent-prompt-") as prompt_dir:
             prompt_path = Path(prompt_dir) / "prompt.md"
             prompt_path.write_text(prompt, encoding="utf-8")
@@ -49,7 +78,7 @@ class Subscription(ABC):
                 extra_paths or [],
                 provider_settings,
             )
-            async for event in stream_subprocess(
+            source = stream_subprocess(
                 cmd,
                 cancel_event=cancel_event,
                 cwd=working_dir,
@@ -60,38 +89,70 @@ class Subscription(ABC):
                     if max_output_bytes is not None
                     else DEFAULT_RESOURCE_LIMITS.max_subprocess_output_bytes
                 ),
-            ):
-                if event["type"] == "chunk":
-                    text = event["text"]
-                    if not text:
-                        continue
-                    payloads = _json_payloads(text)
-                    if payloads:
-                        for thought in _live_thoughts_from_payloads(payloads):
-                            thought = summarize_thought(thought)
-                            if not thought:
+                protocol_stdout=True,
+            )
+            try:
+                async with aclosing(source):
+                    async for event in source:
+                        if event["type"] == "chunk":
+                            text = event["text"]
+                            if not text:
                                 continue
-                            thought_chunks.append(thought)
-                            if on_thought is not None:
-                                on_thought(thought)
-                    else:
-                        thought = summarize_thought(text)
-                        if not thought:
+                            if event["stream"] == "stdout":
+                                stdout_chunks[:] = [retained_text("".join(stdout_chunks) + text)]
+                            else:
+                                stderr_chunks.append(text)
+                            if event["stream"] == "stdout":
+                                complete = protocol.feed(text)
+                                for line in complete:
+                                    observe_line(line)
+                                payloads = [p for line in complete for p in _json_payloads(line)]
+                            else:
+                                payloads = _json_payloads(text)
+                            if payloads:
+                                for thought in _live_thoughts_from_payloads(payloads):
+                                    thought = summarize_thought(thought)
+                                    if not thought:
+                                        continue
+                                    thought_chunks.append(thought)
+                                    if on_thought is not None:
+                                        on_thought(thought)
+                            elif (
+                                not protocol.buffer.lstrip().startswith(("{", "["))
+                                or event["stream"] == "stderr"
+                            ):
+                                thought = summarize_thought(text)
+                                if not thought:
+                                    continue
+                                thought_chunks.append(thought)
+                                if on_thought is not None:
+                                    on_thought(thought)
                             continue
-                        thought_chunks.append(thought)
-                        if on_thought is not None:
-                            on_thought(thought)
-                    if event["stream"] == "stdout":
-                        stdout_chunks.append(text)
-                    else:
-                        stderr_chunks.append(text)
-                    continue
-                if event["stream"] is None:
-                    returncode = event["returncode"] if event["returncode"] is not None else 1
+                        if event["stream"] is None:
+                            returncode = (
+                                event["returncode"] if event["returncode"] is not None else 1
+                            )
+            except ProtocolRecordLimitError as exc:
+                protocol_error = str(exc)
+                local_limit_error = True
+                returncode = 1
         duration = time.monotonic() - start
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
+        if protocol.buffer:
+            observe_line(protocol.buffer)
         message, usage_metadata = self._parse_provider_output(stdout, stderr)
+        message = (
+            (protocol_error if local_limit_error else None)
+            or provider_error
+            or (stderr.strip() if returncode else None)
+            or protocol_error
+            or final_message
+            or message
+        )
+        if provider_error or protocol_error:
+            returncode = returncode or 1
+        usage_metadata.update(protocol_usage)
         return AgentResult(
             agent_id="",
             success=returncode == 0,

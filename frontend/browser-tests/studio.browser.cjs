@@ -191,6 +191,13 @@ async function exerciseRemSteering() {
     document.querySelector("button[title='New thread']")?.click();
   });
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-chat-composer] textarea"))));
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent.trim().endsWith("tools, skills & MCP")).click());
+  await waitFor(() => evaluate(() => [...document.querySelectorAll("label")].some(label => label.textContent === "Search the web")));
+  await evaluate(() => {
+    const web = [...document.querySelectorAll("label")].find(label => label.textContent === "Search the web").querySelector("input");
+    if (web.checked) web.click();
+  });
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent.trim().endsWith("tools, skills & MCP")).click());
   // Use the current provider if this pane was already mounted. Catalog selection is
   // exercised separately by React tests; this rendered flow exercises steering.
   await evaluate(() => {
@@ -202,8 +209,31 @@ async function exerciseRemSteering() {
   await waitFor(() => evaluate(() => !document.querySelector("button[title='Send message']").disabled), 25, "Rem draft ready to send");
   await evaluate(() => document.querySelector("button[title='Send message']").click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("button[aria-label='Steer Rem']"))));
+  await waitFor(() => evaluate(() => Boolean(window.__steeringTurn)));
   assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").disabled), false);
   assert.equal(await evaluate(() => [...document.querySelectorAll("[data-chat-pane] [data-picker-trigger]")].every(button => button.disabled)), true);
+  assert.equal(await evaluate(() => window.__steeringTurn.workflow.remResources.web), false);
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent.trim().endsWith("tools, skills & MCP")).click());
+  await waitFor(() => evaluate(() => document.body.textContent.includes("Tool changes apply when you send your next instruction")));
+  await evaluate(() => [...document.querySelectorAll("label")].find(label => label.textContent === "Search the web").querySelector("input").click());
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Add skill").click());
+  const typeResource = (label, value) => evaluate(async ({ label, value }) => {
+    const input = document.querySelector(`[aria-label="${label}"]`);
+    input.focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise(requestAnimationFrame);
+  }, { label, value });
+  await typeResource("Skill 1 path", "/temporary");
+  await typeResource("Skill 1 path", "");
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="Skill 1 path"]').value), "");
+  await typeResource("Skill 1 path", "/skills/research");
+  await evaluate(() => document.querySelector('[aria-label="Skill 1 path"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Add MCP server").click());
+  await typeResource("Server 1 name", "docs");
+  await evaluate(() => document.querySelector('[aria-label="Server 1 name"]').blur());
+  await typeResource("Server 1 URL", "https://example.com/mcp");
+  await evaluate(() => document.querySelector('[aria-label="Server 1 URL"]').blur());
   const typeDraft = text => evaluate(text => {
     const textarea = document.querySelector("[data-chat-composer] textarea");
     textarea.focus();
@@ -224,6 +254,11 @@ async function exerciseRemSteering() {
     textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   });
   await waitFor(() => evaluate(() => window.__steeringRequests.some(request => request.text === "Preserve the API")));
+  const resources = await evaluate(() => window.__steeringRequests.at(-1).resources);
+  assert.equal(resources.web, true);
+  assert.deepEqual(resources.skills, [{ path: "/skills/research", enabled: true }]);
+  assert.equal(resources.mcpServers[0].name, "docs");
+  assert.equal(resources.mcpServers[0].url, "https://example.com/mcp");
   assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").value), "");
   assert.equal(await evaluate(() => document.querySelector("button[aria-label='Attach files']").disabled), false);
   await evaluate(() => {

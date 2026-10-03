@@ -1,3 +1,6 @@
+import { EDITOR_COMMAND_IDS, editorCommandMetadata, pasteIntoEditor } from "../lib/editorCommands.js";
+import { containsFileTransfer, droppedFileEntries } from "../lib/fileTransfers.js";
+import { useReducedMotion } from "../lib/useReducedMotion.js";
 import { languageForPath } from "../lib/editorLanguage.js";
 export { languageForPath } from "../lib/editorLanguage.js";
 import { pathWithin, pathMatchesChange } from "../lib/workspacePaths.js";
@@ -40,7 +43,8 @@ import {
 } from "lucide-react";
 import { diagnosticsToMarkers, diagnosticToMarker } from "../lib/rattishRanges.js";
 import {
-  DEFAULT_APP_SETTINGS,
+  formatKeybinding, DEFAULT_APP_SETTINGS,
+  KEYBINDING_COMMANDS,
   matchesCommand,
   settingBinding,
 } from "../lib/settings.js";
@@ -77,6 +81,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   onOpenFile,
   onOpenProject,
   onOpenPath,
+  onDropPaths,
   onOpenPathsChange,
   onPinPath,
   onRattishContentChange,
@@ -101,18 +106,62 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   const draggedPathRef = useRef("");
   const documentPathOrderRef = useRef(openPaths);
   const [fileStates, setFileStates] = useState({});
+  const [diffOnOpenPaths, setDiffOnOpenPaths] = useState(() => new Set(navigationRequest?.diff ? [navigationRequest.path] : []));
+  // Git comparisons still need to show the original version of a deleted file.
+  const physicalPathsKey = JSON.stringify(openPaths.filter(path => !browserTabs[path] && !workflowTabs[path] && !parseCommitDiffPath(path) && !diffOnOpenPaths.has(path)));
   const editorLifetimesRef = useRef(new Map());
   reconcileEditorLifetimes(editorLifetimesRef.current, openPaths);
   useEffect(() => {
     setFileStates((current) => retainOpenEditorStates(current, openPaths));
   }, [openPaths]);
+  useEffect(() => {
+    const inspect = window.goferDesktop?.workspace?.getPathInfo;
+    if (!active || !inspect) return undefined;
+    let disposed = false;
+    const paths = JSON.parse(physicalPathsKey);
+    const lifetimes = new Map(paths.map(path => [path, editorLifetimesRef.current.get(path)]));
+    async function checkFiles() {
+      const results = await Promise.all(paths.map(async path => {
+        try { return { path, info: await inspect(path) }; }
+        catch { return { path, info: null }; }
+      }));
+      if (disposed) return;
+      for (const { path, info } of results) {
+        if (info?.exists !== false || !acceptsEditorState(editorLifetimesRef.current, path, lifetimes.get(path))) continue;
+        textEditorRefs.current.get(path)?.discard?.();
+        textEditorSessions.delete(path);
+      }
+      setFileStates(current => {
+        let next = current;
+        for (const { path, info } of results) {
+          if (!info || !acceptsEditorState(editorLifetimesRef.current, path, lifetimes.get(path))) continue;
+          const missing = info.exists === false;
+          if (missing ? current[path]?.missing : !current[path]?.missing) continue;
+          if (next === current) next = { ...current };
+          next[path] = { content: null, dirty: false, error: "", loading: !missing, saving: false, missing };
+        }
+        return next;
+      });
+    }
+    const stop = startPolling(checkFiles, { immediate: true });
+    window.addEventListener("gofer:git-files-changed", checkFiles);
+    window.addEventListener("gofer:code-files-changed", checkFiles);
+    return () => {
+      disposed = true;
+      stop();
+      window.removeEventListener("gofer:git-files-changed", checkFiles);
+      window.removeEventListener("gofer:code-files-changed", checkFiles);
+    };
+  }, [active, physicalPathsKey]);
+
   const [browserViewStates, setBrowserViewStates] = useState({});
   const [documentModes, setDocumentModes] = useState({});
-  const [diffOnOpenPaths, setDiffOnOpenPaths] = useState(() => new Set());
   const [gitGroups, setGitGroups] = useState({});
   const [tabMenu, setTabMenu] = useState(null);
   const [unsavedClosePrompt, setUnsavedClosePrompt] = useState(null);
   const [draggedPath, setDraggedPath] = useState("");
+  const [fileDropActive, setFileDropActive] = useState(false);
+  const [fileDropError, setFileDropError] = useState("");
   const [splitGroup, setSplitGroup] = useState(null);
   const [primaryActivePath, setPrimaryActivePath] = useState("");
   const [splitActivePath, setSplitActivePath] = useState("");
@@ -152,6 +201,21 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   function endTabDrag() {
     draggedPathRef.current = "";
     setDraggedPath("");
+  }
+
+  async function openDroppedFiles(event) {
+    if (!containsFileTransfer(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setFileDropActive(false);
+    setFileDropError("");
+    try {
+      const { entries } = await droppedFileEntries(event.dataTransfer);
+      const paths = entries.filter(entry => !entry.isDirectory).map(entry => entry.path);
+      if (!paths.length) throw new Error("Drop files here to open editor tabs. Drop folders in the file pane to import them.");
+      if (onDropPaths) onDropPaths(paths);
+      else for (const path of paths) await onOpenPath?.(path);
+    } catch (cause) { setFileDropError(cause.message || "Unable to open dropped files."); }
   }
 
   function draggedTabFrom(event) {
@@ -336,6 +400,8 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     if (!navigationRequest.diff) setDiffOnOpenPaths((current) => withoutSetValue(current, navigationRequest.path));
     if (!navigationRequest.lineNumber && !navigationRequest.diff) return;
     if (navigationRequest.diff) {
+      setFileStates(current => current[navigationRequest.path]?.missing
+        ? { ...current, [navigationRequest.path]: { content: null, dirty: false, error: "", loading: true, saving: false } } : current);
       setDiffOnOpenPaths((current) => withSetValue(current, navigationRequest.path));
       setGitGroups((current) => ({ ...current, [navigationRequest.path]: navigationRequest.gitGroup || "" }));
     }
@@ -357,13 +423,19 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       },
       revealDiagnostic: (diagnostic) =>
         textEditorRefs.current.get(sourcePath)?.revealDiagnostic?.(diagnostic),
-      runCommand: (command) => textEditorRefs.current.get(currentPath)?.runCommand?.(command),
+      runCommand: (command) => {
+        if (command === "edit.find" && browserViewStates[currentPath]?.ready) {
+          window.dispatchEvent(new CustomEvent("gofer:find-page", { detail: { clientId: browserTabs[currentPath] ? currentPath : `html:${currentPath}` } }));
+          return true;
+        }
+        return textEditorRefs.current.get(currentPath)?.runCommand?.(command);
+      },
       save: () => textEditorRefs.current.get(sourcePath)?.save?.(),
       saveActive: () => workflowTabs[currentPath]
         ? onWorkflowTabAction?.(workflowTabs[currentPath], "save")
         : textEditorRefs.current.get(currentPath)?.save?.(),
     }),
-    [closeWorkspacePath, currentPath, sourcePath, workflowTabs, onWorkflowTabAction, fileStates],
+    [closeWorkspacePath, currentPath, sourcePath, workflowTabs, onWorkflowTabAction, fileStates, browserViewStates, browserTabs],
   );
 
   useEffect(() => {
@@ -388,7 +460,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       currentPath,
       settings,
     });
-    if (!action) return;
+    if (!action || (["find", "suppress-find"].includes(action) && !textEditorRefs.current.get(currentPath))) return;
     event.preventDefault();
     event.stopPropagation();
     if (action === "new") {
@@ -398,6 +470,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     if (action === "save") {
       if (workflowTabs[currentPath]) void onWorkflowTabAction?.(workflowTabs[currentPath], "save");
       else void textEditorRefs.current.get(currentPath)?.save?.();
+      return;
+    }
+    if (action === "suppress-find") return;
+    if (action === "find") {
+      textEditorRefs.current.get(currentPath)?.runCommand?.("edit.find");
       return;
     }
     if (action === "toggle-word-wrap") {
@@ -570,6 +647,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       const browserTab = browserTabs[path];
       const html = !browserTab && isHtmlPath(path);
       const image = !browserTab && isImagePath(path);
+      const media = !browserTab && mediaKind(path);
       const pdf = !browserTab && isPdfPath(path);
       const svg = !browserTab && isSvgPath(path);
       const mode = codeDocumentMode(path, documentModes, settings.editor);
@@ -582,7 +660,12 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           className={`flex min-h-0 min-w-0 overflow-hidden flex-col ${selected ? "visible z-10" : "invisible z-0 pointer-events-none"} ${splitGroup && column === 2 ? "border-l border-line" : ""}`}
           style={{ gridColumn: column, gridRow: 2, contentVisibility: selected ? "visible" : "hidden" }}
         >
-          {commitDiff ? <CommitDiff {...commitDiff} theme={theme} editorSettings={settings.editor} /> : workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
+          {fileStates[path]?.missing ? (
+            <section aria-label={`${fileName(path)} unavailable`} className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 bg-white px-6 text-center dark:bg-[#19191b]">
+              <p role="status" className="text-sm text-ink">This file doesn&apos;t exist anymore</p>
+              <button type="button" className="rounded border border-line px-4 py-2 text-xs text-ink hover:bg-slate-100 focus-visible:outline-brand" onClick={() => finishClosingWorkspacePaths([path])}>Close Tab</button>
+            </section>
+          ) : commitDiff ? <CommitDiff {...commitDiff} theme={theme} editorSettings={settings.editor} /> : workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
             <PreviewBrowser
               active={active && currentPath === path}
               applicationKeybindings={settings.keybindings}
@@ -628,8 +711,8 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                 if (browserTab) onBrowserStateChange?.(path, nextState);
               }}
             />
-          ) : image ? (
-            <ImagePreview path={path} />
+          ) : media ? (
+            <MediaPreview path={path} active={active && selected} />
           ) : (
           <TextCodeEditor
             active={active && currentPath === path}
@@ -674,6 +757,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
             }}
             onStateChange={(nextState) => {
               if (!acceptsEditorState(editorLifetimesRef.current, path, editorLifetime)) return;
+              if (nextState.missing) textEditorRefs.current.get(path)?.discard?.();
               setFileStates((current) => acceptsEditorState(editorLifetimesRef.current, path, editorLifetime)
                 ? { ...current, [path]: nextState } : current);
               if (nextState.dirty) onPinPath?.(path);
@@ -708,9 +792,15 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   return (
     <section
       ref={workspaceRef}
-      className="code-workspace flex min-h-0 flex-1 flex-col bg-white"
+      className="code-workspace relative flex min-h-0 flex-1 flex-col bg-white"
       aria-label="Code workspace"
+      onDragEnterCapture={event => { if (containsFileTransfer(event.dataTransfer)) { event.preventDefault(); setFileDropActive(true); } }}
+      onDragOverCapture={event => { if (containsFileTransfer(event.dataTransfer)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "copy"; } }}
+      onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFileDropActive(false); }}
+      onDropCapture={openDroppedFiles}
     >
+      {fileDropActive ? <div aria-label="Open dropped files" className="absolute inset-0 z-50 grid place-items-center border-2 border-brand bg-canvas/90 text-sm text-ink">Drop files to open new tabs</div> : null}
+      {fileDropError ? <div role="alert" className="flex items-center gap-2 border-b border-line px-3 py-2 text-xs text-red-700"><span className="flex-1">{fileDropError}</span><button type="button" aria-label="Dismiss file drop error" onClick={() => setFileDropError("")}><X size={13} /></button></div> : null}
       <div
         className="relative grid min-h-0 flex-1"
         style={{
@@ -748,9 +838,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                   Open a project, a single file, or a browser tab.
                 </p>
                 <div className="mt-4 space-y-2">
-                  <EmptyWorkspaceAction icon={FolderOpen} label="Open Project" shortcut="Ctrl+K, Ctrl+O" onClick={onOpenProject} />
-                  <EmptyWorkspaceAction icon={FileText} label="Open File" shortcut="Ctrl+O" onClick={onOpenFile} />
-                  <EmptyWorkspaceAction icon={Globe} label="Open Browser" shortcut="Ctrl+J" onClick={() => onOpenBrowser?.()} />
+                  <EmptyWorkspaceAction icon={FolderOpen} label="Open Project" shortcut={formatKeybinding(settingBinding(settings, "project.open"))} onClick={onOpenProject} />
+                  <EmptyWorkspaceAction icon={FileText} label="Open File" shortcut={formatKeybinding(settingBinding(settings, "file.open"))} onClick={onOpenFile} />
+                  <EmptyWorkspaceAction icon={Globe} label="Open Browser" shortcut={formatKeybinding(settingBinding(settings, "browser.open"))} onClick={() => onOpenBrowser?.()} />
                 </div>
               </div>
               {recentPaths.length ? (
@@ -1050,10 +1140,15 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   const savedContentRef = useRef("");
   const savedVersionRef = useRef(null);
   const savingRef = useRef(false);
+  const recoveryConflictRef = useRef(false);
   const autosaveTimerRef = useRef(null);
   const scheduleAutosaveRef = useRef(() => {});
   const editableRef = useRef(false);
+  const [commands, setCommands] = useState({});
   const diagnosticsRef = useRef(diagnostics);
+  const reduceMotion = useReducedMotion();
+  const reduceMotionRef = useRef(reduceMotion);
+  reduceMotionRef.current = reduceMotion;
   const editorSettingsRef = useRef(editorSettings);
   const gitBaselineRef = useRef(null);
   const onContentChangeRef = useRef(onContentChange);
@@ -1082,7 +1177,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
 
   useEffect(() => {
     function gitChanged(event) {
-      if (!pathMatchesChange(path, event.detail?.rootPath, true)) return;
+      if (!pathMatchesChange(path, event.detail?.rootPath || event.detail?.path, true)) return;
       const model = modelRef.current;
       if (model && editableRef.current && model.getValue() !== savedContentRef.current) {
         setState((current) => ({ ...current, error: "This file changed on disk. Your unsaved edits have been kept." }));
@@ -1097,9 +1192,11 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       editorRef.current?.updateOptions({ readOnly: event.detail.busy || !editableRef.current });
     }
     window.addEventListener("gofer:git-files-changed", gitChanged);
+    window.addEventListener("gofer:code-files-changed", gitChanged);
     window.addEventListener("gofer:git-working-tree-busy", gitBusy);
     return () => {
       window.removeEventListener("gofer:git-files-changed", gitChanged);
+      window.removeEventListener("gofer:code-files-changed", gitChanged);
       window.removeEventListener("gofer:git-working-tree-busy", gitBusy);
     };
   }, [path]);
@@ -1144,6 +1241,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     const content = model.getValue();
     const savingVersion = model.getAlternativeVersionId();
     if (content === savedContentRef.current) return true;
+    if (recoveryConflictRef.current && !window.confirm("The file changed on disk while Raticode was closed. Replace it with your recovered draft?")) return null;
     let fileWritten = false;
     window.clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = null;
@@ -1159,6 +1257,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         await writeTextFile({ targetPath: path, content });
       }
       fileWritten = true;
+      recoveryConflictRef.current = false;
       savedContentRef.current = content;
       savedVersionRef.current = savingVersion;
       const currentContent = model.getValue();
@@ -1196,7 +1295,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     scheduleAutosaveRef.current = () => {
       window.clearTimeout(autosaveTimerRef.current);
       autosaveTimerRef.current = null;
-      if (!autosaveEnabled) return;
+      if (!autosaveEnabled || recoveryConflictRef.current) return;
       autosaveTimerRef.current = window.setTimeout(() => {
         autosaveTimerRef.current = null;
         if (savingRef.current) {
@@ -1249,8 +1348,8 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   }, [navigationRequest]);
 
   useEffect(() => {
-    onStateChangeRef.current?.(state);
-  }, [state]);
+    onStateChangeRef.current?.({ ...state, commands });
+  }, [state, commands]);
 
   useImperativeHandle(ref, () => ({
     acceptContent: (content) => {
@@ -1286,28 +1385,15 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
     runCommand: (command) => {
       const editor = editorRef.current;
       if (!editor) return false;
-      const commandIds = {
-        "edit.undo": "undo",
-        "edit.redo": "redo",
-        "edit.cut": "editor.action.clipboardCutAction",
-        "edit.copy": "editor.action.clipboardCopyAction",
-        "edit.paste": "editor.action.clipboardPasteAction",
-        "edit.find": "actions.find",
-        "edit.replace": "editor.action.startFindReplaceAction",
-        "selection.selectAll": "editor.action.selectAll",
-        "selection.expand": "editor.action.smartSelect.expand",
-        "selection.shrink": "editor.action.smartSelect.shrink",
-        "selection.copyLineUp": "editor.action.copyLinesUpAction",
-        "selection.copyLineDown": "editor.action.copyLinesDownAction",
-        "selection.moveLineUp": "editor.action.moveLinesUpAction",
-        "selection.moveLineDown": "editor.action.moveLinesDownAction",
-        "selection.addCursorAbove": "editor.action.insertCursorAbove",
-        "selection.addCursorBelow": "editor.action.insertCursorBelow",
-        "edit.toggleLineComment": "editor.action.commentLine",
-        "edit.formatDocument": "editor.action.formatDocument",
-      };
-      const commandId = commandIds[command];
+
+      const commandId = EDITOR_COMMAND_IDS[command];
       if (!commandId) return false;
+      if (command === "edit.paste") {
+        void pasteIntoEditor(editor, window.goferDesktop?.clipboard?.readText, editor.getOption(monacoRef.current.editor.EditorOption.readOnly)).catch(error => setState(current => ({ ...current, error: error.message })));
+        return true;
+      }
+      const action = editor.getAction(commandId);
+      if (action && !action.isSupported()) { setState(current => ({ ...current, error: "This command is unavailable for the active document." })); return false; }
       editor.focus();
       editor.trigger("raticode-menu", commandId, null);
       return true;
@@ -1318,11 +1404,12 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   useEffect(() => {
     let disposed = false;
     let contentListener;
+    let commandContextListener;
     let remActions;
     let originalRemActions;
     let conflictControls;
     let resizeObserver;
-    import("../lib/monaco.js").then(async ({ loadRattishMonaco }) => {
+    import("../lib/monaco.js").then(async ({ loadRattishMonaco, prepareLanguageServices }) => {
       if (disposed || !containerRef.current) return;
       const monaco = loadRattishMonaco();
       monacoRef.current = monaco;
@@ -1336,10 +1423,37 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       editableRef.current = false;
       const initialGitBaseline = await refreshGitBaseline();
       if (disposed || !containerRef.current) return;
+      const canRestoreSession = session && !initialGitBaseline?.deleted && !initialGitBaseline?.binary && gitGroup !== "staged";
+      const comparisonOnly = (initialGitBaseline?.deleted && diffMode) || gitGroup === "staged";
+      const readTextFile = window.goferDesktop?.textFiles?.read;
+      let initialRead;
+      recoveryConflictRef.current = false;
+      if (canRestoreSession && session.recovered && readTextFile) {
+        try { const disk = await readTextFile(path); recoveryConflictRef.current = Boolean(disk?.missing || disk.content !== session.savedContent); }
+        catch { recoveryConflictRef.current = true; }
+        if (disposed) return;
+      }
+      if (!canRestoreSession && readTextFile) {
+        try {
+          initialRead = initialGitBaseline?.binary ? { content: "Binary file changed. Text comparison is unavailable." }
+            : comparisonOnly ? { content: initialGitBaseline?.modifiedContent || "" } : await readTextFile(path);
+        } catch (error) {
+          if (disposed) return;
+          setState({ content: null, dirty: false, error: isMissingFileError(error) ? "" : error.message || "Unable to open file", missing: isMissingFileError(error), loading: false, saving: false });
+          return;
+        }
+        if (disposed || !containerRef.current) return;
+        // Missing files never create an editor or retain their old text model.
+        if (initialRead?.missing) {
+          textEditorSessions.delete(path);
+          setState({ content: null, dirty: false, error: "", missing: true, loading: false, saving: false });
+          return;
+        }
+      }
       const model = monaco.editor.createModel(
         session?.content ?? "",
         languageForPath(path),
-        monaco.Uri.parse(`file://${encodeURI(path)}`),
+        monaco.Uri.file(path),
       );
       modelRef.current = model;
       savedVersionRef.current = session?.content === session?.savedContent ? model.getAlternativeVersionId() : null;
@@ -1351,7 +1465,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       const initialEditorSettings = editorSettingsRef.current;
       const editorOptions = {
         automaticLayout: false,
-        cursorBlinking: "smooth",
+        cursorBlinking: reduceMotionRef.current ? "solid" : "smooth",
         fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
         fontSize: initialEditorSettings.fontSize,
         folding: true,
@@ -1360,7 +1474,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         minimap: { enabled: initialEditorSettings.minimap, maxColumn: 80, renderCharacters: false },
         padding: { top: 12, bottom: 20 },
         scrollBeyondLastLine: false,
-        smoothScrolling: true,
+        smoothScrolling: !reduceMotionRef.current,
         tabSize: initialEditorSettings.tabSize,
         theme: theme === "dark" ? "gofer-rattish-dark" : "gofer-rattish-light",
         wordWrap: initialEditorSettings.wordWrap ? "on" : "off",
@@ -1384,6 +1498,16 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         editor = monaco.editor.create(containerRef.current, { ...editorOptions, model });
       }
       editorRef.current = editor;
+      const publishCommands = () => {
+        const next = editorCommandMetadata(editor);
+        setCommands(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+      };
+      commandContextListener = editor._contextKeyService?.onDidChangeContext(publishCommands);
+      // Attaching the editor activates the lazy language provider before the
+      // worker and command availability are queried.
+      try { await prepareLanguageServices(model); } catch { /* Syntax editing remains available without a worker. */ }
+      if (disposed) return;
+      setCommands(editorCommandMetadata(editor));
       remActions = installRemActions(editor, () => ({ path }));
       if (diffEditorRef.current) originalRemActions = installRemActions(diffEditorRef.current.getOriginalEditor(), () => ({ path, version: "Original Git version" }));
       conflictControls = installConflictControls(monaco, editor, model);
@@ -1404,7 +1528,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         });
         setState((current) => {
           if (!publishContent && current.dirty === dirty && !current.error) return current;
-          return { ...current, ...(publishContent ? { content } : {}), dirty, error: "" };
+          return { ...current, ...(publishContent ? { content } : {}), dirty, error: recoveryConflictRef.current ? current.error : "" };
         });
         if (editableRef.current) {
           if (publishContent) onContentChangeRef.current(content);
@@ -1414,7 +1538,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       resizeObserver = new ResizeObserver(() => (diffEditorRef.current ?? editor).layout());
       resizeObserver.observe(containerRef.current);
 
-      if (session && !initialGitBaseline?.deleted && !initialGitBaseline?.binary && gitGroup !== "staged") {
+      if (canRestoreSession) {
         editableRef.current = true;
         savedContentRef.current = session.savedContent;
         savedVersionRef.current = session.content === session.savedContent ? model.getAlternativeVersionId() : null;
@@ -1422,14 +1546,14 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         setState({
           content: session.content,
           dirty: session.content !== session.savedContent,
-          error: "",
+          error: recoveryConflictRef.current ? "Recovered draft: the file changed on disk. Autosave is paused. Save explicitly to replace the disk version." : "",
           loading: false,
           saving: false,
         });
+        setCommands(editorCommandMetadata(editor));
         revealEditorLocation(editor, navigationRequestRef.current);
         return;
       }
-      const readTextFile = window.goferDesktop?.textFiles?.read;
       if (!readTextFile) {
         editableRef.current = false;
         editor.updateOptions({ readOnly: true });
@@ -1442,32 +1566,22 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
         });
         return;
       }
-      const comparisonOnly = initialGitBaseline?.deleted || (gitGroup === "staged");
-      const read = initialGitBaseline?.binary ? Promise.resolve({ content: "Binary file changed. Text comparison is unavailable." }) : comparisonOnly ? Promise.resolve({ content: initialGitBaseline?.modifiedContent || "" }) : readTextFile(path);
-      read.then((payload) => {
-        if (disposed) return;
-        const content = payload?.content ?? "";
-        discardedSessionPaths.delete(path);
-        editableRef.current = !comparisonOnly && !initialGitBaseline?.binary;
-        editor.updateOptions({ readOnly: Boolean(comparisonOnly || initialGitBaseline?.binary || gitOperationRef.current) });
-        savedContentRef.current = content;
-        model.setValue(content);
-        savedVersionRef.current = model.getAlternativeVersionId();
-        if (!comparisonOnly && !initialGitBaseline?.binary) textEditorSessions.set(path, { content, savedContent: content, viewState: null });
-        setState({ content, dirty: false, error: "", loading: false, saving: false });
-        revealEditorLocation(editor, navigationRequestRef.current);
-      }).catch((error) => {
-        if (disposed) return;
-        editableRef.current = false;
-        editor.updateOptions({ readOnly: true });
-        setState({
-          content: null,
-          dirty: false,
-          error: error instanceof Error ? error.message : "Unable to open file",
-          loading: false,
-          saving: false,
-        });
-      });
+      const content = initialRead?.content ?? "";
+      discardedSessionPaths.delete(path);
+      editableRef.current = !comparisonOnly && !initialGitBaseline?.binary;
+      editor.updateOptions({ readOnly: Boolean(comparisonOnly || initialGitBaseline?.binary || gitOperationRef.current) });
+      savedContentRef.current = content;
+      model.setValue(content);
+      savedVersionRef.current = model.getAlternativeVersionId();
+      if (!comparisonOnly && !initialGitBaseline?.binary) textEditorSessions.set(path, { content, savedContent: content, viewState: null });
+      setState({ content, dirty: false, error: "", loading: false, saving: false });
+      setCommands(editorCommandMetadata(editor));
+      revealEditorLocation(editor, navigationRequestRef.current);
+    }).catch(error => {
+      if (disposed) return;
+      editableRef.current = false;
+      editorRef.current?.updateOptions({ readOnly: true });
+      setState({ content: null, dirty: false, error: isMissingFileError(error) ? "" : error.message || "Unable to open file", missing: isMissingFileError(error), loading: false, saving: false });
     });
     return () => {
       disposed = true;
@@ -1486,6 +1600,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       remActions?.dispose();
       originalRemActions?.dispose();
       conflictControls?.dispose();
+      commandContextListener?.dispose();
       contentListener?.dispose();
       resizeObserver?.disconnect();
       decorationIdsRef.current = [];
@@ -1515,13 +1630,15 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   useEffect(() => {
     editorSettingsRef.current = editorSettings;
     editorRef.current?.updateOptions({
+      smoothScrolling: !reduceMotion,
+      cursorBlinking: reduceMotion ? "solid" : "smooth",
       fontSize: editorSettings.fontSize,
       lineHeight: editorSettings.lineHeight,
       minimap: { enabled: editorSettings.minimap, maxColumn: 80, renderCharacters: false },
       tabSize: editorSettings.tabSize,
       wordWrap: editorSettings.wordWrap ? "on" : "off",
     });
-  }, [editorSettings]);
+  }, [editorSettings, reduceMotion]);
 
   useEffect(() => {
     const monaco = monacoRef.current;
@@ -1630,7 +1747,8 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
       </div>
       <div className="flex h-6 shrink-0 items-center justify-end gap-3 border-t border-line bg-white px-3 text-[10px] text-muted">
         <span>{languageLabel(languageForPath(path))}</span>
-        <span>Spaces: 2</span>
+        {!["typescript", "javascript", "json", "css", "scss", "less", "html", "rattish"].includes(languageForPath(path)) ? <span title="Syntax coloring and word suggestions are available. This language has no semantic completion, definitions, diagnostics, or formatter.">Syntax editing</span> : null}
+        <span>Spaces: {editorSettings.tabSize}</span>
       </div>
     </section>
   );
@@ -1737,33 +1855,55 @@ export function SvgPreview({ content, path, onEdit }) {
   );
 }
 
-export function ImagePreview({ path }) {
-  const [state, setState] = useState({ dataUrl: "", error: "", loading: true });
+export function ImagePreview({ path }) { return <MediaPreview path={path} />; }
+
+export function MediaPreview({ path, active = true }) {
+  const kind = mediaKind(path) || "image";
+  const mediaRef = useRef(null);
+  const [state, setState] = useState({ url: "", error: "", loading: true });
+  useEffect(() => {
+    if (!active) mediaRef.current?.pause?.();
+  }, [active]);
   useEffect(() => {
     let disposed = false;
-    const readPreview = window.goferDesktop?.textFiles?.readPreview;
+    let previewId = "";
+    const bridge = window.goferDesktop?.textFiles;
+    const releasePreview = id => { if (id) void Promise.resolve(bridge?.closePreview?.(id)).catch(() => {}); };
+    const readPreview = bridge?.openPreview || (kind === "image" ? bridge?.readPreview : null);
+    setState({ url: "", error: "", loading: true });
     if (!readPreview) {
-      setState({ dataUrl: "", error: "Image preview is unavailable.", loading: false });
+      setState({ url: "", error: "Media preview is unavailable. Restart the desktop app.", loading: false });
       return undefined;
     }
     readPreview(path).then((payload) => {
-      if (!disposed) setState({ dataUrl: payload?.dataUrl ?? "", error: "", loading: false });
+      previewId = payload?.id || "";
+      if (disposed) { releasePreview(previewId); return; }
+      setState({ url: payload?.url || payload?.dataUrl || "", error: "", loading: false });
     }).catch((error) => {
       if (!disposed) setState({
-        dataUrl: "",
-        error: error instanceof Error ? error.message : "Unable to preview image",
+        url: "",
+        error: error instanceof Error ? error.message : "Unable to preview media",
         loading: false,
       });
     });
-    return () => { disposed = true; };
-  }, [path]);
+    return () => { disposed = true; releasePreview(previewId); };
+  }, [path, kind]);
+  function playbackError() {
+    setState(current => ({ ...current, error: kind === "image" ? "This image could not be displayed." : "This file could not be played. Its format or codec may not be supported." }));
+  }
   return (
-    <section className="relative grid min-h-0 flex-1 place-items-center overflow-auto bg-slate-50 p-8 dark:bg-[#19191b]" aria-label={`${fileName(path)} image preview`}>
+    <section className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-4 overflow-auto bg-slate-50 p-8 dark:bg-[#19191b]" aria-label={`${fileName(path)} ${kind} preview`}>
       {state.loading ? <span className="flex items-center gap-2 text-sm text-muted"><Loader2 className="animate-spin" size={16} />Opening {fileName(path)}</span> : null}
-      {state.error ? <div className="flex items-center gap-2 text-sm text-red-700" role="alert"><AlertTriangle size={16} />{state.error}</div> : null}
-      {state.dataUrl ? <img alt={`Preview of ${fileName(path)}`} className="max-h-full max-w-full object-contain" src={state.dataUrl} /> : null}
+      {state.error ? <div className="flex flex-col items-center gap-3 text-sm text-red-700" role="alert"><p className="flex items-center gap-2"><AlertTriangle size={16} />{state.error}</p><button type="button" className="rounded border border-line px-3 py-2 text-xs text-ink" onClick={() => window.goferDesktop?.workspace?.openPath?.(path).catch(error => setState(current => ({ ...current, error: error.message })))}>Open in default app</button></div> : null}
+      {state.url && !state.error ? kind === "video" ? <video ref={mediaRef} aria-label={`Play ${fileName(path)}`} controls playsInline preload="metadata" className="min-h-0 max-h-full max-w-full" src={state.url} onError={playbackError} /> : kind === "audio" ? <><p className="text-sm text-ink">{fileName(path)}</p><audio ref={mediaRef} aria-label={`Play ${fileName(path)}`} controls preload="metadata" className="w-full max-w-lg" src={state.url} onError={playbackError} /></> : <img alt={`Preview of ${fileName(path)}`} className="min-h-0 max-h-full max-w-full object-contain" src={state.url} onError={playbackError} /> : null}
     </section>
   );
+}
+
+// Older desktop builds may still reject the read instead of returning missing: true.
+export function isMissingFileError(error) {
+  return ["ENOENT", "ENOTDIR"].includes(error?.code || error?.cause?.code)
+    || /\b(?:ENOENT|ENOTDIR)\b/.test(error?.message || "");
 }
 
 export function replaceEditorModelContent(model, content) {
@@ -1784,10 +1924,18 @@ export function codeWorkspaceShortcutAction(event, options = {}) {
     && String(event.key ?? "").toLowerCase() === "tab"
     && options.currentPath
   ) return event.shiftKey ? "previous-tab" : "next-tab";
+  if (!options.browserActive && options.currentPath
+    && matchesCommand(event, options.settings, "editor.find", options.platform)) return "find";
   if (matchesCommand(event, options.settings, "file.new")) return "new";
   if (matchesCommand(event, options.settings, "file.save") && options.currentPath) return "save";
   if (matchesCommand(event, options.settings, "file.close") && options.currentPath) return "close";
   if (matchesCommand(event, options.settings, "editor.toggleWordWrap")) return "toggle-word-wrap";
+  // Monaco still owns its original binding. Respect a changed or cleared setting,
+  // while leaving shortcuts assigned to other Raticode commands available.
+  if (!options.browserActive && options.currentPath
+    && matchesCommand(event, DEFAULT_APP_SETTINGS, "editor.find", options.platform)
+    && !KEYBINDING_COMMANDS.some(command => command.id !== "editor.find"
+      && matchesCommand(event, options.settings, command.id, options.platform))) return "suppress-find";
   return null;
 }
 
@@ -1983,6 +2131,14 @@ export function isPdfPath(path) {
 export function isImagePath(path) {
   return [".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".webp"]
     .some((extension) => String(path ?? "").toLowerCase().endsWith(extension));
+}
+
+export function mediaKind(path) {
+  if (isImagePath(path)) return "image";
+  const extension = String(path || "").split(".").at(-1).toLowerCase();
+  if (["mp4", "m4v", "mov", "webm", "ogv", "mkv", "avi"].includes(extension)) return "video";
+  if (["mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "aif", "aiff"].includes(extension)) return "audio";
+  return "";
 }
 
 export function codeDocumentMode(

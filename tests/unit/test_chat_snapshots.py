@@ -2,12 +2,149 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tracemalloc
 from pathlib import Path
 
 import pytest
 
 from gofer.ui import chat
+
+
+@pytest.mark.parametrize("location", [".worktrees/feature", "checkouts/feature"])
+def test_worktree_creation_is_not_an_edit_and_undo_preserves_its_files(tmp_path, location):
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(project), *args], check=True, capture_output=True)
+
+    git("init", "-q")
+    file = project / "own.txt"
+    file.write_text("original\n")
+    git("add", "own.txt")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-qm",
+        "test: prepare worktree regression fixture\n\n - Add the original project file",
+    )
+    baseline = chat._capture_chat_project(project)
+    edits = chat._ChatTurnEdits(project, baseline)
+    trace = {"id": "shell", "kind": "tool", "title": "bash", "category": "shell"}
+    edits.observe({**trace, "phase": "start"})
+    worktree = project / location
+    git("worktree", "add", "--detach", str(worktree), "HEAD")
+    assert (worktree / ".git").is_file()
+    edits.observe({**trace, "phase": "result"})
+    assert edits.snapshots() == ({}, {})
+    assert chat._preview_chat_changes(project, baseline) is None
+
+    edits.observe({**trace, "id": "next", "phase": "start"})
+    file.write_text("parent edit\n")
+    (worktree / "own.txt").write_text("worktree edit\n")
+    edits.observe({**trace, "id": "next", "phase": "result"})
+    data = tmp_path / "data"
+    changes = chat._finalize_chat_changes(project, baseline, data, snapshots=edits.snapshots())
+    assert changes is not None
+    assert [item["path"] for item in changes["files"]] == ["own.txt"]
+    chat.undo_chat_changes(changes["id"], data)
+    assert file.read_text() == "original\n"
+    assert (worktree / "own.txt").read_text() == "worktree edit\n"
+    chat.redo_chat_changes(changes["id"], data)
+    assert file.read_text() == "parent edit\n"
+    assert (worktree / "own.txt").read_text() == "worktree edit\n"
+
+    # Selecting the worktree scopes tracking to that checkout's own files.
+    selected = chat._capture_chat_project(worktree)
+    assert set(selected) == {"own.txt"}
+    (worktree / "own.txt").write_text("selected edit\n")
+    preview = chat._preview_chat_changes(worktree, selected)
+    assert preview is not None
+    assert [item["path"] for item in preview["files"]] == ["own.txt"]
+
+
+@pytest.mark.parametrize("location", [".worktrees/partial", "nested-repo"])
+def test_incremental_and_reported_edits_exclude_nested_checkouts(tracked_project, location):
+    project, tracker = tracked_project
+    checkout = project / location
+    checkout.mkdir(parents=True)
+    if location == "nested-repo":
+        (checkout / ".git").mkdir()
+    nested_file = checkout / "other.txt"
+    nested_file.write_text("nested contents\n")
+    tracker.invalidate(checkout, directory=True)
+    tracker.invalidate(nested_file)
+    assert tracker.pending == set()
+    assert chat._preview_chat_changes(project, tracker.before, tracker) is None
+    assert chat._capture_chat_project(project, paths={location, f"{location}/other.txt"}) == {}
+    edits = chat._ChatTurnEdits(project, tracker.before)
+    (project / "0.txt").write_text("unrelated external edit\n")
+    edits.observe(
+        {
+            "id": "edit",
+            "kind": "tool",
+            "title": "Edit",
+            "phase": "result",
+            "input": json.dumps([{"path": str(nested_file)}]),
+        }
+    )
+    assert edits.snapshots() == ({}, {})
+    tracker.last_recovery -= chat.CHAT_CHANGE_RECOVERY_INTERVAL
+    preview = chat._preview_chat_changes(project, tracker.before, tracker)
+    assert preview is not None
+    assert [item["path"] for item in preview["files"]] == ["0.txt"]
+
+
+def test_directory_becoming_nested_repository_is_not_reported_as_deleted(tmp_path):
+    nested = tmp_path / "checkout"
+    nested.mkdir()
+    (nested / "existing.txt").write_text("keep this\n")
+    baseline = chat._capture_chat_project(tmp_path)
+    assert "checkout/existing.txt" in baseline
+    (nested / ".git").mkdir()
+    assert chat._preview_chat_changes(tmp_path, baseline) is None
+    assert chat._finalize_chat_changes(tmp_path, baseline, tmp_path / "data") is None
+
+
+@pytest.mark.parametrize("location", [".worktrees/feature", "checkouts/feature"])
+@pytest.mark.parametrize("redo", [False, True])
+def test_saved_parent_change_sets_cannot_modify_nested_checkouts(
+    tmp_path, monkeypatch, location, redo
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    file = project / "a.txt"
+    file.write_text("original parent\n")
+    checkout = project / location
+    checkout.mkdir(parents=True)
+    nested_file = checkout / "own.txt"
+    nested_file.write_text("original checkout\n")
+    data = tmp_path / "data"
+    # Reproduce a saved card from before worktree boundaries were enforced.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            chat,
+            "CHAT_CHANGE_IGNORED_DIRECTORIES",
+            chat.CHAT_CHANGE_IGNORED_DIRECTORIES - {".worktrees"},
+        )
+        baseline = chat._capture_chat_project(project)
+        file.write_text("edited parent\n")
+        nested_file.write_text("edited checkout\n")
+        changes = chat._finalize_chat_changes(project, baseline, data)
+        assert changes is not None and changes["fileCount"] == 2
+        if redo:
+            chat.undo_chat_changes(changes["id"], data)
+    (checkout / ".git").write_text("gitdir: /some/repository/worktrees/feature\n")
+    parent_content, nested_content = file.read_text(), nested_file.read_text()
+    action = chat.redo_chat_changes if redo else chat.undo_chat_changes
+    with pytest.raises(chat.ChatChangeError, match="outside this project's edit scope"):
+        action(changes["id"], data)
+    assert file.read_text() == parent_content
+    assert nested_file.read_text() == nested_content
 
 
 def test_snapshot_lifecycle_under_symlinked_temp_root(tmp_path, monkeypatch):

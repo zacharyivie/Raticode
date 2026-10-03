@@ -40,7 +40,10 @@ function createTrustedProjectStore(file) {
 
   function add(roots) {
     const record = read();
-    write({ ...record, roots: [...new Set([...record.roots, ...roots])] });
+    const nextRoots = [...new Set([...record.roots, ...roots])];
+    // Background grant renewal must not rewrite and fsync unchanged trust data.
+    if (nextRoots.length === record.roots.length && nextRoots.every((root, index) => root === record.roots[index])) return;
+    write({ ...record, roots: nextRoots });
   }
 
   function migrate(recentProjects) {

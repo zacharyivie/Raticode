@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gofer.core.prompt_envelope import AgentResources
+from gofer.core.provider_capabilities import IMAGE_ATTACHMENT_PROVIDERS
 from gofer.ui.chat_media import CHAT_ATTACHMENT_MAX_COUNT, resolve_chat_attachment
 
 
@@ -142,6 +144,9 @@ class ChatSteering:
         request_id = _identifier(body.get("requestId"), "requestId")
         text = body.get("text")
         attachments = copy.deepcopy(body.get("attachments", []))
+        resources = None
+        if "resources" in body:
+            resources = AgentResources.model_validate(body["resources"]).model_dump()
         if not isinstance(attachments, list) or len(attachments) > CHAT_ATTACHMENT_MAX_COUNT:
             raise ValueError("Steering accepts up to five attachments")
         if not isinstance(text, str) or len(text) > 100_000 or not (text.strip() or attachments):
@@ -155,6 +160,7 @@ class ChatSteering:
                     old["text"] != text
                     or old["turnId"] != turn_id
                     or old.get("attachments", []) != attachments
+                    or old.get("resources") != resources
                 ):
                     raise ChatSteeringConflict(
                         "requestId was already used for a different instruction"
@@ -171,10 +177,10 @@ class ChatSteering:
                     data_dir=turn.attachment_data_dir or self.data_dir,
                     thread_id=conversation_id,
                 )
-                if str(attachment.get("type", "")).startswith("image/") and turn.provider not in {
-                    "codex",
-                    "claude_code",
-                }:
+                if (
+                    str(attachment.get("type", "")).startswith("image/")
+                    and turn.provider not in IMAGE_ATTACHMENT_PROVIDERS
+                ):
                     raise ValueError(
                         f"{turn.provider} image attachments are not supported by this adapter"
                     )
@@ -184,6 +190,7 @@ class ChatSteering:
                 "requestId": request_id,
                 "text": text,
                 **({"attachments": attachments} if attachments else {}),
+                **({"resources": resources} if resources is not None else {}),
                 "provider": turn.provider,
                 "model": turn.model,
                 "generation": turn.generation + 1,
@@ -253,6 +260,10 @@ class ChatSteering:
                 terminal: dict[str, Any] | None = None
                 partial: list[str] = []
                 source = factory(messages=messages, cancel_event=turn.cancel, **kwargs)
+                if "reset_session" in kwargs:
+                    # Editing starts a fresh session once. Steering successors
+                    # must resume that new conversation after draining the turn.
+                    kwargs["reset_session"] = False
                 try:
                     async for event in source:
                         with self._lock:
@@ -294,6 +305,32 @@ class ChatSteering:
                         turn.delivering += pending
                         turn.pending = []
                         records = self._load(turn.conversation_id)
+                        # Apply only menu resources. Keep project grants, permissions,
+                        # provider identity and built-in tool setup owned by this turn.
+                        for key in pending:
+                            if "resources" in records[key]:
+                                workflow = kwargs.get("workflow") or {}
+                                resources = copy.deepcopy(records[key]["resources"])
+                                swarm_url = kwargs.get("trusted_swarm_url")
+                                if swarm_url:
+                                    managed = [
+                                        server
+                                        for server in (workflow.get("remResources") or {}).get(
+                                            "mcpServers", []
+                                        )
+                                        if server.get("name") == "swarm"
+                                        and server.get("url") == swarm_url
+                                    ]
+                                    if managed:
+                                        resources["mcpServers"] = [
+                                            server
+                                            for server in resources["mcpServers"]
+                                            if server["name"] != "swarm"
+                                        ] + copy.deepcopy(managed)
+                                kwargs["workflow"] = {
+                                    **workflow,
+                                    "remResources": resources,
+                                }
                         final_body = (terminal or {}).get("message", {}).get("body")
                         if final_body or partial:
                             messages.append(

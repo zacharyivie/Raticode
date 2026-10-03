@@ -400,8 +400,8 @@ function parseGitHistory(output = "") {
     .filter(Boolean)
     .map((record) => {
       const normalizedRecord = record.replace(/^\n+/, "");
-      const [hash = "", shortHash = "", author = "", authoredAt = "", subject = "", message = "", refsAndStats = ""] = normalizedRecord.split("\x1f");
-      const [refs = "", ...statLines] = refsAndStats.split("\n");
+      const [hash = "", shortHash = "", author = "", authoredAt = "", subject = "", message = "", refs = "", parentsAndStats = ""] = normalizedRecord.split("\x1f");
+      const [parents = "", ...statLines] = parentsAndStats.split("\n");
       let binaryFiles = 0;
       let insertions = 0;
       let deletions = 0;
@@ -419,6 +419,7 @@ function parseGitHistory(output = "") {
         hash,
         insertions,
         message: message.trimEnd(),
+        parents: parents.split(" ").filter(Boolean),
         refs,
         shortHash,
         subject,
@@ -429,16 +430,44 @@ function parseGitHistory(output = "") {
 
 async function readGitHistory(projectRoot, options = {}) {
   const runner = options.runGit || runGit;
+  let root;
   try {
-    const root = String(await runner(["-C", projectRoot, "rev-parse", "--show-toplevel"])).trim();
-    const output = await runner([
-      "-C", projectRoot, "log", "--max-count=100", "--date=iso-strict", "--numstat", "--diff-merges=first-parent",
-      "--pretty=format:%x00%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%B%x1f%D",
-    ]);
-    return { active: true, commits: parseGitHistory(output), root };
+    root = String(await runner(["-C", projectRoot, "rev-parse", "--show-toplevel"])).trim();
   } catch {
-    return { active: false, commits: [], root: "" };
+    return { active: false, commits: [], refs: [], root: "" };
   }
+  const [refOutput, head, headRef] = await Promise.all([
+    runner(["-C", root, "for-each-ref", "--format=%(refname)%09%(objectname)%09%(*objectname)%09%(symref)%09%(upstream:short)%09%(upstream:track)", "refs/heads", "refs/remotes", "refs/tags"]),
+    runner(["-C", root, "rev-parse", "--verify", "HEAD"]).then(value => String(value).trim(), () => ""),
+    runner(["-C", root, "symbolic-ref", "-q", "HEAD"]).then(value => String(value).trim(), () => ""),
+  ]);
+  const refs = String(refOutput).trim().split("\n").filter(Boolean).map(line => {
+    const [id, object, peeled, symbolic, upstream = "", tracking = ""] = line.split("\t");
+    const type = id.startsWith("refs/heads/") ? "local" : id.startsWith("refs/remotes/") ? "remote" : "tag";
+    return { id, name: id.replace(/^refs\/(heads|remotes|tags)\//, ""), hash: peeled || object, type, current: id === headRef, symbolic: Boolean(symbolic), upstream, upstreamGone: tracking.includes("[gone]"), ahead: Number(tracking.match(/ahead (\d+)/)?.[1] || 0), behind: Number(tracking.match(/behind (\d+)/)?.[1] || 0) };
+  }).filter(ref => !ref.symbolic);
+  const categories = new Map([["local", "--branches"], ["remote", "--remotes"], ["tag", "--tags"]]);
+  if (options.refs != null && !Array.isArray(options.refs)) throw new Error("Choose existing history branches or tags.");
+  const selected = options.refs == null ? (options.ref ? [options.ref] : null) : [...new Set(options.refs)];
+  if (selected?.some(ref => ref !== "HEAD" && !categories.has(ref) && !refs.some(item => item.id === ref))) throw new Error("Choose an existing history branch or tag.");
+  const limit = Math.min(5000, Math.max(100, Math.trunc(Number(options.limit) || 100)));
+  const revisions = selected == null ? ["--branches", "--remotes", "--tags", ...(head ? ["HEAD"] : [])] : selected.flatMap(ref => {
+    if (ref === "HEAD") return head ? [ref] : [];
+    if (categories.has(ref)) return refs.some(item => item.type === ref) ? [categories.get(ref)] : [];
+    return [ref];
+  });
+  if ((!head && !refs.length) || !revisions.length) return { active: true, commits: [], refs, head, root, hasMore: false };
+  const output = await runner([
+    "-C", root, "log", "--topo-order", `--max-count=${limit + 1}`, "--date=iso-strict", "--numstat", "--diff-merges=first-parent",
+    "--pretty=format:%x00%H%x1f%h%x1f%an%x1f%aI%x1f%s%x1f%B%x1f%D%x1f%P", ...revisions, "--",
+  ]);
+  const commits = parseGitHistory(output);
+  const labels = new Map();
+  for (const item of refs) {
+    if (!labels.has(item.hash)) labels.set(item.hash, []);
+    labels.get(item.hash).push(item);
+  }
+  return { active: true, commits: commits.slice(0, limit).map(commit => ({ ...commit, labels: labels.get(commit.hash) || [], isHead: commit.hash === head })), refs, head, root, hasMore: commits.length > limit };
 }
 
 function parseGitWorktrees(output = "") {

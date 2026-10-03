@@ -103,7 +103,7 @@ export default function ProjectSearch({ rootPath, active, focusRequest, onOpenFi
             </div>
             <input id="search-exclude" aria-label="Files to exclude" aria-describedby={excludeRegex ? "search-filter-hint search-exclude-hint" : "search-filter-hint"} placeholder={excludeRegex ? "e.g. \\.(log|json)$" : "e.g. *.log, dist/**, lock.json"} value={exclude} onChange={(event) => setExclude(event.target.value)} className="w-full min-w-0 rounded border border-line bg-white px-2 py-1.5 text-xs text-ink focus:border-brand focus:outline-none" />
           </div>
-          <p id="search-filter-hint" className="text-[11px] leading-4 text-muted">Comma-separated globs. Empty include = all files. Git ignores apply.</p>
+          <p id="search-filter-hint" className="text-[11px] leading-4 text-muted">Comma-separated globs. Empty include searches source files, excluding node_modules, .venv, venv, __pycache__, dist, build, and .next. Explicit includes can search those folders. Git ignores still apply; .git and symbolic links are never searched.</p>
           {excludeRegex && <p id="search-exclude-hint" className="text-[11px] leading-4 text-muted">Exclude regex: case-sensitive paths, | for alternatives, no / delimiters.</p>}
         </fieldset>
         {notice && <p role="status" className="text-xs text-muted">{notice}</p>}

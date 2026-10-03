@@ -1,8 +1,15 @@
 # Additional CLI providers
 
-The backend IDs are `cursor`, `copilot` and `opencode`. They work through the existing Raticode transcript and subprocess runtime. Native session IDs are reported where the wire contract supplies them, but are never passed to another invocation. Rem steering restarts with Raticode's conversation, persona and resource context. Swarm native steering remains Codex-only.
+The backend IDs are `cursor`, `copilot` and `opencode`. They use the existing subprocess runtime. Identified Rem conversations save and resume an explicit native session, sending only new messages. Copilot receives a Raticode-created UUID through `--session-id`; Cursor and OpenCode return their IDs in structured output. See [native provider sessions](rem-provider-sessions.md). Rem steering drains the current process and resumes with new instructions. Swarm native steering remains Codex-only.
 
 ## Catalog and profiles
+
+Rem image input uses repeated native arguments: Cursor `--image=PATH`, Copilot
+`--attachment=PATH`, and OpenCode `--file=PATH`. OpenCode's positional prompt
+follows `--` so its array-valued file option cannot consume the prompt. Cursor's
+installed September 26 headless parser exposes `--image` as a hidden option and
+passes the paths through `selectedImages`. Provider catalog payloads expose
+`supportsImages`; Copilot also preserves model vision support from its SDK catalog.
 
 Each provider catalog entry includes:
 
@@ -38,7 +45,7 @@ These tests use synthetic fixtures from the cited contracts, not captured authen
 
 ## Resources and configuration lifetime
 
-Every invocation uses a private temporary directory and unpredictable MCP names. The caller's trusted Swarm URL must exactly match the selected `swarm` resource before receiving a `swarm_action` grant. The Second Brain executable and argument prefix must match the installed tool before its four tools receive grants. Other selected MCP servers receive their requested server grant. Generated files live until process cleanup, including cancellation and spawn failure. Concurrent invocations do not share files or names.
+Identified Rem conversations retain a private configuration directory and stable MCP names under a random session generation. Current endpoints and grants are rebuilt each turn. Other invocations use a private temporary directory and unpredictable MCP names. The caller's trusted Swarm URL must exactly match the selected `swarm` resource before receiving a `swarm_action` grant. The Second Brain executable and argument prefix must match the installed tool before its four tools receive grants. Other selected MCP servers receive their requested server grant. Temporary files live until process cleanup, including cancellation and spawn failure. Rem configuration persists across turns to preserve native Cursor history and tool identities. Different conversations do not share directories or names.
 
 Copilot receives `--add-dir` for the selected working directory on each invocation, without changing persistent trust settings or granting blanket tool access. It receives `--additional-mcp-config @FILE` and exact `--allow-tool ALIAS(swarm_action)` grants. Shell and URL denials use documented deny flags. OpenCode receives additive `OPENCODE_CONFIG_CONTENT`; pre-existing inline settings from the caller or environment survive. Remote entries set `oauth: false`. `OPENCODE_PERMISSION` supplies a default deny and selected native/MCP grants. Explicit extra filesystem roots use `external_directory` permission patterns. Neither path relocates credentials or copies authentication stores.
 
@@ -100,7 +107,10 @@ No existing provider or resource selection is changed automatically.
 For Agent nodes, select a provider profile with `approval_mode: "cli-managed"`.
 Preflight rejects a default/strict profile with the same explanation. Grok
 preserves exact custom model IDs, accepts the `cli-default` sentinel and rejects
-image attachments and legacy tool/MCP string flags. Grok reads `grok models` for
+legacy tool/MCP string flags. Rem images are delivered as base64 ACP image blocks
+alongside the text prompt. Grok's current prompt parser accepts these blocks,
+even when its initialization response does not advertise image support.
+Grok reads `grok models` for
 IDs and defaults, then queries the same CLI through ACP `_x.ai/models/list` for labels and advertised reasoning efforts.
 This metadata probe sends neither a prompt nor a session creation request. If
 metadata is unavailable, the text catalog remains usable without invented effort

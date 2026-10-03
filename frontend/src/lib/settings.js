@@ -85,6 +85,7 @@ export const KEYBINDING_COMMANDS = [
   { id: "file.new", label: "New file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyN" },
   { id: "file.save", label: "Save active file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyS" },
   { id: "file.close", label: "Close active file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyW" },
+  { id: "editor.find", label: "Find in file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyF" },
   { id: "editor.toggleWordWrap", label: "Toggle word wrap", group: "Code editor", scope: "code", defaultBinding: "Alt+KeyZ" },
   { id: "panel.toggle", label: "Toggle bottom panel", group: "Panel", scope: "global", defaultBinding: "Mod+Backquote" },
   { id: "terminal.new", label: "New terminal", group: "Terminal", scope: "global", defaultBinding: "Ctrl+KeyT" },
@@ -131,6 +132,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     searchUrl: "https://www.google.com/search?q={query}",
   },
   terminal: {
+    shell: "system",
     cursorBlink: true,
     fontSize: 12.5,
     lineHeight: 1.25,
@@ -141,6 +143,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     swarmAccessEnabled: true,
     avatarEnabled: true,
     avatarAnimated: true,
+    autoHideThoughts: true,
     resources: { ...DEFAULT_REM_RESOURCES },
     effort: "",
     model: "",
@@ -189,6 +192,7 @@ export function normalizeAppSettings(value = {}) {
   settings.assistant.swarmAccessEnabled = settings.assistant.swarmAccessEnabled !== false;
   settings.assistant.avatarEnabled = settings.assistant.avatarEnabled !== false;
   settings.assistant.avatarAnimated = settings.assistant.avatarAnimated !== false;
+  settings.assistant.autoHideThoughts = settings.assistant.autoHideThoughts !== false;
   settings.assistant.resources = snapshotRemResources(settings.assistant.resources);
   settings.general.autosave = settings.general.autosave !== false;
   settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["workflows", "files", "search", "source-control", "organizations"], value?.general?.defaultView === "code" ? "files" : "workflows");
@@ -218,6 +222,7 @@ export function normalizeAppSettings(value = {}) {
   settings.terminal.cursorBlink = settings.terminal.cursorBlink !== false;
   settings.terminal.fontSize = boundedNumber(settings.terminal.fontSize, 8, 28, 12.5);
   settings.terminal.lineHeight = boundedNumber(settings.terminal.lineHeight, 1, 2, 1.25);
+  settings.terminal.shell = enumValue(settings.terminal.shell, ["system", "bash", "zsh"], "system");
   settings.terminal.scrollback = boundedNumber(settings.terminal.scrollback, 100, 100000, 5000);
   settings.memory.reportThemes = normalizeReportThemes(value?.memory?.reportThemes, value?.memory?.secondBrainTheme);
   settings.memory.reportFormat = reportOutputFormat(value?.memory);
@@ -263,23 +268,47 @@ export function settingBinding(settings, commandId) {
     ?? "";
 }
 
-export function keybindingConflictIds(settings, commandId, binding = settingBinding(settings, commandId)) {
+// Chords are supported only by the application dispatcher. Other scopes record
+// one gesture and migrate previously accepted, unusable chords to their defaults.
+export const CHORD_COMMAND_IDS = new Set([
+  "settings.open", "file.open", "project.open", "browser.open", "view.graph", "view.code",
+  "view.toggleProjectPane", "view.toggleAssistantPane", "workflow.run",
+]);
+
+export function normalizedBinding(binding, platform = globalThis.navigator?.platform ?? "") {
+  const mac = /Mac|iPhone|iPad/i.test(platform);
+  return String(binding).trim().split(/\s+/).filter(Boolean).map(segment => {
+    const parts = segment.split("+").filter(Boolean);
+    const key = parts.pop();
+    const modifiers = [...new Set(parts.map(part => part === "Mod" ? (mac ? "Meta" : "Ctrl") : part))].sort();
+    return [...modifiers, key === "Backspace" ? "Delete" : key].join("+");
+  }).join(" ");
+}
+
+export function keybindingConflictIds(settings, commandId, binding = settingBinding(settings, commandId), platform = globalThis.navigator?.platform ?? "") {
   if (!binding) return [];
   const command = KEYBINDING_COMMANDS.find((item) => item.id === commandId);
   if (!command) return [];
   return KEYBINDING_COMMANDS.filter((candidate) => (
     candidate.id !== commandId
-    && settingBinding(settings, candidate.id) === binding
+    && (() => {
+      const left = normalizedBinding(binding, platform);
+      const right = normalizedBinding(settingBinding(settings, candidate.id), platform);
+      return right && (left === right || left.startsWith(`${right} `) || right.startsWith(`${left} `));
+    })()
     && (candidate.scope === "global" || command.scope === "global" || candidate.scope === command.scope)
   )).map((candidate) => candidate.id);
 }
 
-export function matchesCommand(event, settings, commandId) {
-  return matchesKeybinding(event, settingBinding(settings, commandId));
+export function matchesCommand(event, settings, commandId, platform = globalThis.navigator?.platform ?? "") {
+  const binding = settingBinding(settings, commandId);
+  return matchesKeybinding(event, binding, platform)
+    || (commandId === "editor.find" && binding === "Mod+KeyF"
+      && /Mac|iPhone|iPad/i.test(platform) && matchesKeybinding(event, "Ctrl+KeyF", platform));
 }
 
 export function matchesKeybinding(event, binding, platform = globalThis.navigator?.platform ?? "") {
-  if (!binding || event.repeat) return false;
+  if (!binding || event.repeat || /\s/.test(String(binding).trim())) return false;
   const parts = String(binding).split("+").filter(Boolean);
   const code = parts.at(-1);
   const modifiers = new Set(parts.slice(0, -1));
@@ -381,7 +410,11 @@ function normalizeKeybindings(value) {
   const bindings = { ...DEFAULT_KEYBINDINGS };
   if (!value || typeof value !== "object") return bindings;
   for (const command of KEYBINDING_COMMANDS) {
-    if (typeof value[command.id] === "string") bindings[command.id] = value[command.id];
+    if (typeof value[command.id] === "string") {
+      const binding = value[command.id].trim();
+      const segments = binding.split(/\s+/).filter(Boolean);
+      if (segments.length <= 1 || (segments.length === 2 && CHORD_COMMAND_IDS.has(command.id))) bindings[command.id] = binding;
+    }
   }
   return bindings;
 }

@@ -52,6 +52,13 @@ class AgentResources(BaseModel):
     skills: list[SkillReference] = Field(default_factory=list, max_length=100)
     mcpServers: list[McpReference] = Field(default_factory=list, max_length=100)
 
+    @model_validator(mode="after")
+    def unique_mcp_names(self) -> AgentResources:
+        names = [server.name for server in self.mcpServers]
+        if len(names) != len(set(names)):
+            raise ValueError("MCP server names must be unique")
+        return self
+
 
 def resource_index(resources: AgentResources) -> str:
     """Index files, never inject their implementation or MCP connection details."""
@@ -103,10 +110,16 @@ def resource_cli_args(
                 for item in resources.skills
             )
             args += ["-c", f"skills.config=[{skills}]"]
-        for name in _codex_mcp_names(working_dir):
-            # Codex splits CLI keys on dots without parsing TOML key quoting.
-            # Quotes would create a different server with no command or URL.
-            args += ["-c", f"mcp_servers.{name}.enabled=false"]
+        inherited = _codex_mcp_names(working_dir)
+        # Codex splits CLI keys on dots without parsing TOML key quoting.
+        # Put dotted names inside one TOML value. Multiple root overrides would
+        # replace earlier CLI overrides and leave some inherited servers enabled.
+        if any("." in name for name in inherited):
+            disabled = ",".join(json.dumps(name) + "={enabled=false}" for name in inherited)
+            args += ["-c", "mcp_servers={" + disabled + "}"]
+        else:
+            for name in inherited:
+                args += ["-c", f"mcp_servers.{name}.enabled=false"]
         server_names = codex_mcp_server_names(resources, working_dir)
         for server in resources.mcpServers:
             # A fresh name prevents Codex from merging inherited transport or credentials.

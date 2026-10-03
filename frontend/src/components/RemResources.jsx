@@ -56,14 +56,20 @@ export default function RemResources({ value = DEFAULT_REM_RESOURCES, onChange }
 }
 
 export function remResourceError(config = DEFAULT_REM_RESOURCES) {
+  if ((config.skills || []).length > 100) return "Use at most 100 skills per thread.";
+  if ((config.mcpServers || []).length > 100) return "Use at most 100 MCP servers per thread.";
   for (const skill of config.skills || []) {
     if (!skill.path?.trim()) return "Enter a folder for each skill, or remove the empty row.";
+    if (skill.path.length > 4096) return "Skill paths must be at most 4096 characters.";
   }
   const names = new Set();
   for (const server of config.mcpServers || []) {
     if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(server.name || "")) return "Give each MCP server a name using letters, digits, hyphens, or underscores.";
     if (names.has(server.name)) return "MCP server names must be unique.";
     names.add(server.name);
+    if ((server.command || "").length > 4096) return "MCP executable paths must be at most 4096 characters.";
+    if ((server.args || []).length > 100) return "Use at most 100 arguments per MCP server.";
+    if ((server.url || "").length > 2048) return "MCP server URLs must be at most 2048 characters.";
     if (server.type === "stdio") {
       if (!server.command?.trim()) return "Enter an executable for each local MCP server.";
       continue;

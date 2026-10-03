@@ -130,6 +130,14 @@ async def test_real_subprocess_keeps_reply_out_of_thoughts_and_transmits_exact_p
     ]
     assert json.loads(native_process.read_text())["message"]["content"] == prompt
     assert [e["text"] for e in events if e["type"] == "thought"] == ["read file"]
+    assert [e["trace"] for e in events if e.get("trace")] == [
+        {
+            "kind": "tool",
+            "id": "2",
+            "title": "read file",
+            "status": "completed",
+        }
+    ]
     assert events[-1]["message"]["body"] == "Hello world"
     assert events[-1]["sessionId"] == "one"
     assert events[-1]["type"] == "final"
@@ -374,3 +382,20 @@ def test_legacy_native_effort_selection_is_valid():
     capabilities._validate_capability_selection(provider, "gemini-3.1-pro-low", None)
     with pytest.raises(capabilities.ProviderCapabilityError):
         capabilities._validate_capability_selection(provider, "gemini-3.1-pro-high", "medium")
+
+
+def test_native_workspace_keeps_directory_and_clears_removed_mcp_servers(tmp_path):
+    from gofer.core.prompt_envelope import AgentResources
+    from gofer.subscriptions.antigravity import antigravity_workspace
+
+    directory = tmp_path / "session-config"
+    resources = AgentResources.model_validate(
+        {"mcpServers": [{"name": "example", "type": "stdio", "command": "fake-tool", "args": []}]}
+    )
+    with antigravity_workspace(tmp_path, resources, session_dir=directory) as (cwd, args):
+        assert cwd == directory
+        assert json.loads((cwd / ".agents/mcp_config.json").read_text())["mcpServers"]
+    with antigravity_workspace(tmp_path, AgentResources(), session_dir=directory) as (cwd, args):
+        assert cwd == directory
+        assert json.loads((cwd / ".agents/mcp_config.json").read_text()) == {"mcpServers": {}}
+        assert args == ["--add-dir", str(tmp_path.resolve())]

@@ -18,6 +18,88 @@ def request(text: str = "Use the new direction", request_id: str = "request-1") 
     }
 
 
+@pytest.mark.parametrize("managed_swarm", [False, True])
+async def test_steering_applies_latest_resources_without_changing_turn_scope(
+    tmp_path, managed_swarm
+):
+    from gofer.core.prompt_envelope import AgentResources, resource_cli_args
+
+    coordinator = ChatSteering(tmp_path)
+    turn = coordinator.begin("conversation-1", "turn-1", "codex", "custom-model")
+    latest: dict[str, Any] = {
+        "shell": True,
+        "web": True,
+        "skills": [{"path": "/skills/research", "enabled": True}],
+        "mcpServers": [{"name": "docs", "url": "https://example.com/mcp"}],
+    }
+    original: dict[str, Any] = {
+        "projectRoot": "/original/project",
+        "remSecondBrain": {"enabled": True, "root": "/notes"},
+        "remResources": {"shell": False, "web": False},
+    }
+    swarm_url = "http://127.0.0.1:1234/managed" if managed_swarm else None
+    if swarm_url:
+        original["remResources"]["mcpServers"] = [{"name": "swarm", "url": swarm_url}]
+    invocations = []
+
+    async def fake(**kwargs):
+        invocations.append(copy.deepcopy({k: v for k, v in kwargs.items() if k != "cancel_event"}))
+        if len(invocations) == 1:
+            coordinator.steer({**request(), "resources": {**latest, "web": False}})
+            receipt = coordinator.steer({**request("Search now", "request-2"), "resources": latest})
+            # Mutating the caller's menu after acceptance cannot change the continuation.
+            latest["skills"][0]["path"] = "/changed-after-acceptance"
+            assert receipt["resources"]["skills"][0]["path"] == "/skills/research"
+            yield {"type": "error", "error": "interrupted"}
+        else:
+            yield {"type": "final", "message": {"body": "done"}}
+
+    events = [
+        event
+        async for event in coordinator.stream(
+            turn,
+            fake,
+            workflow=original,
+            provider="codex",
+            model="custom-model",
+            permission_mode="read-only",
+            trusted_swarm_url=swarm_url,
+        )
+    ]
+    assert events[-1]["type"] == "final"
+    assert len(invocations) == 2
+    continued = invocations[1]
+    assert continued["workflow"]["projectRoot"] == original["projectRoot"]
+    assert continued["workflow"]["remSecondBrain"] == original["remSecondBrain"]
+    assert continued["permission_mode"] == "read-only"
+    assert continued["model"] == "custom-model"
+    resources = AgentResources.model_validate(continued["workflow"]["remResources"])
+    assert resources.skills[0].path == "/skills/research"
+    assert 'web_search="live"' in resource_cli_args("codex", resources)
+    assert "features.shell_tool=true" in resource_cli_args("codex", resources)
+    assert resources.mcpServers[0].name == "docs"
+    if managed_swarm:
+        assert resources.mcpServers[-1].url == swarm_url
+    assert invocations[0]["workflow"]["remResources"]["web"] is False
+    assert original["remResources"]["web"] is False
+
+
+def test_steering_resource_validation_and_retry_identity(tmp_path):
+    coordinator = ChatSteering(tmp_path)
+    turn = coordinator.begin("conversation-1", "turn-1", "codex", "model")
+    for resources in (None, {"web": True, "mcpServers": [{"name": "bad", "url": "file:///tmp"}]}):
+        with pytest.raises(ValueError):
+            coordinator.steer({**request(), "resources": resources})
+        assert not turn.cancel.is_set()
+        assert not turn.pending
+    body = {**request(), "resources": {"shell": False, "web": True}}
+    receipt = coordinator.steer(body)
+    assert coordinator.steer(body) == receipt
+    with pytest.raises(ChatSteeringConflict):
+        coordinator.steer({**body, "resources": {"shell": True, "web": True}})
+    assert ChatSteering(tmp_path).receipts("conversation-1")[0]["resources"] == receipt["resources"]
+
+
 @pytest.mark.parametrize(
     "provider", ["codex", "claude_code", "cursor", "copilot", "xai", "opencode"]
 )
@@ -459,7 +541,10 @@ def test_invalid_steering_attachment_does_not_interrupt_turn(tmp_path):
     assert not coordinator.receipts("conversation-1")
 
 
-def test_steering_uses_turn_data_directory_and_checks_image_support(tmp_path):
+@pytest.mark.parametrize(
+    "provider", ["codex", "claude_code", "cursor", "copilot", "opencode", "grok"]
+)
+def test_steering_uses_turn_data_directory_and_checks_image_support(tmp_path, provider):
     import base64
 
     from gofer.ui.chat_media import store_chat_attachments
@@ -480,11 +565,11 @@ def test_steering_uses_turn_data_directory_and_checks_image_support(tmp_path):
     )["attachments"]
     coordinator = ChatSteering(tmp_path)
     turn = coordinator.begin(
-        "conversation-1", "turn-1", "grok", "grok-4.6", data_dir=attachment_dir
+        "conversation-1", "turn-1", "antigravity", "model", data_dir=attachment_dir
     )
     with pytest.raises(ValueError, match="image attachments are not supported"):
         coordinator.steer({**request(), "attachments": attachments})
     assert not turn.cancel.is_set()
     codex = ChatSteering(tmp_path / "other-server")
-    codex.begin("conversation-1", "turn-1", "codex", "model", data_dir=attachment_dir)
+    codex.begin("conversation-1", "turn-1", provider, "model", data_dir=attachment_dir)
     assert codex.steer({**request(""), "attachments": attachments})["attachments"] == attachments

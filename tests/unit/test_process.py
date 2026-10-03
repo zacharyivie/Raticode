@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import threading
 
@@ -219,6 +220,70 @@ def test_build_subprocess_env_keeps_explicit_override(
     env = build_subprocess_env({"LD_LIBRARY_PATH": "/workflow/lib"})
 
     assert env["LD_LIBRARY_PATH"] == "/workflow/lib"
+
+
+@pytest.mark.parametrize(
+    "original", [None, "", os.pathsep.join(["/opt/user/lib", "/tmp/_MEIparent/lib"])]
+)
+def test_build_subprocess_env_removes_pyinstaller_library_paths(monkeypatch, original):
+    for name in ("APPIMAGE", "APPDIR", "_MEIPASS", "LD_LIBRARY_PATH_ORIG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "LD_LIBRARY_PATH",
+        os.pathsep.join(["/tmp/_MEIchild", "/opt/user/lib", "/custom/tmp/_MEIchild/lib"]),
+    )
+    if original is not None:
+        monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", original)
+
+    env = build_subprocess_env()
+
+    assert env.get("LD_LIBRARY_PATH") == (None if original == "" else "/opt/user/lib")
+    assert "LD_LIBRARY_PATH_ORIG" not in env
+    assert "/tmp/_MEIchild" in os.environ["LD_LIBRARY_PATH"]
+    assert build_subprocess_env({"LD_LIBRARY_PATH": "/workflow/lib"})[
+        "LD_LIBRARY_PATH"
+    ] == "/workflow/lib"
+
+
+def test_build_subprocess_env_removes_actual_pyinstaller_bundle_root(monkeypatch):
+    monkeypatch.setattr(sys, "_MEIPASS", "/opt/raticode/bundle", raising=False)
+    for name in ("APPIMAGE", "APPDIR", "_MEIPASS", "LD_LIBRARY_PATH_ORIG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "LD_LIBRARY_PATH",
+        os.pathsep.join(
+            ["/opt/raticode/bundle", "/opt/raticode/bundle/lib", "/opt/raticode/bundle-other"]
+        ),
+    )
+
+    assert build_subprocess_env()["LD_LIBRARY_PATH"] == "/opt/raticode/bundle-other"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux dynamic linker regression")
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.asyncio
+async def test_bash_does_not_inherit_pyinstaller_libraries(monkeypatch, tmp_path, streaming):
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is unavailable")
+    bundle = tmp_path / "_MEIbroken"
+    bundle.mkdir()
+    # If leaked, this invalid library prevents Bash from even running its command.
+    (bundle / "libreadline.so.8").write_bytes(b"invalid bundled Readline library")
+    for name in ("APPIMAGE", "APPDIR", "_MEIPASS", "LD_LIBRARY_PATH_ORIG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(bundle))
+    command = [bash, "--noprofile", "--norc", "-c", 'printf "shell-ok:%s" "$LD_LIBRARY_PATH"']
+
+    if streaming:
+        events = [event async for event in stream_subprocess(command)]
+        code = events[-1]["returncode"]
+        stdout = "".join(event["text"] for event in events if event["stream"] == "stdout")
+        stderr = "".join(event["text"] for event in events if event["stream"] == "stderr")
+    else:
+        code, stdout, stderr = await run_subprocess(command)
+
+    assert (code, stdout, stderr) == (0, "shell-ok:", "")
 
 
 @pytest.mark.asyncio

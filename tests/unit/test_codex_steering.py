@@ -367,6 +367,46 @@ def test_only_registered_swarm_tool_receives_approval(
 
 
 @pytest.mark.asyncio
+async def test_single_oversized_record_is_explicit_and_does_not_restart_turn(monkeypatch, tmp_path):
+    script = tmp_path / "oversized_server.py"
+    script.write_text("""import json, sys, time
+for line in sys.stdin:
+ m=json.loads(line)
+ method=m['method']
+ if method=='initialized': continue
+ result={}
+ if method=='thread/start': result={'thread': {'id':'thread'}}
+ if method=='turn/start':
+  print(json.dumps({'method':'item/completed','params':{'text':'x'*10000}}), flush=True)
+  time.sleep(30)
+ else: print(json.dumps({'id':m['id'],'result':result}), flush=True)
+""")
+    spawn = asyncio.create_subprocess_exec
+    processes = []
+
+    async def fake_spawn(*args, **kwargs):
+        process = await spawn(sys.executable, str(script), **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    events = [
+        event
+        async for event in stream_codex_turn(
+            [sys.executable, "exec", "--sandbox", "workspace-write", "prompt"],
+            control=CodexTurnControl(),
+            cwd=tmp_path,
+            cancel_event=None,
+            max_output_bytes=500,
+        )
+    ]
+    assert len(processes) == 1
+    assert processes[0].returncode is not None
+    assert "protocol record exceeded" in events[-2]["text"]
+    assert events[-1] == {"type": "exit", "returncode": 1}
+
+
+@pytest.mark.asyncio
 async def test_unlimited_swarm_transport_survives_large_stdout_and_stderr(monkeypatch, tmp_path):
     script = tmp_path / "large.py"
     script.write_text("""import json, sys

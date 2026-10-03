@@ -1,3 +1,5 @@
+import { runFocusedEdit, rememberEditingTarget } from "../lib/focusedEditing.js";
+import { textEditorSessions, flushCodeDrafts } from "../lib/codeEditorSessions.js";
 import { startGenerationJob } from "../lib/generationJobs.js";
 import { generateReportTheme, reportThemeContext, normalizeReportThemes } from "../lib/reportThemes.js";
 import { orderDeviceMessages, startDeviceWorkspaceSync } from "../lib/deviceWorkspaceSync.js";
@@ -85,6 +87,9 @@ import {
   clipboardAttachmentFiles,
   largePasteFile,
   readChatAttachments,
+  CHAT_IMAGE_WARNING_MS,
+  isChatImage,
+  providerSupportsChatImages,
   transferContainsFiles,
   uploadChatAttachments,
 } from "../lib/chatAttachments.js";
@@ -317,6 +322,11 @@ export default function App() {
     }).catch(reportArchiveError);
   }, []);
   useEffect(() => {
+    const editError = event => setTopBarNotice({ type: "error", message: event.detail || "Unable to edit the focused field" });
+    window.addEventListener("gofer:edit-error", editError);
+    return () => window.removeEventListener("gofer:edit-error", editError);
+  }, []);
+  useEffect(() => {
     function archiveError(event) { setTopBarNotice({ type: "error", message: `Conversation archive: ${event.detail}. Rem still keeps its local history.` }); }
     window.addEventListener("gofer:archive-error", archiveError);
     return () => window.removeEventListener("gofer:archive-error", archiveError);
@@ -399,6 +409,7 @@ export default function App() {
   const [workflowTabs, setWorkflowTabs] = useState(initialEditorSession?.workflowTabs || {});
   const [sidebarActivity, setSidebarActivity] = useState(initialEditorSession?.activity || (initialStudioSession.view === "code" ? "files" : settings.general.initialActivity || "workflows"));
 
+  const [lifecyclePrompt, setLifecyclePrompt] = useState(null);
   const [workflowClosePrompt, setWorkflowClosePrompt] = useState(null);
   const [activeCodeDocumentState, setActiveCodeDocumentState] = useState(null);
   const { projectPaneVisible, setProjectPaneVisible, assistantPaneVisible, setAssistantPaneVisible, closeCompactPane } = useResponsivePanes();
@@ -435,6 +446,7 @@ export default function App() {
   const [dirtyWorkflowsById, setDirtyWorkflowsById] = useState({});
   const [saveStatesByWorkflowId, setSaveStatesByWorkflowId] = useState({});
   const [topBarNotice, setTopBarNotice] = useState({ type: "", message: "" });
+  const [updateNotice, setUpdateNotice] = useState({ type: "", message: "" });
   const [runPreview, setRunPreview] = useState(null);
   const [queueState, setQueueState] = useState({ runners: [], runs: [], error: "" });
   const [retentionSettings, setRetentionSettings] = useState(loadRetentionSettings);
@@ -578,6 +590,12 @@ export default function App() {
 
   useEffect(() => {
     function handleTextZoomKeydown(event) {
+      if (matchesKeybinding(event, "Mod+Digit0") || matchesKeybinding(event, "Ctrl+Digit0")) {
+        if (eventTargetsGraphVisualization(event)) return;
+        event.preventDefault();
+        setTextZoom(100);
+        return;
+      }
       const direction = textZoomDirection(event);
       if (!direction) return;
       event.preventDefault();
@@ -609,19 +627,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const reduceMotion = reducedMotionEnabled(
-      settings,
-      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
-    );
+    const motionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    const applyMotion = () => {
+      if (document.documentElement.dataset) document.documentElement.dataset.reducedMotion = String(reducedMotionEnabled(settings, motionQuery?.matches ?? false));
+    };
+    applyMotion();
+    motionQuery?.addEventListener?.("change", applyMotion);
     document.documentElement.classList?.toggle?.("dark", theme === "dark");
-    if (document.documentElement.dataset) {
-      document.documentElement.dataset.reducedMotion = String(reduceMotion);
-    }
     try {
       window.localStorage?.setItem("gofer-ui-theme", theme);
     } catch {
       // The selected theme still applies for this session.
     }
+    return () => motionQuery?.removeEventListener?.("change", applyMotion);
   }, [settings, theme]);
 
   useEffect(() => {
@@ -834,6 +852,7 @@ export default function App() {
       if (command?.action === "text-zoom" && command.reset === true) {
         setTextZoom(100);
       }
+      if (command?.action === "editor-find") rattishEditorRef.current?.runCommand?.("edit.find");
       if (command?.action === "open-browser") runShortcutAction("browser.open");
       if (command?.action === "settings-open") runShortcutAction("settings.open");
       if (command?.action === "file-open") runShortcutAction("file.open");
@@ -1435,9 +1454,9 @@ export default function App() {
       setRecentCodePaths(current => [...new Set(current.map(path =>
         replacePathPrefix(path, change.sourcePath, change.path, change.isDirectory),
       ))]);
-      setCodeOpenPaths((current) => current.map((path) =>
+      setCodeOpenPaths((current) => [...new Set(current.map((path) =>
         replacePathPrefix(path, change.sourcePath, change.path, change.isDirectory),
-      ));
+      ))]);
       setActiveCodePath((current) =>
         replacePathPrefix(current, change.sourcePath, change.path, change.isDirectory));
       setPreviewCodePath((current) => {
@@ -1850,8 +1869,15 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => window.goferDesktop?.onPrepareLifecycle?.(async request => {
+    const dirty = [...textEditorSessions].filter(([, session]) => session.content !== session.savedContent);
+    if (!dirty.length) return true;
+    return new Promise(resolve => setLifecyclePrompt({ ...request, paths: dirty.map(([path]) => path), resolve }));
+  }), []);
+
   const checkForUpdates = useCallback(async ({ silent = false } = {}) => {
     if (!window.goferUpdates?.check) return;
+    if (!silent) setUpdateNotice({ type: "", message: "" });
     setUpdateState((current) => ({
       ...current,
       checking: true,
@@ -1859,15 +1885,11 @@ export default function App() {
     }));
     try {
       const info = await window.goferUpdates.check();
-      setUpdateState({
-        available: Boolean(info?.available),
-        checking: false,
-        error: "",
-        info,
-      });
+      setUpdateState((current) => ({ ...current, ...info, checking: false }));
+      if (info?.error) throw new Error(info.error);
       if (!silent) {
-        setTopBarNotice({
-          type: info?.available ? "success" : "success",
+        setUpdateNotice({
+          type: "success",
           message: info?.available
             ? `Raticode ${info.info?.version ?? "update"} is available`
             : info?.info?.noReleases
@@ -1882,7 +1904,7 @@ export default function App() {
         error: error instanceof Error ? error.message : "Unable to check for updates",
       }));
       if (!silent) {
-        setTopBarNotice({
+        setUpdateNotice({
           type: "error",
           message: error instanceof Error ? error.message : "Unable to check for updates",
         });
@@ -1934,6 +1956,16 @@ export default function App() {
 
     return () => window.clearTimeout(timeoutId);
   }, [topBarNotice?.message]);
+
+  useEffect(() => {
+    if (!updateNotice?.message) return undefined;
+
+    const timeoutId = window.setTimeout(() => {
+      setUpdateNotice({ type: "", message: "" });
+    }, 3500);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [updateNotice?.message]);
 
   const loadLatestLog = useCallback(async (workflowId, { silent = false } = {}) => {
     if (pinnedRunRef.current) return;
@@ -3515,8 +3547,12 @@ export default function App() {
   }
 
   function runGlobalMenuAction(action) {
+    if (["edit.undo", "edit.redo", "edit.cut", "edit.copy", "edit.paste", "selection.selectAll"].includes(action)) {
+      if (runFocusedEdit(action)) return;
+    }
     if (action.startsWith("edit.") || action.startsWith("selection.")) {
-      rattishEditorRef.current?.runCommand?.(action);
+      const ran = rattishEditorRef.current?.runCommand?.(action);
+      if (!ran) setTopBarNotice({ type: "info", message: "This command is unavailable for the active document." });
       return;
     }
     if (action === "file.new") {
@@ -3561,6 +3597,41 @@ export default function App() {
       <div aria-atomic="true" aria-live="assertive" className="sr-only" role="alert">
         {runState.error}
       </div>
+      {lifecyclePrompt ? <Dialog title="Unsaved file changes" onClose={() => {
+        if (lifecyclePrompt.busy) return;
+        lifecyclePrompt.resolve(false); setLifecyclePrompt(null);
+      }}>
+        <p>Save your files before you {lifecyclePrompt.reason}, or keep drafts to recover when the files reopen.</p>
+        {lifecyclePrompt.error ? <p role="alert">{lifecyclePrompt.error}</p> : null}
+        <div className="mt-4 flex gap-3">
+          <button type="button" disabled={lifecyclePrompt.busy} onClick={() => { lifecyclePrompt.resolve(false); setLifecyclePrompt(null); }}>Cancel</button>
+          <button type="button" disabled={lifecyclePrompt.busy} onClick={() => {
+            if (!flushCodeDrafts()) { setLifecyclePrompt(current => ({ ...current, error: "Unable to preserve drafts. Save your files or cancel." })); return; }
+            lifecyclePrompt.resolve(true); setLifecyclePrompt(null);
+          }}>Keep drafts</button>
+          <button type="button" disabled={lifecyclePrompt.busy} onClick={async () => {
+            const prompt = lifecyclePrompt;
+            setLifecyclePrompt(current => ({ ...current, busy: true, error: "" }));
+            try {
+              for (const path of prompt.paths) {
+                const session = textEditorSessions.get(path);
+                if (!session || session.content === session.savedContent) continue;
+                const content = session.content;
+                const managed = rattishEditorRef.current?.savePath?.(path);
+                if (managed !== undefined) { if (!await managed) throw new Error(`Unable to save ${path}`); }
+                else {
+                  const disk = await window.goferDesktop.textFiles.read(path);
+                  if (disk?.missing || disk.content !== session.savedContent) throw new Error(`${path} changed on disk. Open it to review the recovered draft, or choose Keep drafts.`);
+                  await window.goferDesktop.textFiles.write({ targetPath: path, content });
+                  textEditorSessions.set(path, { ...session, savedContent: content });
+                }
+              }
+              if ([...textEditorSessions.values()].some(session => session.content !== session.savedContent)) throw new Error("Some files still have unsaved changes. Save them or keep drafts.");
+              flushCodeDrafts(); prompt.resolve(true); setLifecyclePrompt(null);
+            } catch (error) { setLifecyclePrompt(current => ({ ...current, busy: false, error: error.message })); }
+          }}>Save all</button>
+        </div>
+      </Dialog> : null}
       {workflowClosePrompt ? <Dialog title="Save workflow changes?" onClose={() => {
         if (workflowClosePrompt.busy) return;
         workflowClosePrompt.resolve(false); setWorkflowClosePrompt(null);
@@ -3602,6 +3673,7 @@ export default function App() {
         settingsOpen={settingsOpen}
         theme={theme}
         updateState={updateState}
+        updateNotice={updateNotice}
         workflow={activeWorkflow}
         view={studioView}
         onApplyUpdate={() => applyUpdate(updateState)}
@@ -3733,6 +3805,17 @@ export default function App() {
               onOpenMarkdownPath={openMarkdownFileLink}
               onOpenProject={() => void openProjectFolder()}
               onOpenPath={(path) => void openRecentCodeFile(path)}
+              onDropPaths={paths => {
+                setSelectedSwarm(null);
+                setSelectedOrganization(null);
+                setCodeOpenPaths(current => mergeCodeOpenPaths(current, paths));
+                setRecentCodePaths(current => mergeCodeOpenPaths(current, paths));
+                setActiveCodePath(paths.at(-1));
+                previewCodePathRef.current = "";
+                setPreviewCodePath("");
+                setCodeEditorOpened(true);
+                setStudioView("code");
+              }}
               onOpenPathsChange={setCodeOpenPaths}
               onPinPath={pinCodeFile}
               onRattishContentChange={scheduleRattishAnalysis}
@@ -4362,11 +4445,12 @@ export function workflowLogUrls(workflowId, runId = null) {
   };
 }
 
-export function chatStreamRequestBody({ effort, provider, model, messages, workflow, permissionMode, conversationId, turnId }) {
+export function chatStreamRequestBody({ effort, provider, model, messages, workflow, permissionMode, conversationId, turnId, resetSession }) {
   return {
     provider,
     model,
     ...(conversationId && turnId ? { conversationId, turnId } : {}),
+    ...(resetSession === true ? { resetSession: true } : {}),
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
     messages,
@@ -5459,6 +5543,7 @@ export function GlobalToolbar({
   settingsOpen = false,
   theme,
   updateState,
+  updateNotice,
   workflow,
   view = "graph",
   onApplyUpdate,
@@ -5488,15 +5573,23 @@ export function GlobalToolbar({
         {projectError ? <div role="alert" className="flex min-w-0 items-center gap-2 text-xs text-red-700 dark:text-red-300"><span className="truncate" title={projectError}>{projectError}</span><button type="button" className="shrink-0 underline" onClick={() => onMenuAction?.("file.openFolder")}>Open project</button></div> : null}
       </div>
       <div className="flex items-center gap-1">
-        {hasUpdateBridge ? updateState?.available ? (
-          <button className="inline-flex h-8 items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-70" disabled={Boolean(updateState.downloading)} title={updateButtonTitle(updateState)} type="button" onClick={onApplyUpdate}>
-            {updateState.downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-            {updateButtonLabel(updateState)}
-          </button>
-        ) : (
-          <button className={buttonClass} title={updateState?.error ? `Update check failed: ${updateState.error}` : "Check for updates"} type="button" onClick={onCheckForUpdates}>
-            <RefreshCw size={16} className={updateState?.checking ? "animate-spin" : ""} />
-          </button>
+        {hasUpdateBridge ? (
+          <div className="flex min-w-0 items-center gap-2" aria-label="Application updates">
+            {updateNotice?.message ? (
+              <span role={updateNotice.type === "error" ? "alert" : "status"} title={updateNotice.message} className={`max-w-[min(28rem,35vw)] truncate text-xs ${updateNotice.type === "error" ? "text-red-700 dark:text-red-300" : "text-muted"}`}>
+                {updateNotice.message}
+              </span>
+            ) : null}
+            {updateState?.available ? (
+              <button className="inline-flex h-7 shrink-0 items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-70" disabled={Boolean(updateState.downloading)} title={updateButtonTitle(updateState)} type="button" onClick={onApplyUpdate}>
+                {updateState.downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                {updateButtonLabel(updateState)}
+              </button>
+            ) : null}
+            <button className={`${buttonClass} shrink-0`} disabled={Boolean(updateState?.checking || updateState?.downloading)} title={updateState?.error ? `Update check failed: ${updateState.error}` : "Check for updates"} aria-label="Check for updates" type="button" onClick={onCheckForUpdates}>
+              <RefreshCw size={16} className={updateState?.checking ? "animate-spin" : ""} />
+            </button>
+          </div>
         ) : null}
         <button aria-label="Open settings" aria-expanded={settingsOpen} className={`${buttonClass} ${settingsOpen ? "bg-slate-100 text-ink" : ""}`} title={`Settings (${formatKeybinding(settingBinding(settings, "settings.open"))})`} type="button" onClick={onToggleSettings}>
           <SettingsIcon size={16} />
@@ -5523,20 +5616,20 @@ const APPLICATION_MENUS = [
     ["file.close", "Close Editor", "Ctrl+W", "code-path"],
   ] },
   { label: "Edit", items: [
-    ["edit.undo", "Undo", "Ctrl+Z", "code-document"],
-    ["edit.redo", "Redo", "Ctrl+Shift+Z", "code-document"],
+    ["edit.undo", "Undo", "Ctrl+Z"],
+    ["edit.redo", "Redo", "Ctrl+Shift+Z"],
     null,
-    ["edit.cut", "Cut", "Ctrl+X", "code-document"],
-    ["edit.copy", "Copy", "Ctrl+C", "code-document"],
-    ["edit.paste", "Paste", "Ctrl+V", "code-document"],
+    ["edit.cut", "Cut", "Ctrl+X"],
+    ["edit.copy", "Copy", "Ctrl+C"],
+    ["edit.paste", "Paste", "Ctrl+V"],
     null,
-    ["edit.find", "Find", "Ctrl+F", "code-document"],
+    ["edit.find", "Find", "Ctrl+F", "code-path"],
     ["edit.replace", "Replace", "Ctrl+H", "code-document"],
     ["edit.toggleLineComment", "Toggle Line Comment", "Ctrl+/", "code-document"],
     ["edit.formatDocument", "Format Document", "Shift+Alt+F", "code-document"],
   ] },
   { label: "Selection", items: [
-    ["selection.selectAll", "Select All", "Ctrl+A", "code-document"],
+    ["selection.selectAll", "Select All", "Ctrl+A"],
     ["selection.expand", "Expand Selection", "Shift+Alt+Right", "code-document"],
     ["selection.shrink", "Shrink Selection", "Shift+Alt+Left", "code-document"],
     null,
@@ -5579,14 +5672,55 @@ export function ApplicationMenus({
   onSelectProject,
 }) {
   const [openMenu, setOpenMenu] = useState("");
+  const [focusedMenu, setFocusedMenu] = useState("File");
   const containerRef = useRef(null);
+  const openerRef = useRef(null);
+  const returnFocusRef = useRef(null);
+  const menuFocusRef = useRef(false);
+  useEffect(() => {
+    if (openMenu && menuFocusRef.current) containerRef.current?.querySelector('[role="menu"] button:not(:disabled)')?.focus();
+  }, [openMenu]);
+  function closeMenu(restore = true) {
+    setOpenMenu("");
+    if (restore) openerRef.current?.focus();
+  }
+  function navigateMenu(event) {
+    const trigger = event.target.closest?.("[data-menu-trigger]");
+    const menu = event.target.closest?.('[role="menu"]');
+    const triggers = [...containerRef.current.querySelectorAll("[data-menu-trigger]")];
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeMenu(); return; }
+    if (event.key === "Tab") { setOpenMenu(""); return; }
+    if (trigger && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault(); menuFocusRef.current = true; openerRef.current = trigger;
+      if (openMenu !== trigger.dataset.menuTrigger) setOpenMenu(trigger.dataset.menuTrigger);
+      else containerRef.current.querySelector('[role="menu"] button:not(:disabled)')?.focus();
+      return;
+    }
+    if (menu && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled)')].filter(item => item.closest('[role="menu"]') === menu);
+      const index = items.indexOf(event.target);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+      items[next]?.focus(); return;
+    }
+    if (["ArrowLeft", "ArrowRight"].includes(event.key)) {
+      if (menu?.parentElement?.closest('[role="menu"]')) return;
+      event.preventDefault();
+      const index = triggers.findIndex(item => item.dataset.menuTrigger === (openMenu || trigger?.dataset.menuTrigger));
+      const next = triggers[(index + (event.key === "ArrowLeft" ? -1 : 1) + triggers.length) % triggers.length];
+      if (!next) return;
+      openerRef.current = next;
+      next.focus();
+      if (openMenu) { menuFocusRef.current = true; setOpenMenu(next.dataset.menuTrigger); }
+    }
+  }
   useEffect(() => {
     if (!openMenu) return undefined;
     const dismiss = (event) => {
       if (!containerRef.current?.contains(event.target)) setOpenMenu("");
     };
     const escape = (event) => {
-      if (event.key === "Escape") setOpenMenu("");
+      if (event.key === "Escape") closeMenu();
     };
     window.addEventListener("pointerdown", dismiss);
     window.addEventListener("keydown", escape);
@@ -5597,16 +5731,31 @@ export function ApplicationMenus({
   }, [openMenu]);
   const context = { activeCodeDocument, activeCodePath, assistantPaneVisible, projectPaneVisible, view };
   return (
-    <nav aria-label="Application menu" className="flex h-full items-center gap-0.5" ref={containerRef}>
+    <nav aria-label="Application menu" role="menubar" className="flex h-full items-center gap-0.5" ref={containerRef} onKeyDown={navigateMenu}>
       {APPLICATION_MENUS.map((menu) => (
         <div className="relative" key={menu.label}>
           <button
+            data-menu-trigger={menu.label}
+            role="menuitem"
+            tabIndex={focusedMenu === menu.label ? 0 : -1}
+            onFocus={() => setFocusedMenu(menu.label)}
             aria-expanded={openMenu === menu.label}
             aria-haspopup="menu"
             className={`rounded px-2 py-1 text-[13px] text-ink outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand ${openMenu === menu.label ? "bg-slate-100" : ""}`}
             type="button"
-            onClick={() => setOpenMenu((current) => current === menu.label ? "" : menu.label)}
-            onPointerEnter={() => openMenu && setOpenMenu(menu.label)}
+            onPointerDown={() => { returnFocusRef.current = document.activeElement; rememberEditingTarget(document.activeElement); menuFocusRef.current = false; }}
+            onClick={event => {
+              openerRef.current = event.currentTarget;
+              if (event.detail === 0) menuFocusRef.current = true;
+              setOpenMenu(current => current === menu.label ? "" : menu.label);
+            }}
+            onPointerEnter={event => {
+              if (!openMenu) return;
+              menuFocusRef.current = false;
+              openerRef.current = event.currentTarget;
+              setFocusedMenu(menu.label);
+              setOpenMenu(menu.label);
+            }}
           >
             {menu.label}
           </button>
@@ -5631,6 +5780,7 @@ export function ApplicationMenus({
                   settings={settings}
                   onSelect={() => {
                     setOpenMenu("");
+                    returnFocusRef.current?.focus?.();
                     onAction?.(item[0]);
                   }}
                 />
@@ -5644,6 +5794,7 @@ export function ApplicationMenus({
 }
 
 const APPLICATION_MENU_BINDINGS = {
+  "edit.find": "editor.find",
   "file.close": "file.close",
   "file.new": "file.new",
   "file.open": "file.open",
@@ -5661,13 +5812,17 @@ const APPLICATION_MENU_BINDINGS = {
 function ApplicationMenuItem({ context, item, onSelect, settings }) {
   const [action, label, fallbackShortcut, condition] = item;
   const bindingId = APPLICATION_MENU_BINDINGS[action];
+  const genericShortcuts = { "edit.undo": "Mod+KeyZ", "edit.redo": "Mod+Shift+KeyZ", "edit.cut": "Mod+KeyX", "edit.copy": "Mod+KeyC", "edit.paste": "Mod+KeyV", "selection.selectAll": "Mod+KeyA" };
   const shortcut = bindingId
     ? formatKeybinding(settingBinding(settings, bindingId))
-    : fallbackShortcut;
-  const enabled = !condition || condition.endsWith("-check")
+    : (genericShortcuts[action] ? formatKeybinding(genericShortcuts[action]) : context.activeCodeDocument?.commands?.[action]?.shortcut)
+      || (action.startsWith("edit.") || action.startsWith("selection.") ? "" : formatKeybinding(fallbackShortcut.replace("Ctrl", "Mod")));
+  const capability = context.activeCodeDocument?.commands?.[action];
+  const generalEdit = ["edit.undo", "edit.redo", "edit.cut", "edit.copy", "edit.paste", "selection.selectAll"].includes(action);
+  const enabled = (generalEdit || capability?.supported !== false) && (!condition || condition.endsWith("-check")
     || (condition === "code" && context.view === "code")
     || (condition === "code-path" && context.view === "code" && Boolean(context.activeCodePath))
-    || (condition === "code-document" && context.view === "code" && Boolean(context.activeCodeDocument));
+    || (condition === "code-document" && context.view === "code" && Boolean(context.activeCodeDocument)));
   const checked = condition === "graph-check" && context.view === "graph"
     || condition === "code-check" && context.view === "code"
     || condition === "project-check" && context.projectPaneVisible
@@ -5676,6 +5831,7 @@ function ApplicationMenuItem({ context, item, onSelect, settings }) {
     <button
       className="flex h-8 w-full items-center gap-3 rounded px-2 text-left text-[12px] hover:bg-slate-100 disabled:text-muted disabled:opacity-45 disabled:hover:bg-transparent"
       disabled={!enabled}
+      title={capability?.supported === false ? "Unavailable for this document. No supporting language provider is loaded." : undefined}
       role="menuitem"
       type="button"
       onClick={onSelect}
@@ -5689,6 +5845,10 @@ function ApplicationMenuItem({ context, item, onSelect, settings }) {
 
 function RecentProjectsMenuItem({ recentProjectRoots, onSelect }) {
   const [open, setOpen] = useState(false);
+  const parentRef = useRef(null);
+  const submenuRef = useRef(null);
+  const keyboardOpenRef = useRef(false);
+  useEffect(() => { if (open && keyboardOpenRef.current) submenuRef.current?.querySelector("button")?.focus(); }, [open]);
   const labels = loadProjectLabels();
   const projects = mergeRecentProjects([], recentProjectRoots).map((root) => ({
     name: pathValue(labels, root)?.trim() || projectNameFromPath(root),
@@ -5697,8 +5857,12 @@ function RecentProjectsMenuItem({ recentProjectRoots, onSelect }) {
   return (
     <div className="relative" onPointerEnter={() => setOpen(true)} onPointerLeave={() => setOpen(false)}>
       <button
+        ref={parentRef}
         aria-expanded={open}
         aria-haspopup="menu"
+        onKeyDown={event => {
+          if (["ArrowRight", "Enter", " "].includes(event.key)) { event.preventDefault(); event.stopPropagation(); keyboardOpenRef.current = true; setOpen(true); }
+        }}
         className="flex h-8 w-full items-center gap-3 rounded px-2 text-left text-[12px] hover:bg-slate-100"
         role="menuitem"
         type="button"
@@ -5709,7 +5873,9 @@ function RecentProjectsMenuItem({ recentProjectRoots, onSelect }) {
         <ChevronRight aria-hidden="true" size={13} />
       </button>
       {open ? (
-        <div aria-label="Recent projects" className="absolute left-full top-[-6px] z-[101] min-w-[260px] rounded-md border border-line bg-white p-1.5 shadow-[0_10px_28px_rgba(15,23,42,0.18)]" role="menu">
+        <div aria-label="Recent projects" className="absolute left-full top-[-6px] z-[101] min-w-[260px] rounded-md border border-line bg-white p-1.5 shadow-[0_10px_28px_rgba(15,23,42,0.18)]" role="menu" ref={submenuRef} onKeyDown={event => {
+          if (["ArrowLeft", "Escape"].includes(event.key)) { event.preventDefault(); event.stopPropagation(); setOpen(false); parentRef.current?.focus(); }
+        }}>
           {projects.length ? projects.map((project) => (
             <button className="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-xs hover:bg-slate-100" key={project.root} role="menuitem" title={project.root} type="button" onClick={() => onSelect(project.root)}>
               <FolderOpen aria-hidden="true" className="shrink-0 text-muted" size={13} />
@@ -6000,6 +6166,7 @@ export function ChatPane({
   const draftsByThreadRef = useRef({});
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState("");
+  const [attachmentWarning, setAttachmentWarning] = useState(null);
   const [contextSendThread, setContextSendThread] = useState(null);
   const [pendingRemContext, setPendingRemContext] = useState(null);
   const [contextFocusRequest, setContextFocusRequest] = useState(0);
@@ -6015,6 +6182,17 @@ export function ChatPane({
     refresh: refreshProviders,
   } = useProviderCapabilities(prospectiveProjectRoot);
   const providerCapability = providers.find(item => item.id === providerId);
+  const supportsImages = providerSupportsChatImages(providerId, providerCapability, model);
+  useEffect(() => {
+    if (!attachmentWarning) return undefined;
+    const timer = window.setTimeout(() => setAttachmentWarning(null), CHAT_IMAGE_WARNING_MS);
+    return () => window.clearTimeout(timer);
+  }, [attachmentWarning]);
+  useEffect(() => {
+    if (supportsImages || !attachments.some(isChatImage)) return;
+    setAttachments(current => current.filter(item => !isChatImage(item)));
+    setAttachmentWarning({ text: `${providerCapability?.displayName || providerId} can't accept images with this selection.` });
+  }, [supportsImages, attachments, providerId, providerCapability?.displayName]);
   const permissionOptions = providerPermissionOptions(providerId, providerCapability);
   const [threads, setThreads] = useState([]);
   const [renamingThread, setRenamingThread] = useState(null);
@@ -6373,7 +6551,11 @@ export function ChatPane({
   }
 
   function addAttachments(files) {
-    const result = readChatAttachments(files, attachments);
+    const incoming = Array.from(files || []);
+    if (!supportsImages && incoming.some(isChatImage)) {
+      setAttachmentWarning({ text: `${providerCapability?.displayName || providerId} can't accept images with this selection.` });
+    }
+    const result = readChatAttachments(incoming.filter(file => supportsImages || !isChatImage(file)), attachments);
     setAttachments(result.attachments);
     setAttachmentError(result.error);
   }
@@ -6427,8 +6609,8 @@ export function ChatPane({
   const openScopedFile = useCallback(path => {
     openFileRef.current?.(path, scopedProjectRoot);
   }, [scopedProjectRoot]);
-  const toggleThoughtGroup = useCallback(id => {
-    setExpandedThoughtGroups(current => ({ ...current, [id]: current[id] === false }));
+  const toggleThoughtGroup = useCallback((id, replyId, expanded) => {
+    setExpandedThoughtGroups(current => ({ ...current, [id]: { replyId, expanded: !expanded } }));
   }, []);
 
   useEffect(() => {
@@ -6472,7 +6654,7 @@ export function ChatPane({
       : -1;
     const originalMessage = editedMessageIndex >= 0 ? sourceMessages[editedMessageIndex] : null;
     const text = originalMessage ? String(editedMessage.body ?? "").trim() : options.text ?? draft.trim();
-    const selectedAttachments = originalMessage || options.targetThread ? [] : attachments;
+    const selectedAttachments = originalMessage ? editedMessage.attachments ?? originalMessage.attachments ?? [] : options.targetThread ? [] : attachments;
     const hasMessageAttachments = Boolean(
       originalMessage?.attachments?.length || selectedAttachments.length,
     );
@@ -6517,9 +6699,7 @@ export function ChatPane({
     }));
     let messageAttachments;
     try {
-      messageAttachments = originalMessage
-        ? originalMessage.attachments ?? []
-        : await uploadChatAttachments(selectedAttachments, targetThreadId);
+      messageAttachments = await uploadChatAttachments(selectedAttachments, targetThreadId);
     } catch (error) {
       setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
       setChatStateByThread((current) => ({
@@ -6540,7 +6720,7 @@ export function ChatPane({
     deletedChatThreadIdsRef.current.delete(targetThreadId);
 
     const userMessage = originalMessage
-      ? { ...originalMessage, body: text }
+      ? { ...originalMessage, body: text, attachments: messageAttachments }
       : {
           id: uniqueClientId(),
           role: "user",
@@ -6553,7 +6733,7 @@ export function ChatPane({
     updateThreadMessages(targetThreadId, nextMessages);
     setThreads(current => bumpChatThread(current, targetThreadId));
     updateThreadTitleFromMessage(targetThreadId, titleSource);
-    if (!options.targetThread) {
+    if (!options.targetThread && !originalMessage) {
       setDraft("");
       delete draftsByThreadRef.current[activeThreadId || "new-thread"];
       setAttachments([]);
@@ -6564,6 +6744,7 @@ export function ChatPane({
     let contextBoundaryId = userMessage.id;
     const thoughtGroupId = uniqueClientId();
     let turnSummaryReceived = false;
+    let resumeAvailable = false;
     function appendAssistantMessage(body, kind = "final", extra = {}) {
       if (deletedChatThreadIdsRef.current.has(targetThreadId)) return;
       const assistantMessageId = uniqueClientId();
@@ -6622,6 +6803,7 @@ export function ChatPane({
       if (activeTurn.stopRequested) throw new DOMException("Rem stopped", "AbortError");
       const response = await fetchChatTurn(chatStreamRequestBody({
           conversationId: targetThreadId,
+          resetSession: Boolean(originalMessage),
           turnId: activeTurn.turnId,
           permissionMode: turnPermission,
           provider: turnProvider,
@@ -6724,6 +6906,15 @@ export function ChatPane({
                   deltaStreamId: deltaStreamId || undefined,
                   trace: event.trace && typeof event.trace === "object" ? event.trace : undefined,
               });
+            } else if (event.type === "recovery") {
+              const body = event.partial?.body ?? "";
+              if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
+              if (event.partial?.changes) appendAssistantMessage("", "turn-summary", {
+                id: uniqueClientId(), changes: event.partial.changes,
+                completedAt: event.partial.completedAt, durationMs: event.partial.durationMs,
+              });
+              appendAssistantMessage(event.message || "Rem is resuming the interrupted response.", "system", { role: "system" });
+              setChatAnnouncementByThread(current => ({ ...current, [targetThreadId]: event.message }));
             } else if (event.type === "compaction") {
               const compactedMessages = Array.isArray(event.messages)
                 ? event.messages
@@ -6761,6 +6952,9 @@ export function ChatPane({
                 },
               }));
             } else if (event.type === "error") {
+              resumeAvailable = event.resumeAvailable === true;
+              const body = event.message?.body ?? "";
+              if (body.trim()) appendAssistantMessage(body, "final", { interrupted: true });
               appendTurnSummary(event);
               setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
               throw new Error(event.error || "Rem failed");
@@ -6820,7 +7014,7 @@ export function ChatPane({
           durationMs: Date.now() - clientTurnStartedAt,
         });
       }
-      appendAssistantMessage(error instanceof Error ? error.message : "Unable to send message", "error", { role: "system" });
+      appendAssistantMessage(error instanceof Error ? error.message : "Unable to send message", "error", { role: "system", resumeAvailable });
       setChatStateByThread((current) => ({
         ...current,
         [targetThreadId]: {
@@ -6847,11 +7041,14 @@ export function ChatPane({
     if (!turn || (!draft.trim() && !attachments.length) || steeringRequestsRef.current[threadId]?.pending) return;
     const text = draft;
     const selectedAttachments = attachments;
+    const resources = snapshotRemResources(activeThread?.resources ?? homeResources);
+    const resourceError = remResourceError(resources);
+    if (resourceError) { setSteeringErrors(current => ({ ...current, [threadId]: resourceError })); return; }
     const attachmentKey = JSON.stringify(selectedAttachments.map(item => item.id));
     const previous = steeringRequestsRef.current[threadId];
-    const request = previous?.text === text && previous.turnId === turn.turnId && previous.attachmentKey === attachmentKey
+    const request = previous?.text === text && previous.turnId === turn.turnId && previous.attachmentKey === attachmentKey && JSON.stringify(previous.resources) === JSON.stringify(resources)
       ? { ...previous }
-      : { conversationId: threadId, turnId: turn.turnId, requestId: uniqueClientId(), text, attachmentKey };
+      : { conversationId: threadId, turnId: turn.turnId, requestId: uniqueClientId(), text, attachmentKey, resources };
     steeringRequestsRef.current[threadId] = { ...request, pending: true };
     setSteeringBusy(current => ({ ...current, [threadId]: true }));
     setSteeringErrors(current => ({ ...current, [threadId]: "" }));
@@ -6943,15 +7140,15 @@ export function ChatPane({
   const messageActionsRef = useRef(null);
   messageActionsRef.current = { editUserMessage, toggleAssistantChanges, forkThread, activeThreadId };
   const forkMessageAction = useCallback(id => messageActionsRef.current.forkThread(id), []);
-  const editMessageAction = useCallback((id, body) => messageActionsRef.current.editUserMessage(id, body), []);
+  const editMessageAction = useCallback((id, body, attachments) => messageActionsRef.current.editUserMessage(id, body, attachments), []);
   const undoMessageAction = useCallback((message) => {
     const actions = messageActionsRef.current;
     return actions.toggleAssistantChanges(actions.activeThreadId, message.id, message.changes?.id, Boolean(message.changes?.undone));
   }, []);
 
-  function editUserMessage(messageId, body) {
+  function editUserMessage(messageId, body, attachments) {
     if (!activeThreadId || chatState.sending) return;
-    void sendMessage({ id: messageId, body });
+    void sendMessage({ id: messageId, body, attachments });
   }
 
   async function forkThread(messageId) {
@@ -7151,7 +7348,8 @@ export function ChatPane({
       if (item.type === "thought-group") {
         return <ThoughtGroup
           key={item.id}
-          expanded={expandedThoughtGroups[item.id] !== false}
+          expanded={isThoughtGroupExpanded(item, expandedThoughtGroups, assistantDefaults.autoHideThoughts !== false && !item.thoughts.some(thought => String(thought.id) === String(matchId)))}
+          replyId={item.replyId}
           groupId={item.id}
           onToggle={toggleThoughtGroup}
           searchMessageId={matchId}
@@ -7571,7 +7769,8 @@ export function ChatPane({
               item.type === "thought-group" ? (
                 <ThoughtGroup
                   key={item.id}
-                  expanded={expandedThoughtGroups[item.id] !== false}
+                  expanded={isThoughtGroupExpanded(item, expandedThoughtGroups, assistantDefaults.autoHideThoughts !== false)}
+                  replyId={item.replyId}
                   onOpenLink={openScopedMarkdownLink}
                   sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
                   onOpenFile={openScopedFile}
@@ -7586,6 +7785,10 @@ export function ChatPane({
                   canEdit={!chatState.sending && item.message.id === latestUserMessageId}
                   message={item.message}
                   onEdit={editMessageAction}
+                  onResume={!chatState.sending && item.message.id === visibleMessages.at(-1)?.id
+                    ? () => void sendMessage(null, { text: "Continue the original task. Inspect completed work first and avoid repeating completed actions." }) : undefined}
+                  supportsImages={supportsImages}
+                  providerName={providerCapability?.displayName || providerId}
                   onOpenLink={openScopedMarkdownLink}
                   sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
                   onUndoChanges={undoMessageAction}
@@ -7604,7 +7807,7 @@ export function ChatPane({
       <div className="relative shrink-0 border-t border-line p-3">
           <div className="mb-2">
             <button aria-expanded={resourcesOpen} className="rounded px-1 py-1 text-xs text-muted hover:bg-slate-50" type="button" onClick={() => setResourcesOpen((open) => !open)}>{activeThread ? "Thread tools, skills & MCP" : "New thread tools, skills & MCP"}</button>
-            {resourcesOpen ? <div className="max-h-64 overflow-y-auto border-t border-line py-2"><RemResources key={activeThreadId || "new-thread"} value={activeThread ? activeThread.resources ?? assistantDefaults.resources ?? DEFAULT_REM_RESOURCES : homeResources} onChange={(resources) => activeThread ? updateThreadConfig({ resources }) : setNewThreadResources(resources)} /></div> : null}
+            {resourcesOpen ? <div className="max-h-64 overflow-y-auto border-t border-line py-2"><p role="status" className="mb-2 text-[11px] leading-4 text-muted">{chatState.sending ? "Tool changes apply when you send your next instruction, which restarts the response with these settings." : "Tool changes apply to your next message in this thread."}</p><RemResources key={activeThreadId || "new-thread"} value={activeThread ? activeThread.resources ?? assistantDefaults.resources ?? DEFAULT_REM_RESOURCES : homeResources} onChange={(resources) => activeThread ? updateThreadConfig({ resources }) : setNewThreadResources(resources)} /></div> : null}
           </div>
           <ProviderModelEffortFields
             capabilities={providers}
@@ -7630,6 +7833,10 @@ export function ChatPane({
             <p>{providerCapability?.displayName || providerId} needs CLI-managed permissions to send messages. Raticode&apos;s tool restrictions are unsupported.</p>
             <button type="button" className="mt-2 font-semibold underline" disabled={chatState.sending} onClick={() => selectPermission("cli-managed")}>Use CLI-managed permissions</button>
           </div> : null}
+          {globalScope ? <p role="status" className="mb-2 text-[11px] leading-4 text-muted">
+            Global scope keeps selected web search, skills and MCP servers.
+            {providerId === "codex" ? " Codex keeps your command setting under Read Only here; your project permission choice applies after selecting a project." : ["grok", "antigravity"].includes(providerId) ? " Native tools follow CLI-managed permissions. Select a project before working on its files." : " Commands and project edits wait for project selection."}
+          </p> : null}
           <ChatComposer
             shortcutHint={!activeThreadId ? "Enter to start thread Shift+Enter for a new line Ctrl+Enter to start thread in background" : undefined}
             onSteer={steerAssistant}
@@ -7640,6 +7847,7 @@ export function ChatPane({
             onPermissionModeChange={selectPermission}
             attachments={attachments}
             attachmentError={attachmentError}
+            attachmentWarning={attachmentWarning?.text || ""}
             audioInputDeviceId={audioInputDeviceId}
             contextKey={activeThreadId ?? "new-thread"}
             draft={draft}
@@ -7891,10 +8099,12 @@ const ForkableMessage = memo(function ForkableMessage({ onFork, canFork, ...prop
   </div>;
 });
 
-const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, message, onEdit, onOpenLink, onUndoChanges, sourcePath }) {
+const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, message, onEdit, onResume, onOpenLink, onUndoChanges, sourcePath, supportsImages = true, providerName = "This provider" }) {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState(message.body);
+  const [editAttachments, setEditAttachments] = useState([]);
+  const [editAttachmentError, setEditAttachmentError] = useState("");
   const copyResetTimerRef = useRef(null);
 
   useEffect(() => () => window.clearTimeout(copyResetTimerRef.current), []);
@@ -7907,6 +8117,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
       role="alert" aria-live="assertive"
       className="whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
       {message.body}
+      {message.resumeAvailable && onResume ? <div className="mt-2"><button type="button" className="rounded border border-current px-2 py-1 text-xs focus-visible:outline-brand" onClick={onResume}>Resume task</button></div> : null}
     </div>;
   }
   const isSystem = message.role === "system" || message.kind === "system";
@@ -7925,18 +8136,22 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
 
   function beginEditing() {
     setEditDraft(message.body);
+    setEditAttachments(message.attachments || []);
+    setEditAttachmentError("");
     setEditing(true);
   }
 
   function cancelEditing() {
     setEditDraft(message.body);
+    setEditAttachments([]);
+    setEditAttachmentError("");
     setEditing(false);
   }
 
   function saveEdit() {
     const body = editDraft.trim();
-    if (!body && !message.attachments?.length) return;
-    onEdit?.(message.id, body);
+    if (!body && !editAttachments.length) return;
+    onEdit?.(message.id, body, editAttachments);
     setEditing(false);
   }
 
@@ -7986,7 +8201,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
                 </button>
               </div>
             ) : null}
-            {isUser ? <MessageAttachments attachments={message.attachments} inverse /> : null}
+            {isUser ? <MessageAttachments attachments={editing ? editAttachments : message.attachments} inverse /> : null}
             {isUser && editing ? (
               <div className="space-y-2">
                 <textarea
@@ -7994,12 +8209,25 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
                   autoFocus
                   className="workflow-scrollbar max-h-48 min-h-20 w-full resize-y rounded-md border border-white/35 bg-white/10 px-2.5 py-2 text-sm leading-5 text-white outline-none placeholder:text-indigo-200 focus:border-white/70 focus:ring-2 focus:ring-white/25"
                   value={editDraft}
+                  onPaste={event => {
+                    const files = clipboardAttachmentFiles(event.clipboardData);
+                    const textFile = largePasteFile(event.clipboardData?.getData?.("text/plain") || "");
+                    if (!files.length && !textFile) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const incoming = textFile ? [...files, textFile] : files;
+                    const result = readChatAttachments(incoming.filter(file => supportsImages || !isChatImage(file)), editAttachments);
+                    setEditAttachments(result.attachments);
+                    setEditAttachmentError(!supportsImages && incoming.some(isChatImage)
+                      ? `${providerName} can't accept images with this selection.` : result.error);
+                  }}
                   onChange={(event) => setEditDraft(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Escape") cancelEditing();
                     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) saveEdit();
                   }}
                 />
+                {editAttachmentError ? <p role="alert">{editAttachmentError}</p> : null}
                 <div className="flex justify-end gap-1.5">
                   <button
                     className="h-7 rounded-md px-2 text-xs font-medium text-indigo-100 outline-none transition hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70"
@@ -8010,7 +8238,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
                   </button>
                   <button
                     className="h-7 rounded-md bg-white px-2.5 text-xs font-semibold text-brand outline-none transition hover:bg-indigo-50 focus-visible:ring-2 focus-visible:ring-white/70 disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={!editDraft.trim() && !message.attachments?.length}
+                    disabled={!editDraft.trim() && !editAttachments.length}
                     type="button"
                     onClick={saveEdit}
                   >
@@ -8021,7 +8249,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
             ) : message.body ? (
               <>
                 {message.kind === "search-source" ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
-                  : <MarkdownMessage inverse={isUser} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} />}
+                  : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
                 {!isUser ? (
                   <div className="mt-1 flex justify-end border-t border-line/70 pt-1">
                     <button
@@ -8239,11 +8467,11 @@ export function MarkdownMessage({ compact = false, inverse = false, onOpenLink, 
   );
 }
 
-const ThoughtGroup = memo(function ThoughtGroup({ groupId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
+const ThoughtGroup = memo(function ThoughtGroup({ groupId, replyId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
   const trace = useMemo(() => buildThoughtTrace(thoughts), [thoughts]);
   const count = trace.length;
   const match = thoughts.find(thought => String(thought.id) === String(searchMessageId));
-  const matchKey = match?.trace?.id ? `trace-${match.trace.id}` : match?.id;
+  const matchKey = match?.trace?.id ? `trace-${match.groupId || ""}-${match.trace.id}` : match?.id;
 
   if (!count) return null;
 
@@ -8253,7 +8481,8 @@ const ThoughtGroup = memo(function ThoughtGroup({ groupId, expanded, onOpenFile,
         <button
           className="flex w-full items-center justify-between gap-3 rounded-md px-1 py-1.5 text-left transition hover:text-ink"
           type="button"
-          onClick={() => onToggle(groupId)}
+          aria-expanded={expanded}
+          onClick={() => onToggle(groupId, replyId, expanded)}
         >
           <span className="min-w-0 text-xs font-semibold text-ink">
             {expanded ? "Hide thoughts" : "Show thoughts"}
@@ -8273,7 +8502,7 @@ const ThoughtGroup = memo(function ThoughtGroup({ groupId, expanded, onOpenFile,
               {expanded && trace.map((entry, index) => (
                 <div
                   key={entry.key}
-                  data-history-anchor={`${thoughts[0]?.groupId || ""}:${entry.key}`}
+                  data-history-anchor={`${entry.groupId || ""}:${entry.key}`}
                   data-thread-search-match={entry.key === matchKey ? "true" : undefined}
                   tabIndex={entry.key === matchKey ? -1 : undefined}
                   className={`relative ml-1 border-l border-line pl-5 ${
@@ -8670,16 +8899,14 @@ function loadChatMessages(storageKey) {
 }
 
 export function buildChatItems(messages) {
+  // Hidden context must not split adjacent thoughts in the visible conversation.
+  messages = messages.filter(message => message.kind !== "memory" && message.kind !== "continuation-context" &&
+    !(message.role === "system" && String(message.body || "").startsWith("The previous process was interrupted.")));
   const items = [];
   let index = 0;
 
   while (index < messages.length) {
     const message = messages[index];
-    if (message.kind === "memory" || message.kind === "continuation-context" ||
-      (message.role === "system" && String(message.body || "").startsWith("The previous process was interrupted."))) {
-      index += 1;
-      continue;
-    }
     if (message.kind !== "thought") {
       items.push({ type: "message", message });
       index += 1;
@@ -8691,8 +8918,7 @@ export function buildChatItems(messages) {
     const segmentId = `thought-group-${groupId}-${message.id}`;
     while (
       index < messages.length &&
-      messages[index].kind === "thought" &&
-      (messages[index].groupId || `legacy-${messages[index].id}`) === groupId
+      messages[index].kind === "thought"
     ) {
       thoughts.push({
         ...messages[index],
@@ -8711,13 +8937,33 @@ export function buildChatItems(messages) {
     }
   }
 
+  let replyId = null;
+  for (let position = items.length - 1; position >= 0; position -= 1) {
+    const item = items[position];
+    if (item.type === "thought-group") item.replyId = replyId;
+    else if (item.message.role === "user") replyId = null;
+    else if (item.message.role === "assistant" && item.message.kind !== "error" && String(item.message.body || "").trim()) replyId = item.message.id;
+  }
   return items;
+}
+
+export function isThoughtGroupExpanded(item, overrides, autoHide = true) {
+  const override = overrides[item.id];
+  if (override && override.replyId === item.replyId) return override.expanded;
+  return !autoHide || !item.replyId;
 }
 
 export function removeTrailingDuplicateOutputThought(messages, finalBody, groupId) {
   const finalMessage = { role: "assistant", kind: "final", body: finalBody };
+  const streams = new Map();
+  for (const message of messages) {
+    if (message.groupId !== groupId || message.kind !== "thought" || !message.deltaStreamId || message.trace?.kind === "tool") continue;
+    streams.set(message.deltaStreamId, (streams.get(message.deltaStreamId) || "") + message.body);
+  }
+  const duplicateStreams = new Set([...streams].filter(([, body]) => normalizeMarkdownText(body) === normalizeMarkdownText(finalBody)).map(([id]) => id));
   return messages.filter((message) => {
     if (message.groupId !== groupId || message.kind !== "thought") return true;
+    if (message.trace?.kind !== "tool" && duplicateStreams.has(message.deltaStreamId)) return false;
     if (isDuplicateOutputThought(message, finalMessage)) return false;
     const body = message.trace?.body ?? message.body;
     return message.trace?.kind === "tool" || !isProviderMetadataSummary(body);
@@ -8747,8 +8993,10 @@ export function buildThoughtTrace(thoughts) {
       : { kind: "summary", title: "Thought", body: thought?.body };
     const kind = rawTrace.kind === "tool" ? "tool" : "summary";
     const traceId = rawTrace.id ? String(rawTrace.id) : "";
+    const traceKey = `trace-${thought?.groupId || ""}-${traceId}`;
     const entry = {
-      key: traceId ? `trace-${traceId}` : thought?.id || `trace-${entries.length}`,
+      key: traceId ? traceKey : thought?.id || `trace-${entries.length}`,
+      groupId: thought?.groupId,
       id: traceId,
       kind,
       title: kind === "summary"
@@ -8770,13 +9018,13 @@ export function buildThoughtTrace(thoughts) {
 
     if (kind === "summary" && isProviderMetadataSummary(entry.body)) continue;
 
-    if (!traceId || !traceIndexes.has(traceId)) {
-      if (traceId) traceIndexes.set(traceId, entries.length);
+    if (!traceId || !traceIndexes.has(traceKey)) {
+      if (traceId) traceIndexes.set(traceKey, entries.length);
       entries.push(entry);
       continue;
     }
 
-    const existingIndex = traceIndexes.get(traceId);
+    const existingIndex = traceIndexes.get(traceKey);
     const existing = entries[existingIndex];
     entries[existingIndex] = {
       ...existing,

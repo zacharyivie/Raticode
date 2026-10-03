@@ -30,6 +30,8 @@
 .report-themes select, .report-theme-editor input:not([type="file"]) { width: 100%; background: rgb(var(--color-ink) / .025); border: 1px solid rgb(var(--color-line)); border-radius: 4px; color: inherit; padding: 8px; }
 .report-theme-editor { margin: 12px 0 18px; padding: 12px; border: 1px solid rgb(var(--color-line)); border-radius: 8px; }.report-theme-editor input[type="file"] { font-size: 11px; max-width: 100%; }
 .report-theme-actions { display: flex; flex-wrap: wrap; gap: 8px; }.report-theme-draft { margin-top: 18px; }.report-theme-draft iframe { width: 100%; height: 420px; background: white; border: 1px solid rgb(var(--color-line)); margin: 8px 0; }.report-theme-draft > button { margin-top: 12px; }
+.report-theme-sharing { margin-top: 10px; }
+.report-theme-transfer-status { margin-top: 8px; line-height: 1.6; overflow-wrap: anywhere; }
 .report-theme-error { margin-top: 12px; color: #bd3343; }.dark .report-theme-error { color: #ff9ea9; }
 @media (max-width: 480px) { .report-theme-draft iframe { height: 330px; } }
 

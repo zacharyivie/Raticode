@@ -20,6 +20,7 @@ from gofer.utils.process import (
     env_with_executable_on_path,
     stream_subprocess,
 )
+from gofer.utils.protocol import read_protocol_line
 
 
 class SteeringDeliveryUncertain(RuntimeError):
@@ -101,7 +102,7 @@ class _Transport:
         assert self.process.stdout is not None
         error = "Codex app-server closed before completing the turn"
         try:
-            while line := await self.process.stdout.readline():
+            while line := await read_protocol_line(self.process.stdout, "Codex"):
                 self.size += len(line)
                 if self.limit is not None and self.size > self.limit:
                     raise RuntimeError("Codex output exceeded the configured output limit")
@@ -313,5 +314,6 @@ async def stream_codex_turn(
             cancel_event=cancel_event,
             timeout=None,
             max_output_bytes=max_output_bytes,
+            protocol_stdout=True,
         ):
             yield dict(fallback_event)

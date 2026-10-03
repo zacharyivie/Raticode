@@ -863,3 +863,35 @@ async def test_settings_snapshot_never_probes_cursor_alias_and_reuses_verified_a
     assert cached["discoveryStatus"] == "ready"
     assert cached["executable"] == alias
     assert checks == [alias]
+
+
+@pytest.mark.parametrize(
+    "provider,expected",
+    [
+        ("codex", True),
+        ("claude_code", True),
+        ("cursor", True),
+        ("copilot", True),
+        ("opencode", True),
+        ("grok", True),
+        ("antigravity", False),
+    ],
+)
+def test_catalog_exposes_rem_image_support(provider, expected):
+    capability = ProviderCapability(
+        id=provider, display_name=provider, available=True, discovery_status="ready"
+    )
+    assert capability.to_ui_payload(resolve_executable=False)["supportsImages"] is expected
+
+
+def test_copilot_catalog_preserves_model_vision_support():
+    models = provider_capabilities._copilot_models_from_catalog(
+        {
+            "models": [
+                {"id": "vision", "capabilities": {"supports": {"vision": True}}},
+                {"id": "text", "capabilities": {"supports": {"vision": False}}},
+                {"id": "unknown"},
+            ]
+        }
+    )
+    assert [model.supports_images for model in models] == [True, False, None]

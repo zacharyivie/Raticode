@@ -78,6 +78,23 @@ def test_rem_keeps_early_messages_and_persona_when_switching_provider() -> None:
         assert "<gofer_flow_skill>" not in prompt
 
 
+def test_codex_disables_inherited_server_with_dots_without_creating_a_broken_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    names = ["docs.with.dots", "another.dotted.server", "plain"]
+    config = "\n".join(
+        f"[mcp_servers.{json.dumps(name)}]\ncommand=\"unused-mcp-executable\"" for name in names
+    )
+    (tmp_path / "config.toml").write_text(config)
+    args = resource_cli_args("codex", AgentResources(), tmp_path)
+    overrides = [arg for arg in args if arg.startswith("mcp_servers=")]
+    assert len(overrides) == 1
+    disabled = tomllib.loads(overrides[0])["mcp_servers"]
+    assert disabled == {name: {"enabled": False} for name in names}
+    assert not any(arg.startswith("mcp_servers.docs.") for arg in args)
+
+
 def test_mcp_endpoint_rejects_embedded_credentials() -> None:
     with pytest.raises(ValidationError, match="without credentials"):
         AgentResources.model_validate(
@@ -90,6 +107,32 @@ def test_mcp_endpoint_rejects_embedded_credentials() -> None:
                 ]
             }
         )
+
+
+def test_duplicate_mcp_names_are_rejected_before_provider_configuration() -> None:
+    with pytest.raises(ValidationError, match="names must be unique"):
+        AgentResources.model_validate(
+            {
+                "mcpServers": [
+                    {"name": "docs", "url": "https://example.com/first"},
+                    {"name": "docs", "type": "stdio", "command": "other-server"},
+                ]
+            }
+        )
+
+
+def test_chat_prompt_identifies_current_tools_after_prior_missing_tool_reply() -> None:
+    prompt = build_chat_prompt(
+        "codex",
+        "cli-default",
+        [
+            {"role": "assistant", "body": "I have no web search tool."},
+            {"role": "user", "body": "I enabled it. Search now."},
+        ],
+        {"remResources": {"shell": False, "web": True}},
+    )
+    assert "Current turn tools: run commands=false, web search=true." in prompt
+    assert "previous configuration" in prompt
 
 
 def test_stdio_resources_pass_separate_arguments_to_both_providers() -> None:

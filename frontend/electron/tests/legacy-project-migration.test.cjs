@@ -39,6 +39,18 @@ test("empty or malformed history seals migration without granting paths", (t) =>
   assert.deepEqual(store.migrate('["/later-injection"]'), []);
 });
 
+test("background renewal of an existing project does not rewrite its trust registry", (t) => {
+  const { store, project, other } = fixture(t);
+  store.migrate(JSON.stringify([project]));
+  const publish = t.mock.method(fs, "renameSync");
+  store.add([project]);
+  store.add([project, project]);
+  assert.equal(publish.mock.callCount(), 0);
+  store.add([project, other]);
+  assert.equal(publish.mock.callCount(), 1);
+  assert.deepEqual(store.read(), { roots: [project, other], legacyRecentProjectsMigrated: true });
+});
+
 test("failed registry publication preserves old records and permits next-launch retry", (t) => {
   const { file, store, project, other } = fixture(t);
   store.add([other]);

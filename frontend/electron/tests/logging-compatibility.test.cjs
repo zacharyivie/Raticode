@@ -136,6 +136,7 @@ test("console handler uses one event argument and records studio warnings/errors
   });
   for (const contents of [mainContents, errorContents, {}]) {
     let handler;
+    contents.once = () => {};
     contents.on = (_name, listener) => { handler = listener; };
     register({}, contents);
     assert.equal(handler.length, 1, "Electron detects legacy listeners by argument count");

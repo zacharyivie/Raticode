@@ -29,7 +29,7 @@ async function run() {
       import {normalizeAppSettings, updateSetting} from "/src/lib/settings.js";
       import {startGenerationJob} from "/src/lib/generationJobs.js";
       import "/src/styles/index.css";
-      window.goferDesktop = {rem: {configure: async (key, value) => { if(key === "reportFormat") { localStorage.setItem("theme-test-format", value); return { reportFormat: value }; } localStorage.setItem("theme-test-memory", JSON.stringify(value)); return {reportThemes: value}; }}};
+      window.goferDesktop = {rem: {configure: async (key, value) => { if(window.themeTestFailSave) throw new Error("Could not save theme settings."); if(key === "reportFormat") { localStorage.setItem("theme-test-format", value); return { reportFormat: value }; } localStorage.setItem("theme-test-memory", JSON.stringify(value)); return {reportThemes: value}; }}};
       window.addEventListener("gofer:rem-report-theme", event => {event.detail.handled=true; startGenerationJob("theme", event.detail, {provider:"codex",model:"active-model",effort:"high"}).then(event.detail.resolve,event.detail.reject);});
       function TestSettings(){const [settings,setSettings]=React.useState(()=>normalizeAppSettings({memory:{reportFormat:localStorage.getItem("theme-test-format")||"html",reportThemes:JSON.parse(localStorage.getItem("theme-test-memory")||"null"),secondBrainTheme:"blueprint"}})); return <SettingsPopover open initialCategory="memory" settings={settings} onChange={(key,value)=>setSettings(old=>updateSetting(old,key,value))} onClose={()=>{}}/>;}
       createRoot(document.getElementById("root")).render(<TestSettings/>);
@@ -94,6 +94,46 @@ async function run() {
   await click("Save theme"); await until(`document.querySelectorAll('.report-theme-choice').length===17`);
   await win.reload(); await until(`document.querySelectorAll('.report-theme-choice').length===17`);
   assert.ok(await js(`document.querySelector('[aria-label="Marine journal"]').getAttribute('aria-pressed')==='true'`));
+  const original = JSON.parse(await js(`localStorage.getItem('theme-test-memory')`));
+  const downloadedPath = path.join(profile, "shared-theme.json");
+  const download = new Promise((resolve, reject) => win.webContents.session.once("will-download", (event, item) => {
+    assert.equal(item.getFilename(), "Marine-journal.raticode-theme.json");
+    item.setSavePath(downloadedPath);
+    item.once("done", (_, state) => state === "completed" ? resolve() : reject(new Error(`Theme download ${state}`)));
+  }));
+  await click("Export theme"); await download;
+  const shared = fs.readFileSync(downloadedPath, "utf8");
+  assert.deepEqual(JSON.parse(shared), { format: "raticode-report-theme", version: 1, theme: { label: original.custom[0].label, instructions: original.custom[0].instructions, html: demo } });
+  // A fresh installation imports the actual downloaded file, then persists across reloads.
+  await js(`localStorage.removeItem('theme-test-memory')`);
+  await win.reload(); await until(`document.querySelectorAll('.report-theme-choice').length===16`);
+  assert.ok(await js(`!Array.from(document.querySelectorAll('button')).some(b=>b.textContent==='Export theme')`));
+  const importFile = content => js(`(()=>{const dt=new DataTransfer();dt.items.add(new File([${JSON.stringify(content)}],'shared.raticode-theme.json',{type:'application/json'}));const input=document.querySelector('[aria-label="Import report theme file"]');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await click("Import theme"); await importFile(shared);
+  await until(`document.querySelectorAll('.report-theme-choice').length===17`);
+  let imported = JSON.parse(await js(`localStorage.getItem('theme-test-memory')`));
+  assert.deepEqual(imported.custom[0], { ...original.custom[0], id: imported.selected });
+  assert.notEqual(imported.selected, original.selected);
+  assert.ok(await js(`document.querySelector('.report-theme-transfer-status').textContent.includes('Imported "Marine journal"')`));
+  assert.equal(await js(`document.querySelector('[aria-label="Import report theme file"]').value`), "");
+  assert.equal(await js(`document.querySelector('iframe[title="Marine journal miniature"]').getAttribute('sandbox')`), "");
+  await win.reload(); await until(`document.querySelectorAll('.report-theme-choice').length===17`);
+  assert.ok(await js(`document.querySelector('[aria-label="Marine journal"]').getAttribute('aria-pressed')==='true'`));
+  await importFile(shared); await until(`document.querySelectorAll('.report-theme-choice').length===18`);
+  imported = JSON.parse(await js(`localStorage.getItem('theme-test-memory')`));
+  assert.notEqual(imported.custom[0].id, imported.custom[1].id);
+  const beforeInvalid = await js(`localStorage.getItem('theme-test-memory')`);
+  for (const [content, message] of [["invalid", "not valid JSON"], [JSON.stringify({ format: "raticode-report-theme", version: 2 }), "Unsupported theme"], ["x".repeat(2 * 1024 * 1024 + 1), "2 MB"]]) {
+    await importFile(content);
+    await until(`document.querySelector('[role="alert"]')?.textContent.includes(${JSON.stringify(message)})`);
+    assert.equal(await js(`localStorage.getItem('theme-test-memory')`), beforeInvalid);
+    assert.equal(await js(`document.querySelectorAll('.report-theme-choice').length`), 18);
+  }
+  await js(`window.themeTestFailSave=true`); await importFile(shared);
+  await until(`document.querySelector('[role="alert"]')?.textContent.includes('Could not save theme settings')`);
+  assert.equal(await js(`localStorage.getItem('theme-test-memory')`), beforeInvalid);
+  await js(`window.themeTestFailSave=false`); await importFile(shared);
+  await until(`document.querySelectorAll('.report-theme-choice').length===19`);
   await js(`document.querySelector('.report-generation-settings').open=true`);
   await until(`document.querySelector('[aria-label="Theme generation provider"] option[value="codex"]')`);
   await change("Theme generation provider","codex"); await until(`document.querySelector('[aria-label="Theme generation model"]')`);
@@ -146,6 +186,6 @@ async function run() {
   assert.equal(await js(`getComputedStyle(document.querySelector("[data-chat-composer]")).backgroundColor`), "rgb(24, 24, 26)");
   assert.ok(await js(`[...document.querySelectorAll('.report-themes select')].every(select => getComputedStyle(select).colorScheme === 'dark' && [...select.options].filter(option => !option.selected).every(option => getComputedStyle(option).backgroundColor === 'rgb(30, 30, 32)' && getComputedStyle(option).color === 'rgb(243, 243, 245)'))`));
   const narrowComposer=await win.webContents.capturePage(); fs.writeFileSync(path.join(os.tmpdir(),"raticode-report-theme-composer-narrow.png"),narrowComposer.toPNG());
-  console.log("Report theme browser checks passed: gallery, preview, draft editing, save/reload, paperclip, file paste, long text paste, drop, Enter submit, model overrides, errors, narrow composer.");
+  console.log("Report theme browser checks passed: gallery, preview, draft editing, save/reload, export download, import/reload, duplicate import, invalid files, failed save/retry, paperclip, file paste, long text paste, drop, Enter submit, model overrides, errors, narrow composer.");
 }
 run().then(()=>{clearTimeout(timer);win?.destroy();return vite?.close();}).then(()=>app.quit()).catch(error=>{console.error(error);clearTimeout(timer);win?.destroy();void vite?.close();app.exit(1);});

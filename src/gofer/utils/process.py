@@ -3,10 +3,11 @@ from __future__ import annotations
 import codecs
 import os
 import signal
+import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
-from typing import Any, Literal, TypedDict
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from typing import Any, Literal, NotRequired, TypedDict
 
 import anyio
 import anyio.abc
@@ -17,6 +18,7 @@ class ProcessStreamEvent(TypedDict):
     stream: Literal["stdout", "stderr"] | None
     text: str
     returncode: int | None
+    output_truncated: NotRequired[bool]
 
 
 class ProcessError(Exception):
@@ -99,9 +101,18 @@ def _set_clean_library_path(env: dict[str, str], library_path: str) -> None:
 
 
 def _is_packaged_runtime_library_path(entry: str) -> bool:
-    path = entry.replace("\\", "/")
+    path = entry.replace("\\", "/").rstrip("/")
+    # PyInstaller exposes its bundle directory as a Python attribute, not
+    # necessarily an environment variable. Also recognize extraction paths
+    # inherited from another frozen process, whose bundle root may differ.
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        root = os.fspath(bundle_root).replace("\\", "/").rstrip("/")
+        if path == root or path.startswith(root + "/"):
+            return True
     return (
-        "/.mount_" in path
+        any(part.startswith("_MEI") and len(part) > 4 for part in path.split("/"))
+        or "/.mount_" in path
         or "/app.asar" in path
         or "/resources/app.asar" in path
         or path.endswith("/resources")
@@ -160,8 +171,13 @@ async def stream_subprocess(
     stdin: bytes | None = None,
     max_output_bytes: int | None = None,
     on_stdout: Callable[[str], None] | None = None,
-) -> AsyncIterator[ProcessStreamEvent]:
-    """Run a subprocess and yield stdout/stderr chunks as they arrive."""
+    protocol_stdout: bool = False,
+) -> AsyncGenerator[ProcessStreamEvent, None]:
+    """Stream output, optionally leaving stdout framing intact for protocol readers.
+
+    Protocol consumers must bound records and retained content themselves. The
+    subprocess budget then applies to stderr only, never to JSON wire records.
+    """
     merged_env = build_subprocess_env(env)
 
     async def _stream(process: anyio.abc.Process) -> AsyncIterator[ProcessStreamEvent]:
@@ -253,7 +269,11 @@ async def stream_subprocess(
                 # Structured answers must survive even when retained tool logs fill up.
                 if stream_name == "stdout" and on_stdout is not None:
                     on_stdout(observer_decoder.decode(chunk))
-                bounded = await bounded_chunk(chunk)
+                bounded = (
+                    chunk
+                    if protocol_stdout and stream_name == "stdout"
+                    else await bounded_chunk(chunk)
+                )
                 if bounded is None:
                     continue
                 text = decoder.decode(bounded)
@@ -355,6 +375,7 @@ async def stream_subprocess(
             "stream": None,
             "text": "",
             "returncode": returncode if returncode is not None else 130,
+            "output_truncated": output_truncated,
         }
 
     process = await anyio.open_process(

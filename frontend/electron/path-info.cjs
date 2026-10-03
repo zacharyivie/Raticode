@@ -6,7 +6,7 @@ async function inspectPath(targetPath) {
     const stat = await fs.promises.stat(targetPath);
     return pathInfoFromStat(targetPath, stat);
   } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
+    if (!["ENOENT", "ENOTDIR"].includes(error?.code)) throw error;
     return {
       basename: path.basename(targetPath),
       exists: false,

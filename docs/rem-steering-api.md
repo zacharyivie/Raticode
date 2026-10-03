@@ -2,6 +2,8 @@
 
 Rem steering belongs to the Raticode conversation. It does not depend on a provider's native session ID or selected model. Existing Codex native Swarm steering remains unchanged.
 
+Identified conversations use [native provider continuation](rem-provider-sessions.md). An explicit message edit/resend sets `resetSession: true` and invalidates all provider references for the old branch. Model changes keep the native session. Provider changes restore that provider's saved session with intervening turns, or create one with the full handoff on its first use. Terminal events include `sessionResumed` when native continuation applies.
+
 Start `POST /api/chat/stream` with `conversationId` and a fresh `turnId`, alongside the existing provider, model, messages, workflow and permission fields. IDs contain 1-128 ASCII letters, digits, underscores or hyphens. Requests omitting both identifiers retain the legacy stream behavior. Supplying only one identifier is invalid. Stream admission failures, including reused or active turn IDs, arrive as NDJSON `error` events after the HTTP stream has opened. Reusing a completed turn ID is rejected, including after server restart.
 
 The NDJSON stream emits `type: "turn"` with the conversation ID, turn ID, provider, model and integer `generation`. Generation starts at zero and increases for each interrupted-process continuation. Provider events carry their turn ID and generation. Render only events for the active turn/generation.
@@ -22,13 +24,17 @@ The NDJSON stream emits `type: "turn"` with the conversation ID, turn ID, provid
 A successful response wraps the receipt in `receipt`. The receipt includes these request fields, the original provider and model, generation, `mode: "restart"`, and a status:
 
 - `interrupting`: persisted before cancellation was requested.
-- `delivered`: the successor emitted a `thought` or `final` event after receiving the transcript. This is a handoff, not proof of model compliance or successful task completion.
+- `delivered`: the successor emitted a `thought` or `final` event after receiving the steering request. This is a handoff, not proof of model compliance or successful task completion.
 - `failed`: delivery was not confirmed. Text remains available for review. The provider may have performed tool actions before failing; do not automatically replay.
 - `cancelled`: explicit Stop prevented an unconfirmed delivery from continuing.
 
-The same request ID and text return the existing receipt even after completion. Reusing an ID with different text or a different turn returns HTTP 409. A stale or stopped turn also returns 409. Invalid input returns 400; persistence failure returns 500 without accepting new text. Retain the draft on these failures. Text must be nonblank and at most 100000 characters.
+The request may include `resources` with the same `shell`, `web`, `skills` and `mcpServers` fields as `workflow.remResources`. Raticode validates and persists this snapshot before interrupting. Invalid resources return 400 without cancelling the running process.
 
-Raticode waits for the interrupted stream to close before starting another provider process. Instructions accepted during shutdown retain their order. The successor receives the original conversation and partial assistant output, plus each accepted instruction once. Provider, model, permission settings, workflow context and selected resources stay with the original request. Raticode does not pass a previous provider's native session ID to the successor. This preserves the visible transcript rather than hidden provider reasoning. Completed external tool effects cannot be rolled back by steering.
+The same request ID, text, attachments and resources return the existing receipt even after completion. Reusing an ID with changed content or a different turn returns HTTP 409. A stale or stopped turn also returns 409. Invalid input returns 400; persistence failure returns 500 without accepting new text. Retain the draft on these failures. Steering needs nonblank text or attachments, with text limited to 100000 characters.
+
+Raticode waits for the interrupted stream to close before starting another provider process. Instructions accepted during shutdown retain their order. The successor restores the saved native conversation and receives new steering instructions. Raticode preserves the visible original conversation and partial assistant output for review. Legacy calls without a conversation identity use the transcript handoff.
+
+Provider, model, permission settings and workflow context stay with the original request. The latest accepted resource snapshot configures the successor; omitting resources preserves the previous selection. Raticode retains its trusted managed Swarm connection and rebuilds built-in thread tools for the successor. The successor uses the current provider's saved native ID. It never resumes an ID belonging to a different provider. Completed external tool effects cannot be rolled back by steering.
 
 The stream emits `type: "interrupted"` with the old generation, partial terminal metadata and the updated `messages`. Persist that transcript in the conversation so subsequent ordinary turns retain steering. Preserve partial change metadata for review. Then a new `turn` event identifies the successor generation. Receipt transitions are emitted as `type: "steering", receipt: {...}`. A final event from the interrupted generation cannot complete the successor.
 

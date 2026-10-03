@@ -334,3 +334,91 @@ for (const conflict of [false, true]) {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 }
+
+test("graph history includes remote-only commits, peeled tags, merge parents and branch filters", async () => {
+  const { readGitHistory } = require('./git-status.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rem-graph-'));
+  const git = (...args) => childProcess.execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
+  try {
+    git('init', '-b', 'main');
+    git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+    assert.equal((await readGitHistory(root)).active, true);
+    git('commit', '--allow-empty', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    for (const ref of ['remote', 'tag']) {
+      const empty = await readGitHistory(root, { ref });
+      assert.deepEqual(empty.commits, []);
+      assert.equal(empty.active, true);
+    }
+    git('tag', '-a', 'v1', '-m', 'version');
+    git('switch', '-c', 'remote-tip'); git('commit', '--allow-empty', '-m', 'remote only');
+    const remote = git('rev-parse', 'HEAD');
+    git('update-ref', 'refs/remotes/origin/main', remote);
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+    git('switch', 'main'); git('branch', '-D', 'remote-tip');
+    git('commit', '--allow-empty', '-m', 'local only');
+    let history = await readGitHistory(root);
+    assert.equal(history.commits.length, 3);
+    assert.ok(history.commits.find(commit => commit.hash === remote).labels.some(ref => ref.type === 'remote'));
+    assert.ok(history.commits.find(commit => commit.hash === base).labels.some(ref => ref.type === 'tag'));
+    assert.deepEqual(history.commits.find(commit => commit.hash === remote).parents, [base]);
+    assert.ok(history.commits.find(commit => commit.isHead).labels.some(ref => ref.current));
+    assert.ok(!history.refs.some(ref => ref.name === 'origin/HEAD'));
+    history = await readGitHistory(root, { ref: 'refs/remotes/origin/main' });
+    assert.deepEqual(history.commits.map(commit => commit.subject), ['remote only', 'base']);
+    for (const [category, subjects] of [['local', ['local only', 'base']], ['remote', ['remote only', 'base']], ['tag', ['base']]]) {
+      assert.deepEqual((await readGitHistory(root, { ref: category })).commits.map(commit => commit.subject), subjects);
+    }
+    const selectedRefs = ['refs/heads/main', 'refs/remotes/origin/main'];
+    git('switch', '-c', 'unselected', base);
+    git('commit', '--allow-empty', '-m', 'unselected work');
+    git('switch', 'main');
+    const combined = await readGitHistory(root, { refs: selectedRefs });
+    assert.deepEqual(new Set(combined.commits.map(commit => commit.subject)), new Set(['local only', 'remote only', 'base']));
+    assert.equal(combined.commits.length, 3, 'Shared ancestors must appear only once');
+    assert.ok(combined.refs.some(ref => ref.name === 'unselected'), 'Unselected branches remain available in the picker');
+    assert.deepEqual((await readGitHistory(root, { refs: [...selectedRefs, selectedRefs[0], 'refs/tags/v1'] })).commits.map(commit => commit.hash), combined.commits.map(commit => commit.hash));
+    assert.deepEqual((await readGitHistory(root, { refs: [] })).commits, []);
+    assert.ok((await readGitHistory(root, { refs: null })).commits.some(commit => commit.subject === 'unselected work'));
+    for (const invalid of [['--all'], ['refs/heads/missing'], ['refs/heads/main', '--all'], [null], 'refs/heads/main']) {
+      await assert.rejects(readGitHistory(root, { refs: invalid }), /existing history/);
+    }
+    git('remote', 'add', 'origin', root);
+    git('branch', '--set-upstream-to=origin/main', 'main');
+    const tracked = (await readGitHistory(root)).refs.find(ref => ref.current);
+    assert.equal(tracked.upstream, 'origin/main');
+    assert.equal(tracked.ahead, 1);
+    assert.equal(tracked.behind, 1);
+    for (const ref of ['--all', '__proto__', 'constructor']) await assert.rejects(readGitHistory(root, { ref }), /existing history/);
+    git('merge', '--no-ff', 'origin/main', '-m', 'merge');
+    assert.equal((await readGitHistory(root)).commits[0].parents.length, 2);
+    const detached = git('rev-parse', 'HEAD');
+    git('checkout', '--detach'); git('commit', '--allow-empty', '-m', 'detached work');
+    assert.equal((await readGitHistory(root)).commits.find(commit => commit.isHead).subject, 'detached work');
+    git('checkout', 'main');
+    assert.equal(git('rev-parse', 'HEAD'), detached);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("history loads beyond the first page without losing ancestry or older branch tips", async () => {
+  const { readGitHistory } = require('./git-status.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rem-graph-pages-'));
+  const git = (...args) => childProcess.execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim();
+  try {
+    git('init', '-b', 'main');
+    git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
+    for (let index = 0; index < 105; index++) {
+      git('commit', '--allow-empty', '-m', `commit ${index}`);
+      if (index === 0) git('update-ref', 'refs/remotes/origin/old', git('rev-parse', 'HEAD'));
+    }
+    const first = await readGitHistory(root);
+    assert.equal(first.commits.length, 100);
+    assert.equal(first.hasMore, true);
+    const next = await readGitHistory(root, { limit: 200 });
+    assert.equal(next.commits.length, 105);
+    assert.equal(next.hasMore, false);
+    assert.deepEqual(first.commits.map(commit => commit.hash), next.commits.slice(0, 100).map(commit => commit.hash));
+    assert.ok(next.commits.at(-1).labels.some(ref => ref.name === 'origin/old'));
+    assert.equal(first.commits.at(-1).parents[0], next.commits[100].hash);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
