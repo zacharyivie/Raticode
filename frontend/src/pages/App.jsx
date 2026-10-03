@@ -7833,10 +7833,6 @@ export function ChatPane({
             <p>{providerCapability?.displayName || providerId} needs CLI-managed permissions to send messages. Raticode&apos;s tool restrictions are unsupported.</p>
             <button type="button" className="mt-2 font-semibold underline" disabled={chatState.sending} onClick={() => selectPermission("cli-managed")}>Use CLI-managed permissions</button>
           </div> : null}
-          {globalScope ? <p role="status" className="mb-2 text-[11px] leading-4 text-muted">
-            Global scope keeps selected web search, skills and MCP servers.
-            {providerId === "codex" ? " Codex keeps your command setting under Read Only here; your project permission choice applies after selecting a project." : ["grok", "antigravity"].includes(providerId) ? " Native tools follow CLI-managed permissions. Select a project before working on its files." : " Commands and project edits wait for project selection."}
-          </p> : null}
           <ChatComposer
             shortcutHint={!activeThreadId ? "Enter to start thread Shift+Enter for a new line Ctrl+Enter to start thread in background" : undefined}
             onSteer={steerAssistant}

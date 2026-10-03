@@ -208,7 +208,7 @@ def test_copilot_concurrent_configs_cleanup_and_denials():
 
 
 @pytest.mark.parametrize("provider", ["cursor", "copilot", "opencode"])
-def test_global_research_allows_web_and_mcp_but_denies_native_commands_and_edits(provider):
+def test_explicit_read_only_allows_web_and_mcp_but_denies_native_commands_and_edits(provider):
     url = "http://localhost:1234/research"
     with cli_invocation(
         provider,
@@ -582,6 +582,9 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
             path = Path(command[command.index("--plugin-dir") + 1])
             assert path.exists()
             paths.append(path)
+            permissions = json.loads((path / "config/cli-config.json").read_text())["permissions"]
+            assert {"Write(*)", "Shell(*)"}.issubset(permissions["allow"])
+            assert not {"Write(*)", "Shell(*)"}.intersection(permissions["deny"])
             stdout = wire(
                 {
                     "type": "result",
@@ -595,9 +598,13 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
             assert path.exists()
             paths.append(path)
             stdout = "Answer"
+            allow = [command[i + 1] for i, arg in enumerate(command) if arg == "--allow-tool"]
+            assert {"write", "shell"}.issubset(allow)
         else:
             config = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
             assert "mcp" in config
+            permissions = json.loads(kwargs["env"]["OPENCODE_PERMISSION"])
+            assert permissions["edit"] == permissions["bash"] == "allow"
             stdout = wire(
                 {"type": "text", "sessionID": "opencode-only", "part": {"text": "Answer"}}
             )
@@ -632,7 +639,10 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
             provider,
             "custom/model",
             messages,
-            None,
+            {
+                "remThreads": {"global": scope == "global", "projects": []},
+                "remResources": {"shell": True},
+            },
             working_dir=working_dir,
             data_dir=tmp_path / "data",
             agent_instructions="Keep this persona",

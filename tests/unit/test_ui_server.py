@@ -3315,7 +3315,7 @@ def test_global_rem_scope_handoff_through_local_mcp(tmp_path: Path, monkeypatch)
     assert result.status == 200
     events = [json.loads(line) for line in result.text().splitlines() if line]
     assert [event["type"] for event in events] == ["project-scope", "final"]
-    assert calls == [(None, "read-only"), (str(project), "workspace-write")]
+    assert calls == [(None, "workspace-write"), (str(project), "workspace-write")]
     assert len(set(tool_urls)) == 2
 
 

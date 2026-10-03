@@ -35,7 +35,7 @@ def test_thread_actions_validate_scope_authorization_and_deduplicate() -> None:
 
 
 def test_select_project_is_callable_from_claude_code_plan_mode() -> None:
-    # Global Claude Code turns run in plan mode, which only admits read-only MCP tools.
+    # Users can choose plan mode, which only admits read-only MCP tools.
     tools = {tool["name"]: tool for tool in rem_threads.thread_tools(True, config()["projects"])}
     assert tools["select_project"]["annotations"] == {"readOnlyHint": True}
     assert "select_project" not in {
@@ -45,7 +45,14 @@ def test_select_project_is_callable_from_claude_code_plan_mode() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "provider,mode", [("codex", "workspace-write"), ("claude_code", "dontAsk")]
+    "provider,mode",
+    [
+        ("codex", "read-only"),
+        ("codex", "workspace-write"),
+        ("codex", "danger-full-access"),
+        ("claude_code", "dontAsk"),
+        ("claude_code", "plan"),
+    ],
 )
 async def test_global_handoff_restarts_in_selected_root_with_original_permissions(
     monkeypatch: pytest.MonkeyPatch,
@@ -98,8 +105,8 @@ async def test_global_handoff_restarts_in_selected_root_with_original_permission
         )
     ]
     assert [event["type"] for event in events] == ["project-scope", "final"]
-    assert calls[0]["permission_mode"] == ("read-only" if provider == "codex" else mode)
-    assert calls[0]["workflow"]["remResources"]["shell"] is (provider == "codex")
+    assert calls[0]["permission_mode"] == mode
+    assert calls[0]["workflow"]["remResources"]["shell"] is True
     for call in calls:
         selected = call["workflow"]["remResources"]
         assert selected["web"] is True
@@ -156,7 +163,10 @@ async def test_global_research_retains_selected_resources_without_project_handof
         calls.append(kwargs)
         workflow = kwargs["workflow"]
         resources = AgentResources.model_validate(workflow["remResources"])
-        assert resources.shell is (shell and provider == "codex")
+        assert resources.shell is shell
+        assert kwargs["permission_mode"] == (
+            "danger-full-access" if provider == "codex" else "default"
+        )
         assert resources.web is web
         assert resources.skills == AgentResources.model_validate(snapshot["remResources"]).skills
         assert [server.name for server in resources.mcpServers] == [
@@ -168,7 +178,11 @@ async def test_global_research_retains_selected_resources_without_project_handof
         assert str(tmp_path / "research" / "SKILL.md") in index
         assert "disabled" not in index
         prompt = build_chat_prompt(provider, "cli-default", kwargs["messages"], workflow)
-        assert "Global scope retains selected web search, skills and MCP servers." in prompt
+        assert "Global scope uses the configured provider permissions" in prompt
+        assert "Do not modify repository files unless explicitly asked by the user." in prompt
+        assert "Second Brain save_note do not require project selection." in prompt
+        assert "under Read Only" not in prompt
+        assert "disabled until project selection" not in prompt
         if provider in {"codex", "claude_code"}:
             command = _build_chat_command(
                 provider,
@@ -178,23 +192,20 @@ async def test_global_research_retains_selected_resources_without_project_handof
                 data_dir=tmp_path,
                 resources=resources,
                 permission_mode=kwargs["permission_mode"],
-                global_scope=True,
             )
             if provider == "codex":
-                assert command[command.index("--sandbox") + 1] == "read-only"
+                assert command[command.index("--sandbox") + 1] == "danger-full-access"
                 assert f'web_search="{"live" if web else "disabled"}"' in command
                 assert f"features.shell_tool={str(shell).lower()}" in command
                 assert any(arg.startswith("mcp_servers.docs=") for arg in command)
                 assert any(arg.startswith("skills.config=") for arg in command)
             else:
-                native = command[command.index("--tools") + 1].split(",")
-                assert "Read" in native
-                assert ("WebSearch" in native) is web
-                assert ("WebFetch" in native) is web
-                assert not {"Write", "Edit", "Bash"}.intersection(native)
-                allowed = command[command.index("--allowedTools") + 1 :]
+                allowed = command[command.index("--allowedTools") + 1 : command.index("--add-dir")]
+                assert {"Read", "Write", "Edit"}.issubset(allowed)
+                assert ("Bash" in allowed) is shell
+                assert ("WebSearch" in allowed) is web
+                assert ("WebFetch" in allowed) is web
                 assert "mcp__docs__*" in allowed
-                assert not any(tool.startswith("Bash") for tool in allowed)
         yield {"type": "final", "message": {"body": "Research complete"}}
 
     events = [

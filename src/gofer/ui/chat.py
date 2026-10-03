@@ -1172,7 +1172,6 @@ async def run_workflow_chat(
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
-        global_scope=((workflow or {}).get("remThreads") or {}).get("global") is True,
         second_brain_cli_path=(
             gofer_cli_path
             if (
@@ -1410,7 +1409,6 @@ async def stream_workflow_chat(
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
-        global_scope=((workflow or {}).get("remThreads") or {}).get("global") is True,
         second_brain_cli_path=(
             gofer_cli_path
             if (
@@ -1610,7 +1608,6 @@ async def stream_workflow_chat(
                 provider,
                 command,
                 resources,
-                read_only=((workflow or {}).get("remThreads") or {}).get("global") is True,
                 trusted_swarm_url=trusted_swarm_url,
                 extra_paths=_unique_existing_directories([resolved_data_dir, *extra_paths]),
                 second_brain_cli_path=gofer_cli_path
@@ -2555,7 +2552,6 @@ def _build_chat_command(
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
-    global_scope: bool = False,
 ) -> list[str]:
     if image_paths and provider not in IMAGE_ATTACHMENT_PROVIDERS:
         raise ChatProviderError(f"{provider} image attachments are not supported by this adapter")
@@ -2722,19 +2718,6 @@ def _build_chat_command(
     trusted_gofer_cli = local_gofer_cli_path(data_dir)
     if trusted_gofer_cli.is_file():
         allowed_tools.append(f"Bash({trusted_gofer_cli} *)")
-    if global_scope:
-        # Global research can read skills and use selected web/MCP tools, while
-        # commands and native file edits wait for project selection.
-        allowed_tools = [
-            tool
-            for tool in allowed_tools
-            if tool not in {"Edit", "Write", "Bash"} and not tool.startswith("Bash(")
-        ]
-        native_tools = [tool for tool in allowed_tools if not tool.startswith("mcp__")]
-        if "--tools" in command:
-            command[command.index("--tools") + 1] = ",".join(native_tools)
-        else:
-            command += ["--tools", ",".join(native_tools)]
     command += ["--allowedTools", *allowed_tools]
     for path in trusted_paths:
         command += ["--add-dir", str(path)]
@@ -3164,19 +3147,11 @@ def build_chat_prompt(
     scope_tools = ""
     if global_scope:
         scope_tools = (
-            "Global scope retains selected web search, skills and MCP servers. "
-            "Select a project before working on its files. "
+            "Global scope uses the configured provider permissions and selected Rem resources. "
+            "Global tools such as Second Brain save_note do not require project selection. "
+            "Do not modify repository files unless explicitly asked by the user. "
+            "Select a project before doing requested work on its files."
         )
-        if provider == "codex":
-            scope_tools += (
-                "Codex retains the selected command setting under Read Only "
-                "until project selection; "
-                "the selected project permission mode applies afterward."
-            )
-        elif provider in {"claude_code", "cursor", "copilot", "opencode"}:
-            scope_tools += "Native commands and file edits are disabled until project selection."
-        else:
-            scope_tools += "Native tools follow the provider's CLI-managed permissions."
     instructions = f"""{identity}
 Your persona, conversation, project context, and resource selections belong to this
 thread and remain the same when the provider or model changes.

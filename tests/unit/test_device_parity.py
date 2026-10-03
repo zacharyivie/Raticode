@@ -319,7 +319,7 @@ def test_global_phone_turn_selects_project_and_continues_with_desktop_policy(
         claimed = app.claim()
         bridge.dispatch(claimed)
         list(jobs.events(meta["id"], claimed["turn_id"]))
-        assert calls == [("read-only", ""), ("danger-full-access", str(second))]
+        assert calls == [("danger-full-access", ""), ("danger-full-access", str(second))]
         exported = app.workspace.export(peer, shared["thread_id"])
         assert exported["metadata"]["id"] == meta["id"]
         assert exported["metadata"]["projectRoot"] == str(second)

@@ -145,32 +145,32 @@ async def test_global_chat_manages_organizations_without_open_projects(
     )
     assert [event["type"] for event in events] == ["final"], events
     assert len(observed) == 1
-    assert observed[0]["workflow"]["remResources"]["shell"] is (provider == "codex")
-    assert observed[0]["permission_mode"] == ("read-only" if provider == "codex" else permission)
+    assert observed[0]["workflow"]["remResources"]["shell"] is True
+    assert observed[0]["permission_mode"] == permission
     with pytest.raises(urllib.error.HTTPError) as expired:
         rpc(observed[0]["trusted_organization_url"], "tools/list")
     assert expired.value.code == 401
 
 
-def test_claude_global_management_retains_read_and_mcp_tools_without_native_edits(tmp_path):
+def test_claude_management_retains_selected_native_and_mcp_tools(tmp_path):
     command = _build_chat_command(
         provider="claude_code",
         model="cli-default",
         prompt="Manage company",
         permission_mode="dontAsk",
         data_dir=tmp_path,
-        global_scope=True,
         resources=AgentResources.model_validate(
             {
+                "shell": True,
                 "mcpServers": [
                     {"name": "organizations", "url": "http://127.0.0.1:1234/capability"}
                 ],
             }
         ),
     )
-    assert set(command[command.index("--tools") + 1].split(",")) == {"Read", "Glob", "Grep"}
+    allowed = command[command.index("--allowedTools") + 1 : command.index("--add-dir")]
+    assert {"Read", "Glob", "Grep", "Edit", "Write", "Bash"}.issubset(allowed)
     assert "mcp__organizations__*" in command
-    assert not {"Edit", "Write", "Bash"}.intersection(command)
     assert "plan" not in command
 
 

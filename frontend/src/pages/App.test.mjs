@@ -15056,8 +15056,8 @@ test("global Rem scope becomes the selected project before the final response", 
   }), fetchMock);
   await dom.flush();
   assert.ok(dom.byLabel("Scoped to Global. Change project scope"));
-  assert.match(dom.text(), /Global scope keeps selected web search, skills and MCP servers/);
-  assert.match(dom.text(), /Codex keeps your command setting under Read Only here; your project permission choice applies after selecting a project/);
+  assert.doesNotMatch(dom.text(), /Global scope keeps selected web search, skills and MCP servers/);
+  assert.doesNotMatch(dom.text(), /Codex keeps your command setting under Read Only here/);
   await dom.change(dom.first("textarea"), "Fix the mobile app");
   await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
   const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
@@ -15086,7 +15086,7 @@ test("global research sends selected web, skill and MCP settings with the saved 
     await dom.change(dom.byLabel("Rem permissions"), "danger-full-access");
     await dom.click(dom.byText("New thread tools, skills & MCP"));
     assert.equal(dom.byLabel("Skill 1 path").value, "/skills/research");
-    assert.match(dom.text(), /Codex keeps your command setting under Read Only here; your project permission choice applies after selecting a project/);
+    assert.doesNotMatch(dom.text(), /Codex keeps your command setting under Read Only here/);
     await dom.change(dom.first("textarea"), "Research coding dashboards");
     await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
@@ -15094,7 +15094,7 @@ test("global research sends selected web, skill and MCP settings with the saved 
     assert.deepEqual(request.workflow.remResources, resources);
     assert.equal(request.permissionMode, "danger-full-access");
     assert.equal(dom.byLabel("Rem permissions").value, "danger-full-access");
-    assert.match(dom.text(), /Codex keeps your command setting under Read Only here/);
+    assert.doesNotMatch(dom.text(), /Codex keeps your command setting under Read Only here/);
   } finally { await dom.unmount(); }
 });
 

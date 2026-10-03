@@ -240,6 +240,95 @@ def test_codex_grants_only_builtin_second_brain_tools(
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider,mode", [("codex", "workspace-write"), ("claude_code", "dontAsk")]
+)
+async def test_global_turn_can_save_second_brain_note_without_project_selection(
+    tmp_path: Path, provider: str, mode: str
+) -> None:
+    from gofer.core.prompt_envelope import AgentResources
+    from gofer.ui.chat import _build_chat_command
+    from gofer.ui.rem_threads import stream_with_thread_tools
+
+    cli = tmp_path / "gof"
+    workflow = with_second_brain(
+        {
+            "remThreads": {"global": True, "projects": []},
+            "remResources": {"shell": False},
+            "remSecondBrain": {"enabled": True, "root": str(tmp_path), "format": "html"},
+        },
+        cli,
+    )
+    calls = []
+    content = "<!doctype html><html lang='en'><title>Note</title><body>Saved note</body></html>"
+
+    async def source(**options):
+        calls.append(options)
+        assert options["permission_mode"] == mode
+        assert not options["workflow"].get("projectRoot")
+        resources = AgentResources.model_validate(options["workflow"]["remResources"])
+        assert not resources.shell
+        command = _build_chat_command(
+            provider,
+            "cli-default",
+            "Save a note",
+            permission_mode=mode,
+            resources=resources,
+            second_brain_cli_path=cli,
+            data_dir=tmp_path,
+            working_dir=tmp_path,
+        )
+        if provider == "codex":
+            assert command[command.index("--sandbox") + 1] == mode
+            assert 'mcp_servers.second_brain.tools.save_note.approval_mode="approve"' in command
+        else:
+            assert "mcp__second_brain__*" in command
+            assert command[command.index("--permission-mode") + 1] == mode
+        output = io.StringIO()
+        serve_second_brain(
+            tmp_path,
+            "html",
+            input_stream=io.StringIO(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "save_note",
+                            "arguments": {
+                                "path": "Notes/global.html",
+                                "content": content,
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            ),
+            output_stream=output,
+        )
+        result = json.loads(output.getvalue())["result"]
+        assert not result.get("isError")
+        saved = json.loads(result["content"][0]["text"])
+        assert str(tmp_path / "Notes/global.html") in saved["link"]
+        yield {"type": "final", "message": {"body": saved["link"]}}
+
+    events = [
+        event
+        async for event in stream_with_thread_tools(
+            source,
+            provider=provider,
+            permission_mode=mode,
+            workflow=workflow,
+            messages=[{"role": "user", "body": "Save a Second Brain note"}],
+        )
+    ]
+    assert len(calls) == 1
+    assert [event["type"] for event in events] == ["final"]
+    assert (tmp_path / "Notes/global.html").read_text() == content
+
+
 @pytest.mark.parametrize("theme", REPORT_THEME_PROMPTS)
 def test_html_reports_preserve_authored_styles(tmp_path: Path, theme: str) -> None:
     brain = SecondBrain(tmp_path, "html", theme)

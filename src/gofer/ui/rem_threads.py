@@ -12,8 +12,11 @@ from uuid import uuid4
 from gofer.ui.swarm_tools import SwarmToolServer
 
 INSTRUCTIONS = """Rem thread tools are available. Open projects are listed below.
+Global scope uses the configured provider permissions and selected Rem resources.
+Use global tools such as Second Brain save_note without selecting a project.
 Organizations are global: use organization_action directly to manage them, without
-selecting a project. In global scope, select_project before doing project file work.
+selecting a project. Do not modify repository files unless explicitly asked by the user.
+For requested project file work in global scope, call select_project first.
 Choose the project from the user's request; ask when ambiguous. After selecting, end this
 turn immediately without editing. Raticode continues the request in that project's directory.
 Use start_thread only when the user explicitly asks to create/start a separate or new
@@ -52,8 +55,8 @@ def thread_tools(global_scope: bool, projects: list[dict[str, Any]]) -> list[dic
             {
                 "name": "select_project",
                 "description": "Select this global thread's project before editing.",
-                # Claude Code's plan mode, used for global turns, rejects MCP tools
-                # unless they declare that they leave the workspace unchanged.
+                # Project selection leaves files unchanged and remains available
+                # when the user explicitly chooses Claude Code's plan mode.
                 "annotations": {"readOnlyHint": True},
                 "inputSchema": {
                     "type": "object",
@@ -153,16 +156,7 @@ async def stream_with_thread_tools(
                 "Perform its task here; do not spawn it again.\n"
             )
         workflow.update(remResources=resources, remThreadInstructions=instructions)
-        # Project selection gates native edits, not research. Codex reads skill
-        # files through its command tool under the read-only sandbox below.
-        # Other enforced adapters use dedicated read tools without commands.
-        if actions.global_scope and kwargs.get("provider") != "codex":
-            workflow["remResources"] = {**resources, "shell": False}
         initial = {**kwargs, "workflow": workflow, "trusted_rem_threads_url": url}
-        if actions.global_scope and kwargs.get("provider") == "codex":
-            initial["permission_mode"] = "read-only"
-        # Claude global turns retain read and web tools (see _build_chat_command).
-        # Keep the user's permission mode so global management MCP writes work.
         pending_final = None
         async with aclosing(source(**initial)) as stream:
             async for event in stream:
