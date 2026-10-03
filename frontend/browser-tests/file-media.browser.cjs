@@ -16,6 +16,9 @@ app.commandLine.appendSwitch("no-sandbox");
 app.commandLine.appendSwitch("disable-dev-shm-usage");
 protocol.registerSchemesAsPrivileged([{ scheme: "raticode-media", privileges: { standard: true, secure: true, stream: true } }]);
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rem-file-media-browser-")));
+const profile = path.join(root, "profile");
+fs.mkdirSync(profile);
+app.setPath("userData", profile);
 const previews = createMediaPreviews();
 let server, win;
 const requests = [], errors = [];
@@ -83,7 +86,7 @@ app.whenReady().then(async () => {
   win.webContents.setZoomFactor(1);
   const evaluate = fn => win.webContents.executeJavaScript(`(${fn})()`);
   const evalArgs = (fn, ...args) => win.webContents.executeJavaScript(`(${fn})(...${JSON.stringify(args)})`);
-  async function waitFor(fn) { for (let i = 0; i < 250; i++) { if (await evaluate(fn)) return; await new Promise(resolve => setTimeout(resolve, 40)); } console.log(await evaluate(() => document.body.innerText)); throw new Error(`Timed out: ${fn}`); }
+  async function waitFor(fn) { for (let i = 0; i < 250; i++) { if (await evaluate(fn)) return; await new Promise(resolve => setTimeout(resolve, 40)); } console.log(await evaluate(() => ({ text: document.body.innerText, focused: document.activeElement?.getAttribute("title"), tree: [...document.querySelectorAll('[role="treeitem"]')].map(item => ({ path: item.dataset.path, selected: item.getAttribute("aria-selected"), visible: item.checkVisibility() })) }))); throw new Error(`Timed out: ${fn}`); }
   await waitFor(() => document.querySelector('[title$="/a/note.txt"]'));
   await evaluate(() => document.querySelector('[title$="/a/note.txt"]').focus());
   await waitFor(() => !document.querySelector('[aria-label="Copy selected file"]').disabled);
@@ -199,9 +202,16 @@ app.whenReady().then(async () => {
     await waitFor(() => [...document.querySelectorAll("video,audio")].some(element => element.readyState >= 1 && element.closest('[aria-hidden="false"]')));
     const playback = await evaluate(async () => {
       const element = [...document.querySelectorAll("video,audio")].find(element => element.closest('[aria-hidden="false"]'));
-      element.muted = true; await element.play(); await new Promise(resolve => setTimeout(resolve, 180));
-      const advances = element.currentTime > 0; element.pause(); element.currentTime = 1;
-      await new Promise((resolve, reject) => { element.addEventListener("seeked", resolve, { once: true }); setTimeout(() => reject(new Error("Seek timed out")), 3000); });
+      element.muted = true; await element.play();
+      const deadline = Date.now() + 5000;
+      while (element.currentTime === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+      const advances = element.currentTime > 0; element.pause();
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { element.removeEventListener("seeked", seeked); reject(new Error("Seek timed out")); }, 3000);
+        function seeked() { clearTimeout(timer); resolve(); }
+        element.addEventListener("seeked", seeked, { once: true });
+        element.currentTime = 1;
+      });
       return { advances, seek: element.currentTime, duration: element.duration };
     });
     assert.equal(playback.advances, true, name); assert.equal(playback.seek, 1); assert.ok(playback.duration >= 2);

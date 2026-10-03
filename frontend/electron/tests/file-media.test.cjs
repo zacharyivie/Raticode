@@ -153,3 +153,29 @@ test("a failed replacement installation restores the old destination", async t =
     assert.deepEqual(fs.readdirSync(root), ["destination", "source"]);
   } finally { fs.promises.rename = rename; }
 });
+
+test("replacement preserves destination folders edited while the incoming files are copied", async t => {
+  const root = fixture(t), source = path.join(root, "source"), destination = path.join(root, "destination");
+  fs.mkdirSync(source); fs.mkdirSync(destination);
+  fs.writeFileSync(path.join(source, "new.txt"), "incoming");
+  fs.writeFileSync(path.join(destination, "old.txt"), "original");
+  const open = fs.promises.open;
+  fs.promises.open = async (...args) => {
+    const handle = await open(...args);
+    if (path.basename(args[0]) === "new.txt" && (args[1] & fs.constants.O_CREAT)) {
+      const close = handle.close.bind(handle);
+      handle.close = async () => {
+        await close();
+        // Editing a child leaves its parent directory's size and mtime alone.
+        fs.writeFileSync(path.join(destination, "old.txt"), "edited during copy");
+      };
+    }
+    return handle;
+  };
+  try {
+    await assert.rejects(movePath(source, destination, { ...authorize, replace: true }), /Destination changed/);
+    assert.equal(fs.readFileSync(path.join(destination, "old.txt"), "utf8"), "edited during copy");
+    assert.equal(fs.readFileSync(path.join(source, "new.txt"), "utf8"), "incoming");
+    assert.deepEqual(fs.readdirSync(root), ["destination", "source"]);
+  } finally { fs.promises.open = open; }
+});

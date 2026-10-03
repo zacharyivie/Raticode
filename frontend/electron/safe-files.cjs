@@ -273,6 +273,9 @@ async function replacePath(source, destination, { authorizeSource, authorizeDest
     catch (error) { if (error.code !== "ENOENT") throw error; }
     if (original?.isSymbolicLink() || (original && !(original.isFile() || original.isDirectory()))) throw new Error("Cannot replace a linked or special file.");
     if (original && sameFile(sourceStat, original)) throw new Error("A file cannot replace itself.");
+    // A directory's own size/mtime does not change when a child is edited.
+    // Capture descendants too before copying so replacement retains those edits.
+    const originalVersion = original ? await treeVersion(destinationRoot, authorizeDestination) : null;
     await verifyDestination();
     const holder = await fsp.mkdtemp(path.join(parent, ".raticode-transfer-"));
     const holderName = path.basename(holder);
@@ -296,6 +299,7 @@ async function replacePath(source, destination, { authorizeSource, authorizeDest
         try { current = await fsp.lstat(target); }
         catch (error) { if (error.code !== "ENOENT") throw error; }
         if (original ? !current || !sameFile(original, current) || original.mtimeMs !== current.mtimeMs || original.size !== current.size : current) throw new Error("Destination changed while transferring. Retry the action.");
+        if (original && originalVersion !== await treeVersion(destinationRoot, authorizeDestination)) throw new Error("Destination changed while transferring. Retry the action.");
         await verifyDestination();
         if (original) { await fsp.rename(target, backup); backedUp = true; }
         try { await fsp.rename(stagedEntry, target); installed = true; }

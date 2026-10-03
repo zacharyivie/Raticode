@@ -27,7 +27,7 @@ app.whenReady().then(async () => {
   const frontend = path.resolve(__dirname, "..");
   process.chdir(frontend);
   const { createServer } = await import("vite");
-  server = await createServer({ root: frontend, cacheDir: "/tmp/rem-mac-ui-vite", configFile: false, css: { postcss: { plugins: [(await import("tailwindcss")).default({ config: path.join(frontend, "tailwind.config.js") }), (await import("autoprefixer")).default()] } }, server: { host: "127.0.0.1", port: 0 }, plugins: [
+  server = await createServer({ root: frontend, cacheDir: "/tmp/rem-mac-ui-vite", configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
     (await import("@vitejs/plugin-react")).default(), { name: "mac-ui-fixture", configureServer(dev) { dev.middlewares.use(async (req, res, next) => {
       if (req.url === "/page") { res.setHeader("Content-Type", "text/html"); res.end("<html><title>Find fixture</title><body>needle one<br>needle two<br>other text</body></html>"); return; }
       if (req.url !== "/") return next();
@@ -74,6 +74,25 @@ app.whenReady().then(async () => {
   async function waitFor(fn) { for (let i = 0; i < 300; i++) { if (await evaluate(fn)) return; await new Promise(resolve => setTimeout(resolve, 50)); } console.log(await evaluate(() => ({ body: document.body.textContent.slice(-2000), ready: window.fixtureReady, state: window.fileStateFixture }))); console.log(errors); throw Error(`Timed out waiting for ${fn}`); }
   console.log("Waiting for editors and guest");
   await waitFor(() => window.fileStateFixture && !window.fileStateFixture.loading && document.querySelector("webview"));
+  // Utility typography must still override the authored input font reset.
+  const styleDefaults = await evaluate(() => {
+    const probe = document.createElement("div");
+    probe.className = "text-sm";
+    probe.style.cssText = "position:fixed;left:-2000px;top:0";
+    probe.innerHTML = '<input class="text-xs font-mono h-7 rounded border bg-indigo-50 outline-none"><div class="flex" hidden></div>';
+    document.body.appendChild(probe);
+    const input = window.getComputedStyle(probe.firstElementChild);
+    const result = { font: input.fontSize, family: input.fontFamily, height: input.height, radius: input.borderRadius, outline: input.outlineStyle, hidden: window.getComputedStyle(probe.lastElementChild).display, palette: window.getComputedStyle(document.documentElement).getPropertyValue("--color-indigo-50").trim() };
+    probe.remove();
+    return result;
+  });
+  assert.equal(styleDefaults.font, "12px");
+  assert.match(styleDefaults.family, /monospace/);
+  assert.equal(styleDefaults.height, "28px");
+  assert.equal(styleDefaults.radius, "4px");
+  assert.equal(styleDefaults.outline, "solid");
+  assert.equal(styleDefaults.hidden, "none");
+  assert.equal(styleDefaults.palette, "#eef2ff");
   assert.ok(await evaluate(() => window.fileStateFixture.commands["selection.expand"].supported));
   await waitFor(() => window.fileStateFixture.commands["edit.formatDocument"].supported);
   await evaluate(() => document.querySelector('[data-menu-trigger="Edit"]').click());

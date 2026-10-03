@@ -41,7 +41,13 @@ app.whenReady().then(async () => {
   await evaluate(() => { document.querySelector('[aria-label="Changed files"]').scrollTop = 300; });
   await until(() => window.commitDiffMonaco.editor.getModels().some(model => model.getLanguageId() === "json"));
   await evaluate(() => { document.querySelector('[aria-label="Changed files"]').scrollTop = 0; });
-  await new Promise(resolve => setTimeout(resolve, 500));
+  // Python's tokenizer loads lazily. Wait for its rendered colors rather than
+  // assuming they finish within a fixed delay on a busy release runner.
+  await until(() => {
+    const diff = window.commitDiffMonaco.editor.getDiffEditors().find(item => !item.getModel()?.original.isDisposed() && item.getModel()?.original.getValue().startsWith("def greet"));
+    const spans = diff?.getOriginalEditor().getDomNode().querySelectorAll(".view-line span") || [];
+    return new Set([...spans].map(element => window.getComputedStyle(element).color)).size >= 3;
+  });
   const first = await evaluate(() => {
     const monaco = window.commitDiffMonaco;
     const diff = monaco.editor.getDiffEditors().find(item => !item.getModel()?.original.isDisposed() && item.getModel()?.original.getValue().startsWith("def greet"));
@@ -60,7 +66,7 @@ app.whenReady().then(async () => {
   assert.ok(first.sideBySide);
   assert.ok(first.readOnly);
   assert.ok(first.languages.includes("python") && first.languages.includes("typescript") && first.languages.includes("json"));
-  assert.ok(first.tokenColors.length >= 3, "Python syntax uses distinct colors");
+  assert.ok(first.tokenColors.length >= 3, `Python syntax uses distinct colors: ${JSON.stringify(first.tokenColors)}`);
   assert.ok(first.scrolls && first.editorFits, "Commit owns vertical scrolling");
   assert.match(first.original, /return "Hello "/);
   assert.match(first.modified, /Personalized greeting/);

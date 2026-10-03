@@ -35,6 +35,28 @@ uv 0.11.21. A manifest change without its updated lock therefore fails the build
 
 ## Packaging deprecations
 
+### 0.3.9 dependency repairs
+
+The 0.3.9 lock upgrades urllib3 to 2.8.0 for GHSA-vxq7-64xx-v4gw,
+GHSA-gh4c-6fx4-qh6g and GHSA-8988-9cw3-xx77. Its upstream license remains MIT;
+the reviewed license inventory records the patched version.
+
+GHSA-vfj7-8cjw-p6xm affects all published braces versions through 3.0.3 and
+has no patched release. The CSS build therefore uses Tailwind 4.3.3 with
+`@tailwindcss/postcss`, removing braces, micromatch, fast-glob and chokidar from
+the lock. No advisory exception or severity downgrade was added. The studio's
+palette and compatibility defaults are explicit, and authored styles share the
+utility layer to preserve selector precedence. Browser fixtures use the same
+PostCSS configuration as the app.
+
+Release browser validation includes the file/media fixture and installs FFmpeg
+to generate its test media. The fixture uses a temporary Electron profile so
+saved clipboard entries cannot contaminate repeat runs or user settings.
+
+References: [urllib3 streaming advisory](https://github.com/urllib3/urllib3/security/advisories/GHSA-vxq7-64xx-v4gw),
+[braces advisory](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm),
+[Tailwind migration guide](https://tailwindcss.com/docs/upgrade-guide).
+
 `@electron/asar` 4.3.0 removes the old glob/inflight path from active ASAR packaging;
 `@electron/get` 5.1.0 removes global-agent/boolean from the builder download path.
 These explicit overrides require the pinned Node 22.12.0 toolchain. Linux unpacked

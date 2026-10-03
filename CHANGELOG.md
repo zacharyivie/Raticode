@@ -3,7 +3,58 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
-## 0.3.8 - Unreleased
+## 0.3.9 - Unreleased
+
+Changes since the `v0.3.8` tag.
+
+### Added
+
+- Resume provider conversations across turns and restarts, with incremental
+  prompts, duplicate-send protection and context-aware provider handoffs.
+  Cursor can retry its observed malformed-response error in the same session.
+- Git history graphs with branch, remote and tag filters, ancestry search,
+  tracking badges and adjustable history limits.
+- Animated image, video and audio previews with seeking and playback controls.
+  Pause playback when its editor tab becomes inactive.
+- Explorer range selection with Shift-click, group dragging, copy/cut across
+  projects, native file drops and duplicate-file decisions. Keep both, replace
+  or cancel; apply the choice to duplicates within the same paste or drop.
+- Recover unsaved editor drafts after restart. Add browser-page Find, shared
+  editing commands, language workers and terminal shell selection.
+- Shortcut validation, reduced-motion preferences, automatic thought collapsing,
+  and report theme import/export.
+
+### Fixed
+
+- Replace pasted and dragged files with their incoming contents, refresh open
+  editors, and confirm deletion of multiple selected files with their count.
+- Preserve both source and destination when replacement fails. Refuse folder
+  replacement when destination files change during copying, including nested
+  edits that leave the destination folder's own timestamp unchanged.
+- Preserve resource and permission settings across provider changes, validate
+  MCP configuration, renew project access and handle missing worktrees safely.
+- Improve provider image handling, reasoning/answer separation, bounded protocol
+  records and provider error reporting.
+- Run file/media browser regressions in release validation, install their FFmpeg
+  prerequisite and isolate the fixture's clipboard and saved state. Wait for
+  lazy syntax coloring and media playback to become ready on busy release runners.
+
+### Security
+
+- Upgrade locked urllib3 to 2.8.0 to address three streaming and HTTPS proxy
+  advisories. Review and retain its MIT license notice.
+- Remove the vulnerable braces dependency chain by migrating the CSS build to
+  Tailwind 4. Preserve the studio palette, selector precedence and existing
+  radius, shadow, ring, placeholder and outline defaults.
+
+### Release limitations
+
+- Native Windows/macOS installer and update acceptance remains part of candidate
+  review. Arch checksums must match the actual published candidate artifacts.
+  Organizations and network device pairing retain their experimental gates.
+  See `docs/releasing.md` and `docs/security/device-release.md`.
+
+## 0.3.8 - 2026-09-30
 
 Changes since the `v0.3.7` tag.
 

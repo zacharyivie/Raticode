@@ -1,6 +1,33 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss" source(none);
+@import "./palette.css";
+@config "../../tailwind.config.js";
+@source "../../index.html";
+@source "../";
+
+/* Preserve the studio's v3 defaults while removing its vulnerable glob chain. */
+@theme {
+  --radius-sm: 0.125rem;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --default-ring-width: 3px;
+  --default-ring-color: #3b82f6;
+}
+
+@layer base {
+  *, ::before, ::after, ::backdrop, ::file-selector-button { border-color: #e5e7eb; }
+  input::placeholder, textarea::placeholder { color: #9ca3af; }
+  button, [role="button"] { cursor: pointer; }
+  :disabled { cursor: default; }
+}
+
+/* Keep authored rules in the utility layer so existing selector precedence wins. */
+@layer utilities {
+.outline-none,
+.focus\:outline-none:focus,
+.focus-visible\:outline-none:focus-visible {
+  --tw-outline-style: solid;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
 
 /* Commit review controls share the editor palette and stay above its scroll area. */
 .commit-diff-header { container-type: inline-size; }
@@ -881,3 +908,4 @@ select:focus-visible,
 .dark .scm-history-ref-local { background: #193a57; color: #9bcfff; }
 .dark .scm-history-ref-remote { background: #3c2856; color: #d0b1f3; }
 .dark .scm-history-ref-tag { background: #173e32; color: #8addbe; }
+}

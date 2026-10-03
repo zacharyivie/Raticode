@@ -11,7 +11,7 @@ const deadline = setTimeout(() => app.exit(1), 60000);
 let server;
 app.whenReady().then(async () => {
   const { createServer } = await import("vite");
-  server = await createServer({ root: path.resolve(__dirname, ".."), configFile: false, css: { postcss: { plugins: [(await import("tailwindcss")).default({ config: path.resolve(__dirname, "../tailwind.config.js") }), (await import("autoprefixer")).default()] } }, server: { host: "127.0.0.1", port: 0 }, plugins: [
+  server = await createServer({ root: path.resolve(__dirname, ".."), configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
     (await import("@vitejs/plugin-react")).default(),
     { name: "find-graph-fixture", configureServer(dev) {
       dev.middlewares.use(async (req, res, next) => {
