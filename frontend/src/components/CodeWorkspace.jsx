@@ -107,8 +107,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   const documentPathOrderRef = useRef(openPaths);
   const [fileStates, setFileStates] = useState({});
   const [diffOnOpenPaths, setDiffOnOpenPaths] = useState(() => new Set(navigationRequest?.diff ? [navigationRequest.path] : []));
+  const [appliedNavigationRequest, setAppliedNavigationRequest] = useState(null);
+  const pendingDiffPath = navigationRequest !== appliedNavigationRequest && navigationRequest?.diff ? navigationRequest.path : null;
   // Git comparisons still need to show the original version of a deleted file.
-  const physicalPathsKey = JSON.stringify(openPaths.filter(path => !browserTabs[path] && !workflowTabs[path] && !parseCommitDiffPath(path) && !diffOnOpenPaths.has(path)));
+  // Exclude new comparisons before the navigation effect records their mode.
+  const physicalPathsKey = JSON.stringify(openPaths.filter(path => !browserTabs[path] && !workflowTabs[path] && !parseCommitDiffPath(path) && !diffOnOpenPaths.has(path) && path !== pendingDiffPath));
   const editorLifetimesRef = useRef(new Map());
   reconcileEditorLifetimes(editorLifetimesRef.current, openPaths);
   useEffect(() => {
@@ -396,6 +399,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   }, [tabMenu]);
 
   useEffect(() => {
+    setAppliedNavigationRequest(navigationRequest);
     if (!navigationRequest?.path) return;
     if (!navigationRequest.diff) setDiffOnOpenPaths((current) => withoutSetValue(current, navigationRequest.path));
     if (!navigationRequest.lineNumber && !navigationRequest.diff) return;
@@ -1159,7 +1163,7 @@ const TextCodeEditor = forwardRef(function TextCodeEditor({
   onSaveDocumentRef.current = onSaveDocument;
   const onStateChangeRef = useRef(onStateChange);
   const navigationRequestRef = useRef(navigationRequest);
-  const [diffMode, setDiffMode] = useState(initialDiffMode);
+  const [diffMode, setDiffMode] = useState(initialDiffMode || navigationRequest?.diff === true);
   const [gitBaseline, setGitBaseline] = useState(null);
   const [gitGroup, setGitGroup] = useState(navigationRequest?.gitGroup || "");
   const [diskRevision, setDiskRevision] = useState(0);

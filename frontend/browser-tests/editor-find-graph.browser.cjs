@@ -206,6 +206,7 @@ app.whenReady().then(async () => {
   }
   assert.ok(await evaluate(() => /original\s+deleted\s+file/.test(document.querySelector(".monaco-diff-editor")?.textContent || "")), "Explicit Git comparisons must retain the original version of deleted files");
   assert.equal(await evaluate(() => document.body.textContent.includes("This file doesn't exist anymore")), false);
+  assert.deepEqual(await evaluate(() => window.deletedComparisonDiskReads), [], "Deleted-file comparisons must use Git content without inspecting or reading the missing disk file");
   assert.ok(await evaluate(() => window.generationJobRequests.length > 0 && window.generationJobRequests.every(request => request.grant === "registered")), "Startup polling must wait for folder registration");
   await evaluate(() => { window.expireFixtureGrant(); window.dispatchEvent(new Event("focus")); });
   await new Promise(resolve => setTimeout(resolve, 250));

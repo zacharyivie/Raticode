@@ -16455,6 +16455,34 @@ test("deleted open files clear the editor area and Close Tab dismisses them", as
   } finally { await dom.unmount(); }
 });
 
+test("new deleted-file comparisons skip disk inspection until the comparison is closed", async () => {
+  const path = "/repo/deleted.png";
+  const inspections = [];
+  function Fixture() {
+    const [navigation, setNavigation] = React.useState(null);
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { onClick: () => setNavigation({ path, diff: true, gitGroup: "unstaged" }) }, "Compare deleted file"),
+      React.createElement(codeWorkspaceModule.default, {
+        active: true, activePath: navigation ? path : "", openPaths: navigation ? [path] : [], navigationRequest: navigation,
+      }));
+  }
+  const dom = await mountReact(React.createElement(Fixture), createFetchMock([]), { desktop: { workspace: {
+    getPathInfo: async path => { inspections.push(path); return { exists: false }; },
+    gitFileBaseline: async () => ({ tracked: true, changed: true, deleted: true }),
+  } } });
+  try {
+    await dom.click(dom.byText("Compare deleted file"));
+    await dom.flush();
+    assert.deepEqual(inspections, [], "A comparison must bypass disk checks on its first render");
+    assert.doesNotMatch(dom.text(), /This file doesn't exist anymore/);
+    assert.ok(dom.byLabel("Binary file comparison"));
+    await dom.click(dom.byText("Close diff"));
+    await dom.flush();
+    assert.deepEqual(inspections, [path]);
+    assert.match(dom.text(), /This file doesn't exist anymore/);
+  } finally { await dom.unmount(); }
+});
+
 test("an initially missing file shows the missing message while inspection errors keep the editor", async () => {
   for (const missing of [true, false]) {
     const dom = await mountReact(React.createElement(codeWorkspaceModule.default, {

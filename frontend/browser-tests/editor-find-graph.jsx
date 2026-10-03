@@ -32,6 +32,7 @@ window.closedFiles = [];
 window.unhandled = [];
 window.addEventListener("unhandledrejection", event => window.unhandled.push({ message: String(event.reason), stack: event.reason?.stack, phase: window.fixturePhase }));
 window.fileWrites = 0;
+window.deletedComparisonDiskReads = [];
 window.fetch = async url => {
   const query = new URL(url, window.location.href).searchParams;
   if (query.get("kind") === "commit") {
@@ -87,7 +88,8 @@ function Fixture() {
   };
   window.openDeletedComparison = () => {
     window.fixturePhase = "comparison";
-    window.goferDesktop.workspace.getPathInfo = async () => ({ exists: false });
+    window.goferDesktop.workspace.getPathInfo = async path => { window.deletedComparisonDiskReads.push(path); return { exists: false }; };
+    window.goferDesktop.textFiles.read = async path => { window.deletedComparisonDiskReads.push(path); return { missing: true, content: null }; };
     window.goferDesktop.workspace.gitFileBaseline = async () => ({ tracked: true, changed: true, deleted: true, content: "original deleted file", modifiedContent: "", hunks: [] });
     setNavigation({ path: "/fixture/deleted.js", diff: true, gitGroup: "unstaged" });
     setPaths(["/fixture/deleted.js"]);
