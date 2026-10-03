@@ -709,7 +709,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14" },
-    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "questionary", specifier = ">=2.0" },
     { name = "referencing", specifier = ">=0.35" },
@@ -815,7 +815,7 @@ name = "importlib-metadata"
 version = "9.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.15'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6f/7e/1e7e8dc30634b93ebb3d58a3dea569ad146e656218d3960ab04f62047b29/importlib_metadata-9.0.1.tar.gz", hash = "sha256:ab830580bc0ef3db61ce8fae716389e5462b67e033018bab6d8f80ef17172f99", size = 59124, upload-time = "2026-08-28T15:30:34.646Z" }
 wheels = [
@@ -1011,7 +1011,7 @@ name = "macholib"
 version = "1.16.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "altgraph", marker = "sys_platform == 'darwin'" },
+    { name = "altgraph" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/10/2f/97589876ea967487978071c9042518d28b958d87b17dceb7cdc1d881f963/macholib-1.16.4.tar.gz", hash = "sha256:f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362", size = 59427, upload-time = "2025-11-22T08:28:38.373Z" }
 wheels = [
@@ -1630,11 +1630,11 @@ wheels = [
 
 [[package]]
 name = "python-dotenv"
-version = "1.2.2"
+version = "1.2.3"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef3d94b6ec08bbcabd04a72018415dcb29e588514bba8/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3", size = 50135, upload-time = "2026-03-01T16:00:26.196Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6a/53/ed9d74092561d4b01a2ef1349d52cdbc135e526c245f366b089cfca6de49/python_dotenv-1.2.3.tar.gz", hash = "sha256:a20a594dabeaa385725aa239d5244871c143ecb356add8a20fcf23773a6c3a35", size = 58945, upload-time = "2026-08-16T16:54:54.067Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101, upload-time = "2026-03-01T16:00:25.09Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/17/c5c6b53ddc18f297992099b3d9ec16c855c0ccc83263a21fe4d1c625ec6c/python_dotenv-1.2.3-py3-none-any.whl", hash = "sha256:904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9", size = 22780, upload-time = "2026-08-16T16:54:52.473Z" },
 ]
 
 [[package]]
@@ -1908,8 +1908,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'darwin'" },
-    { name = "jeepney", marker = "sys_platform != 'darwin'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
@@ -2194,11 +2194,11 @@ resolution-markers = [
     "python_full_version < '3.15' and sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "cffi", marker = "sys_platform == 'darwin'" },
-    { name = "requests", marker = "sys_platform == 'darwin'" },
-    { name = "srt", marker = "sys_platform == 'darwin'" },
-    { name = "tqdm", marker = "sys_platform == 'darwin'" },
-    { name = "websockets", marker = "sys_platform == 'darwin'" },
+    { name = "cffi" },
+    { name = "requests" },
+    { name = "srt" },
+    { name = "tqdm" },
+    { name = "websockets" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/44/19/5e8299237bc2005c3d155d3b48adba6fd6484465ad5c970302fc1d37947d/vosk-0.3.44-py3-none-macosx_10_6_universal2.whl", hash = "sha256:029d0b3d6a5cff874c575b8a5814a4cccfb37608cff52e846c02a8c67a882801", size = 4710953, upload-time = "2022-09-25T19:11:57.513Z" },
@@ -2213,11 +2213,11 @@ resolution-markers = [
     "python_full_version < '3.15' and sys_platform != 'darwin'",
 ]
 dependencies = [
-    { name = "cffi", marker = "sys_platform != 'darwin'" },
-    { name = "requests", marker = "sys_platform != 'darwin'" },
-    { name = "srt", marker = "sys_platform != 'darwin'" },
-    { name = "tqdm", marker = "sys_platform != 'darwin'" },
-    { name = "websockets", marker = "sys_platform != 'darwin'" },
+    { name = "cffi" },
+    { name = "requests" },
+    { name = "srt" },
+    { name = "tqdm" },
+    { name = "websockets" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/6d/728d89a4fe8d0573193eb84761b6a55e25690bac91e5bbf30308c7f80051/vosk-0.3.45-py3-none-linux_armv7l.whl", hash = "sha256:4221f83287eefe5abbe54fc6f1da5774e9e3ffcbbdca1705a466b341093b072e", size = 2388263, upload-time = "2022-12-14T23:13:34.467Z" },
