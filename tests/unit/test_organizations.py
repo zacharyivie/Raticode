@@ -421,7 +421,7 @@ def fixture_files() -> Any:
     fixture = Path(__file__).parents[1] / "fixtures" / "agent-company"
     return {
         p.relative_to(fixture).as_posix(): base64.b64encode(p.read_bytes()).decode()
-        for p in fixture.rglob("*")
+        for p in sorted(fixture.rglob("*"))
         if p.is_file()
     }
 

@@ -1560,21 +1560,25 @@ class BrainLibrary:
         except InterruptedError as exc:
             self._task_update(task_id, state="cancelled", error=str(exc), finishedAt=now())
         except Exception as exc:
-            self._task_update(task_id, state="failed", error=str(exc), finishedAt=now())
-            if task["kind"] == "index":
-                try:
-                    brain = self.brain(task["brainId"])
-                    brain["index"].update(state="failed", error=str(exc))
-                    self.put_brain(brain)
-                except ValueError:
-                    pass
-            if task["kind"] == "job" and params.get("jobId"):
-                try:
-                    job = self.entity("jobs", params["jobId"])
-                    job["lastRun"] = {"at": now(), "status": "failed", "detail": str(exc)}
-                    self.put("jobs", job)
-                except ValueError:
-                    pass
+            # Record the failure on its brain or job before the receipt reports it,
+            # so a client that sees the failed task never reads stale state.
+            try:
+                if task["kind"] == "index":
+                    try:
+                        brain = self.brain(task["brainId"])
+                        brain["index"].update(state="failed", error=str(exc))
+                        self.put_brain(brain)
+                    except ValueError:
+                        pass
+                if task["kind"] == "job" and params.get("jobId"):
+                    try:
+                        job = self.entity("jobs", params["jobId"])
+                        job["lastRun"] = {"at": now(), "status": "failed", "detail": str(exc)}
+                        self.put("jobs", job)
+                    except ValueError:
+                        pass
+            finally:
+                self._task_update(task_id, state="failed", error=str(exc), finishedAt=now())
         finally:
             if acquired:
                 self.slots.release()
