@@ -84,10 +84,229 @@ def with_second_brain(
                 report_format,
                 "--report-theme",
                 "none" if "remReportTheme" in (workflow or {}) else config.get("theme", "auto"),
+                *(
+                    [
+                        "--library-data-dir",
+                        str(config["libraryDataDir"]),
+                        *[
+                            part
+                            for brain_id in config["brainIds"]
+                            for part in ("--brain-id", brain_id)
+                        ],
+                    ]
+                    if config.get("brainIds") and config.get("libraryDataDir")
+                    else []
+                ),
             ],
         )
     )
     return {**(workflow or {}), "remResources": resources.model_dump()}
+
+
+def serve_registered_brains(
+    data_dir: Path, brain_ids: list[str], report_format: str, report_theme: str
+) -> None:
+    from gofer.ui.brain_documents import read_source, source_path
+    from gofer.ui.brain_library import BrainLibrary
+
+    library = BrainLibrary(data_dir, start=False, recover=False)
+    allowed = set(brain_ids)
+
+    def selected(arguments: dict[str, Any]) -> list[dict[str, Any]]:
+        chosen = [arguments["brainId"]] if arguments.get("brainId") else brain_ids
+        if any(brain_id not in allowed for brain_id in chosen):
+            raise ValueError("This brain is not selected for the current Rem thread")
+        brains = [library.brain(brain_id) for brain_id in chosen]
+        if any(not brain["settings"].get("allowCloud") for brain in brains):
+            raise ValueError("Cloud access to a selected brain was revoked")
+        if any(not Path(brain["root"]).is_dir() for brain in brains):
+            raise ValueError("A selected brain is unavailable")
+        return brains
+
+    def call(name: str, arguments: dict[str, Any]) -> Any:
+        brains = selected(arguments)
+        if name == "rules":
+            return "\n\n".join(
+                f"Brain ID: {brain['id']} · {brain['name']}\n"
+                + second_brain_rules(Path(brain["root"]), report_format, report_theme)
+                for brain in brains
+            ) + (
+                "\nSearch spans only the selected brains. Use brainId on read_"
+                "note and save_note. Cite documentId, version, blockId and ex"
+                "act source quotes returned by read_note. When saving a cited report, supply "
+                "evidence entries with docId (the documentId returned by read_note), version, "
+                "blockId and the exact quote. This registers checkable citations in Reports. "
+                "Pass title, question and format when available."
+            )
+        documents = [doc for brain in brains for doc in library.entities("documents", brain["id"])]
+        if name == "search":
+            query = str(arguments.get("query", ""))
+            if query.strip():
+                hits = library.search(
+                    {"brainIds": [brain["id"] for brain in brains], "query": query}
+                )["hits"]
+                by_id = {doc["id"]: doc for doc in documents}
+                result = []
+                for hit in hits[:50]:
+                    doc = by_id.get(hit["docId"])
+                    if doc:
+                        block = next(
+                            block for block in doc["blocks"] if block["id"] == hit["blockId"]
+                        )
+                        result.append(
+                            {
+                                "brainId": doc["brainId"],
+                                "documentId": doc["id"],
+                                "path": doc["path"],
+                                "title": doc["title"],
+                                "version": doc["version"],
+                                "blockId": block["id"],
+                                "snippet": block["text"],
+                            }
+                        )
+                return result
+            return [
+                {
+                    "brainId": doc["brainId"],
+                    "documentId": doc["id"],
+                    "path": doc["path"],
+                    "title": doc["title"],
+                    "version": doc["version"],
+                }
+                for doc in documents[:50]
+            ]
+        if name == "read_note":
+            candidates = [
+                doc
+                for doc in documents
+                if (
+                    doc["id"] == arguments.get("documentId") or doc["path"] == arguments.get("path")
+                )
+            ]
+            if len(candidates) != 1:
+                raise ValueError("Choose one document by documentId, or provide brainId and path")
+            doc = candidates[0]
+            brain = next(brain for brain in brains if brain["id"] == doc["brainId"])
+            version = arguments.get("version", doc["version"])
+            if not doc.get("missing"):
+                data = read_source(Path(brain["root"]), doc["path"])
+                if __import__("hashlib").sha256(data).hexdigest() != doc["version"]:
+                    library.scan(brain["id"])
+                    doc = library.entity("documents", doc["id"])
+                    if not arguments.get("version"):
+                        version = doc["version"]
+            elif version == doc["version"]:
+                raise ValueError(
+                    "The source file is unavailable; request its pinned historical version"
+                )
+            blocks = (
+                doc["blocks"]
+                if version == doc["version"]
+                else next(
+                    (entry["blocks"] for entry in doc["versions"] if entry["hash"] == version), None
+                )
+            )
+            if blocks is None:
+                raise ValueError("The requested source version is unavailable")
+            return {
+                "brainId": doc["brainId"],
+                "documentId": doc["id"],
+                "path": str(Path(brain["root"]) / doc["path"]),
+                "title": doc["title"],
+                "version": version,
+                "blocks": blocks,
+                "source": doc["source"],
+            }
+        if name == "save_note":
+            if len(brains) != 1:
+                raise ValueError("Choose the destination brainId before saving a note")
+            brain = brains[0]
+            target = source_path(Path(brain["root"]), str(arguments.get("path", "")))
+            citations = []
+            for index, reference in enumerate(arguments.get("evidence", [])):
+                doc = library.validate_evidence(reference)
+                if doc["brainId"] not in allowed:
+                    raise ValueError("Report evidence is outside the selected brains")
+                selected({"brainId": doc["brainId"]})
+                citations.append(
+                    {**reference, "id": f"c-{index + 1}", "n": index + 1, "state": "unreviewed"}
+                )
+            format_ = arguments.get("format", report_format)
+            saved_result = save_report(
+                Path(brain["root"]),
+                target.relative_to(Path(brain["root"])).as_posix(),
+                arguments.get("content"),
+                format_,
+            )
+            from gofer.ui.brain_library import identifier, now
+
+            report = {
+                "id": identifier("report"),
+                "brainId": brain["id"],
+                "title": str(arguments.get("title") or target.stem),
+                "question": str(arguments.get("question") or "Saved from a Rem thread"),
+                "artifactPath": Path(saved_result["path"])
+                .relative_to(Path(brain["root"]))
+                .as_posix(),
+                "generatedAt": now(),
+                "format": format_,
+                "provider": "Rem thread",
+                "model": "Not reported",
+                "modelReported": "Not reported",
+                "theme": "Authored styling",
+                "template": "Saved artifact",
+                "scope": "Thread resources",
+                "coverage": "Not reported",
+                "filters": "Not reported",
+                "retrievalGeneration": brain["index"]["generation"],
+                "sourceVersions": [
+                    {"docId": citation["docId"], "version": citation["version"]}
+                    for citation in citations
+                ],
+                "citations": citations,
+                "claims": [],
+                "external": True,
+                "draft": False,
+                "outputHash": "sha256:"
+                + __import__("hashlib").sha256(Path(saved_result["path"]).read_bytes()).hexdigest(),
+            }
+            library.put("reports", report)
+            library.scan(brain["id"])
+            return saved_result
+        raise ValueError("Unknown Second Brain tool")
+
+    definitions = tool_definitions()
+    for definition in definitions:
+        definition["inputSchema"]["properties"]["brainId"] = {"type": "string", "enum": brain_ids}
+        if definition["name"] == "read_note":
+            definition["inputSchema"]["properties"].update(
+                documentId={"type": "string"}, version={"type": "string"}
+            )
+            definition["inputSchema"]["required"] = []
+        if definition["name"] == "save_note":
+            definition["inputSchema"]["properties"].update(
+                format={"type": "string", "enum": sorted(REPORT_FORMATS)},
+                title={"type": "string"},
+                question={"type": "string"},
+                evidence={
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "docId": {"type": "string"},
+                            "blockId": {"type": "string"},
+                            "version": {"type": "string"},
+                            "quote": {"type": "string"},
+                        },
+                        "required": ["docId", "blockId", "version", "quote"],
+                        "additionalProperties": False,
+                    },
+                },
+            )
+    try:
+        serve_stdio(call, definitions, call("rules", {}), "raticode-second-brain")
+    finally:
+        library.close()
 
 
 class SecondBrain:
@@ -229,6 +448,10 @@ class _InvalidToolParameters(ValueError):
     """A malformed tools/call request, before dispatch to a tool."""
 
 
+class ToolContent(list[dict[str, Any]]):
+    """MCP content blocks returned as-is, such as images or plain text."""
+
+
 def serve_stdio(
     call: Callable[[str, dict[str, Any]], Any],
     definitions: list[dict[str, Any]],
@@ -286,7 +509,9 @@ def serve_stdio(
                 try:
                     value = call(name, arguments)
                     result = {
-                        "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]
+                        "content": list(value)
+                        if isinstance(value, ToolContent)
+                        else [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]
                     }
                 except (OSError, ValueError, sqlite3.Error) as exc:
                     result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}

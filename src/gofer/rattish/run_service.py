@@ -19,7 +19,7 @@ import anyio
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
 
-from gofer.core.approvals import NotificationAdapter
+from gofer.core.approvals import ApprovalStore, NotificationAdapter
 from gofer.rattish.artifacts import (
     CompiledArtifact,
     compile_rattish_file,
@@ -125,7 +125,7 @@ async def run_rattish_file(
         subscriptions=runtime_subscriptions,
         handlers=runtime_handlers,
     )
-    run_id = run_id or _new_run_id()
+    run_id = run_id or new_run_id()
     with _track_rattish_run(run_id):
         supplied_inputs = dict(workflow_inputs or {})
         path = _run_path(
@@ -162,13 +162,29 @@ async def run_rattish_file(
 
                 def publish_node_event(event: dict[str, Any], record: NodeRunRecord | None) -> None:
                     assert live is not None
+                    previous = (
+                        len(live["events"]),
+                        len(live["runs"]),
+                        dict(live["latest_node_outputs"]),
+                    )
                     live["events"].append({"sequence": len(live["events"]) + 1, **event})
                     if record is not None:
                         live["runs"].append(_node_run_document(record))
                         if record.result.outcome == "success":
                             live["latest_node_outputs"][record.node_id] = record.result.output
                     live["duration_ms"] = round((time.monotonic() - started_clock) * 1000)
-                    _write_json_atomic(path, live)
+                    try:
+                        _write_json_atomic(path, live)
+                    except RattishRunArtifactError as exc:
+                        # Drop the unpublishable event so the final record can still be saved.
+                        del live["events"][previous[0] :]
+                        del live["runs"][previous[1] :]
+                        live["latest_node_outputs"] = previous[2]
+                        node = event.get("node_id") or "workflow"
+                        raise _RunRecordError(
+                            f"Node '{node}' produced output that cannot be saved "
+                            f"to the run record: {exc}"
+                        ) from exc
 
                 async def watch_stop(scope: anyio.CancelScope) -> None:
                     while cancel_event is not None and not cancel_event.is_set():
@@ -202,10 +218,19 @@ async def run_rattish_file(
             except anyio.get_cancelled_exc_class():
                 stopped = True
             except Exception as exc:
-                input_error = RuntimeErrorInfo("runtime", "RATTISH_RUNTIME_UNEXPECTED", str(exc))
+                record_error = _find_run_record_error(exc)
+                if record_error is not None:
+                    input_error = RuntimeErrorInfo(
+                        "runtime", "RATTISH_RUN_RECORD_INVALID", str(record_error)
+                    )
+                else:
+                    input_error = RuntimeErrorInfo(
+                        "runtime", "RATTISH_RUNTIME_UNEXPECTED", str(exc)
+                    )
 
         finished_at = datetime.now(UTC).isoformat()
         status = "stopped" if stopped else _run_status(deployment, execution, input_error)
+        _cancel_pending_approvals(resolved_data_dir, compiled.ir["workflow"]["id"], run_id, status)
         document = _run_document(
             run_id=run_id,
             status=status,
@@ -238,8 +263,66 @@ async def run_rattish_file(
             run_id,
             source_path=compiled.source_path,
         )
-        _write_json_atomic(path, document)
+        try:
+            _write_json_atomic(path, document)
+        except RattishRunArtifactError as exc:
+            # Never leave a run looking active: save a failed record with JSON-safe values.
+            document = _json_safe(document)
+            document["status"] = "failed"
+            document["events"][-1]["status"] = "failed"
+            document["error"] = _runtime_error_document(
+                RuntimeErrorInfo(
+                    "runtime",
+                    "RATTISH_RUN_RECORD_INVALID",
+                    f"The run record could not be saved as produced: {exc}",
+                )
+            )
+            _write_json_atomic(path, document)
         return RattishRunResult(document, path, compiled, deployment)
+
+
+def _cancel_pending_approvals(data_dir: Path, workflow_id: str, run_id: str, status: str) -> None:
+    """Close approval requests that can no longer affect a finished run."""
+    try:
+        ApprovalStore(data_dir).cancel_pending_for_run(
+            workflow_id, run_id, f"The workflow run ended ({status})."
+        )
+    except OSError:
+        pass
+
+
+class _RunRecordError(RuntimeError):
+    """Raised when a node event cannot be persisted to the live run record."""
+
+
+def _find_run_record_error(exc: BaseException) -> _RunRecordError | None:
+    if isinstance(exc, _RunRecordError):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for item in exc.exceptions:
+            found = _find_run_record_error(item)
+            if found is not None:
+                return found
+    cause = exc.__cause__ or exc.__context__
+    return _find_run_record_error(cause) if cause is not None else None
+
+
+_MAX_EXACT_INTEGER = 9_007_199_254_740_991
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert values that RFC 8785 cannot represent into strings."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) <= _MAX_EXACT_INTEGER else str(value)
+    if isinstance(value, float):
+        return value if value == value and abs(value) != float("inf") else str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
 
 
 def _run_status(
@@ -250,6 +333,8 @@ def _run_status(
     if not deployment.ready:
         return "preflight_failed"
     if input_error is not None:
+        if input_error.code != "RATTISH_WORKFLOW_INPUT_INVALID":
+            return "failed"
         return "invalid_inputs"
     if execution is not None and execution.outcome == "pass":
         return "passed"
@@ -349,7 +434,8 @@ def _runtime_error_document(error: RuntimeErrorInfo | None) -> dict[str, Any] | 
     }
 
 
-def _new_run_id() -> str:
+def new_run_id() -> str:
+    """Return a sortable run ID shared by every surface that starts Rattish runs."""
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{timestamp}-{uuid.uuid4().hex[:12]}"
 

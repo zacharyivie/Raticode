@@ -282,6 +282,8 @@ for line in sys.stdin:
 
     async def fake_fallback(command: list[str], **kwargs: Any) -> Any:
         fallback_calls.append(command)
+        assert command[-1] == "-"
+        assert kwargs["stdin"] == b"prompt"
         yield {"type": "exit", "returncode": 0}
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
@@ -444,3 +446,50 @@ for line in sys.stdin:
     ]
     assert events[-1] == {"type": "exit", "returncode": 0}
     assert len(events) == 601
+
+
+@pytest.mark.asyncio
+async def test_managed_network_setting_reaches_app_server(monkeypatch, tmp_path):
+    script = tmp_path / "server.py"
+    capture = tmp_path / "params.json"
+    script.write_text("""import json,sys
+for line in sys.stdin:
+ m=json.loads(line); method=m['method']
+ if method=='initialized': continue
+ result={}
+ if method=='thread/start':
+  open(sys.argv[1],'w').write(json.dumps(m['params']))
+  result={'thread':{'id':'thread'}}
+ if method=='turn/start': result={'turn':{'id':'turn'}}
+ print(json.dumps({'id':m['id'],'result':result}),flush=True)
+ if method=='turn/start':
+  print(json.dumps({'method':'turn/completed','params':{'turn':{'status':'completed'}}}),flush=True)
+""")
+    spawn = asyncio.create_subprocess_exec
+
+    async def fake_spawn(*args, **kwargs):
+        return await spawn(sys.executable, str(script), str(capture), **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    events = [
+        e
+        async for e in stream_codex_turn(
+            [
+                sys.executable,
+                "exec",
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "prompt",
+            ],
+            control=CodexTurnControl(),
+            cwd=tmp_path,
+            cancel_event=None,
+            max_output_bytes=100000,
+        )
+    ]
+    params = json.loads(capture.read_text())
+    assert params["sandbox"] == "workspace-write"
+    assert params["config"]["sandbox_workspace_write.network_access"] is True
+    assert events[-1]["returncode"] == 0

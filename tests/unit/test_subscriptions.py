@@ -21,15 +21,14 @@ def use_unresolved_provider_binaries(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_claude_code_command_basic(monkeypatch) -> None:
     sub = ClaudeCodeSubscription()
     cmd = sub._build_command("hello", [], [])
-    assert cmd[:6] == [
-        "claude",
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "-p",
-    ]
-    assert "hello" in cmd
+    assert cmd == ["claude", "--print", "--output-format", "stream-json", "--verbose"]
+
+
+def test_claude_code_command_accepts_prompt_argument_when_stdin_is_disabled(monkeypatch) -> None:
+    sub = ClaudeCodeSubscription()
+    sub.prompt_via_stdin = False
+    cmd = sub._build_command("hello", [], [])
+    assert cmd[-2:] == ["-p", "hello"]
 
 
 def test_claude_code_command_with_tools(monkeypatch) -> None:
@@ -124,7 +123,7 @@ def test_claude_code_command_adds_extra_sandbox_dirs(
         "--add-dir",
     ]
     assert cmd[6] == str(extra_dir)
-    assert cmd[7:9] == ["-p", "hi"]
+    assert "-p" not in cmd
 
 
 def test_subscription_commands_use_resolved_binary_paths(monkeypatch) -> None:
@@ -513,19 +512,15 @@ async def test_codex_subscription_execute_uses_prompt_file_instead_of_full_promp
 
 
 @pytest.mark.asyncio
-async def test_claude_subscription_execute_uses_prompt_file_instead_of_full_prompt_argv(
+async def test_claude_subscription_execute_sends_prompt_on_stdin_without_tool_access(
     monkeypatch, tmp_path: Path
 ) -> None:
     long_prompt = "hello\n" + ("x" * 50_000)
     captured: dict[str, object] = {}
 
-    async def fake_stream_subprocess(cmd, *_args, **_kwargs):
+    async def fake_stream_subprocess(cmd, *_args, **kwargs):
         captured["cmd"] = cmd
-        prompt_arg = cmd[cmd.index("-p") + 1]
-        captured["prompt_arg"] = prompt_arg
-        prompt_path = Path(prompt_arg.rsplit(": ", 1)[1])
-        captured["prompt_path"] = prompt_path
-        captured["prompt_file_text"] = prompt_path.read_text(encoding="utf-8")
+        captured["stdin"] = kwargs["stdin"]
         yield {"type": "chunk", "stream": "stdout", "text": "done\n", "returncode": None}
         yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
 
@@ -540,10 +535,10 @@ async def test_claude_subscription_execute_uses_prompt_file_instead_of_full_prom
     )
 
     assert result.success
-    assert captured["prompt_file_text"] == long_prompt
-    assert "Read the complete Raticode agent prompt" in str(captured["prompt_arg"])
-    assert long_prompt not in list(captured["cmd"])  # type: ignore[arg-type]
-    assert not Path(captured["prompt_path"]).exists()
+    # A default agent step has no profile, permission mode, or allowed Read tool.
+    assert captured["stdin"] == long_prompt.encode("utf-8")
+    assert "-p" not in list(captured["cmd"])  # type: ignore[arg-type]
+    assert not any("gofer-agent-prompt-" in arg for arg in captured["cmd"])  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("mode", ["read-only", "workspace-write", "danger-full-access"])

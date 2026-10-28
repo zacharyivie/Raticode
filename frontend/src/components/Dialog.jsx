@@ -42,7 +42,7 @@ export function Dialog({
   description,
   initialFocusRef,
   onClose,
-  overlayClassName = "fixed inset-0 z-50 grid place-items-center bg-slate-950/30 px-4",
+  overlayClassName = "fixed inset-0 z-50 grid place-items-center ui-scrim px-4",
   panelClassName = "",
   panelProps = {},
   title,

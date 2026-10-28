@@ -26,12 +26,139 @@ You can reopen completed groups, or turn off this setting to keep them open.
 
 ## Resources
 
-Settings > Rem sets defaults copied into new threads. In a thread, open
-"Thread tools, skills & MCP" to change command execution, web search, skill folders,
-and HTTP or local stdio MCP servers. Empty or invalid entries must be completed or removed before
-sending. These selections survive provider changes.
-Command execution and web search are enabled by default for new threads.
-Explicitly disabled resources stay disabled.
+Settings > Rem sets defaults copied into new threads. In a thread, the **Tools** button
+above the composer summarizes the selection (for example "Commands · Web · 2 skills")
+and opens a menu of switches: built-in tools, Second Brains, skills and MCP servers.
+Invalid entries from older threads must be fixed or removed before sending. These
+selections survive provider changes. Command execution, web search and subagents are
+enabled by default for new threads; the browser is off. Explicitly disabled resources
+stay disabled.
+
+### Built-in tools
+
+| Switch | What it allows | Provider mapping |
+|---|---|---|
+| Run commands | Shell commands, scripts and tests | Codex `features.shell_tool`, Claude `Bash`, Cursor/Copilot/OpenCode shell |
+| Search the web | Web search and page reading | Codex `web_search`, Claude `WebSearch`/`WebFetch`, Cursor/Copilot/OpenCode web tools |
+| Subagents | Handing parts of a task to helper agents | Codex `features.multi_agent`, Claude `Agent`, Cursor `task_tool_call`, Copilot `task`, OpenCode `task` |
+| Browser | Opening, reading and testing pages in the browser chosen in Settings > Browser | An MCP server named `browser` for every provider: `gof ui browser` for Raticode tabs, or a pinned `@playwright/mcp` server started with `npx` |
+
+File reading and editing are always available, subject to the thread's permissions.
+They include image viewing (Codex `tools.view_image`), notebook edits (Claude
+`NotebookEdit`) and language-server queries (Claude `LSP`, Cursor lints, OpenCode
+`lsp`). Codex features the menu does not offer (`apps`, `browser_use`,
+`computer_use` and `image_generation`) are turned off for every Rem turn. A selected
+MCP server already named `browser` is used instead of either browser.
+
+### Rem's browser
+
+Settings > Browser > **Rem's browser** chooses where the Browser switch opens pages:
+
+- **Raticode browser tabs** (default). Rem opens tabs in the editor's tab strip without
+  selecting them, so the current view and keyboard focus stay where they are. Each
+  thread gets its own tabs, kept across its turns, so several threads can work in
+  parallel. Rem may keep up to 8 tabs per thread; tabs idle for 5 minutes stop using
+  CPU in the background, and tabs idle for an hour close. Rem's tabs are not restored
+  after a restart. This requires the desktop app to be open.
+- **External browser window** or **External browser, hidden**. Rem uses Playwright with
+  a private profile, in a visible window or headless. These need Node.js and a
+  Chromium browser: Google Chrome if installed, then Microsoft Edge, then Chromium or
+  Brave, then a Chromium that Playwright downloaded earlier. Without any of these,
+  Rem reports Playwright's install command.
+
+Rem reads pages through an outline with element references (`browser_snapshot`),
+including the contents of same-origin frames, and acts with `browser_click`,
+`browser_type`, `browser_press_key`, `browser_select_option`, `browser_hover`,
+`browser_file_upload`, `browser_handle_dialog`, `browser_evaluate` and
+`browser_wait_for`. It can open `http` and `https` pages only. Input is dispatched as
+page events instead of native input, which would move keyboard focus into the tab; a
+few sites that require native input may ignore it. Hidden tabs lay pages out at
+1280×800. `browser_take_screenshot` works while the editor area is showing, including
+for tabs behind the selected one; otherwise Rem uses the outline.
+
+#### Profiles and sign-ins
+
+Rem's tabs use a separate browser profile, so Rem is signed out everywhere by
+default. **Sites where Rem uses your sign-ins** lists sites, such as `github.com`,
+whose cookies are copied from your profile into Rem's and kept in sync; removing a
+site removes them again. **Sites Rem may open** and **Sites Rem may not open** limit
+where Rem can navigate. Subdomains are included.
+
+You can also share one of your own tabs with Rem from the browser menu. This starts
+a Rem thread that controls that tab, with your sign-ins, until you choose **Stop
+sharing**. For a tab Rem opened, **Take over this tab** ends Rem's access and leaves the
+page open for you.
+
+#### Approvals and visibility
+
+Each Rem tab shows a **Controlled by Rem** chip. It lists Rem's recent actions and can
+pause Rem in that tab. DevTools' overlay outlines each element Rem acts on; pages
+cannot see it. **Approve Rem's browser actions** decides when Rem must ask before it
+submits a form, presses a likely-consequential button such as Send, Pay or Delete,
+uploads files, or runs a page script. By default it asks on sites with shared sign-ins
+and in shared tabs. **Ask on every site** asks everywhere. **Full access, never ask**
+lets Rem act without approval prompts, including in tabs you share. The request
+appears in the tab and as a banner when the tab is in the background. If you decline,
+or do not answer within two minutes, Rem is told not to retry. **Let Rem run page
+scripts** turns off `browser_evaluate` entirely.
+
+When a thread's Browser switch is off, Rem has no browser tools. It asks you to turn
+Browser on in the thread's Tools menu instead of opening pages in your system
+browser. To give new threads Browser by default, turn it on under Settings > Rem >
+Rem resources.
+
+Rem cannot use your HTTP sign-in credentials, client certificates, site permissions
+or certificate-error exceptions. Downloads Rem starts are blocked and reported to it
+unless **Downloads started by Rem** is set to save them. Rem can upload only files
+inside the thread's project and trusted folders.
+
+#### Access control
+
+Access to the desktop browser is granted per Rem turn. When a turn starts with the
+Browser switch on, the backend asks the desktop app for a random capability bound to
+that thread. It writes the capability to a file readable only by the current user,
+under `<data dir>/browser-grants/`, and passes the file to the turn's `gof ui
+browser` MCP server. The desktop identifies the thread from the capability, never
+from the request. When the turn ends, the backend revokes the capability and deletes
+the file. Capabilities expire after 12 hours at most, and none survive a desktop
+restart. The backend reaches the desktop through a loopback service with an
+admin token. Only the backend receives that token, and it is removed from the
+environment of providers, terminals and workflow commands. Earlier versions wrote a
+long-lived `browser-control.json`; it is deleted at startup.
+
+Processes running as your user can still read another process's memory or
+environment, so this is not a boundary against local malware. It ensures that
+turning Browser off, or ending a turn, removes access, and that threads cannot
+reach each other's tabs.
+
+See [the integrated browser](browser.md) for the browser itself.
+
+### Shared library
+
+Skills and MCP servers come from one Raticode-wide library, and each thread turns
+entries on or off. The menu lists:
+
+- skill folders in Raticode's skills folder (`gof rem skill path`), `~/.agents/skills`,
+  `~/.claude/skills` and `$CODEX_HOME/skills`, plus folders registered anywhere else;
+- MCP servers saved in `<data dir>/rem-resources.json`.
+
+New library entries start off in every thread. Adding a skill or server from the menu
+saves it to the library and turns it on for the current selection. Agents and scripts
+use the CLI, and the open menu picks changes up within a few seconds:
+
+```bash
+gof rem skill new release-notes -d "Write release notes from git history"
+gof rem skill add /path/to/skill-folder
+gof rem mcp add docs --url https://example.com/mcp -d "Product docs"
+gof rem mcp add github -- npx -y @modelcontextprotocol/server-github
+gof rem resources --format json
+```
+
+Threads store a link to a library server, not a copy. Each turn resolves the link
+against the current library, so edits reach every provider on the next message, and a
+removed server is dropped from the turn and marked "Removed" in the menu. The names
+`fleet`, `organizations`, `rem_artifacts`, `rem_threads`, `reports`, `second_brain` and
+`swarm` are reserved for built-in connections.
 
 Global threads retain selected web search, skill references and MCP servers, so
 research does not require selecting a project. Until project selection, Codex
@@ -42,8 +169,10 @@ explains these effective restrictions; the chosen project permissions take effec
 after selection. Grok and Antigravity still follow CLI-managed permissions.
 Selected MCP tools keep their own permissions, including Second Brain report saving.
 
-Skills are indexed by path and read on demand. Existing provider-installed skills retain
-their native defaults; this list is not a filesystem access boundary. Codex disables
+Skills are indexed by name, SKILL.md description and path, and read on demand by every
+provider. Cursor, Copilot and OpenCode also receive read access to each enabled skill
+folder. Existing provider-installed skills keep their native defaults; this list is not
+a filesystem access boundary. Codex disables
 inherited configured MCP entries before adding the selection, and Claude Code uses
 strict MCP configuration. Cursor, Copilot and OpenCode add private configuration
 with tool grants; provider-native integrations can remain discoverable. Grok and
@@ -163,10 +292,29 @@ leaves existing archive files untouched.
 
 ## Second Brain
 
+The **Second Brain** activity-rail item opens the multi-brain workspace. Open or create
+local folders, search and read their documents, collect pinned evidence, generate cited
+reports, and manage imports, exports and research jobs. When Settings > Memory enables
+Second Brain, Thread tools has a **Second Brains** checklist of registered brains. Every
+brain starts on, including brains registered later; turn one off to keep Rem out of it in
+that thread, or turn them all off to remove Second Brain from the thread. Brains without
+cloud permission stay off, except the Settings > Memory folder, which Rem reaches by path
+while no other brain is on; the checklist marks it skipped otherwise.
+Cloud permission is checked on every source brain; changing it can revoke an active turn's
+access. The switches remove Second Brain tools and instructions, not file access: Rem can
+still read a brain folder with shell or file tools when it is an open project. Notes saved by
+Rem appear in Reports, with any declared source evidence retained as reviewable citations.
+See [Second Brain workspace](second-brain-workspace.md) for storage, runtime requirements
+and verification.
+
+### Legacy single-folder configuration
+
 Settings > Memory also configures Second Brain independently of the conversation archive.
 Choose its knowledge folder and enable it. Report output is configured separately below it.
-The folder is added to recent projects. Disabling the feature removes its tools from
-subsequent Rem turns; a turn already in progress keeps its original configuration.
+The folder is added to recent projects. This setting turns Second Brain on for Rem;
+disabling it removes the tools from subsequent turns in every thread and hides the Thread
+tools checklist. A turn already in progress keeps its original configuration. Without any
+registered brains, Rem uses this folder directly.
 
 Enabled turns add the native `second_brain` MCP server to both supported providers,
 including when shell access is disabled. Its tools are `rules`, `search`, `read_note`, and

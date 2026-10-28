@@ -1,12 +1,29 @@
 import { useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, Circle, Square, Unplug, X } from "lucide-react";
-import { distinctWorkflowRunRecords, exactWorkflowRunStopPath, workflowRunSummary } from "../lib/workflowRuns";
+import { AlertCircle, CheckCircle2, Circle, CircleSlash, Loader2, Square, Unplug, X } from "lucide-react";
+import { distinctWorkflowRunRecords, exactWorkflowRunStopPath, formatRunAge, sortWorkflowRunsNewestFirst, workflowRunSummary } from "../lib/workflowRuns";
 
 const LABELS = { running: "Running", queued: "Queued", submitting: "Submitting", stopping: "Stopping", success: "Succeeded", error: "Failed", stopped: "Stopped", cancelled: "Cancelled", disconnected: "Disconnected", unknown: "Unknown" };
 
+const ACTIVE_STATUSES = new Set(["running", "queued", "submitting", "stopping"]);
+
 export function RunStatus({ status }) {
-  const Icon = status === "error" ? AlertCircle : status === "success" ? CheckCircle2 : status === "disconnected" ? Unplug : status === "running" ? Activity : Circle;
-  return <span className={`inline-flex items-center gap-1.5 ${status === "error" ? "text-red-700 dark:text-red-300" : status === "success" ? "text-emerald-700 dark:text-emerald-300" : "text-zinc-600 dark:text-zinc-300"}`}><Icon size={13} aria-hidden="true" />{LABELS[status] ?? status}</span>;
+  const active = ACTIVE_STATUSES.has(status);
+  const Icon = status === "error" ? AlertCircle : status === "success" ? CheckCircle2 : status === "disconnected" ? Unplug : ["stopped", "cancelled"].includes(status) ? CircleSlash : active ? Loader2 : Circle;
+  const tone = status === "error" ? "text-red-700 dark:text-red-300"
+    : status === "success" ? "text-emerald-700 dark:text-emerald-300"
+      : ["stopped", "cancelled"].includes(status) ? "text-amber-700 dark:text-amber-300"
+        : active ? "text-blue-700 dark:text-sky-300"
+          : "text-zinc-600 dark:text-zinc-300";
+  return <span className={`inline-flex items-center gap-1.5 ${tone}`}><Icon size={13} aria-hidden="true" className={active ? "animate-spin motion-reduce:animate-none" : undefined} />{LABELS[status] ?? status}</span>;
+}
+
+function runTiming(record, now = Date.now()) {
+  const started = Date.parse(record.startedAt ?? "");
+  if (!Number.isFinite(started)) return "";
+  const finished = Date.parse(record.finishedAt ?? "");
+  const seconds = Math.max(0, Math.round(((Number.isFinite(finished) ? finished : now) - started) / 1000));
+  const duration = seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${formatRunAge(record.startedAt, now)} · ${Number.isFinite(finished) ? "took" : "running for"} ${duration}`;
 }
 
 export default function RunSummary({ embedded = false, records = [], projectPath = "", onReview, onStop, onClose, onRefresh, loading = false, connectionError = "" }) {
@@ -15,7 +32,7 @@ export default function RunSummary({ embedded = false, records = [], projectPath
   const [error, setError] = useState("");
   const summary = workflowRunSummary(records);
   const distinct = distinctWorkflowRunRecords(records);
-  const visible = (scope === "project" ? distinct.filter((record) => record.projectPath === projectPath) : distinct).slice().reverse();
+  const visible = sortWorkflowRunsNewestFirst(scope === "project" ? distinct.filter((record) => record.projectPath === projectPath) : distinct);
 
   async function stop(record) {
     if (pending.has(record.key) || !exactWorkflowRunStopPath(record)) return;
@@ -41,7 +58,7 @@ export default function RunSummary({ embedded = false, records = [], projectPath
     <div className="overflow-auto">
       {!visible.length && <p className="px-4 py-6 text-zinc-600 dark:text-zinc-300">No runs recorded{scope === "project" ? " for this project" : ""}. Run a workflow to see its progress and results here.</p>}
       <ul>{visible.map((record) => <li key={record.key} className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-zinc-200 px-3 py-2 last:border-0 dark:border-zinc-800">
-        <div className="min-w-0 flex-1 basis-40"><p className="truncate font-medium">{record.workflowName}</p><p className="truncate text-[11px] text-zinc-600 dark:text-zinc-400" title={record.projectPath}>{record.projectPath || "Local workflows"} · {record.runId}</p></div>
+        <div className="min-w-0 flex-1 basis-40"><p className="truncate font-medium">{record.workflowName}</p><p className="truncate text-[11px] text-zinc-600 dark:text-zinc-400" title={`${record.projectPath || "Local workflows"}\nRun ${record.runId}${record.startedAt ? `\nStarted ${new Date(record.startedAt).toLocaleString()}` : ""}`}>{[runTiming(record), record.projectPath || "Local workflows"].filter(Boolean).join(" · ")}</p></div>
         <RunStatus status={record.status} />
         {record.unread && <span className="text-indigo-700 dark:text-indigo-300">Unread result</span>}
         <button type="button" onClick={() => onReview?.(record)} className="rounded px-2 py-1 text-indigo-700 hover:bg-indigo-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500 dark:text-indigo-300 dark:hover:bg-zinc-800">{record.status === "error" ? "Review failure" : "Open run"}</button>

@@ -389,7 +389,7 @@ def frame(index: int, body: bytes = b"test bytes") -> bytes:
     return Frame(SESSION, "resume", DIRECTION, index, body).encode()
 
 
-def test_frame_maximum_fits_ntfy_profile() -> None:
+def test_frame_maximum_fits_profile() -> None:
     raw = frame(2**53 - 1, b"x" * MAX_CHUNK)
     assert len(raw) <= MAX_FRAME
     assert len(Frame.decode(raw).body) == MAX_CHUNK
@@ -509,7 +509,7 @@ def test_collection_exact_limit_is_accepted(collection) -> None:
 def test_canonical_mobile_contract_manifest() -> None:
     manifest = (CONTRACT / "SHA256SUMS").read_bytes()
     assert hashlib.sha256(manifest).hexdigest() == (
-        "2265d6a218dfb844cc273bfbd951c8b554eeffa39ad474dea432a477e24da4b8"
+        "4f39378f3639ff179e6c8b4fdca3357f320d842a8fa838c703cec1080354626d"
     )
     for line in manifest.decode().splitlines():
         digest, relative = line.split("  ", 1)
@@ -539,6 +539,10 @@ def test_canonical_mobile_schema_fixtures(path: Path) -> None:
         ("event", "job.submit", "thread_id", None),
         ("event", "job.submit", "type", "shell.exec"),
         ("event", "job.submit", "request_id", None),
+        # Desktop control never names a thread and always answers a request.
+        ("event", "desktop.read", "thread_id", "00000000-0000-4000-8000-000000000001"),
+        ("event", "desktop.action", "request_id", None),
+        ("event", "desktop.result", "thread_id", "00000000-0000-4000-8000-000000000001"),
     ],
 )
 def test_canonical_mobile_negative_shapes(kind: str, fixture: str, field: str, value) -> None:
@@ -559,4 +563,21 @@ def test_canonical_mobile_worker_grant_is_forbidden() -> None:
         "responder_topic": "B" * 43,
         "trust_revision": 0,
     }
+    assert not Draft202012Validator(schema).is_valid(record)
+
+
+@pytest.mark.parametrize(
+    "fixture,field,value",
+    [
+        ("desktop.read", "op", "files.read"),
+        ("desktop.action", "op", "terminal.run"),
+        ("desktop.action", "path", "/etc/passwd"),
+        ("desktop.result", "parts", 0),
+        ("desktop.result", "code", "crash"),
+    ],
+)
+def test_desktop_control_payloads_stay_closed(fixture: str, field: str, value: object) -> None:
+    schema = json.loads((CONTRACT / "event.schema.json").read_text())
+    record = strict_json((CONTRACT / f"fixtures/{fixture}.json").read_bytes())
+    record["payload"][field] = value
     assert not Draft202012Validator(schema).is_valid(record)

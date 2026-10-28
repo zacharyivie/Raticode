@@ -8,7 +8,15 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from gofer.core.prompt_envelope import AgentResources, resource_cli_args, resource_index
+from gofer.core.prompt_envelope import (
+    BROWSER_MCP_PACKAGE,
+    AgentResources,
+    McpReference,
+    playwright_browser_args,
+    resource_cli_args,
+    resource_index,
+    with_browser,
+)
 from gofer.ui.chat import build_chat_prompt
 
 
@@ -37,6 +45,115 @@ def test_resource_selection_maps_to_both_providers_without_inlining_skills(tmp_p
     assert "WebSearch" in claude[claude.index("--tools") + 1]
     assert "--strict-mcp-config" in claude
     assert json.loads(claude[-1])["mcpServers"]["docs"]["url"] == "https://example.com/mcp"
+
+
+def test_backend_defaults_match_the_menu_defaults() -> None:
+    menu = Path(__file__).parents[2] / "frontend/src/lib/remResources.js"
+    defaults = AgentResources().model_dump()
+    line = next(row for row in menu.read_text().splitlines() if "DEFAULT_REM_RESOURCES =" in row)
+    for key in ("shell", "web", "agents", "browser"):
+        assert f"{key}: {str(defaults[key]).lower()}" in line
+
+
+@pytest.mark.parametrize("agents", [True, False])
+def test_subagents_switch_maps_to_codex_and_claude(agents: bool) -> None:
+    resources = AgentResources(agents=agents)
+    codex = resource_cli_args("codex", resources)
+    claude = resource_cli_args("claude_code", resources)
+    assert f"features.multi_agent={str(agents).lower()}" in codex
+    assert ("Agent" in claude[claude.index("--tools") + 1].split(",")) is agents
+
+
+def test_codex_pins_features_the_menu_does_not_offer() -> None:
+    codex = resource_cli_args("codex", AgentResources())
+    for feature in ("apps", "browser_use", "computer_use", "image_generation"):
+        assert f"features.{feature}=false" in codex
+    assert "tools.view_image=true" in codex
+
+
+def test_claude_file_access_includes_notebooks_and_code_intelligence() -> None:
+    claude = resource_cli_args("claude_code", AgentResources.none())
+    assert claude[claude.index("--tools") + 1].split(",") == [
+        "Read",
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "Glob",
+        "Grep",
+        "LSP",
+    ]
+
+
+def test_no_resources_turns_every_built_in_off() -> None:
+    assert AgentResources.none().model_dump() == {
+        "shell": False,
+        "web": False,
+        "agents": False,
+        "browser": False,
+        "skills": [],
+        "mcpServers": [],
+    }
+
+
+def test_browser_switch_adds_a_pinned_playwright_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    assert with_browser(AgentResources()).mcpServers == []
+    server = with_browser(AgentResources(browser=True)).mcpServers[0]
+    assert (server.name, server.type, server.command) == ("browser", "stdio", "/usr/bin/npx")
+    assert server.args == ["-y", BROWSER_MCP_PACKAGE, "--headless", "--isolated"]
+    assert "@latest" not in BROWSER_MCP_PACKAGE
+
+
+def test_playwright_uses_an_installed_chromium_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed: dict[str, str] = {}
+    monkeypatch.setattr("shutil.which", lambda name: installed.get(name))
+    monkeypatch.setattr("gofer.core.prompt_envelope._CHROME_PATHS", {})
+    monkeypatch.setattr("gofer.core.prompt_envelope._EDGE_PATHS", {})
+    monkeypatch.setattr("gofer.core.prompt_envelope._CHROMIUM_PATHS", {})
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+    # Nothing installed: Playwright's own Chromium reports how to install it.
+    assert playwright_browser_args() == ["--browser=chromium"]
+    for revision in ("1234", "1248"):
+        executable = tmp_path / f"chromium-{revision}" / "chrome-linux64" / "chrome"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("")
+    (tmp_path / "chromium_headless_shell-1300").mkdir()
+    newest = tmp_path / "chromium-1248" / "chrome-linux64" / "chrome"
+    assert playwright_browser_args() == ["--browser=chromium", f"--executable-path={newest}"]
+    installed["chromium"] = "/usr/bin/chromium"
+    assert playwright_browser_args() == [
+        "--browser=chromium",
+        "--executable-path=/usr/bin/chromium",
+    ]
+    installed["microsoft-edge"] = "/usr/bin/microsoft-edge"
+    assert playwright_browser_args() == ["--browser=msedge"]
+    installed["google-chrome"] = "/usr/bin/google-chrome"
+    assert playwright_browser_args() == []
+
+
+def test_browser_targets_choose_the_browser_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    resources = AgentResources(browser=True)
+    visible = with_browser(resources, "external").mcpServers[0]
+    assert visible.args == ["-y", BROWSER_MCP_PACKAGE, "--isolated"]
+    own = McpReference(name="raticode", type="stdio", command="/bin/gof", args=["ui", "browser"])
+    server = with_browser(resources, "raticode", raticode_server=own).mcpServers[0]
+    assert (server.name, server.command, server.args) == ("browser", "/bin/gof", ["ui", "browser"])
+    with pytest.raises(ValueError, match="desktop app"):
+        with_browser(resources, "raticode")
+
+
+def test_browser_switch_keeps_a_selected_server_named_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    own = {"name": "browser", "type": "stdio", "command": "my-browser"}
+    resources = AgentResources.model_validate({"browser": True, "mcpServers": [own]})
+    assert with_browser(resources).mcpServers[0].command == "my-browser"
+    with pytest.raises(ValueError, match="needs Node.js"):
+        with_browser(AgentResources(browser=True))
 
 
 @pytest.mark.parametrize("name", ["node_repl", "ambient", "my-server"])
@@ -84,7 +201,7 @@ def test_codex_disables_inherited_server_with_dots_without_creating_a_broken_tra
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     names = ["docs.with.dots", "another.dotted.server", "plain"]
     config = "\n".join(
-        f"[mcp_servers.{json.dumps(name)}]\ncommand=\"unused-mcp-executable\"" for name in names
+        f'[mcp_servers.{json.dumps(name)}]\ncommand="unused-mcp-executable"' for name in names
     )
     (tmp_path / "config.toml").write_text(config)
     args = resource_cli_args("codex", AgentResources(), tmp_path)
@@ -131,8 +248,22 @@ def test_chat_prompt_identifies_current_tools_after_prior_missing_tool_reply() -
         ],
         {"remResources": {"shell": False, "web": True}},
     )
-    assert "Current turn tools: run commands=false, web search=true." in prompt
+    assert (
+        "Current turn tools: run commands=false, web search=true, subagents=true, browser=false."
+        in prompt
+    )
     assert "previous configuration" in prompt
+
+
+def test_rem_asks_for_browser_instead_of_opening_the_system_browser() -> None:
+    messages = [{"role": "user", "body": "Navigate to Theo's YouTube channel."}]
+    off = build_chat_prompt("claude_code", "cli-default", messages, {"remResources": {}})
+    assert "Browser is off for this thread" in off
+    assert "do not open it with xdg-open" in off
+    on = build_chat_prompt(
+        "claude_code", "cli-default", messages, {"remResources": {"browser": True}}
+    )
+    assert "Browser is off for this thread" not in on
 
 
 def test_stdio_resources_pass_separate_arguments_to_both_providers() -> None:

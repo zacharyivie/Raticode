@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -855,16 +857,18 @@ async def test_run_workflow_chat_leaves_prompt_limits_to_provider(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_run_workflow_chat_uses_prompt_file_for_windows_codex_shim(
+async def test_run_workflow_chat_uses_stdin_for_windows_codex_shim(
     monkeypatch,
     tmp_path,
 ) -> None:
     captured_command = None
+    captured_stdin = None
     monkeypatch.setattr(chat.shutil, "which", lambda _binary: r"C:\Users\me\AppData\npm\codex.cmd")
 
     async def capture_subprocess(command, **_kwargs):
-        nonlocal captured_command
+        nonlocal captured_command, captured_stdin
         captured_command = command
+        captured_stdin = _kwargs["stdin"]
         return 0, "done", ""
 
     monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
@@ -879,14 +883,10 @@ async def test_run_workflow_chat_uses_prompt_file_for_windows_codex_shim(
     )
 
     assert captured_command is not None
-    prompt_arg = captured_command[-1]
-    assert "Read the complete Rem prompt" in prompt_arg
-    assert "Create workflow with two nodes" in prompt_arg
-    assert "\n" not in prompt_arg
-
-    prompt_files = list((tmp_path / ".gofer-chat-prompts").glob("*.md"))
-    assert len(prompt_files) == 1
-    prompt_text = prompt_files[0].read_text(encoding="utf-8")
+    assert captured_command[-1] == "-"
+    assert captured_stdin is not None
+    assert not (tmp_path / ".gofer-chat-prompts").exists()
+    prompt_text = captured_stdin.decode("utf-8")
     assert "You are Rem, the coding agent for Raticode." in prompt_text
     assert (
         "USER: Create workflow\nwith two nodes"
@@ -902,11 +902,58 @@ async def test_run_workflow_chat_uses_prompt_file_for_windows_codex_shim(
         data_dir=tmp_path,
     )
 
-    prompt_files = list((tmp_path / ".gofer-chat-prompts").glob("*.md"))
-    assert len(prompt_files) == 1
-    prompt_text = prompt_files[0].read_text(encoding="utf-8")
+    prompt_text = captured_stdin.decode("utf-8")
     assert "USER: Now add review" in prompt_text
     assert "USER: Create workflow\nwith two nodes" not in prompt_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_codex_large_prompt_reaches_real_child_stdin(monkeypatch, tmp_path, streaming):
+    script = tmp_path / "fake_codex.py"
+    script.write_text(
+        "import json, sys, hashlib\n"
+        "assert sys.argv[-1] == '-'\n"
+        "assert max(map(len, sys.argv)) < 8192\n"
+        "prompt = sys.stdin.buffer.read().decode('utf-8')\n"
+        "assert 'REQUEST-END' in prompt and 'START-' in prompt\n"
+        "assert len(prompt) > 300000\n"
+        "print(json.dumps({'type':'item.completed','item':"
+        "{'type':'agent_message','text':hashlib.sha256(prompt.encode('utf-8')).hexdigest()}}))\n"
+    )
+
+    async def no_compaction(**options):
+        return options["messages"], False
+
+    monkeypatch.setattr(chat, "_compact_chat_messages_if_needed", no_compaction)
+    monkeypatch.setattr(chat, "resolve_provider_executable", lambda _: sys.executable)
+    captured = []
+
+    def build_command(**options):
+        captured.append(options["prompt"])
+        return [sys.executable, str(script), "exec", options["prompt"]]
+
+    monkeypatch.setattr(
+        chat,
+        "_build_chat_command",
+        build_command,
+    )
+    body = "START-" + "Large context " * 25000 + "REQUEST-END"
+    options = dict(
+        provider="codex",
+        model="cli-default",
+        messages=[{"role": "user", "body": body}],
+        workflow=None,
+        working_dir=tmp_path,
+        data_dir=tmp_path,
+    )
+    if streaming:
+        result = [event async for event in stream_workflow_chat(**options)][-1]
+    else:
+        result = await run_workflow_chat(**options)
+    if streaming:
+        assert result["type"] == "final", result
+    assert result["message"]["body"] == sha256(captured[-1].encode("utf-8")).hexdigest()
 
 
 @pytest.mark.asyncio

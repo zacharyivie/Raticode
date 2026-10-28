@@ -6,10 +6,30 @@ import os
 import secrets
 import shutil
 import stat
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import BinaryIO
+
+_MACOS_DIRECTORY_ALIASES = (
+    (Path("/var"), Path("/private/var")),
+    (Path("/tmp"), Path("/private/tmp")),
+    (Path("/etc"), Path("/private/etc")),
+)
+
+
+def _absolute_path(path: Path) -> Path:
+    """Expand macOS system aliases while retaining every user path component."""
+    path = path.expanduser().absolute()
+    if sys.platform == "darwin":
+        for alias, canonical in _MACOS_DIRECTORY_ALIASES:
+            if path.is_relative_to(alias) and alias.is_symlink():
+                # Only accept the OS's expected target. Resolving the whole
+                # path would also accept user-controlled or replaced links.
+                if alias.resolve(strict=True) == canonical:
+                    return canonical / path.relative_to(alias)
+    return path
 
 
 @contextmanager
@@ -69,7 +89,7 @@ def _windows_directory_handles(
 @contextmanager
 def open_binary_input(source: Path) -> Iterator[BinaryIO]:
     """Open an ordinary file without following links in any path component."""
-    source = source.expanduser().absolute()
+    source = _absolute_path(source)
     with ExitStack() as held:
         if os.open in os.supports_dir_fd:
             parent = os.open(source.anchor, os.O_RDONLY | os.O_DIRECTORY)
@@ -95,7 +115,7 @@ def open_binary_input(source: Path) -> Iterator[BinaryIO]:
 @contextmanager
 def scandir_without_links(directory: Path) -> Iterator[Iterator[os.DirEntry[str]]]:
     """List a pinned ordinary directory without traversing replaced parent links."""
-    directory = directory.expanduser().absolute()
+    directory = _absolute_path(directory)
     with ExitStack() as held:
         if os.open in os.supports_dir_fd and os.scandir in os.supports_fd:
             descriptor = os.open(directory.anchor, os.O_RDONLY | os.O_DIRECTORY)
@@ -117,7 +137,7 @@ def scandir_without_links(directory: Path) -> Iterator[Iterator[os.DirEntry[str]
 
 def mkdir_without_links(directory: Path, *, exclusive: bool = False) -> None:
     """Create directories without following a replaced or dangling parent link."""
-    directory = directory.expanduser().absolute()
+    directory = _absolute_path(directory)
     if os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd:
         descriptor = os.open(directory.anchor, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -148,7 +168,7 @@ def mkdir_without_links(directory: Path, *, exclusive: bool = False) -> None:
 
 def unlink_without_links(destination: Path, *, directory: bool = False) -> None:
     """Remove one entry without following parent links, including during rollback."""
-    destination = destination.expanduser().absolute()
+    destination = _absolute_path(destination)
     with ExitStack() as held:
         if os.open in os.supports_dir_fd and os.unlink in os.supports_dir_fd:
             parent = os.open(destination.anchor, os.O_RDONLY | os.O_DIRECTORY)
@@ -175,7 +195,7 @@ def remove_tree_without_links(
     directory: Path, *, onerror: Callable[..., None] | None = None
 ) -> None:
     """Remove a tree while refusing replaced parents, including during rollback."""
-    directory = directory.expanduser().absolute()
+    directory = _absolute_path(directory)
     if os.open in os.supports_dir_fd:
         descriptor = os.open(directory.anchor, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -214,7 +234,7 @@ def atomic_binary_output(
     existing hardlink's inode. Exclusive publication fails if any destination
     already exists, including a dangling symlink or a concurrent creation.
     """
-    destination = destination.expanduser().absolute()
+    destination = _absolute_path(destination)
     parent = destination.parent
     temporary = f".{destination.name}.{secrets.token_hex(16)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)

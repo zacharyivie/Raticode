@@ -34,6 +34,8 @@ class OutputFieldOperator(StrEnum):
 
 MISSING = object()
 STRUCTURED_OUTPUT_MAX_DEPTH = 64
+# Models sometimes wrap an otherwise valid reply in one Markdown fence despite instructions.
+_JSON_FENCE = re.compile(r"\A\s*```[ \t]*(?:json)?[ \t]*\r?\n(.*?)\r?\n?```\s*\Z", re.I | re.S)
 
 
 def resolve_output_schema(
@@ -105,6 +107,9 @@ def parse_and_validate_output(text: str, schema: dict[str, Any]) -> Any:
             raise StructuredOutputError("Structured output numbers must be finite")
         return number
 
+    fenced = _JSON_FENCE.match(text)
+    if fenced:
+        text = fenced.group(1)
     try:
         value = json.loads(text, parse_float=finite_number, parse_constant=finite_number)
     except json.JSONDecodeError as exc:

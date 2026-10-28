@@ -11,6 +11,8 @@ import base64
 import json
 import math
 import os
+import sqlite3
+import sys
 import tempfile
 import time
 import urllib.error
@@ -34,8 +36,15 @@ from gofer.subscriptions.acp_transport import (
     AcpTransportError,
     open_acp_transport,
 )
+from gofer.utils.paths import get_data_dir
+from gofer.utils.process import env_with_executable_on_path, run_subprocess
 
 REFRESH_TIMEOUT_SECONDS = 12
+# Antigravity and Claude Code report through their own CLI, which needs time to start.
+CLI_REFRESH_TIMEOUT_SECONDS = 40
+# Claude's usage endpoint rate-limits aggressively and is shared with Claude Code's
+# own status display. Back off after a failed read instead of retrying every refresh.
+CLAUDE_FAILURE_BACKOFF_SECONDS = 900
 MAX_OUTPUT_BYTES = 2_000_000
 PROVIDER_LABELS = {
     "codex": "Codex",
@@ -60,27 +69,6 @@ DASHBOARD_URLS = {
     "anthropic_api": "https://console.anthropic.com/settings/usage",
 }
 _UNAVAILABLE = {
-    "claude_code": (
-        "Connect a Claude OAuth token in Usage settings or sign in with Claude Code. "
-        "Subscription usage requires user:profile access; an Anthropic API key cannot read it."
-    ),
-    "cursor": (
-        "Personal Cursor CLI accounts do not expose a supported allowance feed. For team "
-        "spending, configure RATICODE_CURSOR_ADMIN_API_KEY and RATICODE_CURSOR_USAGE_EMAIL "
-        "in the provider profile environment or secret references."
-    ),
-    "opencode": (
-        "OpenCode allowances belong to its upstream billing accounts. An upstream account "
-        "mapping is required; a shared OpenCode token balance is not available."
-    ),
-    "antigravity": (
-        "Antigravity exposes model quotas in its interactive /usage command, "
-        "but has no verified machine-readable allowance endpoint."
-    ),
-    "grok": (
-        "Grok Build does not expose a verified subscription allowance endpoint. "
-        "xAI API team billing is a separate account and is not a Grok subscription quota."
-    ),
     "openai_api": (
         "OpenAI API usage is metered billing, not a subscription token allowance. "
         "Organization usage reports require separate admin access and do not report tokens left."
@@ -167,7 +155,15 @@ def normalize_codex_limits(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if used is None:
                 continue
             minutes = _number(raw.get("windowDurationMins"))
-            duration = f" · {minutes:g} min" if minutes is not None else ""
+            duration = (
+                ""
+                if not minutes
+                else f" · {minutes / 1440:g}-day"
+                if minutes % 1440 == 0
+                else f" · {minutes / 60:g}-hour"
+                if minutes % 60 == 0
+                else f" · {minutes:g} min"
+            )
             window = _window(f"{key}:{name}", f"{label} · {name}{duration}", "percent")
             window.update(
                 used=used,
@@ -205,6 +201,9 @@ def normalize_copilot_quota(payload: dict[str, Any]) -> list[dict[str, Any]]:
         unlimited = (
             raw.get("isUnlimitedEntitlement") is True or raw.get("entitlementRequests") == -1
         )
+        if raw.get("hasQuota") is False and not unlimited:
+            # The plan has no such allowance, e.g. premium requests on Copilot Free.
+            continue
         limit = _number(raw.get("entitlementRequests"))
         used = _number(raw.get("usedRequests"))
         percent = _percentage(raw.get("remainingPercentage"))
@@ -253,30 +252,35 @@ def normalize_claude_usage(payload: dict[str, Any]) -> list[dict[str, Any]]:
             resets_at=_reset(raw.get("resets_at")),
         )
         windows.append(window)
-    # Some accounts return scoped model windows in a limits array instead.
+    # Newer responses, including Claude Code's /usage report, use a limits array.
+    # is_active marks the currently binding limit; Claude Code still shows the others.
     limits = payload.get("limits")
     if isinstance(limits, list):
         for index, raw in enumerate(limits):
-            if not isinstance(raw, dict) or raw.get("is_active") is False:
+            if not isinstance(raw, dict):
                 continue
             used = _percentage(raw.get("percent"))
             if used is None:
                 continue
             scope = raw.get("scope")
             model = scope.get("model") if isinstance(scope, dict) else None
-            model_id = str(model.get("id", "")) if isinstance(model, dict) else ""
+            model_name = str(model.get("display_name") or "") if isinstance(model, dict) else ""
+            model_id = str(model.get("id") or "") if isinstance(model, dict) else ""
+            model_key = model_id or "_".join(model_name.lower().split())
             kind = str(raw.get("kind") or raw.get("group") or "Allowance")
             legacy_id = (
-                f"seven_day_{model_id}"
-                if model_id
-                else {"weekly": "seven_day", "session": "five_hour"}.get(kind)
+                f"seven_day_{model_key}"
+                if model_key
+                else {"weekly": "seven_day", "weekly_all": "seven_day", "session": "five_hour"}.get(
+                    kind
+                )
             )
             if legacy_id and any(w["id"] == legacy_id for w in windows):
                 continue
-            label = kind.replace("_", " ")
-            if isinstance(model, dict):
-                label += " · " + str(model.get("display_name") or model_id)
-            window = _window(f"limit:{index}", label, "percent")
+            label = labels.get(legacy_id or "", "") or kind.replace("_", " ")
+            if model_key and legacy_id not in labels:
+                label = f"Weekly {model_name or model_id} allowance"
+            window = _window(legacy_id or f"limit:{index}", label, "percent")
             window.update(
                 used=used,
                 limit=100.0,
@@ -309,6 +313,390 @@ def normalize_claude_usage(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return windows
 
 
+def _percent_window(identifier: str, label: str, used: float, resets_at: Any) -> dict[str, Any]:
+    window = _window(identifier, label, "percent")
+    window.update(
+        used=used,
+        limit=100.0,
+        remaining=100.0 - used,
+        remaining_percent=100.0 - used,
+        resets_at=_reset(resets_at),
+    )
+    return window
+
+
+def normalize_cursor_usage(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Cursor's own usage summary: plan percentages and on-demand spend in cents."""
+    reset = payload.get("billingCycleEnd")
+    individual = payload.get("individualUsage")
+    individual = individual if isinstance(individual, dict) else {}
+    windows = []
+    if payload.get("isUnlimited") is True:
+        window = _window("plan", "Included usage · billing cycle", "percent")
+        window.update(unlimited=True, resets_at=_reset(reset))
+        windows.append(window)
+    plan = individual.get("plan")
+    if isinstance(plan, dict) and plan.get("enabled") is not False and not windows:
+        used = _percentage(plan.get("totalPercentUsed"))
+        cents, limit = _number(plan.get("used")), _number(plan.get("limit"))
+        if used is None and cents is not None and limit:
+            used = min(100.0, 100 * cents / limit)
+        if used is not None:
+            windows.append(_percent_window("plan", "Included usage · billing cycle", used, reset))
+    demand = individual.get("onDemand")
+    if isinstance(demand, dict) and demand.get("enabled") is True:
+        cents, limit = _number(demand.get("used")), _number(demand.get("limit"))
+        if cents is not None:
+            used_usd, limit_usd = cents / 100, limit / 100 if limit is not None else None
+            window = _window("on_demand", "On-demand spend · billing cycle", "USD")
+            window.update(
+                used=used_usd,
+                limit=limit_usd,
+                remaining=max(0.0, limit_usd - used_usd) if limit_usd is not None else None,
+                remaining_percent=max(0.0, 100 * (1 - used_usd / limit_usd)) if limit_usd else None,
+                resets_at=_reset(reset),
+            )
+            windows.append(window)
+    return windows
+
+
+def normalize_antigravity_usage(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read `agy -p /usage --output-format json` quota groups, never its text table."""
+    command = payload.get("command")
+    data = command.get("data") if isinstance(command, dict) else None
+    groups = data.get("groups") if isinstance(data, dict) else None
+    windows = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict) or not isinstance(group.get("buckets"), list):
+            continue
+        name = str(group.get("name") or "Models")
+        for bucket in group["buckets"]:
+            if not isinstance(bucket, dict):
+                continue
+            fraction = _number(bucket.get("remaining_fraction"))
+            if fraction is None or fraction > 1:
+                continue
+            period = str(bucket.get("window") or bucket.get("name") or "limit")
+            windows.append(
+                _percent_window(
+                    f"{name}:{bucket.get('id') or period}",
+                    f"{name} · {period}",
+                    100 * (1 - fraction),
+                    bucket.get("reset_time"),
+                )
+            )
+    return windows
+
+
+def normalize_grok_billing(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Grok Build credits. Amounts are hundredths of a dollar; the percent is unitless."""
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        return []
+    period = config.get("currentPeriod")
+    period = period if isinstance(period, dict) else {}
+    kind = str(period.get("type") or "").removeprefix("USAGE_PERIOD_TYPE_").lower()
+    reset = period.get("end") or config.get("billingPeriodEnd")
+
+    def amount(name: str) -> float | None:
+        value = config.get(name)
+        value = value.get("val") if isinstance(value, dict) else None
+        try:
+            return _number(float(value)) if isinstance(value, str) else _number(value)
+        except ValueError:
+            return None
+
+    windows = []
+    used = _percentage(config.get("creditUsagePercent"))
+    if used is not None:
+        label = f"{kind.title()} credits" if kind else "Credits"
+        windows.append(_percent_window("credits", label, used, reset))
+    cap, spent = amount("onDemandCap"), amount("onDemandUsed")
+    if cap and spent is not None:
+        window = _window("on_demand", "On-demand spend", "USD")
+        window.update(
+            used=spent / 100,
+            limit=cap / 100,
+            remaining=max(0.0, cap - spent) / 100,
+            remaining_percent=max(0.0, 100 * (1 - spent / cap)),
+            resets_at=_reset(reset),
+        )
+        windows.append(window)
+    balance = amount("prepaidBalance")
+    if balance:
+        window = _window("prepaid", "Prepaid balance", "USD")
+        window.update(remaining=balance / 100)
+        windows.append(window)
+    return windows
+
+
+def normalize_chatgpt_usage(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ChatGPT subscription windows Codex reads, from an external client's sign-in."""
+    limits = payload.get("rate_limit")
+    windows = []
+    for name, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
+        raw = limits.get(name) if isinstance(limits, dict) else None
+        if not isinstance(raw, dict) or (used := _percentage(raw.get("used_percent"))) is None:
+            continue
+        seconds = _number(raw.get("limit_window_seconds"))
+        if seconds:
+            label = f"{seconds / 3600:g}-hour" if seconds < 86400 else f"{seconds / 86400:g}-day"
+        windows.append(_percent_window(name, f"{label} allowance", used, raw.get("reset_at")))
+    return windows
+
+
+def _drop_past_resets(windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Some providers echo an elapsed reset date. It is not a pending reset and must
+    # not make a fresh reading look stale.
+    now = datetime.now(UTC)
+    for window in windows:
+        try:
+            if window.get("resets_at") and datetime.fromisoformat(window["resets_at"]) <= now:
+                window["resets_at"] = None
+        except (TypeError, ValueError):
+            window["resets_at"] = None
+    return windows
+
+
+def _read_limited(path: Path) -> bytes | None:
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(MAX_OUTPUT_BYTES + 1)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if len(data) > MAX_OUTPUT_BYTES:
+        raise ValueError("Oversized credential file")
+    return data
+
+
+def _jwt_claims(token: str) -> dict[str, Any]:
+    try:
+        part = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except (IndexError, ValueError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _user_directory(
+    env: dict[str, str], profile: str | None, variable: str, default: str
+) -> Path | None:
+    """A profile only uses a sign-in store that its own environment points at."""
+    if env.get(variable):
+        return Path(env[variable]).expanduser()
+    if env.get("HOME"):
+        return Path(env["HOME"]).expanduser() / default
+    if profile:
+        return None
+    return Path(os.environ.get(variable) or Path.home() / default).expanduser()
+
+
+def _cursor_native_token(env: dict[str, str], profile: str | None) -> str | None:
+    """Reuse the cursor-agent or Cursor app sign-in. Never refresh or write it."""
+    if _account_env(env, "CURSOR_API_KEY", profile):
+        # An API key can belong to a different account from the stored sign-in.
+        return None
+    config = _user_directory(env, profile, "XDG_CONFIG_HOME", ".config")
+    if config is None:
+        return None
+    candidates: list[str] = []
+    if (data := _read_limited(config / "cursor" / "auth.json")) is not None:
+        payload = json.loads(data)
+        if isinstance(payload, dict) and isinstance(payload.get("accessToken"), str):
+            candidates.append(payload["accessToken"])
+    app = (
+        Path.home() / "Library" / "Application Support"
+        if sys.platform == "darwin" and not profile
+        else Path(os.environ["APPDATA"])
+        if sys.platform == "win32" and not profile and os.environ.get("APPDATA")
+        else config
+    )
+    database = app / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    if database.is_file():
+        try:
+            with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=2) as db:
+                row = db.execute(
+                    "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken'"
+                ).fetchone()
+            if row and isinstance(row[0], str):
+                candidates.append(row[0])
+        except sqlite3.Error:
+            pass
+    for token in candidates:
+        claims = _jwt_claims(token.strip())
+        expiry, subject = _number(claims.get("exp")), claims.get("sub")
+        if expiry and expiry > time.time() + 60 and isinstance(subject, str) and subject:
+            return token.strip()
+    return None
+
+
+def _cursor_allowance(token: str) -> list[dict[str, Any]]:
+    # cursor.com's dashboard API accepts the CLI's WorkOS session as a cookie.
+    user = str(_jwt_claims(token).get("sub", "")).split("|")[-1]
+    if not user or not all(c.isalnum() or c in "._-" for c in user):
+        raise ValueError("Invalid Cursor session")
+    request = urllib.request.Request(
+        "https://cursor.com/api/usage-summary",
+        headers={
+            "Cookie": f"WorkosCursorSessionToken={user}%3A%3A{token}",
+            "Accept": "application/json",
+        },
+    )
+    return normalize_cursor_usage(_read_json(request))
+
+
+def _read_json(request: urllib.request.Request) -> dict[str, Any]:
+    opener = urllib.request.build_opener(_RejectRedirects())
+    with opener.open(request, timeout=REFRESH_TIMEOUT_SECONDS) as response:
+        data = read_response_bytes(response, MAX_OUTPUT_BYTES)
+    if len(data) > MAX_OUTPUT_BYTES:
+        raise ValueError("Oversized usage response")
+    payload = json.loads(data)
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid usage response")
+    return payload
+
+
+def _chatgpt_allowance(token: str, account: str | None) -> list[dict[str, Any]]:
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if account:
+        headers["ChatGPT-Account-Id"] = account
+    request = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers=headers)
+    return normalize_chatgpt_usage(_read_json(request))
+
+
+def _opencode_accounts(env: dict[str, str], profile: str | None) -> dict[str, Any] | None:
+    """OpenCode's stored upstream sign-ins, which own the allowances it draws from."""
+    if content := _account_env(env, "OPENCODE_AUTH_CONTENT", profile):
+        payload = json.loads(content)
+    else:
+        root = _user_directory(env, profile, "XDG_DATA_HOME", ".local/share")
+        if root is None:
+            return None
+        data = _read_limited(root / "opencode" / "auth.json")
+        payload = json.loads(data) if data is not None else {}
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _opencode_allowance(accounts: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Return windows from supported subscription sign-ins and whether any had expired."""
+    windows: list[dict[str, Any]] = []
+    expired = False
+    for name, label, fetch in (
+        ("anthropic", "Claude", lambda auth: _claude_allowance(auth["access"])),
+        (
+            "openai",
+            "ChatGPT",
+            lambda auth: _chatgpt_allowance(auth["access"], auth.get("accountId")),
+        ),
+    ):
+        auth = accounts.get(name)
+        if not isinstance(auth, dict) or auth.get("type") != "oauth":
+            continue
+        if not isinstance(auth.get("access"), str) or not auth["access"]:
+            continue
+        if (_number(auth.get("expires")) or 0) <= time.time() * 1000 + 60_000:
+            # OpenCode renews this sign-in when it next runs; reading it must not.
+            expired = True
+            continue
+        for window in await asyncio.to_thread(fetch, auth):
+            windows.append(
+                {**window, "id": f"{name}:{window['id']}", "label": f"{label} · {window['label']}"}
+            )
+    return windows, expired
+
+
+def _probe_directory(data_dir: Path | None) -> Path:
+    # A stable directory keeps CLIs from recording a new project on every refresh.
+    path = (data_dir or get_data_dir()) / "usage-probe"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+async def _run_usage_command(
+    command: list[str], env: dict[str, str], data_dir: Path | None
+) -> tuple[int, str]:
+    with tempfile.TemporaryDirectory(prefix="raticode-usage-") as launchers:
+        child = env_with_executable_on_path(command[0], env)
+        if os.name == "posix":
+            # A background refresh must never open a browser sign-in page.
+            for name in ("xdg-open", "open"):
+                launcher = Path(launchers) / name
+                launcher.write_text("#!/bin/sh\nexit 1\n")
+                launcher.chmod(0o700)
+            child["BROWSER"] = str(Path(launchers) / "xdg-open")
+            child["PATH"] = os.pathsep.join(
+                [launchers, child.get("PATH", os.environ.get("PATH", ""))]
+            )
+        code, stdout, _ = await run_subprocess(
+            command,
+            cwd=_probe_directory(data_dir),
+            env=child,
+            timeout=CLI_REFRESH_TIMEOUT_SECONDS - 5,
+            max_output_bytes=MAX_OUTPUT_BYTES,
+        )
+    return code, stdout
+
+
+async def _antigravity_allowance(
+    executable: str, env: dict[str, str], data_dir: Path | None
+) -> tuple[str, str | None, list[dict[str, Any]]]:
+    # /usage is a local command: no conversation turn or model call is made.
+    code, stdout = await _run_usage_command(
+        [executable, "-p", "/usage", "--output-format", "json"],
+        {**env, "AGY_CLI_DISABLE_AUTO_UPDATE": "true"},
+        data_dir,
+    )
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        payload = None
+    if code != 0 or not isinstance(payload, dict) or payload.get("status") != "SUCCESS":
+        return "auth_required", "Run agy and sign in, then refresh usage.", []
+    command = payload.get("command")
+    if not isinstance(command, dict) or command.get("name") != "usage":
+        return "unsupported", "Update the Antigravity CLI to read model quotas.", []
+    windows = normalize_antigravity_usage(payload)
+    if not windows:
+        return "unavailable", "Antigravity returned no model quota measurements.", []
+    return "available", None, windows
+
+
+CLAUDE_USAGE_COMMAND = [
+    "-p",
+    "/usage",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--no-session-persistence",
+    # The probe must not start the user's MCP servers, hooks or remote control.
+    "--strict-mcp-config",
+    "--settings",
+    json.dumps({"disableAllHooks": True, "remoteControlAtStartup": False}),
+]
+
+
+async def _claude_cli_allowance(
+    executable: str, env: dict[str, str], data_dir: Path | None
+) -> list[dict[str, Any]] | None:
+    """Ask Claude Code for its own /usage report; it reads and renews its own sign-in.
+
+    /usage is a local command: no conversation turn or model call is made, and
+    Raticode never handles the Claude credential.
+    """
+    _, stdout = await _run_usage_command([executable, *CLAUDE_USAGE_COMMAND], env, data_dir)
+    for line in stdout.splitlines():
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        report = payload.get("usage_report") if isinstance(payload, dict) else None
+        limits = report.get("rate_limits") if isinstance(report, dict) else None
+        if isinstance(limits, dict):
+            return normalize_claude_usage(limits)
+    return None
+
+
 def _claude_native_token(env: dict[str, str], profile: str | None) -> str | None:
     """Read only the selected Claude account; Claude owns refreshing its tokens."""
     config_dir = env.get("CLAUDE_CONFIG_DIR")
@@ -317,13 +705,9 @@ def _claude_native_token(env: dict[str, str], profile: str | None) -> str | None
     if not profile:
         config_dir = config_dir or os.environ.get("CLAUDE_CONFIG_DIR")
     path = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
-    try:
-        with (path / ".credentials.json").open("rb") as stream:
-            data = stream.read(MAX_OUTPUT_BYTES + 1)
-    except FileNotFoundError:
+    data = _read_limited(path / ".credentials.json")
+    if not data:
         return None
-    if len(data) > MAX_OUTPUT_BYTES:
-        raise ValueError("Oversized credential file")
     payload = json.loads(data)
     oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
     if not isinstance(oauth, dict):
@@ -349,15 +733,7 @@ def _claude_allowance(token: str) -> list[dict[str, Any]]:
             "anthropic-beta": "oauth-2025-04-20",
         },
     )
-    opener = urllib.request.build_opener(_RejectRedirects())
-    with opener.open(request, timeout=REFRESH_TIMEOUT_SECONDS) as response:
-        data = read_response_bytes(response, MAX_OUTPUT_BYTES)
-    if len(data) > MAX_OUTPUT_BYTES:
-        raise ValueError("Oversized usage response")
-    payload = json.loads(data)
-    if not isinstance(payload, dict):
-        raise ValueError("Invalid usage response")
-    return normalize_claude_usage(payload)
+    return normalize_claude_usage(_read_json(request))
 
 
 def _reporting_env(settings: ResolvedProviderSettings, config: dict[str, str]) -> dict[str, str]:
@@ -504,6 +880,34 @@ async def _rpc_allowance(
     )
 
 
+async def _grok_allowance(
+    executable: str, env: dict[str, str]
+) -> tuple[str, str | None, list[dict[str, Any]]]:
+    """Grok's ACP billing extension reads the signed-in account without a session."""
+    with tempfile.TemporaryDirectory(prefix="raticode-usage-") as directory:
+        async with open_acp_transport(
+            [executable, "agent", "--no-leader", "stdio"],
+            cwd=Path(directory),
+            env=env,
+            timeout=REFRESH_TIMEOUT_SECONDS,
+            max_output_bytes=MAX_OUTPUT_BYTES,
+        ) as rpc:
+            await rpc.request(
+                "initialize",
+                {"protocolVersion": 1, "clientCapabilities": {}},
+                timeout=REFRESH_TIMEOUT_SECONDS,
+            )
+            payload = await rpc.request("_x.ai/billing", {}, timeout=REFRESH_TIMEOUT_SECONDS)
+    windows = normalize_grok_billing(payload)
+    if windows:
+        return "available", None, windows
+    return (
+        "unavailable",
+        "Grok reported the current billing period without a usage measurement.",
+        [],
+    )
+
+
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
@@ -600,8 +1004,11 @@ async def refresh_provider_usage(
                 "service; the standard provider's account allowance does not apply."
             ),
         }
+    command_line = provider in {"claude_code", "antigravity"}
     try:
-        async with asyncio.timeout(REFRESH_TIMEOUT_SECONDS):
+        async with asyncio.timeout(
+            CLI_REFRESH_TIMEOUT_SECONDS if command_line else REFRESH_TIMEOUT_SECONDS
+        ):
             if provider == "cursor":
                 # Profile values override the environment, including explicit empty values.
                 key = config.get("admin_api_key") or _account_env(
@@ -610,22 +1017,37 @@ async def refresh_provider_usage(
                 email = config.get("email") or _account_env(
                     env, "RATICODE_CURSOR_USAGE_EMAIL", profile
                 )
-                if not key or not email:
-                    return {
-                        **row,
-                        "status": "configuration_required",
-                        "reason": "Open Settings → Usage → Configure reporting to add a "
-                        "Cursor team Admin API key and team member email.",
-                    }
-                windows = await asyncio.to_thread(_cursor_spending, key, email)
-                row.update(
-                    source="Cursor Admin API /teams/spend",
-                    windows=windows,
-                    status="available" if windows else "unavailable",
-                    reason=None
-                    if windows
-                    else "No spending record matched the configured team member.",
-                )
+                if key and email:
+                    # Team reporting was configured explicitly, so it takes precedence.
+                    windows = await asyncio.to_thread(_cursor_spending, key, email)
+                    row.update(
+                        source="Cursor Admin API /teams/spend",
+                        windows=windows,
+                        status="available" if windows else "unavailable",
+                        reason=None
+                        if windows
+                        else "No spending record matched the configured team member.",
+                    )
+                else:
+                    session = (
+                        None
+                        if settings.extra_args or _account_env(env, "CURSOR_API_ENDPOINT", profile)
+                        else await asyncio.to_thread(_cursor_native_token, env, profile)
+                    )
+                    if not session:
+                        return {
+                            **row,
+                            "status": "auth_required",
+                            "reason": "Run cursor-agent login to sign in, then refresh usage. "
+                            "API-key and custom-endpoint connections cannot read plan usage.",
+                        }
+                    windows = await asyncio.to_thread(_cursor_allowance, session)
+                    row.update(
+                        source="Cursor account usage summary",
+                        windows=windows,
+                        status="available" if windows else "unavailable",
+                        reason=None if windows else "Cursor returned no plan usage measurements.",
+                    )
             elif provider == "claude_code":
                 token: str | None = config.get("oauth_token") or _account_env(
                     env, "CLAUDE_CODE_OAUTH_TOKEN", profile
@@ -641,25 +1063,88 @@ async def refresh_provider_usage(
                         "CLAUDE_CODE_USE_FOUNDRY",
                     )
                 )
-                if not token and not settings.extra_args and not different_auth:
-                    token = await asyncio.to_thread(_claude_native_token, env, profile)
-                if not token:
-                    return {
-                        **row,
-                        "status": "configuration_required",
-                        "reason": (
-                            "Connect a Claude OAuth access token with user:profile scope in "
-                            "Usage settings, or sign in again with Claude Code. Anthropic API "
-                            "keys and inference-only setup tokens cannot read subscription limits."
-                        ),
-                    }
-                windows = await asyncio.to_thread(_claude_allowance, token)
+                native = not token and not settings.extra_args and not different_auth
+                executable = (
+                    resolve_provider_executable("claude_code")
+                    if native and (not profile or env.get("CLAUDE_CONFIG_DIR"))
+                    else None
+                )
+                windows = None
+                if executable:
+                    # Preferred: Claude Code reads, renews and protects its own sign-in.
+                    windows = await _claude_cli_allowance(executable, env, data_dir)
+                    if windows is not None:
+                        row["source"] = "Claude Code /usage"
+                if windows is None:
+                    if native:
+                        token = await asyncio.to_thread(_claude_native_token, env, profile)
+                    if not token:
+                        return {
+                            **row,
+                            "status": "auth_required" if executable else "configuration_required",
+                            "reason": (
+                                "Claude Code could not report usage. Run claude and sign in, "
+                                "then refresh."
+                                if executable
+                                else "Sign in with Claude Code, or connect a Claude OAuth access "
+                                "token with user:profile scope in Usage settings. Anthropic API "
+                                "keys and inference-only setup tokens cannot read subscription "
+                                "limits."
+                            ),
+                            "retry_after_seconds": CLAUDE_FAILURE_BACKOFF_SECONDS,
+                        }
+                    windows = await asyncio.to_thread(_claude_allowance, token)
+                    row["source"] = "Claude OAuth /api/oauth/usage"
                 row.update(
-                    source="Claude OAuth /api/oauth/usage",
                     windows=windows,
                     status="available" if windows else "unavailable",
                     reason=None if windows else "Claude returned no subscription usage windows.",
                 )
+            elif provider == "opencode":
+                accounts = await asyncio.to_thread(_opencode_accounts, env, profile)
+                if accounts is None:
+                    return {
+                        **row,
+                        "status": "unavailable",
+                        "reason": "This profile does not point at its own OpenCode sign-in.",
+                    }
+                windows, expired = await _opencode_allowance(accounts)
+                row.update(
+                    source="OpenCode subscription sign-ins",
+                    windows=windows,
+                    status="available" if windows else "unavailable",
+                    reason=None
+                    if windows
+                    else "OpenCode's subscription sign-in has expired. It renews the next time "
+                    "OpenCode runs."
+                    if expired
+                    else "OpenCode is not signed in to a Claude or ChatGPT subscription. Free "
+                    "models and API keys have no allowance to report.",
+                )
+            elif provider in {"antigravity", "grok"}:
+                executable = resolve_provider_executable(cast(ProviderId, provider))
+                if not executable:
+                    return {
+                        **row,
+                        "status": "not_installed",
+                        "reason": "Install this provider CLI to read account allowances.",
+                    }
+                if settings.extra_args:
+                    return {
+                        **row,
+                        "status": "unavailable",
+                        "reason": "This profile's CLI arguments cannot be used safely for "
+                        "account lookup.",
+                    }
+                if provider == "antigravity":
+                    status, reason, windows = await _antigravity_allowance(
+                        executable, env, data_dir
+                    )
+                    source = "agy /usage"
+                else:
+                    status, reason, windows = await _grok_allowance(executable, env)
+                    source = "grok _x.ai/billing"
+                row.update(status=status, reason=reason, source=source, windows=windows)
             elif provider in {"openai_api", "anthropic_api"}:
                 from gofer.core.provider_usage_reports import fetch_reporting_usage
 
@@ -705,6 +1190,7 @@ async def refresh_provider_usage(
                 return row
         if row["status"] == "available":
             row["observed_at"] = datetime.now(UTC).isoformat()
+            _drop_past_resets(row["windows"])
     except AcpRpcError as exc:
         message = str(exc).lower()
         if exc.code == -32601:
@@ -737,11 +1223,20 @@ async def refresh_provider_usage(
                 "Claude usage access was denied. Reconnect an OAuth token with user:profile "
                 "scope or sign in again with Claude Code. Anthropic API keys do not apply."
                 if provider == "claude_code" and exc.code in {401, 403}
+                else "Sign in to this provider again to read account allowances."
+                if provider in {"cursor", "opencode"} and exc.code in {401, 403}
                 else "The provider rate-limited usage requests. Try refreshing later."
                 if exc.code == 429
                 else "Reporting API request failed. Check credentials and account access."
             ),
         )
+        if exc.code == 429 or provider == "claude_code":
+            retry = exc.headers.get("Retry-After") if exc.headers else None
+            row["rate_limited"] = exc.code == 429
+            row["retry_after_seconds"] = max(
+                CLAUDE_FAILURE_BACKOFF_SECONDS,
+                int(retry) if isinstance(retry, str) and retry.isdigit() else 0,
+            )
     except (TimeoutError, AcpTransportError) as exc:
         timed_out = isinstance(exc, TimeoutError) or any(
             term in str(exc).lower() for term in ("timed out", "time limit")

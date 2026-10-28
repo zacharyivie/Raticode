@@ -21,7 +21,7 @@ import {conversationRepository} from "/src/lib/conversationRepository.js";
 import "/src/styles/index.css";
 window.requests = [];
 window.fetch = async (url, options) => {
-  if (String(url).includes("provider/capabilities")) return new Response(JSON.stringify({providers:[{id:"codex", available:true, discoveryStatus:"ready", defaultModel:"cli-default", models:[{id:"cli-default", label:"CLI default", efforts:[]}]}]}));
+  if (String(url).includes("provider/capabilities")) return new Response(JSON.stringify({providers:[{id:"codex", displayName:"Codex", available:true, discoveryStatus:"ready", defaultModel:"cli-default", models:[{id:"cli-default", label:"CLI default", efforts:[]}, ...["sol","astra"].map(id=>({id,displayName:id,defaultEffort:"high",efforts:[{id:"high",displayName:"High"}]}))]}]}));
   if (String(url).includes("chat/stream")) {
     window.requests.push(JSON.parse(options.body));
     return new Response(new ReadableStream({start(controller) {
@@ -96,6 +96,36 @@ async function main() {
   await draft("Try another approach"); enter([]);
   await wait("window.requests.length === 3");
   assert.equal(await evaluate("window.requests[2].messages.at(-1).body"),"Try another approach");
+  await wait("!document.querySelector('[aria-label=\"Stop Rem\"]')");
+  const chooseModel = async model => {
+    await evaluate("document.querySelector('[data-picker-trigger=\"model\"]').click()");
+    await wait("document.querySelector('[data-picker-menu=\"model\"]')");
+    await evaluate(`[...document.querySelectorAll('[role="option"]')].find(option=>option.textContent.startsWith(${JSON.stringify(model)})).click()`);
+  };
+  assert.equal(await evaluate("document.querySelectorAll('.rem-model-switch').length"), 0);
+  await chooseModel("sol");
+  assert.equal(await evaluate("document.querySelectorAll('.rem-model-switch').length"), 0);
+  await draft("Use Sol"); enter([]);
+  await wait("window.requests.length === 4 && document.querySelector('.rem-model-switch')");
+  assert.equal(await evaluate("document.querySelector('.rem-model-switch').textContent"), "switched to Codex - sol - high");
+  await wait("!document.querySelector('[aria-label=\"Stop Rem\"]')");
+  // Reopen after enough tool output to push the preceding user off the page.
+  await evaluate(`(async()=>{const id=${JSON.stringify(copied.thread.id)};const history=await window.repository.all(id);await window.repository.save(id,[...history,...Array.from({length:80},(_,i)=>({id:'extra-tool-'+i,role:'assistant',kind:'thought',groupId:'extra-tools',body:'Tool output '+i}))],history);})()`);
+  await evaluate("document.querySelector('[aria-label=\"Back to active threads\"]').click()");
+  await evaluate(`[...document.querySelectorAll('button')].find(button=>button.textContent.includes(${JSON.stringify(copied.thread.title)})).click()`);
+  await wait("document.body.innerText.includes('Tool output 79') && !document.querySelector('[aria-busy=\"true\"]')");
+  assert.equal(await evaluate("document.querySelectorAll('.rem-model-switch').length"), 0);
+  await chooseModel("astra");
+  await draft("Use Astra after a long tool trace"); enter([]);
+  await wait("window.requests.length === 5 && document.querySelector('.rem-model-switch')");
+  assert.equal(await evaluate("document.querySelector('.rem-model-switch').textContent"), "switched to Codex - astra - high");
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.rem-model-switch'),'::before').borderTopWidth"), "1px");
+  await evaluate("(async()=>{document.documentElement.classList.add('dark');await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));})()");
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.rem-model-switch')).color"), "rgb(103, 232, 249)");
+  fs.writeFileSync(path.join(artifact,"model-switch-dark.png"),(await win.webContents.capturePage()).toPNG());
+  await evaluate("(async()=>{document.documentElement.classList.remove('dark');await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));})()");
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.rem-model-switch')).color"), "rgb(14, 116, 144)");
+  fs.writeFileSync(path.join(artifact,"model-switch-light.png"),(await win.webContents.capturePage()).toPNG());
   await evaluate("document.querySelector('button[aria-label=\"Search threads\"]').click()");
   await evaluate(`(() => { const input=document.querySelector('input[aria-label="Search all thread history"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,"Source-only fork thought"); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
   await wait("document.querySelector('[aria-label=\"Thread search results\"] button')");
@@ -103,7 +133,7 @@ async function main() {
   await wait("document.querySelector('[data-thread-search-match]')?.textContent.includes('Source-only fork thought')");
   assert.equal(await evaluate("document.querySelector('[data-thread-search-match]').querySelectorAll('[aria-label=\"Fork thread from here\"]').length"),0);
   assert.deepEqual(errors,[]);
-  console.log("Rem browser checks passed: background launch, running state, cleared input, unloaded history fork, automatic user replay, independent continuation, thought search without fork actions.");
+  console.log("Rem browser checks passed: background launch, unloaded history fork, model dividers on send, selection lookup beyond loaded tool output, light/dark styling, thought search.");
 }
 main().then(()=>finish()).catch(error=>finish(error));
 async function finish(error) { clearTimeout(timer); win?.destroy(); await vite?.close(); if(error) console.error(error); app.exit(error?1:0); }

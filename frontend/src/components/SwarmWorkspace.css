@@ -1,33 +1,24 @@
+/* Studio tokens with the documented swarm surfaces (DESIGN.md, Swarm dashboard). */
 .swarm-workspace {
-  --color-ink: 39 47 67;
-  --color-muted: 100 109 130;
-  --color-line: 211 216 228;
-  --color-surface: 255 255 255;
-  --color-brand: 102 87 198;
-  --swarm-panel: #fff;
-  --swarm-recess: #e9ecf4;
-  --swarm-portrait: #dfe0f1;
-  --swarm-accent: #6657c6;
-  --swarm-success: #28745e;
-  --swarm-warning: #936411;
-  background: #f2f3f8;
+  --swarm-panel: rgb(var(--color-surface));
+  --swarm-recess: #e6e0d4;
+  --swarm-portrait: #dfdcf4;
+  --swarm-accent: rgb(var(--color-brand));
+  --swarm-success: #047857;
+  --swarm-warning: #92400e;
+  background: #eee9df;
   container-type: inline-size;
-  font-family: "Segoe UI", "Helvetica Neue", sans-serif;
   overflow-wrap: anywhere;
 }
 .dark .swarm-workspace {
-  --color-ink: 235 238 247;
-  --color-muted: 166 175 196;
-  --color-line: 54 62 82;
-  --color-surface: 33 40 58;
-  --color-brand: 112 96 207;
-  --swarm-panel: #21283a;
-  --swarm-recess: #1a2030;
-  --swarm-portrait: #333953;
-  --swarm-accent: #b8b1ff;
-  --swarm-success: #79c7b0;
-  --swarm-warning: #e3bd7b;
-  background: #1b2131;
+  --color-line: 46 46 51;
+  --swarm-panel: #1e1e21;
+  --swarm-recess: #151517;
+  --swarm-portrait: #2c2b47;
+  --swarm-accent: #a5b4fc;
+  --swarm-success: #6ee7b7;
+  --swarm-warning: #fcd34d;
+  background: #18181a;
 }
 .swarm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-height: 48px; padding: 8px 20px; border-bottom: 1px solid rgb(var(--color-line)); }
 .swarm-toolbar > h3 { min-width: 0; flex-basis: 140px; }

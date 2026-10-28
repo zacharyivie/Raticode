@@ -1,0 +1,73 @@
+/*
+ * The landing page is always dark, whatever appearance the docs use.
+ * These rules adapt the shared VitePress navigation to float over the hero.
+ */
+
+.Layout.landing {
+  --vp-c-bg: #07061a;
+  --vp-c-bg-alt: #07061a;
+  --vp-c-bg-elv: #12102d;
+  --vp-c-bg-soft: #12102d;
+  --vp-c-text-1: #f3eee6;
+  --vp-c-text-2: #b8b3d4;
+  --vp-c-text-3: #8d88ad;
+  --vp-c-divider: rgba(196, 188, 255, 0.12);
+  --vp-c-gutter: rgba(196, 188, 255, 0.08);
+  --vp-c-brand-1: #b9b1ff;
+  --vp-c-default-soft: rgba(196, 188, 255, 0.1);
+  --vp-nav-bg-color: rgba(7, 6, 26, 0.72);
+  --vp-nav-screen-bg-color: #07061a;
+  --vp-local-nav-bg-color: #07061a;
+  color-scheme: dark;
+  background: var(--rc-ink-0);
+  color: var(--vp-c-text-1);
+}
+
+.Layout.landing .VPNav {
+  position: fixed;
+}
+
+.Layout.landing .VPContent {
+  padding-top: 0 !important;
+}
+
+.Layout.landing .VPNavBar,
+.Layout.landing .VPNavBar .content-body,
+.Layout.landing .VPNavBar .title {
+  background-color: transparent !important;
+  border-bottom-color: transparent !important;
+}
+
+.Layout.landing .VPNavBar .divider-line {
+  background-color: transparent !important;
+}
+
+.Layout.landing .VPNavBar:not(.top) {
+  background-color: rgba(7, 6, 26, 0.66) !important;
+  border-bottom: 1px solid var(--rc-line) !important;
+  -webkit-backdrop-filter: saturate(160%) blur(18px);
+  backdrop-filter: saturate(160%) blur(18px);
+}
+
+.Layout.landing .VPNavBar .title {
+  font-family: var(--rc-font-display);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.Layout.landing .VPNavBarAppearance {
+  display: none;
+}
+
+.Layout.landing .VPNavBarExtra .group:has(.VPSwitchAppearance) {
+  display: none;
+}
+
+.Layout.landing .VPNavBarMenuLink {
+  font-weight: 500;
+}
+
+.Layout.landing .VPNavBarMenuLink:hover {
+  color: var(--rc-ivory);
+}

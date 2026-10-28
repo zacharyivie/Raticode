@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000101",
+  "id": "10000000-0000-4000-8000-000000000107",
+  "sequence": 107,
+  "type": "approval.resolve",
+  "payload": {
+    "approval_id": "00000000-0000-4000-8000-000000000007",
+    "action_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "decision": "deny",
+    "instruction": "Run the tests again first."
+  }
+}

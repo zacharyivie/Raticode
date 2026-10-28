@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +19,25 @@ from gofer.core.usage_ledger import activity_payload, now_iso, profile_usage_ide
 from gofer.utils.paths import get_data_dir
 
 REFRESH_INTERVAL_SECONDS = 60
-STALE_SECONDS = 300
+STALE_SECONDS = 900
+# Allowances are kept current without opening Settings → Usage.
+BACKGROUND_REFRESH_SECONDS = 600
+BACKGROUND_START_DELAY_SECONDS = 15
+# Provider activity changes its allowance; refresh once a burst of turns settles.
+ACTIVITY_DELAY_SECONDS = 30
+ACTIVITY_REFRESH_SECONDS = 120
+# Claude Code turns report the account's windows for free. While those readings are
+# this recent, polling would only add load to Claude's rate-limited usage endpoint.
+CLAUDE_ACTIVITY_FRESH_SECONDS = 300
 _refresh_lock = threading.Lock()
 _refreshing: set[str] = set()
+_background_lock = threading.Lock()
+_background: dict[str, tuple[threading.Event, set[str]]] = {}
+logger = logging.getLogger(__name__)
+
+
+def _key(data_dir: Path | None) -> str:
+    return str((data_dir or get_data_dir()).resolve())
 
 
 def _accounts(data_dir: Path | None) -> list[dict[str, Any]]:
@@ -53,6 +71,52 @@ def _age(timestamp: str | None) -> float:
         return float("inf")
 
 
+def _measured_activity(
+    limits: list[Any], identity: dict[str, Any]
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    """Newest measured Claude window per id, from any model's recent turns."""
+    measured: dict[str, tuple[str, dict[str, Any]]] = {}
+    if identity["provider"] != "claude_code" or identity["credential_revision"]:
+        # A saved reporting token can name a different account from Claude Code's.
+        return measured
+    for limit in limits:
+        if limit["provider"] != "claude_code" or limit["profile"] != (
+            identity["id"] if identity["profile"] else ""
+        ):
+            continue
+        for window in json.loads(limit["windows"]):
+            if isinstance(window.get("used"), int | float) and window.get("id") not in measured:
+                measured[window["id"]] = (limit["observed_at"], window)
+    return measured
+
+
+def _with_activity(
+    row: dict[str, Any], measured: dict[str, tuple[str, dict[str, Any]]]
+) -> dict[str, Any]:
+    """Overlay windows from turns that are newer than the last polled reading."""
+    newer = {
+        key: (observed, window)
+        for key, (observed, window) in measured.items()
+        if not row.get("windows") or _age(observed) < _age(row.get("observed_at"))
+    }
+    if not newer:
+        return row
+    windows = {window["id"]: window for window in row.get("windows", [])}
+    for key, (_, window) in newer.items():
+        windows[key] = {**windows.get(key, {}), **window}
+    polled = bool(row.get("windows"))
+    return {
+        **row,
+        "windows": list(windows.values()),
+        "observed_at": min((observed for observed, _ in newer.values()), key=_age),
+        "status": "available",
+        "source": row.get("source") if polled else "Claude Code activity",
+        "reason": "Updated from Claude Code activity in Raticode."
+        if polled
+        else "From Claude Code activity in Raticode. Refresh for model-specific limits.",
+    }
+
+
 def usage_overview(data_dir: Path | None = None, *, days: int = 30) -> dict[str, Any]:
     if days not in {1, 7, 30, 90}:
         raise ValueError("Usage period must be 1, 7, 30, or 90 days")
@@ -70,6 +134,7 @@ def usage_overview(data_dir: Path | None = None, *, days: int = 30) -> dict[str,
         )
         if row.get("credential_revision", "") != identity["credential_revision"]:
             row = provider_usage_placeholder(identity["provider"], identity["profile"])
+        row = _with_activity(row, _measured_activity(limits, identity))
         captured = [
             limit
             for limit in limits
@@ -126,11 +191,18 @@ def usage_overview(data_dir: Path | None = None, *, days: int = 30) -> dict[str,
     }
 
 
-async def refresh_usage(data_dir: Path | None = None, *, days: int = 30) -> dict[str, Any]:
-    from gofer.core.provider_usage import refresh_provider_usage
+async def refresh_usage(
+    data_dir: Path | None = None,
+    *,
+    days: int = 30,
+    providers: set[str] | None = None,
+    min_age: float = REFRESH_INTERVAL_SECONDS,
+    explicit: bool = False,
+) -> dict[str, Any]:
+    from gofer.core.provider_usage import CLI_REFRESH_TIMEOUT_SECONDS, refresh_provider_usage
 
     # HTTP handlers have separate event loops; a threading guard coalesces them.
-    key = str((data_dir or get_data_dir()).resolve())
+    key = _key(data_dir)
     overview = usage_overview(data_dir, days=days)
     with _refresh_lock:
         if key in _refreshing:
@@ -142,13 +214,28 @@ async def refresh_usage(data_dir: Path | None = None, *, days: int = 30) -> dict
                 row["id"]: (row["checked_at"], json.loads(row["payload"]))
                 for row in db.execute("SELECT id, checked_at, payload FROM usage_snapshots")
             }
+            limits = db.execute(
+                "SELECT * FROM usage_rate_limits ORDER BY observed_at DESC"
+            ).fetchall()
         previous = {row["id"]: row for row in overview["accounts"]}
 
         async def refresh(identity: dict[str, Any]) -> None:
             stamp, snapshot = checked.get(identity["id"], (None, {}))
+            if providers is not None and identity["provider"] not in providers:
+                return
             if (
                 snapshot.get("credential_revision", "") == identity["credential_revision"]
-                and _age(stamp) < REFRESH_INTERVAL_SECONDS
+                and _age(stamp) < min_age
+            ):
+                return
+            # Honor provider back-off. A user can retry other failures, never a 429.
+            if _age(snapshot.get("retry_at")) < 0 and (
+                not explicit or snapshot.get("rate_limited")
+            ):
+                return
+            activity = _measured_activity(limits, identity)
+            if activity and min(_age(observed) for observed, _ in activity.values()) < (
+                CLAUDE_ACTIVITY_FRESH_SECONDS
             ):
                 return
             try:
@@ -158,7 +245,7 @@ async def refresh_usage(data_dir: Path | None = None, *, days: int = 30) -> dict
                         identity["profile"],
                         data_dir=data_dir,
                     ),
-                    timeout=15,
+                    timeout=CLI_REFRESH_TIMEOUT_SECONDS + 5,
                 )
             except Exception:
                 # Provider stderr and HTTP bodies can contain credentials.
@@ -175,6 +262,12 @@ async def refresh_usage(data_dir: Path | None = None, *, days: int = 30) -> dict
                 != identity["credential_revision"]
             ):
                 return
+            retry: dict[str, Any] = {}
+            if isinstance(seconds := row.pop("retry_after_seconds", None), int):
+                retry = {
+                    "retry_at": (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat(),
+                    "rate_limited": row.pop("rate_limited", False) is True,
+                }
             old = previous.get(identity["id"], {})
             if (
                 row.get("status") != "available"
@@ -187,7 +280,9 @@ async def refresh_usage(data_dir: Path | None = None, *, days: int = 30) -> dict
                     "reason": row.get("reason"),
                     "refresh_status": row.get("status"),
                 }
-            row = {**row, **identity}
+            # A retry time belongs only to the attempt that produced it.
+            row = {k: v for k, v in row.items() if k not in {"retry_at", "rate_limited"}}
+            row = {**row, **retry, **identity}
             with usage_db(data_dir) as db:
                 db.execute(
                     "INSERT OR REPLACE INTO usage_snapshots VALUES (?, ?, ?)",
@@ -209,3 +304,56 @@ async def refresh_usage(data_dir: Path | None = None, *, days: int = 30) -> dict
     finally:
         with _refresh_lock:
             _refreshing.discard(key)
+
+
+def notify_usage_activity(provider: str, data_dir: Path | None = None) -> None:
+    """Ask the background refresher, when running, to re-read this provider soon."""
+    with _background_lock:
+        registered = _background.get(_key(data_dir))
+        if registered is not None:
+            registered[1].add(provider)
+            registered[0].set()
+
+
+def start_background_refresh(data_dir: Path | None = None) -> Callable[[], None]:
+    """Refresh allowances periodically and after provider activity; returns a stopper."""
+    key = _key(data_dir)
+    wake, stop = threading.Event(), threading.Event()
+    active: set[str] = set()
+    with _background_lock:
+        _background[key] = (wake, active)
+
+    def run(**options: Any) -> None:
+        try:
+            asyncio.run(refresh_usage(data_dir, **options))
+        except Exception:
+            # Provider failures are already per-account rows; never log secrets.
+            logger.warning("Background usage refresh failed", exc_info=False)
+
+    def loop() -> None:
+        if stop.wait(BACKGROUND_START_DELAY_SECONDS):
+            return
+        run()
+        while not stop.is_set():
+            if not wake.wait(BACKGROUND_REFRESH_SECONDS):
+                run()
+                continue
+            if stop.wait(ACTIVITY_DELAY_SECONDS):
+                return
+            with _background_lock:
+                wake.clear()
+                providers = set(active)
+                active.clear()
+            run(providers=providers, min_age=ACTIVITY_REFRESH_SECONDS)
+
+    thread = threading.Thread(target=loop, name="raticode-usage-refresh", daemon=True)
+    thread.start()
+
+    def stopper() -> None:
+        stop.set()
+        wake.set()
+        with _background_lock:
+            if _background.get(key, (None,))[0] is wake:
+                del _background[key]
+
+    return stopper

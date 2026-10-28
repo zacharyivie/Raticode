@@ -260,6 +260,17 @@ def run(
         diagnostic = _run_input_diagnostic(source, exc).to_json()
         _emit(_error_payload("run", source, [diagnostic]), output_format)
         raise typer.Exit(2)
+    execute_rattish_run(source, workflow_inputs, output_format=output_format, data_dir=data_dir)
+
+
+def execute_rattish_run(
+    source: Path,
+    workflow_inputs: dict[str, Any],
+    *,
+    output_format: str = "text",
+    data_dir: Path | None = None,
+) -> None:
+    """Run one Rattish file for a CLI command and exit with its run status."""
     try:
         result = asyncio.run(
             run_rattish_file(source, workflow_inputs=workflow_inputs, data_dir=data_dir)

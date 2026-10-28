@@ -9,9 +9,9 @@ import { swarmOverview, milestoneProgress, objectiveProgressChange, newSwarmAgen
 import "./SwarmWorkspace.css";
 
 const EMPTY_HISTORY = [];
-const fieldClass = "w-full min-w-0 rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder:text-muted focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand disabled:opacity-50";
-const buttonClass = "inline-flex items-center justify-center gap-1.5 rounded-lg border border-line bg-white px-3 py-1.5 text-xs font-semibold text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand disabled:cursor-not-allowed disabled:opacity-50";
-const primaryClass = "inline-flex items-center justify-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-not-allowed disabled:opacity-50";
+const fieldClass = "ui-input";
+const buttonClass = "ui-button ui-button--sm";
+const primaryClass = "ui-button ui-button--primary ui-button--sm";
 
 export default function SwarmWorkspace({ rootPath, swarmId, onSelect, onClose, defaults = {}, selectedAgentId, projectPaths = [] }) {
   const [swarm, setSwarm] = useState(null);

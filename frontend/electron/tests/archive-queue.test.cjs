@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { createArchiveQueue } = require("../archive-queue.cjs");
-const { archiveConversation } = require("../conversation-archive.cjs");
+const { archiveConversation, forgetConversations } = require("../conversation-archive.cjs");
 
 class FakeWorker extends EventEmitter {
   sent = [];
@@ -349,3 +349,37 @@ for (const restart of [false, true]) {
     }
   });
 }
+
+test("forgetting Rem threads erases their archived copies and keeps other threads", () => {
+  const archive = fs.mkdtempSync(path.join(os.tmpdir(), "rem-forget-"));
+  try {
+    archiveConversation(archive, { id: "rem-worker", title: "Worker" }, [{ id: "m", role: "user", body: "old corrupted request" }]);
+    archiveConversation(archive, { id: "mine", title: "Mine" }, [{ id: "m", role: "user", body: "my own thread" }]);
+    assert.deepEqual(forgetConversations(archive, ["rem-worker", "never-archived"]), { forgotten: 2 });
+    const files = fs.readdirSync(path.join(archive, "threads"));
+    assert.equal(files.filter(file => file.endsWith(".json")).length, 1);
+    const content = fs.readdirSync(archive, { recursive: true }).filter(file => fs.statSync(path.join(archive, file)).isFile())
+      .map(file => fs.readFileSync(path.join(archive, file), "utf8")).join("\n");
+    assert.doesNotMatch(content, /old corrupted request|"Worker"/);
+    assert.match(content, /my own thread/);
+    assert.throws(() => forgetConversations(archive, [""]), /Invalid thread IDs/);
+  } finally {
+    fs.rmSync(archive, { recursive: true, force: true });
+  }
+});
+
+test("forgetting waits behind already queued archive saves", async () => {
+  const worker = new FakeWorker();
+  const queue = createArchiveQueue({ createWorker: () => worker });
+  const save = queue.archive("/archive", { id: "a" }, [{ body: "one" }]);
+  const forget = queue.forget("/archive", ["a"]);
+  assert.equal(worker.sent.length, 1);
+  worker.complete();
+  await save;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(worker.sent.at(-1).options.forget, true);
+  assert.deepEqual(worker.sent.at(-1).messages, ["a"]);
+  worker.complete({ forgotten: 1 });
+  assert.deepEqual(await forget, { forgotten: 1 });
+  await queue.close();
+});

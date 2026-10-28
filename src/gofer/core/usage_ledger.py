@@ -176,6 +176,9 @@ def record_invocation(
     except (OSError, sqlite3.Error, ValueError, TypeError):
         # Accounting must never fail the user's model invocation.
         logger.warning("Could not save provider usage", exc_info=False)
+    from gofer.core.usage_service import notify_usage_activity
+
+    notify_usage_activity(provider, data_dir)
 
 
 def activity_payload(data_dir: Path | None = None, *, days: int = 30) -> dict[str, Any]:

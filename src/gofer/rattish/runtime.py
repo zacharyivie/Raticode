@@ -15,6 +15,7 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -26,6 +27,7 @@ from referencing.exceptions import Unresolvable
 
 from gofer.core.agent import Agent, AgentConfig, AgentResult
 from gofer.core.approvals import (
+    APPROVAL_GATE_STOPPED_REASON,
     ApprovalRequest,
     ApprovalStore,
     MultiChannelNotificationAdapter,
@@ -755,10 +757,29 @@ async def _structured_agent_output(
         RuntimeErrorInfo(
             "output_validation",
             "RATTISH_RUNTIME_OUTPUT_INVALID",
-            f"Structured output repair exhausted: {validation_error}",
-            {"repair_attempts": repair_attempts},
+            _structured_failure_message(validation_error, result.output),
+            {
+                "repair_attempts": repair_attempts,
+                "response": result.output[:_AGENT_REPLY_DETAIL_CHARS],
+            },
         ),
     )
+
+
+_AGENT_REPLY_DETAIL_CHARS = 16_000
+_AGENT_REPLY_MESSAGE_CHARS = 1_500
+
+
+def _structured_failure_message(validation_error: str, reply: str) -> str:
+    # The reply usually explains the failure, so every run surface shows an excerpt.
+    message = f"Structured output repair exhausted: {validation_error}"
+    reply = reply.strip()
+    if not reply:
+        return f"{message}\nAgent reply was empty."
+    excerpt = reply[:_AGENT_REPLY_MESSAGE_CHARS]
+    if len(reply) > len(excerpt):
+        excerpt += "\n[reply truncated]"
+    return f"{message}\nAgent reply:\n{excerpt}"
 
 
 def _agent_memory_path(node_id: str, context: RuntimeContext) -> Path:
@@ -1079,13 +1100,18 @@ async def _approval_gate_handler(
         except Exception:  # noqa: BLE001
             # Notification is best-effort. The persisted approval remains actionable.
             pass
-    decision = await wait_for_decision(
-        store,
-        context.workflow_id,
-        context.run_id,
-        node["id"],
-        timeout_seconds=timeout_seconds,
-    )
+    try:
+        decision = await wait_for_decision(
+            store,
+            context.workflow_id,
+            context.run_id,
+            node["id"],
+            timeout_seconds=timeout_seconds,
+        )
+    except anyio.get_cancelled_exc_class():
+        # A stopped gate must not stay actionable or time out after its node ended.
+        store.cancel(context.workflow_id, context.run_id, node["id"], APPROVAL_GATE_STOPPED_REASON)
+        raise
     if decision is None:
         decision_value = "timeout" if configuration["timeout_decision"] == "timeout" else "rejected"
         decided = store.decide(
@@ -1106,22 +1132,8 @@ async def _approval_gate_handler(
         "message": message,
         "subject": subject,
     }
-    if output["approved"]:
-        return HandlerResult(True, output)
-    return HandlerResult(
-        False,
-        output,
-        RuntimeErrorInfo(
-            "timeout" if decision.decision == "timeout" else "configuration",
-            (
-                "RATTISH_APPROVAL_TIMED_OUT"
-                if decision.decision == "timeout"
-                else "RATTISH_APPROVAL_NOT_GRANTED"
-            ),
-            f"Approval was {decision.decision}.",
-            {"decision": decision.decision, "decided_by": decision.decided_by},
-        ),
-    )
+    # A rejected or timed-out decision is a successful gate output; routes branch on approved.
+    return HandlerResult(True, output)
 
 
 async def _common_llm_task_handler(
@@ -1400,7 +1412,7 @@ async def _local_search_handler(
         if configuration["include_snippets"]:
             item["snippet"] = entry.get("text", "")
         if configuration["include_file_metadata"]:
-            item["metadata"] = entry.get("metadata", {})
+            item["metadata"] = _search_result_metadata(entry.get("metadata"))
         results.append(item)
     return HandlerResult(
         True,
@@ -1411,6 +1423,19 @@ async def _local_search_handler(
             "results": results,
         },
     )
+
+
+def _search_result_metadata(metadata: Any) -> dict[str, Any]:
+    """Return index metadata as I-JSON; nanosecond times exceed the exact integer range."""
+    if not isinstance(metadata, Mapping):
+        return {}
+    result: dict[str, Any] = {}
+    if isinstance(metadata.get("size"), int):
+        result["size"] = metadata["size"]
+    mtime_ns = metadata.get("mtime_ns")
+    if isinstance(mtime_ns, int):
+        result["modified_at"] = datetime.fromtimestamp(mtime_ns / 1_000_000_000, UTC).isoformat()
+    return result
 
 
 def _tabular_loop_items(path: Path, context: RuntimeContext) -> list[dict[str, Any]]:
@@ -1581,6 +1606,37 @@ def _dotted_value(value: Any, path: str) -> Any:
     return current
 
 
+def command_failure_message(label: str, returncode: int, stdout: str, stderr: str) -> str:
+    """Describe nonzero exits even when a command writes its diagnostics to stdout."""
+    if stderr.strip():
+        return stderr.strip()[-8192:]
+    detail = stdout.strip()
+    try:
+        payload = json.loads(detail)
+    except (ValueError, TypeError):
+        pass
+    else:
+
+        def first_error(value: Any) -> str:
+            if isinstance(value, dict):
+                for key in ("error", "message", "failures", "reports"):
+                    found = first_error(value.get(key))
+                    if found:
+                        return found
+            elif isinstance(value, list):
+                for item in value:
+                    found = first_error(item)
+                    if found:
+                        return found
+            elif isinstance(value, str):
+                return value.strip()
+            return ""
+
+        detail = first_error(payload) or detail
+    prefix = f"{label} exited with status {returncode}."
+    return prefix + (" " + detail[:8192] if detail else "")
+
+
 async def _bash_handler(
     node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
 ) -> HandlerResult:
@@ -1611,7 +1667,7 @@ async def _bash_handler(
         RuntimeErrorInfo(
             "command",
             "RATTISH_RUNTIME_COMMAND_FAILED",
-            stderr or f"Command exited with status {returncode}.",
+            command_failure_message("Command", returncode, stdout, stderr),
             {"exit_code": returncode},
         ),
     )
@@ -1961,7 +2017,7 @@ async def _script_handler(
         RuntimeErrorInfo(
             "command",
             "RATTISH_RUNTIME_COMMAND_FAILED",
-            stderr or f"Script exited with status {returncode}.",
+            command_failure_message("Script", returncode, stdout, stderr),
             {"exit_code": returncode, "script_path": str(script_path)},
         ),
     )

@@ -35,9 +35,10 @@ def build_subprocess_env(
     env = dict(os.environ) if inherit_parent else {}
     _sanitize_packaged_runtime_env(env)
     env.update(overrides or {})
-    # These credentials authorize Studio and desktop path grants, not child
-    # providers or workflow commands. Strip them even from a copied parent env.
-    for name in ("GOFER_UI_API_TOKEN", "GOFER_DESKTOP_GRANT_SECRET"):
+    # These credentials authorize Studio, desktop path grants and browser
+    # grants, not child providers or workflow commands. Strip them even from a
+    # copied parent env.
+    for name in ("GOFER_UI_API_TOKEN", "GOFER_DESKTOP_GRANT_SECRET", "GOFER_BROWSER_ADMIN_TOKEN"):
         env.pop(name, None)
     return env
 

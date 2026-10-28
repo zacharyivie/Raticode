@@ -23,6 +23,7 @@ let canvasModule;
 let codeFileExplorerModule;
 let codeWorkspaceModule;
 let dialogModule;
+let runPreviewModule;
 let integratedBrowserModule;
 let markdownContentModule;
 let rattishEditorModule;
@@ -55,6 +56,7 @@ before(async () => {
   codeFileExplorerModule = await viteServer.ssrLoadModule("/src/components/CodeFileExplorer.jsx");
   codeWorkspaceModule = await viteServer.ssrLoadModule("/src/components/CodeWorkspace.jsx");
   dialogModule = await viteServer.ssrLoadModule("/src/components/Dialog.jsx");
+  runPreviewModule = await viteServer.ssrLoadModule("/src/components/RunPreviewDialog.jsx");
   integratedBrowserModule = await viteServer.ssrLoadModule("/src/components/IntegratedBrowser.jsx");
   markdownContentModule = await viteServer.ssrLoadModule("/src/components/MarkdownContent.jsx");
   rattishEditorModule = await viteServer.ssrLoadModule("/src/components/RattishEditor.jsx");
@@ -206,6 +208,24 @@ test("settings dropdown exposes useful app categories and searchable commands", 
   for (const query of ["paired devices", "phone", "pairing", "QR", "revoke"]) {
     assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery(query), ["devices"]);
   }
+});
+
+test("settings give Rem resources the full row width beneath their label", () => {
+  const markup = renderToStaticMarkup(React.createElement(settingsPopoverModule.default, {
+    initialCategory: "assistant",
+    onChange() {},
+    onClose() {},
+    onResetAll() {},
+    open: true,
+    settings: settingsModule.DEFAULT_APP_SETTINGS,
+  }));
+  const start = markup.indexOf("Rem resources");
+  const resourcesRow = markup.slice(start, markup.indexOf("Default provider", start));
+
+  assert.ok(start > 0);
+  assert.match(resourcesRow, /class="rem-tools"/);
+  assert.match(resourcesRow, /Run commands/);
+  assert.doesNotMatch(resourcesRow, /w-52/);
 });
 
 test("studio session persists the selected project, workflow, and editor", () => {
@@ -965,7 +985,7 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
     },
     {
       name: "run preview",
-      render: (onClose) => React.createElement(appModule.RunPreviewDialog, {
+      render: (onClose) => React.createElement(runPreviewModule.default, {
         plan: { generations: [] },
         workflow: workflowFixture(),
         onCancel: onClose,
@@ -1111,6 +1131,68 @@ test("reduced-motion preference disables smooth scrolling and status animation",
   const css = fs.readFileSync(path.join(frontendRoot, "src/styles/index.css"), "utf8");
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.match(css, /\.animate-bounce[\s\S]*\.animate-spin[\s\S]*animation:\s*none/);
+});
+
+test("run announcements say started for background runs and completed only when finished", () => {
+  assert.equal(appModule.workflowRunAnnouncement(null), "");
+  assert.equal(appModule.workflowRunAnnouncement({ status: "queued" }), "Workflow run queued.");
+  assert.equal(appModule.workflowRunAnnouncement({ status: "running" }), "Workflow run started.");
+  assert.equal(
+    appModule.workflowRunAnnouncement({ status: "stopped" }),
+    "Workflow run completed: stopped",
+  );
+  assert.equal(
+    appModule.workflowRunAnnouncement({ success: false }),
+    "Workflow run completed: error",
+  );
+});
+
+test("node status badge colors all have dark-theme overrides", () => {
+  const css = fs.readFileSync(path.join(frontendRoot, "src/styles/index.css"), "utf8");
+  const darkPalette = css.match(/\.dark \{\n {2}--color-indigo-50:[^}]*\}/)?.[0] ?? "";
+  // Pale status tints become dark tints, and their text and borders lighten, so each state keeps its hue.
+  for (const family of ["emerald", "amber", "orange", "red"]) {
+    assert.match(darkPalette, new RegExp(`--color-${family}-50: #`), `${family} background`);
+    assert.match(css, new RegExp(`\\.dark :is\\(\\.border-${family}-200,`), `${family} border`);
+    assert.match(css, new RegExp(`\\.text-${family}-700, [^{]*\\{ color: #`), `${family} text`);
+  }
+  const canvas = fs.readFileSync(path.join(frontendRoot, "src/components/DagCanvas.jsx"), "utf8");
+  assert.match(canvas, /allowed_failure: "border-orange-200 bg-orange-50 text-orange-700"/);
+});
+
+test("dark fallbacks defer to authored dark variants and keep semibold text colored", () => {
+  const css = fs.readFileSync(path.join(frontendRoot, "src/styles/index.css"), "utf8");
+  assert.match(css, /\.dark \.bg-white:not\(\[class\*="dark:bg-"\]\)/);
+  assert.match(css, /\.dark \.text-slate-500:not\(\[class\*="dark:text-"\]\)/);
+  assert.doesNotMatch(css, /\.dark \.font-semibold/);
+  // Tailwind 4 draws divide borders on every child but the last, including the first row.
+  assert.match(css, /\.dark \.divide-line > \* \{/);
+});
+
+test("dark mode defines every surface token that shared styles read", () => {
+  const css = fs.readFileSync(path.join(frontendRoot, "src/styles/index.css"), "utf8");
+  const darkTokens = css.match(/\n\.dark \{[^}]*\}/)?.[0] ?? "";
+  for (const token of ["surface", "surface-muted", "raised", "field", "success", "warning", "danger", "info"]) {
+    assert.match(darkTokens, new RegExp(`--color-${token}: \\d+ \\d+ \\d+;`), token);
+  }
+});
+
+test("button primitives used by dialogs and the inspector are defined", () => {
+  const primitives = fs.readFileSync(path.join(frontendRoot, "src/styles/primitives.css"), "utf8");
+  const css = fs.readFileSync(path.join(frontendRoot, "src/styles/index.css"), "utf8");
+  assert.match(css, /@import "\.\/primitives\.css";/);
+  for (const name of ["btn-primary", "btn-ghost", "ui-button", "ui-button--primary", "ui-input", "ui-notice", "ui-scrim"]) {
+    assert.match(primitives, new RegExp(`\\.${name}[ ,{:]`), name);
+  }
+  // The utilities layer must not reset fonts on form controls, or component primitives lose their size.
+  assert.doesNotMatch(css.slice(css.indexOf("@layer utilities")), /^button,\ninput,/m);
+});
+
+test("brand actions keep the indigo accent on hover and focus", () => {
+  for (const file of ["src/pages/App.jsx", "src/components/DagCanvas.jsx", "src/components/PathNameDialog.jsx", "src/components/RunPreviewDialog.jsx"]) {
+    const source = fs.readFileSync(path.join(frontendRoot, file), "utf8");
+    assert.doesNotMatch(source, /(hover|focus|focus-visible|focus-within):(bg|border|ring)-teal-/, file);
+  }
 });
 
 test("workflow save payload keeps all filesystem permission combinations and graph positions", () => {
@@ -2655,7 +2737,28 @@ test("browser addresses normalize dev servers, websites, and searches", () => {
   assert.throws(() => normalizeBrowserUrl("javascript:alert(1)"), /http:\/\/ or https:\/\//);
   assert.equal(browserContentZoomFactor(1.4, 1), 1.4);
   assert.equal(browserContentZoomFactor(1.4, 1.1), 1.54);
-  assert.equal(browserContentZoomFactor(1.5, 3), 3);
+  // Page zoom is independent of the studio and spans Chromium's 25%-500% range.
+  assert.equal(browserContentZoomFactor(1.5, 3), 4.5);
+  assert.equal(browserContentZoomFactor(1.5, 5), 5);
+  assert.equal(browserContentZoomFactor(1, 0.1), 0.25);
+  assert.equal(normalizeBrowserUrl("two words", "https://duckduckgo.com/?q={query}"), "https://duckduckgo.com/?q=two%20words");
+  // Standard browser keys inside a page: Ctrl+L, F5, hard reload, DevTools, print and history.
+  assert.equal(browserShortcutAction({ control: true, key: "l", type: "keyDown" }, "linux"), "focus-location");
+  assert.equal(browserShortcutAction({ meta: true, key: "l", type: "keyDown" }, "darwin"), "focus-location");
+  assert.equal(browserShortcutAction({ control: true, key: "l", type: "keyDown" }, "darwin"), "assistant-pane-toggle");
+  assert.equal(browserShortcutAction({ key: "F5", type: "keyDown" }, "linux"), "reload");
+  assert.equal(browserShortcutAction({ control: true, shift: true, key: "R", type: "keyDown" }, "linux"), "reload-hard");
+  assert.equal(browserShortcutAction({ key: "F12", type: "keyDown" }, "linux"), "toggle-devtools");
+  assert.equal(browserShortcutAction({ control: true, shift: true, key: "I", type: "keyDown" }, "linux"), "toggle-devtools");
+  assert.equal(browserShortcutAction({ control: true, key: "p", type: "keyDown" }, "linux"), "print");
+  assert.equal(browserShortcutAction({ control: true, key: "d", type: "keyDown" }, "linux"), "bookmark");
+  assert.equal(browserShortcutAction({ control: true, key: "h", type: "keyDown" }, "linux"), "history");
+  assert.equal(browserShortcutAction({ meta: true, key: "y", type: "keyDown" }, "darwin"), "history");
+  assert.equal(browserShortcutAction({ control: true, shift: true, key: "T", type: "keyDown" }, "linux"), "reopen-closed-tab");
+  assert.equal(browserShortcutAction({ alt: true, key: "Home", type: "keyDown" }, "linux"), "home");
+  assert.equal(browserShortcutAction({ key: "Escape", type: "keyDown" }, "linux"), "stop-loading");
+  // These win over an app binding on the same keys while a page has focus.
+  assert.equal(browserSessionShortcutAction({ applicationKeybindings: { "view.toggleAssistantPane": "Ctrl+KeyL" } }, { code: "KeyL", control: true, key: "l", type: "keyDown" }, "linux"), "focus-location");
   assert.equal(browserShortcutAction({ alt: true, key: "d", type: "keyDown" }, "linux"), "focus-location");
   const applicationSession = { applicationChord: null };
   assert.equal(
@@ -2685,7 +2788,6 @@ test("browser addresses normalize dev servers, websites, and searches", () => {
     ),
     "command:project.open",
   );
-  assert.equal(browserShortcutAction({ control: true, key: "l", type: "keyDown" }, "linux"), "assistant-pane-toggle");
   assert.equal(browserShortcutAction({ control: true, key: "b", type: "keyDown" }, "linux"), "project-pane-toggle");
   assert.equal(browserShortcutAction({ control: true, key: "o", type: "keyDown" }, "linux"), "file-open");
   assert.equal(browserShortcutAction({ control: true, key: "`", type: "keyDown" }, "linux"), "panel-toggle");
@@ -3378,6 +3480,39 @@ test("file previews replace only the previous preview and pin on a permanent ope
   ), {
     openPaths: [source, "/repo/second.js"],
     previewPath: "",
+  });
+});
+
+test("Rem's browser setting defaults to Raticode tabs and rejects unknown values", () => {
+  assert.equal(settingsModule.normalizeAppSettings({}).browser.agentBrowser, "raticode");
+  assert.equal(settingsModule.normalizeAppSettings({ browser: { agentBrowser: "external" } }).browser.agentBrowser, "external");
+  assert.equal(settingsModule.normalizeAppSettings({ browser: { agentBrowser: "external-headless" } }).browser.agentBrowser, "external-headless");
+  assert.equal(settingsModule.normalizeAppSettings({ browser: { agentBrowser: "firefox" } }).browser.agentBrowser, "raticode");
+});
+
+test("Rem's browser tabs open unselected and are left out of the saved editor session", () => {
+  const tab = appModule.agentBrowserTab({ id: "session-1", label: "  " });
+  assert.deepEqual(tab, {
+    agentLabel: "Rem",
+    agentPartition: "persist:raticode-rem",
+    agentSessionId: "session-1",
+    error: "",
+    focusLocation: false,
+    loading: true,
+    title: "",
+    url: "about:blank",
+  });
+  const tabs = { "raticode-browser:a": { url: "https://example.com" }, "raticode-browser:b": tab };
+  assert.deepEqual(appModule.withoutAgentBrowserTabs(["/repo/a.js", "raticode-browser:a", "raticode-browser:b"], "raticode-browser:b", tabs), {
+    paths: ["/repo/a.js", "raticode-browser:a"],
+    activePath: "raticode-browser:a",
+    browserTabs: { "raticode-browser:a": { url: "https://example.com" } },
+  });
+  const unchanged = { "raticode-browser:a": { url: "https://example.com" } };
+  assert.deepEqual(appModule.withoutAgentBrowserTabs(["raticode-browser:a"], "raticode-browser:a", unchanged), {
+    paths: ["raticode-browser:a"],
+    activePath: "raticode-browser:a",
+    browserTabs: unchanged,
   });
 });
 
@@ -4132,7 +4267,8 @@ test("Rattish graph restores selection and emits targeted inspector mutations", 
             source: document.source.replace("Node prepare:", `Node ${next[0].name}:`),
           });
         }
-        return null;
+        // The server rejects edits that would stop the workflow from compiling.
+        return Promise.resolve(null);
       },
       onWorkflowChange() {},
     }),
@@ -4178,6 +4314,19 @@ test("Rattish graph restores selection and emits targeted inspector mutations", 
       field: "command",
       value: "echo changed",
     },
+  ]);
+
+  await dom.focus(dom.controlAfterLabel("Command"));
+  await dom.change(dom.controlAfterLabel("Command"), "");
+  await dom.blur(dom.controlAfterLabel("Command"));
+  await dom.flush();
+  assert.deepEqual(mutations.at(-1)[0].value, "");
+  assert.equal(dom.controlAfterLabel("Command").value, "echo ready");
+
+  await dom.click(dom.byTitle("Add node"));
+  await dom.flush();
+  assert.deepEqual(mutations.at(-1), [
+    { kind: "add_node", node: "node-1", node_type: "bash-command" },
   ]);
   await dom.unmount();
 });
@@ -4349,6 +4498,52 @@ test("new workflow dialog imports a .raticode bundle into the selected project",
   });
 
   assert.deepEqual(submissions, [{ file, projectRoot: "/repos/raticode" }]);
+  await dom.unmount();
+});
+
+test("workflow list reports backend run and compile state instead of a stale Ready", async () => {
+  const nightly = { ...workflowFixture({ id: "nightly", name: "Nightly" }), sourceFormat: "rattish" };
+  const report = { ...workflowFixture({ id: "report", name: "Report" }), sourceFormat: "rattish" };
+  const broken = {
+    ...workflowFixture({ id: "broken", name: "Broken", status: "Error" }),
+    sourceFormat: "rattish",
+    invalid: true,
+    validationError: "Line 7: No node contract is available for 'nope'.",
+  };
+  const running = { id: "run-2", status: "running", startedAt: "2026-10-26T12:00:00Z" };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([nightly, report, broken])),
+    // The log listing is newest first; the newest run decides the status.
+    jsonResponse("/api/workflows/nightly/logs?limit=100", { runs: [running, { id: "run-1", status: "success", startedAt: "2026-10-26T11:00:00Z" }], pagination: { total: 2 } }),
+    jsonResponse("/api/workflows/nightly/logs?status=running", { runs: [running] }),
+    jsonResponse("/api/workflows/report/logs?limit=100", {
+      runs: [
+        { id: "run-4", status: "error", startedAt: "2026-10-26T10:00:00Z", finishedAt: "2026-10-26T10:00:05Z" },
+        { id: "run-3", status: "success", startedAt: "2026-10-25T10:00:00Z" },
+      ],
+      pagination: { total: 2 },
+    }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, {
+    storage: { [appModule.STUDIO_SESSION_STORAGE_KEY]: JSON.stringify({ projectRoot: "/workspace", workflowId: "nightly" }) },
+  });
+  await dom.flush();
+  await dom.flush();
+
+  const rows = Object.fromEntries(allElements(dom.container)
+    .filter((element) => element.getAttribute?.("data-workflow-status"))
+    .map((element) => [allElements(element).find((child) => child.getAttribute?.("role") === "button").getAttribute("aria-label").split(",")[0], element]));
+  assert.equal(rows.Nightly.getAttribute("data-workflow-status"), "running");
+  assert.equal(rows.Report.getAttribute("data-workflow-status"), "error");
+  assert.match(textOf(rows.Report), /Failed/);
+  assert.equal(rows.Broken.getAttribute("data-workflow-status"), "invalid");
+  assert.match(textOf(rows.Broken), /Line 7: No node contract is available/);
+
+  await dom.click(allElements(rows.Broken).find((element) => element.getAttribute?.("aria-haspopup") === "menu"));
+  const brokenMenu = allElements(dom.container).find((element) => element.getAttribute?.("role") === "menu" && element.getAttribute("aria-label") === "Broken actions");
+  const runItem = allElements(brokenMenu).find((element) => element.getAttribute?.("role") === "menuitem" && textOf(element) === "Run workflow");
+  assert.notEqual(runItem.getAttribute("disabled"), null);
+  assert.match(runItem.getAttribute("title"), /Fix this workflow's errors/);
   await dom.unmount();
 });
 
@@ -4761,6 +4956,77 @@ test("Markdown code blocks keep their scroll position while streaming and copy t
   await dom.unmount();
 });
 
+test("RunPreviewDialog sends edited integer and list inputs with their schema types", async () => {
+  const submitted = [];
+  const dom = await mountReact(
+    React.createElement(runPreviewModule.default, {
+      plan: { generations: [] },
+      workflow: {
+        id: "typed-inputs",
+        name: "Typed inputs",
+        inputs: {
+          count: { type: "integer", required: false, default: 2, schema: { type: "integer", minimum: 1 } },
+          tags: {
+            type: "array",
+            required: false,
+            default: ["alpha", "beta"],
+            schema: { type: "array", items: { type: "string" } },
+          },
+          label: { type: "string", required: false, default: "x", schema: { type: "string" } },
+        },
+      },
+      onCancel() {},
+      onRun(parameters) {
+        submitted.push(parameters);
+      },
+    }),
+    createFetchMock([]),
+  );
+  const field = (name) =>
+    allElements(dom.container).find((node) => node.getAttribute?.("id") === `run-param-${name}`);
+
+  assert.equal(field("tags").value, '["alpha","beta"]');
+  await dom.focus(field("count"));
+  await dom.change(field("count"), "");
+  await dom.change(field("count"), "5");
+  await dom.blur(field("count"));
+  await dom.change(field("tags"), '["gamma"]');
+  await dom.click(dom.byText("Run workflow"));
+  assert.deepEqual(submitted, [{ count: 5, tags: ["gamma"], label: "x" }]);
+
+  await dom.change(field("count"), "0");
+  await dom.change(field("tags"), "gamma");
+  await dom.click(dom.byText("Run workflow"));
+  assert.equal(submitted.length, 1);
+  assert.match(dom.text(), /Must be at least 1/);
+  assert.match(dom.text(), /Enter a JSON list/);
+  await dom.unmount();
+});
+
+test("coerceWorkflowParameters converts drafts and validates them against the input schema", () => {
+  const workflow = {
+    inputs: {
+      ratio: { type: "number", schema: { type: "number", maximum: 1 } },
+      options: { type: "object", schema: { type: "object" } },
+      limit: { type: "integer", schema: { type: "integer" } },
+      legacy: { type: "number" },
+    },
+  };
+  assert.deepEqual(
+    runPreviewModule.coerceWorkflowParameters(workflow, {
+      ratio: "0.5",
+      options: '{"a": 1}',
+      limit: "",
+      legacy: "7",
+    }),
+    { errors: {}, parameters: { ratio: 0.5, options: { a: 1 }, legacy: "7" } },
+  );
+  assert.deepEqual(
+    runPreviewModule.coerceWorkflowParameters(workflow, { ratio: "2", options: "[1]", limit: "1.5" }).errors,
+    { ratio: "Must be at most 1", options: "Expected object", limit: "Enter a whole number" },
+  );
+});
+
 test("RunPreviewDialog renders grouped warnings, destructive actions, providers, fan-out samples, and node details", () => {
   const plan = {
     workflowId: "preview-demo",
@@ -4849,7 +5115,7 @@ test("RunPreviewDialog renders grouped warnings, destructive actions, providers,
   };
 
   const html = renderToStaticMarkup(
-    React.createElement(appModule.RunPreviewDialog, {
+    React.createElement(runPreviewModule.default, {
       plan,
       workflow: { id: "preview-demo", name: "Preview Demo" },
       onCancel: () => {},
@@ -5169,7 +5435,9 @@ test("App renders run and stop state, opens the run preview, executes runs, and 
   await dom.click(dom.ancestor(dom.byText("Run Timeline"), "BUTTON"));
   await dom.flush();
   assert.match(dom.text(), /run stopped/);
-  assert.match(dom.text(), /Stopped/);
+  // The list still reports run-1's unconfirmed stop request; the finished run
+  // returned no run ID, so it appears once the registry rescans the logs.
+  assert.equal(allElements(dom.container).find((element) => element.getAttribute?.("data-workflow-status"))?.getAttribute("data-workflow-status"), "stopping");
   assert.match(dom.text(), /Workflow run completed: stopped/);
   assert.equal(
     matchingLiveRegions(dom.container, {
@@ -5496,6 +5764,9 @@ test("assistant threads keep streaming after navigation and report running and c
   await dom.flush();
   await dom.click(dom.byTitle("Back to active threads"));
 
+  assert.equal(threadGroupToggle(dom, "Running").getAttribute("aria-expanded"), "false");
+  assert.doesNotMatch(dom.text(), /Keep tracking this response/);
+  await openThreadGroup(dom, "Running");
   assert.equal(dom.byTitle("Rem response running").tagName, "SPAN");
   assert.match(dom.text(), /Keep tracking this response/);
 
@@ -5506,6 +5777,8 @@ test("assistant threads keep streaming after navigation and report running and c
   controlledStream.releaseNext();
   await dom.flush();
   assert.equal(dom.byTitle("Rem response complete").tagName, "SPAN");
+  assert.equal(allElements(dom.container).some(node => directText(node) === "Running"), false);
+  assert.match(dom.text(), /Unread1 thread[\s\S]*Keep tracking this response/);
   assert.equal(
     matchingLiveRegions(dom.container, {
       politeness: "polite",
@@ -5865,7 +6138,10 @@ test("changing project scope from assistant home keeps the thread list visible",
   assert.ok(allElements(dom.container).find(
     (element) => element.getAttribute?.("data-assistant-home") !== null,
   ));
-  assert.match(dom.text(), /Active threads/);
+  assert.match(dom.text(), /No thread history yet/);
+  // Rem's sprite and introduction moved to Rem's home.
+  assert.doesNotMatch(dom.text(), /I'm Rem|Your coding agent in Raticode/);
+  assert.equal(allElements(dom.container).some(element => element.getAttribute?.("class") === "rem-avatar"), false);
 
   await dom.click(dom.byLabel("Scoped to alpha. Change project scope"));
   const scopeMenu = dom.byLabel("Rem project scope");
@@ -5879,7 +6155,7 @@ test("changing project scope from assistant home keeps the thread list visible",
   assert.ok(allElements(dom.container).find(
     (element) => element.getAttribute?.("data-assistant-home") !== null,
   ));
-  assert.match(dom.text(), /Active threads/);
+  assert.match(dom.text(), /No thread history yet/);
   assert.equal(dom.allByTitle("Back to active threads").length, 0);
 
   await dom.unmount();
@@ -5905,6 +6181,7 @@ test("deleting a background assistant thread disposes its pending stream state",
   const chatRequest = fetchMock.calls.find((call) => call.url === "/api/chat/stream");
   const threadId = JSON.parse(chatRequest.options.body).workflow.chatThreadId;
   await dom.click(dom.byTitle("Back to active threads"));
+  await openThreadGroup(dom, "Running");
   await dom.click(dom.byTitle("Thread options"));
   window.confirm = () => true;
   await dom.click(dom.byText("Delete thread"));
@@ -5953,6 +6230,7 @@ test("assistant activity remains independent across concurrent threads", async (
   await dom.click(dom.byTitle("Send message"));
   await dom.flush();
   await dom.click(dom.byTitle("Back to active threads"));
+  await openThreadGroup(dom, "Running");
   assert.equal(dom.allByTitle("Rem response running").length, 2);
 
   secondStream.releaseNext();
@@ -6290,11 +6568,18 @@ test("DagCanvas mounted interactions create/select/edit/delete nodes, create edg
   const initialViewportScale = Number(
     nodeCard.parentNode.style.transform.match(/scale\(([-\d.]+)\)/)?.[1],
   );
-  await dom.pointer(nodeCard, "onPointerDown", { clientX: 10, clientY: 10, pointerId: 7 });
-  await dom.pointer(nodeCard, "onPointerMove", { clientX: 35, clientY: 45, movementX: 25, movementY: 35, pointerId: 7 });
+  const dragStart = testEvent(nodeCard, { clientX: 10, clientY: 10, pointerId: 7 });
+  await React.act(async () => reactProps(nodeCard).onPointerDown(dragStart));
+  assert.equal(dragStart.defaultPrevented, true);
+  // movementX/Y can be in device pixels; the node must follow the cursor's client position.
+  await dom.pointer(nodeCard, "onPointerMove", { clientX: 20, clientY: 30, movementX: 20, movementY: 40, pointerId: 7 });
+  await dom.pointer(nodeCard, "onPointerMove", { clientX: 35, clientY: 45, movementX: 30, movementY: 30, pointerId: 7 });
   await dom.pointer(nodeCard, "onPointerUp", { clientX: 35, clientY: 45, pointerId: 7 });
   assert.equal(changes.at(-1).nodes[0].x, 25 / initialViewportScale);
   assert.equal(changes.at(-1).nodes[0].y, 35 / initialViewportScale);
+  const changesAfterDrop = changes.length;
+  await dom.pointer(nodeCard, "onPointerMove", { buttons: 0, clientX: 90, clientY: 90, pointerId: 7 });
+  assert.equal(changes.length, changesAfterDrop);
 
   await dom.click(dom.byText("Add edge"));
   await dom.change(dom.selectWithOption("node-1"), "node-1");
@@ -7109,6 +7394,67 @@ test("DagCanvas renders pending approvals as a centered graph overlay", async ()
   await dom.unmount();
 });
 
+test("approval dialog keeps typed notes and stays closed across approval polls", async () => {
+  const decisions = [];
+  const approval = {
+    workflowId: "approval-poll",
+    runId: "run-a.log",
+    nodeId: "approve",
+    message: "Approve deployment?",
+    status: "pending",
+    approvers: ["ops"],
+    requestedAt: "2026-10-27T19:11:44+00:00",
+  };
+  let poll;
+  function PollHarness() {
+    const [current, setCurrent] = React.useState(approval);
+    poll = setCurrent;
+    return React.createElement(canvasModule.ApprovalDecisionOverlay, {
+      approval: current,
+      node: { id: "approve", label: "Deploy" },
+      onDecideApproval(nextApproval, decision, notes, approver) {
+        decisions.push({ decision, notes, approver, runId: nextApproval.runId });
+      },
+      pendingCount: 2,
+    });
+  }
+  // Every poll returns fresh objects and arrays for the same pending gate.
+  const pollAgain = async (patch = {}) => {
+    await React.act(async () => {
+      poll({ ...approval, approvers: [...approval.approvers], ...patch });
+    });
+  };
+  const dom = await mountReact(React.createElement(PollHarness), createFetchMock([]));
+
+  assert.ok(dom.byText("run-a.log"));
+  assert.ok(dom.byText("2 approvals waiting"));
+
+  await dom.change(dom.controlAfterLabel("Notes"), "second note");
+  await dom.change(dom.controlAfterLabel("Approver"), "zack");
+  await pollAgain();
+  await pollAgain();
+  assert.equal(dom.controlAfterLabel("Notes").value, "second note");
+  assert.equal(dom.controlAfterLabel("Approver").value, "zack");
+
+  await dom.click(dom.byTitle("Reject pending approval"));
+  assert.deepEqual(decisions, [
+    { decision: "rejected", notes: "second note", approver: "zack", runId: "run-a.log" },
+  ]);
+
+  await dom.dispatchWindow("keydown", { key: "Escape" });
+  assert.equal(dom.container.textContent.includes("Approval Required"), false);
+  await pollAgain();
+  assert.equal(dom.container.textContent.includes("Approval Required"), false);
+
+  // A different run's gate is a new request, so the dialog opens again with empty drafts.
+  await pollAgain({ runId: "run-b.log", requestedAt: "2026-10-27T19:12:00+00:00" });
+  assert.ok(dom.byText("run-b.log"));
+  assert.equal(dom.controlAfterLabel("Notes").value, "");
+  assert.equal(dom.controlAfterLabel("Approver").value, "ops");
+
+  await dom.unmount();
+});
+
 test("DagCanvas renders inline agent health warnings in the inspector", async () => {
   const workflow = {
     ...workflowFixture({ id: "agent-health", name: "Agent Health", label: "Review" }),
@@ -7412,6 +7758,71 @@ test("DagCanvas run history exposes resume and rerun controls", async () => {
     { runId: "run-1.log", options: { skipCache: true } },
     { runId: "run-1.log", options: { fromNode: "step" } },
   ]);
+
+  await dom.unmount();
+});
+
+test("DagCanvas shows Rattish run outcomes, start nodes, needs, and project paths", async () => {
+  const rattishNode = (id, type, operation, needs) => ({
+    id,
+    type: type.replaceAll("-", "_"),
+    label: id,
+    x: 0,
+    y: 0,
+    operation: { type: type.replaceAll("-", "_"), ...operation },
+    rattish: { id, type, needs, status: "valid" },
+  });
+  const workflow = {
+    ...workflowFixture({ id: "rattish-run", name: "Rattish run" }),
+    sourceFormat: "rattish",
+    projectRoot: "/project",
+    nodes: [
+      rattishNode("decide", "bash-command", { command: "echo" }, []),
+      rattishNode("work", "bash-command", { command: "echo" }, ["decide"]),
+      rattishNode("read", "read-file", { path: "report.txt" }, ["decide"]),
+    ],
+    edges: [{ id: "decide:route:0", from: "decide", to: "work", mode: "unconditional", condition: "always" }],
+  };
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      dataDir: "/app-data",
+      resumable: false,
+      workflow,
+      logState: {
+        loading: false,
+        error: "",
+        text: "",
+        path: "runs/rattish-run/run.json",
+        runs: [{ id: "run-1", status: "error", startedAt: "2026-10-26T03:04:05Z" }],
+        selectedRunId: "run-1",
+        runNodes: {
+          decide: { nodeId: "decide", status: "allowed_failure" },
+          work: { nodeId: "work", status: "error", activationSummary: "1 of 3 failed" },
+        },
+      },
+      onWorkflowChange() {},
+    }),
+    createFetchMock([]),
+  );
+
+  await dom.flush();
+  assert.match(dom.text(), /allowed failure/);
+  assert.match(dom.text(), /1 of 3 failed/);
+  assert.match(dom.text(), /read \/project\/report\.txt/);
+  assert.doesNotMatch(dom.text(), /app-data/);
+  assert.match(dom.text(), /bash-command/);
+  const startMarkers = allElements(dom.container).filter(
+    (element) => element.getAttribute?.("title") === "Runs when the workflow starts because it has no needs",
+  );
+  assert.equal(startMarkers.length, 1);
+  const needsLinks = allElements(dom.container)
+    .map((element) => element.getAttribute?.("aria-label"))
+    .filter((label) => label?.includes(" needs "));
+  assert.deepEqual(needsLinks, ["read needs decide"]);
+
+  await dom.click(dom.byTitle("More graph actions"));
+  await dom.click(dom.byTitle("Select workflow run"));
+  assert.doesNotMatch(dom.text(), /Rerun failed nodes|Rerun from selected node/);
 
   await dom.unmount();
 });
@@ -8245,6 +8656,7 @@ test("integrated browser ignores late events from replaced native sessions", () 
 
 test("Electron integrated browser uses locked-down webview guests", () => {
   const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
+  const sessions = fs.readFileSync(path.join(repoRoot, "frontend/electron/browser-sessions.cjs"), "utf8");
   const preloadSource = fs.readFileSync(
     path.join(repoRoot, "frontend/electron/browser-preload.cjs"),
     "utf8",
@@ -8256,52 +8668,50 @@ test("Electron integrated browser uses locked-down webview guests", () => {
   assert.doesNotMatch(source, /new WebContentsView/);
   assert.match(source, /webviewTag: true/);
   assert.match(source, /will-attach-webview/);
-  assert.match(source, /params\.partition !== "persist:raticode-browser"/);
-  assert.match(source, /isPendingBrowserSessionSrc\(terminalOwnerId, params\.src\)/);
+  assert.match(source, /!browsers\.isPendingAttach\(terminalOwnerId, params\)/);
   assert.match(source, /webPreferences\.preload = browserPreloadPath/);
   assert.match(source, /webPreferences\.contextIsolation = true/);
   assert.match(source, /webPreferences\.nodeIntegration = false/);
   assert.match(source, /webPreferences\.sandbox = true/);
   assert.match(source, /webPreferences\.webSecurity = true/);
-  assert.match(source, /did-attach-webview/);
-  assert.match(source, /guestContents\.setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)/);
-  assert.match(source, /guest\.hostWebContents !== event\.sender/);
-  assert.match(source, /guest\.getType\(\) !== "webview"/);
+  assert.match(source, /did-attach-webview", \(_event, guestContents\) => browsers\.hardenGuest\(guestContents\)/);
+  assert.match(sessions, /guest\.setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)/);
+  assert.match(sessions, /guest\.hostWebContents !== event\.sender/);
+  assert.match(sessions, /guest\.getType\(\) !== "webview"/);
+  assert.match(sessions, /!sameProfile\(guest\.session, profile\(session\.kind\)\)/);
   assert.doesNotMatch(source, /edit-local-html/);
   assert.doesNotMatch(componentSource, /edit-local-html/);
-  assert.match(source, /closeBrowserSession/);
-  assert.match(source, /gofer:browser-open-file/);
-  assert.match(source, /event\.senderFrame !== contents\.mainFrame/);
-  assert.match(source, /gofer:browser-navigation/);
-  assert.match(source, /contents\.navigationHistory\.goBack\(\)/);
-  assert.match(source, /setWindowOpenHandler\(\(\{ url \}\) => \{[\s\S]*?contents\.loadURL\(url\)/);
+  assert.match(sessions, /gofer:browser-open-file/);
+  assert.match(sessions, /event\.senderFrame !== contents\.mainFrame/);
+  assert.match(sessions, /gofer:browser-navigation/);
+  assert.match(sessions, /contents\.setWindowOpenHandler\(\(details\) => openWindow\(session, details\)\)/);
   assert.match(
-    source,
+    sessions,
     /if \(browserCommandRequiresOwnerFocus\(action\)\) session\.owner\.focus\(\);\s*session\.owner\.send\("gofer:browser-command"/,
   );
-  assert.match(source, /session\.openBrowserBinding/);
-  assert.match(source, /syncBrowserContentZoom\(session\)/);
-  assert.match(source, /session\.ownerZoomFactor/);
+  assert.match(sessions, /session\.ownerZoomFactor/);
   assert.doesNotMatch(source, /accelerator: "CommandOrControl\+Alt\+\//);
+  // No long-lived browser credential is ever written for agents to find.
+  assert.doesNotMatch(source, /writeAgentBrowserConnection/);
   assert.match(componentSource, /document\.createElement\("webview"\)/);
-  assert.match(componentSource, /setAttribute\("partition", "persist:raticode-browser"\)/);
-  assert.match(componentSource, /bridge\.adopt\(sessionId, element\.getWebContentsId\(\)\)/);
+  assert.match(componentSource, /setAttribute\("partition", partition \|\| USER_PARTITION\)/);
+  assert.match(componentSource, /bridge\.adopt\(sessionId, element\.getWebContentsId\(\), clientId\)/);
   assert.match(componentSource, /page-favicon-updated/);
-  assert.match(source, /page-favicon-updated/);
+  assert.match(sessions, /page-favicon-updated/);
   assert.match(preloadSource, /gofer:browser-link-clicked/);
   assert.match(preloadSource, /gofer:browser-navigation/);
   assert.match(preloadSource, /gofer:browser-zoom/);
-  assert.match(preloadSource, /event\.preventDefault\(\)/);
+  assert.match(preloadSource, /!event\.isTrusted/);
 });
 
 test("Electron integrated browser restores renderer focus after closing a focused view", () => {
-  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
+  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/browser-sessions.cjs"), "utf8");
   const closeFunction = source.slice(
-    source.indexOf("function closeBrowserSession"),
-    source.indexOf("function browserSessionContents"),
+    source.indexOf("function closeSession"),
+    source.indexOf("function registerOwnerCleanup"),
   );
 
-  assert.match(closeFunction, /const contents = browserSessionContents\(session\)/);
+  assert.match(closeFunction, /const contents = liveContents\(session\)/);
   assert.match(closeFunction, /contents\?\.isFocused\(\) === true/);
   assert.match(closeFunction, /restoreOwnerFocus[\s\S]*session\.owner\.focus\(\)/);
   assert.match(closeFunction, /!session\.owner\.isDestroyed\(\)/);
@@ -8330,31 +8740,31 @@ test("recent project selection always rediscovers the selected folder", () => {
 });
 
 test("Electron integrated browser ignores state events after native view disposal", () => {
-  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
+  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/browser-sessions.cjs"), "utf8");
   const emitFunction = source.slice(
-    source.indexOf("function emitBrowserState"),
-    source.indexOf("function emitBrowserCommand"),
+    source.indexOf("function emitState"),
+    source.indexOf("function emitCommand"),
   );
   const stateFunction = source.slice(
-    source.indexOf("function browserSessionState"),
-    source.indexOf("function emitBrowserState"),
+    source.indexOf("function sessionState"),
+    source.indexOf("function emitState"),
   );
 
-  assert.match(emitFunction, /browserSessions\.get\(session\.id\) === session/);
-  assert.match(emitFunction, /browserSessionContents\(session\)/);
+  assert.match(emitFunction, /sessions\.get\(session\.id\) === session/);
+  assert.match(emitFunction, /liveContents\(session\)/);
   assert.match(stateFunction, /if \(!contents\)/);
   assert.match(stateFunction, /Browser view is unavailable\./);
 });
 
 test("Electron integrated browser registers one cleanup listener per renderer owner", () => {
-  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
+  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/browser-sessions.cjs"), "utf8");
   const registerFunction = source.slice(
-    source.indexOf("function registerBrowserOwnerCleanup"),
-    source.indexOf("function closeBrowsersForOwner"),
+    source.indexOf("function registerOwnerCleanup"),
+    source.indexOf("function closeForOwner"),
   );
 
-  assert.match(source, /const browserOwnersWithCleanup = new WeakSet\(\)/);
-  assert.match(registerFunction, /browserOwnersWithCleanup\.has\(owner\)/);
+  assert.match(source, /const ownersWithCleanup = new WeakSet\(\)/);
+  assert.match(registerFunction, /ownersWithCleanup\.has\(owner\)/);
   assert.match(registerFunction, /owner\.once\("destroyed"/);
   assert.doesNotMatch(source, /event\.sender\.once\("destroyed"/);
 });
@@ -8381,8 +8791,41 @@ test("integrated browser reserves new tabs for modified link clicks", () => {
   assert.equal(modifiedClick.defaultPrevented, true);
   assert.deepEqual(toPlainObject(sent), [{
     channel: "gofer:browser-link-clicked",
-    payload: { url: "https://example.com/docs" },
+    payload: { url: "https://example.com/docs", disposition: "background" },
   }]);
+});
+
+test("integrated browser opens target=_blank and middle-clicked links as tabs", () => {
+  const { dispatch, sent } = runBrowserPreload();
+  const anchor = (target) => ({
+    getAttribute: (name) => (name === "target" ? target : null),
+    hasAttribute: () => false,
+    href: "https://example.com/new",
+    tagName: "A",
+  });
+  const blank = browserPageEvent({ composedPath: () => [anchor("_blank")], type: "click" });
+  dispatch("click", blank);
+  assert.equal(blank.defaultPrevented, true);
+  const self = browserPageEvent({ composedPath: () => [anchor("_self")], type: "click" });
+  dispatch("click", self);
+  assert.equal(self.defaultPrevented, false);
+  const middle = browserPageEvent({ button: 1, composedPath: () => [anchor("")], type: "auxclick" });
+  dispatch("auxclick", middle);
+  assert.equal(middle.defaultPrevented, true);
+  assert.deepEqual(toPlainObject(sent).map((item) => item.payload.disposition), ["foreground", "background"]);
+});
+
+test("integrated browser ignores events a page script dispatches itself", () => {
+  const { dispatch, sent } = runBrowserPreload();
+  const anchor = { hasAttribute: () => false, href: "https://ads.example/", tagName: "A" };
+  const forgedClick = browserPageEvent({ composedPath: () => [anchor], ctrlKey: true, isTrusted: false, type: "click" });
+  dispatch("click", forgedClick);
+  const forgedKey = browserPageEvent({ isTrusted: false, key: "Backspace", type: "keydown" });
+  dispatch("keydown", forgedKey);
+  const forgedWheel = browserPageEvent({ ctrlKey: true, deltaY: -100, isTrusted: false, type: "wheel" });
+  dispatch("wheel", forgedWheel);
+  assert.deepEqual(sent, []);
+  assert.equal(forgedClick.defaultPrevented || forgedKey.defaultPrevented || forgedWheel.defaultPrevented, false);
 });
 
 test("integrated browser Backspace navigates unless focus is editable", () => {
@@ -8405,7 +8848,7 @@ test("integrated browser Backspace navigates unless focus is editable", () => {
   assert.equal(sent.length, 1);
 });
 
-test("integrated browser forwards modified wheel gestures to app zoom", () => {
+test("integrated browser forwards modified wheel gestures to page zoom", () => {
   const { dispatch, sent } = runBrowserPreload();
 
   const plainWheel = browserPageEvent({ deltaY: -100, type: "wheel" });
@@ -9122,7 +9565,7 @@ test("DagCanvas rendered navigation controls auto-layout, fit, and zoom", async 
   const expectedInitialViewport = canvasModule.fitViewportToNodes(workflow.nodes, {
     width: 960,
     height: 640,
-  });
+  }, { maxZoom: canvasModule.graphFitMaxZoom });
   assert.equal(
     scanCard.parentNode.style.transform,
     `translate(${expectedInitialViewport.x}px, ${expectedInitialViewport.y}px) scale(${expectedInitialViewport.scale})`,
@@ -9143,7 +9586,9 @@ test("DagCanvas rendered navigation controls auto-layout, fit, and zoom", async 
     false,
   );
   assert.equal(allElements(dom.container).some((element) => element.getAttribute?.("aria-label") === "Search nodes"), false);
-  assert.match(dom.byText("Workflow is valid").getAttribute("class"), /right-0/);
+  // The notice opens from the validate button toward the canvas so it is not
+  // clipped by the workflow sidebar.
+  assert.match(dom.byText("Workflow is valid").getAttribute("class"), /left-0/);
 
   await dom.flush();
   await dom.click(dom.byTitle("Auto-layout graph"));
@@ -9356,24 +9801,56 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
   assert.deepEqual(Object.keys(exposed.goferDesktop.dataDirectory).sort(), ["choose", "get"]);
   assert.deepEqual(Object.keys(exposed.goferBrowser).sort(), [
     "adopt",
+    "allowCertificate",
+    "allowPopups",
     "back",
+    "bookmark",
+    "clearSiteData",
     "close",
     "create",
+    "dismissBlockedPopups",
     "find",
     "focus",
     "forward",
+    "goToIndex",
+    "historyEntries",
+    "home",
+    "library",
+    "mute",
     "navigate",
+    "onAgentClose",
+    "onAgentOpen",
     "onCommand",
+    "onDownloads",
+    "onLibraryChanged",
     "onOpenFile",
     "onOpenTab",
+    "onPrompt",
     "onState",
+    "openBlockedPopup",
     "openExternal",
+    "pageContext",
+    "pauseRem",
     "platform",
     "preloadPath",
+    "print",
     "reload",
+    "reloadHard",
+    "respondPrompt",
+    "savePage",
+    "savePdf",
+    "setPolicy",
     "setPreferences",
+    "shareWithRem",
+    "siteInfo",
+    "sitePermission",
     "stop",
     "stopFind",
+    "stopSharing",
+    "takeOver",
+    "toggleDevTools",
+    "viewport",
+    "zoom",
   ]);
   assert.deepEqual(Object.keys(exposed.goferUpdates).sort(), [
     "check",
@@ -9466,8 +9943,20 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     toPlainObject(await exposed.goferBrowser.navigate("browser-session", "localhost:5173")),
     {
       channel: "gofer:browser-action",
-      payload: { action: "navigate", id: "browser-session", url: "localhost:5173" },
+      payload: { action: "navigate", id: "browser-session", url: "localhost:5173", typed: false },
     },
+  );
+  // Prompt answers cross the bridge as plain, bounded values only.
+  assert.deepEqual(
+    toPlainObject(await exposed.goferBrowser.respondPrompt("browser-session", "request-1", { username: "ada", password: "pw", extra: true })),
+    {
+      channel: "gofer:browser-action",
+      payload: { action: "prompt-response", id: "browser-session", requestId: "request-1", response: { username: "ada", password: "pw" } },
+    },
+  );
+  assert.deepEqual(
+    toPlainObject(await exposed.goferBrowser.library("suggest", { text: "git", action: "clear-data" })),
+    { channel: "gofer:browser-library", payload: { text: "git", action: "suggest" } },
   );
 });
 
@@ -9657,6 +10146,8 @@ function runBrowserPreload(location = "https://example.com/start") {
 
 function browserPageEvent(patch = {}) {
   return {
+    // Real user input unless a test says a page script dispatched it.
+    isTrusted: true,
     altKey: false,
     button: 0,
     composedPath: () => [],
@@ -9740,6 +10231,7 @@ function DagCanvasHarness({
   onRetentionSettingsChange,
   onResumeRunLog,
   onWorkflowChange,
+  resumable = true,
   retentionSettings,
   rattishDocument,
   workflow,
@@ -9786,7 +10278,7 @@ function DagCanvasHarness({
     onRattishMutation: handleRattishMutation,
     onReplayRunLog: onReplayRunLog ?? (() => {}),
     onRetentionSettingsChange: handleRetentionSettingsChange,
-    onResumeRunLog: onResumeRunLog ?? (() => {}),
+    onResumeRunLog: resumable ? onResumeRunLog ?? (() => {}) : undefined,
     onRunWorkflow: () => {},
     onSelectRunLog: () => {},
     onStopRunLog: () => {},
@@ -10062,6 +10554,14 @@ async function exerciseDialogFamily(renderDialog, desktop = {}) {
   );
 
   await dom.unmount();
+}
+
+// Rem, Swarms, and Second Brain are experimental plugins, so tests that open
+// them from the activity rail turn them on first.
+const EXPERIMENTAL_PLUGINS_ON = { rem: true, swarms: true, "second-brain": true };
+
+function experimentalPluginStorage() {
+  return { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ plugins: { enabled: EXPERIMENTAL_PLUGINS_ON } }) };
 }
 
 async function mountReact(element, fetchMock, { browser, desktop = {}, storage = {} } = {}) {
@@ -10554,6 +11054,15 @@ function textOf(node) {
   return node.textContent ?? "";
 }
 
+function threadGroupToggle(dom, label) {
+  return dom.ancestor(dom.byExactText(label), "BUTTON");
+}
+
+async function openThreadGroup(dom, label) {
+  const toggle = threadGroupToggle(dom, label);
+  if (toggle.getAttribute("aria-expanded") !== "true") await dom.click(toggle);
+}
+
 test("Rem pages older threads and bumps active history without loading messages", async () => {
   const threads = Array.from({ length: 31 }, (_, index) => ({ id: `t${index}`, title: `Thread ${index}`, updatedAt: new Date(2026, 0, 31 - index).toISOString() }));
   const bumped = appModule.bumpChatThread(threads, "t30", "2026-09-08T12:00:00Z");
@@ -10582,27 +11091,140 @@ test("Rem large pastes become text attachments without entering the draft", asyn
   await dom.unmount();
 });
 
-test("Rem resource drafts allow clear, type, blur and survive row removal", async () => {
+test("Rem tools merge the shared library with thread selections and add new entries to it", async () => {
+  const { default: RemResources } = await viteServer.ssrLoadModule("/src/components/RemResources.jsx");
+  let library = {
+    skillsDir: "/data/skills",
+    skills: [{ path: "/data/skills/release-notes", name: "release-notes", description: "Write release notes", origin: "codex", available: true, registered: false }],
+    mcpServers: [{ name: "github", type: "stdio", url: "", command: "npx", args: ["-y", "gh"], description: "GitHub issues", addedBy: "cli" }],
+  };
+  const posts = [];
+  const fetchMock = createFetchMock([(url, options = {}) => {
+    if (url !== "/api/rem-resources") return null;
+    if (options.method === "POST") {
+      const body = JSON.parse(options.body);
+      posts.push(body);
+      if (body.action === "save_mcp") library = { ...library, mcpServers: [...library.mcpServers, { ...body.server, addedBy: "app" }] };
+    }
+    return { ok: true, status: 200, json: async () => library };
+  }]);
+  let saved;
+  function Editor() {
+    const [value, setValue] = React.useState({ shell: true, web: false, skills: [{ path: "/legacy/notes", enabled: true }], mcpServers: [] });
+    return React.createElement(RemResources, { value, onChange: (next) => { saved = next; setValue(next); } });
+  }
+  const dom = await mountReact(React.createElement(Editor), fetchMock);
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /Write release notes/);
+    assert.match(dom.text(), /GitHub issues/);
+    const skillBadge = () => textOf(allElements(dom.ancestor(dom.byLabel("release-notes"), "LI")).find((el) => el.getAttribute?.("class") === "rem-tools__badge"));
+    assert.equal(reactProps(dom.byLabel("release-notes")).checked, false, "library entries start off");
+    assert.equal(skillBadge(), "Codex", "an off skill shows the folder it came from");
+    assert.equal(reactProps(dom.byLabel("github")).checked, false);
+    assert.equal(reactProps(dom.byLabel("notes")).checked, true, "thread-only entries stay visible");
+    await dom.change(dom.byLabel("release-notes"), true);
+    assert.equal(skillBadge(), "Rem", "an enabled skill belongs to Rem for every provider");
+    await dom.change(dom.byLabel("release-notes"), false);
+    assert.equal(skillBadge(), "Codex");
+    await dom.change(dom.byLabel("release-notes"), true);
+    await dom.change(dom.byLabel("github"), true);
+    assert.deepEqual(saved.skills, [{ path: "/legacy/notes", enabled: true }, { path: "/data/skills/release-notes", enabled: true }]);
+    assert.deepEqual(saved.mcpServers, [{ name: "github", type: "stdio", url: "", command: "npx", args: ["-y", "gh"], enabled: true, library: true }]);
+    await dom.change(dom.byLabel("github"), false);
+    assert.deepEqual(saved.mcpServers, []);
+    await dom.click(dom.byLabel("Remove skill notes"));
+    assert.deepEqual(saved.skills, [{ path: "/data/skills/release-notes", enabled: true }]);
+    await dom.click(dom.byLabel("Add MCP server"));
+    await dom.change(dom.byLabel("Server name"), "docs");
+    const urlField = dom.byLabel("Server URL");
+    await dom.focus(urlField);
+    await dom.change(urlField, "https://old.example/mcp");
+    await dom.change(urlField, "");
+    assert.equal(urlField.value, "");
+    await dom.change(urlField, "https://example.com/mcp");
+    await dom.blur(urlField);
+    await dom.pointer(dom.ancestor(urlField, "FORM"), "onSubmit");
+    await dom.flush();
+    assert.deepEqual(posts.at(-1), { action: "save_mcp", server: { name: "docs", type: "http", url: "https://example.com/mcp", description: "" } });
+    assert.deepEqual(saved.mcpServers, [{ name: "docs", type: "http", url: "https://example.com/mcp", command: "", args: [], enabled: true, library: true }]);
+    assert.equal(reactProps(dom.byLabel("docs")).checked, true, "a server added here is on for this selection");
+    assert.throws(() => dom.byLabel("Server URL"), "the form closes after saving");
+  } finally { await dom.unmount(); }
+});
+
+test("Rem tools list Second Brains on by default only while Settings > Memory enables them", async () => {
+  const { default: RemResources } = await viteServer.ssrLoadModule("/src/components/RemResources.jsx");
+  const { resetSecondBrainStore } = await viteServer.ssrLoadModule("/src/lib/secondBrainStore.js");
+  const brain = (id, settings = { allowCloud: true }) => ({ id, name: id, root: `/brains/${id}`, state: "available", settings });
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem-resources", { skills: [], mcpServers: [] }),
+    jsonResponse("/api/second-brains", { result: { brains: [brain("school"), brain("work"), brain("private", { allowCloud: false })] } }),
+  ]);
+  let saved;
+  function Editor({ memory }) {
+    const [value, setValue] = React.useState({ shell: true, web: true, skills: [], mcpServers: [] });
+    return React.createElement(RemResources, { value, memory, onChange: (next) => { saved = next; setValue(next); } });
+  }
+  resetSecondBrainStore();
+  const dom = await mountReact(React.createElement(Editor, { memory: { secondBrainEnabled: true, secondBrainRoot: "/brains/school" } }), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 60 && !/Second Brains/.test(dom.text()); attempt++) {
+      await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    }
+    assert.match(dom.text(), /2 on/);
+    assert.equal(reactProps(dom.byLabel("school")).checked, true, "a thread without a brain choice has every brain on");
+    assert.equal(reactProps(dom.byLabel("work")).checked, true);
+    assert.equal(reactProps(dom.byLabel("private")).checked, false, "brains without cloud permission cannot be used");
+    assert.equal(reactProps(dom.byLabel("private")).disabled, true);
+    await dom.change(dom.byLabel("work"), false);
+    assert.deepEqual(saved.disabledSecondBrains, ["work"]);
+    assert.equal(saved.secondBrains, undefined);
+    assert.match(dom.text(), /1 on/);
+    await dom.change(dom.byLabel("work"), true);
+    assert.deepEqual(saved.disabledSecondBrains, []);
+  } finally { await dom.unmount(); }
+  // A Memory folder without cloud permission is reached by path, which cannot join registered brains.
+  const mixed = await mountReact(React.createElement(Editor, { memory: { secondBrainEnabled: true, secondBrainRoot: "/brains/private" } }), fetchMock);
+  try {
+    await mixed.flush();
+    assert.equal(reactProps(mixed.byLabel("private")).checked, true);
+    assert.match(mixed.text(), /Skipped while other brains are on/);
+    assert.match(mixed.text(), /2 on/, "the summary counts only the brains Rem receives");
+  } finally { await mixed.unmount(); }
+  // The library is loaded now, so only the setting can hide the section.
+  const off = await mountReact(React.createElement(Editor, { memory: { secondBrainEnabled: false, secondBrainRoot: "" } }), fetchMock);
+  try {
+    await off.flush();
+    assert.match(off.text(), /Built-in/);
+    assert.doesNotMatch(off.text(), /Second Brains/);
+  } finally { await off.unmount(); resetSecondBrainStore(); }
+});
+
+test("Rem tools fall back to selection-only entries when the library is unavailable", async () => {
   const { default: RemResources } = await viteServer.ssrLoadModule("/src/components/RemResources.jsx");
   let saved;
   function Editor() {
-    const [value, setValue] = React.useState({ shell: true, web: false, skills: [{ path: "/one" }, { path: "/two" }], mcpServers: [] });
+    const [value, setValue] = React.useState({ shell: false, web: false, skills: [], mcpServers: [] });
     return React.createElement(RemResources, { value, onChange: (next) => { saved = next; setValue(next); } });
   }
-  const dom = await mountReact(React.createElement(Editor), createFetchMock([]));
-  let field = dom.byLabel("Skill 1 path");
-  await dom.pointer(field, "onFocus");
-  await dom.change(field, "");
-  assert.equal(field.value, "");
-  await dom.change(field, "/replacement");
-  await dom.pointer(field, "onBlur");
-  assert.equal(saved.skills[0].path, "/replacement");
-  await dom.click(dom.byLabel("Remove skill 1"));
-  field = dom.byLabel("Skill 1 path");
-  assert.equal(field.value, "/two");
-  await dom.pointer(field, "onBlur");
-  assert.equal(saved.skills[0].path, "/two");
-  await dom.unmount();
+  const dom = await mountReact(React.createElement(Editor), createFetchMock([jsonResponse("/api/rem-resources", { error: "offline" }, { ok: false })]));
+  try {
+    await dom.flush();
+    assert.match(dom.text(), /offline/);
+    await dom.click(dom.byLabel("Add skill"));
+    await dom.change(dom.byLabel("Skill folder"), "/skills/weather");
+    await dom.pointer(dom.ancestor(dom.byLabel("Skill folder"), "FORM"), "onSubmit");
+    await dom.flush();
+    assert.deepEqual(saved.skills, [{ path: "/skills/weather", enabled: true }]);
+    await dom.click(dom.byLabel("Add MCP server"));
+    await dom.change(dom.byLabel("Server name"), "bad name");
+    await dom.change(dom.byLabel("Server URL"), "https://example.com/mcp");
+    await dom.pointer(dom.ancestor(dom.byLabel("Server URL"), "FORM"), "onSubmit");
+    await dom.flush();
+    assert.match(dom.text(), /Give each MCP server a name/);
+    assert.deepEqual(saved.mcpServers, []);
+  } finally { await dom.unmount(); }
 });
 
 test("source control displays the current unborn branch before and after the first commit", async () => {
@@ -10838,17 +11460,18 @@ test("Git comparisons cover empty additions, renamed files, and binary versions"
 });
 
 test("browser close is idempotent after guest destruction and checks live ownership", () => {
-  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
-  const actionSource = source.slice(source.indexOf("function browserAction("), source.indexOf("function configureBrowserSession("));
-  const ownerSource = source.slice(source.indexOf("function ownedBrowserSession("), source.indexOf("function closeBrowserSession("));
-  const browserSessions = new Map();
-  const action = vm.runInNewContext(`${ownerSource}\n${actionSource}\nbrowserAction`, {
-    browserSessions, browserSessionContents: () => null, browserSessionState: () => ({ ready: false }),
+  const { createBrowserSessions } = require("../../electron/browser-sessions.cjs");
+  const browsers = createBrowserSessions({
+    app: {}, Menu: {}, clipboard: {}, dialog: {}, shell: {}, session: {}, webContents: {},
+    getMainWindow: () => ({ isDestroyed: () => false }),
+    resolvePath: (value) => value,
+    store: { bookmarkFor: () => null, site: () => ({}), flush() {} },
   });
-  assert.equal(action({ sender: { id: 1 } }, { id: "gone", action: "close" }).closed, true);
-  browserSessions.set("pending", { ownerId: 1 });
-  assert.equal(action({ sender: { id: 1 } }, { id: "pending", action: "focus" }).ready, false);
-  assert.throws(() => action({ sender: { id: 2 } }, { id: "pending", action: "close" }), /not found/);
+  const owner = { id: 1, once() {}, isDestroyed: () => false };
+  assert.equal(browsers.browserAction({ sender: owner }, { id: "gone", action: "close" }).closed, true);
+  const pending = browsers.createBrowser({ sender: owner }, { url: "https://example.com/" });
+  assert.equal(browsers.browserAction({ sender: owner }, { id: pending.id, action: "focus" }).ready, false);
+  assert.throws(() => browsers.browserAction({ sender: { id: 2 } }, { id: pending.id, action: "close" }), /not found/);
 });
 
 test("browser waits for adoption before focusing and ignores late state after cleanup", async () => {
@@ -12339,10 +12962,50 @@ test("Rem stops before sending chat when folder renewal fails and allows retry",
   fail = false;
   await dom.change(dom.first("textarea"), "Try again");
   await dom.click(dom.byTitle("Send message"));
-  await dom.flush();
+  // Sending also reads the brain library before the chat request.
+  for (let attempt = 0; attempt < 20 && !/Recovered reply/.test(dom.text()); attempt++) await dom.flush();
   assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 1);
   assert.match(dom.text(), /Recovered reply/);
   await dom.unmount();
+});
+
+async function sentSecondBrain({ memory, resources }) {
+  const brain = (id) => ({ id, name: id, root: `/brains/${id}`, state: "available", settings: { allowCloud: true } });
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    jsonResponse("/api/second-brains", { result: { brains: [brain("school"), brain("work")] } }),
+    url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
+  ]);
+  const desktop = { workspace: { trustProjectRoot: async () => {}, pathGrantForApi: (root) => `grant:${root}` } };
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    workflows: [], width: 380, assistantDefaults: { resources },
+    memorySettings: { secondBrainEnabled: true, secondBrainRoot: "/brains/school", secondBrainFormat: "html", ...memory },
+  }), fetchMock, { desktop });
+  await dom.flush();
+  await dom.change(dom.first("textarea"), "Search my notes");
+  await dom.click(dom.byTitle("Send message"));
+  for (let attempt = 0; attempt < 20 && !/Done/.test(dom.text()); attempt++) await dom.flush();
+  const call = fetchMock.calls.find(item => item.url === "/api/chat/stream");
+  await dom.unmount();
+  return JSON.parse(call.options.body).workflow.remSecondBrain;
+}
+
+test("Rem threads use every Second Brain until one is turned off", async () => {
+  const resources = { shell: true, web: true, skills: [], mcpServers: [] };
+  const all = await sentSecondBrain({ resources });
+  assert.equal(all.enabled, true);
+  assert.deepEqual(all.brainIds, ["school", "work"]);
+  const some = await sentSecondBrain({ resources: { ...resources, disabledSecondBrains: ["school"] } });
+  assert.deepEqual(some.brainIds, ["work"]);
+  assert.equal(some.root, "/brains/work");
+  const none = await sentSecondBrain({ resources: { ...resources, disabledSecondBrains: ["school", "work"] } });
+  assert.deepEqual(none, { enabled: false });
+});
+
+test("Settings > Memory turns Second Brain off for every thread", async () => {
+  const sent = await sentSecondBrain({ memory: { secondBrainEnabled: false }, resources: { shell: true, web: true, skills: [], mcpServers: [] } });
+  assert.equal(sent.enabled, false);
+  assert.equal(sent.brainIds, undefined);
 });
 
 test('workspace keeps dirty tabs when closing is cancelled or the editor cannot save', async () => {
@@ -12517,34 +13180,6 @@ test("HTML previews open resolved local links on ordinary clicks", () => {
 });
 
 
-test("HTML file links use the studio path checks across folders and preserve locations", () => {
-  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
-  const body = source.slice(source.indexOf("function openBrowserLink("), source.indexOf("function showBrowserContextMenu("));
-  const sent = [];
-  let currentUrl = "file:///repo/report.html";
-  const sandbox = {
-    URL,
-    isAllowedBrowserNavigation: () => false,
-    browserSessionContents: () => ({ getURL: () => currentUrl }),
-  };
-  vm.runInNewContext(body, sandbox);
-  const session = { grantId: "test-grant", owner: { isDestroyed: () => false, send: (...args) => sent.push(args) } };
-  for (const href of ["file:///repo/guide.md", "file:///outside/next.html", "file:///outside/app.py:12:3"]) {
-    sandbox.openBrowserLink(session, href);
-    assert.deepEqual(toPlainObject(sent.at(-1)), ["gofer:browser-open-file", { href }]);
-  }
-  assert.deepEqual(codeWorkspaceModule.markdownFileLinkTarget("", sent.at(-1)[1].href), {
-    path: "/outside/app.py", lineNumber: 12, column: 3,
-  });
-  currentUrl = "https://example.com";
-  sandbox.openBrowserLink(session, "file:///outside/private.md");
-  currentUrl = "file:///repo/report.html";
-  sandbox.openBrowserLink({ ...session, grantId: "" }, "file:///outside/private.md");
-  sandbox.openBrowserLink(session, "invalid URL");
-  assert.equal(sent.length, 3);
-});
-
-
 test("Rem and Markdown previews open absolute paths and file URLs with spaces", async () => {
   const content = "[Absolute](</outside/My Notes/guide.md:8>) [File](file:///outside/My%20Notes/report.html)";
   for (const chat of [true, false]) {
@@ -12626,39 +13261,10 @@ test("local HTML website clicks hand off to browser tabs for ordinary and modifi
       assert.equal(event.defaultPrevented, true);
       assert.deepEqual(toPlainObject(sent.at(-1)), {
         channel: "gofer:browser-link-clicked",
-        payload: { url: href.startsWith("//") ? `https:${href}` : href },
+        payload: { url: href.startsWith("//") ? `https:${href}` : href, disposition: ctrlKey ? "background" : "foreground" },
       });
     }
   }
-});
-
-test("local HTML popup and click handoffs open websites without carrying file grants", () => {
-  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
-  const body = source.slice(source.indexOf("function configureBrowserSession("), source.indexOf("function showBrowserContextMenu("));
-  const sent = [];
-  let popup;
-  const contents = {
-    on() {}, getURL: () => "file:///repo/report.html",
-    setWindowOpenHandler: handler => { popup = handler; },
-  };
-  const sandbox = { URL, browserSessionContents: () => contents };
-  vm.runInNewContext(body, sandbox);
-  const session = {
-    contents, grantId: "local-file-grant",
-    owner: { isDestroyed: () => false, send: (...args) => sent.push(args) },
-  };
-  sandbox.configureBrowserSession(session);
-  for (const url of ["https://example.com/docs", "http://example.com/"]) {
-    sandbox.openBrowserLink(session, url);
-    assert.deepEqual(toPlainObject(sent.at(-1)), ["gofer:browser-open-tab", { url }]);
-    assert.equal(popup({ url }).action, "deny");
-    assert.deepEqual(toPlainObject(sent.at(-1)), ["gofer:browser-open-tab", { url }]);
-  }
-  for (const url of ["javascript:alert(1)", "data:text/html,hello", "about:blank"]) {
-    sandbox.openBrowserLink(session, url);
-    assert.equal(popup({ url }).action, "deny");
-  }
-  assert.equal(sent.length, 4);
 });
 
 test("Branches lists inactive branches without checkout and offers deletion and worktree picking", async () => {
@@ -12802,6 +13408,32 @@ function deferredDocumentResponse() {
 const writeTestWorkflow = id => ({ id, sourceFormat: 'rattish', sourcePath: `/projects/${id}/workflow.rattish` });
 const writeTestDocument = (source, savedRevision = 'r1', dirty = false) => ({ source, savedRevision, dirty, runnable: true });
 
+test('toolbar Stop explains overlapping runs instead of silently disabling itself', () => {
+  const run = (runId) => ({ workflowId: 'demo', runId, status: 'running' });
+  assert.deepEqual(appModule.workflowStopControl([]), { stopDisabled: true, stopTitle: 'No run in progress' });
+  assert.deepEqual(appModule.workflowStopControl([run('a')]), { stopDisabled: false, stopTitle: 'Stop this run' });
+  const several = appModule.workflowStopControl([run('a'), run('b')]);
+  assert.equal(several.stopDisabled, false);
+  assert.match(several.stopTitle, /2 runs in progress/);
+});
+
+test('a clean Rattish editor follows a file changed on disk before running', async () => {
+  const state = { current: { document: writeTestDocument('old', 'r1') } };
+  const session = { rattishEditorStateRef: state, setRattishEditorState(next) { state.current = next; } };
+  const followed = await appModule.followSavedRattishDocument(session, async () => writeTestDocument('edited by Rem', 'r2'));
+  assert.equal(followed.savedRevision, 'r2');
+  assert.equal(state.current.document.source, 'edited by Rem');
+
+  state.current = { document: writeTestDocument('unsaved edit', 'r1', true) };
+  let loads = 0;
+  const kept = await appModule.followSavedRattishDocument(session, async () => { loads += 1; return writeTestDocument('disk', 'r3'); });
+  assert.equal(loads, 0);
+  assert.equal(kept.source, 'unsaved edit');
+
+  const missing = { rattishEditorStateRef: { current: null }, setRattishEditorState(next) { this.rattishEditorStateRef.current = next; } };
+  assert.equal((await appModule.followSavedRattishDocument(missing, async () => writeTestDocument('disk', 'r4'))).savedRevision, 'r4');
+});
+
 test('workflow source typed during save retains its draft and advances the saved revision', async () => {
   const pending = deferredDocumentResponse();
   const harness = workflowDocumentWriteHarness(() => pending.promise);
@@ -12863,6 +13495,27 @@ test('workflow document writes serialize per workflow and run independently acro
   pending[2].resolve(writeTestDocument('alpha second', 'r3')); await second;
   assert.equal(harness.documentSession('alpha').rattishEditorStateRef.current.document.savedRevision, 'r3');
   assert.equal(harness.documentSession('beta').rattishEditorStateRef.current.document.savedRevision, 'b2');
+});
+
+test('starting a run leaves a pinned run review so the new run is visible', async () => {
+  const source = fs.readFileSync(path.join(frontendRoot, 'src/pages/App.jsx'), 'utf8');
+  const block = source.slice(source.indexOf('  async function executeWorkflowRun('), source.indexOf('  async function decideApproval('));
+  const pins = [];
+  const pinnedRunRef = { current: { workflowId: 'alpha', runId: 'old-failure' } };
+  const execute = vm.runInNewContext(`(function () { ${block}; return executeWorkflowRun; })()`, {
+    runStatesRef: { current: {} }, pinnedRunRef, executionMode: 'local',
+    setPinnedRun: value => pins.push(value), setRunPreview() {}, setRunState() {}, setLogState() {},
+    workflowRunRequest() { throw new Error('stop after the pin is cleared'); },
+    setTopBarNotice() {}, loadLatestLog() {}, loadRunLogs() {}, Error,
+  });
+  await execute(writeTestWorkflow('alpha')).catch(() => {});
+  assert.deepEqual(pins, [null]);
+  assert.equal(pinnedRunRef.current, null);
+
+  pins.length = 0;
+  pinnedRunRef.current = { workflowId: 'beta', runId: 'other' };
+  await execute(writeTestWorkflow('alpha')).catch(() => {});
+  assert.deepEqual(pins, [], 'a pin for another workflow stays');
 });
 
 test('closing mixed workflow tabs prompts every last dirty view and aborts on cancel', async () => {
@@ -13345,12 +13998,12 @@ for (const scenario of ["confirm", "cancel", "unrelated-error", "force-error"]) 
 }
 
 test("Rem archives are collapsed without metadata reads and load ten at a time", async () => {
-  const old = Array.from({ length: 23 }, (_, i) => ({ id: `archived-${i}`, title: `Archived conversation ${i}`, updatedAt: new Date(Date.now() - (11 + i) * 86400000).toISOString(), projectRoot: "/repo" }));
+  const old = Array.from({ length: 23 }, (_, i) => ({ id: `archived-${i}`, title: `Archived conversation ${i}`, updatedAt: new Date(Date.now() - (11 + i) * 86400000).toISOString(), projectRoot: "/repo", archived: true }));
   const live = { id: "live", title: "Current conversation", updatedAt: new Date().toISOString(), projectRoot: "/repo" };
-  const gone = { id: "gone", title: "Deleted workspace conversation", updatedAt: new Date().toISOString(), projectRoot: "/gone" };
+  const gone = { id: "gone", title: "Deleted workspace conversation", updatedAt: new Date().toISOString(), projectRoot: "/gone", pinned: true };
   const all = [live, gone, ...old];
   const storage = Object.fromEntries(all.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
-  storage["gofer-flow-chat-threads"] = JSON.stringify(all.map(({ id, updatedAt, projectRoot }) => ({ id, updatedAt, projectRoot, scopeIndexed: true })));
+  storage["gofer-flow-chat-threads"] = JSON.stringify(all.map(({ id, updatedAt, projectRoot, archived, pinned }) => ({ id, updatedAt, projectRoot, archived, pinned, scopeIndexed: true })));
   const reads = [];
   let wrapped = false;
   function Harness() {
@@ -13366,23 +14019,116 @@ test("Rem archives are collapsed without metadata reads and load ten at a time",
   });
   await dom.flush();
   assert.match(dom.text(), /Current conversation/);
-  assert.doesNotMatch(dom.text(), /Archived conversation|Deleted workspace conversation/);
-  assert.equal(dom.byText("Archived threads").getAttribute("aria-expanded"), "false");
+  // A thread whose folder is gone is archived even when pinned.
+  assert.doesNotMatch(dom.text(), /Archived conversation|Deleted workspace conversation|Pinned/);
+  assert.match(dom.text(), /Archived24 threads/);
+  assert.equal(threadGroupToggle(dom, "Archived").getAttribute("aria-expanded"), "false");
   assert.equal(reads.some(key => key.includes("meta:archived-")), false);
-  await dom.click(dom.byText("Archived threads"));
+  await dom.click(threadGroupToggle(dom, "Archived"));
   assert.match(dom.text(), /Deleted workspace conversation/);
   assert.equal((dom.text().match(/Archived conversation/g) || []).length, 9);
   await dom.click(dom.byText("Show older threads"));
   assert.equal((dom.text().match(/Archived conversation/g) || []).length, 19);
   await dom.click(dom.byText("Show older threads"));
   assert.equal((dom.text().match(/Archived conversation/g) || []).length, 23);
-  await dom.click(dom.byText("Archived threads"));
+  await dom.click(threadGroupToggle(dom, "Archived"));
   reads.length = 0;
   await dom.flush();
   assert.equal(reads.some(key => key.includes("meta:archived-")), false);
-  await dom.click(dom.byText("Archived threads"));
+  await dom.click(threadGroupToggle(dom, "Archived"));
   assert.equal((dom.text().match(/Archived conversation/g) || []).length, 9);
   await dom.unmount();
+});
+
+test("Rem orders thread groups and keeps only the seven most recently read threads out of the archive", async () => {
+  const stamp = minutes => new Date(Date.now() - minutes * 60000).toISOString();
+  const read = Array.from({ length: 9 }, (_, i) => ({ id: `read-${i}`, title: `Read conversation ${i}`, updatedAt: stamp(60 + i) }));
+  const threads = [
+    ...read,
+    { id: "pin", title: "Pinned conversation", pinned: true, updatedAt: stamp(999) },
+    { id: "unread", title: "Unread conversation", unread: true, updatedAt: stamp(5) },
+    { id: "busy", title: "Busy conversation", updatedAt: stamp(1) },
+  ];
+  const storage = Object.fromEntries(threads.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
+  storage["gofer-flow-chat-threads"] = JSON.stringify(threads.map(thread => ({ ...thread, scopeIndexed: true })));
+  const dom = await mountReact(React.createElement(appModule.ThreadSections, {
+    threads: [], onOpen() {}, onDelete() {}, activityByThread: { busy: { sending: true } },
+  }), createFetchMock([]), { storage });
+  try {
+    await dom.flush();
+    const sections = allElements(dom.container).filter(node => node.tagName === "SECTION").map(node => node.getAttribute("aria-label"));
+    assert.deepEqual(sections, ["Pinned threads", "Unread threads", "Read threads", "Running threads", "Archived threads"]);
+    assert.match(dom.text(), /Pinned conversation[\s\S]*Unread conversation[\s\S]*Read7 threads[\s\S]*Read conversation 0[\s\S]*Read conversation 6/);
+    assert.doesNotMatch(dom.text(), /Busy conversation|Read conversation [78]/);
+    assert.equal(threadGroupToggle(dom, "Running").getAttribute("aria-expanded"), "false");
+    assert.match(dom.text(), /Running1 thread[\s\S]*Archived2 threads/);
+    await openThreadGroup(dom, "Running");
+    assert.match(dom.text(), /Busy conversation/);
+    await openThreadGroup(dom, "Archived");
+    assert.match(dom.text(), /Archived2 threads[\s\S]*Read conversation 7[\s\S]*Read conversation 8/);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem clears the archive after confirmation and keeps Rem task threads", async () => {
+  const stamp = new Date().toISOString();
+  const threads = [
+    { id: "keep", title: "Keep reading", updatedAt: stamp },
+    { id: "old-a", title: "Old archived A", archived: true, updatedAt: stamp },
+    { id: "old-b", title: "Old archived B", archived: true, updatedAt: stamp },
+    { id: "worker", title: "Rem task worker", archived: true, managedRole: "execute", updatedAt: stamp },
+  ];
+  const storage = Object.fromEntries(threads.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
+  storage["gofer-flow-chat-threads"] = JSON.stringify(threads.map(thread => ({ ...thread, scopeIndexed: true })));
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
+  const previousConfirm = window.confirm;
+  const prompts = [];
+  try {
+    await dom.flush();
+    window.confirm = message => { prompts.push(message); return false; };
+    assert.equal(dom.allByTitle("Delete every archived thread").length, 0);
+    await openThreadGroup(dom, "Archived");
+    assert.match(dom.text(), /Kept until you clear them/);
+    await dom.click(dom.byLabel("Clear archive, 2 threads"));
+    assert.match(prompts[0], /Delete 2 archived threads\? This cannot be undone\./);
+    assert.ok(appModule.loadChatThread("old-a"));
+    window.confirm = () => true;
+    await dom.click(dom.byLabel("Clear archive, 2 threads"));
+    await dom.flush();
+    assert.equal(appModule.loadChatThread("old-a"), null);
+    assert.equal(appModule.loadChatThread("old-b"), null);
+    assert.ok(appModule.loadChatThread("keep"));
+    assert.ok(appModule.loadChatThread("worker"));
+    assert.deepEqual(fetchMock.calls.filter(call => call.options?.method === "DELETE").map(call => call.url), ["/api/chat/threads/old-a", "/api/chat/threads/old-b"]);
+    assert.match(dom.text(), /Archived1 thread/);
+    assert.equal(dom.allByTitle("Delete every archived thread").length, 0);
+  } finally { window.confirm = previousConfirm; await dom.unmount(); }
+});
+
+test("Rem deletes archived threads after the configured time without activity", async () => {
+  const old = new Date(Date.now() - 40 * 86400000).toISOString();
+  const threads = [
+    { id: "stale", title: "Stale archived", archived: true, updatedAt: old },
+    { id: "fresh", title: "Fresh archived", archived: true, updatedAt: new Date().toISOString() },
+    { id: "stale-read", title: "Stale but visible", updatedAt: old },
+  ];
+  const storage = Object.fromEntries(threads.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
+  storage["gofer-flow-chat-threads"] = JSON.stringify(threads.map(thread => ({ ...thread, scopeIndexed: true })));
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380, archiveRetention: "30" }), fetchMock, { storage });
+  try {
+    await dom.flush(6000);
+    for (let i = 0; i < 5; i++) await dom.flush();
+    assert.equal(appModule.loadChatThread("stale"), null);
+    assert.ok(appModule.loadChatThread("fresh"));
+    assert.ok(appModule.loadChatThread("stale-read"));
+  } finally { await dom.unmount(); }
 });
 
 test("Rem retains a thread's branch and archives it after that branch is deleted", async () => {
@@ -13404,7 +14150,7 @@ test("Rem retains a thread's branch and archives it after that branch is deleted
   branches = ["main"];
   await dom.flush(60000);
   assert.equal(dom.allByTitle("Delete thread").length, 0);
-  await dom.click(dom.byText("Archived threads"));
+  await openThreadGroup(dom, "Archived");
   assert.equal(dom.allByTitle("Delete thread").length, 1);
   assert.equal(appModule.loadChatThreads()[0].projectBranch, "feature");
   await dom.unmount();
@@ -13426,12 +14172,13 @@ test("Rem archives, pins and confirms deletion with persisted organization", asy
     await dom.flush();
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Pin thread"));
-    assert.match(dom.text(), /Pinned threads[\s\S]*Organize this conversation[\s\S]*Active threads/);
+    assert.match(dom.text(), /Pinned1 thread[\s\S]*Organize this conversation[\s\S]*Archived0 threads/);
     assert.equal(appModule.loadChatThread(thread.id).pinned, true);
     assert.equal(appModule.chatThreadIndex()[0].pinned, true);
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Unpin thread"));
-    assert.doesNotMatch(dom.text(), /Pinned threads/);
+    assert.match(dom.text(), /Read1 thread[\s\S]*Organize this conversation/);
+    assert.doesNotMatch(dom.text(), /Pinned\d/);
     await dom.click(dom.byTitle("Thread options"));
     await dom.click(dom.byText("Delete thread"));
     assert.equal(prompts.length, 1);
@@ -13442,7 +14189,7 @@ test("Rem archives, pins and confirms deletion with persisted organization", asy
     assert.doesNotMatch(dom.text(), /Organize this conversation/);
     assert.equal(appModule.loadChatThread(thread.id).archived, true);
     assert.equal(appModule.chatThreadIndex()[0].archived, true);
-    await dom.click(dom.byText("Archived threads"));
+    await openThreadGroup(dom, "Archived");
     assert.match(dom.text(), /Organize this conversation/);
     await dom.click(dom.byTitle("Delete thread"));
     assert.equal(prompts.length, 2);
@@ -13465,7 +14212,7 @@ for (const organization of [{}, { pinned: true }, { archived: true }]) {
     });
     try {
       await dom.flush();
-      if (thread.archived) await dom.click(dom.byText("Archived threads"));
+      if (thread.archived) await openThreadGroup(dom, "Archived");
       await dom.click(dom.byTitle("Thread options"));
       await dom.click(dom.byText("Rename Thread"));
       const input = dom.byLabel("Thread name");
@@ -13495,7 +14242,7 @@ for (const organization of [{}, { pinned: true }, { archived: true }]) {
       await dom.unmount();
       dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
       await dom.flush();
-      if (thread.archived) await dom.click(dom.byText("Archived threads"));
+      if (thread.archived) await openThreadGroup(dom, "Archived");
       assert.match(dom.text(), /Release planning/);
       assert.equal(appModule.loadChatThread(thread.id).titleCustomized, true);
     } finally { await dom.unmount(); }
@@ -13537,20 +14284,23 @@ test("Rem cancels thread renames and keeps a custom New thread title after sendi
   } finally { await dom.unmount(); }
 });
 
-test("Rem loads old pinned threads from the index above active threads after restart", async () => {
-  const pinned = { id: "old-pin", title: "Keep this thread", pinned: true, projectRoot: "/gone", projectBranch: "deleted", updatedAt: "2020-01-01" };
+test("Rem loads old pinned threads from the index above read threads and archives unreachable pins", async () => {
+  const pinned = { id: "old-pin", title: "Keep this thread", pinned: true, projectRoot: "/repo", updatedAt: "2020-01-01" };
+  const removed = { id: "removed-pin", title: "Removed worktree thread", pinned: true, projectRoot: "/gone", projectBranch: "deleted", updatedAt: "2020-01-02" };
   const active = { id: "active", title: "Fresh thread", updatedAt: new Date().toISOString() };
   const storage = {
-    "gofer-flow-chat-threads": JSON.stringify([active, pinned]),
+    "gofer-flow-chat-threads": JSON.stringify([active, pinned, removed]),
   };
   const dom = await mountReact(React.createElement(appModule.ThreadSections, { threads: [], onOpen() {}, onDelete() {} }), createFetchMock([]), {
     storage, desktop: { workspace: { missingThreadRoots: async () => ["/gone"] } },
   });
   try {
     await dom.flush();
-    assert.match(dom.text(), /Pinned threads[\s\S]*Keep this thread[\s\S]*Active threads[\s\S]*Fresh thread/);
-    await dom.click(dom.byText("Archived threads"));
-    assert.equal(dom.allByTitle("Delete thread").length, 0);
+    assert.match(dom.text(), /Pinned1 thread[\s\S]*Keep this thread[\s\S]*Read1 thread[\s\S]*Fresh thread/);
+    assert.doesNotMatch(dom.text(), /Removed worktree thread/);
+    await openThreadGroup(dom, "Archived");
+    assert.match(dom.text(), /Archived1 thread[\s\S]*Removed worktree thread/);
+    assert.equal(dom.allByTitle("Delete thread").length, 1);
   } finally { await dom.unmount(); }
 });
 
@@ -13628,6 +14378,8 @@ for (const provider of ["cursor", "copilot", "opencode", "antigravity", "grok"])
       assert.ok(checkpoint.messages.some(message => message.body === "Continue with steering"));
       assert.ok(checkpoint.messages.some(message => message.body === "Partial work"));
       assert.ok(fetchMock.calls.some(call => call.url.startsWith("/api/chat/steering?conversationId=")));
+      const submitted = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(request.conversationId))).filter(message => message.role === "user");
+      assert.deepEqual(submitted.at(-1).remModelSelection, submitted[0].remModelSelection);
       await dom.click(dom.byTitle("Send message")); await dom.flush();
       const followup = JSON.parse(fetchMock.calls.filter(call => call.url === "/api/chat/stream").at(-1).options.body);
       assert.equal(followup.messages.filter(message => message.body === receipt.text).length, 1);
@@ -13829,21 +14581,6 @@ test("browser addresses preserve Windows, UNC and local file paths", () => {
     assert.equal(integratedBrowserModule.browserAddress(input, "https://search.example/?q={query}"), input);
     assert.equal(normalizeBrowserUrl(input), expected);
   }
-});
-
-test("browser operation failures cannot escape after navigation or tab destruction", async () => {
-  const source = fs.readFileSync(path.join(repoRoot, "frontend/electron/main.js"), "utf8");
-  const body = source.slice(source.indexOf("async function runBrowserOperation("), source.indexOf("function configureBrowserSession("));
-  let updates = 0;
-  const sandbox = { emitBrowserState: () => { updates += 1; }, Error };
-  vm.runInNewContext(body, sandbox);
-  const session = {};
-  await sandbox.runBrowserOperation(session, () => { throw new Error("bad file path"); });
-  assert.equal(session.error, "bad file path");
-  assert.equal(updates, 1);
-  sandbox.emitBrowserState = () => { throw new Error("Object has been destroyed"); };
-  await sandbox.runBrowserOperation(session, () => Promise.reject(new Error("ERR_FILE_NOT_FOUND")));
-  assert.equal(session.error, "ERR_FILE_NOT_FOUND");
 });
 
 test("provider settings preserve executable drafts and save picker paths", async () => {
@@ -14290,14 +15027,16 @@ test("active threads are clickable before Git resolves and metadata reads follow
   const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { storage, desktop: { workspace } });
   try {
     assert.equal(branchCalls, 1);
-    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 15);
+    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 7);
     assert.equal(reads.some(key => key.startsWith("gofer-flow-chat-thread:")), false);
     await dom.click(allElements(dom.container).find(el => el.tagName === "BUTTON" && el.textContent.includes("Fast thread 0")));
     assert.deepEqual(opened, ["fast-0"]);
+    await openThreadGroup(dom, "Archived");
+    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 17);
     await dom.click(dom.byText("Show older threads"));
-    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 30);
+    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 27);
     git.resolve({ active: true, branches: ["main"] }); await dom.flush();
-    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 30);
+    assert.equal(reads.filter(key => key.startsWith("gofer-flow-chat-thread-meta:")).length, 27);
   } finally { await dom.unmount(); }
 });
 
@@ -14485,6 +15224,84 @@ test("Rem sends provider model and effort overrides on startup and after switchi
       assert.equal(request.model, "astra");
       assert.equal(request.effort, "high");
     }
+  } finally { await dom.unmount(); }
+});
+
+test("Rem shows one model switch divider on send, persists it, and keeps picker changes out of history", async () => {
+  const efforts = [{ id: "medium", displayName: "Medium" }, { id: "high", displayName: "High" }];
+  const providers = [
+    { id: "codex", displayName: "Codex", available: true, defaultModel: "sol", models: [
+      { id: "sol", displayName: "Sol", defaultEffort: "high", efforts },
+      { id: "astra", displayName: "Astra", defaultEffort: "high", efforts },
+    ] },
+    { id: "claude_code", displayName: "Claude Code", available: true, defaultModel: "opus", models: [{ id: "opus", displayName: "Opus" }] },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers }),
+    (url, options) => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url, options) : null,
+  ]);
+  let dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const banners = () => allElements(dom.container).filter(el => el.getAttribute?.("aria-label") === "Model changed");
+  async function choose(picker, label) {
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("data-picker-trigger") === picker));
+    await dom.click(allElements(dom.container).find(el => el.getAttribute?.("role") === "option" && textOf(el).startsWith(label)));
+    await dom.flush();
+  }
+  async function send(text) {
+    await dom.change(dom.first("textarea"), text);
+    await dom.click(dom.byTitle("Send message")); await dom.flush();
+  }
+  try {
+    await dom.flush();
+    await choose("model", "Sol");
+    await send("First model");
+    assert.equal(banners().length, 0);
+    for (let index = 0; index < 30; index++) await choose("model", index % 2 ? "Sol" : "Astra");
+    assert.equal(banners().length, 0);
+    await send("Back to original model");
+    assert.equal(banners().length, 0);
+    for (let index = 0; index < 29; index++) await choose("model", index % 2 ? "Sol" : "Astra");
+    assert.equal(banners().length, 0);
+    await send("Use the final model");
+    assert.deepEqual(banners().map(textOf), ["switched to Codex - astra - high"]);
+    await send("Same settings");
+    assert.equal(banners().length, 1);
+    await choose("effort", "Medium");
+    assert.equal(banners().length, 1);
+    await send("Change effort");
+    assert.deepEqual(banners().map(textOf), ["switched to Codex - astra - high", "switched to Codex - astra - medium"]);
+    await choose("provider", "Claude Code");
+    assert.equal(banners().length, 2);
+    await send("Change provider");
+    assert.equal(textOf(banners().at(-1)), "switched to Claude Code - opus - default effort");
+    await dom.click(dom.byLabel("Edit message"));
+    await dom.change(dom.byLabel("Edit message text"), "Change provider, corrected");
+    await dom.click(dom.ancestor(dom.byText("Send again"), "BUTTON")); await dom.flush();
+    assert.equal(banners().length, 3);
+    const requests = fetchMock.calls.filter(call => call.url === "/api/chat/stream").map(call => JSON.parse(call.options.body));
+    assert.ok(requests.every(request => request.messages.every(message => !("modelSwitchBanner" in message) && !("remModelSelection" in message))));
+    assert.ok(requests.every(request => request.messages.every(message => !message.body.startsWith("switched to"))));
+    const [thread] = appModule.loadChatThreads();
+    const stored = JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(thread.id)));
+    assert.equal(stored.filter(message => message.modelSwitchBanner).length, 3);
+    const storage = Object.fromEntries(["gofer-flow-chat-threads", `gofer-flow-chat-thread-meta:${thread.id}`, appModule.chatStorageKeyFor(thread.id)].map(key => [key, window.localStorage.getItem(key)]));
+    await dom.unmount();
+    dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock, { storage });
+    await dom.click(dom.ancestor(dom.byText(thread.title), "BUTTON")); await dom.flush();
+    assert.equal(banners().length, 3);
+    await send("After reopening");
+    assert.equal(banners().length, 3);
+    await choose("provider", "Codex");
+    await choose("model", "Astra");
+    await choose("effort", "Medium");
+    await dom.click(dom.byLabel("Edit message"));
+    await dom.change(dom.byLabel("Edit message text"), "After reopening, revised settings");
+    await dom.click(dom.ancestor(dom.byText("Send again"), "BUTTON")); await dom.flush();
+    assert.equal(banners().length, 4);
+    assert.equal(textOf(banners().at(-1)), "switched to Codex - astra - medium");
+    await dom.click(dom.byTitle("New thread")); await dom.flush();
+    await send("Independent thread");
+    assert.equal(banners().length, 0);
   } finally { await dom.unmount(); }
 });
 
@@ -14819,16 +15636,16 @@ test("Ctrl+Enter starts background threads while Enter opens the new thread", as
   assert.equal(requests.length, 2);
   assert.notEqual(requests[0].conversationId, requests[1].conversationId);
   assert.equal(requests[0].workflow.projectRoot, "/projects/mobile");
-  assert.deepEqual(requests[0].workflow.remResources, { shell: true, web: true, skills: [], mcpServers: [] });
+  assert.deepEqual(requests[0].workflow.remResources, { shell: true, web: true, agents: true, browser: false, skills: [], mcpServers: [] });
   assert.deepEqual(requests[1].workflow.remResources, requests[0].workflow.remResources);
   await dom.unmount();
 });
 
 test("new thread resource defaults enable tools without overriding saved restrictions", () => {
   assert.deepEqual(settingsModule.normalizeAppSettings({}).assistant.resources,
-    { shell: true, web: true, skills: [], mcpServers: [] });
-  assert.deepEqual(settingsModule.normalizeAppSettings({ assistant: { resources: { shell: false, web: false } } }).assistant.resources,
-    { shell: false, web: false, skills: [], mcpServers: [] });
+    { shell: true, web: true, agents: true, browser: false, skills: [], mcpServers: [] });
+  assert.deepEqual(settingsModule.normalizeAppSettings({ assistant: { resources: { shell: false, web: false, agents: false, browser: true } } }).assistant.resources,
+    { shell: false, web: false, agents: false, browser: true, skills: [], mcpServers: [] });
 });
 
 test("an existing Codex thread sends edited tools, skills and MCP to steering and later messages", async () => {
@@ -14854,32 +15671,30 @@ test("an existing Codex thread sends edited tools, skills and MCP to steering an
   const dom = await mountReact(React.createElement(appModule.ChatPane, {
     width: 380, assistantDefaults: { provider: "codex", resources: { shell: false, web: false, skills: [], mcpServers: [] } },
   }), fetchMock);
-  const checkbox = label => allElements(dom.byText(label)).find(el => el.tagName === "INPUT");
+  const checkbox = label => dom.byLabel(label);
   try {
     await dom.flush();
     await dom.change(dom.first("textarea"), "Research this topic");
     await dom.click(dom.byTitle("Send message")); await dom.flush();
     stream.releaseNext(); await dom.flush();
     assert.equal(initial.workflow.remResources.web, false);
-    await dom.click(dom.byText("Thread tools, skills & MCP"));
-    assert.match(dom.text(), /Tool changes apply when you send your next instruction/);
+    await dom.click(dom.byLabel("Thread tools, skills & MCP"));
+    assert.match(dom.text(), /Changes apply when you send your next instruction/);
     await dom.change(checkbox("Search the web"), true);
     await dom.change(checkbox("Run commands"), true);
-    await dom.click(dom.byExactText("Add skill"));
-    await dom.change(dom.first("textarea"), "Search now");
-    await dom.click(dom.byLabel("Steer Rem")); await dom.flush();
-    assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/steer").length, 0);
-    assert.equal(dom.first("textarea").value, "Search now");
-    const field = dom.byLabel("Skill 1 path");
+    await dom.click(dom.byLabel("Add skill"));
+    const field = dom.byLabel("Skill folder");
     await dom.focus(field); await dom.change(field, "/old"); await dom.change(field, "");
     assert.equal(field.value, "");
     await dom.change(field, "/skills/research"); await dom.blur(field);
-    await dom.click(dom.byExactText("Add MCP server"));
-    const commit = async (label, value) => { const input = dom.byLabel(label); await dom.focus(input); await dom.change(input, value); await dom.blur(input); };
-    await commit("Server 1 name", "docs");
-    await dom.change(dom.byLabel("Server 1 connection"), "stdio");
-    await commit("Server 1 executable", "/tools/docs");
-    await commit("Server 1 arguments", "--root\n/path with spaces");
+    await dom.pointer(dom.ancestor(field, "FORM"), "onSubmit"); await dom.flush();
+    await dom.click(dom.byLabel("Add MCP server"));
+    await dom.change(dom.byLabel("Server name"), "docs");
+    await dom.click(dom.byExactText("Local program"));
+    await dom.change(dom.byLabel("Server program"), "/tools/docs");
+    await dom.change(dom.byLabel("Server arguments"), "--root\n/path with spaces");
+    await dom.pointer(dom.ancestor(dom.byLabel("Server program"), "FORM"), "onSubmit"); await dom.flush();
+    await dom.change(dom.first("textarea"), "Search now");
     await dom.click(dom.byLabel("Steer Rem")); await dom.flush();
     assert.equal(receipt.resources.web, true);
     assert.equal(receipt.resources.shell, true);
@@ -14889,7 +15704,7 @@ test("an existing Codex thread sends edited tools, skills and MCP to steering an
     chunks[1] = JSON.stringify({ type: "turn", turnId: initial.turnId, generation: 1 }) + "\n"
       + JSON.stringify({ type: "final", turnId: initial.turnId, generation: 1, message: { body: "Searched" } }) + "\n";
     stream.releaseNext(); await dom.flush();
-    assert.match(dom.text(), /Tool changes apply to your next message/);
+    assert.match(dom.text(), /Changes apply to your next message/);
     const composer = allElements(dom.container).find(node => node.getAttribute("data-chat-composer") !== null);
     await dom.change(allElements(composer).find(node => node.tagName === "TEXTAREA"), "Follow up");
     await dom.click(dom.byTitle("Send message")); await dom.flush();
@@ -14929,28 +15744,32 @@ test("background first turn captures tools, skills, MCP and permissions before a
     trustProjectRoot: () => grant.promise,
     pathGrantForApi: () => "project-grant",
   } } });
-  const checkbox = label => allElements(dom.byText(label)).find(el => el.tagName === "INPUT");
+  const checkbox = label => dom.byLabel(label);
   const requests = () => fetchMock.calls.filter(call => call.url === "/api/chat/stream").map(call => JSON.parse(call.options.body));
   try {
     await dom.flush();
-    await dom.click(dom.byText("New thread tools, skills & MCP"));
+    await dom.click(dom.byLabel("New thread tools, skills & MCP"));
     assert.equal(reactProps(checkbox("Search the web")).checked, false);
     await dom.change(checkbox("Search the web"), true);
     await dom.change(checkbox("Run commands"), true);
+    assert.equal(reactProps(checkbox("Subagents")).checked, true);
+    assert.equal(reactProps(checkbox("Browser")).checked, false);
+    await dom.change(checkbox("Subagents"), false);
+    await dom.change(checkbox("Browser"), true);
     await dom.change(dom.byLabel("Rem permissions"), "workspace-write");
     await dom.change(dom.first("textarea"), "Search the current temperature and calculate its square root");
     await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
     await dom.flush();
     assert.throws(() => dom.byLabel("Back to active threads"));
     assert.equal(requests().length, 0, "provider must wait for the project grant");
-    const expected = { ...resources, shell: true, web: true };
+    const expected = { ...resources, shell: true, web: true, agents: false, browser: true };
     const thread = appModule.loadChatThreads()[0];
     assert.deepEqual(thread.resources, expected, "configuration is saved before dispatch");
     // Configure the next thread while the first one is waiting to start.
     await dom.change(checkbox("Search the web"), false);
     await dom.change(checkbox("Run commands"), false);
-    await dom.click(dom.byLabel("Remove skill 1"));
-    await dom.click(dom.byLabel("Remove server 1"));
+    await dom.click(dom.byLabel("Remove skill weather"));
+    await dom.click(dom.byLabel("Remove server weather"));
     grant.resolve();
     await dom.flush();
     assert.equal(requests().length, 1);
@@ -14964,13 +15783,15 @@ test("background first turn captures tools, skills, MCP and permissions before a
     const row = allElements(dom.container).find(el => el.getAttribute("data-thread-id") === thread.id);
     await dom.click(allElements(row).find(el => el.tagName === "BUTTON"));
     await dom.flush();
+    if (!reactProps(dom.byLabel("Thread tools, skills & MCP"))["aria-expanded"]) await dom.click(dom.byLabel("Thread tools, skills & MCP"));
     assert.equal(reactProps(checkbox("Search the web")).checked, true);
-    assert.equal(dom.byLabel("Skill 1 path").value, "/skills/weather");
+    assert.equal(reactProps(checkbox("weather")).checked, true);
+    assert.match(dom.text(), /\/skills\/weather/);
     await dom.click(dom.byLabel("Back to active threads"));
     await dom.change(dom.first("textarea"), "Second task with tools disabled");
     await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
     await dom.flush();
-    assert.deepEqual(requests()[1].workflow.remResources, { shell: false, web: false, skills: [], mcpServers: [] });
+    assert.deepEqual(requests()[1].workflow.remResources, { shell: false, web: false, agents: false, browser: true, skills: [], mcpServers: [] });
     assert.deepEqual(resources.skills, [{ path: "/skills/weather", enabled: true }]);
     assert.equal(resources.web, false, "application defaults were not mutated");
   } finally { grant.resolve(); await dom.flush(); await dom.unmount(); }
@@ -14981,26 +15802,28 @@ test("invalid new thread resources block background dispatch until corrected", a
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
     url => url === "/api/chat/stream" ? streamResponse(['{"type":"final","message":{"body":"Done"}}\n'])(url) : null,
   ]);
-  const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380 }), fetchMock);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, {
+    width: 380,
+    assistantDefaults: { resources: { shell: true, web: true, skills: [{ path: "/skills/weather", enabled: true }], mcpServers: [{ name: "broken", type: "stdio", command: "", enabled: true }] } },
+  }), fetchMock);
   try {
     await dom.flush();
     const threadCount = appModule.loadChatThreads().length;
-    await dom.click(dom.byText("New thread tools, skills & MCP"));
-    await dom.click(dom.byExactText("Add skill"));
+    assert.match(dom.text(), /Needs attention/);
     await dom.change(dom.first("textarea"), "Use my skill");
     await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
     await dom.flush();
     assert.equal(fetchMock.calls.filter(call => call.url === "/api/chat/stream").length, 0);
     assert.equal(appModule.loadChatThreads().length, threadCount);
     assert.equal(reactProps(dom.first("textarea")).value, "Use my skill");
-    const path = dom.byLabel("Skill 1 path");
-    await dom.focus(path);
-    await dom.change(path, "/skills/weather");
-    await dom.blur(path);
+    await dom.click(dom.byLabel("New thread tools, skills & MCP"));
+    assert.match(dom.text(), /Enter an executable for each local MCP server/);
+    await dom.click(dom.byLabel("Remove server broken"));
     await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
     await dom.flush();
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
     assert.deepEqual(request.workflow.remResources.skills, [{ path: "/skills/weather", enabled: true }]);
+    assert.deepEqual(request.workflow.remResources.mcpServers, []);
   } finally { await dom.unmount(); }
 });
 
@@ -15084,14 +15907,14 @@ test("global research sends selected web, skill and MCP settings with the saved 
   try {
     await dom.flush();
     await dom.change(dom.byLabel("Rem permissions"), "danger-full-access");
-    await dom.click(dom.byText("New thread tools, skills & MCP"));
-    assert.equal(dom.byLabel("Skill 1 path").value, "/skills/research");
+    await dom.click(dom.byLabel("New thread tools, skills & MCP"));
+    assert.equal(reactProps(dom.byLabel("research")).checked, true);
     assert.doesNotMatch(dom.text(), /Codex keeps your command setting under Read Only here/);
     await dom.change(dom.first("textarea"), "Research coding dashboards");
     await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
     assert.equal(request.workflow.remThreads.global, true);
-    assert.deepEqual(request.workflow.remResources, resources);
+    assert.deepEqual(request.workflow.remResources, { ...resources, agents: true, browser: false });
     assert.equal(request.permissionMode, "danger-full-access");
     assert.equal(dom.byLabel("Rem permissions").value, "danger-full-access");
     assert.doesNotMatch(dom.text(), /Codex keeps your command setting under Read Only here/);
@@ -15527,6 +16350,9 @@ test("thread order changes on user submission and completion, never streamed tho
     await dom.change(dom.first("textarea"), "First task");
     await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
     await dom.flush();
+    // Background threads wait in the collapsed Running group.
+    assert.deepEqual(ids(), []);
+    await openThreadGroup(dom, "Running");
     const firstId = ids()[0];
     await dom.change(dom.first("textarea"), "Second task");
     await dom.keyDown(dom.first("textarea"), "Enter", { ctrlKey: true });
@@ -15551,8 +16377,12 @@ test("thread order changes on user submission and completion, never streamed tho
     await dom.flush();
     await dom.click(dom.byLabel("Back to active threads"));
     await dom.flush();
-    assert.deepEqual(ids(), [firstId, secondId]);
+    // The unread second thread stays above the running follow-up.
+    assert.deepEqual(ids(), [secondId]);
+    await openThreadGroup(dom, "Running");
+    assert.deepEqual(ids(), [secondId, firstId]);
     followup.releaseNext(); await dom.flush();
+    assert.deepEqual(ids(), [firstId, secondId]);
   } finally {
     for (const stream of streams) for (let i = 0; i < 3; i++) stream.releaseNext();
     await dom.flush(); await dom.unmount();
@@ -16781,4 +17611,812 @@ test("update notices and upgrade actions share the toolbar group with the check 
   }
   assert.equal(checks, 2);
   assert.equal(upgrades, 1);
+});
+
+test("Rem leads the activity rail and Second Brain follows Swarms in arrow-key traversal", async () => {
+  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => ({ active: false, entries: [] }) };
+  const opened = [];
+  const remOpened = [];
+  const settings = settingsModule.normalizeAppSettings({ plugins: { enabled: EXPERIMENTAL_PLUGINS_ON } });
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { settings, workflow: { projectRoot: "/workspace/project" }, onOpenSecondBrain: () => opened.push(true), onOpenRemHome: () => remOpened.push(true) }), createFetchMock([]), { desktop: { workspace } });
+  try {
+    const labels = allElements(dom.container).filter(element => String(element.getAttribute?.("id") || "").startsWith("sidebar-tab-")).map(element => element.getAttribute("aria-label"));
+    assert.equal(labels[0], "Rem");
+    // Organizations stays off until a user turns it on.
+    assert.deepEqual(labels.slice(-2), ["Swarms", "Second Brain"]);
+    assert.equal(labels.includes("Organizations"), false);
+    const rail = { currentTarget: { parentElement: { querySelector: () => null } } };
+    await dom.keyDown(dom.byLabel("Swarms"), "ArrowDown", rail);
+    assert.equal(dom.byLabel("Second Brain").getAttribute("aria-selected"), "true");
+    await dom.keyDown(dom.byLabel("Second Brain"), "ArrowDown", rail);
+    assert.equal(dom.byLabel("Rem").getAttribute("aria-selected"), "true");
+    await dom.keyDown(dom.byLabel("Rem"), "ArrowDown", rail);
+    assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
+    await dom.keyDown(dom.byLabel("File explorer"), "End", rail);
+    assert.equal(dom.byLabel("Second Brain").getAttribute("aria-selected"), "true");
+    // Arrow keys only move between panels; choosing Rem opens its conversation.
+    assert.deepEqual(opened, []);
+    assert.deepEqual(remOpened, []);
+    await dom.click(dom.byLabel("Rem"));
+    assert.deepEqual(remOpened, [true]);
+  } finally { await dom.unmount(); }
+});
+
+test("plugin settings hide, order, and lock the activity rail", async () => {
+  const workspace = { trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }), gitStatus: async () => ({ active: false, entries: [] }) };
+  const changes = [];
+  const settingsFor = (plugins) => settingsModule.normalizeAppSettings({ plugins });
+  const railLabels = (dom) => allElements(dom.container).filter(element => String(element.getAttribute?.("id") || "").startsWith("sidebar-tab-")).map(element => element.getAttribute("aria-label"));
+  const props = (plugins) => ({
+    workflow: { projectRoot: "/workspace/project" },
+    settings: settingsFor(plugins),
+    sidebarView: "second-brain",
+    onSettingsChange: (path, value) => changes.push([path, value]),
+  });
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, props({
+    order: ["second-brain", "files", "rem", "search", "source-control", "swarms", "organizations"],
+    enabled: { rem: false, files: false, organizations: true, swarms: true, "second-brain": true },
+  })), createFetchMock([]), { desktop: { workspace } });
+  try {
+    // File explorer cannot be turned off; Rem is hidden and Organizations is opted in.
+    assert.deepEqual(railLabels(dom), ["Second Brain", "File explorer", "Search", "Source control", "Swarms", "Organizations"]);
+    const target = dom.byLabel("Swarms");
+    const dragEvent = { clientY: 30, currentTarget: { getBoundingClientRect: () => ({ top: 0, height: 40 }) }, dataTransfer: { setData() {} } };
+    await dom.pointer(dom.byLabel("Second Brain"), "onDragStart", dragEvent);
+    await dom.pointer(target, "onDragOver", dragEvent);
+    await dom.pointer(target, "onDrop", dragEvent);
+    // Workflows was missing from the stored order, so it returns after Rem.
+    assert.deepEqual(changes.at(-1), ["plugins.order", ["files", "rem", "workflows", "search", "source-control", "swarms", "second-brain", "organizations"]]);
+    const rail = { currentTarget: { parentElement: { querySelector: () => null } } };
+    await dom.keyDown(dom.byLabel("Search"), "ArrowUp", { ...rail, altKey: true });
+    // Hidden plugins are skipped, so Search moves above File explorer.
+    assert.deepEqual(changes.at(-1), ["plugins.order", ["second-brain", "search", "files", "rem", "workflows", "source-control", "swarms", "organizations"]]);
+    await dom.click(dom.byLabel("Lock plugin order"));
+    assert.deepEqual(changes.at(-1), ["plugins.locked", true]);
+  } finally { await dom.unmount(); }
+
+  changes.length = 0;
+  const locked = await mountReact(React.createElement(codeFileExplorerModule.default, props({ locked: true, enabled: { "second-brain": false } })), createFetchMock([]), { desktop: { workspace } });
+  try {
+    // A turned-off plugin cannot keep the sidebar, so it falls back to files.
+    assert.equal(locked.byLabel("File explorer").getAttribute("aria-selected"), "true");
+    assert.equal(railLabels(locked).includes("Second Brain"), false);
+    assert.equal(reactProps(locked.byLabel("Search")).draggable, false);
+    assert.equal(locked.byLabel("Lock plugin order").getAttribute("aria-pressed"), "true");
+    let prevented = false;
+    await locked.pointer(locked.byLabel("Search"), "onDragStart", { preventDefault: () => { prevented = true; } });
+    assert.equal(prevented, true);
+    await locked.keyDown(locked.byLabel("Search"), "ArrowDown", { currentTarget: { parentElement: { querySelector: () => null } }, altKey: true });
+    assert.deepEqual(changes, []);
+  } finally { await locked.unmount(); }
+});
+
+test("the Plugins settings section toggles, reorders, and restores sidebar plugins", async () => {
+  const changes = [];
+  let settings = settingsModule.normalizeAppSettings({});
+  const render = () => React.createElement(settingsPopoverModule.default, {
+    open: true,
+    initialCategory: "plugins",
+    settings,
+    onChange: (path, value) => { changes.push([path, value]); settings = settingsModule.updateSetting(settings, path, value); },
+    onClose: () => {},
+  });
+  const dom = await mountReact(render(), createFetchMock([]));
+  try {
+    assert.ok(dom.byText("Experimental"));
+    assert.ok(dom.byText("Always shown"));
+    assert.equal(allElements(dom.container).filter(node => textOf(node) === "Experimental").length, 4);
+    for (const label of ["Rem", "Swarms", "Organizations", "Second Brain"]) {
+      assert.equal(dom.byLabel(`Show ${label}`).getAttribute("aria-checked"), "false", `${label} is experimental and off by default`);
+    }
+    assert.equal(dom.byLabel("Show Search").getAttribute("aria-checked"), "true");
+    await dom.click(dom.byLabel("Show Rem"));
+    assert.deepEqual(changes.at(-1), ["plugins.enabled", { rem: true }]);
+    await dom.click(dom.byLabel("Show Search"));
+    assert.deepEqual(changes.at(-1), ["plugins.enabled", { search: false }]);
+    await dom.keyDown(dom.byLabel("Move Rem"), "ArrowDown");
+    assert.deepEqual(changes.at(-1), ["plugins.order", ["workflows", "rem", "files", "search", "source-control", "swarms", "organizations", "second-brain"]]);
+  } finally { await dom.unmount(); }
+
+  changes.length = 0;
+  settings = settingsModule.normalizeAppSettings({ plugins: { locked: true, order: ["files", "rem"], enabled: { rem: false } } });
+  const lockedDom = await mountReact(render(), createFetchMock([]));
+  try {
+    assert.equal(reactProps(lockedDom.byLabel("Move Rem")).disabled, true);
+    await lockedDom.click(lockedDom.byText("Restore defaults"));
+    assert.deepEqual(changes, [["plugins.order", settingsModule.DEFAULT_APP_SETTINGS.plugins.order], ["plugins.enabled", {}]]);
+  } finally { await lockedDom.unmount(); }
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("experimental"), ["plugins"]);
+  assert.ok(settingsPopoverModule.settingsCategoriesForQuery("plugins").includes("plugins"));
+});
+
+test("Rem opens its conversation from the rail and sends thread links to the Rem pane", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const created = new Date().toISOString();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "m1", role: "rem", created_at: created, body: "Started a research thread.", work: { task_id: "t1", run_id: "r1", thread_id: "thread-worker" } }] }),
+    jsonResponse("/api/rem/tasks", { tasks: [{ id: "t1", title: "Sync research", type: "research", revision: 1, state: "enabled", schedule: { kind: "once" }, active_run: { id: "r1", state: "executing", thread_id: "thread-worker" } }] }),
+    jsonResponse("/api/rem/threads/thread-worker", {
+      metadata: { id: "thread-worker", title: "Sync research", managedRunId: "r1", managedRole: "execute", scopeMode: "global", projectRoot: "", provider: "codex", model: "cli-default", updatedAt: created },
+      messages: [{ id: "worker-message", role: "assistant", kind: "thought", body: "Reading sources." }],
+      running: true, activeTurn: "worker-turn",
+    }),
+  ]);
+  const opened = [];
+  const listener = event => opened.push(event.detail.threadId);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  window.addEventListener("gofer:rem-open-thread", listener);
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Rem"));
+    for (let attempt = 0; attempt < 20 && !allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Conversation with Rem" && textOf(node).includes("Started a research thread.")); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.match(textOf(dom.byLabel("Conversation with Rem")), /Started a research thread\.[\s\S]*Sync research[\s\S]*Working/);
+    assert.ok(fetchMock.calls.some(call => call.url === "/api/rem/tasks"));
+    assert.ok(fetchMock.calls.some(call => call.url === "/api/rem/context" && call.options.method === "POST"));
+    await dom.click(dom.ancestor(dom.byText("Open thread"), "BUTTON"));
+    assert.deepEqual(opened, ["thread-worker"]);
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:thread-worker")).managedRunId, "r1");
+  } finally {
+    window.removeEventListener("gofer:rem-open-thread", listener);
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("the sidebar activity decides what the main content area shows", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const hasLabel = label => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
+  const settle = async (label) => {
+    for (let attempt = 0; attempt < 20 && !hasLabel(label); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Rem"));
+    await settle("Conversation with Rem");
+    assert.ok(hasLabel("Conversation with Rem"));
+
+    assert.equal(hasLabel("Organizations"), false, "experimental plugins are off by default");
+    for (const activity of ["Workflows", "File explorer", "Search", "Source control", "Swarms"]) {
+      await dom.click(dom.byLabel("Rem"));
+      await settle("Conversation with Rem");
+      await dom.click(dom.byLabel(activity));
+      assert.equal(hasLabel("Conversation with Rem"), false, `${activity} hides Rem's conversation`);
+    }
+
+    await dom.click(dom.byLabel("Second Brain"));
+    await settle("Back to editor");
+    assert.ok(hasLabel("Back to editor"));
+    await dom.click(dom.byLabel("File explorer"));
+    assert.equal(hasLabel("Back to editor"), false);
+
+    await dom.click(dom.byLabel("Second Brain"));
+    await settle("Back to editor");
+    await dom.click(dom.byLabel("Back to editor"));
+    assert.equal(hasLabel("Back to editor"), false);
+    assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+  assert.equal(appModule.editorActivity("rem"), "files");
+  assert.equal(appModule.editorActivity("second-brain", "workflows"), "workflows");
+  assert.equal(appModule.editorActivity("swarms"), "swarms");
+  assert.equal(appModule.editorActivity("search", "workflows"), "search");
+});
+
+test("Rem keeps original replies and links task updates to the archived worker", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const created = new Date().toISOString();
+  const work = { task_id: "task", run_id: "run", thread_id: "worker" };
+  const summary = "Reviewed the latest commits and found no unfinished work. " + "Detailed findings. ".repeat(80);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [
+      { id: "queued-run", role: "rem", created_at: created, body: "Queued work. I will check it.", work },
+      { id: "finished-run", role: "rem", created_at: created, body: summary, work: { ...work, state: "succeeded" } },
+    ] }),
+    jsonResponse("/api/rem/tasks", { tasks: [{ id: "task", title: "Review recent commits", type: "errand", schedule: { kind: "once" }, last_run: { id: "run", state: "succeeded", thread_id: "worker", verification_thread_id: "review", criteria: [{ result: "pass" }], finished_at: created } }] }),
+    (url) => url.startsWith("/api/rem/threads/") ? { ok: true, json: async () => ({ metadata: { id: url.split("/").at(-1), title: "Review recent commits", provider: "cursor", model: "auto", managedRunId: "run", archived: true, updatedAt: created }, messages: [], running: false }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  try {
+    await dom.click(dom.byLabel("Rem"));
+    for (let attempt = 0; attempt < 20 && !allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Conversation with Rem" && textOf(node).includes("Reviewed the latest commits")); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const log = dom.byLabel("Conversation with Rem");
+    const content = textOf(log);
+    assert.match(content, /Reviewed the latest commits/);
+    assert.match(content, /Queued work/);
+    assert.doesNotMatch(content, /checks passed|Review$/);
+    const replies = allElements(log).filter(node => node.getAttribute?.("data-message-id"));
+    assert.deepEqual(replies.map(node => node.getAttribute("data-message-id")), ["queued-run", "finished-run"]);
+    assert.ok(textOf(replies[1]).includes(summary.trim()), "Existing reply text must not be rewritten or truncated");
+    // The acknowledgement card points to the result instead of repeating its state.
+    assert.match(textOf(replies[0]), /Latest update below/);
+    assert.doesNotMatch(textOf(replies[1]), /Latest update below/);
+    assert.equal(allElements(log).filter(node => node.tagName === "BUTTON" && textOf(node) === "Open thread").length, 2);
+    await dom.click(dom.ancestor(dom.byText("Open thread"), "BUTTON"));
+    const metadata = JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:worker"));
+    assert.equal(metadata.archived, true);
+    assert.equal(metadata.provider, "cursor");
+    assert.equal(metadata.model, "auto");
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("Rem displays proactive task results and problems without sending a user message", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const messages = [];
+  const fetchMock = createFetchMock([
+    (url) => url === "/api/rem/conversation" ? { ok: true, json: async () => ({ conversation: { id: "rem", turn_state: "idle" }, messages: [...messages] }) } : null,
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url) => url.startsWith("/api/rem/threads/") ? { ok: true, json: async () => ({ metadata: { id: url.split("/").at(-1), title: "Work", updatedAt: new Date().toISOString() }, messages: [] }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default), fetchMock);
+  try {
+    const findings = "The digest and workflow exist. " + "The saved audit covers the installed tool and its checks. ".repeat(5);
+    const nextStep = "Next, connect your YouTube account and enable the 6 AM schedule.";
+    assert.ok((findings + nextStep).length > 320);
+    for (const [state, body] of [["succeeded", findings + nextStep], ["blocked", "YouTube sign-in is missing. Please complete authorization."]]) {
+      messages.push({ id: state, role: "rem", kind: "task_update", concise: true, body, created_at: new Date().toISOString(), work: { run_id: state, task_id: state, thread_id: `worker-${state}`, state } });
+      await store.refreshRemHome();
+      await dom.flush();
+      assert.ok(textOf(dom.byLabel("Conversation with Rem")).includes(body));
+    }
+    assert.equal(allElements(dom.byLabel("Conversation with Rem")).filter(node => node.tagName === "BUTTON" && textOf(node) === "Open thread").length, 2);
+    assert.equal(store.getState().conversation.turn_state, "idle");
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/rem/messages").length, 0);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("Rem mirrors completion and archives linked worker and review threads between polls", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  let completed = false;
+  const created = "2026-10-07T16:00:00Z";
+  const requests = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url) => {
+      if (url === "/api/rem/tasks") {
+        const run = { id: "run", thread_id: "worker", verification_thread_id: "review", state: completed ? "succeeded" : "executing", ...(completed ? { finished_at: created } : {}) };
+        return { ok: true, json: async () => ({ tasks: [{ id: "task", ...(completed ? { last_run: run, recent_runs: [run] } : { active_run: run }) }] }) };
+      }
+      if (!url.startsWith("/api/rem/threads/")) return null;
+      const id = url.split("/").at(-1);
+      requests.push(id);
+      return { ok: true, json: async () => ({ metadata: { id, title: id, managedRunId: "run", archived: completed, updatedAt: created }, messages: [{ id: `${id}-reply`, role: "assistant", kind: "final", body: completed ? "Finished." : "Working." }], running: !completed }) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  const opened = [];
+  const listener = event => opened.push(event.detail.threadId);
+  window.addEventListener("gofer:rem-open-thread", listener);
+  try {
+    window.localStorage.setItem("gofer-flow-chat-thread-meta:manual", JSON.stringify({ id: "manual", title: "My thread", updatedAt: created }));
+    window.localStorage.setItem("gofer-flow-chat-threads", JSON.stringify([{ id: "manual", updatedAt: created }]));
+    await store.refreshRemHome();
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:worker")).archived, false);
+    completed = true;
+    await store.refreshRemHome();
+    assert.deepEqual(requests, ["worker", "review", "worker", "review"]);
+    for (const id of ["worker", "review"]) {
+      assert.equal(JSON.parse(window.localStorage.getItem(`gofer-flow-chat-thread-meta:${id}`)).archived, true);
+    }
+    const repository = (await viteServer.ssrLoadModule("/src/lib/conversationRepository.js")).conversationRepository();
+    assert.equal((await repository.all("worker")).at(-1).body, "Finished.");
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:manual")).archived, undefined);
+    await store.refreshRemHome();
+    assert.equal(requests.length, 4, "Finished transcripts should only sync once");
+    const snapshots = [];
+    const receive = event => snapshots.push(event.detail);
+    window.addEventListener("gofer:device-thread-sync", receive);
+    try {
+      await store.openRemThread("worker");
+      assert.equal(snapshots.length, 1, "An already cached terminal snapshot must be delivered to a newly opened pane");
+      assert.equal(snapshots[0].running, false);
+      assert.equal(snapshots[0].messages.at(-1).body, "Finished.");
+    } finally { window.removeEventListener("gofer:device-thread-sync", receive); }
+    assert.deepEqual(opened, ["worker"]);
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:worker")).archived, true);
+  } finally {
+    window.removeEventListener("gofer:rem-open-thread", listener);
+    store.resetRemHomeStore();
+    await dom.unmount();
+  }
+});
+
+test("Rem retries a message with its original request ID after a lost response", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const requests = [];
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (url !== "/api/rem/messages" || options.method !== "POST") return null;
+      requests.push(JSON.parse(options.body));
+      if (requests.length === 1) throw new Error("Response lost after acceptance");
+      return { ok: true, status: 200, json: async () => ({ accepted: true }) };
+    },
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  try {
+    await store.refreshRemHome();
+    assert.equal(await store.sendRemMessage("Research accessibility"), false);
+    const message = store.getState().messages[0];
+    assert.equal(message.failed, true);
+    store.retryRemMessage(message.id);
+    for (let attempt = 0; attempt < 20 && requests.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1], requests[0]);
+  } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
+});
+
+test("Rem configuration changes do not wait on a discarded workspace lookup", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  try {
+    store.setRemHomeContext(() => new Promise(() => {}));
+    await dom.flush();
+    store.setRemHomeContext(async () => ({ provider: "claude_code", projects: [] }));
+    await store.refreshRemHome();
+    const configured = fetchMock.calls.filter(call => call.url === "/api/rem/context");
+    assert.equal(configured.length, 1);
+    assert.equal(JSON.parse(configured[0].options.body).provider, "claude_code");
+    assert.equal(store.getState().status, "ready");
+  } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
+});
+
+test("Rem's home stays open when the first workflow graph finishes loading afterwards", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const workflowsLoaded = createDeferred();
+  const fetchMock = createFetchMock([
+    (url, options = {}) => url === "/api/workflows" && (options.method ?? "GET") === "GET"
+      ? { ok: true, status: 200, json: () => workflowsLoaded.promise } : null,
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const remHomeShown = () => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Conversation with Rem");
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("Rem"));
+    for (let attempt = 0; attempt < 20 && !remHomeShown(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.ok(remHomeShown());
+    // Rem's sprite greets on the welcome screen of an empty conversation.
+    assert.ok(allElements(dom.container).some(node => node.getAttribute?.("class") === "rem-avatar"));
+    await React.act(async () => workflowsLoaded.resolve(workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])));
+    await dom.flush();
+    await dom.flush();
+    assert.ok(remHomeShown(), "The startup graph must open in the background");
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("Second Brain draft fields keep cleared and partial text until blur", async () => {
+  const parts = await viteServer.ssrLoadModule("/src/components/SecondBrainParts.jsx");
+  const commits = [];
+  function Harness() {
+    const [value, setValue] = React.useState("2026");
+    // The parent normalizes committed values; the draft must not snap back while focused.
+    return React.createElement(parts.DraftInput, { label: "From date", value, onCommit: (next) => { commits.push(next); setValue(next.trim() || "2026"); } });
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]));
+  try {
+    const input = dom.byLabel("From date");
+    await dom.focus(input);
+    await dom.change(input, "");
+    assert.equal(input.value, "");
+    await dom.change(input, "2025-0");
+    assert.equal(input.value, "2025-0");
+    assert.deepEqual(commits, []);
+    await dom.blur(input);
+    assert.deepEqual(commits, ["2025-0"]);
+    assert.equal(dom.byLabel("From date").value, "2025-0");
+    await dom.focus(input);
+    await dom.change(input, "");
+    await dom.blur(input);
+    assert.deepEqual(commits, ["2025-0", ""]);
+    assert.equal(dom.byLabel("From date").value, "2026");
+  } finally { await dom.unmount(); }
+});
+
+test("Rem clear history erases its conversation and task threads but keeps the user's threads", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const created = new Date().toISOString();
+  let conversation = { conversation: { id: "old", turn_state: "idle" }, messages: [{ id: "m1", role: "user", created_at: created, body: "Corrupted old request" }] };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    (url) => url === "/api/rem/conversation" ? { ok: true, json: async () => conversation } : null,
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options) => {
+      if (url === "/api/rem/messages" && options.method === "POST") {
+        const message = JSON.parse(options.body);
+        assert.equal(conversation.conversation.id, "fresh");
+        conversation.messages.push({ id: message.request_id, request_id: message.request_id, role: "user", body: message.body, created_at: created });
+        return { ok: true, json: async () => ({ conversation: conversation.conversation }) };
+      }
+      if (url !== "/api/rem/reset" || options.method !== "POST") return null;
+      const body = JSON.parse(options.body);
+      assert.equal(body.conversation_id, "old");
+      assert.equal(body.confirm, true);
+      conversation = { conversation: { id: "fresh", turn_state: "idle" }, messages: [] };
+      return { ok: true, json: async () => ({ conversation: conversation.conversation, removed_thread_ids: ["rem-worker"] }) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  try {
+    const storage = window.localStorage;
+    storage.setItem("gofer-flow-chat-threads", JSON.stringify([{ id: "rem-worker" }, { id: "rem-review" }, { id: "mine" }]));
+    storage.setItem("gofer-flow-chat-thread-meta:rem-worker", JSON.stringify({ id: "rem-worker", managedRunId: "run" }));
+    storage.setItem("gofer-flow-chat-thread-meta:rem-review", JSON.stringify({ id: "rem-review", managedRunId: "run", managedRole: "verify" }));
+    storage.setItem("gofer-flow-chat-thread-meta:mine", JSON.stringify({ id: "mine", title: "My own thread" }));
+    await dom.click(dom.byLabel("Rem"));
+    for (let attempt = 0; attempt < 20 && !textOf(dom.container).includes("Corrupted old request"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    await dom.click(dom.byLabel("Rem options"));
+    await dom.click(dom.ancestor(dom.byText("Clear history and tasks…"), "BUTTON"));
+    await dom.click(dom.ancestor(dom.byText("Clear history and tasks"), "BUTTON"));
+    for (let attempt = 0; attempt < 20 && textOf(dom.container).includes("Corrupted old request"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/rem/reset").length, 1);
+    assert.doesNotMatch(textOf(dom.container), /Corrupted old request|Start fresh with Rem/);
+    assert.deepEqual(JSON.parse(storage.getItem("gofer-flow-chat-threads")).map(entry => entry.id), ["mine"]);
+    assert.equal(storage.getItem("gofer-flow-chat-thread-meta:rem-worker"), null);
+    assert.equal(storage.getItem("gofer-flow-chat-thread-meta:rem-review"), null);
+    assert.ok(storage.getItem("gofer-flow-chat-thread-meta:mine"));
+    assert.equal(storage.getItem("gofer-flow-rem-reset-pending"), null);
+    assert.ok(store.remThreadWasCleared("rem-review"));
+    assert.equal(store.getState().resetting, false);
+    assert.equal(await store.sendRemMessage("Hello after clearing"), true);
+    await dom.flush();
+    assert.ok(textOf(dom.byLabel("Conversation with Rem")).includes("Hello after clearing"));
+    assert.equal(fetchMock.calls.filter(call => call.url === "/api/rem/messages").length, 1);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("Rem folder links open projects, and its menu opens provider settings", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const opened = [];
+  const workspace = {
+    grantUserPath: async path => { opened.push(path); return { path }; },
+    getPathInfo: async path => ({ path, exists: true, isDirectory: path === "/linked-project", isFile: path !== "/linked-project" }),
+    trustProjectRoot: async path => path,
+    listDirectory: async ({ currentPath }) => ({ directory: currentPath, entries: [] }),
+    gitStatus: async () => ({ active: false }),
+    gitWorktrees: async () => ({ worktrees: [] }),
+  };
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "result", role: "rem", created_at: new Date().toISOString(), body: "[Tool folder](/linked-project)" }] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    jsonResponse("/api/projects/open", { projectRoot: "/linked-project", workflows: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { desktop: { workspace, textFiles: { read: async () => ({ content: "# Audit report" }) } }, storage: experimentalPluginStorage() });
+  try {
+    await dom.click(dom.byLabel("Rem"));
+    for (let n = 0; n < 20 && !textOf(dom.container).includes("Tool folder"); n++) { await new Promise(resolve => setTimeout(resolve, 10)); await dom.flush(); }
+    await dom.click(dom.byLabel("Rem options"));
+    await dom.click(dom.ancestor(dom.byText("Provider, model and effort…"), "BUTTON"));
+    await dom.flush();
+    assert.ok(textOf(dom.container).includes("Default provider"));
+    await dom.click(dom.byLabel("Close settings"));
+    await dom.click(dom.ancestor(dom.byText("Tool folder"), "A"));
+    await dom.flush();
+    assert.ok(opened.includes("/linked-project"));
+    assert.ok(fetchMock.calls.some(call => call.url === "/api/projects/open" && JSON.parse(call.options.body).projectRoot === "/linked-project"));
+    assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
+});
+
+test("recent project selector retains ten projects and gives their rows room", async () => {
+  const roots = Array.from({ length: 10 }, (_, n) => `/projects/project-${n}`);
+  const selected = [];
+  const dom = await mountReact(React.createElement(appModule.RecentProjectSelector, { recentProjectRoots: roots, onSelectProject: root => selected.push(root) }), createFetchMock([]));
+  try {
+    await dom.click(dom.byLabel("Recent projects"));
+    const menu = allElements(dom.container).find(node => node.getAttribute?.("role") === "menu");
+    assert.match(menu.getAttribute("class"), /32rem/);
+    for (const root of roots) assert.ok(dom.byText(root.split("/").at(-1)));
+    await dom.click(dom.ancestor(dom.byText("project-9"), "BUTTON"));
+    assert.deepEqual(selected, [roots[9]]);
+  } finally { await dom.unmount(); }
+});
+
+
+test("Rem report links call the local file handler with their full path", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore(); store.setRemHomeContext(null);
+  const links = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "report", role: "rem", created_at: new Date().toISOString(), concise: true, body: "[Saved report](</reports/audit one.html>)" }] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default, { onOpenLink: href => links.push(href) }), fetchMock);
+  try {
+    await store.refreshRemHome(); await dom.flush();
+    await dom.click(dom.ancestor(dom.byText("Saved report"), "A"));
+    assert.deepEqual(links, ["/reports/audit%20one.html"]);
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
+});
+
+
+test("Problems show runtime node failures and let the user reveal the failed run", async () => {
+  const panel = await viteServer.ssrLoadModule("/src/components/UnifiedBottomPanel.jsx");
+  const runs = await viteServer.ssrLoadModule("/src/lib/workflowRuns.js");
+  const diagnostics = runs.workflowRunProblems({ digest: { status: "error", message: "Temporary failure in name resolution for www.youtube.com" } });
+  const revealed = [];
+  const dom = await mountReact(React.createElement(panel.default, { diagnostics, onRevealDiagnostic: problem => revealed.push(problem) }), createFetchMock([]));
+  try {
+    await dom.click(dom.byText("Problems"));
+    const problem = allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node).includes("digest: Temporary failure in name resolution"));
+    assert.ok(problem);
+    assert.match(textOf(problem), /Run failure/);
+    await dom.click(problem);
+    assert.equal(revealed[0].nodeId, "digest");
+    assert.equal(revealed[0].runtime, true);
+  } finally { await dom.unmount(); }
+});
+
+
+test("Rem syncs completed worker transcripts while its home is closed", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const stamp = new Date().toISOString();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [{ id: "task", last_run: { id: "run", thread_id: "managed-worker", state: "succeeded", finished_at: stamp } }] }),
+    jsonResponse("/api/rem/threads/managed-worker", { metadata: { id: "managed-worker", title: "Digest worker", scopeMode: "global", managedRunId: "run", archived: true, updatedAt: stamp }, messages: [{ id: "worker-final", role: "assistant", kind: "final", body: "The digest finished." }], running: false }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 50 && !window.localStorage.getItem("gofer-flow-chat-thread-meta:managed-worker"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10)); await dom.flush();
+    }
+    assert.ok(!allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Conversation with Rem"));
+    const repository = (await viteServer.ssrLoadModule("/src/lib/conversationRepository.js")).conversationRepository();
+    assert.equal((await repository.all("managed-worker")).at(-1)?.body, "The digest finished.");
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:managed-worker")).archived, true);
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
+});
+
+
+test("Rem serializes overlapping active and completed thread snapshots", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const old = createDeferred();
+  let calls = 0;
+  const snapshot = finished => ({ metadata: { id: "race-worker", managedRunId: "run", archived: finished }, messages: [{ id: "reply", role: "assistant", kind: "final", body: finished ? "Finished." : "Working." }], running: !finished });
+  const dom = await mountReact(React.createElement("div"), createFetchMock([(url) => {
+    if (url !== "/api/rem/threads/race-worker") return null;
+    calls += 1;
+    return { ok: true, json: async () => calls === 1 ? old.promise : snapshot(true) };
+  }]));
+  try {
+    const first = store.syncRemThread("race-worker");
+    const second = store.syncRemThread("race-worker");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(calls, 1);
+    old.resolve(snapshot(false));
+    await first; await second;
+    const repository = (await viteServer.ssrLoadModule("/src/lib/conversationRepository.js")).conversationRepository();
+    assert.equal((await repository.all("race-worker")).at(-1).body, "Finished.");
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:race-worker")).archived, true);
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
+});
+
+function fakeBrowserBridge(overrides = {}) {
+  const calls = [];
+  let stateListener = null;
+  const record = (name) => async (...args) => { calls.push([name, ...args]); return overrides[`${name}Result`] ?? null; };
+  const bridge = {
+    platform: "linux",
+    close: async () => null,
+    create: async () => ({ id: "s1", clientId: "tab", ready: true, loading: false, url: "https://example.com/", security: { level: "secure", label: "Connection is secure" }, profile: "user" }),
+    onCommand: () => () => {},
+    onState: (callback) => { stateListener = callback; return () => {}; },
+    setPreferences: async () => null,
+    focus: async () => null,
+    historyEntries: record("historyEntries"),
+    library: async () => ({ downloads: [] }),
+    onDownloads: () => () => {},
+    ...Object.fromEntries(["respondPrompt", "allowCertificate", "allowPopups", "pauseRem", "stopSharing", "takeOver", "zoom", "bookmark", "reloadHard", "back", "home"].map((name) => [name, record(name)])),
+    ...overrides,
+  };
+  return { bridge, calls, push: (state) => stateListener?.({ id: "s1", clientId: "tab", ...state }) };
+}
+
+async function mountBrowser(fake, props = {}) {
+  const dom = await mountReact(React.createElement(integratedBrowserModule.default, {
+    active: true, clientId: "tab", initialUrl: "https://example.com/", ...props,
+  }), createFetchMock([]), { browser: fake.bridge });
+  await dom.flush();
+  return dom;
+}
+
+test("browser prompts ask inside the tab and send only the user's answer", async () => {
+  const fake = fakeBrowserBridge();
+  const dom = await mountBrowser(fake);
+  await React.act(async () => fake.push({ prompts: [{ requestId: "r1", kind: "permission", origin: "https://meet.example.com", permissions: [{ key: "camera", label: "Use your camera" }] }] }));
+  assert.ok(dom.byText("wants to use your camera"));
+  await dom.click(dom.byExactText("Allow this time"));
+  assert.deepEqual(fake.calls.at(-1), ["respondPrompt", "s1", "r1", "allow-once"]);
+  await React.act(async () => fake.push({ prompts: [{ requestId: "r2", kind: "rem-confirm", label: "Send", url: "https://mail.example.com/", agentLabel: "Rem" }] }));
+  assert.ok(dom.byLabel("Rem needs approval"));
+  await dom.click(dom.byExactText("Decline"));
+  assert.deepEqual(fake.calls.at(-1), ["respondPrompt", "s1", "r2", null]);
+  await React.act(async () => fake.push({ prompts: [{ requestId: "r3", kind: "auth", host: "intranet.test", realm: "Staff" }] }));
+  await dom.change(dom.byLabel("Username"), "ada");
+  await dom.change(dom.byLabel("Password"), "s3cret");
+  await dom.pointer(dom.byLabel("Sign in to site"), "onSubmit");
+  assert.deepEqual(toPlainObject(fake.calls.at(-1)), ["respondPrompt", "s1", "r3", { username: "ada", password: "s3cret" }]);
+  await dom.unmount();
+});
+
+test("certificate errors show an interstitial and blocked pop-ups an info bar", async () => {
+  const fake = fakeBrowserBridge();
+  const dom = await mountBrowser(fake);
+  await React.act(async () => fake.push({
+    url: "https://self-signed.test/",
+    loadError: { kind: "certificate", code: -202, title: "Your connection is not private", url: "https://self-signed.test/" },
+    certificateError: { host: "self-signed.test", error: "net::ERR_CERT_AUTHORITY_INVALID", canProceed: true, fingerprint: "sha256/x" },
+    security: { level: "error", label: "Certificate error" },
+  }));
+  assert.ok(dom.byText("Your connection is not private"));
+  await dom.click(dom.byExactText("Back to safety"));
+  assert.deepEqual(fake.calls.at(-1), ["home", "s1"]);
+  await dom.click(dom.byExactText("Continue to self-signed.test (unsafe)"));
+  assert.deepEqual(fake.calls.at(-1), ["allowCertificate", "s1"]);
+  await React.act(async () => fake.push({ loadError: null, certificateError: null, blockedPopups: [{ url: "https://ads.test/" }] }));
+  assert.ok(dom.byText("Pop-up blocked"));
+  await dom.click(dom.byExactText("Always allow on this site"));
+  assert.deepEqual(fake.calls.at(-1), ["allowPopups", "s1"]);
+  await dom.unmount();
+});
+
+test("the Rem chip shows activity and lets the user pause or stop sharing", async () => {
+  const fake = fakeBrowserBridge();
+  const dom = await mountBrowser(fake);
+  await React.act(async () => fake.push({ agent: { label: "Rem", shared: true, paused: false, log: [{ action: "click", detail: "Send", at: Date.now() }] } }));
+  await dom.click(dom.byExactText("Shared with Rem"));
+  assert.ok(dom.byLabel("Rem activity"));
+  assert.ok(dom.byText("Send"));
+  await dom.click(dom.byText("Pause Rem"));
+  assert.deepEqual(fake.calls.at(-1), ["pauseRem", "s1", true]);
+  await dom.click(dom.byExactText("Stop sharing"));
+  assert.deepEqual(fake.calls.at(-1), ["stopSharing", "s1"]);
+  await dom.unmount();
+});
+
+test("standard browser keys apply while the browser chrome has focus", async () => {
+  const fake = fakeBrowserBridge();
+  const dom = await mountBrowser(fake);
+  const address = dom.byLabel("Browser address");
+  const section = dom.byLabel("Integrated browser");
+  address.closest = (selector) => (selector === "[data-integrated-browser]" ? section : null);
+  await dom.dispatchWindow("keydown", { key: "R", ctrlKey: true, shiftKey: true, target: address });
+  assert.deepEqual(fake.calls.at(-1), ["reloadHard", "s1"]);
+  await dom.dispatchWindow("keydown", { key: "=", ctrlKey: true, target: address });
+  assert.deepEqual(fake.calls.at(-1), ["zoom", "s1", 1]);
+  // The same keys elsewhere in the studio keep their app meaning.
+  const before = fake.calls.length;
+  await dom.dispatchWindow("keydown", { key: "R", ctrlKey: true, shiftKey: true, target: null });
+  assert.equal(fake.calls.length, before);
+  assert.equal(appModule.browserChromeOwnsShortcut({ key: "l", ctrlKey: true, target: address }), true);
+  assert.equal(appModule.browserChromeOwnsShortcut({ key: "l", ctrlKey: true, target: { closest: () => null } }), false);
+  await dom.unmount();
+});
+
+test("browser menu keeps keyboard focus when tab state updates arrive", async () => {
+  const fake = fakeBrowserBridge();
+  const dom = await mountBrowser(fake, { onReopenClosedTab: () => {} });
+  await dom.click(allElements(dom.container).find((element) => element.getAttribute?.("aria-label") === "Browser menu" && element.tagName === "BUTTON"));
+  const menu = allElements(dom.container).find((element) => element.getAttribute?.("role") === "menu");
+  const items = () => allElements(menu).filter((element) => element.getAttribute?.("role") === "menuitem" && !element.disabled);
+  menu.querySelectorAll = () => items();
+  menu.querySelector = () => items()[0] || null;
+  items()[0].focus();
+  await dom.keyDown(menu, "ArrowDown");
+  await dom.keyDown(menu, "ArrowDown");
+  const focused = document.activeElement;
+  assert.ok(focused === items()[2], "ArrowDown moves through the items");
+  // Tab state pushes re-render the browser and recreate its inline callbacks.
+  await React.act(async () => fake.push({ title: "Updated", loading: true }));
+  await React.act(async () => fake.push({ title: "Updated again", loading: false }));
+  assert.ok(document.activeElement === focused, "state updates must not reset menu focus");
+  await dom.keyDown(menu, "End");
+  assert.ok(document.activeElement === items().at(-1), "End focuses the last item");
+  await dom.keyDown(menu, "ArrowDown");
+  assert.ok(document.activeElement === items()[0], "ArrowDown wraps to the first item");
+  assert.match(items()[0].getAttribute("class"), /\bbrowser-menu-item\b/);
+  assert.doesNotMatch(items()[0].getAttribute("class"), /focus:bg-slate-100/);
+  await dom.keyDown(menu, "Escape");
+  assert.equal(allElements(dom.container).some((element) => element.getAttribute?.("role") === "menu"), false);
+  await dom.unmount();
+});
+
+test("web tabs save a bounded back/forward history for restore", async () => {
+  const history = { index: 1, entries: [{ url: "https://a.test/", title: "A" }, { url: "https://b.test/", title: "B", pageState: "state" }] };
+  const fake = fakeBrowserBridge({ historyEntriesResult: history });
+  const saved = [];
+  const dom = await mountBrowser(fake, { onStateChange: (state) => { if (state.history) saved.push(state.history); } });
+  await dom.flush(900);
+  assert.deepEqual(toPlainObject(saved.at(-1)), history);
+  await dom.unmount();
+});
+
+test("browser settings normalize Rem's site lists and safety options", () => {
+  const settings = settingsModule.normalizeAppSettings({ browser: {
+    remSignInSites: "GitHub.com, https://mail.google.com/inbox, user:pw@bad.test, ,github.com",
+    remConfirm: "sometimes", remEvaluate: false, remDownloads: "allow", discardAfterMinutes: 99999,
+  } });
+  assert.deepEqual(settings.browser.remSignInSites, ["github.com", "mail.google.com"]);
+  assert.equal(settings.browser.remConfirm, "signed-in");
+  assert.equal(settings.browser.remEvaluate, false);
+  assert.equal(settings.browser.remDownloads, "allow");
+  assert.equal(settings.browser.discardAfterMinutes, 1440);
+  const defaults = settingsModule.normalizeAppSettings({});
+  assert.deepEqual(defaults.browser.remSignInSites, []);
+  assert.equal(defaults.browser.remDownloads, "block");
+  assert.equal(defaults.browser.discardAfterMinutes, 30);
+  assert.deepEqual(toPlainObject(appModule.browserPolicyFromSettings(settings.browser)).remSignInSites, ["github.com", "mail.google.com"]);
+});
+
+test("Ctrl+Shift+T reopens closed browser tabs from anywhere in the studio", () => {
+  const command = settingsModule.KEYBINDING_COMMANDS.find((item) => item.id === "browser.reopenClosedTab");
+  assert.equal(command?.defaultBinding, "Mod+Shift+KeyT");
+  assert.equal(command?.scope, "global");
+  const appSource = fs.readFileSync(path.join(repoRoot, "frontend/src/pages/App.jsx"), "utf8");
+  assert.match(appSource, /if \(action === "browser\.reopenClosedTab"\) reopenClosedBrowserTabRef\.current\?\.\(\);/);
 });

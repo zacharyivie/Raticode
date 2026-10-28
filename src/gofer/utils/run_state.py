@@ -7,7 +7,8 @@ from gofer.utils.paths import get_data_dir
 
 
 def workflow_stop_path(workflow_id: str, data_dir: Path | None = None) -> Path:
-    base = data_dir or get_data_dir()
+    # Resolve only the trusted root; links below run-state remain forbidden.
+    base = (data_dir or get_data_dir()).resolve()
     safe_id = workflow_id.replace("/", "_").replace("\\", "_")
     return base / "run-state" / f"{safe_id}.stop"
 
@@ -17,7 +18,7 @@ def workflow_run_stop_path(
     run_id: str,
     data_dir: Path | None = None,
 ) -> Path:
-    base = data_dir or get_data_dir()
+    base = (data_dir or get_data_dir()).resolve()
     safe_workflow_id = workflow_id.replace("/", "_").replace("\\", "_")
     if safe_workflow_id in {"", ".", ".."}:
         raise ValueError("A workflow identifier is required for a run stop marker")

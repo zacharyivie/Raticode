@@ -29,6 +29,9 @@ def native_cli(monkeypatch, tmp_path):
         provider = command[0]
         flag = "-p" if provider in {"claude_code", "cursor", "copilot"} else None
         prompt = command[command.index(flag) + 1] if flag else command[-1]
+        if provider == "codex":
+            assert command[-1] == "-"
+            prompt = kwargs["stdin"].decode("utf-8")
         if provider == "antigravity":
             prompt = json.loads(kwargs["stdin"])["message"]["content"]
         calls.append((provider, command, prompt, kwargs))
@@ -139,6 +142,44 @@ async def test_followup_resumes_native_context_and_omits_seen_messages(
     if provider == "cursor":
         configs = [c[3]["env"]["CURSOR_CONFIG_DIR"] for c in native_cli]
         assert configs[0] == configs[1] and Path(configs[0]).exists()
+
+
+async def test_native_session_under_symlinked_data_root(native_cli, tmp_path):
+    canonical = tmp_path.resolve() / "private" / "var" / "data"
+    canonical.mkdir(parents=True)
+    alias = tmp_path / "var"
+    alias.symlink_to(canonical.parent, target_is_directory=True)
+    messages = [{"role": "user", "body": "First request"}]
+    for _ in range(2):
+        events = [
+            event
+            async for event in chat.stream_workflow_chat(
+                "cursor",
+                "cli-default",
+                messages,
+                {"projectRoot": str(tmp_path / "project")},
+                conversation_id="aliased-data-root",
+                data_dir=alias / "data",
+            )
+        ]
+        assert events[-1]["type"] == "final"
+        messages.append({"role": "user", "body": "Continue"})
+    assert events[-1]["sessionResumed"] is True
+    config = Path(native_cli[-1][3]["env"]["CURSOR_CONFIG_DIR"])
+    assert config.is_relative_to(canonical)
+    assert len(list(canonical.glob("chat-provider-sessions/*/session.json"))) == 1
+
+
+async def test_native_session_rejects_link_below_data_root(native_cli, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (data / "chat-provider-sessions").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        await turn(tmp_path, "cursor", [{"role": "user", "body": "First request"}])
+    assert not list(outside.iterdir())
+    assert not native_cli
 
 
 async def test_model_changes_keep_session_and_refresh_changed_context(native_cli, tmp_path):

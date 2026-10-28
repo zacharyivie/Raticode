@@ -4,6 +4,7 @@ import io
 import json
 from email.message import Message
 from pathlib import Path
+from typing import Any
 from urllib.request import HTTPHandler, build_opener
 from urllib.response import addinfourl
 
@@ -294,3 +295,24 @@ def test_pdf_reexport_replaces_old_paper_margins():
     assert "margin: 0" in prepared
     assert "min-height: 297mm" in prepared
     assert prepare_report(prepared, "pdf") == prepared
+
+
+def test_report_preferences_do_not_grant_managed_readonly_workers_extra_writes(tmp_path):
+    workflow: dict[str, Any] = {
+        "remManagedTask": {"readOnly": True},
+        "remReportTheme": {"format": "html", "theme": "blueprint"},
+        "remResources": {"shell": True},
+    }
+    assert with_report_outputs(workflow, None, tmp_path) is workflow
+    assert "mcpServers" not in workflow["remResources"]
+
+
+def test_artifact_rules_include_custom_theme_and_all_informational_documents(tmp_path):
+    tools = ReportTools(tmp_path, "html", theme={"instructions": "Use ocean ink #123456."})
+    rules = tools.call("rules", {})
+    assert "ocean ink #123456" in rules
+    assert "notes, summaries, audits, plans, handoffs, guides" in rules
+    assert "explicitly requested format" in rules
+    assert "Source code, existing repository documentation" in rules
+    with pytest.raises(ValueError, match="configured .html extension"):
+        tools.call("save_report", {"path": "findings.md", "content": "# Findings"})

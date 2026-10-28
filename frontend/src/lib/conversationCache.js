@@ -67,13 +67,15 @@ export function createConversationCache({ load, save, changed, maxInactive = 4, 
       const entry = entries.get(id);
       if (entry && !entry.dirty) entries.set(id, { messages: entry.messages.slice(-limit), persisted: entry.messages.slice(-limit), dirty: false });
     },
-    hydrate(id, messages, { recent = false, device = false } = {}) {
+    hydrate(id, messages, { recent = false, device = false, authoritative = false } = {}) {
       const entry = entries.get(id);
       const current = entry?.messages || [];
       const merged = new Map((recent ? current : messages).map(message => [message.id, message]));
       if (recent) for (const message of messages) if (!merged.has(message.id)) merged.set(message.id, message);
       for (const message of current) merged.set(message.id, message);
-      const combined = device ? mergeDeviceMessages(current, messages) : [...merged.values()];
+      const combined = authoritative
+        ? [...new Map([...current, ...messages].map(message => [message.id, message])).values()]
+        : device ? mergeDeviceMessages(current, messages) : [...merged.values()];
       if (entry) {
         entry.messages = combined;
         if (!entry.dirty) entry.persisted = combined;

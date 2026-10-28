@@ -48,10 +48,11 @@ app.whenReady().then(async () => {
   await remote.loadFile(report);
   assert.equal(await remote.webContents.executeJavaScript('window.reportLoaded'), true);
   // Exercise the production failure boundary against real Chromium loads.
-  const mainSource = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-  const operationSource = mainSource.slice(mainSource.indexOf("async function runBrowserOperation("), mainSource.indexOf("function configureBrowserSession("));
-  const operations = { Error, emitBrowserState() {} };
-  vm.runInNewContext(operationSource, operations);
+  const sessionsSource = fs.readFileSync(path.join(__dirname, "../browser-sessions.cjs"), "utf8");
+  const operationSource = sessionsSource.slice(sessionsSource.indexOf("async function run(session, operation)"), sessionsSource.indexOf("function navigate(session,"));
+  assert.ok(operationSource.length > 0, "browser-sessions.cjs no longer defines run(session, operation)");
+  const operations = { Error, emitState() {} };
+  vm.runInNewContext(`${operationSource}; this.runBrowserOperation = run;`, operations);
   const browserState = {};
   await operations.runBrowserOperation(browserState, () => remote.loadURL(normalizeBrowserUrl(path.join(root, "missing report.html"))));
   assert.match(browserState.error, /ERR_FILE_NOT_FOUND/);

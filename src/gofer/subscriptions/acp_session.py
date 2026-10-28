@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 from gofer.subscriptions.acp_transport import AcpTransport, AcpTransportError
+from gofer.subscriptions.tool_trace import normalize_tool_trace
 
 
 def session_text(event: dict[str, Any], session_id: str) -> str:
@@ -101,15 +102,17 @@ def _session_trace(
     return {
         "type": "thought",
         "text": title,
-        "trace": {
-            "kind": "tool",
-            "id": identity,
-            "title": title,
-            "category": current.get("kind", ""),
-            "status": current.get("status", "pending"),
-            "input": display(current.get("rawInput")),
-            "output": display(output),
-        },
+        "trace": normalize_tool_trace(
+            {
+                "kind": "tool",
+                "id": identity,
+                "title": title,
+                "category": current.get("kind", ""),
+                "status": current.get("status", "pending"),
+                "input": display(current.get("rawInput")),
+                "output": output,
+            }
+        ),
     }
 
 

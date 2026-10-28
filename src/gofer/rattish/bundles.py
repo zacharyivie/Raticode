@@ -77,28 +77,8 @@ def export_rattish_bundle(
     if output_path == workflow.workflow_root or workflow.workflow_root in output_path.parents:
         raise RattishBundleError("Export the bundle outside the workflow folder")
 
-    ignore_path = workflow.workflow_root / WORKFLOW_IGNORE
-    for ignore_name in LEGACY_WORKFLOW_IGNORES:
-        if not ignore_path.exists():
-            ignore_path = workflow.workflow_root / ignore_name
-    patterns = _read_ignore_patterns(ignore_path)
-    files: list[tuple[Path, str]] = []
-    for path in sorted(workflow.workflow_root.rglob("*")):
-        relative = path.relative_to(workflow.workflow_root).as_posix()
-        if relative in LEGACY_WORKFLOW_IGNORES and relative != ignore_path.name:
-            continue
-        if _is_ignored(relative, path.is_dir(), patterns):
-            continue
-        if path.is_symlink():
-            raise RattishBundleError(f"Workflow bundle cannot include symbolic link: {relative}")
-        if path.is_file():
-            _validate_bundle_path(relative)
-            files.append(
-                (path, WORKFLOW_IGNORE if relative in LEGACY_WORKFLOW_IGNORES else relative)
-            )
+    files = _portable_workspace_files(workflow)
     included = {relative for _, relative in files}
-    if WORKFLOW_ENTRYPOINT not in included:
-        raise RattishBundleError(f"{WORKFLOW_IGNORE} excludes required {WORKFLOW_ENTRYPOINT}")
     if included.intersection({BUNDLE_MANIFEST, *LEGACY_BUNDLE_FORMATS}):
         raise RattishBundleError(f"Workflow contains reserved bundle file {BUNDLE_MANIFEST}")
     _validate_bundle_path_collisions([BUNDLE_MANIFEST, *included])
@@ -201,6 +181,65 @@ def _install_archive(
         raise RattishBundleError(f"Could not import workflow bundle: {exc}") from exc
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)
+
+
+def duplicate_rattish_workspace(
+    workflow_id: str,
+    name: str,
+    *,
+    registry_dir: Path,
+) -> RegisteredWorkflow:
+    """Copy a workflow beside the original with the same files a bundle would carry."""
+    workflow = find_registered_workflow(workflow_id, registry_dir=registry_dir)
+    files = _portable_workspace_files(workflow)
+    staging_parent = Path(tempfile.mkdtemp(prefix="raticode-duplicate-"))
+    staged_root = staging_parent / "workflow"
+    staged_root.mkdir()
+    try:
+        for source, relative in files:
+            destination = staged_root / PurePosixPath(relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with open_binary_input(source) as input_file, destination.open("wb") as target:
+                shutil.copyfileobj(input_file, target, 1024 * 1024)
+                if os.name != "nt":
+                    os.fchmod(target.fileno(), os.fstat(input_file.fileno()).st_mode & 0o777)
+        return install_registered_workflow(
+            workflow.project_root,
+            staged_root,
+            name,
+            name,
+            registry_dir=registry_dir,
+        )
+    except OSError as exc:
+        raise RattishBundleError(f"Could not duplicate workflow: {exc}") from exc
+    finally:
+        shutil.rmtree(staging_parent, ignore_errors=True)
+
+
+def _portable_workspace_files(workflow: RegisteredWorkflow) -> list[tuple[Path, str]]:
+    """Workspace files that may leave the workflow folder, honoring .raticodeignore."""
+    ignore_path = workflow.workflow_root / WORKFLOW_IGNORE
+    for ignore_name in LEGACY_WORKFLOW_IGNORES:
+        if not ignore_path.exists():
+            ignore_path = workflow.workflow_root / ignore_name
+    patterns = _read_ignore_patterns(ignore_path)
+    files: list[tuple[Path, str]] = []
+    for path in sorted(workflow.workflow_root.rglob("*")):
+        relative = path.relative_to(workflow.workflow_root).as_posix()
+        if relative in LEGACY_WORKFLOW_IGNORES and relative != ignore_path.name:
+            continue
+        if _is_ignored(relative, path.is_dir(), patterns):
+            continue
+        if path.is_symlink():
+            raise RattishBundleError(f"Workflow bundle cannot include symbolic link: {relative}")
+        if path.is_file():
+            _validate_bundle_path(relative)
+            files.append(
+                (path, WORKFLOW_IGNORE if relative in LEGACY_WORKFLOW_IGNORES else relative)
+            )
+    if WORKFLOW_ENTRYPOINT not in {relative for _, relative in files}:
+        raise RattishBundleError(f"{WORKFLOW_IGNORE} excludes required {WORKFLOW_ENTRYPOINT}")
+    return files
 
 
 def _read_ignore_patterns(path: Path) -> tuple[tuple[str, bool], ...]:

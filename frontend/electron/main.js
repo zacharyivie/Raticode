@@ -56,14 +56,14 @@ const {
   removeGitWorktree,
 } = require("./git-status.cjs");
 const {
-  RATICODE_HOME_URL,
-  browserCommandRequiresOwnerFocus,
-  browserContentZoomFactor,
-  browserLoadUrl,
-  browserSessionShortcutAction,
-  canOpenInExternalBrowser,
-  normalizeBrowserUrl,
-} = require("./browser-utils.cjs");
+  createAgentBrowserController,
+  createCapabilityRegistry,
+  removeLegacyAgentBrowserConnection,
+  startAgentBrowserService,
+} = require("./agent-browser.cjs");
+const { createBrowserSessions } = require("./browser-sessions.cjs");
+const { createBrowserStore } = require("./browser-store.cjs");
+const { PARTITIONS: BROWSER_PARTITIONS } = require("./browser-policy.cjs");
 const { searchProject, replaceProject } = require("./project-search.cjs");
 const { createAppLog } = require("./app-log.cjs");
 const { createArchiveQueue } = require("./archive-queue.cjs");
@@ -119,6 +119,7 @@ let backendReady;
 let backgroundTray;
 let backendProcess;
 let reportPdfService;
+let agentBrowserService;
 let backendLogStream;
 const desktopGrantSecret = crypto.randomBytes(32).toString("hex");
 const expectedBackendStops = new WeakSet();
@@ -132,9 +133,7 @@ let ipcSecurity;
 let backendErrorIpcSecurity;
 let legacyProjectMigrationToken = "";
 const terminalSessions = new Map();
-const browserSessions = new Map();
 const terminalEditorRequests = new Map();
-const browserOwnersWithCleanup = new WeakSet();
 let terminalEditorServer;
 let terminalEditorEndpoint = "";
 let updateState = {
@@ -150,11 +149,23 @@ let installUpdateAfterDownload = false;
 
 const singleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
+  if (!isProduction) {
+    // The running window may come from another checkout with different code.
+    // Say so instead of silently focusing it as if this launch had worked.
+    console.error(
+      `Raticode is already running with the profile ${app.getPath("userData")}.\n`
+      + `The existing window was focused; ${repoRoot} did not start.\n`
+      + "Close the other Raticode development window, then launch again.",
+    );
+  }
   app.quit();
-  process.exit(0);
+  process.exit(isProduction ? 0 : 1);
 }
 
-function createWindow(apiBaseUrl, apiToken = "") {
+let lastWindowArgs = null;
+const shownWindows = new WeakSet();
+function createWindow(apiBaseUrl, apiToken = "", { show = true } = {}) {
+  lastWindowArgs = [apiBaseUrl, apiToken];
   legacyProjectMigrationToken = "";
   try {
     if (!trustedProjectStore().read().legacyRecentProjectsMigrated) legacyProjectMigrationToken = crypto.randomUUID();
@@ -184,11 +195,17 @@ function createWindow(apiBaseUrl, apiToken = "") {
     },
   });
   // Set the launch size before showing the startup shell to avoid a small-window flash.
-  mainWindow.maximize();
-  mainWindow.show();
+  // maximize() also shows a hidden window, so a background window waits until opened.
+  if (show) {
+    mainWindow.maximize();
+    mainWindow.show();
+    shownWindows.add(mainWindow);
+  }
+  const window = mainWindow;
   const terminalOwnerId = mainWindow.webContents.id;
   const studioOptions = { indexPath: distIndexPath, devServerUrl: VITE_DEV_SERVER_URL, isProduction };
-  installPermissionPolicy(session.fromPartition("persist:raticode-browser"), mainWindow.webContents.session,
+  browsers.install();
+  installPermissionPolicy(session.fromPartition(BROWSER_PARTITIONS.preview), mainWindow.webContents.session,
     () => mainWindow?.webContents, studioOptions);
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (!isStudioDocument(url, studioOptions)) event.preventDefault();
@@ -207,10 +224,7 @@ function createWindow(apiBaseUrl, apiToken = "") {
   });
 
   mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-    if (
-      params.partition !== "persist:raticode-browser"
-      || !isPendingBrowserSessionSrc(terminalOwnerId, params.src)
-    ) {
+    if (!browsers.isPendingAttach(terminalOwnerId, params)) {
       event.preventDefault();
       return;
     }
@@ -224,9 +238,7 @@ function createWindow(apiBaseUrl, apiToken = "") {
     webPreferences.webSecurity = true;
     webPreferences.allowRunningInsecureContent = false;
   });
-  mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => {
-    guestContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  });
+  mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => browsers.hardenGuest(guestContents));
 
   mainWindow.webContents.once("did-finish-load", () => {
     if (!isSmokeTest) return;
@@ -276,10 +288,31 @@ function createWindow(apiBaseUrl, apiToken = "") {
     mainWindow.hide();
   });
 
+
   mainWindow.on("closed", () => {
-    closeBrowsersForOwner(terminalOwnerId);
+    browsers.closeForOwner(terminalOwnerId);
     closeTerminalsForOwner(terminalOwnerId);
+    if (mainWindow !== window) return; // Already replaced, for example by a backend restart.
     mainWindow = undefined;
+    // A page-initiated close destroys the window instead of hiding it. Raticode keeps
+    // running in the tray, so restore a hidden window to keep phone sync and archives going.
+    if (!isQuitting && !isSmokeTest) setTimeout(() => {
+      if (!isQuitting && !mainWindow && lastWindowArgs) createWindow(...lastWindowArgs, { show: false });
+    }, 1000);
+  });
+
+  // The hidden window keeps phone thread sync and archives running in the
+  // background. Reload a crashed renderer, a few times per hour at most.
+  const rendererRestarts = [];
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    if (isQuitting || isSmokeTest || details.reason === "clean-exit") return;
+    const now = Date.now();
+    while (rendererRestarts.length && now - rendererRestarts[0] > 60 * 60 * 1000) rendererRestarts.shift();
+    if (rendererRestarts.length >= 3) return;
+    rendererRestarts.push(now);
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.reload();
+    }, 2000);
   });
 }
 
@@ -325,6 +358,11 @@ function startBackend(port = 0) {
         ...reportPdfService?.env,
         GOFER_DESKTOP_GRANT_SECRET: desktopGrantSecret,
         GOFER_UI_EMIT_READY_TOKEN: "1",
+        // Lets the backend grant and revoke Rem's per-turn browser access.
+        ...(agentBrowserService ? {
+          GOFER_BROWSER_SERVICE_URL: agentBrowserService.url,
+          GOFER_BROWSER_ADMIN_TOKEN: agentBrowserService.adminToken,
+        } : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -489,6 +527,8 @@ function dataDirConfigPath() {
 
 function stopBackend() {
   backendPathGrants.reset();
+  // Turns end with their backend, and so does their browser access.
+  agentBrowserCapabilities.revokeAll();
   if (!backendProcess || backendProcess.killed) return;
 
   const child = backendProcess;
@@ -589,8 +629,8 @@ app.whenReady().then(async () => {
       { role: "togglefullscreen" },
       { label: "Find in Page", accelerator: "Command+F", registerAccelerator: false,
         click: () => {
-          const active = [...browserSessions.values()].find(item => browserSessionContents(item)?.isFocused());
-          if (active) emitBrowserCommand(active, "find");
+          const active = browsers.focusedSession();
+          if (active) browsers.emitCommand(active, "find");
           else mainWindow?.webContents.send("gofer:browser-command", { action: "editor-find" });
         } },
     ] },
@@ -603,6 +643,10 @@ app.whenReady().then(async () => {
     const backendPort = await allocateBackendPort();
     backendReady = shellPathReady.then(async () => {
       reportPdfService = await startReportPdfService({ BrowserWindow, session });
+      agentBrowserService = await startAgentBrowserService(agentBrowser.handle, agentBrowserCapabilities);
+      // In-process Electron tests reach the service without exporting its token.
+      if (process.env.GOFER_ELECTRON_TEST_HOOKS === "1") globalThis.__raticodeTestHooks = { agentBrowserService };
+      removeLegacyAgentBrowserConnection(getGoferDataDir());
       return startBackend(backendPort);
     });
     // Handlers await readiness; neither Python nor terminal setup gates first paint.
@@ -630,7 +674,12 @@ app.whenReady().then(async () => {
 app.on("activate", showMainWindow);
 
 function showMainWindow() {
+  if ((!mainWindow || mainWindow.isDestroyed()) && lastWindowArgs && !isQuitting) createWindow(...lastWindowArgs);
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!shownWindows.has(mainWindow)) {
+    mainWindow.maximize();
+    shownWindows.add(mainWindow);
+  }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -692,7 +741,7 @@ app.on("before-quit", (event) => {
     void conversationArchives.close().finally(() => { archivesDrained = true; app.quit(); });
     return;
   }
-  closeAllBrowsers();
+  browsers.closeAll();
   closeTerminalEditorServer();
   closeAllTerminals();
   stopBackend();
@@ -747,12 +796,15 @@ function setupIpcHandlers() {
     remSettings,
     configureRem,
     archiveRem,
+    forgetRem,
     checkForUpdates,
     copyPath,
     movePath,
-    browserAction,
-    browserOwnerZoom,
-    createBrowser,
+    browserAction: (event, options) => browsers.browserAction(event, options),
+    browserLibrary: (event, options) => browsers.browserLibrary(event, options),
+    browserOwnerZoom: (event) => browsers.ownerZoom(event),
+    browserPolicy: (event, options) => browsers.setPolicy(event, options?.policy),
+    createBrowser: (event, options) => browsers.createBrowser(event, options),
     createFile,
     createFolder,
     createTerminal,
@@ -774,8 +826,8 @@ function setupIpcHandlers() {
     grantUserPath,
     getUpdateState,
     apiSession: async () => {
-      await backendReady;
-      return { apiBaseUrl: activeApiBaseUrl, apiToken: activeUiApiToken };
+      const backend = await backendReady;
+      return { apiBaseUrl: backend.apiBaseUrl, apiToken: backend.apiToken };
     },
     installDownloadedUpdate,
     listDirectory,
@@ -820,498 +872,44 @@ function setupIpcHandlers() {
   });
 }
 
-function createBrowser(event, options = {}) {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    throw new Error("The browser window is unavailable.");
-  }
-  const requestedPath = typeof options.path === "string" ? options.path.trim() : "";
-  let url = "about:blank";
-  let grantId = "";
-  if (requestedPath) {
-    const targetPath = resolveExactPath(requestedPath, {
-      grantId: options.grantId,
-      mustExist: true,
-    });
-    if (!fs.statSync(targetPath).isFile()) {
-      throw new Error(`Browser preview path is not a file: ${targetPath}`);
-    }
-    url = pathToFileURL(targetPath).toString();
-    grantId = typeof options.grantId === "string" ? options.grantId : "";
-  } else if (options.url) {
-    url = browserLoadUrl(normalizeBrowserUrl(options.url));
-  }
+const browsers = createBrowserSessions({
+  app,
+  Menu,
+  clipboard,
+  dialog,
+  shell,
+  session,
+  webContents,
+  getMainWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+  resolvePath: (targetPath, options) => resolveExactPath(targetPath, options),
+  store: createBrowserStore(path.join(app.getPath("userData"), "browser")),
+  log: (level, message) => applicationLog?.write(level, "browser", message),
+  quarantineDir: path.join(app.getPath("userData"), "browser", "quarantine"),
+});
 
-  const id = crypto.randomUUID();
-  const session = {
-    applicationChord: null,
-    applicationKeybindings: sanitizeBrowserKeybindings(options.applicationKeybindings),
-    clientId: typeof options.clientId === "string" ? options.clientId : "",
-    contents: null,
-    error: "",
-    favicon: "",
-    grantId,
-    id,
-    initialUrl: url,
-    localNavigation: url.startsWith("file:"),
-    internalHomeUrl: url.startsWith("data:text/html") ? url : "",
-    owner: event.sender,
-    ownerId: event.sender.id,
-    openBrowserBinding: typeof options.openBrowserBinding === "string"
-      ? options.openBrowserBinding.slice(0, 120)
-      : "Mod+Alt+Slash",
-    ownerZoomFactor: 1,
-    pageZoomFactor: 1,
-    pendingSrc: url,
-    projectChordDeadline: 0,
-  };
-  browserSessions.set(id, session);
-  registerBrowserOwnerCleanup(event.sender);
-  return { ...browserSessionState(session, url), src: url };
-}
+const agentBrowserCapabilities = createCapabilityRegistry();
+const agentBrowser = createAgentBrowserController({
+  openTab: (details) => browsers.openAgentTab(details),
+  agentTabs: (agent) => browsers.agentTabs(agent),
+  allAgentTabs: () => browsers.allAgentTabs(),
+  closeTab: (tab) => browsers.closeAgentTab(tab),
+  normalizeUrl: (value) => browsers.normalizeUrl(value),
+  policy: () => browsers.policy(),
+  confirm: (tab, details) => browsers.confirmAgent(tab, details),
+  record: (tab, entry) => browsers.recordAgentActivity(tab, entry),
+});
+browsers.setViewportListener((tab) => void agentBrowser.viewportChanged(tab));
+setInterval(() => agentBrowser.sweep(), 60 * 1000).unref();
 
-function isPendingBrowserSessionSrc(ownerId, src) {
-  const requested = String(src ?? "");
-  for (const session of browserSessions.values()) {
-    if (session.ownerId === ownerId && session.pendingSrc && session.pendingSrc === requested) {
-      return true;
-    }
-  }
-  return requested === "about:blank";
-}
-
-function adoptBrowserContents(event, session, webContentsId) {
-  const guest = webContents.fromId(Number(webContentsId));
-  if (
-    !guest
-    || guest.isDestroyed()
-    || guest.hostWebContents !== event.sender
-    || guest.getType() !== "webview"
-  ) {
-    throw new Error("Browser view is unavailable.");
-  }
-  if (session.contents === guest) return;
-  if (session.contents) throw new Error("Browser session already has a view.");
-  session.contents = guest;
-  session.pendingSrc = "";
-  if (typeof guest.setBackgroundColor === "function") guest.setBackgroundColor("#ffffff");
-  guest.once("destroyed", () => closeBrowserSession(session));
-  configureBrowserSession(session);
-  session.ownerZoomFactor = session.owner.getZoomFactor();
-  syncBrowserContentZoom(session);
-  emitBrowserState(session);
-}
-
-function browserAction(event, options = {}) {
-  // Destruction of a guest can precede the renderer's cleanup IPC.
-  if (["close", "adopt", "focus", "set-preferences"].includes(options.action) && !browserSessions.has(options.id)) {
-    return { closed: true, ready: false };
-  }
-  const session = ownedBrowserSession(event, options.id);
-  if (options.action === "adopt") {
-    adoptBrowserContents(event, session, options.webContentsId);
-    return browserSessionState(session);
-  }
-  if (options.action === "close") {
-    closeBrowserSession(session);
-    return { closed: true };
-  }
-  if (options.action === "set-preferences") {
-    if (options.applicationKeybindings) {
-      session.applicationKeybindings = sanitizeBrowserKeybindings(options.applicationKeybindings);
-    }
-    session.openBrowserBinding = typeof options.openBrowserBinding === "string"
-      && options.openBrowserBinding
-      ? options.openBrowserBinding.slice(0, 120)
-      : session.openBrowserBinding;
-    return browserSessionState(session);
-  }
-  const contents = browserSessionContents(session);
-  if (!contents && options.action === "focus") return browserSessionState(session);
-  if (!contents) throw new Error("Browser view is unavailable.");
-  switch (options.action) {
-    case "back":
-      if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
-      break;
-    case "focus":
-      contents.focus();
-      break;
-    case "forward":
-      if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
-      break;
-    case "navigate":
-      session.error = "";
-      {
-        const normalizedUrl = normalizeBrowserUrl(options.url);
-        const loadUrl = browserLoadUrl(normalizedUrl);
-        session.internalHomeUrl = normalizedUrl === RATICODE_HOME_URL ? loadUrl : "";
-        session.localNavigation = loadUrl.startsWith("file:");
-        void runBrowserOperation(session, () => contents.loadURL(loadUrl));
-      }
-      break;
-    case "open-external": {
-      const url = contents.getURL();
-      if (canOpenInExternalBrowser(url)) void runBrowserOperation(session, () => shell.openExternal(url));
-      break;
-    }
-    case "find": {
-      const text = typeof options.text === "string" ? options.text.slice(0, 2048) : "";
-      if (!text) { contents.stopFindInPage("clearSelection"); session.findResult = null; session.findRequestId = null; }
-      else session.findRequestId = contents.findInPage(text, { forward: options.forward !== false, findNext: options.newSearch !== false });
-      break;
-    }
-    case "stop-find":
-      contents.stopFindInPage("clearSelection");
-      session.findResult = null;
-      session.findRequestId = null;
-      break;
-    case "reload":
-      contents.reload();
-      break;
-    case "stop":
-      contents.stop();
-      break;
-    default:
-      throw new Error(`Unknown browser action: ${options.action || "missing"}`);
-  }
-  return browserSessionState(session);
-}
-
-async function runBrowserOperation(session, operation) {
-  try {
-    await operation();
-  } catch (error) {
-    session.error = error instanceof Error ? error.message : String(error);
-    // The view or its owner may have closed while navigation was pending.
-    try { emitBrowserState(session); } catch { /* No live view to notify. */ }
-  }
-}
-
-function configureBrowserSession(session) {
-  const contents = session.contents;
-  const update = () => emitBrowserState(session);
-  contents.on("found-in-page", (_event, result) => {
-    if (result.requestId !== session.findRequestId) return;
-    session.findResult = { matches: result.matches, activeMatchOrdinal: result.activeMatchOrdinal, finalUpdate: result.finalUpdate };
-    update();
-  });
-  contents.on("did-start-loading", () => {
-    session.error = "";
-    session.findResult = null;
-    session.findRequestId = null;
-    update();
-  });
-  contents.on("did-stop-loading", update);
-  contents.on("did-navigate", () => {
-    session.favicon = "";
-    update();
-  });
-  contents.on("did-navigate-in-page", update);
-  contents.on("page-title-updated", update);
-  contents.on("page-favicon-updated", (_event, favicons) => {
-    session.favicon = Array.isArray(favicons) ? String(favicons[0] || "") : "";
-    update();
-  });
-  contents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
-    if (!isMainFrame || errorCode === -3) return;
-    session.error = `${errorDescription}: ${validatedUrl}`;
-    update();
-  });
-  contents.on("render-process-gone", (_event, details) => {
-    session.error = `Browser renderer stopped: ${details.reason}`;
-    update();
-  });
-  contents.on("will-navigate", (event, url) => {
-    if (!isAllowedBrowserNavigation(session, url)) event.preventDefault();
-  });
-  contents.on("ipc-message", (event, channel, payload) => {
-    if (event.senderFrame !== contents.mainFrame) return;
-    if (channel === "gofer:browser-link-clicked") openBrowserLink(session, payload?.url);
-    if (
-      channel === "gofer:browser-zoom"
-      && (payload?.direction === 1 || payload?.direction === -1)
-    ) {
-      session.pageZoomFactor = 1;
-      emitBrowserCommand(session, "text-zoom", { direction: payload.direction });
-    }
-    if (
-      channel === "gofer:browser-navigation"
-      && payload?.action === "back"
-      && contents.navigationHistory.canGoBack()
-    ) {
-      contents.navigationHistory.goBack();
-    }
-  });
-  contents.on("before-input-event", (event, input) => {
-    const action = browserSessionShortcutAction(session, input, process.platform);
-    if (!action) return;
-    event.preventDefault();
-    if (action === "chord-pending") return;
-    if (action.startsWith("command:")) {
-      emitBrowserCommand(session, "application-shortcut", {
-        commandId: action.slice("command:".length),
-      });
-      return;
-    }
-    if ([
-      "focus-location",
-      "find",
-      "close",
-      "next-tab",
-      "previous-tab",
-      "new-tab",
-      "settings-open",
-      "file-open",
-      "project-open",
-      "panel-toggle",
-      "project-pane-toggle",
-      "assistant-pane-toggle",
-    ].includes(action)) {
-      emitBrowserCommand(session, action);
-      return;
-    }
-    if (action === "open-browser") {
-      emitBrowserCommand(session, action);
-      return;
-    }
-    if (action === "reload") contents.reload();
-    if (action === "back" && contents.navigationHistory.canGoBack()) {
-      contents.navigationHistory.goBack();
-    }
-    if (action === "forward" && contents.navigationHistory.canGoForward()) {
-      contents.navigationHistory.goForward();
-    }
-    if (action === "zoom-in" || action === "zoom-out") {
-      event.preventDefault();
-      session.pageZoomFactor = 1;
-      emitBrowserCommand(session, "text-zoom", {
-        direction: action === "zoom-in" ? 1 : -1,
-      });
-    }
-    if (action === "zoom-reset") {
-      session.pageZoomFactor = 1;
-      syncBrowserContentZoom(session);
-      emitBrowserCommand(session, "text-zoom", { reset: true });
-    }
-  });
-  contents.setWindowOpenHandler(({ url }) => {
-    if ((session.grantId || session.localNavigation) && /^file:/i.test(contents.getURL())) {
-      openBrowserLink(session, url);
-      return { action: "deny" };
-    }
-    if (isAllowedBrowserNavigation(session, url)) {
-      session.error = "";
-      void runBrowserOperation(session, () => contents.loadURL(url));
-    }
-    return { action: "deny" };
-  });
-  contents.on("context-menu", (_event, params) => showBrowserContextMenu(session, params));
-}
-
-function openBrowserLink(session, value) {
-  if (session.owner.isDestroyed()) return;
-  let url;
-  try { url = new URL(value); } catch { return; }
-  if (url.protocol === "file:") {
-    // Local previews hand links to the studio, which checks the destination's
-    // own path grant and reports missing files. Never grant remote pages this route.
-    if (!(session.grantId || session.localNavigation) || !/^file:/i.test(browserSessionContents(session)?.getURL() || "")) return;
-    session.owner.send("gofer:browser-open-file", { href: url.toString() });
-    return;
-  }
-  if (!["http:", "https:"].includes(url.protocol)) return;
-  session.owner.send("gofer:browser-open-tab", { url: url.toString() });
-}
-
-function showBrowserContextMenu(session, params) {
-  const contents = session.contents;
-  const template = [];
-  if (params.linkURL && isSafeExternalUrl(params.linkURL)) {
-    template.push({
-      label: "Open link in new browser tab",
-      click: () => session.owner.send("gofer:browser-open-tab", { url: params.linkURL }),
-    });
-    template.push({ type: "separator" });
-  }
-  if (params.isEditable) {
-    template.push({ role: "cut" }, { role: "copy" }, { role: "paste" }, { type: "separator" });
-  } else if (params.selectionText) {
-    template.push({ role: "copy" }, { type: "separator" });
-  }
-  template.push(
-    {
-      label: "Back",
-      enabled: contents.navigationHistory.canGoBack(),
-      click: () => contents.navigationHistory.goBack(),
-    },
-    {
-      label: "Forward",
-      enabled: contents.navigationHistory.canGoForward(),
-      click: () => contents.navigationHistory.goForward(),
-    },
-    { label: "Reload", click: () => contents.reload() },
-    { type: "separator" },
-    { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) },
-  );
-  Menu.buildFromTemplate(template).popup({ window: mainWindow });
-}
-
-function browserOwnerZoom(event) {
-  const ownerZoomFactor = event.sender.getZoomFactor();
-  for (const session of browserSessions.values()) {
-    if (session.ownerId !== event.sender.id) continue;
-    if (session.ownerZoomFactor === ownerZoomFactor) continue;
-    session.ownerZoomFactor = ownerZoomFactor;
-    syncBrowserContentZoom(session);
-  }
-  return { zoomFactor: ownerZoomFactor };
-}
-
-function syncBrowserContentZoom(session) {
-  const contents = browserSessionContents(session);
-  if (!contents) return;
-  contents.setZoomFactor(browserContentZoomFactor(
-    session.ownerZoomFactor,
-    session.pageZoomFactor,
-  ));
-}
-
-function browserSessionState(session, fallbackUrl = "") {
-  const fallback = fallbackUrl || session.initialUrl || "about:blank";
-  const contents = browserSessionContents(session);
-  if (!contents) {
-    if (!browserSessions.has(session.id)) {
-      return {
-        canGoBack: false,
-        canGoForward: false,
-        canOpenExternal: false,
-        clientId: session.clientId,
-        error: session.error || "Browser view is unavailable.",
-        favicon: session.favicon || "",
-        id: session.id,
-        loading: false,
-        title: "",
-        url: fallback,
-      };
-    }
-    return {
-      ready: false,
-      canGoBack: false,
-      canGoForward: false,
-      canOpenExternal: false,
-      clientId: session.clientId,
-      error: session.error,
-      favicon: session.favicon || "",
-      id: session.id,
-      loading: !session.error,
-      title: "",
-      url: session.internalHomeUrl ? RATICODE_HOME_URL : fallback,
-    };
-  }
-  const currentUrl = contents.getURL() || fallback;
-  return {
-    ready: true,
-    findResult: session.findResult || null,
-    canOpenExternal: canOpenInExternalBrowser(currentUrl),
-    canGoBack: contents.navigationHistory.canGoBack(),
-    canGoForward: contents.navigationHistory.canGoForward(),
-    clientId: session.clientId,
-    error: session.error,
-    favicon: session.favicon || "",
-    id: session.id,
-    loading: contents.isLoading(),
-    title: contents.getTitle(),
-    url: session.internalHomeUrl && currentUrl === session.internalHomeUrl
-      ? RATICODE_HOME_URL
-      : currentUrl,
-  };
-}
-
-function emitBrowserState(session) {
-  try {
-    if (
-      browserSessions.get(session.id) === session
-      && browserSessionContents(session)
-      && !session.owner.isDestroyed()
-    ) {
-      session.owner.send("gofer:browser-state", browserSessionState(session));
-    }
-  } catch (error) {
-    // Electron can destroy either contents between the checks and the send.
-    session.error = error instanceof Error ? error.message : String(error);
-  }
-}
-
-function emitBrowserCommand(session, action, details = {}) {
-  if (!session.owner.isDestroyed()) {
-    if (browserCommandRequiresOwnerFocus(action)) session.owner.focus();
-    session.owner.send("gofer:browser-command", {
-      action,
-      clientId: session.clientId,
-      ...details,
-      id: session.id,
-    });
-  }
-}
-
-function sanitizeBrowserKeybindings(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(Object.entries(value).flatMap(([commandId, binding]) => (
-    typeof commandId === "string" && commandId.length <= 120 && typeof binding === "string"
-      ? [[commandId, binding.slice(0, 240)]]
-      : []
-  )));
-}
-
-function ownedBrowserSession(event, id) {
-  const session = typeof id === "string" ? browserSessions.get(id) : null;
-  if (!session || session.ownerId !== event.sender.id) {
-    throw new Error("Browser session was not found.");
-  }
-  return session;
-}
-
-function closeBrowserSession(session) {
-  if (!session || !browserSessions.has(session.id)) return;
-  const contents = browserSessionContents(session);
-  const restoreOwnerFocus = contents?.isFocused() === true;
-  browserSessions.delete(session.id);
-  session.contents = null;
-  if (restoreOwnerFocus && !session.owner.isDestroyed()) session.owner.focus();
-}
-
-function browserSessionContents(session) {
-  const contents = session?.contents;
-  return contents && !contents.isDestroyed() ? contents : null;
-}
-
-function registerBrowserOwnerCleanup(owner) {
-  if (browserOwnersWithCleanup.has(owner)) return;
-  browserOwnersWithCleanup.add(owner);
-  const ownerId = owner.id;
-  owner.once("destroyed", () => closeBrowsersForOwner(ownerId));
-}
-
-function closeBrowsersForOwner(ownerId) {
-  for (const session of [...browserSessions.values()]) {
-    if (session.ownerId === ownerId) closeBrowserSession(session);
-  }
-}
-
-function closeAllBrowsers() {
-  for (const session of [...browserSessions.values()]) closeBrowserSession(session);
-}
-
-function isAllowedBrowserNavigation(session, value) {
-  try {
-    const url = new URL(value);
-    if (["http:", "https:", "about:", "blob:", "data:"].includes(url.protocol)) return true;
-    if (url.protocol !== "file:" || !(session.grantId || session.localNavigation)) return false;
-    resolveExactPath(fileURLToPath(url), { grantId: session.grantId, mustExist: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
+app.on("certificate-error", (event, contents, url, error, certificate, callback, isMainFrame) => {
+  browsers.handleCertificateError(event, contents, url, error, certificate, callback, isMainFrame);
+});
+app.on("login", (event, contents, details, authInfo, callback) => {
+  browsers.handleLogin(event, contents, details, authInfo, callback);
+});
+app.on("select-client-certificate", (event, contents, url, list, callback) => {
+  browsers.handleSelectClientCertificate(event, contents, url, list, callback);
+});
 
 async function createTerminal(event, options = {}) {
   const requestedCwd = typeof options.cwd === "string" ? options.cwd.trim() : "";
@@ -2338,6 +1936,12 @@ async function archiveRem(_event, { thread, messages, deleted } = {}) {
   return result;
 }
 
+async function forgetRem(_event, { threadIds } = {}) {
+  const config = remSettings();
+  if (!config.archiveFolder) return { skipped: true };
+  return conversationArchives.forget(config.archiveFolder, threadIds);
+}
+
 async function gitRepoAction(_event, options = {}) {
   const projectRoot = await resolveGitProjectDirectory(options);
   try { return await gitRepositoryAction(projectRoot, options.action, options.value, { authorizeTarget: (target) => resolveGitProjectDirectory({ projectRoot: target, grantId: getIpcSecurity().grantForPath(target) }) }); }
@@ -2469,6 +2073,13 @@ async function selectPath(_event, options = {}) {
   const parentWindow =
     mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
   const defaultPath = resolvePickerDefaultPath(options.currentPath, options.grantId);
+  if (options.save === true) {
+    const result = await dialog.showSaveDialog(parentWindow, { defaultPath, title: "Save export" });
+    if (result.canceled || !result.filePath) return null;
+    const root = path.dirname(result.filePath);
+    const trusted = getIpcSecurity().trustPath(root);
+    return { path: result.filePath, grantId: trusted.grantId };
+  }
   const properties = options.directoryOnly === true
     ? ["openDirectory", "showHiddenFiles", "createDirectory"]
     : options.fileOnly === true
@@ -2632,6 +2243,7 @@ async function restartBackend() {
 async function replaceBackendWindow() {
   stopBackend();
   try {
+    removeLegacyAgentBrowserConnection(getGoferDataDir());
     backendReady = startBackend();
     const backend = await backendReady;
     activeApiBaseUrl = backend.apiBaseUrl;

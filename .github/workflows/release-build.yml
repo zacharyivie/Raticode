@@ -145,6 +145,12 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # Electron 42+ no longer downloads its runtime during npm ci. Tests and
+      # the license bundle need it, including Chromium's notices.
+      - name: Download the Electron runtime
+        working-directory: frontend
+        run: node node_modules/electron/install.js
+
       - name: Require Windows signing credentials
         env:
           CSC_LINK: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE) || '' }}

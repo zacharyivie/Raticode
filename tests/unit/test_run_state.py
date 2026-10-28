@@ -1,12 +1,32 @@
 import pytest
 
 from gofer.utils.run_state import (
+    clear_stop_marker,
     clear_workflow_stop,
     request_workflow_run_stop,
     request_workflow_stop,
     workflow_run_stop_path,
     workflow_stop_path,
 )
+
+
+@pytest.mark.parametrize("per_run", [False, True])
+def test_stop_markers_under_symlinked_data_root(tmp_path, per_run):
+    canonical = tmp_path.resolve() / "private" / "var" / "data"
+    canonical.mkdir(parents=True)
+    alias = tmp_path / "var"
+    alias.symlink_to(canonical.parent, target_is_directory=True)
+    if per_run:
+        marker = request_workflow_run_stop("workflow", "run", alias / "data")
+    else:
+        marker = request_workflow_stop("workflow", alias / "data")
+    assert marker.is_relative_to(canonical)
+    assert marker.read_bytes() == b"stop requested\n"
+    if per_run:
+        clear_stop_marker(marker)
+    else:
+        clear_workflow_stop("workflow", alias / "data")
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("per_run", [False, True])

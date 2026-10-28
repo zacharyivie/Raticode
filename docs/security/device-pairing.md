@@ -1,5 +1,11 @@
 # Current live device behavior
 
+> **October 26, 2026:** The ntfy relay was removed. Phones and desktops connect
+> only over the local network. Relay, topic and quota material below is historical.
+> Invitation `relay` and topic fields remain only for wire compatibility and name the
+> unresolvable `https://relay.invalid`. See the mobile repository's
+> `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
+
 September 20 update. Production mobile navigation is live-only. Earlier milestone descriptions below are historical where they refer to missing application handlers or manual thread IDs.
 
 Device networking still requires the explicit environment opt-in. The default listener host is now the OS-selected outgoing private IPv4 address when available; a UDP route lookup obtains the address without transmitting a packet. Public, wildcard and multicast addresses are rejected. An explicit `RATICODE_DEVICE_HOST` remains authoritative. No opt-in means loopback-only and no public relay subscription.

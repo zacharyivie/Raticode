@@ -1,0 +1,32 @@
+[
+  {
+    "$schema": "urn:raticode:rattish:schema:diagnostic-1.json",
+    "code": "RATTISH_ROUTE_TARGET_AUTO_STARTS",
+    "severity": "warning",
+    "phase": "semantic",
+    "message": "Node 'fast' has no needs, so it also runs when the workflow starts, not only after 'decide'.",
+    "file": "workflow.rattish",
+    "span": {
+      "start": {
+        "offset": 196,
+        "line": 13,
+        "column": 6
+      },
+      "end": {
+        "offset": 200,
+        "line": 13,
+        "column": 10
+      }
+    },
+    "related": [],
+    "details": {
+      "node": "fast",
+      "route_sources": [
+        "decide"
+      ]
+    },
+    "suggestions": [
+      "Add needs: decide to run it only after that node, or start: true if it should also run at workflow start."
+    ]
+  }
+]

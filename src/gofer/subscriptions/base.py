@@ -20,6 +20,9 @@ from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retain
 
 
 class Subscription(ABC):
+    # Tool-free calls must receive the evidence directly, without reading a prompt file.
+    prompt_via_stdin = False
+
     @track_invocation
     async def execute(
         self,
@@ -68,9 +71,12 @@ class Subscription(ABC):
                 final_message = retained_text(candidate)
 
         with tempfile.TemporaryDirectory(prefix="gofer-agent-prompt-") as prompt_dir:
-            prompt_path = Path(prompt_dir) / "prompt.md"
-            prompt_path.write_text(prompt, encoding="utf-8")
-            prompt_arg = self._prompt_file_instruction(prompt_path)
+            if self.prompt_via_stdin:
+                prompt_arg = "-"
+            else:
+                prompt_path = Path(prompt_dir) / "prompt.md"
+                prompt_path.write_text(prompt, encoding="utf-8")
+                prompt_arg = self._prompt_file_instruction(prompt_path)
             cmd = self._build_command(
                 prompt_arg,
                 tools,
@@ -90,6 +96,7 @@ class Subscription(ABC):
                     else DEFAULT_RESOURCE_LIMITS.max_subprocess_output_bytes
                 ),
                 protocol_stdout=True,
+                stdin=prompt.encode("utf-8") if self.prompt_via_stdin else None,
             )
             try:
                 async with aclosing(source):

@@ -1,6 +1,7 @@
 const { pathToFileURL } = require("node:url");
 const legacyBrand = require("./brand-compat.json");
 const RATICODE_HOME_URL = "raticode://home";
+const DEFAULT_SEARCH_URL = "https://www.google.com/search?q={query}";
 
 // Only documents may leave the embedded browser through a local file URL.
 // Do not let this action launch arbitrary local programs via their OS association.
@@ -14,7 +15,7 @@ function canOpenInExternalBrowser(value) {
   }
 }
 
-function normalizeBrowserUrl(value) {
+function normalizeBrowserUrl(value, searchUrl = DEFAULT_SEARCH_URL) {
   let input = String(value ?? "").trim();
   if (/^file\/\//i.test(input)) input = input.replace(/^file/i, "file:");
   if (/^[a-z]:[\\/]/i.test(input)) {
@@ -39,31 +40,48 @@ function normalizeBrowserUrl(value) {
   if (/^[a-z][a-z\d+.-]*:/i.test(input)) {
     throw new Error("Enter an http:// or https:// address, or a local file path or file:// URL.");
   }
-  return `https://www.google.com/search?q=${encodeURIComponent(input)}`;
+  const template = typeof searchUrl === "string" && searchUrl.includes("{query}") ? searchUrl : DEFAULT_SEARCH_URL;
+  return template.replace("{query}", encodeURIComponent(input));
 }
 
 function browserShortcutAction(input = {}, platform = process.platform, openBrowserBinding = "Mod+Alt+Slash") {
   if (input.type !== "keyDown" || input.isAutoRepeat) return "";
   const key = String(input.key ?? "").toLowerCase();
-  const primary = platform === "darwin" ? input.meta : input.control;
+  const mac = platform === "darwin";
+  const primary = mac ? input.meta : input.control;
+  const plain = !input.control && !input.meta && !input.alt && !input.shift;
   if (matchesBrowserBinding(input, openBrowserBinding, platform)) return "open-browser";
   if (primary && !input.alt && !input.shift && key === ",") return "settings-open";
   if (primary && !input.alt && !input.shift && key === "o") return "file-open";
   if (primary && !input.alt && !input.shift && key === "`") return "panel-toggle";
   if (input.control && !input.alt && !input.meta && !input.shift && key === "b") return "project-pane-toggle";
-  if (input.control && !input.alt && !input.meta && !input.shift && key === "l") return "assistant-pane-toggle";
+  // Every browser focuses the address bar with Ctrl+L (Cmd+L on macOS).
+  if (primary && !input.alt && !input.shift && key === "l") return "focus-location";
+  if (mac && input.control && !input.alt && !input.meta && !input.shift && key === "l") return "assistant-pane-toggle";
   if (input.alt && !input.control && !input.meta && key === "d") return "focus-location";
   if (primary && !input.alt && !input.shift && key === "f") return "find";
-  if (primary && key === "r") return "reload";
+  if ((primary && input.shift && key === "r") || (key === "f5" && (input.shift || primary))) return "reload-hard";
+  if ((primary && key === "r") || (plain && key === "f5")) return "reload";
   if (primary && key === "w") return "close";
+  if (primary && input.shift && !input.alt && key === "t") return "reopen-closed-tab";
   if (input.control && !input.alt && !input.meta && key === "tab") {
     return input.shift ? "previous-tab" : "next-tab";
   }
+  if ((plain && key === "f12") || (!mac && input.control && input.shift && !input.alt && key === "i")
+    || (mac && input.meta && input.alt && !input.shift && key === "i")) return "toggle-devtools";
+  if (primary && !input.alt && !input.shift && key === "p") return "print";
+  if (primary && !input.alt && !input.shift && key === "d") return "bookmark";
+  if ((!mac && input.control && !input.alt && !input.shift && key === "h")
+    || (mac && input.meta && !input.alt && !input.shift && key === "y")) return "history";
+  if (input.alt && !input.control && !input.meta && key === "home") return "home";
   if (input.alt && key === "left") return "back";
   if (input.alt && key === "right") return "forward";
+  if (mac && input.meta && !input.alt && !input.shift && key === "[") return "back";
+  if (mac && input.meta && !input.alt && !input.shift && key === "]") return "forward";
   if (primary && (key === "+" || key === "=")) return "zoom-in";
   if (primary && key === "-") return "zoom-out";
   if (primary && key === "0") return "zoom-reset";
+  if (plain && key === "escape") return "stop-loading";
   return "";
 }
 
@@ -122,7 +140,8 @@ function browserSessionShortcutAction(
       && matchesBrowserBinding(input, session.applicationKeybindings?.["terminal.new"] || "Ctrl+KeyT", platform)) {
     return "command:terminal.new";
   }
-  if (["close", "new-tab"].includes(browserAction)) return browserAction;
+  // Standard browser keys win over app bindings while a page has focus.
+  if (BROWSER_PRIORITY_ACTIONS.has(browserAction)) return browserAction;
   return browserApplicationShortcutAction(
     session,
     input,
@@ -131,14 +150,22 @@ function browserSessionShortcutAction(
   ) || browserProjectChordAction(session, input, platform) || browserAction;
 }
 
+const BROWSER_PRIORITY_ACTIONS = new Set([
+  "close", "new-tab", "focus-location", "reload", "reload-hard", "print", "toggle-devtools",
+  "reopen-closed-tab", "bookmark", "history",
+]);
+
 function browserCommandRequiresOwnerFocus(action) {
   return [
+    "bookmark",
     "close",
     "focus-location",
     "find",
+    "history",
     "new-tab",
     "next-tab",
     "previous-tab",
+    "reopen-closed-tab",
   ].includes(action);
 }
 
@@ -171,7 +198,7 @@ function browserContentZoomFactor(ownerZoomFactor = 1, pageZoomFactor = 1) {
   const pageScale = Number.isFinite(pageZoomFactor) && pageZoomFactor > 0
     ? pageZoomFactor
     : 1;
-  return clamp(ownerScale * pageScale, 0.5, 3);
+  return clamp(ownerScale * pageScale, 0.25, 5);
 }
 
 function clamp(value, minimum, maximum) {

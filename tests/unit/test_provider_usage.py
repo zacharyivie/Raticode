@@ -15,11 +15,27 @@ from gofer.core import provider_usage as usage
 from gofer.core.provider_profiles import ProviderProfile, save_provider_profiles
 from gofer.subscriptions.acp_transport import AcpRpcError, AcpTransportError, open_acp_transport
 
+CLAUDE_CODE_REPORT = usage._claude_cli_allowance
+
 
 @pytest.fixture(autouse=True)
 def isolated_usage_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr(usage.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(usage, "get_data_dir", lambda: tmp_path / "data")
+    reports: list[Any] = []
+
+    async def report(executable, env, data_dir):
+        reports.append((executable, env))
+
+    # Never start a real Claude Code process from a unit test. By default Claude
+    # Code produces no report, so the direct credential fallback is exercised.
+    monkeypatch.setattr(usage, "_claude_cli_allowance", report)
     for name in (
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "CURSOR_API_KEY",
+        "CURSOR_API_ENDPOINT",
+        "OPENCODE_AUTH_CONTENT",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CONFIG_DIR",
         "ANTHROPIC_API_KEY",
@@ -32,6 +48,7 @@ def isolated_usage_credentials(monkeypatch, tmp_path):
         "RATICODE_ANTHROPIC_ADMIN_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
+    return reports
 
 
 def test_codex_multiple_buckets_do_not_duplicate_legacy_or_convert_to_tokens():
@@ -117,6 +134,8 @@ class FakeRpc:
             return {"account": {"type": self.account_type}}
         if method == "account/rateLimits/read":
             return {"rateLimits": {"primary": {"usedPercent": 25}}}
+        if method == "_x.ai/billing":
+            return {"config": {"creditUsagePercent": 30, "currentPeriod": {"end": "2099-01-01"}}}
         if method == "account.getQuota":
             return {
                 "quotaSnapshots": {
@@ -234,11 +253,16 @@ async def test_refresh_deadline_is_bounded(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "provider",
-    ["cursor", "opencode", "antigravity", "grok", "openai_api", "anthropic_api"],
+    "provider,status",
+    [
+        ("cursor", "auth_required"),
+        ("opencode", "unavailable"),
+        ("openai_api", "configuration_required"),
+        ("anthropic_api", "configuration_required"),
+    ],
 )
-async def test_unsupported_polling_is_explicit_and_never_runs_a_prompt(
-    monkeypatch, tmp_path, provider
+async def test_missing_sign_in_is_explicit_and_never_runs_a_prompt(
+    monkeypatch, tmp_path, provider, status
 ):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
@@ -246,11 +270,7 @@ async def test_unsupported_polling_is_explicit_and_never_runs_a_prompt(
     monkeypatch.delenv("RATICODE_CURSOR_USAGE_EMAIL", raising=False)
     launches = patch_rpc(monkeypatch, FakeRpc())
     row = await usage.refresh_provider_usage(provider, data_dir=tmp_path)
-    assert row["status"] == (
-        "configuration_required"
-        if provider in {"cursor", "openai_api", "anthropic_api"}
-        else "unavailable"
-    )
+    assert row["status"] == status
     assert row["reason"] and row["dashboard_url"]
     assert row["windows"] == []
     assert not launches
@@ -409,7 +429,8 @@ def test_claude_new_model_scoped_limits_are_preserved_without_legacy_duplicates(
             ],
         }
     )
-    assert len(windows) == 2
+    # is_active marks the binding limit only; Claude Code still shows the others.
+    assert [w["id"] for w in windows] == ["seven_day_sonnet", "seven_day_new-model", "seven_day"]
     assert windows[1]["remaining"] == 50
     assert "New model" in windows[1]["label"]
 
@@ -675,3 +696,485 @@ async def test_saved_usage_key_overrides_missing_profile_reporting_secret(monkey
     row = await usage.refresh_provider_usage("claude_code", "work", data_dir=tmp_path)
     assert row["status"] == "available"
     assert seen == ["saved-secret"]
+
+
+def jwt(**claims: Any) -> str:
+    import base64
+
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{body}.signature"
+
+
+def test_cursor_summary_preserves_percent_cents_and_unlimited():
+    windows = usage.normalize_cursor_usage(
+        {
+            "billingCycleEnd": "2099-10-29T18:15:34.916Z",
+            "individualUsage": {
+                "plan": {"enabled": True, "used": 1500, "limit": 2000},
+                "onDemand": {"enabled": True, "used": 250, "limit": 1000},
+            },
+        }
+    )
+    assert [w["id"] for w in windows] == ["plan", "on_demand"]
+    assert windows[0]["used"] == 75
+    assert windows[0]["unit"] == "percent"
+    assert windows[0]["resets_at"].startswith("2099-10-29T18:15:34")
+    assert (windows[1]["used"], windows[1]["limit"], windows[1]["unit"]) == (2.5, 10, "USD")
+    reported = usage.normalize_cursor_usage(
+        {"individualUsage": {"plan": {"totalPercentUsed": 12.5, "used": 0, "limit": 0}}}
+    )
+    assert reported[0]["remaining_percent"] == 87.5
+    unlimited = usage.normalize_cursor_usage({"isUnlimited": True, "individualUsage": {}})
+    assert unlimited[0]["unlimited"] is True
+    assert usage.normalize_cursor_usage({"individualUsage": {"plan": {"limit": 0}}}) == []
+
+
+def write_cursor_login(root: Path, token: str) -> None:
+    (root / "cursor").mkdir(parents=True)
+    (root / "cursor" / "auth.json").write_text(json.dumps({"accessToken": token}))
+
+
+async def test_cursor_reads_cli_sign_in_without_configuration(monkeypatch, tmp_path):
+    token = jwt(sub="auth0|user_123", exp=4_000_000_000)
+    write_cursor_login(tmp_path / ".config", token)
+    seen = []
+
+    def fetch(session):
+        seen.append(session)
+        return usage.normalize_cursor_usage({"individualUsage": {"plan": {"totalPercentUsed": 5}}})
+
+    monkeypatch.setattr(usage, "_cursor_allowance", fetch)
+    row = await usage.refresh_provider_usage("cursor", data_dir=tmp_path)
+    assert row["status"] == "available"
+    assert row["source"] == "Cursor account usage summary"
+    assert seen == [token]
+    assert token not in json.dumps(row)
+
+
+@pytest.mark.parametrize(
+    "token,env",
+    [
+        (jwt(sub="auth0|user_123", exp=1), {}),
+        (jwt(exp=4_000_000_000), {}),
+        ("not-a-jwt", {}),
+        (jwt(sub="auth0|user_123", exp=4_000_000_000), {"CURSOR_API_KEY": "key"}),
+    ],
+)
+def test_cursor_expired_unidentified_or_api_key_sessions_are_not_used(tmp_path, token, env):
+    write_cursor_login(tmp_path / ".config", token)
+    assert usage._cursor_native_token(env, None) is None
+
+
+def test_cursor_profiles_only_read_their_own_sign_in(tmp_path):
+    token = jwt(sub="auth0|work", exp=4_000_000_000)
+    write_cursor_login(tmp_path / ".config", jwt(sub="auth0|default", exp=4_000_000_000))
+    write_cursor_login(tmp_path / "work", token)
+    assert usage._cursor_native_token({}, "work") is None
+    assert usage._cursor_native_token({"XDG_CONFIG_HOME": str(tmp_path / "work")}, "work") == token
+
+
+def test_cursor_app_database_is_a_read_only_fallback(tmp_path):
+    import sqlite3
+
+    token = jwt(sub="google-oauth2|user_9", exp=4_000_000_000)
+    database = tmp_path / "config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        db.execute("INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', ?)", (token,))
+    before = sorted(path.name for path in database.parent.iterdir())
+    assert usage._cursor_native_token({"XDG_CONFIG_HOME": str(tmp_path / "config")}, "p") == token
+    assert sorted(path.name for path in database.parent.iterdir()) == before
+
+
+def test_cursor_request_uses_session_cookie_and_rejects_redirects(monkeypatch):
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, limit):
+            return b'{"individualUsage":{"plan":{"totalPercentUsed":40}}}'
+
+    class Opener:
+        def open(self, request, *, timeout):
+            calls.append(request)
+            return Response()
+
+    handlers: list[Any] = []
+
+    def build_opener(*args):
+        handlers.extend(args)
+        return Opener()
+
+    monkeypatch.setattr(usage.urllib.request, "build_opener", build_opener)
+    token = jwt(sub="auth0|user_123", exp=4_000_000_000)
+    assert usage._cursor_allowance(token)[0]["remaining"] == 60
+    assert calls[0].full_url == "https://cursor.com/api/usage-summary"
+    assert calls[0].get_header("Cookie") == f"WorkosCursorSessionToken=user_123%3A%3A{token}"
+    assert isinstance(handlers[0], usage._RejectRedirects)
+    with pytest.raises(ValueError):
+        usage._cursor_allowance(jwt(sub="auth0|bad/user"))
+
+
+def test_antigravity_groups_keep_each_quota_and_reject_bad_fractions():
+    windows = usage.normalize_antigravity_usage(
+        {
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.25,
+                                    "reset_time": "2099-11-03T18:41:42Z",
+                                },
+                                {"id": "bad", "remaining_fraction": 1.5},
+                                {"id": "missing"},
+                            ],
+                        },
+                        "malformed",
+                    ]
+                },
+            }
+        }
+    )
+    assert len(windows) == 1
+    assert windows[0]["id"] == "Gemini Models:gemini-weekly"
+    assert windows[0]["label"] == "Gemini Models · weekly"
+    assert windows[0]["used"] == 75
+    assert windows[0]["resets_at"] == "2099-11-03T18:41:42+00:00"
+
+
+@pytest.mark.parametrize(
+    "code,payload,status",
+    [
+        (
+            0,
+            {
+                "status": "SUCCESS",
+                "command": {
+                    "name": "usage",
+                    "data": {
+                        "groups": [{"name": "G", "buckets": [{"id": "w", "remaining_fraction": 1}]}]
+                    },
+                },
+            },
+            "available",
+        ),
+        (0, {"status": "SUCCESS", "num_turns": 0}, "unsupported"),
+        (1, {"status": "ERROR"}, "auth_required"),
+        (0, "not json", "auth_required"),
+    ],
+)
+async def test_antigravity_reads_local_usage_command_without_a_prompt(
+    monkeypatch, tmp_path, code, payload, status
+):
+    launches = []
+
+    async def run(command, **kwargs):
+        launches.append((command, kwargs))
+        return code, json.dumps(payload) if isinstance(payload, dict) else payload, ""
+
+    monkeypatch.setattr(usage, "run_subprocess", run)
+    monkeypatch.setattr(usage, "resolve_provider_executable", lambda provider: "/bin/agy")
+    row = await usage.refresh_provider_usage("antigravity", data_dir=tmp_path)
+    assert row["status"] == status
+    assert bool(row["windows"]) is (status == "available")
+    command, options = launches[0]
+    assert command == ["/bin/agy", "-p", "/usage", "--output-format", "json"]
+    assert options["env"]["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+    assert options["cwd"] == tmp_path / "usage-probe"
+    if sys.platform != "win32":
+        # Sign-in pages must never open from a background refresh.
+        assert options["env"]["BROWSER"].endswith("xdg-open")
+        assert not Path(options["env"]["BROWSER"]).exists()
+
+
+def test_grok_billing_units_and_unknown_usage():
+    windows = usage.normalize_grok_billing(
+        {
+            "config": {
+                "creditUsagePercent": 42.5,
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2099-11-03T00:00:00+00:00",
+                },
+                "onDemandCap": {"val": 2000},
+                "onDemandUsed": {"val": "500"},
+                "prepaidBalance": {"val": 1250},
+            }
+        }
+    )
+    assert [(w["id"], w["unit"]) for w in windows] == [
+        ("credits", "percent"),
+        ("on_demand", "USD"),
+        ("prepaid", "USD"),
+    ]
+    assert windows[0]["label"] == "Weekly credits"
+    assert windows[0]["remaining"] == 57.5
+    assert (windows[1]["used"], windows[1]["limit"], windows[1]["remaining"]) == (5, 20, 15)
+    assert windows[2]["remaining"] == 12.5
+    # A period without a published percentage is unknown usage, never zero.
+    assert (
+        usage.normalize_grok_billing(
+            {"config": {"currentPeriod": {"end": "2099-01-01"}, "onDemandCap": {"val": 0}}}
+        )
+        == []
+    )
+
+
+async def test_grok_reads_billing_extension_without_a_session(monkeypatch, tmp_path):
+    rpc = FakeRpc("grok")
+    launches = patch_rpc(monkeypatch, rpc)
+    row = await usage.refresh_provider_usage("grok", data_dir=tmp_path)
+    assert row["status"] == "available"
+    assert row["windows"][0]["remaining"] == 70
+    assert [method for method, _ in rpc.calls] == ["initialize", "_x.ai/billing"]
+    assert launches[0][0] == ["/bin/grok", "agent", "--no-leader", "stdio"]
+
+
+def write_opencode_auth(root: Path, accounts: dict[str, Any]) -> None:
+    (root / "opencode").mkdir(parents=True)
+    (root / "opencode" / "auth.json").write_text(json.dumps(accounts))
+
+
+async def test_opencode_reuses_upstream_subscription_sign_ins(monkeypatch, tmp_path):
+    write_opencode_auth(
+        tmp_path / ".local" / "share",
+        {
+            "anthropic": {
+                "type": "oauth",
+                "access": "claude-secret",
+                "refresh": "r",
+                "expires": 9e15,
+            },
+            "openai": {
+                "type": "oauth",
+                "access": "chatgpt-secret",
+                "refresh": "r",
+                "expires": 9e15,
+                "accountId": "acct",
+            },
+            "openrouter": {"type": "api", "key": "api-secret"},
+        },
+    )
+    seen = []
+
+    def claude(token):
+        seen.append(("claude", token))
+        return usage.normalize_claude_usage({"five_hour": {"utilization": 20}})
+
+    def chatgpt(token, account):
+        seen.append(("chatgpt", token, account))
+        return usage.normalize_chatgpt_usage(
+            {"rate_limit": {"primary_window": {"used_percent": 10, "limit_window_seconds": 18000}}}
+        )
+
+    monkeypatch.setattr(usage, "_claude_allowance", claude)
+    monkeypatch.setattr(usage, "_chatgpt_allowance", chatgpt)
+    row = await usage.refresh_provider_usage("opencode", data_dir=tmp_path)
+    assert row["status"] == "available"
+    assert seen == [("claude", "claude-secret"), ("chatgpt", "chatgpt-secret", "acct")]
+    assert [w["label"] for w in row["windows"]] == [
+        "Claude · Five-hour allowance",
+        "ChatGPT · 5-hour allowance",
+    ]
+    assert "secret" not in json.dumps(row)
+
+
+async def test_opencode_expired_sign_in_is_not_refreshed(monkeypatch, tmp_path):
+    write_opencode_auth(
+        tmp_path / ".local" / "share",
+        {"anthropic": {"type": "oauth", "access": "old", "refresh": "r", "expires": 1}},
+    )
+    monkeypatch.setattr(usage, "_claude_allowance", pytest.fail)
+    row = await usage.refresh_provider_usage("opencode", data_dir=tmp_path)
+    assert row["status"] == "unavailable"
+    assert "expired" in row["reason"]
+
+
+def test_chatgpt_usage_request_headers(monkeypatch):
+    seen = []
+
+    def read(request):
+        seen.append(request)
+        return {}
+
+    monkeypatch.setattr(usage, "_read_json", read)
+    assert usage._chatgpt_allowance("token", "acct") == []
+    assert seen[0].full_url == "https://chatgpt.com/backend-api/wham/usage"
+    assert seen[0].get_header("Authorization") == "Bearer token"
+    assert seen[0].get_header("Chatgpt-account-id") == "acct"
+
+
+CLAUDE_REPORT = {
+    "type": "assistant",
+    "usage_report": {
+        "rate_limits": {
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 14, "is_active": True},
+                {"kind": "weekly_all", "group": "weekly", "percent": 6, "is_active": False},
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 0,
+                    "scope": {"model": {"display_name": "Fable"}},
+                    "is_active": False,
+                },
+            ],
+            "extra_usage": {"is_enabled": True, "monthly_limit": 2000, "used_credits": 0},
+        }
+    },
+}
+
+
+async def test_claude_code_reports_usage_without_raticode_reading_credentials(
+    monkeypatch, tmp_path
+):
+    write_claude_credentials(tmp_path / ".claude")
+    launches = []
+
+    async def run(command, **kwargs):
+        launches.append((command, kwargs))
+        lines = [{"type": "system", "subtype": "init"}, CLAUDE_REPORT, {"type": "result"}]
+        return 0, "not json\n" + "\n".join(json.dumps(line) for line in lines), ""
+
+    monkeypatch.setattr(usage, "_claude_cli_allowance", CLAUDE_CODE_REPORT)
+    monkeypatch.setattr(usage, "run_subprocess", run)
+    monkeypatch.setattr(usage, "_claude_native_token", pytest.fail)
+    monkeypatch.setattr(usage, "_claude_allowance", pytest.fail)
+    monkeypatch.setattr(usage, "resolve_provider_executable", lambda provider: "/bin/claude")
+    row = await usage.refresh_provider_usage("claude_code", data_dir=tmp_path)
+    assert row["status"] == "available"
+    assert row["source"] == "Claude Code /usage"
+    assert [(w["id"], w["label"], w["used"]) for w in row["windows"]] == [
+        ("five_hour", "Five-hour allowance", 14),
+        ("seven_day", "Weekly allowance", 6),
+        ("seven_day_fable", "Weekly Fable allowance", 0),
+        ("extra_usage", "Monthly extra usage", 0),
+    ]
+    command, options = launches[0]
+    assert command[:3] == ["/bin/claude", "-p", "/usage"]
+    # The probe never persists a session or starts the user's hooks and MCP servers.
+    assert {"--no-session-persistence", "--strict-mcp-config"} <= set(command)
+    settings = json.loads(command[command.index("--settings") + 1])
+    assert settings == {"disableAllHooks": True, "remoteControlAtStartup": False}
+    assert options["cwd"] == tmp_path / "usage-probe"
+
+
+async def test_claude_code_without_a_report_falls_back_to_its_stored_sign_in(
+    monkeypatch, tmp_path, isolated_usage_credentials
+):
+    write_claude_credentials(tmp_path / ".claude")
+    monkeypatch.setattr(usage, "resolve_provider_executable", lambda provider: "/bin/claude")
+    seen = []
+
+    def fetch(token):
+        seen.append(token)
+        return usage.normalize_claude_usage({"five_hour": {"utilization": 5}})
+
+    monkeypatch.setattr(usage, "_claude_allowance", fetch)
+    row = await usage.refresh_provider_usage("claude_code", data_dir=tmp_path)
+    assert row["status"] == "available"
+    assert row["source"] == "Claude OAuth /api/oauth/usage"
+    assert len(isolated_usage_credentials) == 1
+    assert seen == ["native-secret"]
+
+
+async def test_claude_code_signed_out_backs_off(monkeypatch, tmp_path):
+    monkeypatch.setattr(usage, "resolve_provider_executable", lambda provider: "/bin/claude")
+    row = await usage.refresh_provider_usage("claude_code", data_dir=tmp_path)
+    assert row["status"] == "auth_required"
+    assert row["retry_after_seconds"] == usage.CLAUDE_FAILURE_BACKOFF_SECONDS
+
+
+async def test_claude_rate_limit_honors_retry_after(monkeypatch, tmp_path):
+    from email.message import Message
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret-token")
+    headers = Message()
+    headers["Retry-After"] = "3600"
+
+    def fetch(token):
+        raise usage.urllib.error.HTTPError("https://api.anthropic.com", 429, "busy", headers, None)
+
+    monkeypatch.setattr(usage, "_claude_allowance", fetch)
+    row = await usage.refresh_provider_usage("claude_code", data_dir=tmp_path)
+    assert row["rate_limited"] is True
+    assert row["retry_after_seconds"] == 3600
+
+
+async def test_claude_profile_without_its_own_config_never_uses_claude_code(
+    monkeypatch, tmp_path, isolated_usage_credentials
+):
+    save_provider_profiles(
+        {"work": ProviderProfile(name="work", subscription="claude_code")}, tmp_path
+    )
+    monkeypatch.setattr(usage, "resolve_provider_executable", lambda provider: "/bin/claude")
+    row = await usage.refresh_provider_usage("claude_code", "work", data_dir=tmp_path)
+    assert row["status"] == "configuration_required"
+    assert isolated_usage_credentials == []
+
+
+def test_copilot_plan_without_an_allowance_is_omitted():
+    windows = usage.normalize_copilot_quota(
+        {
+            "quotaSnapshots": {
+                "chat": {"entitlementRequests": 200, "usedRequests": 25, "hasQuota": True},
+                "premium_interactions": {
+                    "entitlementRequests": 0,
+                    "usedRequests": 0,
+                    "remainingPercentage": 0,
+                    "hasQuota": False,
+                },
+            }
+        }
+    )
+    assert [w["id"] for w in windows] == ["chat"]
+
+
+async def test_elapsed_provider_reset_dates_do_not_mark_fresh_readings_stale(monkeypatch, tmp_path):
+    class Expired(FakeRpc):
+        async def request(self, method, params, *, timeout):
+            return {
+                "quotaSnapshots": {
+                    "chat": {
+                        "entitlementRequests": 200,
+                        "usedRequests": 25,
+                        "resetDate": "2020-01-01T00:00:00Z",
+                    },
+                    "completions": {
+                        "entitlementRequests": 200,
+                        "usedRequests": 25,
+                        "resetDate": "2099-01-01T00:00:00Z",
+                    },
+                }
+            }
+
+    patch_rpc(monkeypatch, Expired("copilot"))
+    row = await usage.refresh_provider_usage("copilot", data_dir=tmp_path)
+    assert [w["resets_at"] for w in row["windows"]] == [None, "2099-01-01T00:00:00+00:00"]
+
+
+def test_codex_window_durations_are_readable():
+    windows = usage.normalize_codex_limits(
+        {
+            "rateLimits": {
+                "primary": {"usedPercent": 1, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 1, "windowDurationMins": 10080},
+            }
+        }
+    )
+    assert [w["label"] for w in windows] == [
+        "codex · primary · 5-hour",
+        "codex · secondary · 7-day",
+    ]

@@ -27,6 +27,22 @@ _VALIDATOR = Draft202012Validator(event_schema(_SCHEMA))
 OUTBOX_EVENTS = 10000
 OUTBOX_BYTES = 64 * 1024 * 1024
 RETAIN_ACKNOWLEDGED = 400
+# Polling requests change no state, so their replay records are a bounded recent
+# window instead of lifetime evidence. Otherwise a phone syncing in the background
+# would exhaust the inbox quota after a few days.
+READ_ONLY_KINDS = frozenset(
+    {
+        "sync.request",
+        "catalog.request",
+        "thread.history.request",
+        "thread.search.request",
+        "fleet.request",
+        "swarm.request",
+        "approval.request",
+        "desktop.read",
+    }
+)
+RECENT_READS = 2048
 
 
 class DeviceApplication:
@@ -49,6 +65,9 @@ class DeviceApplication:
                 peer TEXT NOT NULL, thread TEXT NOT NULL, context BLOB NOT NULL,
                 PRIMARY KEY(peer,thread));
               CREATE TABLE IF NOT EXISTS device_inbox (
+                peer TEXT NOT NULL,id TEXT NOT NULL,digest TEXT NOT NULL,sequence INTEGER NOT NULL,
+                PRIMARY KEY(peer,id),UNIQUE(peer,sequence));
+              CREATE TABLE IF NOT EXISTS device_inbox_reads (
                 peer TEXT NOT NULL,id TEXT NOT NULL,digest TEXT NOT NULL,sequence INTEGER NOT NULL,
                 PRIMARY KEY(peer,id),UNIQUE(peer,sequence));
               CREATE TABLE IF NOT EXISTS device_work (
@@ -104,6 +123,12 @@ class DeviceApplication:
         from gofer.devices.workspace import DeviceWorkspace
 
         self.workspace = DeviceWorkspace(self)
+        from gofer.devices.remote_control import RemoteControl
+
+        self.remote = RemoteControl(self)
+        from gofer.devices.desktop_control import DesktopControl
+
+        self.desktop = DesktopControl(self)
 
     def _encode(self, peer: str, value: dict[str, Any]) -> bytes:
         raw = json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode()
@@ -155,6 +180,7 @@ class DeviceApplication:
             for table in (
                 "device_grants",
                 "device_inbox",
+                "device_inbox_reads",
                 "device_transcript",
                 "device_message_attachments",
                 "device_sequences",
@@ -170,6 +196,8 @@ class DeviceApplication:
                 "device_workspace_threads",
                 "device_workspace_versions",
                 "device_workspace_denied",
+                "device_remote_control",
+                "device_desktop_control",
                 "relay_origins",
             ):
                 db.execute(f"DELETE FROM {table} WHERE peer=?", (peer,))
@@ -258,26 +286,38 @@ class DeviceApplication:
         with self.registry.transaction():
             self._trusted(peer)
             db = self.registry.db
-            prior = db.execute(
-                "SELECT digest FROM device_inbox WHERE peer=? AND id=?", (peer, event["id"])
-            ).fetchone()
-            if prior is not None:
-                if prior[0] != digest:
-                    raise PairingError("event_id_conflict")
-                return self.pending(peer)
-            if (
+            read_only = event["type"] in READ_ONLY_KINDS
+            for table in ("device_inbox", "device_inbox_reads"):
+                prior = db.execute(
+                    f"SELECT digest FROM {table} WHERE peer=? AND id=?", (peer, event["id"])
+                ).fetchone()
+                if prior is not None:
+                    if prior[0] != digest:
+                        raise PairingError("event_id_conflict")
+                    return self.pending(peer)
+            if not read_only and (
                 db.execute("SELECT COUNT(*) FROM device_inbox WHERE peer=?", (peer,)).fetchone()[0]
                 >= 100000
             ):
                 raise PairingError("inbox_quota")
-            if db.execute(
-                "SELECT 1 FROM device_inbox WHERE peer=? AND sequence=?", (peer, event["sequence"])
-            ).fetchone():
-                raise PairingError("sequence_conflict")
+            for table in ("device_inbox", "device_inbox_reads"):
+                if db.execute(
+                    f"SELECT 1 FROM {table} WHERE peer=? AND sequence=?",
+                    (peer, event["sequence"]),
+                ).fetchone():
+                    raise PairingError("sequence_conflict")
             db.execute(
-                "INSERT INTO device_inbox VALUES (?,?,?,?)",
+                f"INSERT INTO {'device_inbox_reads' if read_only else 'device_inbox'} "
+                "VALUES (?,?,?,?)",
                 (peer, event["id"], digest, event["sequence"]),
             )
+            if read_only:
+                db.execute(
+                    "DELETE FROM device_inbox_reads WHERE peer=? AND sequence NOT IN (SELECT "
+                    "sequence FROM device_inbox_reads WHERE peer=? ORDER BY sequence DESC "
+                    "LIMIT ?)",
+                    (peer, peer, RECENT_READS),
+                )
             db.execute(
                 "UPDATE peers SET last_seen=? WHERE device_id=?", (self.registry.clock(), peer)
             )
@@ -285,6 +325,12 @@ class DeviceApplication:
             workspace_result = self.workspace.handle(peer, event)
             if workspace_result is not None:
                 return workspace_result
+            remote_result = self.remote.handle(peer, event)
+            if remote_result is not None:
+                return remote_result
+            desktop_result = self.desktop.handle(peer, event)
+            if desktop_result is not None:
+                return desktop_result
             if kind == "thread.create":
 
                 def rejected(code: str, detail: str) -> list[dict[str, Any]]:
@@ -499,6 +545,8 @@ class DeviceApplication:
                                     "connection": {
                                         "lan_endpoint": self.lan_endpoint,
                                         "rem_ready": self.rem_ready(),
+                                        "remote_control": self.remote.allowed(peer),
+                                        "desktop_control": self.desktop.allowed(peer),
                                     }
                                 }
                                 if payload.get("include_connection")

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ensureGoferApiToken, installGoferApiFetchAuth, withGoferApiAuth } from "./api.js";
+import { apiUrl, ensureGoferApiToken, installGoferApiFetchAuth, withGoferApiAuth } from "./api.js";
 
 function browser(overrides = {}) {
   globalThis.window = {
@@ -61,4 +61,30 @@ test("API token never goes to unrelated hosts, path prefixes or webhooks", () =>
   for (const target of ["https://attacker.invalid/api/workflows", "http://127.0.0.1:8765/api-other/workflows", "http://127.0.0.1:8765/api/workflows/w/webhooks/default/trigger"]) {
     assert.equal(withGoferApiAuth(target)[1].headers, undefined);
   }
+});
+
+
+test("desktop IPC failure never falls back to the Vite proxy and a retry recovers", async () => {
+  const calls = [];
+  let ready = false;
+  browser({
+    goferDesktop: { apiSession: async () => {
+      if (!ready) throw new Error("Backend starting");
+      return { apiBaseUrl: "http://127.0.0.1:43210", apiToken: "ready-token" };
+    } },
+    fetch: async (url, init) => { calls.push({ url, init }); return new Response("{}"); },
+  });
+  installGoferApiFetchAuth();
+  await assert.rejects(window.fetch(apiUrl("/workflows")), /desktop backend is unavailable/);
+  assert.equal(calls.length, 0);
+  ready = true;
+  await window.fetch(apiUrl("/workflows"));
+  assert.equal(calls[0].url, "http://127.0.0.1:43210/api/workflows");
+  assert.equal(calls[0].init.headers.get("Authorization"), "Bearer ready-token");
+});
+
+test("manual desktop backends use their actual address even without a token", async () => {
+  browser({ goferDesktop: { apiSession: async () => ({ apiBaseUrl: "http://127.0.0.1:43210", apiToken: "" }) } });
+  await ensureGoferApiToken();
+  assert.equal(apiUrl("/queue"), "http://127.0.0.1:43210/api/queue");
 });

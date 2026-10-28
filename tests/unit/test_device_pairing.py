@@ -55,7 +55,7 @@ def invitation(
     registry: DeviceRegistry, invitations: Invitations | None = None
 ) -> tuple[Invitations, bytes, dict[str, Any]]:
     invitations = invitations or Invitations(registry)
-    payload = invitations.create("Test desktop", "https://ntfy.sh")
+    payload = invitations.create("Test desktop")
     raw, value = parse_invitation(payload["uri"], registry.clock())
     return invitations, raw, value
 
@@ -364,7 +364,7 @@ async def test_two_desktops_pair_over_actual_bounded_loopback_stream(tmp_path):
     invites = Invitations(a)
     listener = DeviceListener(a, invites)
     port = await listener.start()
-    payload = invites.create("Desktop A", "https://ntfy.sh", {"host": "127.0.0.1", "port": port})
+    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port})
     task = asyncio.create_task(pair_desktop(b, payload["uri"]))
     try:
         async with asyncio.timeout(5):
@@ -413,11 +413,10 @@ def test_local_control_gate_and_no_secrets_in_status(tmp_path):
         with pytest.raises(PairingError, match="experimental_network_opt_in_required"):
             control.action({"action": "invite"})
         assert control.invitations.current is None
-        assert not control.status()["relay_enabled"]
         assert not control.status()["lan_available"]
         # Local probes bypass the user-facing phone invitation API deliberately.
         payload = control.invitations.create(
-            "Local test", "https://ntfy.sh", {"host": "127.0.0.1", "port": control.port}
+            "Local test", {"host": "127.0.0.1", "port": control.port}
         )
         raw, data = parse_invitation(payload["uri"], control.registry.clock())
         assert data["secret"] not in json.dumps(control.status())
@@ -435,12 +434,7 @@ def test_local_control_gate_and_no_secrets_in_status(tmp_path):
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "192.168.1.20"])
-def test_phone_invitation_advertises_only_reachable_routes(tmp_path, monkeypatch, host):
-    from gofer.devices.relay_service import RelayService
-
-    async def idle_relay(self):
-        await asyncio.Event().wait()
-
+def test_phone_invitation_requires_a_local_network_address(tmp_path, monkeypatch, host):
     real_start = DeviceListener.start
 
     async def local_listener(self, requested_host, port):
@@ -449,20 +443,26 @@ def test_phone_invitation_advertises_only_reachable_routes(tmp_path, monkeypatch
 
     monkeypatch.setenv("RATICODE_DEVICE_EXPERIMENTAL_NETWORK", "1")
     monkeypatch.setenv("RATICODE_DEVICE_HOST", host)
-    monkeypatch.setattr(RelayService, "run", idle_relay)
     monkeypatch.setattr(DeviceListener, "start", local_listener)
     control = DeviceControl(tmp_path, store=TestSecrets())
     try:
         control.action({"action": "enable"})
+        status = control.status()
+        assert "relay_enabled" not in status and "relay_error" not in status
+        if host != "192.168.1.20":
+            # A loopback-only desktop cannot be reached by a phone on Wi-Fi.
+            with pytest.raises(PairingError, match="local_network_address_required"):
+                control.action({"action": "invite"})
+            assert control.invitations.current is None
+            assert not status["lan_available"]
+            return
         payload = control.action({"action": "invite"})
         _, data = parse_invitation(payload["uri"], control.registry.clock())
-        assert data["lan_endpoint"] == (
-            {"host": host, "port": control.port} if host == "192.168.1.20" else None
-        )
-        status = control.status()
-        assert status["relay_enabled"]
-        assert status["lan_available"] == (host == "192.168.1.20")
-        assert data["secret"] not in json.dumps(status)
+        assert data["lan_endpoint"] == {"host": host, "port": control.port}
+        # The required v2 relay field names a reserved domain that never resolves.
+        assert data["relay"] == "https://relay.invalid"
+        assert status["lan_available"]
+        assert data["secret"] not in json.dumps(control.status())
         assert "data:image/svg+xml" in payload["qr"]
     finally:
         control.close()
@@ -530,9 +530,7 @@ async def test_two_desktop_reconnect_survives_registry_restart(tmp_path):
     listener = DeviceListener(a, invites)
     port = await listener.start()
     endpoint = {"host": "127.0.0.1", "port": port}
-    task = asyncio.create_task(
-        pair_desktop(b, invites.create("A", "https://ntfy.sh", endpoint)["uri"])
-    )
+    task = asyncio.create_task(pair_desktop(b, invites.create("A", endpoint)["uri"]))
     try:
         async with asyncio.timeout(5):
             while not a.list():

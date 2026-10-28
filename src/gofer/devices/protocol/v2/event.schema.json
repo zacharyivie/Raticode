@@ -69,7 +69,15 @@
         "thread.history.snapshot",
         "thread.search.request",
         "thread.search.snapshot",
-        "thread.manage"
+        "thread.manage",
+        "swarm.request",
+        "swarm.control",
+        "swarm.message",
+        "approval.request",
+        "approval.snapshot",
+        "desktop.read",
+        "desktop.action",
+        "desktop.result"
       ]
     },
     "payload": {
@@ -374,6 +382,41 @@
               },
               "delete_pending": {
                 "type": "boolean"
+              },
+              "resources": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 160,
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "enum": [
+                        "builtin",
+                        "skill",
+                        "mcp"
+                      ]
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "kind",
+                    "enabled"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
@@ -431,12 +474,72 @@
                         "awaiting_approval",
                         "completed",
                         "failed",
-                        "cancelled"
+                        "cancelled",
+                        "paused",
+                        "idle"
                       ]
                     },
                     "detail": {
                       "type": "string",
                       "maxLength": 1000
+                    },
+                    "project_name": {
+                      "type": "string",
+                      "maxLength": 160
+                    },
+                    "progress": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "agents": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "maxLength": 80
+                          },
+                          "state": {
+                            "type": "string",
+                            "maxLength": 40
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "state"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "messages": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sender": {
+                            "type": "string",
+                            "maxLength": 80
+                          },
+                          "body": {
+                            "type": "string",
+                            "maxLength": 1000
+                          },
+                          "created_at": {
+                            "type": "string",
+                            "maxLength": 80
+                          }
+                        },
+                        "required": [
+                          "sender",
+                          "body",
+                          "created_at"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
@@ -448,6 +551,9 @@
                   "additionalProperties": false
                 },
                 "maxItems": 100
+              },
+              "remote_allowed": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -457,8 +563,15 @@
             "additionalProperties": false
           },
           "thread_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       }
@@ -539,6 +652,10 @@
                   "approve",
                   "deny"
                 ]
+              },
+              "instruction": {
+                "type": "string",
+                "maxLength": 2000
               }
             },
             "required": [
@@ -553,8 +670,15 @@
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
           },
           "thread_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       }
@@ -1017,6 +1141,9 @@
               "permission_mode": {
                 "type": "string",
                 "maxLength": 80
+              },
+              "set_resources": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -1249,6 +1376,12 @@
                     ]
                   },
                   "rem_ready": {
+                    "type": "boolean"
+                  },
+                  "remote_control": {
+                    "type": "boolean"
+                  },
+                  "desktop_control": {
                     "type": "boolean"
                   }
                 },
@@ -1997,6 +2130,50 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 9007199254740991
+              },
+              "resources": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 160,
+                      "minLength": 1
+                    },
+                    "kind": {
+                      "enum": [
+                        "builtin",
+                        "skill",
+                        "mcp"
+                      ]
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "kind",
+                    "enabled"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "resource_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "maxItems": 32,
+                "uniqueItems": true
               }
             },
             "required": [
@@ -2164,6 +2341,418 @@
           "thread_id": {
             "type": "string",
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "swarm.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "swarm_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "swarm_id"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "swarm.control"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "swarm_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "action": {
+                "enum": [
+                  "pause",
+                  "resume",
+                  "stop"
+                ]
+              }
+            },
+            "required": [
+              "swarm_id",
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "swarm.message"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "swarm_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "body": {
+                "type": "string",
+                "maxLength": 4000,
+                "minLength": 1
+              }
+            },
+            "required": [
+              "swarm_id",
+              "body"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "approval.request"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "approval.snapshot"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "remote_allowed": {
+                "type": "boolean"
+              },
+              "approvals": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "approval_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    },
+                    "action_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "source": {
+                      "enum": [
+                        "workflow",
+                        "swarm"
+                      ]
+                    },
+                    "title": {
+                      "type": "string",
+                      "maxLength": 160
+                    },
+                    "summary": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "requested_at": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "instruction_required": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "approval_id",
+                    "action_digest",
+                    "source",
+                    "title",
+                    "summary",
+                    "requested_at",
+                    "instruction_required"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "remote_allowed",
+              "approvals"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "desktop.read"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "enum": [
+                  "organizations.list",
+                  "organizations.read",
+                  "overview",
+                  "rem.home",
+                  "rem.task",
+                  "rem.thread",
+                  "settings.get",
+                  "usage.overview"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "maxProperties": 24
+              }
+            },
+            "required": [
+              "op",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "desktop.action"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "enum": [
+                  "organizations.control",
+                  "organizations.task",
+                  "rem.instruct",
+                  "rem.message",
+                  "rem.run.acknowledge",
+                  "rem.run.cancel",
+                  "rem.task.create",
+                  "rem.task.delete",
+                  "rem.task.pause",
+                  "rem.task.resume",
+                  "rem.task.run",
+                  "settings.update",
+                  "swarms.start"
+                ]
+              },
+              "params": {
+                "type": "object",
+                "maxProperties": 24
+              }
+            },
+            "required": [
+              "op",
+              "params"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
+          },
+          "request_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "desktop.result"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "enum": [
+                  "organizations.control",
+                  "organizations.list",
+                  "organizations.read",
+                  "organizations.task",
+                  "overview",
+                  "rem.home",
+                  "rem.instruct",
+                  "rem.message",
+                  "rem.run.acknowledge",
+                  "rem.run.cancel",
+                  "rem.task",
+                  "rem.task.create",
+                  "rem.task.delete",
+                  "rem.task.pause",
+                  "rem.task.resume",
+                  "rem.task.run",
+                  "rem.thread",
+                  "settings.get",
+                  "settings.update",
+                  "swarms.start",
+                  "usage.overview"
+                ]
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "part": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 47
+              },
+              "parts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 48
+              },
+              "body": {
+                "type": "string",
+                "maxLength": 24000
+              },
+              "code": {
+                "enum": [
+                  "unauthorized",
+                  "unavailable",
+                  "invalid",
+                  "conflict",
+                  "not_found"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "op",
+              "ok",
+              "part",
+              "parts",
+              "body"
+            ],
+            "additionalProperties": false
+          },
+          "thread_id": {
+            "type": "null"
           },
           "request_id": {
             "type": "string",

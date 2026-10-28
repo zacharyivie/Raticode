@@ -10,6 +10,11 @@ from gofer.subscriptions import base as subscription_base
 from gofer.subscriptions.base import Subscription
 
 
+def codex_exec_input(command: list[str]) -> tuple[list[str], bytes]:
+    """Deliver exec/resume prompts intact without OS command-line size limits."""
+    return [*command[:-1], "-"], command[-1].encode("utf-8")
+
+
 class CodexSubscription(Subscription):
     provider = "codex"
 

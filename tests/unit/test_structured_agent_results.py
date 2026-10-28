@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -730,3 +731,39 @@ async def test_invalid_predicate_configuration_blocks_provider_call(tmp_path: Pa
         await WorkflowExecutor(workflow, {"claude_code": subscription}).run()
 
     assert subscription.calls == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ['```json\n{"result": "value"}\n```', '  ```\n{"result": "value"}\n```\n'],
+)
+def test_output_validation_accepts_one_markdown_json_fence(reply):
+    schema = {"type": "object", "properties": {"result": {"type": "string"}}}
+    assert parse_and_validate_output(reply, schema) == {"result": "value"}
+
+
+def test_output_validation_rejects_prose_around_a_json_fence():
+    with pytest.raises(StructuredOutputError, match="not valid JSON"):
+        parse_and_validate_output('Here it is:\n```json\n{"result": "value"}\n```', {})
+
+
+@pytest.mark.anyio
+async def test_rattish_output_failure_carries_the_agent_reply():
+    from gofer.core.agent import AgentResult
+    from gofer.rattish.runtime import _structured_agent_output
+
+    reply = "I need permission to read the prompt file."
+    result = AgentResult(
+        agent_id="ask", success=True, output=reply, exit_code=0, duration_seconds=0
+    )
+
+    # Without repair attempts the provider, settings, and context are never used.
+    unused: Any = None
+    output, _, error = await _structured_agent_output(
+        result, {"type": "object"}, 0, unused, unused, unused, unused
+    )
+
+    assert output is None
+    assert error is not None
+    assert error.message.endswith(f"Agent reply:\n{reply}")
+    assert error.details["response"] == reply

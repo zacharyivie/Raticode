@@ -97,6 +97,94 @@ def test_plaintext_secret_warning_does_not_prevent_ir() -> None:
     assert result.ir["nodes"][0]["configuration"]["env"]["API_TOKEN"] == ("visible-in-source")
 
 
+def test_route_target_without_needs_warns_that_it_also_auto_starts() -> None:
+    fixture = RATTISH_ROOT / "conformance" / "warnings" / "route-target-auto-starts"
+
+    result = default_compiler().compile(
+        (fixture / "workflow.rattish").read_text(),
+        CompileContext("auto-start-warning", Path("/fixture/project")),
+    )
+
+    assert [item.to_json() for item in result.diagnostics] == load_json(
+        fixture / "expected-diagnostics.json"
+    )
+
+
+def test_underscore_output_selectors_are_references_and_broken_ones_warn() -> None:
+    source = """Rattish: 1
+
+Workflow:
+  name: Underscore selectors
+
+Node first:
+  type: bash-command
+  command: printf hi
+  to:
+    - second when node.first.output.exit_code == 0
+
+Node second:
+  type: bash-command
+  needs: first
+  with:
+    code: node.first.output.exit_code
+    typo: node.first.output.exit_code!
+  command: printf "$CODE"
+"""
+
+    result = default_compiler().compile(
+        source, CompileContext("underscore-selectors", Path("/fixture/project"))
+    )
+
+    nodes = {node["id"]: node for node in result.ir["nodes"]}
+    bindings = {binding["name"]: binding for binding in nodes["second"]["bindings"]}
+    reference = bindings["code"]["source"]["reference"]
+    assert bindings["code"]["source"]["kind"] == "reference"
+    assert [item["value"] for item in reference["path"]] == ["exit_code"]
+    route = nodes["first"]["routes"][0]["predicate"]
+    assert route["left"]["reference"]["path"][0]["value"] == "exit_code"
+    assert bindings["typo"]["source"] == {
+        "kind": "literal",
+        "value": "node.first.output.exit_code!",
+    }
+    assert [item.code for item in result.diagnostics] == [
+        "RATTISH_BINDING_LITERAL_LOOKS_LIKE_REFERENCE"
+    ]
+    assert result.diagnostics[0].details == {"node": "second", "binding": "typo"}
+
+
+def test_loop_back_to_entry_node_and_explicit_start_do_not_warn() -> None:
+    source = """Rattish: 1
+
+Workflow:
+  name: Review loop
+
+Node implement:
+  type: bash-command
+  command: implement
+  to: review
+
+Node review:
+  type: bash-command
+  command: review
+  needs: implement
+  to: implement when node.review.output.stdout == "again"
+
+Node notify:
+  type: bash-command
+  command: notify
+  start: true
+
+Node trigger:
+  type: bash-command
+  command: trigger
+  to: notify
+"""
+
+    result = default_compiler().compile(source, CompileContext("loop", Path("/fixture/project")))
+
+    assert result.diagnostics == ()
+
+
 @pytest.mark.parametrize(
     ("body", "code"),
     [
@@ -565,3 +653,39 @@ Node a:
     assert "RATTISH_INVALID_FIELD_VALUE" in {
         diagnostic.code for diagnostic in caught.value.diagnostics
     }
+
+
+def test_parallel_loop_warns_when_a_body_node_keeps_the_default_concurrency() -> None:
+    source = """Rattish: 1
+
+Workflow:
+  name: Loop concurrency
+
+Node items:
+  type: loop
+  source: {"type": "count", "count": 6, "max-concurrency": 3}
+  to:
+    - slow
+    - fast
+
+Node slow:
+  type: bash-command
+  command: sleep 1
+  needs: items
+
+Node fast:
+  type: bash-command
+  command: sleep 1
+  needs: items
+  max-concurrency: 3
+"""
+
+    compiler = RattishCompiler.from_paths(
+        schema_root=SCHEMA_ROOT,
+        contract_paths=sorted((RATTISH_ROOT / "contracts").glob("*.json")),
+    )
+    result = compiler.compile(source, CompileContext("loop-concurrency", Path("/fixture/project")))
+
+    assert [(item.code, item.details["node"]) for item in result.diagnostics] == [
+        ("RATTISH_LOOP_BODY_CONCURRENCY_LIMITED", "slow")
+    ]

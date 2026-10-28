@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from gofer.ui.chat import ChatProviderError, build_chat_prompt
+from gofer.ui.chat_sessions import with_chat_session
 from gofer.ui.report_theme_generation import generate_report_theme, validate_theme_draft
 from gofer.ui.second_brain import SecondBrain, with_second_brain
 
@@ -63,8 +64,14 @@ def test_accepts_fenced_theme_draft() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider", ["codex", "claude_code", "cursor", "copilot", "opencode", "grok"]
+)
+@pytest.mark.parametrize("reference_field", ["screenshot", "attachments"])
 async def test_theme_generation_uses_selection_and_isolated_screenshot(
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    reference_field: str,
 ) -> None:
     draft = {
         "label": "Ocean",
@@ -75,10 +82,10 @@ async def test_theme_generation_uses_selection_and_isolated_screenshot(
 
     async def fake_chat(**kwargs: Any) -> AsyncGenerator[dict[str, Any], None]:
         roots.append(kwargs["working_dir"])
-        assert kwargs["provider"] == "codex"
+        assert kwargs["provider"] == provider
         assert kwargs["model"] == "chosen-model"
         assert kwargs["effort"] == "high"
-        assert kwargs["workflow"]["remResources"] == {"shell": False, "web": False}
+        assert kwargs["workflow"]["remResources"] == {"shell": False, "web": False, "agents": False}
         assert "remSecondBrain" not in kwargs["workflow"]
         attachment = kwargs["messages"][0]["attachments"][0]
         assert (
@@ -89,14 +96,57 @@ async def test_theme_generation_uses_selection_and_isolated_screenshot(
     monkeypatch.setattr("gofer.ui.report_theme_generation.stream_workflow_chat", fake_chat)
     result = await generate_report_theme(
         {
-            "provider": "codex",
+            "provider": provider,
             "model": "chosen-model",
             "effort": "high",
-            "screenshot": {"name": "report.png", "type": "image/png", "data": "aW1hZ2U="},
+            reference_field: {"name": "report.png", "type": "image/png", "data": "aW1hZ2U="}
+            if reference_field == "screenshot"
+            else [{"name": "report.png", "type": "image/png", "data": "aW1hZ2U="}],
         }
     )
     assert result == draft
     assert not roots[0].exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_attachment", [False, True])
+async def test_theme_generation_under_symlinked_temp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_attachment: bool
+) -> None:
+    import tempfile
+
+    canonical = tmp_path.resolve() / "private" / "var"
+    canonical.mkdir(parents=True)
+    alias = tmp_path / "var"
+    alias.symlink_to(canonical, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(alias))
+    draft = {"label": "Ocean", "instructions": "Navy ink", "html": "<html>Demo</html>"}
+    roots = []
+
+    @with_chat_session
+    async def fake_chat(
+        provider: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        workflow: dict[str, Any],
+        data_dir: Path,
+        working_dir: Path,
+        **kwargs: Any,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        roots.append(working_dir)
+        assert data_dir == working_dir == working_dir.resolve()
+        assert working_dir.is_relative_to(canonical)
+        assert len(list(data_dir.glob("chat-provider-sessions/*/session.json"))) == 1
+        yield {"type": "session", "sessionId": "theme-native-id"}
+        yield {"type": "final", "message": {"body": json.dumps(draft)}}
+
+    monkeypatch.setattr("gofer.ui.report_theme_generation.stream_workflow_chat", fake_chat)
+    body: dict[str, Any] = {"description": "Ocean"}
+    if with_attachment:
+        body["attachments"] = [{"name": "report.png", "type": "image/png", "data": "aW1hZ2U="}]
+    assert await generate_report_theme(body) == draft
+    assert not roots[0].exists()
+    assert not list(canonical.iterdir())
 
 
 @pytest.mark.asyncio
@@ -105,7 +155,8 @@ async def test_theme_generation_uses_selection_and_isolated_screenshot(
     [
         {},
         {"description": "x" * 100001},
-        {"provider": "grok", "screenshot": {"type": "image/png"}},
+        {"provider": "antigravity", "screenshot": {"type": "image/png"}},
+        {"provider": "antigravity", "attachments": [{"type": "image/png"}]},
         {"screenshot": {"type": "text/html"}},
     ],
 )
@@ -159,7 +210,7 @@ async def test_theme_documents_are_available_and_cleaned_up(
     async def fake_chat(**kwargs: Any) -> AsyncGenerator[dict[str, Any], None]:
         root = kwargs["data_dir"]
         roots.append(root)
-        assert kwargs["workflow"]["remResources"] == {"shell": True, "web": False}
+        assert kwargs["workflow"]["remResources"] == {"shell": True, "web": False, "agents": False}
         stored = kwargs["messages"][0]["attachments"]
         assert len(stored) == 2
         assert (

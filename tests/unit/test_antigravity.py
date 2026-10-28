@@ -136,6 +136,7 @@ async def test_real_subprocess_keeps_reply_out_of_thoughts_and_transmits_exact_p
             "id": "2",
             "title": "read file",
             "status": "completed",
+            "phase": "result",
         }
     ]
     assert events[-1]["message"]["body"] == "Hello world"

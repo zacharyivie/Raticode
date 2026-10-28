@@ -228,11 +228,11 @@ def with_chat_session(
             finally:
                 await source.aclose()
             return
-        root = (
-            (options.get("data_dir") or get_data_dir())
-            / "chat-provider-sessions"
-            / _digest(identity)
-        )
+        # Canonicalize the trusted data root, including macOS /var aliases,
+        # before appending private paths that must still reject replaced links.
+        data_root = (options.get("data_dir") or get_data_dir()).resolve()
+        options["data_dir"] = data_root
+        root = data_root / "chat-provider-sessions" / _digest(identity)
         mkdir_without_links(root)
         # A nonblocking SQLite lease works across request loops, threads and
         # backend processes. Closing the connection releases it after crashes.

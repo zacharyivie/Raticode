@@ -11,7 +11,6 @@ export default function PairedDevices() {
   const [busy, setBusy] = useState(false);
   const [invite, setInvite] = useState(null);
   const [name, setName] = useState("Raticode Desktop");
-  const [relay, setRelay] = useState("https://ntfy.sh");
   const [uri, setUri] = useState("");
   const [preview, setPreview] = useState(null);
   const [revoke, setRevoke] = useState(null);
@@ -99,6 +98,8 @@ export default function PairedDevices() {
           const sharing = (status.workspace_peers || []).includes(peer.device_id);
           const peerGrants = grants.filter(grant => grant.device_id === peer.device_id);
           const canCreate = peerGrants.some(grant => grant.allow_thread_create);
+          const desktopControl = (status.desktop_control_peers || []).includes(peer.device_id);
+          const remoteControl = desktopControl || (status.remote_control_peers || []).includes(peer.device_id);
           return <li className="space-y-3 py-3 first:pt-0" key={peer.device_id}>
             <div className="flex items-baseline justify-between gap-3">
               <h4 className="font-semibold">{peer.role === "controller" ? "Phone" : "Desktop"}{activePeers.length > 1 ? ` ${index + 1}` : ""}</h4>
@@ -122,7 +123,21 @@ export default function PairedDevices() {
               <p role="status" className="text-muted">{sharing
                 ? `${peerGrants.length} ${peerGrants.length === 1 ? "thread" : "threads"} shared. ${canCreate ? "New conversations allowed." : "No project available for new conversations yet."}`
                 : "Thread sync is off. Turn it on to sync your desktop conversations and projects."}</p>
-              {sharing && !canCreate && <p className="text-muted">Keep desktop open to finish syncing your projects and conversations.</p>}
+              {sharing && !canCreate && <p className="text-muted">Raticode finishes syncing your projects and conversations while it runs, including in the background.</p>}
+              <label className="flex items-start gap-3">
+                <input type="checkbox" className="mt-0.5 accent-indigo-600" checked={remoteControl} disabled={busy || !sharing || desktopControl}
+                  onChange={event => action({ action: "remote_control", device_id: peer.device_id, enabled: event.target.checked })} />
+                <span><span className="font-medium">Allow approvals and swarm controls from this phone</span>
+                  <span className="mt-1 block text-muted">Answer workflow and swarm approvals, message swarms, and pause, resume or stop them. Off by default. Requires thread sync.</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-3">
+                <input type="checkbox" className="mt-0.5 accent-indigo-600" checked={desktopControl} disabled={busy || !sharing}
+                  onChange={event => action({ action: "desktop_control", device_id: peer.device_id, enabled: event.target.checked })} />
+                <span><span className="font-medium">Use Raticode from this phone</span>
+                  <span className="mt-1 block text-muted">Also talk to Rem and manage its tasks, run organizations, start swarms, check usage and change display settings. Work still runs on this computer under its approval policies. Files, terminals, the browser, credentials and agent permissions stay here. Off by default. Requires thread sync.</span>
+                </span>
+              </label>
             </>}
             {peer.state === "active" && peer.role === "desktop" && <PeerWork peer={peer} busy={busy} action={action} grants={peerGrants} />}
             <div className="space-y-3 text-muted">
@@ -155,11 +170,9 @@ export default function PairedDevices() {
         <h4 className="font-semibold">Connect a phone</h4>
         <p className="text-muted">Create a QR code, scan it on your phone, then confirm its identity here.</p>
         <label className="block space-y-1"><span>Desktop name</span><input className={input} value={name} maxLength={80} onChange={e => setName(e.target.value)} /></label>
-        <details><summary className="cursor-pointer text-muted">Relay settings</summary>
-          <label className="mt-2 block">Relay origin<input className={input} value={relay} onChange={e => setRelay(e.target.value)} /></label>
-          <p className="mt-1 text-muted">Encrypted fallback when the local network is unavailable.</p>
-        </details>
-        <button type="button" className={button} disabled={busy || !status.experimental_network || Boolean(status.error)} onClick={() => action({ action: "invite", name, relay })}>Create QR code</button>
+        <p className="text-muted">Your phone connects only over the same Wi-Fi network as this computer. There is no internet relay.</p>
+        {status.experimental_network && !status.lan_available && <p role="status">This computer has no local network address. Connect it to your Wi-Fi network or set RATICODE_DEVICE_HOST, then restart Raticode.</p>}
+        <button type="button" className={button} disabled={busy || !status.experimental_network || !status.lan_available || Boolean(status.error)} onClick={() => action({ action: "invite", name })}>Create QR code</button>
         {invite && <div className="space-y-3">
           <img src={invite.qr} width="256" height="256" className="max-w-full" alt="One-time pairing invitation QR code" />
           <p className="text-muted">Expires {new Date(invite.expires_at * 1000).toLocaleTimeString()}. Keep this code private.</p>
@@ -192,9 +205,8 @@ export default function PairedDevices() {
       <details className="border-t border-line pt-3">
         <summary className="cursor-pointer font-medium">Connection and troubleshooting</summary>
         <div className="mt-3 space-y-3 text-muted">
-          {status.lan_available && status.lan_host ? <p>Local address <span className="select-text font-mono text-ink">{status.lan_host}:{status.port}</span>. On your phone, open Desktop and choose Try local network.</p>
+          {status.lan_available && status.lan_host ? <p>Local address <span className="select-text font-mono text-ink">{status.lan_host}:{status.port}</span>. If your phone cannot connect, enter this address in its Desktop settings, then check that both devices use the same Wi-Fi and the firewall allows this port.</p>
             : <p>Direct LAN is unavailable. Check the desktop network address.</p>}
-          {status.relay_error && <p role="status">{status.relay_error === "relay_rate_limited" ? "The relay is rate limited. Local network connections are independent. This warning clears when the affected relay operation succeeds." : "Relay unavailable. Check desktop internet access."}</p>}
           <p>{status.dispatch_error ? "Rem could not read its message queue. Check desktop storage and restart the backend." : "Project permissions and approvals stay on desktop."}</p>
           <details><summary className="cursor-pointer">Desktop identity and security</summary>
             <p className="mt-2 break-all select-text">{status.fingerprint}</p>

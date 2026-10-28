@@ -1,0 +1,55 @@
+/* A quiet reading workspace using the landing page's ink, indigo and ivory. */
+.Layout.docs-layout {
+  --vp-sidebar-width: 280px;
+  --vp-font-family-base: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+.docs-layout .VPNavBarTitle,
+.docs-layout .vp-doc h1,
+.docs-layout .vp-doc h2,
+.docs-layout .vp-doc h3 {
+  font-family: var(--rc-font-display);
+}
+.docs-layout .vp-doc h1 { font-size: clamp(2rem, 4vw, 2.6rem); line-height: 1.16; letter-spacing: -.035em; }
+.docs-layout .vp-doc h1 + p { font-size: 1.14rem; line-height: 1.7; color: var(--vp-c-text-2); }
+.docs-layout .vp-doc h2 { padding-top: 28px; margin-top: 44px; letter-spacing: -.025em; }
+.docs-layout .vp-doc p,
+.docs-layout .vp-doc li { line-height: 1.8; }
+.docs-layout .vp-doc a { text-underline-offset: 3px; }
+.docs-layout .VPDoc.has-aside .content-container { max-width: 760px; }
+.docs-layout .VPSidebar { border-right: 1px solid var(--vp-c-divider); }
+.docs-layout .VPSidebarItem.level-0 > .item .text { font-family: var(--rc-font-display); font-size: 14px; }
+.docs-layout .VPSidebarItem.is-active > .item > .link {
+  border-radius: 5px;
+  background: var(--vp-c-brand-soft);
+  box-shadow: inset 2px 0 var(--vp-c-brand-1);
+  padding-left: 10px;
+  margin-left: -10px;
+}
+.docs-layout .vp-doc table { display: block; width: 100%; overflow-x: auto; font-size: .9rem; }
+.docs-layout .vp-doc th { white-space: nowrap; }
+.docs-layout .vp-doc .custom-block { border-radius: 8px; }
+.docs-layout .vp-doc div[class*='language-'] { border: 1px solid var(--vp-c-divider); }
+.docs-layout :focus-visible { outline: 2px solid var(--vp-c-brand-1); outline-offset: 3px; }
+.docs-layout .VPDocFooter { margin-top: 56px; }
+@media (max-width: 767px) {
+  .docs-layout .vp-doc h1 { font-size: 2rem; }
+  .docs-layout .vp-doc table { font-size: .84rem; }
+}
+@media print {
+  .Layout.docs-layout {
+    --vp-c-bg: #fff;
+    --vp-c-bg-soft: #f3f1f8;
+    --vp-c-text-1: #19132c;
+    --vp-c-text-2: #48405c;
+    --vp-c-brand-1: #4f40c4;
+    --vp-c-divider: #ccc6db;
+    background: #fff;
+    color: var(--vp-c-text-1);
+  }
+  .docs-layout .VPNav, .docs-layout .VPSidebar, .docs-layout .VPDocAside, .docs-layout .VPLocalNav, .docs-layout .VPDocFooter { display: none; }
+  .docs-layout .VPContent, .docs-layout .VPDoc { padding: 0 !important; margin: 0 !important; }
+  .docs-layout .content-container { max-width: none !important; }
+  .docs-layout .vp-doc h2, .docs-layout .vp-doc h3 { break-after: avoid; }
+  .docs-layout .vp-doc tr { break-inside: avoid; }
+  .docs-layout .vp-doc pre code, .docs-layout .vp-doc pre code span { color: #19132c !important; }
+}

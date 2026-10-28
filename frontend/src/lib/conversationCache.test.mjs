@@ -122,3 +122,12 @@ test('hydration during an asynchronous save does not leave the cache permanently
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(f.snapshot.thread, undefined);
 });
+
+
+test('managed snapshots update saved replies and append their final message', () => {
+  const f = fixture();
+  const thought = { id: 'thought', role: 'assistant', kind: 'thought', body: 'Working' };
+  f.cache.hydrate('managed', [thought]);
+  f.cache.hydrate('managed', [{ ...thought, body: 'Checked' }, { id: 'final', role: 'assistant', kind: 'final', body: 'Finished.' }], { recent: true, device: true, authoritative: true });
+  assert.deepEqual(f.snapshot.managed.map(m => m.body), ['Checked', 'Finished.']);
+});

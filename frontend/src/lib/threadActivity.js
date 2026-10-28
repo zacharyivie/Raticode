@@ -1,15 +1,67 @@
 import { samePath, uniquePaths, pathKey } from "./workspacePaths.js";
-export const THREAD_IDLE_MS = 10 * 24 * 60 * 60 * 1000;
+export const READ_THREAD_LIMIT = 7;
+export const ARCHIVE_RETENTION_OPTIONS = [["never", "Never"], ["7", "After 7 days"], ["30", "After 30 days"], ["90", "After 90 days"]];
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-export function threadIsArchived(thread, missingRoots = new Set(), branches = new Map(), now = Date.now()) {
-  if (thread.archived) return true;
-  if (thread.pinned) return false;
-  const timestamp = Date.parse(thread.updatedAt);
+// Index entries carry every field needed to group threads without reading metadata.
+export function threadIndexEntry(thread) {
+  return { id: thread.id, updatedAt: thread.updatedAt, projectRoot: thread.projectRoot || "",
+    projectBranch: thread.projectBranch, managedRole: thread.managedRole, archived: Boolean(thread.archived),
+    pinned: Boolean(thread.pinned), unread: Boolean(thread.unread), readAt: thread.readAt, scopeIndexed: true };
+}
+
+export function threadReadTime(thread) {
+  return String(thread.readAt || "") > String(thread.updatedAt || "") ? thread.readAt : thread.updatedAt || "";
+}
+
+const newestFirst = (key) => (a, b) => String(key(b) || "").localeCompare(String(key(a) || ""));
+
+// A thread whose folder or saved branch is gone cannot continue, so it is archived even when pinned.
+export function threadIsUnreachable(thread, missingRoots = new Set(), branches = new Map()) {
+  if (!thread.projectRoot) return false;
   const projectBranches = [...branches].find(([root]) => samePath(root, thread.projectRoot))?.[1];
-  return !Number.isFinite(timestamp) || now - timestamp >= THREAD_IDLE_MS
-    || [...missingRoots].some(root => samePath(root, thread.projectRoot))
-    || Boolean(thread.projectBranch && projectBranches
-      && !projectBranches.includes(thread.projectBranch));
+  return [...missingRoots].some(root => samePath(root, thread.projectRoot))
+    || Boolean(thread.projectBranch && projectBranches && !projectBranches.includes(thread.projectBranch));
+}
+
+// Pinned, then unread, then the most recently read threads. Running threads
+// leave those groups until their turn ends; older read threads are archived.
+export function organizeThreads(entries, { running = new Set(), unread = new Set(), missingRoots, branches, readLimit = READ_THREAD_LIMIT } = {}) {
+  const groups = { pinned: [], unread: [], read: [], running: [], archived: [] };
+  const readCandidates = [];
+  for (const entry of entries) {
+    const isRunning = running.has(entry.id);
+    if (entry.archived || (!isRunning && threadIsUnreachable(entry, missingRoots, branches))) groups.archived.push(entry);
+    else if (entry.pinned) groups.pinned.push(entry);
+    else if (isRunning) groups.running.push(entry);
+    else if (entry.unread || unread.has(entry.id)) groups.unread.push(entry);
+    else readCandidates.push(entry);
+  }
+  readCandidates.sort(newestFirst(threadReadTime));
+  groups.read = readCandidates.slice(0, readLimit);
+  groups.archived.push(...readCandidates.slice(readLimit));
+  for (const name of ["pinned", "unread", "running"]) groups[name].sort(newestFirst(entry => entry.updatedAt));
+  groups.archived.sort(newestFirst(threadReadTime));
+  return groups;
+}
+
+export function threadIsArchived(thread, missingRoots, branches) {
+  return Boolean(thread.archived) || threadIsUnreachable(thread, missingRoots, branches);
+}
+
+export function archiveRetentionDays(value) {
+  const days = Number(value);
+  return Number.isFinite(days) && days > 0 ? days : 0;
+}
+
+// Archived threads are disposed of after the configured time without activity.
+export function expiredArchivedThreads(archived, retention, now = Date.now()) {
+  const days = archiveRetentionDays(retention);
+  if (!days) return [];
+  return archived.filter(entry => {
+    const timestamp = Date.parse(threadReadTime(entry));
+    return Number.isFinite(timestamp) && now - timestamp >= days * DAY_MS;
+  });
 }
 
 const scopeCaches = new WeakMap();
@@ -19,10 +71,13 @@ export function cachedThreadScopes(workspace) {
   return workspace ? scopeCaches.get(workspace)?.result || emptyScopes : emptyScopes;
 }
 
-export function threadScopeKey(entries, now = Date.now()) {
+// Only threads that could be shown need a folder check. Extra read candidates
+// let a thread fill the Read group when a newer one turns out to be unreachable.
+export function threadScopeKey(entries, readLimit = READ_THREAD_LIMIT) {
+  const { pinned, unread, read } = organizeThreads(entries, { readLimit: readLimit * 3 });
   const scopes = new Map();
-  for (const entry of entries) {
-    if (!entry.projectRoot || entry.pinned || threadIsArchived(entry, undefined, undefined, now)) continue;
+  for (const entry of [...pinned, ...unread, ...read]) {
+    if (!entry.projectRoot) continue;
     const key = pathKey(entry.projectRoot);
     const previous = scopes.get(key);
     scopes.set(key, { projectRoot: key, projectBranch: Boolean(entry.projectBranch || previous?.projectBranch) });

@@ -96,6 +96,9 @@ point into a `.rattish` file.
 | `RATTISH_PREDICATE_TYPE_MISMATCH` | error | Predicate operands do not support the selected operator. |
 | `RATTISH_INVALID_REGEX` | error | The right side of `matches` is not a valid regular expression. |
 | `RATTISH_INVALID_START_ASSERTION` | error | `start: true` appears with `needs`. |
+| `RATTISH_ROUTE_TARGET_AUTO_STARTS` | warning | A route target without `needs` or `start: true` also runs at workflow start. Routes that loop back to the node do not trigger it. |
+| `RATTISH_LOOP_BODY_CONCURRENCY_LIMITED` | warning | A loop allows more overlapping iterations than a direct body node's own `max-concurrency`, so the body runs fewer iterations at once than the loop limit suggests. |
+| `RATTISH_BINDING_LITERAL_LOOKS_LIKE_REFERENCE` | warning | A bare binding value starts like a reference (`node.`, `input.`, …) but does not parse as one, so it lowers to literal text. |
 | `RATTISH_INVALID_TERMINAL` | error | A terminal conflicts with routes or failure policy. |
 | `RATTISH_INVALID_BREAK_TARGET` | error | Break does not name a reachable Loop in its activation lineage. |
 | `RATTISH_INVALID_BREAK_ROUTE` | error | A Break node declares an outgoing route. |

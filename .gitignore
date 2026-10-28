@@ -70,7 +70,8 @@ wireframes/
 # Environment
 .env
 .env.local
-node_modules/
+# No trailing slash: also ignore worktree symlinks to a shared node_modules.
+node_modules
 frontend/dist/
 frontend/release/
 

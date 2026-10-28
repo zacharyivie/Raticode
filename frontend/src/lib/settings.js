@@ -2,6 +2,8 @@ import { DEFAULT_REPORT_THEMES, normalizeReportThemes, reportOutputFormat } from
 import brandCompat from "./brandCompat.js";
 import { cloneJson } from "./jsonValue.js";
 import { DEFAULT_REM_RESOURCES, snapshotRemResources } from "./remResources.js";
+import { DEFAULT_PLUGIN_SETTINGS, normalizePluginSettings } from "./plugins.js";
+import { ARCHIVE_RETENTION_OPTIONS } from "./threadActivity.js";
 export const REPORT_THEMES = [
   {
     "id": "auto",
@@ -77,6 +79,7 @@ export const KEYBINDING_COMMANDS = [
   { id: "file.open", label: "Open file", group: "Application", scope: "global", defaultBinding: "Mod+KeyO" },
   { id: "project.open", label: "Open project folder", group: "Application", scope: "global", defaultBinding: "Mod+KeyK Mod+KeyO" },
   { id: "browser.open", label: "Open browser", group: "Application", scope: "global", defaultBinding: "Ctrl+KeyJ" },
+  { id: "browser.reopenClosedTab", label: "Reopen closed browser tab", group: "Application", scope: "global", defaultBinding: "Mod+Shift+KeyT" },
   { id: "view.graph", label: "Show graph editor", group: "Application", scope: "global", defaultBinding: "Mod+Digit1" },
   { id: "view.code", label: "Show code editor", group: "Application", scope: "global", defaultBinding: "Mod+Digit2" },
   { id: "view.toggleProjectPane", label: "Toggle project pane", group: "View", scope: "global", defaultBinding: "Ctrl+KeyB" },
@@ -109,6 +112,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     initialActivity: "workflows",
     executionMode: "local",
     checkForUpdates: true,
+    archivedThreadRetention: "never",
   },
   appearance: {
     theme: "system",
@@ -130,6 +134,21 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
   browser: {
     homepage: RATICODE_BROWSER_HOME,
     searchUrl: "https://www.google.com/search?q={query}",
+    // Where Rem's Browser tool opens pages. Keep in sync with BROWSER_TARGETS
+    // in src/gofer/core/prompt_envelope.py.
+    agentBrowser: "raticode",
+    // Rem browses in its own profile. These sites share the user's sign-ins.
+    remSignInSites: [],
+    // Empty means any site; blocked sites always win.
+    remAllowedSites: [],
+    remBlockedSites: [],
+    // When Rem must ask before submitting forms or running page scripts.
+    remConfirm: "signed-in",
+    remEvaluate: true,
+    remDownloads: "block",
+    askWhereToSave: false,
+    // Background tabs give their memory back after this many minutes; 0 keeps them.
+    discardAfterMinutes: 30,
   },
   terminal: {
     shell: "system",
@@ -156,6 +175,7 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     graphInspectorWidth: 340,
     workflowPaneWidth: 272,
   },
+  plugins: DEFAULT_PLUGIN_SETTINGS,
   keybindings: DEFAULT_KEYBINDINGS,
 });
 
@@ -195,11 +215,12 @@ export function normalizeAppSettings(value = {}) {
   settings.assistant.autoHideThoughts = settings.assistant.autoHideThoughts !== false;
   settings.assistant.resources = snapshotRemResources(settings.assistant.resources);
   settings.general.autosave = settings.general.autosave !== false;
-  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["workflows", "files", "search", "source-control", "organizations"], value?.general?.defaultView === "code" ? "files" : "workflows");
+  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["rem", "workflows", "files", "search", "source-control", "organizations", "second-brain"], value?.general?.defaultView === "code" ? "files" : "workflows");
   // Retain the old field for older installations reading these settings.
   settings.general.defaultView = settings.general.initialActivity === "workflows" ? "graph" : "code";
   settings.general.executionMode = enumValue(settings.general.executionMode, ["local", "remote"], "local");
   settings.general.checkForUpdates = settings.general.checkForUpdates !== false;
+  settings.general.archivedThreadRetention = enumValue(String(settings.general.archivedThreadRetention), ARCHIVE_RETENTION_OPTIONS.map(([id]) => id), "never");
   settings.appearance.theme = enumValue(settings.appearance.theme, ["system", "light", "dark"], "system");
   settings.appearance.reducedMotion = enumValue(settings.appearance.reducedMotion, ["system", "on", "off"], "system");
   settings.devices.audioInputId = safeString(settings.devices.audioInputId, "default", 512) || "default";
@@ -219,6 +240,15 @@ export function normalizeAppSettings(value = {}) {
     2048,
   );
   settings.browser.searchUrl = searchUrlValue(settings.browser.searchUrl);
+  settings.browser.agentBrowser = enumValue(settings.browser.agentBrowser, ["raticode", "external", "external-headless"], "raticode");
+  settings.browser.remSignInSites = siteListValue(settings.browser.remSignInSites);
+  settings.browser.remAllowedSites = siteListValue(settings.browser.remAllowedSites);
+  settings.browser.remBlockedSites = siteListValue(settings.browser.remBlockedSites);
+  settings.browser.remConfirm = enumValue(settings.browser.remConfirm, ["signed-in", "always", "never"], "signed-in");
+  settings.browser.remEvaluate = settings.browser.remEvaluate !== false;
+  settings.browser.remDownloads = enumValue(settings.browser.remDownloads, ["block", "allow"], "block");
+  settings.browser.askWhereToSave = settings.browser.askWhereToSave === true;
+  settings.browser.discardAfterMinutes = Math.round(boundedNumber(settings.browser.discardAfterMinutes, 0, 1440, 30));
   settings.terminal.cursorBlink = settings.terminal.cursorBlink !== false;
   settings.terminal.fontSize = boundedNumber(settings.terminal.fontSize, 8, 28, 12.5);
   settings.terminal.lineHeight = boundedNumber(settings.terminal.lineHeight, 1, 2, 1.25);
@@ -238,6 +268,7 @@ export function normalizeAppSettings(value = {}) {
   settings.layout.assistantPaneWidth = boundedNumber(settings.layout.assistantPaneWidth, 300, 520, 380);
   settings.layout.bottomPanelHeight = boundedNumber(settings.layout.bottomPanelHeight, 140, 480, 300);
   settings.layout.graphInspectorWidth = boundedNumber(settings.layout.graphInspectorWidth, 280, 520, 340);
+  settings.plugins = normalizePluginSettings(settings.plugins);
   settings.keybindings = normalizeKeybindings(settings.keybindings);
   return settings;
 }
@@ -271,7 +302,7 @@ export function settingBinding(settings, commandId) {
 // Chords are supported only by the application dispatcher. Other scopes record
 // one gesture and migrate previously accepted, unusable chords to their defaults.
 export const CHORD_COMMAND_IDS = new Set([
-  "settings.open", "file.open", "project.open", "browser.open", "view.graph", "view.code",
+  "settings.open", "file.open", "project.open", "browser.open", "browser.reopenClosedTab", "view.graph", "view.code",
   "view.toggleProjectPane", "view.toggleAssistantPane", "workflow.run",
 ]);
 
@@ -431,6 +462,25 @@ function boundedNumber(value, minimum, maximum, fallback) {
 
 function safeString(value, fallback, maxLength) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : fallback;
+}
+
+// Accepts "github.com", "https://github.com/x" or a comma-separated list.
+export function siteListValue(value) {
+  const items = Array.isArray(value) ? value : String(value ?? "").split(/[\s,]+/);
+  const sites = items.map((item) => {
+    let input = String(item ?? "").trim().toLowerCase().replace(/^\*\./, "");
+    if (!input) return "";
+    if (!/^[a-z][a-z\d+.-]*:\/\//.test(input)) input = `https://${input}`;
+    try {
+      const url = new URL(input);
+      if (url.username || url.password) return "";
+      const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");
+      return /^[a-z\d.:-]+$/.test(host) && !host.startsWith(".") && !host.includes("..") ? host : "";
+    } catch {
+      return "";
+    }
+  });
+  return [...new Set(sites.filter(Boolean))].slice(0, 200);
 }
 
 function searchUrlValue(value) {

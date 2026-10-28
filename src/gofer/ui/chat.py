@@ -37,6 +37,7 @@ from watchdog.observers.api import BaseObserver
 
 from gofer.core.prompt_envelope import (
     AgentResources,
+    claude_native_tools,
     codex_mcp_server_names,
     prompt_envelope,
     resource_cli_args,
@@ -52,6 +53,7 @@ from gofer.core.provider_capabilities import (
 from gofer.core.provider_context import estimate_tokens, handoff_token_budget, token_chunks
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.core.provider_preferences import provider_preference
+from gofer.core.rem_library import skill_folder, with_library_resources
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
 from gofer.core.usage_ledger import track_chat_usage
 from gofer.rattish.artifacts import (
@@ -70,6 +72,8 @@ from gofer.subscriptions.cli_providers import (
     cli_invocation,
     stream_cli,
 )
+from gofer.subscriptions.codex import codex_exec_input
+from gofer.ui.browser_tools import releases_browser_access, with_agent_browser
 from gofer.ui.chat_media import ChatMediaError, resolve_chat_attachment
 from gofer.ui.chat_sessions import ChatSession, with_chat_session
 from gofer.ui.codex_steering import CodexTurnControl, stream_codex_turn
@@ -774,6 +778,7 @@ def _finalize_chat_changes(
 ) -> dict[str, Any] | None:
     if root is None:
         return None
+    data_dir = data_dir.resolve()
     if snapshots is None:
         after = _capture_chat_project(root, before)
     else:
@@ -941,7 +946,8 @@ def _apply_chat_changes(
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{32}", change_set_id):
         raise ChatChangeError("Unknown Rem change set")
-    store = _chat_change_store(data_dir or get_data_dir(), change_set_id)
+    data_dir = (data_dir or get_data_dir()).resolve()
+    store = _chat_change_store(data_dir, change_set_id)
     try:
         payload = json.loads(store.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1026,6 +1032,7 @@ def redo_chat_changes(change_set_id: str, data_dir: Path | None = None) -> dict[
     return _apply_chat_changes(change_set_id, redo=True, data_dir=data_dir)
 
 
+@releases_browser_access
 async def run_workflow_chat(
     provider: str,
     model: str,
@@ -1039,6 +1046,7 @@ async def run_workflow_chat(
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
+    trusted_rem_artifacts_url: str | None = None,
     conversation_id: str | None = None,
     reset_session: bool = False,
 ) -> dict[str, Any]:
@@ -1060,6 +1068,7 @@ async def run_workflow_chat(
             trusted_swarm_url=trusted_swarm_url,
             trusted_rem_threads_url=trusted_rem_threads_url,
             trusted_organization_url=trusted_organization_url,
+            trusted_rem_artifacts_url=trusted_rem_artifacts_url,
             conversation_id=conversation_id,
             reset_session=reset_session,
         )
@@ -1116,13 +1125,18 @@ async def run_workflow_chat(
     if binary_path is None:
         raise ChatProviderError(f"'{binary}' CLI is not available on PATH")
 
-    resolved_data_dir = data_dir or get_data_dir()
+    resolved_data_dir = (data_dir or get_data_dir()).resolve()
     resolved_working_dir = _chat_working_dir(workflow, working_dir or resolved_data_dir)
     limits = _limits_from_workflow(workflow, resource_limits)
     resolved_working_dir.mkdir(parents=True, exist_ok=True)
     gofer_cli_path = ensure_local_gofer_cli(resolved_data_dir)
+    try:
+        workflow = with_library_resources(workflow, resolved_data_dir)
+    except ValueError as exc:
+        raise ChatProviderError(str(exc)) from exc
     workflow = with_second_brain(workflow, gofer_cli_path)
     workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
+    workflow = _with_browser(workflow, gofer_cli_path, resolved_data_dir, resolved_working_dir)
     messages, _ = await _compact_chat_messages_if_needed(
         provider=provider,
         model=model,
@@ -1148,15 +1162,9 @@ async def run_workflow_chat(
         workflow=workflow,
         gofer_cli_path=gofer_cli_path,
     )
-    prompt = _prepare_prompt_for_cli(
-        provider=provider,
-        binary_path=binary_path,
-        data_dir=resolved_data_dir,
-        messages=messages,
-        prompt=prompt,
-        workflow=workflow,
-    )
     extra_paths = _trusted_workflow_paths(workflow, resolved_working_dir)
+    if provider in ADDITIONAL_PROVIDERS:
+        extra_paths += _skill_read_paths(workflow)
     command = _build_chat_command(
         provider=provider,
         model=model,
@@ -1168,9 +1176,11 @@ async def run_workflow_chat(
         extra_paths=extra_paths,
         image_paths=image_paths,
         permission_mode=permission_mode,
+        network_access=((workflow or {}).get("remManagedTask") or {}).get("networkAccess") is True,
         trusted_swarm_url=trusted_swarm_url,
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
+        trusted_rem_artifacts_url=trusted_rem_artifacts_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
         second_brain_cli_path=(
             gofer_cli_path
@@ -1196,8 +1206,12 @@ async def run_workflow_chat(
                         parsed_answer = retained_text(answer)
 
     try:
+        stdin = None
+        if provider == "codex":
+            command, stdin = codex_exec_input(command)
         returncode, stdout, stderr = await run_subprocess(
             command,
+            stdin=stdin,
             cwd=resolved_working_dir,
             env=env_with_executable_on_path(binary_path),
             timeout=None,
@@ -1230,6 +1244,7 @@ async def run_workflow_chat(
 
 @with_chat_session
 @track_chat_usage
+@releases_browser_access
 async def stream_workflow_chat(
     provider: str,
     model: str,
@@ -1246,6 +1261,7 @@ async def stream_workflow_chat(
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
+    trusted_rem_artifacts_url: str | None = None,
     unlimited_output: bool = False,
     include_agent_messages: bool = False,
     conversation_id: str | None = None,
@@ -1296,13 +1312,18 @@ async def stream_workflow_chat(
     if binary_path is None:
         raise ChatProviderError(f"'{binary}' CLI is not available on PATH")
 
-    resolved_data_dir = data_dir or get_data_dir()
+    resolved_data_dir = (data_dir or get_data_dir()).resolve()
     resolved_working_dir = _chat_working_dir(workflow, working_dir or resolved_data_dir)
     limits = _limits_from_workflow(workflow, resource_limits)
     resolved_working_dir.mkdir(parents=True, exist_ok=True)
     gofer_cli_path = ensure_local_gofer_cli(resolved_data_dir)
+    try:
+        workflow = with_library_resources(workflow, resolved_data_dir)
+    except ValueError as exc:
+        raise ChatProviderError(str(exc)) from exc
     workflow = with_second_brain(workflow, gofer_cli_path)
     workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
+    workflow = _with_browser(workflow, gofer_cli_path, resolved_data_dir, resolved_working_dir)
     compacted = False
     if _session is None:
         messages, compacted = await _compact_chat_messages_if_needed(
@@ -1383,17 +1404,11 @@ async def stream_workflow_chat(
         agent_instructions=agent_instructions,
         session=_session,
     )
-    prompt = _prepare_prompt_for_cli(
-        provider=provider,
-        binary_path=binary_path,
-        data_dir=resolved_data_dir,
-        messages=messages,
-        prompt=prompt,
-        workflow=workflow,
-    )
     if cancel_event is not None and cancel_event.is_set():
         return
     extra_paths = _trusted_workflow_paths(workflow, resolved_working_dir)
+    if provider in ADDITIONAL_PROVIDERS:
+        extra_paths += _skill_read_paths(workflow)
     command = _build_chat_command(
         provider=provider,
         model=model,
@@ -1405,9 +1420,11 @@ async def stream_workflow_chat(
         extra_paths=extra_paths,
         image_paths=image_paths,
         permission_mode=permission_mode,
+        network_access=((workflow or {}).get("remManagedTask") or {}).get("networkAccess") is True,
         trusted_swarm_url=trusted_swarm_url,
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
+        trusted_rem_artifacts_url=trusted_rem_artifacts_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
         second_brain_cli_path=(
             gofer_cli_path
@@ -1608,6 +1625,8 @@ async def stream_workflow_chat(
                 provider,
                 command,
                 resources,
+                read_only=((workflow or {}).get("remManagedTask") or {}).get("readOnly") is True,
+                structured_output="remManagedTask" in (workflow or {}),
                 trusted_swarm_url=trusted_swarm_url,
                 extra_paths=_unique_existing_directories([resolved_data_dir, *extra_paths]),
                 second_brain_cli_path=gofer_cli_path
@@ -1654,8 +1673,10 @@ async def stream_workflow_chat(
             project_tracker.close()
         return
     try:
+        exec_command, stdin = codex_exec_input(command) if provider == "codex" else (command, None)
         provider_stream: AsyncIterator[Any] = stream_subprocess(
-            command,
+            exec_command,
+            stdin=stdin,
             cancel_event=cancel_event,
             cwd=resolved_working_dir,
             env=env_with_executable_on_path(binary_path),
@@ -2093,6 +2114,7 @@ def _codex_trace_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "detail": _first_line(command),
                 "input": command,
                 "output": _trace_value(item.get("aggregated_output") or item.get("output")),
+                "exitCode": item.get("exit_code"),
                 "status": status,
                 "phase": phase,
                 **shell_metadata,
@@ -2552,6 +2574,8 @@ def _build_chat_command(
     trusted_swarm_url: str | None = None,
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
+    trusted_rem_artifacts_url: str | None = None,
+    network_access: bool = False,
 ) -> list[str]:
     if image_paths and provider not in IMAGE_ATTACHMENT_PROVIDERS:
         raise ChatProviderError(f"{provider} image attachments are not supported by this adapter")
@@ -2601,6 +2625,8 @@ def _build_chat_command(
             "--cd",
             str(working_dir),
         ]
+        if network_access and permission_mode == "workspace-write":
+            command += ["-c", "sandbox_workspace_write.network_access=true"]
         for path in trusted_paths:
             command += ["--add-dir", str(path)]
         if model and model != "cli-default":
@@ -2659,6 +2685,20 @@ def _build_chat_command(
                     "-c",
                     f'mcp_servers.{swarm_name}.tools.swarm_action.approval_mode="approve"',
                 ]
+            if trusted_rem_artifacts_url is not None and any(
+                server.enabled
+                and server.name == "rem_artifacts"
+                and server.type == "http"
+                and server.url == trusted_rem_artifacts_url
+                for server in resources.mcpServers
+            ):
+                output_server = codex_mcp_server_names(resources, working_dir)["rem_artifacts"]
+                command += [
+                    "-c",
+                    f'mcp_servers.{output_server}.enabled_tools=["save_report"]',
+                    "-c",
+                    f'mcp_servers.{output_server}.tools.save_report.approval_mode="approve"',
+                ]
             if trusted_organization_url is not None and any(
                 server.enabled
                 and server.name == "organizations"
@@ -2707,11 +2747,7 @@ def _build_chat_command(
     allowed_tools = ["Read", "Edit", "Write"]
     if resources is not None:
         command += resource_cli_args(provider, resources, working_dir)
-        allowed_tools += ["Glob", "Grep"]
-        if resources.shell:
-            allowed_tools.append("Bash")
-        if resources.web:
-            allowed_tools += ["WebFetch", "WebSearch"]
+        allowed_tools = claude_native_tools(resources)
         allowed_tools += [
             f"mcp__{server.name}__*" for server in resources.mcpServers if server.enabled
         ]
@@ -2727,6 +2763,20 @@ def _build_chat_command(
     if effort:
         command += ["--effort", effort]
     return command
+
+
+def _with_browser(
+    workflow: dict[str, Any] | None,
+    cli_path: Path | None,
+    data_dir: Path,
+    working_dir: Path,
+) -> dict[str, Any] | None:
+    # Rem may upload files only from the folders this turn can already use.
+    upload_roots = [working_dir, *_trusted_workflow_paths(workflow, working_dir)]
+    try:
+        return with_agent_browser(workflow, cli_path, data_dir, upload_roots)
+    except ValueError as exc:
+        raise ChatProviderError(str(exc)) from exc
 
 
 def _trusted_workflow_paths(
@@ -2753,6 +2803,13 @@ def _trusted_workflow_paths(
             path = path_base / path
         trusted_paths.append(path)
     return trusted_paths
+
+
+def _skill_read_paths(workflow: dict[str, Any] | None) -> list[Path]:
+    """Skill folders that path-restricted CLIs must be allowed to read."""
+    resources = AgentResources.model_validate((workflow or {}).get("remResources") or {})
+    folders = [skill_folder(skill.path) for skill in resources.skills if skill.enabled]
+    return _unique_existing_directories([folder for folder in folders if folder.is_dir()])
 
 
 def _chat_working_dir(workflow: dict[str, Any] | None, fallback: Path) -> Path:
@@ -2818,42 +2875,12 @@ def _looks_like_windows_absolute_path(path: Path) -> bool:
     return len(value) >= 3 and value[1:3] in {":\\", ":/"}
 
 
-def _prepare_prompt_for_cli(
-    *,
-    provider: str,
-    binary_path: str,
-    data_dir: Path,
-    messages: list[dict[str, Any]],
-    prompt: str,
-    workflow: dict[str, Any] | None,
-) -> str:
-    if provider != "codex" or not _uses_windows_command_shim(binary_path):
-        return prompt
-
-    workflow_id = _workflow_id_for_chat(workflow)
-    prompt_path = workflow_chat_prompt_path(data_dir, workflow_id)
-    prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(prompt, encoding="utf-8")
-    latest_user_message = _latest_user_message(messages)
-    return (
-        "Read the complete Rem prompt, workflow context, and "
-        f"conversation from this file: {prompt_path}. Then answer the latest user "
-        f"message: {_single_line(latest_user_message)}"
-    )
-
-
 def delete_workflow_chat_prompt(data_dir: Path, workflow_id: str) -> None:
     workflow_chat_prompt_path(data_dir, workflow_id).unlink(missing_ok=True)
 
 
 def workflow_chat_prompt_path(data_dir: Path, workflow_id: str) -> Path:
     return data_dir / ".gofer-chat-prompts" / f"{_safe_chat_prompt_stem(workflow_id)}.md"
-
-
-def _workflow_id_for_chat(workflow: dict[str, Any] | None) -> str:
-    if isinstance(workflow, dict) and workflow.get("id"):
-        return str(workflow["id"])
-    return "no-workflow"
 
 
 def _safe_chat_prompt_stem(workflow_id: str) -> str:
@@ -2863,21 +2890,6 @@ def _safe_chat_prompt_stem(workflow_id: str) -> str:
     ).strip("-")
     digest = sha256(workflow_id.encode("utf-8")).hexdigest()[:12]
     return f"{safe_name or 'workflow'}-{digest}"
-
-
-def _uses_windows_command_shim(binary_path: str) -> bool:
-    return Path(binary_path.lower()).suffix in {".cmd", ".bat"}
-
-
-def _latest_user_message(messages: list[dict[str, Any]]) -> str:
-    for message in reversed(messages):
-        if message.get("role") == "user":
-            return str(message.get("body") or "")
-    return ""
-
-
-def _single_line(value: str) -> str:
-    return " ".join(value.split())
 
 
 async def _compact_chat_messages_if_needed(
@@ -2997,14 +3009,6 @@ async def _summarize_chat_messages(
         "errors, unresolved tasks, and important assistant outputs. Omit chatter.\n\n"
         f"{transcript}"
     )
-    prompt = _prepare_prompt_for_cli(
-        provider=provider,
-        binary_path=binary_path,
-        data_dir=data_dir,
-        messages=messages,
-        prompt=prompt,
-        workflow=None,
-    )
     command = _build_chat_command(
         provider=provider,
         model=model,
@@ -3020,8 +3024,12 @@ async def _summarize_chat_messages(
     usage_metadata: dict[str, Any] = {}
     usage_status = "failed"
     try:
+        stdin = None
+        if provider == "codex":
+            command, stdin = codex_exec_input(command)
         returncode, stdout, stderr = await run_subprocess(
             command,
+            stdin=stdin,
             cwd=working_dir,
             env=env_with_executable_on_path(binary_path),
             timeout=None,
@@ -3141,7 +3149,19 @@ def build_chat_prompt(
         "Help users build workflows, edit code, debug, and understand their projects."
     )
     tool_settings = (
-        f"run commands={str(resources.shell).lower()}, web search={str(resources.web).lower()}"
+        f"run commands={str(resources.shell).lower()}, web search={str(resources.web).lower()}, "
+        f"subagents={str(resources.agents).lower()}, browser={str(resources.browser).lower()}"
+    )
+    browser_guidance = (
+        ""
+        if resources.browser
+        else (
+            "Browser is off for this thread. When the user asks you to open, read or use a "
+            "web page, do not open it with xdg-open, open, start or another system command. "
+            "Tell them to turn on Browser in this thread's Tools menu and send the request "
+            "again; then you can work in Raticode's browser tabs. Reading pages through web "
+            "search remains fine when web search is on."
+        )
     )
     global_scope = ((workflow or {}).get("remThreads") or {}).get("global") is True
     scope_tools = ""
@@ -3161,6 +3181,7 @@ Requested model: {model}
 Current turn tools: {tool_settings}.
 These are the current requested settings. Check the tools available in this turn;
 earlier messages about missing tools may describe a previous configuration.
+{browser_guidance}
 {scope_tools}
 
 {commit_instructions}
@@ -3209,7 +3230,10 @@ def _gofer_cli_prompt_context(gofer_cli_path: Path | None) -> str:
 
     return (
         "Raticode CLI: use this exact executable path for all Raticode CLI commands "
-        f"instead of relying on PATH: {gofer_cli_path}"
+        f"instead of relying on PATH: {gofer_cli_path}\n"
+        f"To set up skills or MCP servers for Rem threads, use `{gofer_cli_path} rem skill new`, "
+        f"`rem skill add`, or `rem mcp add` (see `{gofer_cli_path} rem --help`). They work with "
+        "every provider and appear in Thread tools, where the user turns them on per thread."
     )
 
 

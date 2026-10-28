@@ -997,19 +997,20 @@ The test suite uses `FakeSubscription` from `tests/conftest.py`, so tests do not
 Desktop Settings > Paired devices now supports protected identities, expiring
 QR invitations, local identity confirmation, revocation and pinned reconnect.
 Real encrypted LAN pairing requires explicit experimental opt-in. Independent
-security review is still pending. Encrypted mobile chat, relay transport, local
+security review is still pending. Encrypted mobile chat over Wi-Fi, local
 thread grants, scoped files and authorized desktop fleet execution are available
 for experimental testing. See the
 [setup, recovery and verification guide](docs/security/device-pairing.md).
 
 Phone invitations require `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1` at desktop
 startup, including `electron:dev`. Without it, both phone networking and invitation
-creation are disabled. Set `RATICODE_DEVICE_HOST` to the desktop's private LAN IP
-for LAN preference; otherwise the invitation uses encrypted relay transport only.
+creation are disabled. Phones connect only over the local network; there is no internet relay. Desktop
+creates a phone invitation only when it has a private address. Set
+`RATICODE_DEVICE_HOST` to the desktop's private LAN IP if it picks the wrong interface.
 
 The experimental paired-device messaging, local thread grants, fleet dispatch and
 bounded file transfer are described in [device messaging](docs/security/device-messaging.md).
-Independent review and physical/internet acceptance remain release gates.
+Independent review and physical-device acceptance remain release gates.
 
 The current [release scope and acceptance guide](docs/security/device-release.md)
 describes fleet grant/revocation, storage recovery, packaging and the remaining
@@ -1018,9 +1019,11 @@ security, physical-device and distribution decisions.
 
 ### Phone conversations and LAN preference
 
-With `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1`, desktop selects its outgoing private IPv4 address for the device listener. `RATICODE_DEVICE_HOST` overrides it. The separate UI API stays on loopback. Updated phones learn the current LAN endpoint over encrypted sync, prefer LAN and retain ntfy when direct access fails.
+With `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1`, desktop selects its outgoing private IPv4 address for the device listener. `RATICODE_DEVICE_HOST` overrides it. The separate UI API stays on loopback. Updated phones learn the current LAN endpoint over encrypted sync and connect only over Wi-Fi. The ntfy relay was removed on October 26, 2026.
 
 Confirm a phone in Paired devices to sync your desktop threads and projects by default. Identity, connection details, Unpair and Revoke appear directly under Phone. The phone uses your desktop provider settings and approval policies. Install and authenticate the selected provider on desktop first.
+
+Closing the Raticode window keeps it running in the tray, and phone threads keep syncing. Phones can switch a thread's existing resources on or off. **Allow approvals and swarm controls from this phone**, off by default, lets the phone answer workflow and swarm approvals and pause, resume, stop or message swarms in shared projects. The desktop carries out every action through its own approval and swarm services.
 
 
 ### Shared desktop threads on mobile

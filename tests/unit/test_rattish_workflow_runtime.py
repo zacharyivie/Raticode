@@ -853,3 +853,54 @@ Node target:
     assert result.outcome == "pass"
     assert peak_active == 2
     assert sum(record.node_id == "target" for record in result.runs) == 2
+
+
+@pytest.mark.anyio
+async def test_routes_and_bindings_select_members_of_the_error_document(tmp_path: Path) -> None:
+    source = """Rattish: 1
+
+Workflow:
+  name: Error kind route
+
+Node risky:
+  type: bash-command
+  command: risky
+  allow-fail: true
+  to:
+    - on-timeout when node.risky.error.kind == "timeout"
+    - on-command when node.risky.error.kind == "command"
+
+Node on-timeout:
+  type: bash-command
+  command: timeout
+  needs: risky
+
+Node on-command:
+  type: bash-command
+  needs: risky
+  command: report
+  with:
+    error-code:
+      from: node.risky.error.code
+      default: none
+"""
+    ir = compile_source(source, tmp_path)
+    report = next(node for node in ir["nodes"] if node["id"] == "on-command")
+    reference = report["bindings"][0]["source"]["reference"]
+    assert reference["channel"] == "error"
+    assert reference["path"] == [{"kind": "member", "value": "code", "case_sensitive": True}]
+    seen: dict[str, object] = {}
+
+    async def fake_handler(node, context, bindings):
+        _ = context
+        if node["id"] == "risky":
+            return HandlerResult(False, output(), RuntimeErrorInfo("command", "EXIT_3", "boom"))
+        seen[node["id"]] = bindings.local.get("error-code")
+        return HandlerResult(True, output(node["id"]))
+
+    result = await execute_workflow(
+        ir, handlers=NodeHandlerRegistry({"raticode.bash_command": fake_handler})
+    )
+
+    assert result.outcome == "pass"
+    assert seen == {"on-command": "EXIT_3"}

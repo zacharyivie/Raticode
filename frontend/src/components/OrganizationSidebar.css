@@ -1,4 +1,4 @@
-.org-sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; font-size: 12px; border-bottom: 1px solid rgb(var(--color-line)); }
+.org-sidebar-heading { border-bottom: 1px solid rgb(var(--color-line)); }
 .org-sidebar-heading > div { display: flex; gap: 2px; }
 .org-sidebar-heading button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 4px; color: rgb(var(--color-muted)); }
 .org-sidebar button:hover:not(:disabled) { background: rgb(var(--color-ink) / .07); }

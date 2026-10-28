@@ -20,6 +20,10 @@ from gofer.devices.binding import SessionBinding
 from gofer.devices.framing import strict_json
 from gofer.devices.registry import DeviceRegistry, PairingError, device_id
 
+# Protocol v2 still requires relay and topic fields. Devices connect only over the
+# local network, so invitations name a reserved domain that can never resolve.
+UNUSED_RELAY_ORIGIN = "https://relay.invalid"
+
 
 def relay_origin(value: str) -> str:
     try:
@@ -95,9 +99,7 @@ class Invitations:
         self.lock = threading.RLock()
         self.current: Invitation | None = None
 
-    def create(
-        self, name: str, relay: str, endpoint: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
+    def create(self, name: str, endpoint: dict[str, Any] | None = None) -> dict[str, Any]:
         with self.lock:
             now = self.registry.clock()
             data: dict[str, Any] = {
@@ -110,7 +112,7 @@ class Invitations:
                 "responder_spki_sha256": self.registry.identity.pin.hex(),
                 "secret": secrets.token_urlsafe(32),
                 "expires_at": int(now) + 300,
-                "relay": relay_origin(relay),
+                "relay": UNUSED_RELAY_ORIGIN,
                 "pair_initiator_topic": secrets.token_urlsafe(32),
                 "pair_responder_topic": secrets.token_urlsafe(32),
                 "lan_endpoint": lan_endpoint(endpoint),
@@ -150,7 +152,6 @@ class Invitations:
             )
             expected.verify(record)
             self.registry.propose(peer, pin, role, invite.expires)
-            self.registry.save_relay(peer, data["relay"])
             invite.consumed = True
             # Discard the only retained secret once a candidate has claimed it.
             self.current = None

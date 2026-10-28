@@ -429,3 +429,61 @@ def test_rattish_run_uses_stable_failure_and_usage_exit_codes(tmp_path: Path) ->
     assert invalid_cli_input.exit_code == 2
     invalid_payload = json.loads(invalid_cli_input.stdout)
     assert invalid_payload["diagnostics"][0]["code"] == "RATTISH_CLI_INPUT_INVALID"
+
+
+def test_workflow_run_accepts_rattish_paths_folders_and_registered_ids(tmp_path: Path) -> None:
+    from gofer.rattish.workspaces import create_registered_workflow
+
+    data_dir = tmp_path / "app-data"
+    project = tmp_path / "project"
+    project.mkdir()
+    workflow = create_registered_workflow(project, "CLI run", registry_dir=data_dir)
+    workflow.entrypoint.write_text(
+        """Rattish: 1
+Workflow:
+  name: CLI run
+  inputs:
+    count:
+      schema: {"type": "integer"}
+      required: true
+Node echo:
+  type: bash-command
+  with:
+    count: input.count
+  command: printf "count=$COUNT"
+""",
+        encoding="utf-8",
+    )
+
+    for target in (
+        str(workflow.entrypoint),
+        str(workflow.entrypoint.parent),
+        workflow.workflow_id,
+    ):
+        result = runner.invoke(
+            app,
+            ["workflow", "run", target, "--input", "count=3", "--data-dir", str(data_dir)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "passed" in result.output
+
+    invalid = runner.invoke(
+        app,
+        [
+            "workflow",
+            "run",
+            workflow.workflow_id,
+            "--input",
+            "count=x",
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+    assert invalid.exit_code == 2
+
+    resume = runner.invoke(
+        app,
+        ["workflow", "resume", workflow.workflow_id, "--run-id", "x", "--data-dir", str(data_dir)],
+    )
+    assert resume.exit_code == 1
+    assert "not supported" in resume.output

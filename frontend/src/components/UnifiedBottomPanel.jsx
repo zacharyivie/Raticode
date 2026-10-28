@@ -9,6 +9,7 @@ import { workflowRunSummary } from "../lib/workflowRuns.js";
 
 const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
 import { bottomPanelTabForShortcut, clamp } from "../lib/terminalWorkspace.js";
+import { trackPointerDrag } from "../lib/paneResize.js";
 export * from "../lib/terminalWorkspace.js";
 
 const PANEL_MIN_HEIGHT = 140;
@@ -107,32 +108,30 @@ export default function UnifiedBottomPanel({
     setHeight(settings.layout.bottomPanelHeight);
   }, [settings.layout.bottomPanelHeight]);
 
+  // Size the panel directly while dragging. The open/close height animation is
+  // paused so each frame lands immediately instead of chasing the pointer.
   function startResize(event) {
     if (collapsed) return;
-    event.preventDefault();
+    const handle = event.currentTarget;
+    const panel = handle.parentElement;
     const startY = event.clientY;
     const startHeight = height;
-    const previousCursor = document.body.style.cursor;
-    const previousUserSelect = document.body.style.userSelect;
     let nextHeight = startHeight;
-    document.body.style.cursor = "row-resize";
-    document.body.style.userSelect = "none";
-
-    function handlePointerMove(moveEvent) {
-      nextHeight = clamp(startHeight + startY - moveEvent.clientY, PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
-      setHeight(nextHeight);
-    }
-
-    function handlePointerUp() {
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = previousUserSelect;
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-      onSettingChange?.("layout.bottomPanelHeight", nextHeight);
-    }
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
+    const started = trackPointerDrag(event, {
+      cursor: "row-resize",
+      onMove({ clientY }) {
+        nextHeight = clamp(startHeight + startY - clientY, PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT);
+        panel.style.height = `${nextHeight}px`;
+        handle.setAttribute("aria-valuenow", String(nextHeight));
+      },
+      onEnd() {
+        panel.style.transition = "";
+        if (nextHeight === startHeight) return;
+        setHeight(nextHeight);
+        onSettingChange?.("layout.bottomPanelHeight", nextHeight);
+      },
+    });
+    if (started) panel.style.transition = "none";
   }
 
   function resizeWithKeyboard(event) {
@@ -291,7 +290,7 @@ function ProblemsPanel({ diagnostics, onRevealDiagnostic }) {
   if (!diagnostics.length) {
     return (
       <div className="grid h-full place-items-center px-6 text-xs text-muted">
-        No problems in workflow.rattish.
+        No workflow or run problems.
       </div>
     );
   }
@@ -311,10 +310,10 @@ function ProblemsPanel({ diagnostics, onRevealDiagnostic }) {
           >
             <Icon aria-hidden="true" className={`mt-0.5 shrink-0 ${warning ? "text-amber-600" : "text-red-600"}`} size={13} />
             <span className="min-w-0 flex-1 text-ink">
-              {diagnostic.message}
+              {diagnostic.runtime ? `${diagnostic.nodeId}: ` : ""}{diagnostic.message}
               {diagnostic.code ? <span className="ml-2 font-mono text-[10px] text-muted">{diagnostic.code}</span> : null}
             </span>
-            <span className="shrink-0 font-mono text-[10px] text-muted">workflow.rattish:{line}</span>
+            <span className="shrink-0 font-mono text-[10px] text-muted">{diagnostic.runtime ? "Run failure" : `workflow.rattish:${line}`}</span>
           </button>
         );
       })}

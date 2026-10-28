@@ -2486,7 +2486,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             workflow={
                 "id": f"swarm-diagnosis-{run['id']}",
                 "projectRoot": working_dir,
-                "remResources": {"shell": False, "web": False, "mcpServers": []},
+                "remResources": AgentResources.none().model_dump(),
             },
             working_dir=Path(working_dir),
             data_dir=self.data_dir,

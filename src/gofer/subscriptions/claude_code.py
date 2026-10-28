@@ -10,6 +10,8 @@ from gofer.subscriptions.base import Subscription
 
 class ClaudeCodeSubscription(Subscription):
     provider = "claude_code"
+    # Print mode cannot read a prompt file outside the workspace without extra permissions.
+    prompt_via_stdin = True
 
     def _parse_provider_output(self, stdout: str, stderr: str) -> tuple[str, dict[str, object]]:
         from gofer.subscriptions.base import _json_payloads, _message_from_payloads
@@ -46,7 +48,8 @@ class ClaudeCodeSubscription(Subscription):
             cmd += provider_settings.extra_args
         for path in extra_paths or []:
             cmd += ["--add-dir", str(path)]
-        cmd += ["-p", prompt]
+        if not self.prompt_via_stdin:
+            cmd += ["-p", prompt]
         for tool in [*(provider_settings.tools if provider_settings else []), *tools]:
             cmd += ["--allowedTools", tool]
         for server in [

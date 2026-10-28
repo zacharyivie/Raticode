@@ -84,8 +84,8 @@ _DESCRIPTIONS = {
     "claude_code": "Read Claude subscription windows using Claude Code's OAuth sign-in. "
     "Raticode tries local Claude Code credentials automatically; an override is optional. "
     "This endpoint is used by Claude clients but is not a documented public reporting API.",
-    "cursor": "Connect team admin reporting for on-demand spend. "
-    "Cursor does not offer a verified personal subscription quota feed through this API.",
+    "cursor": "Optional. Raticode reads plan usage from your Cursor sign-in automatically. "
+    "Connect team admin reporting only to track a team member's on-demand spend instead.",
     "openai_api": "Read month-to-date API token usage. Reporting totals can lag behind requests "
     "and do not represent a remaining token allowance.",
     "anthropic_api": "Read month-to-date API token usage. These totals do not include "

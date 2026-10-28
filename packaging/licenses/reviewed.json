@@ -112,9 +112,9 @@
       "license": "MIT",
       "version": "6.8.9"
     },
-    "electron@41.10.7": {
+    "electron@45.1.0": {
       "license": "MIT",
-      "version": "41.10.7"
+      "version": "45.1.0"
     },
     "escape-string-regexp@5.0.0": {
       "license": "MIT",

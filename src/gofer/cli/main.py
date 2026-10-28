@@ -10,6 +10,7 @@ from gofer.cli.commands import (
     doctor,
     provider,
     rattish,
+    rem,
     runner,
     schedule,
     schema,
@@ -29,6 +30,7 @@ app.add_typer(runner.app, name="runner")
 app.add_typer(schedule.app, name="schedule")
 app.add_typer(watch.app, name="watch")
 app.add_typer(rattish.app, name="rattish")
+app.add_typer(rem.app, name="rem")
 app.command("doctor")(doctor.doctor)
 app.command("schema")(schema.schema_command)
 
@@ -60,9 +62,15 @@ def second_brain(
     root: Path = typer.Option(..., "--root"),
     report_format: str = typer.Option("md", "--report-format"),
     report_theme: str = typer.Option("auto", "--report-theme"),
+    library_data_dir: Path | None = typer.Option(None, "--library-data-dir"),
+    brain_id: list[str] | None = typer.Option(None, "--brain-id"),
 ) -> None:
     """Serve the native Rem knowledge tools over MCP stdio."""
-    from gofer.ui.second_brain import serve_second_brain
+    from gofer.ui.second_brain import serve_registered_brains, serve_second_brain
+
+    if library_data_dir is not None and brain_id:
+        serve_registered_brains(library_data_dir, brain_id, report_format, report_theme)
+        return
 
     serve_second_brain(root, report_format, report_theme)
 
@@ -87,6 +95,16 @@ def serve_ui(
     from gofer.ui.server import serve
 
     serve(host=host, port=port, data_dir=data_dir)
+
+
+@ui_app.command("browser", hidden=True)
+def browser(
+    capability_file: Path = typer.Option(..., "--capability-file"),
+) -> None:
+    """Serve Rem's tools for Raticode's browser tabs over MCP stdio."""
+    from gofer.ui.browser_tools import serve_browser
+
+    serve_browser(capability_file)
 
 
 @ui_app.command("reports", hidden=True)

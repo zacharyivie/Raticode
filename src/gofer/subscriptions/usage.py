@@ -127,6 +127,7 @@ def normalize_usage(provider: str, metadata: dict[str, Any]) -> dict[str, Any]:
             "cache_creation_input_tokens",
             "cacheCreationTokens",
             "cacheCreationInputTokens",
+            "cacheWriteTokens",
         ),
         "reasoning_tokens": (
             "reasoning_tokens",
@@ -154,7 +155,7 @@ def normalize_usage(provider: str, metadata: dict[str, Any]) -> dict[str, Any]:
         detail = metadata.get(detail_key)
         if isinstance(detail, dict) and (value := _tokens(detail.get(field))) is not None:
             result[target] = value
-    # Anthropic and OpenCode report disjoint input buckets. Their normalized output
+    # Anthropic, OpenCode and Cursor report disjoint input buckets. Their normalized output
     # can pass through this function again without adding cache a second time.
     disjoint = provider in {"claude_code", "anthropic_api"} and any(
         key in metadata
@@ -166,6 +167,11 @@ def normalize_usage(provider: str, metadata: dict[str, Any]) -> dict[str, Any]:
         )
     )
     disjoint = disjoint or provider == "opencode" and "input" in metadata
+    disjoint = (
+        disjoint
+        or provider == "cursor"
+        and any(key in metadata for key in ("cacheReadTokens", "cacheWriteTokens"))
+    )
     if disjoint and isinstance(result.get("input_tokens"), (int, float)):
         result["input_tokens"] += result.get("cache_read_tokens", 0) + result.get(
             "cache_write_tokens", 0
@@ -245,8 +251,50 @@ def provider_payload_usage(provider: str, payloads: list[dict[str, Any]]) -> dic
     return normalize_usage(provider, result)
 
 
+CLAUDE_WINDOW_LABELS = {
+    "five_hour": "Five-hour allowance",
+    "seven_day": "Weekly allowance",
+    "seven_day_opus": "Weekly Opus allowance",
+    "seven_day_sonnet": "Weekly Sonnet allowance",
+    "seven_day_overage_included": "Weekly allowance with overage",
+}
+
+
+def _claude_window(identity: str, status: Any, utilization: Any, resets_at: Any) -> dict[str, Any]:
+    reset = None
+    timestamp = _number(resets_at)
+    if timestamp is not None:
+        try:
+            reset = datetime.fromtimestamp(timestamp, UTC).isoformat()
+        except (ValueError, OverflowError, OSError):
+            pass
+    # Claude Code reports the fraction of a window used. It can exceed 1 past a cap.
+    fraction = _number(utilization)
+    used = min(100.0, fraction * 100) if fraction is not None else None
+    label = CLAUDE_WINDOW_LABELS.get(identity, identity.replace("_", " "))
+    if used is None:
+        # Status only: the window is known to exist, but not how much is used.
+        label = (label if identity != "unspecified" else "Plan status") + ": " + str(status)
+    return {
+        "id": identity,
+        "status": status,
+        "label": label.replace("_", " "),
+        "unit": "percent",
+        "used": used,
+        "limit": 100.0 if used is not None else None,
+        "remaining": 100.0 - used if used is not None else None,
+        "remaining_percent": 100.0 - used if used is not None else None,
+        "resets_at": reset,
+        "unlimited": False,
+    }
+
+
 def claude_quota_windows(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Preserve SDK status/reset events without assuming utilization units."""
+    """Subscription windows from Claude Code's rate-limit events on each response.
+
+    These come from the response headers of turns Raticode already runs, so they
+    cost no request and need no credentials.
+    """
     windows: dict[str, dict[str, Any]] = {}
     for payload in payloads:
         if payload.get("type") != "rate_limit_event":
@@ -254,33 +302,31 @@ def claude_quota_windows(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]
         info = payload.get("rate_limit_info")
         if not isinstance(info, dict):
             continue
-        identity = info.get("rateLimitType")
-        if not isinstance(identity, str) or not identity:
-            identity = "unspecified"
         status = info.get("status")
         if status not in {"allowed", "allowed_warning", "rejected"}:
             continue
-        reset = None
-        timestamp = _number(info.get("resetsAt"))
-        if timestamp is not None:
-            try:
-                reset = datetime.fromtimestamp(timestamp, UTC).isoformat()
-            except (ValueError, OverflowError, OSError):
-                pass
-        windows[identity] = {
-            "id": identity,
-            "status": status,
-            "label": (identity.replace("_", " ") if identity != "unspecified" else "Plan status")
-            + ": "
-            + str(status).replace("_", " "),
-            "unit": "percent",
-            "used": None,
-            "remaining": None,
-            "remaining_percent": None,
-            "limit": None,
-            "resets_at": reset,
-            "unlimited": False,
-        }
+        identity = info.get("rateLimitType")
+        if not isinstance(identity, str) or not identity:
+            identity = "unspecified"
+        # The top-level utilization describes only the currently limiting window,
+        # so it is a measurement only when that window is named.
+        windows[identity] = _claude_window(
+            identity,
+            status,
+            info.get("utilization") if identity != "unspecified" else None,
+            info.get("resetsAt"),
+        )
+        unified = info.get("unifiedWindows")
+        for name, raw in unified.items() if isinstance(unified, dict) else ():
+            if isinstance(name, str) and isinstance(raw, dict):
+                window = _claude_window(
+                    name,
+                    status if name == identity else None,
+                    raw.get("utilization"),
+                    raw.get("resetsAt"),
+                )
+                if window["used"] is not None:
+                    windows[name] = window
     return list(windows.values())
 
 

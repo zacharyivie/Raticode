@@ -21,10 +21,11 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
 from contextlib import aclosing, contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,7 @@ from gofer.core.usage_credentials import (
     save_usage_credentials,
     usage_credentials_payload,
 )
-from gofer.core.usage_service import refresh_usage, usage_overview
+from gofer.core.usage_service import refresh_usage, start_background_refresh, usage_overview
 from gofer.core.watcher import WorkflowWatcher
 from gofer.core.workflow import AgenticWorkflow
 from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
@@ -151,6 +152,8 @@ from gofer.ui.organization_operations import READ_OPERATIONS
 from gofer.ui.organization_packages import read_directory
 from gofer.ui.organization_store import OrganizationConflict
 from gofer.ui.organizations import OrganizationManager
+from gofer.ui.rem_home import RemHome
+from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.swarms import SwarmManager
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
@@ -166,6 +169,23 @@ UI_JSON_MAX_DEPTH = 64
 UI_JOB_DEADLINE_SECONDS = 24 * 60 * 60
 COMMIT_MESSAGE_MAX_BODY_BYTES = 2 * 1024 * 1024
 DEFAULT_DEV_FRONTEND_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173"}
+
+
+def _device_provider_catalog() -> list[dict[str, Any]]:
+    """Enabled desktop providers as the phone's model catalog. No credentials or paths."""
+    return [
+        {
+            "id": p["id"],
+            "permission_modes": [mode["id"] for mode in p.get("permissionModes", [])],
+            "default_permission": p.get("defaultPermissionMode", "default"),
+            "efforts": {
+                m["id"]: [e["id"] for e in m.get("efforts", [])] for m in p.get("models", [])[:100]
+            },
+            "models": list(dict.fromkeys([m["id"] for m in p.get("models", [])]))[:100],
+        }
+        for p in provider_capabilities_payload()["providers"]
+        if p.get("available") and p.get("enabled")
+    ][:32]
 
 
 def _optional_query(query: dict[str, list[str]], name: str) -> str | None:
@@ -330,7 +350,8 @@ class GoferUiServer(ThreadingHTTPServer):
             raise ValueError("desktop_project_grant_expired")
         with self.swarms.rem_session(
             root,
-            read_only=options.get("permission_mode") in {"read-only", "plan"},
+            read_only=options.get("permission_mode") in {"read-only", "plan"}
+            or (workflow.get("remManagedTask") or {}).get("readOnly") is True,
             workspace_grants=config.get("workspaceGrants") or {},
         ) as url:
             resources = dict(workflow.get("remResources") or {})
@@ -358,6 +379,9 @@ class GoferUiServer(ThreadingHTTPServer):
         data_dir.mkdir(parents=True, exist_ok=True)
         super().__init__(server_address, GoferUiRequestHandler)
         self.data_dir = data_dir
+        from gofer.ui.brain_library import BrainLibrary
+
+        self.second_brains = BrainLibrary(data_dir)
         self.resource_limits = resource_limits or bundle_resource_limits_from_env()
         self.chat_steering = ChatSteering(data_dir)
         self.chat_jobs = ChatJobs(data_dir, UI_MAX_EXPENSIVE_REQUESTS)
@@ -419,12 +443,33 @@ class GoferUiServer(ThreadingHTTPServer):
         )
 
         if self.devices is not None:
+            self.devices.attach_services(
+                providers=_device_provider_catalog,
+                swarms=self.swarms,
+                data_dir=data_dir,
+                decide_workflow=decide_workflow_approval_payload,
+            )
             self.devices.attach_chat(
                 self.chat_jobs,
                 self.chat_steering,
                 data_dir,
                 self.resource_limits,
                 source=self._device_chat_source,
+            )
+
+        self.rem_home = RemHome(
+            data_dir,
+            source=self._device_chat_source,
+            jobs=self.chat_jobs,
+            steering=self.chat_steering,
+            authorize=self._authorize_rem_home,
+            context=self._rem_home_context,
+        )
+        if self.devices is not None:
+            self.devices.attach_desktop(
+                rem=self.rem_home,
+                organizations=self.organizations,
+                usage=lambda: usage_overview(data_dir, days=30),
             )
 
     async def _swarm_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
@@ -514,7 +559,109 @@ class GoferUiServer(ThreadingHTTPServer):
                 "Open the project and select it again."
             )
 
+    def _authorize_rem_home(self, config: dict[str, Any], recipe: dict[str, Any]) -> None:
+        projects = config.get("projects", [])
+        if not isinstance(projects, list) or len(projects) > 100:
+            raise ValueError("Choose at most 100 Rem projects")
+        for project in projects:
+            if not isinstance(project, dict) or not isinstance(project.get("root"), str):
+                raise ValueError("Invalid Rem project")
+            root = Path(project["root"])
+            if not root.is_absolute() or not root.is_dir() or str(root.resolve()) != str(root):
+                raise ValueError("Rem projects must be canonical existing directories")
+            self._authorize_swarm_workspace(root, project.get("grantId"))
+        project_dir = recipe.get("project_dir")
+        if project_dir and not any(p["root"] == project_dir for p in projects):
+            raise ValueError("Select an approved project for this task")
+        brain = config.get("brain") or {}
+        if not isinstance(brain, dict):
+            raise ValueError("Invalid Second Brain configuration")
+        if brain.get("enabled"):
+            root = Path(str(brain.get("root", "")))
+            if not root.is_absolute() or not root.is_dir():
+                raise ValueError("Select an existing Second Brain")
+            self._authorize_swarm_workspace(root, brain.get("grantId"))
+            for identity in brain.get("brainIds", []):
+                registered = self.second_brains.brain(identity)
+                if not registered["settings"].get("allowCloud"):
+                    raise ValueError("Second Brain cloud access was revoked")
+                self._authorize_swarm_workspace(
+                    Path(registered["root"]),
+                    (brain.get("workspaceGrants") or {}).get(registered["root"]),
+                )
+        if recipe.get("type") == "research" and not project_dir and not brain.get("enabled"):
+            raise ValueError(
+                "Research needs an approved project or enabled Second Brain destination"
+            )
+
+    def _rem_home_context(self) -> dict[str, Any]:
+        with self.rem_home.store.connect() as db:
+            config = self.rem_home.store.setting(db, "config")
+        self._authorize_rem_home(config, {})
+        roots = {p["root"] for p in config.get("projects", [])}
+        workflows = [
+            {key: workflow.get(key) for key in ("id", "name", "projectRoot", "status", "latestRun")}
+            for workflow in list_workflow_payloads(self.data_dir).get("workflows", [])
+            if workflow.get("projectRoot") in roots
+        ]
+        organizations = [
+            item
+            for item in self.organizations.store.summaries()
+            if not item.get("projectRoots") or roots.intersection(item["projectRoots"])
+        ]
+        notes: list[dict[str, Any]] = []
+        brain = config.get("brain") or {}
+        if brain.get("enabled") and brain.get("root"):
+            from gofer.ui.second_brain import SecondBrain
+
+            history = self.rem_home.store.conversation()["messages"]
+            query = next((m["body"] for m in reversed(history) if m["role"] == "user"), "")
+            references: list[tuple[str, str]] = []
+            if brain.get("brainIds"):
+                hits = self.second_brains.search(
+                    {
+                        "brainIds": brain["brainIds"],
+                        "query": query,
+                        "mode": "exact",
+                    }
+                )["hits"]
+                for hit in hits[:10]:
+                    doc = self.second_brains.entity("documents", hit["docId"])
+                    if not doc.get("excluded") and not doc.get("missing"):
+                        references.append(
+                            (self.second_brains.brain(doc["brainId"])["root"], doc["path"])
+                        )
+            else:
+                knowledge = SecondBrain(Path(brain["root"]), "html")
+                references = [(brain["root"], h["path"]) for h in knowledge.search(query)[:3]]
+            for destination, relative in list(dict.fromkeys(references))[:5]:
+                knowledge = SecondBrain(Path(destination), "html")
+                try:
+                    note = knowledge.call("read_note", {"path": relative})
+                    notes.append({"path": note["path"], "content": note["content"][:6000]})
+                except (ValueError, OSError):
+                    continue
+        return {
+            "at": datetime.now(UTC).isoformat(),
+            "workflows": workflows,
+            "swarms": [s for root in roots for s in self.swarms.list(root)],
+            "organizations": organizations,
+            "running_threads": self.chat_jobs.active_snapshot(),
+            "brains": {
+                "enabled": bool(config.get("brain", {}).get("enabled")),
+                "ids": config.get("brain", {}).get("brainIds", []),
+            },
+            "desktop": config.get("workspace_snapshot", {}),
+            "knowledge": notes,
+        }
+
     def server_close(self) -> None:
+        rem_home = getattr(self, "rem_home", None)
+        if rem_home is not None:
+            rem_home.close()
+        second_brains = getattr(self, "second_brains", None)
+        if second_brains is not None:
+            second_brains.close()
         generation_jobs = getattr(self, "generation_jobs", None)
         if generation_jobs is not None:
             generation_jobs.close()
@@ -719,6 +866,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         self._dispatch_request("PUT")
 
+    def do_PATCH(self) -> None:
+        self._dispatch_request("PATCH")
+
     def do_DELETE(self) -> None:
         self._dispatch_request("DELETE")
 
@@ -763,6 +913,15 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "Too many active requests; retry shortly"}, status=503)
                 return
         try:
+            if parsed.path == "/api/second-brains":
+                self._dispatch_second_brain_request(method)
+                return
+            if parsed.path == "/api/rem-resources":
+                self._dispatch_rem_resources_request(method)
+                return
+            if parsed.path.startswith("/api/rem/"):
+                self._dispatch_rem_home_request(method)
+                return
             if parsed.path == "/api/organizations":
                 self._dispatch_organization_request(method)
                 return
@@ -789,7 +948,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._dispatch_swarm_request(method)
                 return
             getattr(self, f"_dispatch_{method}")()
-        except OrganizationConflict as exc:
+        except (OrganizationConflict, RemConflict) as exc:
             self._send_json({"error": str(exc)}, status=409)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             self._send_json({"error": str(exc)}, status=400)
@@ -798,6 +957,164 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         finally:
             if acquired and slots is not None:
                 slots.release()
+
+    def _dispatch_rem_home_request(self, method: str) -> None:
+        if method == "OPTIONS":
+            self._dispatch_OPTIONS()
+            return
+        service = self.server.rem_home
+        parsed = urlparse(self.path)
+        parts = parsed.path.removeprefix("/api/rem/").split("/")
+        try:
+            if method == "GET" and parts == ["conversation"]:
+                result = service.store.conversation()
+            elif method == "GET" and parts == ["tasks"]:
+                result = {"tasks": service.store.tasks()}
+            elif method == "GET" and len(parts) == 2 and parts[0] == "threads":
+                result = service.store.thread(parts[1])
+            elif method == "GET" and len(parts) == 2 and parts[0] == "runs":
+                with service.store.connect() as db:
+                    result = {"run": service.store.get(db, "runs", parts[1])}
+            elif method == "GET" and parts == ["events"]:
+                after = int(parse_qs(parsed.query).get("after", ["0"])[0])
+                if after < 0:
+                    raise ValueError("Invalid event cursor")
+                result = {"events": service.store.events(after)}
+            elif method == "POST" and parts == ["context"]:
+                body = self._read_json()
+                self._validate_rem_thread_projects(
+                    {"workflow": {"remThreads": {"projects": body.get("projects", [])}}}
+                )
+                if not isinstance(body.get("brain", {}), dict):
+                    raise ValueError("Invalid Second Brain configuration")
+                if body.get("brain", {}).get("enabled"):
+                    self._validate_second_brain({"workflow": {"remSecondBrain": body["brain"]}})
+                result = service.configure(body)
+            elif method == "POST" and parts == ["messages"]:
+                result = service.submit_message(self._read_json())
+            elif method == "POST" and parts == ["reset"]:
+                result = service.clear_history(self._read_json())
+            elif (
+                method == "POST"
+                and len(parts) == 3
+                and parts[0] == "threads"
+                and parts[2] == "messages"
+            ):
+                result = service.instruct(parts[1], self._read_json())
+            elif method == "POST" and parts == ["tasks"]:
+                result = service.create_task(self._read_json())
+            elif method == "PATCH" and len(parts) == 2 and parts[0] == "tasks":
+                result = service.edit_task(parts[1], self._read_json(), "edit")
+            elif (
+                method == "POST"
+                and len(parts) == 3
+                and parts[0] == "tasks"
+                and parts[2] in {"run", "pause"}
+            ):
+                result = service.edit_task(parts[1], self._read_json(), parts[2])
+            elif (
+                method == "POST"
+                and len(parts) == 3
+                and parts[0] == "runs"
+                and parts[2] in {"cancel", "acknowledge"}
+            ):
+                result = service.store.mutate_run(parts[1], self._read_json(), parts[2])
+            elif method == "DELETE" and len(parts) == 2 and parts[0] == "tasks":
+                request_id = parse_qs(parsed.query).get("request_id", [""])[0]
+                result = service.edit_task(parts[1], {"request_id": request_id}, "delete")
+            else:
+                self._send_json({"error": "Unknown Rem endpoint"}, status=404)
+                return
+            self._send_json(result)
+        except KeyError:
+            self._send_json({"error": "Rem record was not found"}, status=404)
+
+    def _dispatch_rem_resources_request(self, method: str) -> None:
+        """Read or edit the Raticode-wide skill and MCP server library."""
+        from pydantic import ValidationError
+
+        from gofer.core import rem_library
+
+        if method == "OPTIONS":
+            self._dispatch_OPTIONS()
+            return
+        if method not in {"GET", "POST"}:
+            self._send_json({"error": "Method not allowed"}, status=405)
+            return
+        data_dir = self._default_data_dir()
+        try:
+            if method == "POST":
+                body = self._read_json(limit=256 * 1024)
+                action = body.get("action")
+                if action == "add_skill":
+                    rem_library.add_skill(data_dir, str(body.get("path", "")))
+                elif action == "remove_skill":
+                    rem_library.remove_skill(data_dir, str(body.get("path", "")))
+                elif action == "save_mcp":
+                    server = body.get("server")
+                    if not isinstance(server, dict):
+                        raise ValueError("Expected an MCP server definition")
+                    replace = body.get("replace")
+                    rem_library.save_mcp_server(
+                        data_dir, server, replace=str(replace) if replace else None
+                    )
+                elif action == "remove_mcp":
+                    rem_library.remove_mcp_server(data_dir, str(body.get("name", "")))
+                else:
+                    raise ValueError("Unknown resource library action")
+            self._send_json(rem_library.snapshot(data_dir))
+        except ValidationError as exc:
+            message = exc.errors()[0].get("msg", "Invalid MCP server") if exc.errors() else ""
+            self._send_json({"error": str(message).removeprefix("Value error, ")}, status=400)
+        except (json.JSONDecodeError, ValueError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+
+    def _dispatch_second_brain_request(self, method: str) -> None:
+        if method == "OPTIONS":
+            self._dispatch_OPTIONS()
+            return
+        if method not in {"GET", "POST"}:
+            self._send_json({"error": "Method not allowed"}, status=405)
+            return
+        query = parse_qs(urlparse(self.path).query)
+        body = self._read_json(limit=8 * 1024 * 1024) if method == "POST" else {}
+        action = str(body.get("action") or _optional_query(query, "action") or "snapshot")
+        if method == "GET" and action != "snapshot":
+            raise ValueError("Second Brain actions require POST")
+        params = body.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError("Expected Second Brain parameters")
+        grants = body.get("workspaceGrants", {})
+        if not isinstance(grants, dict):
+            raise ValueError("Expected folder access grants")
+        paths: list[tuple[str, bool]] = []
+        if action == "open":
+            paths.append((str(params.get("root", "")), not params.get("create", False)))
+        if action == "update_brain" and params.get("patch", {}).get("root"):
+            paths.append((params["patch"]["root"], True))
+        if action == "import_preview":
+            paths.append((str(params.get("path", "")), True))
+        if action == "task":
+            kind = params.get("kind")
+            if kind == "add-files":
+                paths.extend((str(path), True) for path in params.get("paths", []))
+            if kind in {"import", "bibliography"}:
+                paths.append((str(params.get("path", "")), not params.get("export", False)))
+            if kind in {"import", "export"}:
+                paths.append((str(params.get("destination", "")), False))
+        try:
+            for value, must_exist in paths:
+                self._assert_bundle_path_allowed(
+                    Path(value), grants.get(value), must_exist=must_exist
+                )
+            result = self.server.second_brains.request(action, params)
+        except WorkflowBundleError as exc:
+            self._send_json({"error": str(exc)}, status=403)
+            return
+        except (OSError, sqlite3.Error, zipfile.BadZipFile, KeyError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json({"result": result})
 
     def _dispatch_organization_request(self, method: str) -> None:
         if method == "OPTIONS":
@@ -1451,6 +1768,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         refresh_usage(
                             self._request_data_dir(query),
                             days=int(query.get("days", ["30"])[0]),
+                            explicit=True,
                         )
                     )
                 )
@@ -1491,25 +1809,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     body.get("action") in {"workspace_poll", "workspace_exchange"}
                     and self.server.devices.application is not None
                 ):
-                    providers = provider_capabilities_payload()["providers"]
-                    self.server.devices.application.workspace.providers = [
-                        {
-                            "id": p["id"],
-                            "permission_modes": [
-                                mode["id"] for mode in p.get("permissionModes", [])
-                            ],
-                            "default_permission": p.get("defaultPermissionMode", "default"),
-                            "efforts": {
-                                m["id"]: [e["id"] for e in m.get("efforts", [])]
-                                for m in p.get("models", [])[:100]
-                            },
-                            "models": list(dict.fromkeys([m["id"] for m in p.get("models", [])]))[
-                                :100
-                            ],
-                        }
-                        for p in providers
-                        if p.get("available") and p.get("enabled")
-                    ][:32]
+                    self.server.devices.application.workspace.providers = _device_provider_catalog()
                 if body.get("action") == "authorize_thread":
                     context = body.get("context")
                     if not isinstance(context, dict):
@@ -2128,11 +2428,17 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             try:
                 body = self._read_json()
                 if parsed.path == "/api/chat/steer":
+                    manager = getattr(self.server, "rem_home", None)
+                    if manager is not None and manager.manages(body.get("conversationId", "")):
+                        raise ValueError("Send managed task instructions through Rem")
                     self._send_json({"receipt": self.server.chat_steering.steer(body)})
                 else:
                     self.server.chat_steering.stop(
                         body.get("conversationId", ""), body.get("turnId", "")
                     )
+                    rem_home = getattr(self.server, "rem_home", None)
+                    if rem_home is not None:
+                        rem_home.manual_stop(body.get("conversationId", ""))
                     self._send_json({"stopped": True})
             except ChatSteeringConflict as exc:
                 self._send_json({"error": str(exc)}, status=409)
@@ -2146,6 +2452,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             try:
                 body = self._read_json()
+                manager = getattr(self.server, "rem_home", None)
+                if manager is not None and manager.manages(body.get("conversationId", "")):
+                    raise ValueError("Managed task turns are executed by Rem")
                 self._validate_second_brain(body)
                 self._validate_rem_thread_projects(body)
                 data_dir = self._request_data_dir(query)
@@ -2753,7 +3062,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
     def _dispatch_OPTIONS(self) -> None:
         self.send_response(204)
         self._send_common_headers()
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         self.end_headers()
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -3015,6 +3324,23 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         config = (body.get("workflow") or {}).get("remSecondBrain") or {}
         if config.get("enabled") is not True:
             return
+        if "brainIds" in config:
+            selected = config["brainIds"]
+            if not isinstance(selected, list) or not selected or len(selected) > 100:
+                raise ValueError("Choose between 1 and 100 registered Second Brains")
+            grants = config.get("workspaceGrants", {})
+            registered = [self.server.second_brains.brain(str(item)) for item in selected]
+            for brain in registered:
+                if not brain["settings"].get("allowCloud"):
+                    raise ValueError(
+                        f"Allow cloud processing for {brain['name']} before attaching it to Rem"
+                    )
+                self._assert_bundle_path_allowed(
+                    Path(brain["root"]), grants.get(brain["root"]), must_exist=True
+                )
+            config["root"] = registered[0]["root"]
+            config["grantId"] = grants.get(config["root"])
+            config["libraryDataDir"] = str(self.server.data_dir)
         root = Path(str(config.get("root", ""))).expanduser()
         if not root.is_absolute() or not root.is_dir():
             raise ValueError("Choose an existing absolute Second Brain folder.")
@@ -3535,6 +3861,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = Non
     server.scheduler.resume()
     server.watcher.start()
     server.start_continuous_monitor()
+    stop_usage_refresh = start_background_refresh(server.data_dir)
     _install_shutdown_handlers(server)
     print(f"GOFER_UI_READY {json.dumps(ready_payload(server), sort_keys=True)}", flush=True)
     try:
@@ -3542,6 +3869,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = Non
     except KeyboardInterrupt:
         pass
     finally:
+        stop_usage_refresh()
         server.stop_continuous_monitor()
         stop_rattish_runs_for_shutdown(server.data_dir)
         server.watcher.shutdown(wait=False)

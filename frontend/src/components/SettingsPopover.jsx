@@ -13,11 +13,13 @@ import {
   Code2,
   Command,
   Globe2,
+  GripVertical,
   LayoutPanelLeft,
   MonitorCog,
   Palette,
   PcCase,
   PlugZap,
+  Puzzle,
   RotateCcw,
   Search,
   Terminal,
@@ -32,7 +34,9 @@ import CommitMessageSettings from "./CommitMessageSettings.jsx";
 import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
 import "./SettingsPopover.css";
+import { PLUGIN_ICONS } from "./pluginIcons.js";
 import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
+import { ARCHIVE_RETENTION_OPTIONS } from "../lib/threadActivity.js";
 import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevices.js";
 import {
   DEFAULT_APP_SETTINGS,
@@ -42,6 +46,21 @@ import {
   formatKeybinding,
   keybindingConflictIds,
 } from "../lib/settings.js";
+import {
+  DEFAULT_PLUGIN_SETTINGS,
+  PLUGIN_DRAG_TYPE,
+  SIDEBAR_PLUGINS,
+  dropPlacement,
+  enabledPlugins,
+  movePlugin,
+  orderedPlugins,
+  pluginEnabled,
+  resolvePluginActivity,
+  stepPlugin,
+  withPluginEnabled,
+} from "../lib/plugins.js";
+
+const INITIAL_ACTIVITY_IDS = ["rem", "workflows", "files", "search", "source-control", "organizations", "second-brain"];
 
 const CATEGORIES = [
   { id: "general", label: "General", icon: MonitorCog },
@@ -56,6 +75,7 @@ const CATEGORIES = [
   { id: "memory", label: "Memory", icon: Brain },
   { id: "developer", label: "Developer", icon: Wrench },
   { id: "layout", label: "Layout", icon: LayoutPanelLeft },
+  { id: "plugins", label: "Plugins", icon: Puzzle },
   { id: "keybindings", label: "Keybindings", icon: Command },
 ];
 
@@ -162,12 +182,12 @@ export default function SettingsPopover({
       </aside>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4 transition-colors focus-within:border-brand">
           <Search aria-hidden="true" className="text-muted" size={14} />
           <input
             ref={searchRef}
             aria-label="Search settings"
-            className="min-w-0 flex-1 bg-transparent text-xs text-ink outline-none placeholder:text-muted"
+            className="studio-search-input min-w-0 flex-1 bg-transparent text-xs text-ink outline-none placeholder:text-muted"
             placeholder="Search settings"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -232,8 +252,8 @@ function SettingsCategory({ category, dataDir, onChange, onChooseDataDirectory, 
 }
 
 function categoryRows(category, settings, onChange, providerState, appControls) {
-  const row = (key, label, description, element) => ({
-    element: <SettingRow key={key} label={label} description={description}>{element}</SettingRow>,
+  const row = (key, label, description, element, options = {}) => ({
+    element: <SettingRow key={key} label={label} description={description} stacked={options.stacked}>{element}</SettingRow>,
     searchText: `${label} ${description}`,
   });
   if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied", element: <ProviderSettings key="providers" providerState={providerState} /> }];
@@ -245,7 +265,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
       <PathControl value={appControls.dataDir} onChoose={appControls.onChooseDataDirectory} />
     )),
     row("initialActivity", "Initial sidebar", "Shown on first launch or when the last sidebar cannot be restored.", (
-      <SelectControl value={settings.general.initialActivity} onChange={(value) => onChange("general.initialActivity", value)} options={[["workflows", "Workflows"], ["files", "Files"], ["search", "Search"], ["source-control", "Source control"], ["organizations", "Organizations"]]} />
+      <SelectControl value={resolvePluginActivity(settings.plugins, settings.general.initialActivity)} onChange={(value) => onChange("general.initialActivity", value)} options={enabledPlugins(settings.plugins).filter((plugin) => INITIAL_ACTIVITY_IDS.includes(plugin.id)).map((plugin) => [plugin.id, plugin.label])} />
     )),
     row("autosave", "Autosave files", "Save file edits after a short delay.", (
       <SwitchControl checked={settings.general.autosave} onChange={(value) => onChange("general.autosave", value)} />
@@ -255,6 +275,9 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     )),
     row("updates", "Check for updates at startup", "Ask the desktop updater for a new release when the app starts.", (
       <SwitchControl checked={settings.general.checkForUpdates} onChange={(value) => onChange("general.checkForUpdates", value)} />
+    )),
+    row("archivedThreadRetention", "Delete archived threads", "Permanently delete archived Rem threads with no activity for this long. A configured conversation archive keeps a copy.", (
+      <SelectControl value={settings.general.archivedThreadRetention} onChange={(value) => onChange("general.archivedThreadRetention", value)} options={ARCHIVE_RETENTION_OPTIONS} />
     )),
   ];
   if (category === "appearance") return [
@@ -290,6 +313,15 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   if (category === "browser") return [
     row("homepage", "Home page", "Address loaded when you open a new integrated browser tab.", <TextControl value={settings.browser.homepage} placeholder={DEFAULT_APP_SETTINGS.browser.homepage} onCommit={(value) => onChange("browser.homepage", value)} />),
     row("search", "Search URL", "Use {query} where the encoded search terms belong.", <TextControl value={settings.browser.searchUrl} placeholder="https://www.google.com/search?q={query}" onCommit={(value) => onChange("browser.searchUrl", value)} />),
+    row("agentBrowser", "Rem's browser", "Where Rem opens pages when its Browser tool is on. Raticode tabs open in the background, so you keep your place, and several tasks can work side by side. External browsers use Playwright and need Node.js.", <SelectControl value={settings.browser.agentBrowser} onChange={(value) => onChange("browser.agentBrowser", value)} options={[["raticode", "Raticode browser tabs"], ["external", "External browser window"], ["external-headless", "External browser, hidden"]]} />),
+    row("remSignInSites", "Sites where Rem uses your sign-ins", "Rem browses in its own profile and is signed out everywhere. List sites, such as github.com, whose sign-ins Rem may use. Rem asks before submitting or running scripts on them.", <TextControl value={settings.browser.remSignInSites.join(", ")} placeholder="None" onCommit={(value) => onChange("browser.remSignInSites", value)} />),
+    row("remAllowedSites", "Sites Rem may open", "Leave empty to let Rem open any site. Subdomains are included.", <TextControl value={settings.browser.remAllowedSites.join(", ")} placeholder="Any site" onCommit={(value) => onChange("browser.remAllowedSites", value)} />),
+    row("remBlockedSites", "Sites Rem may not open", "Always blocked, even when listed above.", <TextControl value={settings.browser.remBlockedSites.join(", ")} placeholder="None" onCommit={(value) => onChange("browser.remBlockedSites", value)} />),
+    row("remConfirm", "Approve Rem's browser actions", "Whether Rem must ask before it submits forms, presses buttons such as Send or Delete, uploads files or runs page scripts. Full access lets Rem act without approval prompts.", <SelectControl value={settings.browser.remConfirm} onChange={(value) => onChange("browser.remConfirm", value)} options={[["signed-in", "Ask on signed-in and shared tabs"], ["always", "Ask on every site"], ["never", "Full access, never ask"]]} />),
+    row("remEvaluate", "Let Rem run page scripts", "Allows browser_evaluate. Turn off to limit Rem to reading, clicking and typing.", <SwitchControl checked={settings.browser.remEvaluate} onChange={(value) => onChange("browser.remEvaluate", value)} />),
+    row("remDownloads", "Downloads started by Rem", "Blocked downloads are reported to Rem instead of saved.", <SelectControl value={settings.browser.remDownloads} onChange={(value) => onChange("browser.remDownloads", value)} options={[["block", "Block"], ["allow", "Save to Downloads"]]} />),
+    row("askWhereToSave", "Ask where to save each download", "Otherwise files go to your Downloads folder. Files that can run code always wait for you to keep them.", <SwitchControl checked={settings.browser.askWhereToSave} onChange={(value) => onChange("browser.askWhereToSave", value)} />),
+    row("discardAfterMinutes", "Free memory from background tabs", "Tabs you have not viewed for this long pause and reload when you return. Tabs playing audio or controlled by Rem stay open. 0 keeps every tab loaded.", <NumberControl value={settings.browser.discardAfterMinutes} min={0} max={1440} step={5} suffix="min" onCommit={(value) => onChange("browser.discardAfterMinutes", value)} />),
   ];
   if (category === "terminal") return [
     row("shell", "Shell", "Use your account's login shell, or select bash or zsh for new terminals. Windows uses PowerShell.", <SelectControl value={settings.terminal.shell} onChange={value => onChange("terminal.shell", value)} options={[["system", "System login shell"], ["bash", "bash"], ["zsh", "zsh"]]} />),
@@ -304,6 +336,15 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("assistantPane", "Rem pane width", "Default and current width of Rem's chat pane.", <NumberControl value={settings.layout.assistantPaneWidth} min={300} max={520} suffix="px" onCommit={(value) => onChange("layout.assistantPaneWidth", value)} />),
     row("bottomPanel", "Bottom panel height", "Height used for Problems, Run Timeline, Runs, and Terminal.", <NumberControl value={settings.layout.bottomPanelHeight} min={140} max={480} suffix="px" onCommit={(value) => onChange("layout.bottomPanelHeight", value)} />),
     row("inspector", "Graph inspector width", "Width of the node and workflow inspector.", <NumberControl value={settings.layout.graphInspectorWidth} min={280} max={520} suffix="px" onCommit={(value) => onChange("layout.graphInspectorWidth", value)} />),
+  ];
+  if (category === "plugins") return [
+    row("pluginLock", "Lock plugin order", "Keep plugins in place so they cannot be dragged in the sidebar or here.", (
+      <SwitchControl checked={settings.plugins.locked} onChange={(value) => onChange("plugins.locked", value)} />
+    )),
+    {
+      searchText: `Plugins sidebar order drag reorder show hide enable disable experimental ${SIDEBAR_PLUGINS.map((plugin) => plugin.label).join(" ")}`,
+      element: <PluginSettings key="plugin-list" value={settings.plugins} onChange={onChange} />,
+    },
   ];
   if (category === "keybindings") return keybindingRows(settings, onChange);
   return [];
@@ -321,18 +362,18 @@ function assistantRows(settings, onChange, row, providerState) {
   return [
     { searchText: "Rem commit messages provider model auto commit changes template format", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
     row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
-    row("avatar", "Show Rem avatar", "Show Rem on the chat welcome screen.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
+    row("avatar", "Show Rem avatar", "Show Rem on the welcome screen of Rem’s home.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
     row("autoHideThoughts", "Auto-hide thoughts", "Collapse thoughts when Rem replies. You can reopen them at any time.", <SwitchControl checked={settings.assistant.autoHideThoughts} onChange={(value) => onChange("assistant.autoHideThoughts", value)} />),
-    row("avatarAnimation", "Animate Rem", "Greet you when the pane opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
+    row("avatarAnimation", "Animate Rem", "Greet you when Rem’s home opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
     row("swarmAccess", "Swarm access", "Let Rem manage project teams and runs when asked. Instructions load on demand. Changes apply to the next message.", <SwitchControl checked={settings.assistant.swarmAccessEnabled} onChange={(value) => onChange("assistant.swarmAccessEnabled", value)} />),
-    row("resources", "Rem resources", "Defaults copied into new threads. Each thread can change its own selection.", <RemResources value={settings.assistant.resources} onChange={(value) => onChange("assistant.resources", value)} />),
-    row("provider", "Default provider", "Provider selected for new Rem conversations.", (
+    row("resources", "Rem resources", "Defaults copied into new threads. Each thread can change its own selection.", <RemResources value={settings.assistant.resources} memory={settings.memory} onChange={(value) => onChange("assistant.resources", value)} />, { stacked: true }),
+    row("provider", "Default provider", "Used for Rem’s next message and as the default for new tasks and threads.", (
       <SelectControl disabled={loading || !availableProviders.length} value={provider?.id ?? settings.assistant.provider} onChange={(value) => onChange("assistant.provider", value)} options={availableProviders.map((item) => [item.id, item.displayName ?? item.id])} />
     )),
-    row("model", "Default model", "Model selected when a new Rem conversation starts.", (
+    row("model", "Default model", "Used for Rem’s next message. Existing task and thread selections stay unchanged.", (
       <SelectControl disabled={!models.length} value={model?.id ?? settings.assistant.model} onChange={(value) => onChange("assistant.model", value)} options={models.map((item) => [item.id, item.displayName ?? item.id])} />
     )),
-    row("effort", "Default reasoning effort", "Reasoning level selected for new Rem conversations.", (
+    row("effort", "Default reasoning effort", "Reasoning level for Rem’s next message and new tasks and threads.", (
       <SelectControl disabled={!model?.efforts?.length} value={settings.assistant.effort || model?.defaultEffort || ""} onChange={(value) => onChange("assistant.effort", value)} options={(model?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
     )),
   ];
@@ -359,7 +400,15 @@ function keybindingRows(settings, onChange) {
   });
 }
 
-function SettingRow({ children, description, label }) {
+// Stacked rows give list-like controls the full width beneath their label.
+function SettingRow({ children, description, label, stacked = false }) {
+  if (stacked) return (
+    <div className="py-3">
+      <p className="text-xs font-semibold text-ink">{label}</p>
+      <p className="mt-1 max-w-[54ch] text-[10px] leading-4 text-muted">{description}</p>
+      <div className="mt-3 rounded-lg border border-line px-2 py-3">{children}</div>
+    </div>
+  );
   return (
     <div className="flex min-h-[66px] items-center gap-5 py-3">
       <div className="min-w-0 flex-1">
@@ -562,10 +611,11 @@ function deviceErrorMessage(error) {
   return error instanceof Error ? error.message : "The microphone could not be opened.";
 }
 
-function SwitchControl({ checked, onChange }) {
+function SwitchControl({ checked, label, onChange }) {
   return (
     <button
       aria-checked={checked}
+      aria-label={label}
       className="ml-auto grid h-7 w-10 place-items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
       role="switch"
       type="button"
@@ -584,6 +634,110 @@ function SwitchControl({ checked, onChange }) {
         />
       </span>
     </button>
+  );
+}
+
+function PluginSettings({ onChange, value }) {
+  const [drag, setDrag] = useState(null);
+  const listRef = useRef(null);
+  const plugins = orderedPlugins(value);
+  const order = plugins.map((plugin) => plugin.id);
+  const locked = value.locked;
+  const customized = Object.keys(value.enabled).length > 0
+    || order.some((id, index) => id !== DEFAULT_PLUGIN_SETTINGS.order[index]);
+
+  function reorder(next) {
+    if (next.some((id, index) => id !== order[index])) onChange("plugins.order", next);
+  }
+
+  return (
+    <div className="py-3">
+      <div className="flex items-start gap-5">
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold text-ink">Sidebar plugins</p>
+          <p className="mt-1 max-w-[54ch] text-[10px] leading-4 text-muted">
+            Choose which plugins appear in the left sidebar and drag them into order. File explorer is always shown. Experimental plugins are off until you turn them on.
+          </p>
+        </div>
+        <button
+          className="h-7 shrink-0 rounded-md border border-line bg-white px-2 text-[10px] font-semibold text-ink transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={!customized}
+          type="button"
+          onClick={() => {
+            onChange("plugins.order", DEFAULT_PLUGIN_SETTINGS.order);
+            onChange("plugins.enabled", {});
+          }}
+        >Restore defaults</button>
+      </div>
+      <ol ref={listRef} aria-label="Sidebar plugins" className="mt-3 divide-y divide-line rounded-lg border border-line">
+        {plugins.map((plugin) => {
+          const Icon = PLUGIN_ICONS[plugin.id];
+          const enabled = pluginEnabled(value, plugin.id);
+          const dropTarget = drag && drag.id !== plugin.id && drag.targetId === plugin.id ? drag.placement : "";
+          return (
+            <li
+              key={plugin.id}
+              draggable={!locked}
+              className={`relative flex items-center gap-2.5 px-2 py-2 ${drag?.id === plugin.id ? "opacity-40" : ""}`}
+              onDragStart={(event) => {
+                if (locked) { event.preventDefault(); return; }
+                event.dataTransfer?.setData(PLUGIN_DRAG_TYPE, plugin.id);
+                if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+                setDrag({ id: plugin.id, targetId: "", placement: "before" });
+              }}
+              onDragOver={(event) => {
+                if (!drag) return;
+                event.preventDefault();
+                if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+                const placement = dropPlacement(event);
+                setDrag((current) => current && (current.targetId !== plugin.id || current.placement !== placement) ? { ...current, targetId: plugin.id, placement } : current);
+              }}
+              onDrop={(event) => {
+                if (!drag) return;
+                event.preventDefault();
+                reorder(movePlugin(order, drag.id, plugin.id, dropPlacement(event)));
+                setDrag(null);
+              }}
+              onDragEnd={() => setDrag(null)}
+            >
+              {dropTarget ? <span aria-hidden="true" className={`pointer-events-none absolute inset-x-2 h-0.5 rounded-full bg-brand ${dropTarget === "after" ? "-bottom-px" : "-top-px"}`} /> : null}
+              <button
+                aria-label={`Move ${plugin.label}`}
+                className={`grid h-7 w-5 shrink-0 place-items-center rounded text-muted outline-none transition focus-visible:ring-2 focus-visible:ring-brand/40 disabled:opacity-30 ${locked ? "cursor-not-allowed" : "cursor-grab hover:text-ink active:cursor-grabbing"}`}
+                disabled={locked}
+                title={locked ? "Unlock plugin order to move plugins" : "Drag to reorder, or use the arrow keys"}
+                type="button"
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                  event.preventDefault();
+                  reorder(stepPlugin(order, plugin.id, event.key === "ArrowUp" ? -1 : 1));
+                  window.setTimeout(() => listRef.current?.querySelector?.(`[aria-label="Move ${plugin.label}"]`)?.focus(), 0);
+                }}
+              ><GripVertical aria-hidden="true" size={14} /></button>
+              <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line ${enabled ? "text-ink" : "text-muted"}`}>
+                <Icon aria-hidden="true" size={15} strokeWidth={1.5} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="flex items-center gap-1.5 text-xs font-semibold text-ink">
+                  {plugin.label}
+                  {plugin.experimental ? <span className="rounded-full bg-amber-50 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-700">Experimental</span> : null}
+                </p>
+                <p className="mt-0.5 truncate text-[10px] leading-4 text-muted" title={plugin.description}>{plugin.description}</p>
+              </div>
+              {plugin.required ? (
+                <span className="shrink-0 pr-1 text-[10px] text-muted">Always shown</span>
+              ) : (
+                <SwitchControl
+                  checked={enabled}
+                  label={`Show ${plugin.label}`}
+                  onChange={(next) => onChange("plugins.enabled", withPluginEnabled(value, plugin.id, next))}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -764,11 +918,11 @@ export function settingsCategoriesForQuery(query) {
 
 function categoryKeywords(category) {
   return {
-    general: "startup default workspace run target update queue local data directory storage artifacts autosave files",
+    general: "startup default workspace run target update queue local data directory storage artifacts autosave files archived threads delete cleanup retention",
     devices: "microphone mic audio input device recording transcription test signal level paired devices phone mobile desktop pairing qr trust revoke",
     appearance: "theme dark light system motion animation",
     editor: "font line tab wrap minimap autosave markdown html preview code",
-    browser: "homepage new tab search engine url web",
+    browser: "homepage new tab search engine url web rem agent playwright chrome automation testing sign-in cookies sites allowlist blocklist downloads memory approval approve prompts full access permission scripts",
     terminal: "font line cursor blink scrollback shell",
     providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
     usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
@@ -776,6 +930,7 @@ function categoryKeywords(category) {
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
     developer: "developer diagnostics logs logging app data storage version backend restart tools",
     layout: "width pane sidebar panel inspector",
+    plugins: "plugins sidebar rail activity bar icons order reorder drag lock unlock show hide enable disable experimental",
   }[category] ?? "";
 }
 

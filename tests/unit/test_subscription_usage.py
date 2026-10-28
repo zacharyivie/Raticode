@@ -46,6 +46,31 @@ def test_anthropic_caches_are_disjoint_but_openai_caches_are_inclusive() -> None
     assert openai["reasoning_tokens"] == 3
 
 
+def test_cursor_terminal_usage_counts_cache_as_input_once() -> None:
+    output = CliOutput("cursor")
+    output.feed(
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "Done",
+                "usage": {
+                    "inputTokens": 3,
+                    "outputTokens": 6,
+                    "cacheReadTokens": 12635,
+                    "cacheWriteTokens": 3136,
+                },
+            }
+        )
+        + "\n"
+    )
+    output.finish(0, "")
+    assert output.usage["input_tokens"] == 15774
+    assert output.usage["cache_read_tokens"] == 12635
+    assert output.usage["total_tokens"] == 15780
+    assert normalize_usage("cursor", output.usage) == output.usage
+
+
 def test_terminal_claude_totals_override_messages_and_model_subtotals() -> None:
     result = provider_payload_usage(
         "claude_code",
@@ -307,6 +332,40 @@ def test_claude_quota_events_keep_reset_without_assuming_utilization_units() -> 
     assert "allowed warning" in window["label"]
     assert window["resets_at"] is not None
     assert result["total_tokens"] == 15
+
+
+def test_claude_turns_report_every_subscription_window_as_percentages() -> None:
+    result = provider_payload_usage(
+        "claude_code",
+        [
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "status": "allowed",
+                    "rateLimitType": "five_hour",
+                    "utilization": 0.15,
+                    "resetsAt": 1793133000,
+                    "unifiedWindows": {
+                        "five_hour": {"utilization": 0.15, "resetsAt": 1793133000},
+                        "seven_day": {"utilization": 1.2, "resetsAt": 1793336400},
+                        "bogus": {"utilization": "high", "resetsAt": 1},
+                    },
+                },
+            },
+            {"type": "result", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        ],
+    )
+    windows = {window["id"]: window for window in result["quota_windows"]}
+    assert set(windows) == {"five_hour", "seven_day"}
+    assert windows["five_hour"]["used"] == 15
+    assert windows["five_hour"]["remaining_percent"] == 85
+    assert windows["five_hour"]["label"] == "Five-hour allowance"
+    assert windows["five_hour"]["status"] == "allowed"
+    # Usage past a cap is reported above 1 but never shown as negative remaining.
+    assert windows["seven_day"]["used"] == 100
+    assert windows["seven_day"]["remaining"] == 0
+    assert windows["seven_day"]["status"] is None
+    assert windows["seven_day"]["resets_at"] == "2026-10-30T05:00:00+00:00"
 
 
 def test_codex_cumulative_snapshots_replace_earlier_totals() -> None:

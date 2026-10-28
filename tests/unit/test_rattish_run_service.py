@@ -9,6 +9,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from gofer.core.approvals import ApprovalStore
 from gofer.rattish.run_service import RattishRunArtifactError, _write_json_atomic, run_rattish_file
 from gofer.rattish.runtime import HandlerResult, NodeHandlerRegistry, RuntimeErrorInfo
 from gofer.rattish.workspaces import create_registered_workflow
@@ -301,6 +302,325 @@ Node read:
 
 
 @pytest.mark.anyio
+async def test_read_file_may_read_a_file_an_upstream_node_creates(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(
+        """Rattish: 1
+Workflow:
+  name: Write then read
+Node write:
+  type: bash-command
+  command: printf hello > report.txt
+  to: read
+Node read:
+  type: read-file
+  path: report.txt
+  needs: write
+""",
+        encoding="utf-8",
+    )
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert result.status == "passed"
+    assert result.document["latest_node_outputs"]["read"]["content"] == "hello"
+
+
+_GATE_ROUTES = """Rattish: 1
+Workflow:
+  name: Gate routes
+Node gate:
+  type: approval-gate
+  message: Ship it?
+{timeout}  to:
+    - shipped when node.gate.output.approved == true
+    - held otherwise
+Node shipped:
+  type: bash-command
+  command: printf shipped
+  needs: gate
+Node held:
+  type: bash-command
+  command: printf held
+  needs: gate
+"""
+
+
+@pytest.mark.anyio
+async def test_rejected_approval_routes_on_approved_false(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(_GATE_ROUTES.format(timeout=""), encoding="utf-8")
+    data_dir = tmp_path / "app-data"
+    store = ApprovalStore(data_dir)
+    holder: dict[str, object] = {}
+
+    async def run() -> None:
+        holder["result"] = await run_rattish_file(source, data_dir=data_dir)
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(run)
+        while not store.list_pending():
+            await anyio.sleep(0.01)
+        pending = store.list_pending()[0]
+        store.decide(pending.workflow_id, pending.run_id, "gate", "rejected", decided_by="owner")
+
+    result = holder["result"]
+    assert result.status == "passed"
+    outputs = result.document["latest_node_outputs"]
+    assert outputs["gate"]["decision"] == "rejected"
+    assert outputs["gate"]["approved"] is False
+    assert outputs["held"]["stdout"] == "held"
+    assert "shipped" not in outputs
+
+
+@pytest.mark.anyio
+async def test_timed_out_approval_routes_on_approved_false(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(
+        _GATE_ROUTES.format(timeout="  decision-timeout: 200ms\n  timeout-decision: reject\n"),
+        encoding="utf-8",
+    )
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert result.status == "passed"
+    outputs = result.document["latest_node_outputs"]
+    assert outputs["gate"]["decision"] == "rejected"
+    assert outputs["held"]["stdout"] == "held"
+
+
+@pytest.mark.anyio
+async def test_pending_approval_is_cancelled_when_its_run_fails(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(
+        """Rattish: 1
+Workflow:
+  name: Gate outlived
+Node gate:
+  type: approval-gate
+  message: Ship it?
+  decision-timeout: 1s
+  timeout-decision: reject
+Node boom:
+  type: bash-command
+  command: sleep 0.2; exit 3
+""",
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "app-data"
+
+    result = await run_rattish_file(source, data_dir=data_dir)
+
+    assert result.status == "failed"
+    store = ApprovalStore(data_dir)
+    assert store.list_pending() == []
+    [request] = store.list_requests()
+    assert request.status == "cancelled"
+    # The run's failure, not the gate's own stop, explains why the gate closed.
+    assert request.cancelled_reason == "The workflow run ended (failed)."
+    await anyio.sleep(1.1)
+    # The closed gate neither times out later nor accepts a late decision.
+    assert store.get(request.workflow_id, request.run_id, "gate").decision is None
+    with pytest.raises(ValueError, match="cancelled"):
+        store.decide(request.workflow_id, request.run_id, "gate", "rejected")
+
+
+@pytest.mark.anyio
+async def test_file_nodes_may_use_paths_an_upstream_node_creates(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(
+        """Rattish: 1
+Workflow:
+  name: Create then use
+Node make:
+  type: bash-command
+  command: mkdir -p made && printf hi > made/a.txt
+  to: inspect
+Node inspect:
+  type: folder
+  path: made
+  needs: make
+  to: write
+Node write:
+  type: write-file
+  path: made/new/b.txt
+  content: written
+  needs: inspect
+  to: copy
+Node copy:
+  type: copy-file
+  source-path: made/a.txt
+  destination-path: made/c.txt
+  needs: write
+  to: move
+Node move:
+  type: move-file
+  source-path: made/c.txt
+  destination-path: made/d.txt
+  needs: copy
+  to: remove
+Node remove:
+  type: delete-file
+  path: made/d.txt
+  needs: move
+""",
+        encoding="utf-8",
+    )
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert result.status == "passed", result.document["diagnostics"]
+    assert (tmp_path / "made" / "new" / "b.txt").read_text(encoding="utf-8") == "written"
+    assert not (tmp_path / "made" / "d.txt").exists()
+
+
+@pytest.mark.anyio
+async def test_scripts_templates_and_folders_may_be_created_upstream(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(
+        """Rattish: 1
+Workflow:
+  name: Generated inputs
+Node make-script:
+  type: write-file
+  start: true
+  path: gen/hello.sh
+  content: echo hello from a generated script
+  to: run-script
+Node run-script:
+  type: shell-script
+  script-path: gen/hello.sh
+  needs: make-script
+Node make-template:
+  type: write-file
+  start: true
+  path: gen/template.md
+  content: Hello from a generated template
+  to: render
+Node render:
+  type: prompt-file
+  template-path: gen/template.md
+  output-path: gen/rendered.md
+  needs: make-template
+Node make-dir:
+  type: write-file
+  start: true
+  path: gen/workdir/keep.txt
+  content: keep
+  to: in-dir
+Node in-dir:
+  type: bash-command
+  command: ls
+  working-dir: gen/workdir
+  needs: make-dir
+Node make-docs:
+  type: write-file
+  start: true
+  path: gen/docs/rockets.md
+  content: rockets fly
+  to: index
+Node index:
+  type: local-vectorize
+  source-path: gen/docs
+  index-path: gen/index.json
+  needs: make-docs
+""",
+        encoding="utf-8",
+    )
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert result.status == "passed", result.document["diagnostics"]
+    outputs = result.document["latest_node_outputs"]
+    assert "hello from a generated script" in outputs["run-script"]["stdout"]
+    assert "keep.txt" in outputs["in-dir"]["stdout"]
+    assert (tmp_path / "gen" / "index.json").is_file()
+
+
+@pytest.mark.anyio
+async def test_deferred_path_that_is_never_created_fails_its_node(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(
+        """Rattish: 1
+Workflow:
+  name: Never created
+Node noop:
+  type: bash-command
+  command: "true"
+  to: in-dir
+Node in-dir:
+  type: bash-command
+  command: ls
+  working-dir: missing/workdir
+  needs: noop
+""",
+        encoding="utf-8",
+    )
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert result.status == "failed"
+    assert "missing/workdir" in json.dumps(result.document)
+
+
+@pytest.mark.anyio
+async def test_default_local_search_metadata_is_saved_in_the_run_record(tmp_path: Path) -> None:
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "alpha.md").write_text("alpha search words", encoding="utf-8")
+    source = tmp_path / "workflow.rattish"
+    source.write_text(
+        """Rattish: 1
+Workflow:
+  name: Index then search
+Node index:
+  type: local-vectorize
+  source-path: notes
+  index-path: index/notes.json
+  to: search
+Node search:
+  type: local-search
+  index-path: index/notes.json
+  query: alpha
+  needs: index
+""",
+        encoding="utf-8",
+    )
+
+    result = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+
+    assert result.status == "passed", result.document["error"]
+    metadata = result.document["latest_node_outputs"]["search"]["results"][0]["metadata"]
+    assert metadata["size"] == len("alpha search words")
+    assert metadata["modified_at"].endswith("+00:00")
+    assert json.loads(result.path.read_text(encoding="utf-8")) == result.document
+
+
+@pytest.mark.anyio
+async def test_unsaveable_node_output_fails_the_run_with_a_reason(tmp_path: Path) -> None:
+    source = tmp_path / "workflow.rattish"
+    source.write_text(_bash_source(), encoding="utf-8")
+
+    async def handler(node, context, bindings):
+        return HandlerResult(True, {**_output(), "exit_code": 2**60})
+
+    result = await run_rattish_file(
+        source,
+        data_dir=tmp_path / "app-data",
+        handlers=NodeHandlerRegistry({"raticode.bash_command": handler}),
+    )
+
+    assert result.status == "failed"
+    assert result.document["error"]["code"] == "RATTISH_RUN_RECORD_INVALID"
+    assert "execute" in result.document["error"]["message"]
+    assert result.document["events"][-1] == {
+        **result.document["events"][-1],
+        "type": "workflow_completed",
+        "status": "failed",
+    }
+    assert json.loads(result.path.read_text(encoding="utf-8"))["status"] == "failed"
+
+
+@pytest.mark.anyio
 async def test_run_service_persists_runtime_failure_and_invalid_inputs(
     tmp_path: Path,
 ) -> None:
@@ -318,6 +638,7 @@ async def test_run_service_persists_runtime_failure_and_invalid_inputs(
     failed_output = failed_payload["nodeOutputs"]["execute"]
     assert {key: value for key, value in failed_output.items() if key != "output"} == {
         "success": False,
+        "outcome": "failure",
         "data": {"stdout": "", "stderr": "not a cat", "exit_code": 7},
         "exitCode": 7,
         "error": "not a cat",
@@ -547,3 +868,30 @@ Node slow:
     )
     assert payload["runNodes"]["slow"]["status"] == "stopped"
     assert any(event["type"] == "node_stopped" for event in payload["runEvents"])
+
+
+@pytest.mark.anyio
+async def test_stdout_failure_is_visible_in_receipt_events_and_older_log_projection(tmp_path):
+    source = tmp_path / "workflow.rattish"
+    failure = json.dumps(
+        {"ok": False, "reports": [{"failures": ["DNS resolution failed for www.youtube.com"]}]}
+    )
+    source.write_text(_bash_source("printf '%s' '" + failure + "'; exit 1"))
+    failed = await run_rattish_file(source, data_dir=tmp_path / "app-data")
+    assert "DNS resolution failed" in failed.document["error"]["message"]
+    completed = next(
+        event for event in failed.document["events"] if event["type"] == "node_completed"
+    )
+    assert "DNS resolution failed" in completed["message"]
+    # Old receipts only kept a generic exit message; the reader can recover stdout.
+    document = json.loads(failed.path.read_text())
+    document["runs"][0]["error"]["message"] = "Command exited with status 1."
+    document["events"][2]["message"] = "Command exited with status 1."
+    failed.path.write_text(json.dumps(document))
+    payload = workflow_run_log_payload(
+        document["workflow"]["id"], document["run_id"], tmp_path / "app-data"
+    )
+    assert "DNS resolution failed" in payload["runNodes"]["execute"]["message"]
+    assert any(
+        "DNS resolution failed" in event.get("message", "") for event in payload["runEvents"]
+    )

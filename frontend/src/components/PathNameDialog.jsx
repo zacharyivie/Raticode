@@ -29,7 +29,7 @@ export function PathNameDialog({ directory, initialName = "", kind, mode, onClos
     <Dialog
       description={directory}
       onClose={onClose}
-      overlayClassName="fixed inset-0 z-[95] grid place-items-center bg-slate-950/25 px-4"
+      overlayClassName="fixed inset-0 z-[95] grid place-items-center ui-scrim px-4"
       panelClassName="w-full max-w-sm rounded-lg border border-line bg-white p-4 shadow-panel"
       title={title}
     >
@@ -42,7 +42,7 @@ export function PathNameDialog({ directory, initialName = "", kind, mode, onClos
         </div>
         <input
           autoFocus
-          className="h-10 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none transition focus:border-teal-500"
+          className="h-10 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none transition focus:border-brand"
           placeholder={kind === "file" ? "new-file.txt" : "new-folder"}
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -57,7 +57,7 @@ export function PathNameDialog({ directory, initialName = "", kind, mode, onClos
             Cancel
           </button>
           <button
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={submitting || !name.trim()}
             type="submit"
           >

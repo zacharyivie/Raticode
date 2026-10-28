@@ -981,7 +981,8 @@ class OrganizationManager:
             actor,
             read_only=management_read_only
             if global_scope and management_read_only is not None
-            else options.get("permission_mode") in {"read-only", "plan"},
+            else options.get("permission_mode") in {"read-only", "plan"}
+            or (workflow.get("remManagedTask") or {}).get("readOnly") is True,
             workspace_paths={
                 *([str(Path(project).resolve())] if project else []),
                 *(

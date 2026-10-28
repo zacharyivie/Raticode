@@ -37,7 +37,14 @@ class _SlideSections(HTMLParser):
 
 
 def report_format_rules(report_format: str) -> str:
-    common = "Use the user's explicitly requested format when it differs from this default. "
+    common = (
+        "Apply this default to every informational file you create: research, notes, "
+        "summaries, audits, plans, handoffs, guides, and task findings, wherever it is saved. "
+        "Do not choose Markdown merely because the file is called a note or handoff. "
+        "Use the user's explicitly requested format when it differs from this default. "
+        "Source code, existing repository documentation, and machine-readable data keep "
+        "their required formats. "
+    )
     if report_format == "slides":
         return (
             "Default report output: Slides. Generate a single-file HTML slideshow in landscape "
@@ -246,7 +253,13 @@ def with_report_outputs(
     workflow: dict[str, Any] | None, cli_path: Path | None, root: Path
 ) -> dict[str, Any] | None:
     config = (workflow or {}).get("remReportTheme") or {}
-    if not config.get("format") or ((workflow or {}).get("remThreads") or {}).get("global"):
+    # Managed read-only workers use the supervisor's narrow artifact grant;
+    # reviewers receive guidance without gaining an output write capability.
+    if (
+        not config.get("format")
+        or ((workflow or {}).get("remThreads") or {}).get("global")
+        or ((workflow or {}).get("remManagedTask") or {}).get("readOnly") is True
+    ):
         return workflow
     if cli_path is None:
         raise ValueError("The Raticode CLI is unavailable for report output tools.")
@@ -266,15 +279,25 @@ def with_report_outputs(
 
 
 class ReportTools:
-    def __init__(self, root: Path, report_format: str) -> None:
+    def __init__(
+        self, root: Path, report_format: str, *, theme: dict[str, Any] | None = None
+    ) -> None:
         self.root = root.resolve(strict=True)
         if not self.root.is_dir() or report_format not in REPORT_FORMATS:
             raise ValueError("Reports need an output folder and a supported format.")
         self.report_format = report_format
+        self.theme = theme
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
         if name == "rules":
-            return report_format_rules(self.report_format) + (
+            from gofer.ui.report_themes import report_theme_rules
+
+            guidance = (
+                report_theme_rules({**self.theme, "format": self.report_format})
+                if self.theme is not None
+                else report_format_rules(self.report_format)
+            )
+            return guidance + (
                 f" Save reports relative to {self.root} using save_report. "
                 "Existing files are kept. Include the returned local link in your response."
             )

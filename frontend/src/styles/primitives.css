@@ -1,0 +1,250 @@
+/*
+Shared UI primitives. Every rule reads the semantic tokens defined in index.css,
+so one class works in light mode, dark mode, and the tinted sidebar and chat regions.
+
+  Buttons   .ui-button [--primary | --ghost | --danger | --danger-ghost] [--sm | --lg]
+            .ui-icon-button [--sm]
+  Fields    .ui-input (input, textarea), .ui-select, .ui-label, .ui-hint, .ui-field-error
+  Status    .ui-badge[data-tone], .ui-notice[data-tone]
+            tones: neutral, brand, success, warning, danger, info
+  Surfaces  .ui-popover, .ui-menu-item, .ui-dialog, .ui-scrim
+  Layout    .ui-panel-header (sidebar panel title row)
+  Text      .ui-section-title, .ui-kbd
+
+These rules sit in the components layer, so Tailwind utilities on the same element
+(width, margin, a custom height) still win.
+*/
+@layer components {
+  .ui-button,
+  .btn-primary,
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid rgb(var(--color-line));
+    border-radius: 6px;
+    background: rgb(var(--color-field));
+    color: rgb(var(--color-ink));
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.25;
+    white-space: nowrap;
+    transition: background-color 120ms, border-color 120ms, color 120ms, opacity 120ms;
+  }
+  .ui-button:hover:not(:disabled),
+  .btn-ghost:hover:not(:disabled) {
+    background: rgb(var(--color-ink) / .06);
+  }
+  .ui-button:disabled,
+  .btn-primary:disabled,
+  .btn-ghost:disabled,
+  .ui-icon-button:disabled {
+    cursor: not-allowed;
+    opacity: .5;
+  }
+  .ui-button > svg,
+  .btn-primary > svg,
+  .ui-icon-button > svg { flex-shrink: 0; }
+
+  .ui-button--primary,
+  .btn-primary {
+    border-color: rgb(var(--color-brand-solid));
+    background: rgb(var(--color-brand-solid));
+    color: rgb(var(--color-on-brand));
+  }
+  .ui-button--primary:hover:not(:disabled),
+  .btn-primary:hover:not(:disabled) {
+    border-color: rgb(var(--color-brand-hover));
+    background: rgb(var(--color-brand-hover));
+  }
+
+  .ui-button--ghost,
+  .btn-ghost {
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .ui-button--danger {
+    border-color: rgb(var(--color-danger-solid));
+    background: rgb(var(--color-danger-solid));
+    color: #fff;
+  }
+  .ui-button--danger:hover:not(:disabled) { background: rgb(var(--color-danger-solid) / .88); }
+
+  .ui-button--danger-ghost {
+    border-color: transparent;
+    background: transparent;
+    color: rgb(var(--color-danger));
+  }
+  .ui-button--danger-ghost:hover:not(:disabled) { background: rgb(var(--color-danger-soft)); }
+
+  .ui-button--sm { min-height: 28px; padding: 0 8px; font-size: 12px; }
+  .ui-button--lg { min-height: 36px; padding: 0 14px; }
+
+  .ui-icon-button {
+    display: inline-grid;
+    flex-shrink: 0;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: rgb(var(--color-muted));
+    transition: background-color 120ms, color 120ms;
+  }
+  .ui-icon-button:hover:not(:disabled),
+  .ui-icon-button[aria-expanded="true"],
+  .ui-icon-button[aria-pressed="true"] {
+    background: rgb(var(--color-ink) / .07);
+    color: rgb(var(--color-ink));
+  }
+  .ui-icon-button--sm { width: 28px; height: 28px; }
+
+  .ui-input,
+  .ui-select {
+    width: 100%;
+    min-width: 0;
+    min-height: 32px;
+    padding: 6px 10px;
+    border: 1px solid rgb(var(--color-line));
+    border-radius: 6px;
+    background-color: rgb(var(--color-field));
+    color: rgb(var(--color-ink));
+    font-size: 13px;
+    line-height: 1.4;
+    outline: none;
+    transition: border-color 120ms, box-shadow 120ms;
+  }
+  .ui-input::placeholder { color: rgb(var(--color-muted)); opacity: .8; }
+  .ui-input:hover:not(:disabled, :focus),
+  .ui-select:hover:not(:disabled, :focus) { border-color: rgb(var(--color-muted) / .6); }
+  .ui-input:focus,
+  .ui-select:focus {
+    border-color: rgb(var(--color-brand));
+    box-shadow: 0 0 0 2px rgb(var(--color-brand) / .15);
+  }
+  .ui-input:focus-visible,
+  .ui-select:focus-visible { outline: none !important; }
+  .ui-input[aria-invalid="true"],
+  .ui-select[aria-invalid="true"] { border-color: rgb(var(--color-danger)); }
+  .ui-input:disabled,
+  .ui-select:disabled { cursor: not-allowed; opacity: .6; }
+  .ui-input:read-only:not(select) { background-color: rgb(var(--color-ink) / .03); }
+
+  select.ui-input,
+  .ui-select {
+    appearance: none;
+    padding-right: 30px;
+    background-image: var(--ui-select-arrow);
+    background-position: right 8px center;
+    background-repeat: no-repeat;
+    background-size: 16px;
+  }
+
+  .ui-label { display: block; color: rgb(var(--color-ink)); font-size: 12px; font-weight: 500; }
+  .ui-hint { color: rgb(var(--color-muted)); font-size: 11px; line-height: 1.45; }
+  .ui-field-error { color: rgb(var(--color-danger)); font-size: 11px; line-height: 1.45; }
+
+  .ui-badge {
+    --ui-tone: var(--color-muted);
+    --ui-tone-soft: var(--color-ink) / .06;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    border: 1px solid rgb(var(--ui-tone) / .28);
+    border-radius: 999px;
+    background: rgb(var(--ui-tone-soft));
+    color: rgb(var(--ui-tone));
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+
+  .ui-notice {
+    --ui-tone: var(--color-muted);
+    --ui-tone-soft: var(--color-ink) / .04;
+    border: 1px solid rgb(var(--ui-tone) / .35);
+    border-radius: 6px;
+    background: rgb(var(--ui-tone-soft));
+    color: rgb(var(--color-ink));
+  }
+  .ui-notice--banner { border-width: 0 0 1px; border-radius: 0; }
+  .ui-notice-title { color: rgb(var(--color-ink)); font-weight: 600; }
+  .ui-notice-icon { color: rgb(var(--ui-tone)); }
+
+  :is(.ui-badge, .ui-notice)[data-tone="brand"] { --ui-tone: var(--color-brand); --ui-tone-soft: var(--color-brand) / .12; }
+  :is(.ui-badge, .ui-notice)[data-tone="success"] { --ui-tone: var(--color-success); --ui-tone-soft: var(--color-success-soft); }
+  :is(.ui-badge, .ui-notice)[data-tone="warning"] { --ui-tone: var(--color-warning); --ui-tone-soft: var(--color-warning-soft); }
+  :is(.ui-badge, .ui-notice)[data-tone="danger"] { --ui-tone: var(--color-danger); --ui-tone-soft: var(--color-danger-soft); }
+  :is(.ui-badge, .ui-notice)[data-tone="info"] { --ui-tone: var(--color-info); --ui-tone-soft: var(--color-info-soft); }
+
+  .ui-popover {
+    border: 1px solid rgb(var(--color-line));
+    border-radius: 14px;
+    background: rgb(var(--color-raised));
+    color: rgb(var(--color-ink));
+    box-shadow: var(--shadow-popover);
+  }
+  .ui-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 6px;
+    color: rgb(var(--color-ink));
+    font-size: 13px;
+    text-align: left;
+  }
+  .ui-menu-item:hover:not(:disabled),
+  .ui-menu-item:focus-visible { background: rgb(var(--color-menu-active)); outline: none !important; }
+  .ui-menu-item:disabled { cursor: not-allowed; opacity: .5; }
+  .ui-menu-item[data-danger] { color: rgb(var(--color-danger)); }
+
+  .ui-scrim { background: var(--color-scrim); }
+  .ui-dialog {
+    border: 1px solid rgb(var(--color-line));
+    border-radius: 14px;
+    background: rgb(var(--color-surface));
+    color: rgb(var(--color-ink));
+    box-shadow: var(--shadow-dialog);
+  }
+
+  .ui-panel-header {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    min-height: 32px;
+    padding: 0 6px 0 12px;
+  }
+  .ui-section-title {
+    color: rgb(var(--color-muted));
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    line-height: 1.25;
+    text-transform: uppercase;
+  }
+  .ui-section-title:has(.ui-badge) { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .ui-section-title .ui-badge { padding: 0 5px; font-size: 9px; letter-spacing: .04em; line-height: 14px; }
+  .ui-kbd {
+    display: inline-block;
+    min-width: 18px;
+    padding: 0 4px;
+    border: 1px solid rgb(var(--color-line));
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: rgb(var(--color-field));
+    color: rgb(var(--color-muted));
+    font: 10px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-align: center;
+  }
+}

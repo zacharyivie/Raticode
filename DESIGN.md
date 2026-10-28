@@ -62,7 +62,7 @@ components:
 
 **Creative North Star: "The Local Workflow Cockpit"**
 
-Workflow graphs, source files, and browser pages share persistent editor tabs. An activity rail chooses what to browse; the project selector changes the browsing folder without retargeting open documents. Navigation and assistance frame the editor with compact, predictable tools. Light mode uses a deep indigo navigation rail, a warm stone workspace and editor, and a muted sage assistant pane. Indigo marks selection, focus, and the primary action. Dark mode retains its existing zinc palette.
+Workflow graphs, source files, and browser pages share persistent editor tabs. An activity rail chooses what to browse; the project selector changes the browsing folder without retargeting open documents. Navigation and assistance frame the editor with compact, predictable tools. Light mode uses a deep indigo navigation rail, a warm stone workspace and editor, and a muted sage assistant pane. Indigo marks selection, focus, and the primary action. Dark mode uses a zinc palette (#18181a surfaces, #1e1e21 raised panels) with the same semantic hues.
 
 The interface is dense enough for builders but uses plain labels and familiar controls so workflow authors do not need to know the TOML model first.
 
@@ -87,7 +87,7 @@ The hierarchy stays compact: 14px titles, 13px body copy, 11px supporting labels
 
 ## Layout
 
-The desktop layout uses a 41px activity rail within a resizable 272px project pane, a flexible tabbed editor, and a 380px assistant pane. Workflows, Files, Search, and Source control share the rail. The recent-project selector sits below the sidebar identity header and stays in place across activities. New Workflow belongs inside the Workflows panel, to the right of the activity rail. When the sidebar is collapsed, File > Open Recent retains project access. Each graph view owns its toolbar, camera, selection, and inspector. Graph headers wrap controls when space is limited. Below 1000 CSS pixels, both side panes collapse; users can open one at a time, and desktop preferences return when the window widens.
+The desktop layout uses a 41px activity rail within a resizable 272px project pane, a flexible tabbed editor, and a 380px assistant pane. Rem, Workflows, Files, Search, Source control, Swarms, Organizations, and Second Brain share the rail. Rem leads it with a rat-face icon. The recent-project selector sits below the sidebar identity header and stays in place across activities. New Workflow belongs inside the Workflows panel, to the right of the activity rail. When the sidebar is collapsed, File > Open Recent retains project access. Each graph view owns its toolbar, camera, selection, and inspector. Graph headers wrap controls when space is limited. Below 1000 CSS pixels, both side panes collapse; users can open one at a time, and desktop preferences return when the window widens.
 
 Floating canvas controls must keep 16px from the viewport edge and move clear of the inspector. The application targets desktop windows and keeps keyboard access for every graph action.
 
@@ -102,6 +102,24 @@ Base panes are flat and separated by one-pixel lines. Shadows belong to floating
 Standard controls use 6px corners. Nodes and compact surfaces use 10px corners. Popovers and the composer use 14px corners. Pills are limited to badges, status chips, and the combined model trigger.
 
 ## Components
+
+### Primitives and tokens
+
+Shared controls live in `frontend/src/styles/primitives.css` and read semantic tokens
+from `index.css` (`--color-surface`, `-surface-muted`, `-raised`, `-field`, `-brand-solid`,
+`-success`, `-warning`, `-danger`, `-info`, each status with a `-soft` tint, plus
+`--color-scrim`). Every token is defined for light, dark, and the light-mode indigo
+sidebar region, and the same names are Tailwind colors (`bg-surface`, `text-danger`,
+`bg-warning-soft`). Use the primitives before writing new control styles:
+`ui-button` (`--primary`, `--ghost`, `--danger`, `--danger-ghost`, `--sm`, `--lg`),
+`ui-icon-button`, `ui-input`, `ui-badge` and `ui-notice` with `data-tone`, `ui-popover`,
+`ui-menu-item`, `ui-dialog`, `ui-scrim`, `ui-panel-header`, and `ui-section-title`.
+Every single-line select shares one chevron.
+
+Dark mode follows light-mode utilities automatically: the 50 and 100 tints of each hue
+become dark tints, 200–300 borders and 600–950 text shades lighten, and neutral slate
+utilities map to the zinc surfaces. These fallbacks yield to an authored `dark:` variant
+on the same element. New pale tint text must not use the 50 or 100 shades.
 
 ### Buttons
 
@@ -161,3 +179,44 @@ Swarm surfaces retain the studio's indigo actions and semantic state colors. Dar
 uses #18181a for the workspace, #1e1e21 for the board, and #151517 for inset status areas.
 Light mode uses the existing warm workspace, paper, and stone colors. Task titles can
 reach 32px; roster names remain 14px. Progress fill transitions honor reduced motion.
+
+### Second Brain workspace
+
+Second Brain follows Organizations in the activity rail. Its sidebar leads with a brain
+switcher (opened brains, folder, availability, open/create/import) and then lists saved
+searches, collections, reports, and recent documents for the selected brain. The workspace
+keeps the existing Rem pane instead of adding a second assistant; Ask Rem actions attach
+the selected evidence to a Rem thread for review before sending.
+
+Search is the default section: one query bar with a text syntax, visible filter buttons
+(Scope, Type, Tags, Date, Search in, More filters), removable chips, a plain-language
+explanation of the query, and the equivalent text form. Results sit in a 300–400px column
+beside a tabbed reader; single click previews, Enter or double-click keeps a tab. Below
+860px of workspace width, results and reader become tabs. Invalid query clauses are shown
+and never silently dropped.
+
+Citations are numbered indigo chips. Their state is always written out: Passage found,
+Source changed, Location needs review, Source unavailable, Support not reviewed. Amber marks
+changed sources and affected claims; red marks unsupported claims. Coverage counts evidence
+links and is labeled as not measuring truth. Light mode uses the warm editor paper; dark mode
+uses #18181a, #1e1e21, and #232327 surfaces.
+
+The workspace uses the persistent Second Brain API. Import/export, extraction, citations,
+reports, comparisons and research jobs show real task receipts and errors. Explicit fixtures
+are limited to tests. See [Second Brain workspace](docs/second-brain-workspace.md) for
+storage, provider privacy, runtime requirements and verification commands.
+
+### Rem home
+
+Rem's home is a lazy river: one continuous conversation in a 680px column on warm editor
+paper, with Rem's task list in the sidebar. Rem's identity is the rat face on a sage disc, and the animated
+Rem sprite greets on the welcome screen (it no longer appears above the thread list);
+user messages are soft indigo bubbles; Rem's replies are plain text without a bubble.
+Work Rem starts appears as a live card under its message, always with an Open thread link.
+The sidebar groups tasks by what they need (Working on, Needs you, Coming up, Paused, Done);
+only running phases spin, and every state is written out.
+
+The task sheet keeps visible controls to the four task sections plus Done when. Run controls
+sit beside the run's threads in the status card, and Delete is a quiet icon that confirms inline.
+Do not add provider, budget, or permission knobs to this surface; they belong to the backend
+task recipe and its details. See [Rem home](docs/rem-home.md).

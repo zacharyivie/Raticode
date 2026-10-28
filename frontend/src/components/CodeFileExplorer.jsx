@@ -6,12 +6,9 @@ import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath } 
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { commitDiffPath } from "../lib/commitDiff.js";
 import RemActionIcon from "./RemActionIcon.jsx";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { beginFileDrag, containsFileTransfer, droppedFileEntries, getFileClipboard, setFileClipboard, subscribeFileClipboard, transferName, clipboardEntries, topLevelTransferEntries } from "../lib/fileTransfers.js";
 import {
-  Search,
-  Building2,
-  Waypoints,
   ArrowDown,
   ArrowUp,
   Check,
@@ -30,6 +27,8 @@ import {
   GitMerge,
   GitCommitHorizontal,
   Loader2,
+  Lock,
+  LockOpen,
   PencilLine,
   Plus,
   Minus,
@@ -42,8 +41,11 @@ import GitIntegrationControls from "./GitIntegrationControls.jsx";
 import WorktreeContextMenu, { historyOperations, integrationOperations } from "./WorktreeContextMenu.jsx";
 import OrganizationSidebar from "./OrganizationSidebar.jsx";
 import SwarmSidebar from "./SwarmSidebar.jsx";
-import RatSwarmIcon from "./RatSwarmIcon.jsx";
+import { PLUGIN_ICONS } from "./pluginIcons.js";
+import { dropPlacement, enabledPlugins, movePlugin, PLUGIN_DRAG_TYPE, pluginEnabled, resolvePluginActivity, stepPlugin } from "../lib/plugins.js";
 import ProjectSearch from "./ProjectSearch.jsx";
+const SecondBrainSidebar = lazy(() => import("./SecondBrainSidebar.jsx"));
+const RemHomeSidebar = lazy(() => import("./RemHomeSidebar.jsx"));
 import { Dialog } from "./Dialog.jsx";
 import { hasUnsavedCodeChanges } from "../lib/codeEditorSessions.js";
 import { PathNameDialog } from "./PathNameDialog.jsx";
@@ -62,10 +64,15 @@ export default function CodeFileExplorer({
   recentProjects = [],
   settings = DEFAULT_APP_SETTINGS,
   workflow,
+  onSettingsChange,
   onOpenSwarm,
   selectedSwarmId,
   onOpenOrganization,
   selectedOrganizationId,
+  onOpenSecondBrain,
+  secondBrainOpen = false,
+  onOpenRemHome,
+  remHomeOpen = false,
   onFilesystemChange,
   onCloseActiveFile,
   onOpenFile,
@@ -205,12 +212,23 @@ export default function CodeFileExplorer({
   useEffect(() => { setCommitMessage(""); setBlockedBranch(""); setGitError(""); setGitNotice(""); setRemote(""); }, [rootPath]);
   const [sourceTab, setSourceTab] = useState("changes");
   const stagedCount = sourceControl.entries.filter((entry) => entry.staged && entry.status !== "!").length;
+  const pluginSettings = settings?.plugins ?? DEFAULT_APP_SETTINGS.plugins;
+  const railPlugins = enabledPlugins(pluginSettings).filter((plugin) => plugin.id !== "workflows" || workflowsContent !== undefined);
+  const railIds = railPlugins.map((plugin) => plugin.id);
+  const pluginsLocked = pluginSettings.locked || !onSettingsChange;
+  const railRef = useRef(null);
+  const [pluginDrag, setPluginDrag] = useState(null);
+  function reorderPlugins(order) {
+    if (order.some((id, index) => id !== pluginSettings.order?.[index])) onSettingsChange?.("plugins.order", order);
+  }
   const [localSidebarView, setLocalSidebarView] = useState("files");
-  const sidebarView = controlledSidebarView || localSidebarView;
+  const sidebarView = resolvePluginActivity(pluginSettings, controlledSidebarView || localSidebarView);
   const setSidebarView = useCallback((value) => { setLocalSidebarView(value); onSidebarViewChange?.(value); }, [onSidebarViewChange]);
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
+  const searchEnabled = pluginEnabled(pluginSettings, "search");
   useEffect(() => {
     function openSearch(event) {
+      if (!searchEnabled) return;
       if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.key.toLowerCase() !== "f") return;
       event.preventDefault();
       setSidebarView("search");
@@ -218,7 +236,7 @@ export default function CodeFileExplorer({
     }
     window.addEventListener("keydown", openSearch);
     return () => window.removeEventListener("keydown", openSearch);
-  }, [setSidebarView]);
+  }, [searchEnabled, setSidebarView]);
   const [gitHistory, setGitHistory] = useState({ active: false, commits: [], loading: false });
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyRefs, setHistoryRefs] = useState(null);
@@ -1119,41 +1137,80 @@ export default function CodeFileExplorer({
       aria-label="Project sidebar"
       onKeyDownCapture={handleExplorerKeyDown}
     >
-      <div role="tablist" aria-label="Project sidebar views" aria-orientation="vertical" className="flex w-10 shrink-0 flex-col border-r border-line">
-        {[
-          ...(workflowsContent !== undefined ? [{ id: "workflows", label: "Workflows", icon: Waypoints }] : []),
-          { id: "files", label: "File explorer", icon: Folder },
-          { id: "search", label: "Search", icon: Search },
-          { id: "source-control", label: "Source control", icon: GitBranch },
-          { id: "swarms", label: "Swarms", icon: RatSwarmIcon },
-          { id: "organizations", label: "Organizations", icon: Building2 },
-        ].map(({ id, label, icon: Icon }) => (
+      <div className="flex w-10 shrink-0 flex-col border-r border-line">
+        <div ref={railRef} role="tablist" aria-label="Project sidebar views" aria-orientation="vertical" className="flex flex-col">
+          {railPlugins.map(({ id, label }) => {
+            const Icon = PLUGIN_ICONS[id];
+            const dropTarget = pluginDrag && pluginDrag.id !== id && pluginDrag.targetId === id ? pluginDrag.placement : "";
+            return (
+              <button
+                key={id}
+                id={`sidebar-tab-${id}`}
+                role="tab"
+                type="button"
+                aria-label={label}
+                title={pluginsLocked ? label : `${label} · Drag to reorder`}
+                aria-selected={sidebarView === id}
+                aria-controls={`sidebar-panel-${id}`}
+                tabIndex={sidebarView === id ? 0 : -1}
+                draggable={!pluginsLocked}
+                className={`relative grid h-10 w-full shrink-0 place-items-center border-l-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${sidebarView === id ? "border-brand text-ink" : "border-transparent text-muted hover:bg-slate-100 hover:text-ink"} ${pluginDrag?.id === id ? "opacity-40" : ""}`}
+                onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); setContextMenu(null); setRecentMenuOpen(false); }}
+                onDragStart={(event) => {
+                  if (pluginsLocked) { event.preventDefault(); return; }
+                  event.dataTransfer?.setData(PLUGIN_DRAG_TYPE, id);
+                  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+                  setPluginDrag({ id, targetId: "", placement: "before" });
+                }}
+                onDragOver={(event) => {
+                  if (!pluginDrag) return;
+                  event.preventDefault();
+                  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+                  const placement = dropPlacement(event);
+                  setPluginDrag((current) => current && (current.targetId !== id || current.placement !== placement) ? { ...current, targetId: id, placement } : current);
+                }}
+                onDrop={(event) => {
+                  if (!pluginDrag) return;
+                  event.preventDefault();
+                  reorderPlugins(movePlugin(pluginSettings.order, pluginDrag.id, id, dropPlacement(event)));
+                  setPluginDrag(null);
+                }}
+                onDragEnd={() => setPluginDrag(null)}
+                onKeyDown={(event) => {
+                  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+                  event.preventDefault();
+                  // Alt+Arrow moves the focused plugin when the order is unlocked.
+                  if (event.altKey) {
+                    if (pluginsLocked || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+                    reorderPlugins(stepPlugin(pluginSettings.order, id, event.key === "ArrowUp" ? -1 : 1, railIds));
+                    window.setTimeout(() => railRef.current?.querySelector?.(`#sidebar-tab-${id}`)?.focus(), 0);
+                    return;
+                  }
+                  const next = event.key === "Home" ? railIds[0] : event.key === "End" ? railIds.at(-1) : railIds[(railIds.indexOf(id) + (event.key === "ArrowDown" ? 1 : railIds.length - 1)) % railIds.length];
+                  setSidebarView(next);
+                  setContextMenu(null);
+                  setRecentMenuOpen(false);
+                  event.currentTarget.parentElement.querySelector(`#sidebar-tab-${next}`)?.focus();
+                }}
+              >
+                {dropTarget ? <span aria-hidden="true" className={`pointer-events-none absolute inset-x-1.5 h-0.5 rounded-full bg-brand ${dropTarget === "after" ? "bottom-0" : "top-0"}`} /> : null}
+                <Icon aria-hidden="true" size={19} strokeWidth={1.5} />
+              </button>
+            );
+          })}
+        </div>
+        {onSettingsChange ? (
           <button
-            key={id}
-            id={`sidebar-tab-${id}`}
-            role="tab"
             type="button"
-            aria-label={label}
-            title={label}
-            aria-selected={sidebarView === id}
-            aria-controls={`sidebar-panel-${id}`}
-            tabIndex={sidebarView === id ? 0 : -1}
-            className={`grid h-10 w-full shrink-0 place-items-center border-l-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${sidebarView === id ? "border-brand text-ink" : "border-transparent text-muted hover:bg-slate-100 hover:text-ink"}`}
-            onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); setContextMenu(null); setRecentMenuOpen(false); }}
-            onKeyDown={(event) => {
-              if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-              event.preventDefault();
-              const views = [...(workflowsContent !== undefined ? ["workflows"] : []), "files", "search", "source-control", "swarms", "organizations"];
-              const next = event.key === "Home" ? views[0] : event.key === "End" ? views.at(-1) : views[(views.indexOf(id) + (event.key === "ArrowDown" ? 1 : views.length - 1)) % views.length];
-              setSidebarView(next);
-              setContextMenu(null);
-              setRecentMenuOpen(false);
-              event.currentTarget.parentElement.querySelector(`#sidebar-tab-${next}`)?.focus();
-            }}
-          ><Icon aria-hidden="true" size={19} strokeWidth={1.5} /></button>
-        ))}
+            aria-label="Lock plugin order"
+            aria-pressed={pluginSettings.locked}
+            title={pluginSettings.locked ? "Plugin order is locked. Click to allow dragging." : "Lock plugin order"}
+            className={`mt-auto grid h-8 w-full shrink-0 place-items-center text-muted transition hover:text-ink hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${pluginSettings.locked ? "opacity-60" : "opacity-35"}`}
+            onClick={() => onSettingsChange("plugins.locked", !pluginSettings.locked)}
+          >{pluginSettings.locked ? <Lock aria-hidden="true" size={12} strokeWidth={1.75} /> : <LockOpen aria-hidden="true" size={12} strokeWidth={1.75} />}</button>
+        ) : null}
       </div>
-      {workflowsContent !== undefined ? (
+      {workflowsContent !== undefined && railIds.includes("workflows") ? (
         <div
           id="sidebar-panel-workflows"
           role="tabpanel"
@@ -1165,9 +1222,11 @@ export default function CodeFileExplorer({
           <div className="min-h-0 flex-1 overflow-y-auto px-2">{workflowsContent}</div>
         </div>
       ) : null}
-      <OrganizationSidebar active={sidebarView === "organizations"} selectedId={selectedOrganizationId} onSelect={onOpenOrganization} />
-      <SwarmSidebar key={`swarms:${rootPath}`} rootPath={rootPath} active={sidebarView === "swarms"} selectedId={selectedSwarmId} onSelect={onOpenSwarm} />
-      <ProjectSearch key={rootPath} rootPath={rootPath} active={sidebarView === "search"} focusRequest={searchFocusRequest} onOpenFile={onOpenFile} disabled={gitBusy} onBusy={setGitBusy} onReplace={() => { void refreshTree(); onFilesystemChange?.({ type: "git", rootPath }); }} />
+      {sidebarView === "rem" ? <Suspense fallback={<section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" className="flex-1 p-3 text-xs text-muted">Loading Rem…</section>}><RemHomeSidebar active open={remHomeOpen} onOpen={() => onOpenRemHome?.()} /></Suspense> : null}
+      {railIds.includes("organizations") ? <OrganizationSidebar active={sidebarView === "organizations"} selectedId={selectedOrganizationId} onSelect={onOpenOrganization} /> : null}
+      {sidebarView === "second-brain" ? <Suspense fallback={<section id="sidebar-panel-second-brain" role="tabpanel" aria-labelledby="sidebar-tab-second-brain" className="flex-1 p-3 text-xs text-muted">Loading Second Brain…</section>}><SecondBrainSidebar active open={secondBrainOpen} onOpen={() => onOpenSecondBrain?.()} /></Suspense> : null}
+      {railIds.includes("swarms") ? <SwarmSidebar key={`swarms:${rootPath}`} rootPath={rootPath} active={sidebarView === "swarms"} selectedId={selectedSwarmId} onSelect={onOpenSwarm} /> : null}
+      {railIds.includes("search") ? <ProjectSearch key={rootPath} rootPath={rootPath} active={sidebarView === "search"} focusRequest={searchFocusRequest} onOpenFile={onOpenFile} disabled={gitBusy} onBusy={setGitBusy} onReplace={() => { void refreshTree(); onFilesystemChange?.({ type: "git", rootPath }); }} /> : null}
       <div id="sidebar-panel-files" role="tabpanel" aria-labelledby="sidebar-tab-files" hidden={sidebarView !== "files"} className={`min-h-0 min-w-0 flex-1 flex-col ${sidebarView === "files" ? "flex" : "hidden"}`}>
       <div className="flex h-7 items-center justify-between px-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Explorer</span>
@@ -1389,8 +1448,8 @@ export default function CodeFileExplorer({
 
       </div>
       <section id="sidebar-panel-source-control" role="tabpanel" aria-labelledby="sidebar-tab-source-control" hidden={sidebarView !== "source-control"} className={`scm-panel min-h-0 min-w-0 flex-1 flex-col bg-white text-ink ${sidebarView === "source-control" ? "flex" : "hidden"}`}>
-        <div className="flex h-8 shrink-0 items-center justify-between px-3">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Source control</span>
+        <div className="ui-panel-header">
+          <span className="ui-section-title">Source control</span>
           <div className="flex shrink-0 items-center gap-1">
             {sourceControl.active && (sourceControl.ahead != null || sourceControl.remotes?.length) ? <>
               <button aria-label="Pull" title="Pull" className="grid h-7 w-7 place-items-center rounded text-muted hover:bg-slate-100 focus-visible:outline disabled:opacity-40" disabled={gitBusy || sourceControl.ahead == null} type="button" onClick={() => void changeSourceControl("pull")}><ArrowDown aria-hidden="true" size={13} /></button>

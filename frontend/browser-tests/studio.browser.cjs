@@ -180,6 +180,16 @@ async function exerciseRemSteering() {
         window.__steeringReceipts.push(receipt);
         return json({ receipt });
       }
+      if (endpoint.endsWith("/rem-resources")) {
+        window.__remLibrary ??= { skillsDir: "/data/skills", skills: [], mcpServers: [] };
+        if (options.method === "POST") {
+          const body = JSON.parse(options.body);
+          const library = window.__remLibrary;
+          if (body.action === "add_skill") library.skills.push({ path: body.path, name: body.path.split("/").pop(), description: "", origin: "added", available: true, registered: true });
+          if (body.action === "save_mcp") library.mcpServers.push({ args: [], command: "", url: "", ...body.server, addedBy: "app" });
+        }
+        return json(window.__remLibrary);
+      }
       if (endpoint.endsWith("/chat/stop")) {
         window.__steeringStop = JSON.parse(options.body);
         window.__steeringStream.enqueue(new TextEncoder().encode(JSON.stringify({ type: "stopped", turnId: window.__steeringTurn.turnId }) + "\n"));
@@ -191,13 +201,14 @@ async function exerciseRemSteering() {
     document.querySelector("button[title='New thread']")?.click();
   });
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-chat-composer] textarea"))));
-  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent.trim().endsWith("tools, skills & MCP")).click());
-  await waitFor(() => evaluate(() => [...document.querySelectorAll("label")].some(label => label.textContent === "Search the web")));
+  await evaluate(() => document.querySelector('button[aria-label$="tools, skills & MCP"]').click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector('[role="switch"][aria-label="Search the web"]'))));
   await evaluate(() => {
-    const web = [...document.querySelectorAll("label")].find(label => label.textContent === "Search the web").querySelector("input");
+    const web = document.querySelector('[role="switch"][aria-label="Search the web"]');
     if (web.checked) web.click();
   });
-  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent.trim().endsWith("tools, skills & MCP")).click());
+  await evaluate(() => document.querySelector('button[aria-label$="tools, skills & MCP"]').click());
+  assert.equal(await evaluate(() => Boolean(document.querySelector(".rem-tools-popover"))), false);
   // Use the current provider if this pane was already mounted. Catalog selection is
   // exercised separately by React tests; this rendered flow exercises steering.
   await evaluate(() => {
@@ -213,10 +224,10 @@ async function exerciseRemSteering() {
   assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").disabled), false);
   assert.equal(await evaluate(() => [...document.querySelectorAll("[data-chat-pane] [data-picker-trigger]")].every(button => button.disabled)), true);
   assert.equal(await evaluate(() => window.__steeringTurn.workflow.remResources.web), false);
-  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent.trim().endsWith("tools, skills & MCP")).click());
-  await waitFor(() => evaluate(() => document.body.textContent.includes("Tool changes apply when you send your next instruction")));
-  await evaluate(() => [...document.querySelectorAll("label")].find(label => label.textContent === "Search the web").querySelector("input").click());
-  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Add skill").click());
+  await evaluate(() => document.querySelector('button[aria-label$="tools, skills & MCP"]').click());
+  await waitFor(() => evaluate(() => document.body.textContent.includes("Changes apply when you send your next instruction")));
+  await evaluate(() => document.querySelector('[role="switch"][aria-label="Search the web"]').click());
+  await evaluate(() => document.querySelector('button[aria-label="Add skill"]').click());
   const typeResource = (label, value) => evaluate(async ({ label, value }) => {
     const input = document.querySelector(`[aria-label="${label}"]`);
     input.focus();
@@ -224,16 +235,17 @@ async function exerciseRemSteering() {
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await new Promise(requestAnimationFrame);
   }, { label, value });
-  await typeResource("Skill 1 path", "/temporary");
-  await typeResource("Skill 1 path", "");
-  assert.equal(await evaluate(() => document.querySelector('[aria-label="Skill 1 path"]').value), "");
-  await typeResource("Skill 1 path", "/skills/research");
-  await evaluate(() => document.querySelector('[aria-label="Skill 1 path"]').dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
-  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Add MCP server").click());
-  await typeResource("Server 1 name", "docs");
-  await evaluate(() => document.querySelector('[aria-label="Server 1 name"]').blur());
-  await typeResource("Server 1 URL", "https://example.com/mcp");
-  await evaluate(() => document.querySelector('[aria-label="Server 1 URL"]').blur());
+  await typeResource("Skill folder", "/temporary");
+  await typeResource("Skill folder", "");
+  assert.equal(await evaluate(() => document.querySelector('[aria-label="Skill folder"]').value), "");
+  await typeResource("Skill folder", "/skills/research");
+  await evaluate(() => document.querySelector('[aria-label="Skill folder"]').form.requestSubmit());
+  await waitFor(() => evaluate(() => document.querySelector('[role="switch"][aria-label="research"]')?.checked === true), 25, "added skill is on");
+  await evaluate(() => document.querySelector('button[aria-label="Add MCP server"]').click());
+  await typeResource("Server name", "docs");
+  await typeResource("Server URL", "https://example.com/mcp");
+  await evaluate(() => document.querySelector('[aria-label="Server URL"]').form.requestSubmit());
+  await waitFor(() => evaluate(() => document.querySelector('[role="switch"][aria-label="docs"]')?.checked === true), 25, "added server is on");
   const typeDraft = text => evaluate(text => {
     const textarea = document.querySelector("[data-chat-composer] textarea");
     textarea.focus();
@@ -259,6 +271,7 @@ async function exerciseRemSteering() {
   assert.deepEqual(resources.skills, [{ path: "/skills/research", enabled: true }]);
   assert.equal(resources.mcpServers[0].name, "docs");
   assert.equal(resources.mcpServers[0].url, "https://example.com/mcp");
+  assert.equal(resources.mcpServers[0].library, true);
   assert.equal(await evaluate(() => document.querySelector("[data-chat-composer] textarea").value), "");
   assert.equal(await evaluate(() => document.querySelector("button[aria-label='Attach files']").disabled), false);
   await evaluate(() => {
@@ -520,28 +533,27 @@ async function exerciseThreadSearchNavigation() {
 }
 
 async function exerciseRemAvatar() {
-  await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.pose === "waving"));
-  await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.pose === "seated"));
+  // Rem's sprite lives on the welcome screen of Rem's home; the thread pane has none.
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[data-assistant-home] .rem-avatar"))), false, "Threads no longer show Rem's sprite");
+  await evaluate(() => document.querySelector(".studio-sidebar #sidebar-tab-rem").click());
+  await waitFor(() => evaluate(() => document.querySelector(".rem-home .rem-avatar")?.dataset.pose === "waving"));
+  assert.deepEqual(await evaluate(() => {
+    const style = getComputedStyle(document.querySelector(".rem-home .rem-avatar-wave"));
+    return { opacity: style.opacity, transitionDuration: style.transitionDuration };
+  }), { opacity: "1", transitionDuration: "0s" });
+  fs.writeFileSync("/tmp/raticode-rem-wave.png", (await windowRef.webContents.capturePage()).toPNG());
+  // A paused sprite reports "seated" mid-greeting; wait for the greeting to finish while playing.
+  await waitFor(() => evaluate(() => { const avatar = document.querySelector(".rem-home .rem-avatar"); return avatar?.dataset.pose === "seated" && avatar.dataset.animated === "true"; }));
   await wait(700);
   const metrics = await evaluate(() => {
-    const avatar = document.querySelector(".rem-avatar");
+    const avatar = document.querySelector(".rem-home .rem-avatar");
     return { width: avatar.offsetWidth, imagesLoaded: [...avatar.querySelectorAll("img")].every((img) => img.complete && img.naturalWidth > 0), waveOpacity: getComputedStyle(avatar.querySelector(".rem-avatar-wave")).opacity };
   });
   assert.deepEqual(metrics, { width: 112, imagesLoaded: true, waveOpacity: "0" });
   fs.writeFileSync("/tmp/raticode-rem-seated.png", (await windowRef.webContents.capturePage()).toPNG());
-  await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.blinking === "true"));
-  await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.blinking === "false"));
-  const toggle = () => evaluate(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", code: "KeyL", ctrlKey: true, bubbles: true })));
-  await toggle();
-  await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.animated === "false"));
-  await toggle();
-  await waitFor(() => evaluate(() => document.querySelector(".rem-avatar")?.dataset.pose === "waving"));
-  assert.deepEqual(await evaluate(() => {
-    const wave = document.querySelector(".rem-avatar-wave");
-    const style = getComputedStyle(wave);
-    return { opacity: style.opacity, transitionDuration: style.transitionDuration };
-  }), { opacity: "1", transitionDuration: "0s" });
-  fs.writeFileSync("/tmp/raticode-rem-wave.png", (await windowRef.webContents.capturePage()).toPNG());
+  await waitFor(() => evaluate(() => document.querySelector(".rem-home .rem-avatar")?.dataset.blinking === "true"));
+  await waitFor(() => evaluate(() => document.querySelector(".rem-home .rem-avatar")?.dataset.blinking === "false"));
 }
 
 async function exerciseBottomPanelTerminal() {
@@ -799,15 +811,9 @@ async function exerciseDesignRegressions() {
   await waitFor(() => evaluate(() => Boolean(document.querySelector("button[title='Back to active threads']"))));
   await evaluate(() => document.querySelector("button[title='Back to active threads']").click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
-  assert.equal(
-    await evaluate(() => document.querySelector("[data-assistant-home] h2")?.textContent.trim()),
-    "I'm Rem",
-    "Returning from a thread should show Rem's home screen",
-  );
-  assert.match(
-    await evaluate(() => document.querySelector("[data-assistant-home]").textContent),
-    /Your coding agent in Raticode\./,
-  );
+  // The thread home is just the thread list; Rem's introduction lives in Rem's home.
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[data-assistant-home] h2, [data-assistant-home] .rem-avatar"))), false);
+  assert.doesNotMatch(await evaluate(() => document.querySelector("[data-assistant-home]").textContent), /Your coding agent in Raticode/);
   assert.equal(
     await evaluate(() => document.querySelector("[data-assistant-home] section[aria-label='Active threads'] h3")?.textContent.trim()),
     "Active threads",
@@ -1225,11 +1231,12 @@ async function exerciseSwarms() {
     tab.focus();
     tab.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
   });
-  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-organizations", "End reaches Organizations from Workflows");
+  // Organizations is an experimental plugin, so Second Brain ends the default rail.
+  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-second-brain", "End reaches Second Brain from Workflows");
   await evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })));
-  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-swarms", "ArrowUp reaches Swarms from Organizations");
+  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-swarms", "ArrowUp reaches Swarms from Second Brain");
   await evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })));
-  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-workflows", "Home returns to Workflows");
+  assert.equal(await evaluate(() => document.activeElement.id), "sidebar-tab-rem", "Home returns to Rem at the top of the rail");
   const editorTabs = await evaluate(() => document.querySelector("[aria-label='Editor tabs']").textContent);
   await evaluate(() => document.querySelector("#sidebar-tab-swarms").click());
   await waitFor(() => evaluate(() => document.querySelector("#sidebar-panel-swarms").textContent.includes("Release team")));

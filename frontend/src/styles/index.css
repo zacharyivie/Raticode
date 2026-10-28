@@ -1,5 +1,6 @@
 @import "tailwindcss" source(none);
 @import "./palette.css";
+@import "./primitives.css";
 @config "../../tailwind.config.js";
 @source "../../index.html";
 @source "../";
@@ -15,12 +16,35 @@
 @layer base {
   *, ::before, ::after, ::backdrop, ::file-selector-button { border-color: #e5e7eb; }
   input::placeholder, textarea::placeholder { color: #9ca3af; }
+  .dark :is(*, ::before, ::after, ::backdrop, ::file-selector-button) { border-color: rgb(var(--color-line)); }
+  .dark :is(input, textarea)::placeholder { color: rgb(var(--color-muted) / .8); }
+  button, input, textarea, select { font: inherit; }
   button, [role="button"] { cursor: pointer; }
   :disabled { cursor: default; }
 }
 
 /* Keep authored rules in the utility layer so existing selector precedence wins. */
 @layer utilities {
+.rem-model-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 16px;
+  color: #0e7490;
+  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+}
+.dark .rem-model-switch { color: #67e8f9; }
+.rem-model-switch::before,
+.rem-model-switch::after {
+  content: "";
+  flex: 1;
+  min-width: 16px;
+  border-top: 1px solid currentColor;
+  opacity: .3;
+}
+.rem-model-switch > span { min-width: 0; overflow-wrap: anywhere; }
+
 .outline-none,
 .focus\:outline-none:focus,
 .focus-visible\:outline-none:focus-visible {
@@ -127,6 +151,25 @@ FORM: Operate-mode desktop studio, translated directly from wireframes/studio.ht
   --color-brand: 79 70 229;
   --color-signal: 217 119 6;
   --color-terminal: #eee9df;
+  /* Semantic tokens shared by primitives.css and the Tailwind theme. */
+  --color-raised: 249 247 242;
+  --color-field: 244 240 231;
+  --color-brand-solid: 79 70 229;
+  --color-brand-hover: 67 56 202;
+  --color-on-brand: 255 255 255;
+  --color-success: 4 120 87;
+  --color-success-soft: 220 241 230;
+  --color-warning: 146 64 14;
+  --color-warning-soft: 254 243 199;
+  --color-danger: 185 28 28;
+  --color-danger-soft: 254 226 226;
+  --color-danger-solid: 185 28 28;
+  --color-info: 29 78 216;
+  --color-info-soft: 219 234 254;
+  --color-scrim: rgb(15 23 42 / .3);
+  --shadow-popover: 0 16px 40px rgb(24 24 27 / .16), 0 4px 10px rgb(24 24 27 / .06);
+  --shadow-dialog: 0 24px 64px rgb(17 24 39 / .2), 0 4px 12px rgb(17 24 39 / .08);
+  --ui-select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2362635f' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   color-scheme: light;
   --model-picker-active-bg: #c4ccf4;
   --model-picker-active-fg: #4338ca;
@@ -148,6 +191,25 @@ FORM: Operate-mode desktop studio, translated directly from wireframes/studio.ht
   --color-line: 42 42 46;
   --color-brand: 99 102 241;
   --color-signal: 245 158 11;
+  --color-surface: 24 24 26;
+  --color-surface-muted: 38 38 42;
+  --color-raised: 30 30 33;
+  --color-field: 24 24 26;
+  --color-brand-solid: 99 102 241;
+  --color-brand-hover: 79 70 229;
+  --color-success: 110 231 183;
+  --color-success-soft: 21 44 37;
+  --color-warning: 252 211 77;
+  --color-warning-soft: 46 37 18;
+  --color-danger: 252 165 165;
+  --color-danger-soft: 50 26 28;
+  --color-danger-solid: 185 28 28;
+  --color-info: 147 197 253;
+  --color-info-soft: 23 35 56;
+  --color-scrim: rgb(0 0 0 / .55);
+  --shadow-popover: 0 20px 48px rgb(0 0 0 / .55), 0 4px 12px rgb(0 0 0 / .4);
+  --shadow-dialog: 0 28px 72px rgb(0 0 0 / .6), 0 4px 14px rgb(0 0 0 / .4);
+  --ui-select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239d9da5' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --model-picker-active-bg: #2a2a2a;
   --model-picker-active-fg: #f2f2f2;
   --thread-match-bg: #ffe600;
@@ -182,13 +244,6 @@ html[data-reduced-motion="true"] *::after {
   transition-duration: 0.01ms !important;
 }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
-}
-
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
@@ -197,6 +252,20 @@ select:focus-visible,
 [role="button"]:focus-visible {
   outline: 2px solid rgb(var(--color-brand)) !important;
   outline-offset: 2px;
+}
+
+/*
+One chevron for every single-line select, tinted by the region's --ui-select-arrow.
+Component stylesheets are unlayered and often set the background shorthand, so the
+chevron parts are important; their background colors still apply.
+*/
+select:not([multiple], [size]) {
+  appearance: none;
+  padding-right: 28px !important;
+  background-image: var(--ui-select-arrow) !important;
+  background-position: right 6px center !important;
+  background-repeat: no-repeat !important;
+  background-size: 16px !important;
 }
 
 [data-chat-composer] textarea:focus-visible {
@@ -321,6 +390,17 @@ select:focus-visible,
   --color-muted: 191 198 222;
   --color-line: 100 109 145;
   --color-brand: 184 177 255;
+  --color-raised: 48 54 79;
+  --color-field: 37 44 67;
+  --color-success: 110 231 183;
+  --color-success-soft: 39 72 77;
+  --color-warning: 252 211 77;
+  --color-warning-soft: 74 64 62;
+  --color-danger: 253 164 175;
+  --color-danger-soft: 87 46 67;
+  --color-info: 165 200 255;
+  --color-info-soft: 52 66 108;
+  --ui-select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23bfc6de' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --model-picker-active-bg: #4f5781;
   --model-picker-active-fg: #f0eff9;
   color: rgb(var(--color-ink));
@@ -422,6 +502,12 @@ select:focus-visible,
   outline: none !important;
 }
 
+.browser-menu-item:hover:not(:disabled),
+.browser-menu-item:focus-visible {
+  background-color: rgb(var(--color-menu-active));
+  outline: none !important;
+}
+
 [data-keyboard-navigation="true"] .worktree-menu-item:focus {
   outline: 2px solid rgb(var(--color-brand)) !important;
   outline-offset: -2px;
@@ -431,102 +517,175 @@ select:focus-visible,
   scrollbar-color: #5f6468 transparent;
 }
 
-.dark h1,
-.dark h2,
-.dark h3,
-.dark .font-semibold {
+/* Headings without an authored color stay bright; any text utility still wins. */
+:where(.dark) :where(h1, h2, h3) {
   color: #f2f2f2;
 }
 
-.dark .border-line {
-  border-color: #2a2a2e;
-}
-
-.dark .divide-line > :not([hidden]) ~ :not([hidden]) {
+.dark .divide-line > * {
   border-color: #202020;
 }
 
-.dark .bg-white {
-  background-color: #18181a;
+/*
+Dark fallbacks for light-only utilities. Each rule steps aside when the element
+already carries an authored dark: variant for the same property.
+*/
+.dark .bg-white:not([class*="dark:bg-"]) {
+  background-color: rgb(var(--color-surface));
 }
 
-.dark .bg-slate-50,
-.dark .bg-\[\#f9fbfd\] {
+.dark :is(.bg-white\/70, .bg-white\/90):not([class*="dark:bg-"]) {
+  background-color: rgb(var(--color-surface) / .9);
+}
+
+.dark :is(.hover\:bg-white, .hover\:bg-white\/70):hover:not([class*="dark:hover:bg-"]) {
+  background-color: rgb(var(--color-surface-muted));
+}
+
+.dark :is(.bg-slate-50, .bg-\[\#f9fbfd\], .read-only\:bg-slate-50:read-only):not([class*="dark:bg-"]) {
   background-color: #202023;
 }
 
-.dark .bg-slate-100 {
-  background-color: #26262a;
+.dark :is(.bg-slate-100, .bg-slate-100\/60):not([class*="dark:bg-"]) {
+  background-color: rgb(var(--color-surface-muted));
 }
 
-.dark .text-slate-400 {
-  color: #858585;
+.dark .bg-slate-200:not([class*="dark:bg-"]) {
+  background-color: #2e2e33;
 }
 
-.dark .text-slate-500,
-.dark .text-slate-600,
-.dark .text-slate-700 {
-  color: #cccccc;
+.dark :is(.text-slate-400, .disabled\:text-slate-400:disabled):not([class*="dark:text-"]) {
+  color: #85858c;
 }
 
-.dark .border-slate-100,
-.dark .border-slate-200,
-.dark .border-slate-300 {
-  border-color: #252526;
+.dark .text-slate-500:not([class*="dark:text-"]) {
+  color: rgb(var(--color-muted));
+}
+
+.dark .text-slate-600:not([class*="dark:text-"]) {
+  color: #b4b4bb;
+}
+
+.dark .text-slate-700:not([class*="dark:text-"]) {
+  color: #d4d4d8;
+}
+
+.dark :is(.text-slate-800, .text-slate-900):not([class*="dark:text-"]) {
+  color: rgb(var(--color-ink));
+}
+
+.dark :is(.border-slate-100, .border-slate-200, .border-slate-300, .divide-slate-200 > *):not([class*="dark:border-"]) {
+  border-color: rgb(var(--color-line));
 }
 
 .dark .placeholder\:text-slate-400::placeholder {
   color: #7a7a7a;
 }
 
-.dark .hover\:border-slate-300:hover {
-  border-color: #333333;
+.dark .hover\:border-slate-300:hover:not([class*="dark:hover:border-"]) {
+  border-color: #3a3a40;
 }
 
-.dark .hover\:bg-slate-50:hover,
-.dark .hover\:bg-slate-100:hover {
-  background-color: #2a2a2a;
+.dark :is(.hover\:bg-slate-50, .hover\:bg-slate-100, .hover\:bg-slate-100\/70):hover:not([class*="dark:hover:bg-"]),
+.dark :is(.focus\:bg-slate-50:focus, .focus-visible\:bg-slate-100:focus-visible, .focus-within\:bg-slate-50:focus-within):not([class*="dark:focus"]) {
+  background-color: #2a2a2e;
 }
 
-.dark .hover\:bg-teal-700:hover {
-  background-color: #0e639c;
+.dark :is(.hover\:bg-slate-200, .hover\:bg-slate-200\/70):hover:not([class*="dark:hover:bg-"]),
+.dark .focus-visible\:bg-slate-200:focus-visible {
+  background-color: #333338;
 }
 
-.dark .border-teal-100,
-.dark .border-teal-200 {
-  border-color: #312e81;
+/* Tint shades become dark tints, so every bg/border/ring variant of them follows. */
+.dark {
+  --color-indigo-50: #1e1b4b; --color-indigo-100: #25215d;
+  --color-blue-50: #1c2330; --color-blue-100: #1e293d;
+  --color-sky-50: #17262f; --color-sky-100: #162f3b;
+  --color-cyan-50: #16282d; --color-cyan-100: #153138;
+  --color-teal-50: #182828; --color-teal-100: #173230;
+  --color-emerald-50: #172824; --color-emerald-100: #17322a;
+  --color-green-50: #192921; --color-green-100: #1a3425;
+  --color-lime-50: #232a1a; --color-lime-100: #293519;
+  --color-amber-50: #2e2519; --color-amber-100: #3b2d18;
+  --color-yellow-50: #2d2818; --color-yellow-100: #3a3117;
+  --color-orange-50: #2e211a; --color-orange-100: #3c2719;
+  --color-red-50: #2e1c1e; --color-red-100: #3a1f21;
+  --color-rose-50: #2e1c21; --color-rose-100: #3b1e25;
+  --color-pink-50: #2d1d27; --color-pink-100: #3a202e;
+  --color-fuchsia-50: #2b1d2f; --color-fuchsia-100: #371f3c;
+  --color-purple-50: #261e30; --color-purple-100: #2f223d;
+  --color-violet-50: #241f30; --color-violet-100: #2a233d;
 }
 
-.dark .bg-teal-50,
-.dark .bg-teal-100 {
-  background-color: #1e1b4b;
-}
-
-.dark .text-teal-700 {
-  color: #a5b4fc;
-}
-
-.dark .bg-emerald-50,
-.dark .bg-amber-50,
-.dark .bg-red-50 {
-  background-color: #2a2a2a;
-}
-
-.dark .hover\:bg-red-50:hover {
-  background-color: #3a2424;
-}
-
-.dark .border-emerald-200,
-.dark .border-amber-200,
-.dark .border-red-200 {
-  border-color: #3a3a3a;
-}
-
-.dark .text-emerald-700,
-.dark .text-amber-700,
-.dark .text-red-700 {
-  color: #d4d4d4;
-}
+/* Light-mode borders and text shades. Authored dark: variants on the same element win. */
+.dark :is(.border-indigo-200, .border-indigo-300):not([class*="dark:border-"]), .dark :is(.hover\:border-indigo-200, .hover\:border-indigo-300, .enabled\:hover\:border-indigo-200):hover:not([class*="dark:hover:border-"]) { border-color: #4338ca; }
+.dark :is(.bg-indigo-200):not([class*="dark:bg-"]), .dark .hover\:bg-indigo-200:hover:not([class*="dark:hover:bg-"]) { background-color: #2c2c52; }
+.dark :is(.text-indigo-600, .text-indigo-700, .text-indigo-800, .text-indigo-900, .text-indigo-950, .enabled\:text-indigo-600:enabled):not([class*="dark:text-"]) { color: #a5b4fc; }
+.dark :is(.hover\:text-indigo-600, .hover\:text-indigo-700, .hover\:text-indigo-800, .hover\:text-indigo-900, .hover\:text-indigo-950):hover:not([class*="dark:hover:text-"]) { color: #c7d2fe; }
+.dark :is(.border-blue-200, .border-blue-300):not([class*="dark:border-"]), .dark :is(.hover\:border-blue-200, .hover\:border-blue-300, .enabled\:hover\:border-blue-200):hover:not([class*="dark:hover:border-"]) { border-color: #223658; }
+.dark :is(.bg-blue-200):not([class*="dark:bg-"]), .dark .hover\:bg-blue-200:hover:not([class*="dark:hover:bg-"]) { background-color: #213453; }
+.dark :is(.text-blue-600, .text-blue-700, .text-blue-800, .text-blue-900, .text-blue-950, .enabled\:text-blue-600:enabled):not([class*="dark:text-"]) { color: #93c5fd; }
+.dark :is(.hover\:text-blue-600, .hover\:text-blue-700, .hover\:text-blue-800, .hover\:text-blue-900, .hover\:text-blue-950):hover:not([class*="dark:hover:text-"]) { color: #bfdbfe; }
+.dark :is(.border-sky-200, .border-sky-300):not([class*="dark:border-"]), .dark :is(.hover\:border-sky-200, .hover\:border-sky-300, .enabled\:hover\:border-sky-200):hover:not([class*="dark:hover:border-"]) { border-color: #153f54; }
+.dark :is(.bg-sky-200):not([class*="dark:bg-"]), .dark .hover\:bg-sky-200:hover:not([class*="dark:hover:bg-"]) { background-color: #153d50; }
+.dark :is(.text-sky-600, .text-sky-700, .text-sky-800, .text-sky-900, .text-sky-950, .enabled\:text-sky-600:enabled):not([class*="dark:text-"]) { color: #7dd3fc; }
+.dark :is(.hover\:text-sky-600, .hover\:text-sky-700, .hover\:text-sky-800, .hover\:text-sky-900, .hover\:text-sky-950):hover:not([class*="dark:hover:text-"]) { color: #bae6fd; }
+.dark :is(.border-cyan-200, .border-cyan-300):not([class*="dark:border-"]), .dark :is(.hover\:border-cyan-200, .hover\:border-cyan-300, .enabled\:hover\:border-cyan-200):hover:not([class*="dark:hover:border-"]) { border-color: #13444e; }
+.dark :is(.bg-cyan-200):not([class*="dark:bg-"]), .dark .hover\:bg-cyan-200:hover:not([class*="dark:hover:bg-"]) { background-color: #13414a; }
+.dark :is(.text-cyan-600, .text-cyan-700, .text-cyan-800, .text-cyan-900, .text-cyan-950, .enabled\:text-cyan-600:enabled):not([class*="dark:text-"]) { color: #67e8f9; }
+.dark :is(.hover\:text-cyan-600, .hover\:text-cyan-700, .hover\:text-cyan-800, .hover\:text-cyan-900, .hover\:text-cyan-950):hover:not([class*="dark:hover:text-"]) { color: #a5f3fc; }
+.dark :is(.border-teal-200, .border-teal-300):not([class*="dark:border-"]), .dark :is(.hover\:border-teal-200, .hover\:border-teal-300, .enabled\:hover\:border-teal-200):hover:not([class*="dark:hover:border-"]) { border-color: #174541; }
+.dark :is(.bg-teal-200):not([class*="dark:bg-"]), .dark .hover\:bg-teal-200:hover:not([class*="dark:hover:bg-"]) { background-color: #17423e; }
+.dark :is(.text-teal-600, .text-teal-700, .text-teal-800, .text-teal-900, .text-teal-950, .enabled\:text-teal-600:enabled):not([class*="dark:text-"]) { color: #5eead4; }
+.dark :is(.hover\:text-teal-600, .hover\:text-teal-700, .hover\:text-teal-800, .hover\:text-teal-900, .hover\:text-teal-950):hover:not([class*="dark:hover:text-"]) { color: #99f6e4; }
+.dark :is(.border-emerald-200, .border-emerald-300):not([class*="dark:border-"]), .dark :is(.hover\:border-emerald-200, .hover\:border-emerald-300, .enabled\:hover\:border-emerald-200):hover:not([class*="dark:hover:border-"]) { border-color: #164537; }
+.dark :is(.bg-emerald-200):not([class*="dark:bg-"]), .dark .hover\:bg-emerald-200:hover:not([class*="dark:hover:bg-"]) { background-color: #164235; }
+.dark :is(.text-emerald-600, .text-emerald-700, .text-emerald-800, .text-emerald-900, .text-emerald-950, .enabled\:text-emerald-600:enabled):not([class*="dark:text-"]) { color: #6ee7b7; }
+.dark :is(.hover\:text-emerald-600, .hover\:text-emerald-700, .hover\:text-emerald-800, .hover\:text-emerald-900, .hover\:text-emerald-950):hover:not([class*="dark:hover:text-"]) { color: #a7f3d0; }
+.dark :is(.border-green-200, .border-green-300):not([class*="dark:border-"]), .dark :is(.hover\:border-green-200, .hover\:border-green-300, .enabled\:hover\:border-green-200):hover:not([class*="dark:hover:border-"]) { border-color: #1b482d; }
+.dark :is(.bg-green-200):not([class*="dark:bg-"]), .dark .hover\:bg-green-200:hover:not([class*="dark:hover:bg-"]) { background-color: #1b452c; }
+.dark :is(.text-green-600, .text-green-700, .text-green-800, .text-green-900, .text-green-950, .enabled\:text-green-600:enabled):not([class*="dark:text-"]) { color: #86efac; }
+.dark :is(.hover\:text-green-600, .hover\:text-green-700, .hover\:text-green-800, .hover\:text-green-900, .hover\:text-green-950):hover:not([class*="dark:hover:text-"]) { color: #bbf7d0; }
+.dark :is(.border-lime-200, .border-lime-300):not([class*="dark:border-"]), .dark :is(.hover\:border-lime-200, .hover\:border-lime-300, .enabled\:hover\:border-lime-200):hover:not([class*="dark:hover:border-"]) { border-color: #364a19; }
+.dark :is(.bg-lime-200):not([class*="dark:bg-"]), .dark .hover\:bg-lime-200:hover:not([class*="dark:hover:bg-"]) { background-color: #344719; }
+.dark :is(.text-lime-600, .text-lime-700, .text-lime-800, .text-lime-900, .text-lime-950, .enabled\:text-lime-600:enabled):not([class*="dark:text-"]) { color: #bef264; }
+.dark :is(.hover\:text-lime-600, .hover\:text-lime-700, .hover\:text-lime-800, .hover\:text-lime-900, .hover\:text-lime-950):hover:not([class*="dark:hover:text-"]) { color: #d9f99d; }
+.dark :is(.border-amber-200, .border-amber-300):not([class*="dark:border-"]), .dark :is(.hover\:border-amber-200, .hover\:border-amber-300, .enabled\:hover\:border-amber-200):hover:not([class*="dark:hover:border-"]) { border-color: #563e16; }
+.dark :is(.bg-amber-200):not([class*="dark:bg-"]), .dark .hover\:bg-amber-200:hover:not([class*="dark:hover:bg-"]) { background-color: #513b16; }
+.dark :is(.text-amber-600, .text-amber-700, .text-amber-800, .text-amber-900, .text-amber-950, .enabled\:text-amber-600:enabled):not([class*="dark:text-"]) { color: #fcd34d; }
+.dark :is(.hover\:text-amber-600, .hover\:text-amber-700, .hover\:text-amber-800, .hover\:text-amber-900, .hover\:text-amber-950):hover:not([class*="dark:hover:text-"]) { color: #fde68a; }
+.dark :is(.border-yellow-200, .border-yellow-300):not([class*="dark:border-"]), .dark :is(.hover\:border-yellow-200, .hover\:border-yellow-300, .enabled\:hover\:border-yellow-200):hover:not([class*="dark:hover:border-"]) { border-color: #534315; }
+.dark :is(.bg-yellow-200):not([class*="dark:bg-"]), .dark .hover\:bg-yellow-200:hover:not([class*="dark:hover:bg-"]) { background-color: #4f4015; }
+.dark :is(.text-yellow-600, .text-yellow-700, .text-yellow-800, .text-yellow-900, .text-yellow-950, .enabled\:text-yellow-600:enabled):not([class*="dark:text-"]) { color: #fde047; }
+.dark :is(.hover\:text-yellow-600, .hover\:text-yellow-700, .hover\:text-yellow-800, .hover\:text-yellow-900, .hover\:text-yellow-950):hover:not([class*="dark:hover:text-"]) { color: #fef08a; }
+.dark :is(.border-orange-200, .border-orange-300):not([class*="dark:border-"]), .dark :is(.hover\:border-orange-200, .hover\:border-orange-300, .enabled\:hover\:border-orange-200):hover:not([class*="dark:hover:border-"]) { border-color: #573119; }
+.dark :is(.bg-orange-200):not([class*="dark:bg-"]), .dark .hover\:bg-orange-200:hover:not([class*="dark:hover:bg-"]) { background-color: #523019; }
+.dark :is(.text-orange-600, .text-orange-700, .text-orange-800, .text-orange-900, .text-orange-950, .enabled\:text-orange-600:enabled):not([class*="dark:text-"]) { color: #fdba74; }
+.dark :is(.hover\:text-orange-600, .hover\:text-orange-700, .hover\:text-orange-800, .hover\:text-orange-900, .hover\:text-orange-950):hover:not([class*="dark:hover:text-"]) { color: #fed7aa; }
+.dark :is(.border-red-200, .border-red-300):not([class*="dark:border-"]), .dark :is(.hover\:border-red-200, .hover\:border-red-300, .enabled\:hover\:border-red-200):hover:not([class*="dark:hover:border-"]) { border-color: #542426; }
+.dark :is(.bg-red-200):not([class*="dark:bg-"]), .dark .hover\:bg-red-200:hover:not([class*="dark:hover:bg-"]) { background-color: #502325; }
+.dark :is(.text-red-600, .text-red-700, .text-red-800, .text-red-900, .text-red-950, .enabled\:text-red-600:enabled):not([class*="dark:text-"]) { color: #fca5a5; }
+.dark :is(.hover\:text-red-600, .hover\:text-red-700, .hover\:text-red-800, .hover\:text-red-900, .hover\:text-red-950):hover:not([class*="dark:hover:text-"]) { color: #fecaca; }
+.dark :is(.border-rose-200, .border-rose-300):not([class*="dark:border-"]), .dark :is(.hover\:border-rose-200, .hover\:border-rose-300, .enabled\:hover\:border-rose-200):hover:not([class*="dark:hover:border-"]) { border-color: #56232d; }
+.dark :is(.bg-rose-200):not([class*="dark:bg-"]), .dark .hover\:bg-rose-200:hover:not([class*="dark:hover:bg-"]) { background-color: #51222c; }
+.dark :is(.text-rose-600, .text-rose-700, .text-rose-800, .text-rose-900, .text-rose-950, .enabled\:text-rose-600:enabled):not([class*="dark:text-"]) { color: #fda4af; }
+.dark :is(.hover\:text-rose-600, .hover\:text-rose-700, .hover\:text-rose-800, .hover\:text-rose-900, .hover\:text-rose-950):hover:not([class*="dark:hover:text-"]) { color: #fecdd3; }
+.dark :is(.border-pink-200, .border-pink-300):not([class*="dark:border-"]), .dark :is(.hover\:border-pink-200, .hover\:border-pink-300, .enabled\:hover\:border-pink-200):hover:not([class*="dark:hover:border-"]) { border-color: #53253e; }
+.dark :is(.bg-pink-200):not([class*="dark:bg-"]), .dark .hover\:bg-pink-200:hover:not([class*="dark:hover:bg-"]) { background-color: #4f243b; }
+.dark :is(.text-pink-600, .text-pink-700, .text-pink-800, .text-pink-900, .text-pink-950, .enabled\:text-pink-600:enabled):not([class*="dark:text-"]) { color: #f9a8d4; }
+.dark :is(.hover\:text-pink-600, .hover\:text-pink-700, .hover\:text-pink-800, .hover\:text-pink-900, .hover\:text-pink-950):hover:not([class*="dark:hover:text-"]) { color: #fbcfe8; }
+.dark :is(.border-fuchsia-200, .border-fuchsia-300):not([class*="dark:border-"]), .dark :is(.hover\:border-fuchsia-200, .hover\:border-fuchsia-300, .enabled\:hover\:border-fuchsia-200):hover:not([class*="dark:hover:border-"]) { border-color: #4e2556; }
+.dark :is(.bg-fuchsia-200):not([class*="dark:bg-"]), .dark .hover\:bg-fuchsia-200:hover:not([class*="dark:hover:bg-"]) { background-color: #4a2451; }
+.dark :is(.text-fuchsia-600, .text-fuchsia-700, .text-fuchsia-800, .text-fuchsia-900, .text-fuchsia-950, .enabled\:text-fuchsia-600:enabled):not([class*="dark:text-"]) { color: #f0abfc; }
+.dark :is(.hover\:text-fuchsia-600, .hover\:text-fuchsia-700, .hover\:text-fuchsia-800, .hover\:text-fuchsia-900, .hover\:text-fuchsia-950):hover:not([class*="dark:hover:text-"]) { color: #f5d0fe; }
+.dark :is(.border-purple-200, .border-purple-300):not([class*="dark:border-"]), .dark :is(.hover\:border-purple-200, .hover\:border-purple-300, .enabled\:hover\:border-purple-200):hover:not([class*="dark:hover:border-"]) { border-color: #402958; }
+.dark :is(.bg-purple-200):not([class*="dark:bg-"]), .dark .hover\:bg-purple-200:hover:not([class*="dark:hover:bg-"]) { background-color: #3d2853; }
+.dark :is(.text-purple-600, .text-purple-700, .text-purple-800, .text-purple-900, .text-purple-950, .enabled\:text-purple-600:enabled):not([class*="dark:text-"]) { color: #d8b4fe; }
+.dark :is(.hover\:text-purple-600, .hover\:text-purple-700, .hover\:text-purple-800, .hover\:text-purple-900, .hover\:text-purple-950):hover:not([class*="dark:hover:text-"]) { color: #e9d5ff; }
+.dark :is(.border-violet-200, .border-violet-300):not([class*="dark:border-"]), .dark :is(.hover\:border-violet-200, .hover\:border-violet-300, .enabled\:hover\:border-violet-200):hover:not([class*="dark:hover:border-"]) { border-color: #382b58; }
+.dark :is(.bg-violet-200):not([class*="dark:bg-"]), .dark .hover\:bg-violet-200:hover:not([class*="dark:hover:bg-"]) { background-color: #362a53; }
+.dark :is(.text-violet-600, .text-violet-700, .text-violet-800, .text-violet-900, .text-violet-950, .enabled\:text-violet-600:enabled):not([class*="dark:text-"]) { color: #c4b5fd; }
+.dark :is(.hover\:text-violet-600, .hover\:text-violet-700, .hover\:text-violet-800, .hover\:text-violet-900, .hover\:text-violet-950):hover:not([class*="dark:hover:text-"]) { color: #ddd6fe; }
 
 .source-control-status--added,
 .source-control-status--untracked {
@@ -690,20 +849,6 @@ select:focus-visible,
   background: #131314;
 }
 
-.dark .bg-indigo-50 {
-  background-color: #1e1b4b;
-}
-
-.dark .bg-indigo-100 {
-  background-color: #25215d;
-}
-
-.dark .text-indigo-600,
-.dark .text-indigo-700 {
-  color: #a5b4fc;
-}
-
-.dark .border-indigo-200,
 .dark .focus-within\:border-indigo-500:focus-within {
   border-color: #4338ca;
 }
@@ -890,6 +1035,23 @@ select:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .rem-thread-launch { box-shadow: inset 3px 0 0 #6366f1; }
 }
+
+/* Thread groups: open lists first, then collapsed Running and Archived rows. */
+.rem-thread-group + .rem-thread-group { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgb(var(--color-line)); }
+.rem-thread-group-header { display: flex; align-items: center; gap: 4px; min-height: 28px; margin-bottom: 4px; border-radius: 8px; }
+.rem-thread-group-title, .rem-thread-group-toggle {
+  display: flex; flex: 1; min-width: 0; align-items: center; gap: 6px; padding: 4px 8px;
+  color: rgb(var(--color-muted)); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; text-align: left;
+}
+.rem-thread-group-toggle { border-radius: 8px; transition: color 120ms, background-color 120ms; }
+.rem-thread-group-toggle:hover { color: rgb(var(--color-ink)); background: rgb(var(--color-ink) / .05); }
+.rem-thread-group-toggle:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: -2px; }
+.rem-thread-count {
+  min-width: 18px; padding: 0 6px; border-radius: 999px; background: rgb(var(--color-ink) / .07);
+  color: rgb(var(--color-muted)); font-size: 10px; line-height: 16px; letter-spacing: 0; text-align: center; font-variant-numeric: tabular-nums;
+}
+.rem-archive-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 4px; padding: 0 4px 0 12px; color: rgb(var(--color-muted)); font-size: 10px; }
+.rem-thread-group[data-thread-group="unread"] .rem-thread-count { background: rgb(59 130 246 / .14); color: rgb(var(--color-ink)); }
 
 /* Continuous ancestry lanes sit beside variable-height commit details. */
 .scm-history-graph { --scm-graph-background: rgb(var(--color-surface)); --scm-lane-0: #0067a5; --scm-lane-1: #956000; --scm-lane-2: #9f367c; --scm-lane-3: #007565; }

@@ -1,0 +1,46 @@
+/* Raticode brand tokens, shared by the landing page and the documentation theme. */
+
+:root {
+  --rc-ink-0: #05040d;
+  --rc-ink-1: #0a0920;
+  --rc-ink-2: #12102d;
+  --rc-ink-3: #1b1840;
+  --rc-line: rgba(196, 188, 255, 0.12);
+  --rc-line-strong: rgba(196, 188, 255, 0.24);
+
+  --rc-indigo: #6353d5;
+  --rc-indigo-bright: #8f82ff;
+  --rc-periwinkle: #b9b1ff;
+  --rc-ivory: #fdf2dc;
+  --rc-ivory-dim: #d9d2c4;
+  --rc-mist: #a9a4c8;
+  --rc-cyan: #4ff0ff;
+  --rc-mint: #5cf2a5;
+  --rc-amber: #ffb648;
+  --rc-rose: #ff6b8b;
+
+  --rc-font-display: 'Bricolage Grotesque Variable', 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
+  --rc-font-body: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --rc-font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  --rc-font-pixel: 'Silkscreen', var(--rc-font-mono);
+
+  --vp-font-family-mono: var(--rc-font-mono);
+
+  --vp-c-brand-1: #4f40c4;
+  --vp-c-brand-2: #6353d5;
+  --vp-c-brand-3: #6353d5;
+  --vp-c-brand-soft: rgba(99, 83, 213, 0.14);
+}
+
+.dark {
+  --vp-c-bg: #0a0920;
+  --vp-c-bg-alt: #07061a;
+  --vp-c-bg-elv: #12102d;
+  --vp-c-bg-soft: #12102d;
+  --vp-c-text-1: #f3eee6;
+  --vp-c-text-2: #b8b3d4;
+  --vp-c-brand-1: #a59bff;
+  --vp-c-brand-2: #8f82ff;
+  --vp-c-brand-3: #6353d5;
+  --vp-c-brand-soft: rgba(143, 130, 255, 0.16);
+}

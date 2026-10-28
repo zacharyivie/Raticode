@@ -2003,7 +2003,9 @@ def test_ui_server_unknown_invalid_json_and_options(tmp_path) -> None:
     assert options.status == 204
     assert options.body == b""
     assert options.header("Access-Control-Allow-Origin") == "http://127.0.0.1:5173"
-    assert options.header("Access-Control-Allow-Methods") == "GET, POST, PUT, DELETE, OPTIONS"
+    assert options.header("Access-Control-Allow-Methods") == (
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    )
     assert "Authorization" in (options.header("Access-Control-Allow-Headers") or "")
 
 
@@ -2211,8 +2213,16 @@ def test_ui_server_serve_shutdown_cleans_up(monkeypatch, tmp_path, capsys) -> No
     fake_server = FakeServer()
     monkeypatch.setattr(server_module, "create_server", lambda **_kwargs: fake_server)
     monkeypatch.setattr(server_module, "_install_shutdown_handlers", lambda _server: None)
+    usage_refresh: list[Any] = []
+
+    def start_background_refresh(data_dir: Path) -> Any:
+        usage_refresh.append(data_dir)
+        return lambda: usage_refresh.append("stop")
+
+    monkeypatch.setattr(server_module, "start_background_refresh", start_background_refresh)
 
     server_module.serve(host="127.0.0.1", port=9999, data_dir=tmp_path)
+    assert usage_refresh == [tmp_path, "stop"]
 
     output = capsys.readouterr()
     assert "GOFER_UI_READY" in output.out
@@ -3407,8 +3417,10 @@ def test_usage_overview_and_period_validation(tmp_path: Path) -> None:
 
 
 def test_usage_refresh_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def refresh(data_dir: Path | None, *, days: int) -> dict[str, object]:
+    async def refresh(data_dir: Path | None, *, days: int, explicit: bool) -> dict[str, object]:
         assert data_dir == tmp_path
+        # A user's refresh may retry ordinary failures, but never a provider 429.
+        assert explicit is True
         return {"days": days, "accounts": []}
 
     monkeypatch.setattr(server_module, "refresh_usage", refresh)

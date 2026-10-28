@@ -120,7 +120,10 @@ reference             = IDENTIFIER, { reference-selector } ;
 reference-selector    = ".", reference-segment
                       | "[", QUOTED_STRING, "]"
                       | "[", INTEGER, "]" ;
-reference-segment     = IDENTIFIER | INTEGER ;
+reference-segment     = IDENTIFIER | INTEGER | JSON_MEMBER_NAME ;
+(* JSON_MEMBER_NAME = [A-Za-z_][A-Za-z0-9_]*(-[A-Za-z0-9_]+)* ; it is accepted only
+   after a selector enters a JSON value: node.<id>.output., node.<id>.error.,
+   input.<name>., trigger., loop.item. and after any bracket selector. *)
 
 separators            = { NEWLINE } ;
 line-end              = [ hspace, COMMENT ], NEWLINE ;

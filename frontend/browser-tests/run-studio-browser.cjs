@@ -30,6 +30,8 @@ async function main() {
   await runBrowserTest(path.join(__dirname, "../electron/tests/studio-policy.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "../electron/tests/conversation-storage.browser.cjs"));
   await runBrowserTest(path.join(__dirname, "../electron/tests/background-lifecycle.browser.cjs"));
+  await runBrowserTest(path.join(__dirname, "../electron/tests/agent-browser.browser.cjs"));
+  await runBrowserTest(path.join(__dirname, "../electron/tests/agent-browser-studio.browser.cjs"));
   for (const script of ["file-media", "editor-find-graph", "mac-ui-fixes", "rem-actions", "commit-diff", "usage", "report-themes", "report-outputs", "organizations"]) {
     await runBrowserTest(path.join(__dirname, `${script}.browser.cjs`));
   }

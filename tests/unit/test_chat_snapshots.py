@@ -165,7 +165,7 @@ def test_snapshot_lifecycle_under_symlinked_temp_root(tmp_path, monkeypatch):
     file.write_text("after\n")
     preview = chat._preview_chat_changes(project, before)
     assert preview is not None and "+after" in preview["files"][0]["diff"]
-    data = tmp_path.resolve() / "data"
+    data = alias / "data"
     changes = chat._finalize_chat_changes(project, before, data)
     assert changes is not None and changes["undoable"]
     chat.undo_chat_changes(changes["id"], data)

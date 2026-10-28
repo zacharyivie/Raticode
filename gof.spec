@@ -23,6 +23,8 @@ datas = [("dist/third-party-licenses", "third-party-licenses")]
 datas += copy_metadata("gofer-flow")
 datas += collect_data_files("openpyxl")
 datas += collect_data_files("tzdata")
+for package in ("fastembed", "onnxruntime", "tokenizers", "huggingface_hub", "pypdf", "bibtexparser"):
+    datas += collect_data_files(package)
 if find_spec("vosk") is None:
     raise RuntimeError("Vosk is required for Rem transcription in release builds")
 datas += collect_data_files("vosk", excludes=["**/*.dyld"])
@@ -46,6 +48,8 @@ hiddenimports += collect_submodules("sqlalchemy")
 hiddenimports += collect_submodules("typer")
 hiddenimports += collect_submodules("watchdog.observers")
 hiddenimports += collect_submodules("vosk")
+for package in ("fastembed", "onnxruntime", "tokenizers", "pypdf", "bibtexparser"):
+    hiddenimports += collect_submodules(package)
 
 # The Mac wheel calls its Mach-O library libvosk.dyld. Treat it as a binary
 # so PyInstaller checks its architecture and signs it with the other libraries.
@@ -54,6 +58,8 @@ binaries = collect_dynamic_libs(
 )
 if not binaries:
     raise RuntimeError("The Vosk native speech library is missing")
+for package in ("onnxruntime", "numpy", "tokenizers"):
+    binaries += collect_dynamic_libs(package)
 
 a = Analysis(
     ["packaging/pyinstaller/gof_entry.py"],

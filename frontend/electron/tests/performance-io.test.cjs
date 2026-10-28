@@ -69,7 +69,7 @@ test('normal quit awaits the log drain and repeated quit requests share it', asy
     lifecycleApproved: true, mainWindow: null, isSmokeTest: false,
     archivesDrained: true, logsDrained: false, logsClosing: false, isQuitting: false,
     applicationLog: { close: () => { closes++; return gate; } },
-    closeAllBrowsers() {}, closeTerminalEditorServer() {}, closeAllTerminals() {}, stopBackend() {},
+    browsers: { closeAll() {} }, closeTerminalEditorServer() {}, closeAllTerminals() {}, stopBackend() {},
   });
   const event = { preventDefault: () => { prevented++; } };
   callback(event); callback(event);

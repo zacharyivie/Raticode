@@ -30,6 +30,7 @@ from gofer.core.provider_capabilities import (
 from gofer.core.provider_profiles import ResolvedProviderSettings, validate_provider_settings
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.subscriptions.base import Subscription
+from gofer.subscriptions.tool_trace import normalize_tool_trace
 from gofer.subscriptions.usage import normalize_usage, track_invocation
 from gofer.utils.atomic_output import mkdir_without_links
 from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
@@ -41,6 +42,7 @@ ADDITIONAL_PROVIDERS = {"cursor", "copilot", "opencode"}
 @dataclass
 class CliOutput:
     provider: str
+    json_output: bool = False
     text: str = ""
     session_id: str | None = None
     error: str | None = None
@@ -58,9 +60,10 @@ class CliOutput:
     seen_tool_updates: set[tuple[str, str]] = field(default_factory=set)
     lines: ProtocolLines = field(default_factory=ProtocolLines)
     request_id: str | None = None
+    tool_starts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def feed(self, chunk: str) -> list[str]:
-        if self.provider == "copilot":
+        if self.provider == "copilot" and not self.json_output:
             self.text = retained_text(self.text + chunk)
             return [chunk] if chunk else []
         lines = self.lines.feed(chunk)
@@ -79,6 +82,8 @@ class CliOutput:
             self.parse_error = "Provider emitted a non-object JSON record"
             return ""
         kind = payload.get("type")
+        if self.provider == "copilot":
+            return self._copilot_line(payload)
         if isinstance(payload.get("request_id"), str):
             self.request_id = payload["request_id"][:256]
         if kind in {
@@ -131,6 +136,9 @@ class CliOutput:
                     self.completed = True
                     if not self.text and isinstance(payload.get("result"), str):
                         text = payload["result"]
+                if isinstance(payload.get("usage"), dict):
+                    # The terminal record totals the whole turn, including failed turns.
+                    self.usage = normalize_usage("cursor", payload["usage"])
             elif kind == "tool_call":
                 call = payload.get("tool_call")
                 if isinstance(call, dict):
@@ -171,12 +179,14 @@ class CliOutput:
                 part = payload.get("part")
                 if isinstance(part, dict) and isinstance(part.get("state"), dict):
                     state = part["state"]
+                    metadata = state.get("metadata") or {}
                     self._tool(
                         str(part.get("callID") or part.get("id") or ""),
                         str(part.get("tool") or "Tool"),
                         state.get("input"),
                         state.get("output") or state.get("error"),
                         str(state.get("status") or "completed"),
+                        exit_code=metadata.get("exit") if isinstance(metadata, dict) else None,
                     )
             elif kind == "error":
                 error = payload.get("error")
@@ -223,7 +233,16 @@ class CliOutput:
             self.events.append({"type": "thought", "text": text, "deltaStreamId": self.stream_id})
         return text
 
-    def _tool(self, identity: str, name: str, args: Any, result: Any, status: str) -> None:
+    def _tool(
+        self,
+        identity: str,
+        name: str,
+        args: Any,
+        result: Any,
+        status: str,
+        *,
+        exit_code: Any = None,
+    ) -> None:
         key = (identity, status)
         if identity and key in self.seen_tool_updates:
             return
@@ -238,16 +257,91 @@ class CliOutput:
             {
                 "type": "thought",
                 "text": name,
-                "trace": {
-                    "kind": "tool",
-                    "id": identity,
-                    "title": name,
-                    "input": _trace_value(args),
-                    "output": _trace_value(result),
-                    "status": status,
-                },
+                "trace": normalize_tool_trace(
+                    {
+                        "kind": "tool",
+                        "id": identity,
+                        "title": name,
+                        "input": args,
+                        "output": result,
+                        "status": status,
+                        **({"exitCode": exit_code} if type(exit_code) is int else {}),
+                    }
+                ),
             }
         )
+
+    def _copilot_line(self, payload: dict[str, Any]) -> str:
+        """Official Copilot SDK events; only the main agent's final answer."""
+        kind, data = payload.get("type"), payload.get("data")
+        if not isinstance(data, dict) or payload.get("agentId"):
+            return ""
+        self.records += 1
+        if kind in {"session.start", "session.resume"}:
+            session = data.get("sessionId")
+            if isinstance(session, str):
+                if self.session_id and session != self.session_id:
+                    self.error = "Provider changed session identity during the turn"
+                    self.error_kind = "session_identity"
+                self.session_id = session
+        elif kind == "tool.execution_start":
+            identity = str(data.get("toolCallId") or "")
+            self.tool_starts[identity] = data
+            self.answer_text = ""
+            self._tool(
+                identity,
+                str(data.get("toolName") or "Tool"),
+                data.get("arguments"),
+                None,
+                "running",
+            )
+        elif kind == "tool.execution_complete":
+            identity = str(data.get("toolCallId") or "")
+            start = self.tool_starts.get(identity, {})
+            result = data.get("result") or {}
+            output = result.get("content") if isinstance(result, dict) else result
+            shell = data.get("shellExecution") or {}
+            self._tool(
+                identity,
+                str(start.get("toolName") or "Tool"),
+                start.get("arguments"),
+                data.get("error") or output,
+                "completed" if data.get("success") is True and not data.get("error") else "failed",
+                exit_code=shell.get("exitCode") if isinstance(shell, dict) else None,
+            )
+        elif kind == "assistant.message":
+            identity = str(data.get("messageId") or payload.get("id") or "")
+            if identity in self.seen_parts:
+                return ""
+            self.seen_parts.add(identity)
+            text = data.get("content")
+            if isinstance(text, str):
+                self.text = retained_text(self.text + text)
+                self.answer_text = retained_text(self.answer_text + text)
+                return text
+        elif kind == "assistant.reasoning" and isinstance(data.get("content"), str):
+            self.events.append({"type": "thought", "text": data["content"]})
+        elif kind == "assistant.usage":
+            identity = str(payload.get("id") or "")
+            key = ("copilot", "usage", identity)
+            if identity and key not in self.usage_parts:
+                self.usage_parts.add(key)
+                for key_name, value in normalize_usage("copilot", data).items():
+                    if key_name.endswith("tokens") and type(value) in {int, float}:
+                        self.usage[key_name] = self.usage.get(key_name, 0) + value
+                if self.usage:
+                    self.usage["source"] = "provider_metadata"
+        elif kind in {"session.error", "session.shutdown"}:
+            if kind == "session.error" or data.get("shutdownType") == "error":
+                self.error = str(data.get("message") or data.get("errorReason") or "Copilot failed")
+            elif kind == "session.shutdown":
+                self.completed = True
+        elif kind == "session.idle":
+            if data.get("aborted") is True:
+                self.error = "Copilot turn cancelled"
+            else:
+                self.completed = True
+        return ""
 
     def drain_events(self) -> list[dict[str, Any]]:
         events, self.events = self.events, []
@@ -274,15 +368,10 @@ class CliOutput:
         elif self.provider == "opencode" and not self.records:
             self.error = self.error or "OpenCode returned no protocol records"
             self.error_kind = "incomplete"
+        elif self.provider == "copilot" and self.json_output and not self.completed:
+            self.error = "Copilot output ended without a completed turn"
+            self.error_kind = "incomplete"
         self.completed = self.error is None
-
-
-def _trace_value(value: Any) -> str:
-    if value is None:
-        return ""
-    return retained_text(
-        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), 8192
-    )
 
 
 def cli_command(
@@ -364,10 +453,18 @@ def cli_invocation(
     extra_paths: list[Path] | None = None,
     session_dir: Path | None = None,
     read_only: bool = False,
+    tool_free: bool = False,
+    structured_output: bool = False,
 ) -> Iterator[tuple[list[str], dict[str, str]]]:
     """Own additive per-run config through subprocess drain, preserving login stores."""
     child_env = env_with_executable_on_path(command[0], env)
     args = list(command)
+    if provider == "copilot" and structured_output:
+        if "--output-format" in args:
+            args[args.index("--output-format") + 1] = "json"
+        else:
+            args += ["--output-format", "json"]
+        args += ["--stream", "off"]
     if session_dir is not None:
         mkdir_without_links(session_dir)
     directory_context = (
@@ -451,6 +548,10 @@ def cli_invocation(
                         for tool in native_tools
                         if tool not in {"edit_tool_call", "delete_tool_call"}
                     ]
+                if tool_free:
+                    native_tools = []
+                    allow = []
+                    deny = ["Read(*)", "Write(*)", "Shell(*)", "WebSearch(*)", "Mcp(*)"]
                 if resources.shell and not read_only:
                     allow.append("Shell(*)")
                     native_tools += ["shell_tool_call", "write_shell_stdin_tool_call"]
@@ -465,6 +566,8 @@ def cli_invocation(
                     ]
                 else:
                     deny.append("WebFetch(*)")
+                if resources.agents and not tool_free:
+                    native_tools.append("task_tool_call")
                 for alias, tools in grants.items():
                     for tool in tools:
                         allow.append(f"Mcp(plugin-{alias_prefix}-{alias}:{tool})")
@@ -504,6 +607,10 @@ def cli_invocation(
                     "shell",
                 ]
                 args += ["--allow-tool" if resources.web else "--deny-tool", "url"]
+                if not resources.agents:
+                    args += ["--excluded-tools", "task"]
+                if tool_free:
+                    args += ["--available-tools", "", "--deny-tool", "read"]
                 for alias, tools in grants.items():
                     for tool in tools:
                         args += ["--allow-tool", alias if tool == "*" else f"{alias}({tool})"]
@@ -523,10 +630,14 @@ def cli_invocation(
                     "glob": "allow",
                     "grep": "allow",
                     "list": "allow",
+                    "lsp": "allow",
+                    "task": "allow" if resources.agents else "deny",
                     "bash": "allow" if resources.shell and not read_only else "deny",
                     "webfetch": "allow" if resources.web else "deny",
                     "websearch": "allow" if resources.web else "deny",
                 }
+                if tool_free:
+                    permission = {"*": "deny"}
                 if extra_paths:
                     permission["external_directory"] = {"*": "deny"}
                     for path in extra_paths:
@@ -570,7 +681,10 @@ async def stream_cli(
     # Tool permissions remain controlled by cli_invocation.
     if provider == "copilot":
         command = [*command, "--add-dir", str(cwd.resolve())]
-    output = CliOutput(provider)
+    json_output = (
+        "--output-format" in command and command[command.index("--output-format") + 1] == "json"
+    )
+    output = CliOutput(provider, json_output=json_output)
     stderr = ""
     source = stream_subprocess(
         command,
@@ -579,7 +693,7 @@ async def stream_cli(
         cancel_event=cancel_event,
         timeout=timeout,
         max_output_bytes=max_output_bytes,
-        protocol_stdout=provider != "copilot",
+        protocol_stdout=provider != "copilot" or json_output,
     )
     try:
         async for event in source:
@@ -595,7 +709,12 @@ async def stream_cli(
             else:
                 code = event["returncode"] if event["returncode"] is not None else 1
                 output.finish(code, stderr, cancelled=bool(cancel_event and cancel_event.is_set()))
-                if provider == "copilot" and event.get("output_truncated") and not output.error:
+                if (
+                    provider == "copilot"
+                    and not json_output
+                    and event.get("output_truncated")
+                    and not output.error
+                ):
                     output.error = "Copilot text output exceeded the configured output limit"
                     output.error_kind = "output_limit"
                 for trace_event in output.drain_events():
@@ -605,7 +724,9 @@ async def stream_cli(
                     "error": output.error,
                     "message": {
                         "role": "assistant",
-                        "body": output.text if provider == "copilot" else output.answer_text,
+                        "body": output.text
+                        if provider == "copilot" and not json_output
+                        else output.answer_text,
                     },
                     "sessionId": output.session_id,
                     "usage": output.usage,
@@ -634,10 +755,20 @@ async def stream_cli(
 
 
 class CliSubscription(Subscription):
-    def __init__(self, provider: str) -> None:
+    def __init__(
+        self,
+        provider: str,
+        *,
+        resources: AgentResources | None = None,
+        read_only: bool = False,
+        tool_free: bool = False,
+    ) -> None:
         if provider not in ADDITIONAL_PROVIDERS:
             raise ValueError(f"Unknown CLI provider '{provider}'")
         self.provider = provider
+        self.resources = resources
+        self.read_only = read_only
+        self.tool_free = tool_free
 
     def _build_command(
         self,
@@ -694,9 +825,11 @@ class CliSubscription(Subscription):
         with cli_invocation(
             self.provider,
             command,
-            AgentResources(shell=True, web=True),
+            self.resources if self.resources is not None else AgentResources(shell=True, web=True),
             env=env,
             extra_paths=extra_paths,
+            read_only=self.read_only,
+            tool_free=self.tool_free,
         ) as (command, child_env):
             async for event in stream_cli(
                 command,

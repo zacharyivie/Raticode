@@ -21,9 +21,13 @@ from gofer.utils.process import run_subprocess
 
 ApprovalDecisionValue = Literal["approved", "rejected", "timeout"]
 
+# Written when a gate's own task stops. The run's end reason replaces it once known.
+APPROVAL_GATE_STOPPED_REASON = "The approval gate was stopped."
+
 
 def _now() -> str:
-    return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
+    # Millisecond precision keeps short decision timeouts from expiring early.
+    return datetime.now(UTC).astimezone().isoformat(timespec="milliseconds")
 
 
 def _safe_part(value: str) -> str:
@@ -65,7 +69,7 @@ class ApprovalRequest:
     run_id: str
     node_id: str
     message: str
-    status: Literal["pending", "decided"] = "pending"
+    status: Literal["pending", "decided", "cancelled"] = "pending"
     approvers: list[str] = field(default_factory=list)
     requested_at: str = field(default_factory=_now)
     timeout_seconds: float | None = None
@@ -79,6 +83,7 @@ class ApprovalRequest:
     waiter_pid: int | None = None
     resume_claimed_at: str | None = None
     resume_claimed_by_pid: int | None = None
+    cancelled_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -100,6 +105,7 @@ class ApprovalRequest:
             "waiterPid": self.waiter_pid,
             "resumeClaimedAt": self.resume_claimed_at,
             "resumeClaimedByPid": self.resume_claimed_by_pid,
+            "cancelledReason": self.cancelled_reason,
         }
 
     @classmethod
@@ -118,12 +124,18 @@ class ApprovalRequest:
         )
         if timeout_decision not in {"reject", "timeout"}:
             timeout_decision = "timeout"
+        if decision is not None:
+            status = "decided"
+        elif data.get("status") == "cancelled":
+            status = "cancelled"
+        else:
+            status = "pending"
         return cls(
             workflow_id=str(data.get("workflowId") or data.get("workflow_id") or ""),
             run_id=str(data.get("runId") or data.get("run_id") or ""),
             node_id=str(data.get("nodeId") or data.get("node_id") or ""),
             message=str(data.get("message") or ""),
-            status="decided" if decision is not None else "pending",
+            status=status,  # type: ignore[arg-type]
             approvers=[str(item) for item in approvers] if isinstance(approvers, list) else [],
             requested_at=str(data.get("requestedAt") or data.get("requested_at") or _now()),
             timeout_seconds=timeout_seconds,
@@ -164,6 +176,9 @@ class ApprovalRequest:
                 )
                 and str(resume_pid).isdigit()
                 else None
+            ),
+            cancelled_reason=(
+                str(data.get("cancelledReason") or data.get("cancelled_reason") or "") or None
             ),
         )
 
@@ -224,6 +239,11 @@ class ApprovalStore:
             raise ValueError("Pending approval not found")
         if request.decision is not None:
             raise ValueError(f"Approval already decided as {request.decision.decision}")
+        if request.status == "cancelled":
+            raise ValueError(
+                "Approval was cancelled"
+                + (f": {request.cancelled_reason}" if request.cancelled_reason else ".")
+            )
         if request.approvers and decided_by != "gofer" and decided_by not in request.approvers:
             allowed = ", ".join(request.approvers)
             raise ValueError(f"Approver {decided_by!r} is not allowed; expected one of: {allowed}")
@@ -235,6 +255,33 @@ class ApprovalStore:
         )
         self.create_or_update(request)
         return request
+
+    def cancel(self, workflow_id: str, run_id: str, node_id: str, reason: str) -> bool:
+        """Close an undecided request so it can no longer be decided or time out."""
+        request = self.get(workflow_id, run_id, node_id)
+        if request is None or request.status != "pending":
+            return False
+        request.status = "cancelled"
+        request.cancelled_reason = reason
+        self.create_or_update(request)
+        return True
+
+    def cancel_pending_for_run(self, workflow_id: str, run_id: str, reason: str) -> int:
+        """Close every undecided request that belongs to one finished run."""
+        for request in self.list_requests(workflow_id):
+            if (
+                request.run_id == run_id
+                and request.status == "cancelled"
+                and request.cancelled_reason == APPROVAL_GATE_STOPPED_REASON
+            ):
+                # The gate stopped because its run ended, so record why the run ended.
+                request.cancelled_reason = reason
+                self.create_or_update(request)
+        return sum(
+            self.cancel(request.workflow_id, request.run_id, request.node_id, reason)
+            for request in self.list_pending(workflow_id)
+            if request.run_id == run_id
+        )
 
     def mark_waiting(self, workflow_id: str, run_id: str, node_id: str) -> None:
         request = self.get(workflow_id, run_id, node_id)
@@ -264,7 +311,9 @@ class ApprovalStore:
         self.create_or_update(request)
 
     def list_pending(self, workflow_id: str | None = None) -> list[ApprovalRequest]:
-        return [request for request in self.list_requests(workflow_id) if request.decision is None]
+        return [
+            request for request in self.list_requests(workflow_id) if request.status == "pending"
+        ]
 
     def list_requests(self, workflow_id: str | None = None) -> list[ApprovalRequest]:
         root = self.base_dir / "approvals"
@@ -288,7 +337,11 @@ class ApprovalStore:
         return requests
 
     def _expire_if_needed(self, request: ApprovalRequest) -> ApprovalRequest:
-        if request.decision is not None or request.timeout_seconds is None:
+        if (
+            request.decision is not None
+            or request.status == "cancelled"
+            or request.timeout_seconds is None
+        ):
             return request
         try:
             requested_at = datetime.fromisoformat(request.requested_at)

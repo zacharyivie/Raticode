@@ -291,3 +291,188 @@ def test_polled_reset_does_not_imply_new_balance(tmp_path: Path) -> None:
     row = usage_overview(tmp_path)["accounts"][0]
     assert row["status"] == "stale"
     assert row["windows"][0]["remaining"] == 0
+
+
+async def test_activity_refresh_is_limited_to_the_active_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.core import provider_usage
+
+    calls: list[str] = []
+
+    async def adapter(provider: str, profile: str | None, **kwargs: Any) -> dict[str, Any]:
+        calls.append(provider)
+        return {"status": "available", "windows": [], "observed_at": None}
+
+    monkeypatch.setattr(provider_usage, "refresh_provider_usage", adapter)
+    await refresh_usage(tmp_path, providers={"codex"})
+    assert calls == ["codex"]
+    await refresh_usage(tmp_path, providers={"codex"}, min_age=0)
+    await refresh_usage(tmp_path, providers={"codex"})
+    assert calls == ["codex", "codex"]
+
+
+def test_background_refresh_runs_periodically_and_after_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    runs: list[dict[str, Any]] = []
+    ran = threading.Event()
+
+    async def refresh(data_dir: Path | None, **options: Any) -> dict[str, Any]:
+        assert data_dir == tmp_path
+        runs.append(options)
+        ran.set()
+        return {}
+
+    monkeypatch.setattr(usage_service, "refresh_usage", refresh)
+    monkeypatch.setattr(usage_service, "BACKGROUND_START_DELAY_SECONDS", 0)
+    monkeypatch.setattr(usage_service, "ACTIVITY_DELAY_SECONDS", 0)
+    stop = usage_service.start_background_refresh(tmp_path)
+    try:
+        assert ran.wait(5)
+        ran.clear()
+        record_invocation(invocation_id="turn", provider="claude_code", data_dir=tmp_path)
+        assert ran.wait(5)
+    finally:
+        stop()
+    assert runs == [
+        {},
+        {"providers": {"claude_code"}, "min_age": usage_service.ACTIVITY_REFRESH_SECONDS},
+    ]
+    # A stopped refresher is no longer notified.
+    usage_service.notify_usage_activity("codex", tmp_path)
+    assert len(runs) == 2
+
+
+def _claude_turn(tmp_path: Path, five_hour: float, invocation: str = "turn") -> None:
+    record_invocation(
+        invocation_id=invocation,
+        provider="claude_code",
+        model="claude-opus-5-5",
+        data_dir=tmp_path,
+        metadata={
+            "quota_windows": [
+                {
+                    "id": "five_hour",
+                    "label": "Five-hour allowance",
+                    "unit": "percent",
+                    "used": five_hour,
+                    "limit": 100.0,
+                    "remaining": 100 - five_hour,
+                    "remaining_percent": 100 - five_hour,
+                    "resets_at": "2099-01-01T00:00:00+00:00",
+                }
+            ]
+        },
+    )
+
+
+def _save_snapshot(tmp_path: Path, payload: dict[str, Any], checked_at: str) -> None:
+    with usage_db(tmp_path) as db:
+        db.execute(
+            "INSERT OR REPLACE INTO usage_snapshots VALUES (?, ?, ?)",
+            ("claude_code", json.dumps(payload), checked_at),
+        )
+
+
+def _claude_row(tmp_path: Path) -> dict[str, Any]:
+    return next(
+        row for row in usage_overview(tmp_path)["accounts"] if row["provider"] == "claude_code"
+    )
+
+
+def test_claude_turns_update_polled_windows_without_dropping_model_limits(tmp_path: Path) -> None:
+    _save_snapshot(
+        tmp_path,
+        {
+            "status": "available",
+            "source": "Claude Code /usage",
+            "observed_at": "2020-01-01T00:00:00+00:00",
+            "windows": [
+                {"id": "five_hour", "label": "Five-hour allowance", "used": 10},
+                {"id": "seven_day_fable", "label": "Weekly Fable allowance", "used": 3},
+            ],
+        },
+        "2020-01-01T00:00:00+00:00",
+    )
+    _claude_turn(tmp_path, 42)
+    row = _claude_row(tmp_path)
+    assert row["status"] == "available"
+    assert [(w["id"], w["used"]) for w in row["windows"]] == [
+        ("five_hour", 42),
+        ("seven_day_fable", 3),
+    ]
+    assert row["source"] == "Claude Code /usage"
+    assert "Claude Code activity" in row["reason"]
+
+
+def test_claude_turns_alone_populate_usage(tmp_path: Path) -> None:
+    _claude_turn(tmp_path, 25)
+    row = _claude_row(tmp_path)
+    assert row["status"] == "available"
+    assert row["source"] == "Claude Code activity"
+    assert row["windows"][0]["remaining"] == 75
+
+
+async def test_fresh_claude_turns_avoid_polling_the_rate_limited_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.core import provider_usage
+
+    calls: list[str] = []
+
+    async def adapter(provider: str, profile: str | None, **kwargs: Any) -> dict[str, Any]:
+        calls.append(provider)
+        return {"status": "available", "windows": [], "observed_at": None}
+
+    monkeypatch.setattr(provider_usage, "refresh_provider_usage", adapter)
+    _claude_turn(tmp_path, 25)
+    await refresh_usage(tmp_path, providers={"claude_code"}, min_age=0, explicit=True)
+    assert calls == []
+    with usage_db(tmp_path) as db:
+        db.execute("UPDATE usage_rate_limits SET observed_at='2020-01-01T00:00:00+00:00'")
+    await refresh_usage(tmp_path, providers={"claude_code"}, min_age=0)
+    assert calls == ["claude_code"]
+
+
+@pytest.mark.parametrize(
+    "rate_limited,explicit,polled",
+    [
+        (True, True, False),
+        (False, False, False),
+        (False, True, True),
+    ],
+)
+async def test_failed_reads_back_off_and_rate_limits_bind_manual_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rate_limited: bool,
+    explicit: bool,
+    polled: bool,
+) -> None:
+    from gofer.core import provider_usage
+
+    calls: list[str] = []
+
+    async def adapter(provider: str, profile: str | None, **kwargs: Any) -> dict[str, Any]:
+        calls.append(provider)
+        return {
+            "status": "error",
+            "windows": [],
+            "observed_at": None,
+            "rate_limited": rate_limited,
+            "retry_after_seconds": 900,
+        }
+
+    monkeypatch.setattr(provider_usage, "refresh_provider_usage", adapter)
+    await refresh_usage(tmp_path, providers={"claude_code"})
+    with usage_db(tmp_path) as db:
+        stored = json.loads(
+            db.execute("SELECT payload FROM usage_snapshots WHERE id='claude_code'").fetchone()[0]
+        )
+    assert stored["rate_limited"] is rate_limited
+    assert "retry_after_seconds" not in stored
+    await refresh_usage(tmp_path, providers={"claude_code"}, min_age=0, explicit=explicit)
+    assert calls == ["claude_code"] * (2 if polled else 1)

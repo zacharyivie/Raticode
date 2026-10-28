@@ -26,10 +26,14 @@ function harness(t) {
     BACKEND_START_TIMEOUT_MS: 15000,
     BACKEND_READY_PREFIX: 'GOFER_UI_READY ',
     repoRoot: '/app', desktopGrantSecret: 'test-secret',
+    agentBrowserService: { url: 'http://127.0.0.1:4100/browser', adminToken: 'b'.repeat(64) },
     getBackendCommand: () => ({ command: 'test-backend', args: [] }),
     getGoferDataDir: () => '/data',
     spawn: (_command, _args, options) => {
       assert.equal(options.env.RATICODE_REPORT_PDF_TOKEN, 'pdf-test-token');
+      // The backend alone may grant and revoke Rem's browser access.
+      assert.equal(options.env.GOFER_BROWSER_SERVICE_URL, 'http://127.0.0.1:4100/browser');
+      assert.equal(options.env.GOFER_BROWSER_ADMIN_TOKEN, 'b'.repeat(64));
       return child;
     },
     createBackendLogStream: () => null,

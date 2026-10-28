@@ -197,4 +197,23 @@ function archiveConversation(root, thread, messages, { dataDir = "", deleted = f
   if (completedArchives.size > 1024) completedArchives.delete(completedArchives.keys().next().value);
   return { id, updatedAt: now, warnings };
 }
-module.exports = { archiveConversation };
+function forgetConversations(root, threadIds) {
+  if (!Array.isArray(threadIds) || threadIds.some(id => typeof id !== "string" || !id || id.length > 128)) throw new Error("Invalid thread IDs.");
+  root = fs.realpathSync(root);
+  const indexPath = safeArchivePath(root, "index.json");
+  const index = readArchiveIndex(indexPath);
+  for (const threadId of threadIds) {
+    const id = hash(threadId);
+    for (const extension of ["json", "jsonl"]) {
+      const file = safeArchivePath(root, path.join("threads", `${id}.${extension}`));
+      fs.rmSync(file, { force: true });
+      completedArchives.delete(file);
+    }
+    delete index.threads[id];
+  }
+  atomicJson(indexPath, index);
+  archiveIndexes.delete(indexPath);
+  return { forgotten: threadIds.length };
+}
+
+module.exports = { archiveConversation, forgetConversations };

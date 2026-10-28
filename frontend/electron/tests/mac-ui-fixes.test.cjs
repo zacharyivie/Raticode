@@ -76,7 +76,7 @@ test("restart and quit share a renderer handshake; a foreign or cancelled respon
   const owner = { id: 7, send: (_name, request) => { sent = request; }, once() {}, removeListener() {} };
   const context = { crypto: { randomUUID: () => "request-1" }, mainWindow: { isDestroyed: () => false, webContents: owner, destroy: () => destroyed++ }, isSmokeTest: false,
     app: { on: (_event, fn) => { handler = fn; }, quit: () => quits++ }, Promise, archivesDrained: true, logsDrained: true, applicationLog: null,
-    showMainWindow() {}, stopBackend: () => stopped++, closeAllBrowsers() {}, closeTerminalEditorServer() {}, closeAllTerminals() {}, backendErrorWindow: null,
+    showMainWindow() {}, stopBackend: () => stopped++, browsers: { closeAll() {} }, removeLegacyAgentBrowserConnection() {}, getGoferDataDir: () => "/data", closeTerminalEditorServer() {}, closeAllTerminals() {}, backendErrorWindow: null,
     startBackend: async () => ({ apiBaseUrl: "fixture", apiToken: "token" }), createWindow() {}, createBackendErrorWindow: error => { throw error; } };
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("let lifecycleApproved = false;"), source.indexOf('app.on("window-all-closed"')), context);

@@ -158,6 +158,18 @@ test("project selection accepts arbitrary roots and persists access without a pi
   assert.equal((await renew(null, { targetPath: path.dirname(outside) })).path, path.dirname(outside));
 });
 
+test("native export picker grants the chosen parent and cancellation grants nothing", async (t) => {
+  const { inside, outside, security } = await fixture(t);
+  const file = path.join(outside, "export.zip");
+  const select = mainFunction("selectPath", { path, fs, mainWindow: null, resolvePickerDefaultPath: () => inside, getIpcSecurity: () => security, dialog: { showSaveDialog: async () => ({ canceled: false, filePath: file }) } });
+  const handle = await select(null, { save: true });
+  assert.equal(handle.path, file);
+  assert.equal(security.resolveAllowedPath(file, { grantId: handle.grantId, mustExist: false }), file);
+  assert.equal(fs.existsSync(file), false);
+  const cancel = mainFunction("selectPath", { path, mainWindow: null, resolvePickerDefaultPath: () => inside, getIpcSecurity: () => ({ trustPath: () => assert.fail("Cancellation must not grant access") }), dialog: { showSaveDialog: async () => ({ canceled: true }) } });
+  assert.equal(await cancel(null, { save: true }), null);
+});
+
 test("agent resolver requires an existing grant for every directory listing mode", async (t) => {
   const { outside, security } = await fixture(t);
   const list = mainFunction("listDirectory", {

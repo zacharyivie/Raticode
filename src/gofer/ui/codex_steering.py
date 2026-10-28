@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from gofer.subscriptions.codex import codex_exec_input
 from gofer.subscriptions.usage import normalize_usage
 from gofer.utils.process import (
     _terminate_process_tree,
@@ -239,6 +240,11 @@ async def stream_codex_turn(
         # Same additional writable directories as the ordinary Rem transport.
         roots = [command[i + 1] for i, flag in enumerate(command[:-1]) if flag == "--add-dir"]
         params["config"] = {"sandbox_workspace_write.writable_roots": roots}
+        if (
+            "sandbox_workspace_write.network_access=true" in command
+            and sandbox == "workspace-write"
+        ):
+            params["config"]["sandbox_workspace_write.network_access"] = True
         result = await transport.request("thread/start", params)
         control.thread_id = result["thread"]["id"]
         inputs = [{"type": "text", "text": command[-1]}]
@@ -307,8 +313,10 @@ async def stream_codex_turn(
     if fallback:
         # Only retry before turn/start was sent. A missing start response may
         # already represent running work and must never cause duplicate execution.
+        command, stdin = codex_exec_input(command)
         async for fallback_event in stream_subprocess(
             command,
+            stdin=stdin,
             cwd=cwd,
             env=env_with_executable_on_path(command[0]),
             cancel_event=cancel_event,

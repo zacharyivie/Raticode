@@ -235,6 +235,19 @@ class ChatSteering:
                 turn.stopped = True
                 turn.cancel.set()
 
+    def forget(self, conversation_id: str) -> None:
+        """Remove a drained conversation's control receipts and in-memory copies."""
+        conversation_id = _identifier(conversation_id, "conversationId")
+        with self._lock:
+            if conversation_id in self._active:
+                raise ChatSteeringConflict("Wait for this conversation to stop before clearing it")
+            (self.directory / f"{conversation_id}.json").unlink(missing_ok=True)
+            self._records.pop(conversation_id, None)
+            self._turn_ids.pop(conversation_id, None)
+            self._ended = {
+                key: value for key, value in self._ended.items() if key[0] != conversation_id
+            }
+
     async def stream(
         self,
         turn: ChatTurn,

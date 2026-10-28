@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 import unicodedata
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
@@ -77,6 +80,84 @@ def wire_id(value: str) -> str:
     return str(uuid5(NAMESPACE_URL, "raticode-desktop-thread:" + value))
 
 
+BUILTIN_RESOURCES = (
+    ("shell", "Commands"),
+    ("web", "Web"),
+    ("agents", "Subagents"),
+    ("browser", "Browser"),
+)
+
+
+def _resource_id(kind: str, key: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"raticode-resource:{kind}:{key}"))
+
+
+def resource_options(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """The thread's desktop resources as phone toggles. Paths and commands stay on desktop."""
+    from gofer.core.prompt_envelope import AgentResources
+
+    try:
+        resources = AgentResources.model_validate(
+            (context.get("workflow") or {}).get("remResources") or {}
+        )
+    except ValueError:
+        return []
+    options = [
+        {
+            "id": _resource_id("builtin", key),
+            "name": name,
+            "kind": "builtin",
+            "enabled": bool(getattr(resources, key)),
+        }
+        for key, name in BUILTIN_RESOURCES
+    ]
+    for skill in resources.skills:
+        label = skill.path.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or "Skill"
+        options.append(
+            {
+                "id": _resource_id("skill", skill.path),
+                "name": label[:160],
+                "kind": "skill",
+                "enabled": skill.enabled,
+            }
+        )
+    for server in resources.mcpServers:
+        options.append(
+            {
+                "id": _resource_id("mcp", server.name),
+                "name": server.name,
+                "kind": "mcp",
+                "enabled": server.enabled,
+            }
+        )
+    return options[:32]
+
+
+def apply_resource_selection(context: dict[str, Any], selected: list[str]) -> dict[str, Any]:
+    """Turn existing desktop resources on or off. A phone cannot add a path or command."""
+    from gofer.core.prompt_envelope import AgentResources
+
+    options = resource_options(context)
+    known = {o["id"] for o in options}
+    if any(identifier not in known for identifier in selected):
+        raise ValueError("This resource is no longer on desktop. Refresh and choose again.")
+    chosen = set(selected)
+    workflow = dict(context.get("workflow") or {})
+    resources = AgentResources.model_validate(workflow.get("remResources") or {}).model_dump()
+    for key, _ in BUILTIN_RESOURCES:
+        resources[key] = _resource_id("builtin", key) in chosen
+    for skill in resources["skills"]:
+        identifier = _resource_id("skill", skill["path"])
+        if identifier in known:
+            skill["enabled"] = identifier in chosen
+    for server in resources["mcpServers"]:
+        identifier = _resource_id("mcp", server["name"])
+        if identifier in known:
+            server["enabled"] = identifier in chosen
+    workflow["remResources"] = resources
+    return {**context, "workflow": workflow}
+
+
 class DeviceWorkspace:
     def __init__(self, application: Any) -> None:
         self.app = application
@@ -92,6 +173,35 @@ class DeviceWorkspace:
             peer TEXT NOT NULL, thread TEXT NOT NULL, PRIMARY KEY(peer,thread));
         """)
         self.providers: list[dict[str, Any]] = []
+        # The backend reads provider capabilities itself, so model choices work
+        # even before the desktop window has synced since a restart.
+        self.provider_source: Callable[[], list[dict[str, Any]]] | None = None
+        self._providers_read = 0.0
+        self._providers_reading = threading.Lock()
+
+    def refresh_providers(self) -> threading.Thread | None:
+        """Read provider capabilities on a worker thread; device sessions never wait for it.
+
+        Capability checks can probe local CLIs and must not run on the device event loop.
+        """
+        source = self.provider_source
+        if source is None or (self.providers and time.monotonic() - self._providers_read < 60):
+            return None
+        if not self._providers_reading.acquire(blocking=False):
+            return None
+
+        def read() -> None:
+            try:
+                self.providers = source()
+                self._providers_read = time.monotonic()
+            except Exception:  # noqa: BLE001 - keep the last catalog; retry on the next request.
+                pass
+            finally:
+                self._providers_reading.release()
+
+        worker = threading.Thread(target=read, name="device-provider-catalog", daemon=True)
+        worker.start()
+        return worker
 
     def enabled(self) -> list[str]:
         return [
@@ -347,6 +457,11 @@ class DeviceWorkspace:
                         if context.get("project_id")
                         else "Global",
                         "scopeMode": context.get("scope_mode", "project"),
+                        **(
+                            {"resources": (context.get("workflow") or {}).get("remResources")}
+                            if value.get("resources_modified")
+                            else {}
+                        ),
                     }
                     if context.get("desktop_parity")
                     else {}
@@ -481,6 +596,7 @@ class DeviceWorkspace:
         )
 
     def catalog(self, peer: str) -> dict[str, Any]:
+        self.refresh_providers()
         projects = {}
         for row in self.db.execute("SELECT context FROM device_grants WHERE peer=?", (peer,)):
             context = self.app._decode(peer, row[0])
@@ -582,15 +698,24 @@ class DeviceWorkspace:
                         "before": start,
                         "has_more": start > 0,
                         **({"total": len(parts)} if rich else {}),
+                        **(
+                            {
+                                "resources": resource_options(context),
+                                "resource_ids": self.enabled_resources(context),
+                            }
+                            if rich and context.get("desktop_parity")
+                            else {}
+                        ),
                     },
                 )
             ]
         if payload["expected_revision"] != context.get("revision", 1):
             return reject("conflict", "Thread settings changed. Refresh and choose again.")
+        previous_context = context
         value = self.value(peer, thread)
         if value and value.get("delete_requested"):
             return reject(
-                "conflict", "Deletion is waiting for the desktop archive. Open desktop to finish."
+                "conflict", "Deletion is waiting for the desktop archive. Try again shortly."
             )
         if kind == "thread.manage":
             if not value or peer not in self.enabled():
@@ -623,6 +748,14 @@ class DeviceWorkspace:
         )
         value = self.value(peer, thread)
         if value:
+            changed = (
+                kind == "thread.context.update"
+                and payload.get("set_resources") is True
+                and sorted(payload["resource_ids"])
+                != sorted(self.enabled_resources(previous_context))
+            )
+            if changed:
+                value["resources_modified"] = True
             value["revision"] = context["revision"]
             if kind == "thread.context.update":
                 value["context_modified"] = True
@@ -631,11 +764,25 @@ class DeviceWorkspace:
             k: context.get(k, [] if k == "resource_ids" else None)
             for k in ("title", "project_id", "resource_ids", "provider", "model", "revision")
         }
-        result.update(self.details(peer, thread, context))
+        result.update(self.details(peer, thread, context, resources=True))
         return [self.app._emit(peer, event, "thread.snapshot", result)]
 
+    @staticmethod
+    def enabled_resources(context: dict[str, Any]) -> list[str]:
+        if not context.get("desktop_parity"):
+            return list(context.get("resource_ids", []))
+        return [o["id"] for o in resource_options(context) if o["enabled"]]
+
     def configure_context(self, context: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        if payload["resource_ids"] != context.get("resource_ids", []):
+        # Older phones always send their last resource IDs. Only an explicit choice
+        # changes resources, so a stale list can never turn tools off.
+        if payload.get("set_resources"):
+            if not context.get("desktop_parity"):
+                raise ValueError("This conversation uses a scoped desktop grant.")
+            context = apply_resource_selection(context, payload["resource_ids"])
+        elif not context.get("desktop_parity") and payload["resource_ids"] != context.get(
+            "resource_ids", []
+        ):
             raise ValueError("Refresh this thread's resource selection on desktop.")
         if payload["project_id"] != context.get("project_id") or (
             payload["project_id"] is None
@@ -649,6 +796,7 @@ class DeviceWorkspace:
                     "This project is no longer open on desktop. Refresh and choose again."
                 )
         provider, model = payload["provider"], payload["model"]
+        self.refresh_providers()
         if not any(p["id"] == provider and model in p["models"] for p in self.providers) and (
             provider,
             model,
@@ -691,7 +839,9 @@ class DeviceWorkspace:
         }
         return context
 
-    def details(self, peer: str, thread: str, context: dict[str, Any]) -> dict[str, Any]:
+    def details(
+        self, peer: str, thread: str, context: dict[str, Any], *, resources: bool = False
+    ) -> dict[str, Any]:
         value = self.value(peer, thread) or {}
         meta = {**value.get("metadata", {}), **value.get("organization", {})}
         jobs = self.app.local_chat_jobs
@@ -708,6 +858,14 @@ class DeviceWorkspace:
                 t["thread_id"] == context.get("desktop_thread_id") for t in jobs.active_snapshot()
             )
         return {
+            **(
+                {
+                    **({"resources": resource_options(context)} if resources else {}),
+                    "resource_ids": self.enabled_resources(context),
+                }
+                if context.get("desktop_parity")
+                else {}
+            ),
             "can_manage": bool(value) and peer in self.enabled(),
             "delete_pending": value.get("delete_requested", False),
             "effort": context.get("effort") or "",

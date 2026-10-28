@@ -1469,12 +1469,37 @@ def test_workflow_approval_cli_rejects_already_decided_request(tmp_path: Path) -
     )
 
     assert result.exit_code == 1
-    assert "Pending approval not found" in result.output
+    assert "Approval already decided as timeout" in result.output
     decided = store.get("approval-flow", "run.log", "approve")
     assert decided is not None
     assert decided.decision is not None
     assert decided.decision.decision == "timeout"
     assert decided.decision.decided_by == "gofer"
+
+
+@pytest.mark.parametrize("workflow_args", [["--workflow", "approval-flow"], []])
+def test_workflow_reject_cli_explains_a_cancelled_gate(
+    tmp_path: Path, workflow_args: list[str]
+) -> None:
+    store = ApprovalStore(tmp_path)
+    store.create_or_update(
+        ApprovalRequest(
+            workflow_id="approval-flow",
+            run_id="run.log",
+            node_id="approve",
+            message="Approve deploy?",
+        )
+    )
+    store.cancel("approval-flow", "run.log", "approve", "The workflow run ended (failed).")
+
+    result = runner.invoke(
+        app,
+        ["workflow", "reject", "run.log", "approve", *workflow_args, "--data-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code == 1
+    assert "Approval was cancelled: The workflow run ended (failed)." in result.output
+    assert "pass --workflow" not in result.output
 
 
 def test_workflow_approval_cli_enforces_configured_approvers(tmp_path: Path) -> None:

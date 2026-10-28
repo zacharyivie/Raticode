@@ -67,6 +67,10 @@ _SENSITIVE_NAME = re.compile(
     r"(?:^|[_-])(?:api[_-]?key|auth(?:orization)?|bearer|credential|key|pass(?:word)?|secret|token)(?:$|[_-])",
     re.IGNORECASE,
 )
+# Bare text shaped like a reference that did not parse as one, e.g. a typo in a selector.
+_LOOKS_LIKE_REFERENCE = re.compile(
+    r"(?:node|input|loop|trigger|secret|workflow)(?:\.[^\s.]+)+\Z", re.IGNORECASE
+)
 _DURATION_MULTIPLIERS = {
     "ms": 1,
     "s": 1000,
@@ -1431,6 +1435,102 @@ class RattishCompiler:
                     path_name,
                 )
 
+    def _serial_loop_body_warnings(
+        self,
+        drafts: Mapping[str, _NodeDraft],
+        route_graph: Mapping[str, set[str]],
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> None:
+        """Warn when a parallel loop's body node still allows one activation at a time."""
+        for loop_id, loop in sorted(drafts.items()):
+            if loop.contract.node_type != "loop":
+                continue
+            source = loop.configuration.get("source")
+            limit = source.get("max_concurrency") if isinstance(source, Mapping) else None
+            if not isinstance(limit, int) or limit <= 1:
+                continue
+            body = sorted(
+                node_id
+                for node_id, draft in drafts.items()
+                if node_id != loop_id
+                and (loop_id in draft.needs or node_id in route_graph[loop_id])
+            )
+            for node_id in body:
+                node_limit = drafts[node_id].common.get("max-concurrency", 1)
+                if not isinstance(node_limit, int) or node_limit >= limit:
+                    continue
+                diagnostics.append(
+                    RattishDiagnostic(
+                        code="RATTISH_LOOP_BODY_CONCURRENCY_LIMITED",
+                        severity="warning",
+                        phase="semantic",
+                        message=(
+                            f"Loop {loop_id!r} allows {limit} overlapping iterations, but body "
+                            f"node {node_id!r} allows {node_limit} activation(s) at a time, so "
+                            "its iterations queue behind each other."
+                        ),
+                        file=context.entrypoint,
+                        span=self._span(drafts[node_id].declaration["name"]["span"]),
+                        details={
+                            "loop": loop_id,
+                            "node": node_id,
+                            "loop_max_concurrency": limit,
+                            "node_max_concurrency": node_limit,
+                        },
+                        suggestions=(
+                            f"Add max-concurrency: {limit} to node {node_id!r} to run its "
+                            "iterations in parallel.",
+                        ),
+                    )
+                )
+
+    def _auto_start_route_target_warnings(
+        self,
+        drafts: Mapping[str, _NodeDraft],
+        incoming: Mapping[str, set[str]],
+        route_graph: Mapping[str, set[str]],
+        context: CompileContext,
+        diagnostics: list[RattishDiagnostic],
+    ) -> None:
+        """Warn when a route target without needs also runs when the workflow starts."""
+        for node_id, draft in sorted(drafts.items()):
+            if draft.needs or draft.common.get("start") is True or not incoming[node_id]:
+                continue
+            reachable: set[str] = set()
+            pending = [node_id]
+            while pending:
+                for target in route_graph[pending.pop()]:
+                    if target not in reachable:
+                        reachable.add(target)
+                        pending.append(target)
+            # A route that loops back to an entry node is an intended cycle, not a second start.
+            upstream = sorted(
+                source
+                for source in incoming[node_id]
+                if source != node_id and source not in reachable
+            )
+            if not upstream:
+                continue
+            diagnostics.append(
+                RattishDiagnostic(
+                    code="RATTISH_ROUTE_TARGET_AUTO_STARTS",
+                    severity="warning",
+                    phase="semantic",
+                    message=(
+                        f"Node {node_id!r} has no needs, so it also runs when the workflow "
+                        f"starts, not only after {', '.join(repr(item) for item in upstream)}."
+                    ),
+                    file=context.entrypoint,
+                    span=self._span(draft.declaration["name"]["span"]),
+                    details={"node": node_id, "route_sources": upstream},
+                    suggestions=(
+                        f"Add needs: {upstream[0]} to run it only after that node, or "
+                        "start: true if it should also run at workflow start.",
+                    ),
+                )
+            )
+
     def _analyze_graph(
         self,
         drafts: Mapping[str, _NodeDraft],
@@ -1627,6 +1727,8 @@ class RattishCompiler:
             }
             for node_id, draft in drafts.items()
         }
+        self._auto_start_route_target_warnings(drafts, incoming, route_graph, context, diagnostics)
+        self._serial_loop_body_warnings(drafts, route_graph, context, diagnostics)
         activation_contexts: dict[str, set[tuple[str, ...]]] = {
             node_id: ({()} if not draft.needs else set()) for node_id, draft in drafts.items()
         }
@@ -2142,6 +2244,29 @@ class RattishCompiler:
             value = self._value(source_ast)
             source = {"kind": "literal", "value": value}
             source_schema = self._infer_schema(value)
+            if (
+                source_ast["kind"] == "string"
+                and source_ast.get("style") == "bare"
+                and _LOOKS_LIKE_REFERENCE.match(str(value))
+            ):
+                diagnostics.append(
+                    RattishDiagnostic(
+                        code="RATTISH_BINDING_LITERAL_LOOKS_LIKE_REFERENCE",
+                        severity="warning",
+                        phase="semantic",
+                        message=(
+                            f"Binding {name!r} is the literal text {value!r}, not a reference. "
+                            "Part of it is not a valid selector."
+                        ),
+                        file=context.entrypoint,
+                        span=self._span(source_ast["span"]),
+                        details={"node": consumer.node_id, "binding": name},
+                        suggestions=(
+                            'Use bracket notation such as node.step.output["field"] for '
+                            "unusual member names, or quote the value if it is meant as text.",
+                        ),
+                    )
+                )
 
         port_contract = consumer.contract.document["input_ports"]
         declared_port = (
@@ -2302,6 +2427,15 @@ class RattishCompiler:
                     "required": ["kind", "code", "message"],
                     "additionalProperties": False,
                 }
+                # Members such as node.x.error.kind follow the error schema like output paths.
+                for selector in selectors[2:]:
+                    if selector["kind"] == "member":
+                        value = selector["source"]
+                        path.append({"kind": "member", "value": value, "case_sensitive": True})
+                        schema = self._member_schema(schema, value)
+                    else:
+                        path.append({"kind": "index", "value": selector["value"]})
+                        schema = self._item_schema(schema)
                 # Completion does not guarantee an error document. A successful producer
                 # has no error channel, even when its activation is guaranteed.
                 optional = True

@@ -26,8 +26,11 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
+  Bot,
   Play,
   Square,
+  Volume2,
+  VolumeX,
   Workflow,
   Eye,
   FileCode2,
@@ -52,6 +55,7 @@ import raticodeIcon from "../assets/roundel.png";
 import { Dialog } from "./Dialog.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
+import { pendingRemApprovals } from "../lib/browserUi.js";
 
 import { textEditorSessions, discardedSessionPaths, codeCloseProtection } from "../lib/codeEditorSessions.js";
 export { FILE_AUTOSAVE_DELAY_MS, codeCloseProtection, hasUnsavedCodeChanges, applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
@@ -73,6 +77,10 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   onClosePath,
   onClosePaths,
   onBrowserStateChange,
+  onAskRemAboutPage,
+  onShareBrowserTab,
+  canShareBrowserTab = false,
+  onReopenClosedBrowserTab,
   onDocumentStateChange,
   onActiveDocumentStateChange,
   onNewFile,
@@ -158,6 +166,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   }, [active, physicalPathsKey]);
 
   const [browserViewStates, setBrowserViewStates] = useState({});
+  const openBrowserTabList = useMemo(() => openPaths.filter((path) => browserTabs[path]).map((path) => {
+    const metadata = browserViewTabMetadata(browserTabs[path], browserViewStates[path]);
+    return { path, url: metadata?.url || "", title: metadata?.title || "" };
+  }), [browserTabs, browserViewStates, openPaths]);
+  const discardAfterMs = Math.max(0, Number(settings.browser?.discardAfterMinutes) || 0) * 60 * 1000;
   const [documentModes, setDocumentModes] = useState({});
   const [gitGroups, setGitGroups] = useState({});
   const [tabMenu, setTabMenu] = useState(null);
@@ -603,7 +616,21 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                   <span className="max-w-full truncate leading-[14px]">{label}</span>
                 </span>
                 {dirty ? <span aria-label="Unsaved changes" className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" /> : null}
+                {tabMetadata?.prompts?.some((prompt) => prompt?.kind === "rem-confirm") ? <Bot aria-label="Rem needs your approval" className="shrink-0 animate-pulse text-amber-700" size={12} /> : null}
               </button>
+              {browserTab && (tabMetadata?.audible || tabMetadata?.muted) ? (
+                <button
+                  aria-label={tabMetadata.muted ? `Unmute ${label}` : `Mute ${label}`}
+                  className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink"
+                  draggable={false}
+                  title={tabMetadata.muted ? "Unmute tab" : "Mute tab"}
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (tabMetadata.id) void window.goferBrowser?.mute?.(tabMetadata.id, !tabMetadata.muted)?.catch?.(() => {});
+                  }}
+                >{tabMetadata.muted ? <VolumeX size={12} /> : <Volume2 size={12} />}</button>
+              ) : null}
               {workflowTab ? <WorkflowTabControls tab={workflowTab} onAction={onWorkflowTabAction} /> : null}
               <button
                 aria-label={`Close ${label}`}
@@ -656,13 +683,16 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       const svg = !browserTab && isSvgPath(path);
       const mode = codeDocumentMode(path, documentModes, settings.editor);
       const selected = activeForGroup === path;
+      // Rem's tabs keep their size while hidden so pages keep rendering and
+      // can be captured. Hidden tabs that skip layout collapse to 0x0.
+      const keepRendered = Boolean(browserTab?.agentSessionId);
       return (
         <div
           key={path}
           aria-hidden={!selected}
           inert={!selected ? "" : undefined}
-          className={`flex min-h-0 min-w-0 overflow-hidden flex-col ${selected ? "visible z-10" : "invisible z-0 pointer-events-none"} ${splitGroup && column === 2 ? "border-l border-line" : ""}`}
-          style={{ gridColumn: column, gridRow: 2, contentVisibility: selected ? "visible" : "hidden" }}
+          className={`flex min-h-0 min-w-0 overflow-hidden flex-col ${selected ? "visible z-10" : keepRendered ? "opacity-0 z-0 pointer-events-none" : "invisible z-0 pointer-events-none"} ${splitGroup && column === 2 ? "border-l border-line" : ""}`}
+          style={{ gridColumn: column, gridRow: 2, contentVisibility: selected || keepRendered ? "visible" : "hidden" }}
         >
           {fileStates[path]?.missing ? (
             <section aria-label={`${fileName(path)} unavailable`} className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 bg-white px-6 text-center dark:bg-[#19191b]">
@@ -672,6 +702,17 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           ) : commitDiff ? <CommitDiff {...commitDiff} theme={theme} editorSettings={settings.editor} /> : workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
             <PreviewBrowser
               active={active && currentPath === path}
+              agentLabel={browserTab?.agentLabel || ""}
+              agentPartition={browserTab?.agentPartition || ""}
+              agentSessionId={browserTab?.agentSessionId || ""}
+              canShareWithRem={canShareBrowserTab}
+              discardAfterMs={browserTab && !browserTab.agentSessionId ? discardAfterMs : 0}
+              openTabs={browserTab ? openBrowserTabList : []}
+              savedHistory={browserTab?.history || null}
+              onActivateTab={onActivePathChange}
+              onAskRem={onAskRemAboutPage}
+              onReopenClosedTab={onReopenClosedBrowserTab}
+              onShareWithRem={onShareBrowserTab}
               applicationKeybindings={settings.keybindings}
               clientId={browserTab ? path : `html:${path}`}
               dragActive={Boolean(draggedPath)}
@@ -793,6 +834,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     });
   }
 
+  // Rem's approval requests in tabs the user is not looking at.
+  const hiddenApproval = pendingRemApprovals(browserViewStates)
+    .find((item) => openPaths.includes(item.path) && !(active && [primaryPath, splitPath].includes(item.path))) || null;
   return (
     <section
       ref={workspaceRef}
@@ -805,6 +849,13 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     >
       {fileDropActive ? <div aria-label="Open dropped files" className="absolute inset-0 z-50 grid place-items-center border-2 border-brand bg-canvas/90 text-sm text-ink">Drop files to open new tabs</div> : null}
       {fileDropError ? <div role="alert" className="flex items-center gap-2 border-b border-line px-3 py-2 text-xs text-red-700"><span className="flex-1">{fileDropError}</span><button type="button" aria-label="Dismiss file drop error" onClick={() => setFileDropError("")}><X size={13} /></button></div> : null}
+      {hiddenApproval ? (
+        <div role="alert" className="absolute bottom-3 right-3 z-40 flex max-w-sm items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-ink shadow-lg">
+          <Bot aria-hidden="true" className="shrink-0 text-amber-800" size={14} />
+          <span className="min-w-0 flex-1">{hiddenApproval.agentLabel} needs your approval to {hiddenApproval.label || "continue"} in “{codeTabLabel(hiddenApproval.path, browserViewTabMetadata(browserTabs[hiddenApproval.path], browserViewStates[hiddenApproval.path]))}”.</span>
+          <button className="rounded-md bg-brand px-2.5 py-1 font-semibold text-white hover:opacity-90" type="button" onClick={() => onActivePathChange?.(hiddenApproval.path)}>Review</button>
+        </div>
+      ) : null}
       <div
         className="relative grid min-h-0 flex-1"
         style={{

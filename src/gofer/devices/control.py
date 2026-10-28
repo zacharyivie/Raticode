@@ -2,7 +2,8 @@
 
 The runtime lives in the backend, never in the renderer. Real LAN networking
 requires an explicit experimental opt-in. Independent review remains required
-for production release. Pairing never sends secrets to a public relay.
+for production release. Devices connect only over the local network; there is no
+internet relay.
 """
 
 from __future__ import annotations
@@ -60,10 +61,10 @@ class DeviceControl:
         self.listener: DeviceListener | None = None
         self.application: DeviceApplication | None = None
         self.chat_config: tuple[Any, ...] | None = None
+        self.services: dict[str, Any] = {}
         self.chat_source: Any = None
         self.bridge: Any = None
         self.remote_tasks: dict[tuple[str, str], concurrent.futures.Future[str]] = {}
-        self.relay_service: Any = None
         self.port: int | None = None
         self.error: str | None = None
         self.last_fleet_refresh = 0.0
@@ -141,13 +142,9 @@ class DeviceControl:
                 if ipaddress.ip_address(self.host).is_loopback
                 else {"host": self.host, "port": port}
             )
+            self._apply_services()
             self._start_chat()
             asyncio.run_coroutine_threadsafe(self._remote_loop(), self.loop)
-            if self.experimental_network:
-                from gofer.devices.relay_service import RelayService
-
-                self.relay_service = RelayService(registry, invitations, application)
-                asyncio.run_coroutine_threadsafe(self.relay_service.run(), self.loop)
             self.error = None
 
     def status(self) -> dict[str, Any]:
@@ -167,7 +164,6 @@ class DeviceControl:
                 "lan_available": bool(
                     self.listener and not ipaddress.ip_address(self.host).is_loopback
                 ),
-                "relay_enabled": self.relay_service is not None,
                 "notice": (
                     "Independent security review is pending. Experimental encrypted device "
                     "networking is enabled. Remote Rem requires a local thread grant."
@@ -183,9 +179,14 @@ class DeviceControl:
                 "dispatch_error": getattr(self.bridge, "error", None),
                 "rem_ready": self.bridge is not None and not getattr(self.bridge, "error", None),
                 "lan_host": self.host if self.listener else None,
-                "relay_error": getattr(self.relay_service, "error", None),
                 "grants": self.application.grants() if self.application else [],
                 "workspace_peers": self.application.workspace.enabled() if self.application else [],
+                "remote_control_peers": self.application.remote.enabled()
+                if self.application
+                else [],
+                "desktop_control_peers": self.application.desktop.enabled()
+                if self.application
+                else [],
                 "outbound": outbound,
                 "invitation_available": bool(self.invitations and self.invitations.current),
             }
@@ -284,6 +285,23 @@ class DeviceControl:
                     raise PairingError("invalid_sharing_choice")
                 self.application.workspace.enable(str(body.get("device_id", "")), body["enabled"])
                 return self.status()
+            if action == "remote_control":
+                assert self.application is not None
+                if not isinstance(body.get("enabled"), bool):
+                    raise PairingError("invalid_remote_control_choice")
+                self.application.remote.enable(str(body.get("device_id", "")), body["enabled"])
+                return self.status()
+            if action == "desktop_control":
+                assert self.application is not None
+                if not isinstance(body.get("enabled"), bool):
+                    raise PairingError("invalid_desktop_control_choice")
+                self.application.desktop.enable(str(body.get("device_id", "")), body["enabled"])
+                return self.status()
+            if action == "settings_exchange":
+                assert self.application is not None
+                return self.application.desktop.exchange_settings(
+                    body.get("settings"), body.get("applied")
+                )
             if action == "workspace_remove":
                 assert self.application is not None
                 self.application.workspace.remove(
@@ -336,14 +354,12 @@ class DeviceControl:
             if action == "invite":
                 if not self.experimental_network:
                     raise PairingError("experimental_network_opt_in_required")
+                # Phones connect only over the local network, so a QR must carry its address.
+                if self.port is None or ipaddress.ip_address(self.host).is_loopback:
+                    raise PairingError("local_network_address_required")
                 result = self.invitations.create(
                     str(body.get("name", "Raticode Desktop")),
-                    str(body.get("relay", "https://ntfy.sh")),
-                    (
-                        None
-                        if ipaddress.ip_address(self.host).is_loopback
-                        else {"host": self.host, "port": self.port}
-                    ),
+                    {"host": self.host, "port": self.port},
                 )
                 import segno
 
@@ -433,6 +449,48 @@ class DeviceControl:
                         )
             await asyncio.sleep(30)
 
+    def attach_services(
+        self,
+        *,
+        providers: Any = None,
+        swarms: Any = None,
+        data_dir: Path | None = None,
+        decide_workflow: Any = None,
+    ) -> None:
+        """Backend services the phone uses directly, without the desktop window."""
+        with self.lock:
+            self.services.update(
+                {
+                    "providers": providers,
+                    "swarms": swarms,
+                    "data_dir": data_dir,
+                    "decide_workflow": decide_workflow,
+                }
+            )
+            self._apply_services()
+
+    def _apply_services(self) -> None:
+        if self.application is None or not self.services:
+            return
+        self.application.workspace.provider_source = self.services.get("providers")
+        self.application.workspace.refresh_providers()
+        remote = self.application.remote
+        remote.swarms = self.services.get("swarms")
+        remote.data_dir = self.services.get("data_dir")
+        remote.decide_workflow = self.services.get("decide_workflow")
+        desktop = self.application.desktop
+        desktop.rem = self.services.get("rem")
+        desktop.organizations = self.services.get("organizations")
+        desktop.usage = self.services.get("usage")
+
+    def attach_desktop(
+        self, *, rem: Any = None, organizations: Any = None, usage: Any = None
+    ) -> None:
+        """Rem, organizations and usage for phones allowed to use Raticode remotely."""
+        with self.lock:
+            self.services.update(rem=rem, organizations=organizations, usage=usage)
+            self._apply_services()
+
     def attach_chat(
         self,
         jobs: Any,
@@ -468,8 +526,6 @@ class DeviceControl:
         with self.lock:
             if self.bridge is not None:
                 self.bridge.close()
-            if self.relay_service is not None:
-                self.relay_service.closed = True
             if self.outbound is not None:
                 self.outbound.cancel()
             if self.listener is not None:

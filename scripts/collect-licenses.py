@@ -189,6 +189,14 @@ def collect(output: Path) -> None:
                 notices.extend(
                     p for p in (package / folder).rglob("*") if p.is_file() and notice_file(p)
                 )
+        if manifest["name"] == "electron" and not any(
+            p.name == "LICENSES.chromium.html" for p in notices
+        ):
+            # Electron 42+ downloads its runtime on first use, not during npm ci.
+            raise ValueError(
+                "Electron's Chromium notices are missing; "
+                "run `node node_modules/electron/install.js` in frontend first"
+            )
         for index, source in enumerate(notices):
             shutil.copy2(source, target / f"{index}-{source.name}")
         if (

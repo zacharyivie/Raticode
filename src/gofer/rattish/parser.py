@@ -25,6 +25,8 @@ from gofer.rattish.lexer import (
 AST_SCHEMA_ID = "urn:raticode:rattish:schema:ast-1.json"
 
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*\Z")
+_IDENTIFIER_SEGMENT = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[0-9]+")
+_JSON_MEMBER_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*|[0-9]+")
 _INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
 _NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z")
 _DURATION = re.compile(r"([1-9][0-9]*)(ms|s|m|h|d)\Z", re.IGNORECASE)
@@ -1150,8 +1152,10 @@ class RattishParser:
         while cursor < len(text):
             if text[cursor] == ".":
                 segment_start = cursor + 1
+                # JSON member segments (after output., error., input. ...) may use underscores,
+                # matching built-in output names such as exit_code and file_content.
                 segment_match = re.match(
-                    r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[0-9]+",
+                    _JSON_MEMBER_SEGMENT if json_mode else _IDENTIFIER_SEGMENT,
                     text[segment_start:],
                 )
                 if segment_match is None:

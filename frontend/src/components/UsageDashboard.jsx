@@ -8,6 +8,8 @@ import {
 import "./UsageDashboard.css";
 import UsageCredentials from "./UsageCredentials.jsx";
 
+const USAGE_POLL_MS = 60_000;
+
 export default function UsageDashboard() {
   const [overview, setOverview] = useState(null);
   const [days, setDays] = useState(30);
@@ -18,12 +20,14 @@ export default function UsageDashboard() {
   const request = useRef(null);
   const tabs = useRef([]);
   const id = useId();
-  const load = useCallback(async (refresh = false, checkAccounts = false) => {
+  const load = useCallback(async (refresh = false, checkAccounts = false, quiet = false) => {
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
-    setLoading(true);
-    setError("");
+    if (!quiet) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const read = async force => {
         const response = await fetch(apiUrl(`/usage/${force ? "refresh" : "overview"}?days=${days}`), {
@@ -47,9 +51,9 @@ export default function UsageDashboard() {
       }
       if (data.refreshing && !controller.signal.aborted) setError("Provider usage is still updating. Try refreshing again shortly.");
     } catch (failure) {
-      if (!controller.signal.aborted) setError(failure.message || "Could not load usage. Try refreshing again.");
+      if (!controller.signal.aborted && !quiet) setError(failure.message || "Could not load usage. Try refreshing again.");
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted && !quiet) setLoading(false);
     }
   }, [days]);
   useEffect(() => {
@@ -61,6 +65,12 @@ export default function UsageDashboard() {
       window.removeEventListener("raticode:providers-changed", refresh);
     };
   }, [load]);
+  useEffect(() => {
+    if (loading) return undefined;
+    // The backend refreshes allowances in the background; keep an open page current.
+    const timer = setInterval(() => { if (!document.hidden) void load(false, false, true); }, USAGE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [load, loading]);
 
   const accounts = (overview?.accounts || []).filter(account => group === "all" || (group === "api") === account.provider?.endsWith("_api"));
   function tabKey(event, index) {

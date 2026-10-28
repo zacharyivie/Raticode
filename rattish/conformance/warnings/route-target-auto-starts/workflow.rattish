@@ -1,0 +1,20 @@
+Rattish: 1
+
+Workflow:
+  name: Route target auto starts
+
+Node decide:
+  type: bash-command
+  command: echo fast
+  to:
+    - fast when node.decide.output.stdout == "fast"
+    - slow otherwise
+
+Node fast:
+  type: bash-command
+  command: echo fast
+
+Node slow:
+  type: bash-command
+  command: echo slow
+  needs: decide

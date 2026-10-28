@@ -1,8 +1,8 @@
 # Dependency and release verification
 
-The security refresh upgrades Electron to 41.10.7, React Router to 7.18.3,
-Vite to 7.3.6 with its React plugin 5.2.0, pydantic-settings to 2.15.0, and
-setuptools to 84.0.0. The lockfiles also contain patched transitive packages.
+The security refresh upgrades Electron to 45.1.0 (Chromium 156), React Router
+to 7.18.3, Vite to 7.3.6 with its React plugin 5.2.0, pydantic-settings to
+2.15.0, and setuptools to 84.0.0. The lockfiles also contain patched transitive packages.
 React 18 and the studio's existing routes and appearance are unchanged.
 
 The full npm audit includes Electron even though npm classifies it as a development

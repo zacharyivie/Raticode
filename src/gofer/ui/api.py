@@ -104,6 +104,7 @@ from gofer.prompts.manager import PromptManager
 from gofer.rattish.artifacts import RattishArtifactError, compile_rattish_file
 from gofer.rattish.bundles import (
     RattishBundleError,
+    duplicate_rattish_workspace,
     export_rattish_bundle,
     import_rattish_bundle,
     preview_rattish_bundle,
@@ -111,12 +112,16 @@ from gofer.rattish.bundles import (
 from gofer.rattish.diagnostics import RattishError
 from gofer.rattish.editor import (
     DEFAULT_RATTISH_EDITOR_SERVICE,
+    MAX_EDITOR_SOURCE_BYTES,
+    RattishEditorError,
 )
+from gofer.rattish.parser import parse_rattish_recovering
 from gofer.rattish.preflight import run_preflight
 from gofer.rattish.run_service import (
     RattishRunArtifactError,
     RattishRunResult,
     is_rattish_run_active,
+    new_run_id,
     run_rattish_file,
 )
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
@@ -126,7 +131,9 @@ from gofer.rattish.workspaces import (
     create_registered_workflow,
     delete_registered_workflow,
     discover_registered_workflows,
+    find_registered_workflow,
     list_registered_workflows,
+    update_registered_workflow_name,
 )
 from gofer.subscriptions.acp_providers import AcpSubscription
 from gofer.subscriptions.antigravity import AntigravitySubscription
@@ -488,6 +495,7 @@ def _registered_rattish_payload(
 ) -> dict[str, Any]:
     status = "Ready"
     validation_error = None
+    name = workflow.name
     try:
         artifact = compile_rattish_file(
             workflow.entrypoint,
@@ -497,6 +505,11 @@ def _registered_rattish_payload(
         node_count = len(artifact.ir["nodes"])
         edge_count = sum(len(node["routes"]) for node in artifact.ir["nodes"])
         inputs = _rattish_workflow_inputs(artifact.ir["workflow"]["inputs"])
+        # The registry name is only refreshed when Studio saves the source, so
+        # files changed elsewhere must report the name they declare.
+        declared_name = artifact.ir["workflow"].get("name")
+        if isinstance(declared_name, str) and declared_name.strip():
+            name = declared_name.strip()
     except (RattishArtifactError, RattishError, OSError) as exc:
         status = "Error"
         filesystem_error = exc if isinstance(exc, OSError) else exc.__cause__
@@ -508,7 +521,8 @@ def _registered_rattish_payload(
             )
             validation_error = f"Unable to compile workflow: {reason}. Retry on refresh."
         else:
-            validation_error = str(exc)
+            validation_error = _rattish_validation_summary(exc)
+            name = _declared_rattish_name(workflow.entrypoint) or name
         node_count = 0
         edge_count = 0
         inputs = {}
@@ -518,7 +532,7 @@ def _registered_rattish_payload(
         updated_at = "Unknown"
     return {
         "id": workflow.workflow_id,
-        "name": workflow.name,
+        "name": name,
         "description": f"{node_count} Rattish nodes, {edge_count} routes.",
         "status": status,
         "updatedAt": updated_at,
@@ -539,6 +553,35 @@ def _registered_rattish_payload(
         "invalid": validation_error is not None,
         "validationError": validation_error,
     }
+
+
+def _declared_rattish_name(entrypoint: Path) -> str | None:
+    """Read the declared name from source that parses but does not compile."""
+    try:
+        if entrypoint.stat().st_size > MAX_EDITOR_SOURCE_BYTES:
+            return None
+        source = entrypoint.read_text(encoding="utf-8")
+        ast = parse_rattish_recovering(source, source_id=entrypoint.name).ast
+    except (OSError, UnicodeError, RattishError):
+        return None
+    if ast is None:
+        return None
+    for entry in ast["workflow"]["entries"]:
+        if entry["kind"] == "field" and entry["name"]["canonical"] == "name":
+            value = entry["value"].get("value")
+            return value.strip() if isinstance(value, str) and value.strip() else None
+    return None
+
+
+def _rattish_validation_summary(exc: BaseException) -> str:
+    """Describe the first compile error instead of only counting errors."""
+    diagnostics = getattr(exc, "diagnostics", None) or getattr(exc.__cause__, "diagnostics", None)
+    if not diagnostics:
+        return str(exc)
+    errors = [item for item in diagnostics if item.severity == "error"] or list(diagnostics)
+    first = errors[0]
+    more = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
+    return f"Line {first.span.start.line}: {first.message}{more}"
 
 
 def health_payload(
@@ -1204,7 +1247,11 @@ def rename_workflow_payload(
     base = _data_dir(data_dir)
     path = _workflow_toml_path(workflow_id, base, error_cls=WorkflowUpdateError)
     if not path.exists():
-        raise WorkflowUpdateError(f"Workflow '{workflow_id}' not found")
+        registered = _registered_workflow_or_none(workflow_id, base)
+        if registered is None:
+            raise WorkflowUpdateError(f"Workflow '{workflow_id}' not found")
+        _set_rattish_workflow_name(registered.workflow_id, workflow_name, base)
+        return _registered_rattish_payload(_find_registered(registered.workflow_id, base), base)
 
     workflow = AgenticWorkflow.from_file(path)
     workflow.config.name = workflow_name
@@ -1267,7 +1314,10 @@ def duplicate_workflow_payload(
     base = _data_dir(data_dir)
     path = _workflow_toml_path(workflow_id, base, error_cls=WorkflowUpdateError)
     if not path.exists():
-        raise WorkflowUpdateError(f"Workflow '{workflow_id}' not found")
+        registered = _registered_workflow_or_none(workflow_id, base)
+        if registered is None:
+            raise WorkflowUpdateError(f"Workflow '{workflow_id}' not found")
+        return _duplicate_registered_rattish_workflow(registered, name, base)
 
     source = AgenticWorkflow.from_file(path)
     if name and name.strip():
@@ -1289,6 +1339,77 @@ def duplicate_workflow_payload(
     payload = workflow_to_payload(duplicated, target_path)
     _upsert_workflow_index(base, target_path, payload)
     return payload
+
+
+def _registered_workflow_or_none(workflow_id: str, base: Path) -> RegisteredWorkflow | None:
+    try:
+        return find_registered_workflow(workflow_id, registry_dir=base)
+    except RattishWorkspaceError:
+        return None
+
+
+def _find_registered(workflow_id: str, base: Path) -> RegisteredWorkflow:
+    try:
+        return find_registered_workflow(workflow_id, registry_dir=base)
+    except RattishWorkspaceError as exc:
+        raise WorkflowUpdateError(str(exc)) from exc
+
+
+def _set_rattish_workflow_name(workflow_id: str, name: str, base: Path) -> None:
+    """Rename by editing the declared name, which is what the workflow reports."""
+    service = DEFAULT_RATTISH_EDITOR_SERVICE
+    try:
+        document = service.open_document(workflow_id, data_dir=base)
+        service.mutate_document(
+            workflow_id,
+            [{"kind": "set_field", "target": "workflow", "field": "name", "value": name}],
+            str(document["savedRevision"]),
+            data_dir=base,
+        )
+        # Invalid workflows report the registry name, so keep it in step too.
+        update_registered_workflow_name(workflow_id, name, registry_dir=base)
+    except (RattishEditorError, RattishWorkspaceError, OSError) as exc:
+        raise WorkflowUpdateError(f"Unable to rename workflow: {exc}") from exc
+
+
+def _duplicate_registered_rattish_workflow(
+    registered: RegisteredWorkflow,
+    name: str | None,
+    base: Path,
+) -> dict[str, Any]:
+    source_name = str(_registered_rattish_payload(registered, base)["name"])
+    if name and name.strip():
+        candidate_name = name.strip()
+    else:
+        taken = {
+            str(workflow.name).lower()
+            for workflow in list_registered_workflows(registry_dir=base)
+            if workflow.project_root == registered.project_root
+        }
+        candidate_name = f"{source_name} copy"
+        suffix = 2
+        while candidate_name.lower() in taken:
+            candidate_name = f"{source_name} copy {suffix}"
+            suffix += 1
+    try:
+        duplicated = duplicate_rattish_workspace(
+            registered.workflow_id,
+            candidate_name,
+            registry_dir=base,
+        )
+    except RattishError as exc:
+        raise WorkflowCreateError(
+            f"Fix this workflow before duplicating it. {_rattish_validation_summary(exc)}"
+        ) from exc
+    except (RattishBundleError, RattishWorkspaceError) as exc:
+        raise WorkflowCreateError(str(exc)) from exc
+    try:
+        _set_rattish_workflow_name(duplicated.workflow_id, candidate_name, base)
+    except WorkflowUpdateError:
+        # Source that cannot be parsed keeps its text; the registry name still
+        # distinguishes the copy until the source is fixed.
+        pass
+    return _registered_rattish_payload(_find_registered(duplicated.workflow_id, base), base)
 
 
 def delete_workflow_chat_payload(
@@ -1504,7 +1625,7 @@ async def run_workflow_payload(
                 trigger_context,
                 expected_revision,
             )
-        run_id = uuid.uuid4().hex
+        run_id = new_run_id()
         cancel_event = threading.Event()
         active_key = (*_run_key(base, workflow_id), run_id)
         with _active_run_lock:
@@ -1524,7 +1645,7 @@ async def run_workflow_payload(
         finally:
             with _active_run_lock:
                 _active_rattish_runs.pop(active_key, None)
-        return _rattish_run_payload(rattish_result)
+        return _rattish_run_payload(rattish_result, include_log_text=False)
     path = _workflow_toml_path(workflow_id, base, error_cls=WorkflowRunError)
     if not path.exists():
         raise WorkflowRunError(f"Workflow '{workflow_id}' not found")
@@ -1665,6 +1786,11 @@ async def resume_workflow_payload(
         raise WorkflowRunError("fromNode and onlyNode cannot be used together")
     if not run_id:
         raise WorkflowRunError("runId is required")
+    if _registered_rattish_workflow(workflow_id, _data_dir(data_dir)) is not None:
+        # Running the workflow again here would ignore the requested run and node.
+        raise WorkflowRunError(
+            "Resuming Rattish workflow runs is not supported yet. Start a new run instead."
+        )
     return await run_workflow_payload(
         workflow_id,
         data_dir,
@@ -1915,7 +2041,7 @@ async def _start_rattish_background_run(
     trigger_context: dict[str, Any] | None,
     expected_revision: str | None,
 ) -> dict[str, Any]:
-    run_id = uuid.uuid4().hex
+    run_id = new_run_id()
     cancel_event = threading.Event()
     acknowledged = threading.Event()
     result: dict[str, Any] = {}
@@ -2107,7 +2233,9 @@ def _approval_request_payload(request: ApprovalRequest) -> dict[str, Any]:
         "runId": request.run_id,
         "nodeId": request.node_id,
         "message": request.message,
-        "status": "decided" if decision is not None else "pending",
+        "subject": request.subject_manifest_id,
+        "status": request.status,
+        "cancelledReason": request.cancelled_reason,
         "approvers": request.approvers,
         "requestedAt": request.requested_at,
         "timeoutSeconds": request.timeout_seconds,
@@ -2126,6 +2254,8 @@ def list_workflow_approvals_payload(
     base = _data_dir(data_dir)
     _validate_storage_workflow_id(workflow_id, WorkflowApprovalError)
     store = ApprovalStore(base)
+    for pending in store.list_pending(workflow_id):
+        _cancel_approval_for_finished_rattish_run(base, store, pending)
     all_requests = store.list_requests(workflow_id)
     for request in all_requests:
         if _is_timeout_decision(request):
@@ -2133,7 +2263,7 @@ def list_workflow_approvals_payload(
     requests = (
         all_requests
         if include_decided
-        else [request for request in all_requests if request.decision is None]
+        else [request for request in all_requests if request.status == "pending"]
     )
     return {
         "workflowId": workflow_id,
@@ -2159,6 +2289,7 @@ def decide_workflow_approval_payload(
     request = store.get(workflow_id, run_id, node_id)
     if request is None or request.decision is not None:
         raise WorkflowApprovalError("Pending approval not found")
+    _cancel_approval_for_finished_rattish_run(base, store, request)
     try:
         decided = store.decide(
             workflow_id,
@@ -2177,6 +2308,27 @@ def decide_workflow_approval_payload(
         "approval": _approval_request_payload(persisted_decision),
         "resumed": resumed,
     }
+
+
+def _cancel_approval_for_finished_rattish_run(
+    base: Path, store: ApprovalStore, request: ApprovalRequest
+) -> bool:
+    """Close a pending gate whose Rattish run already ended, e.g. after a crash."""
+    if request.status != "pending":
+        return False
+    try:
+        path = _rattish_run_artifact_path(base, request.workflow_id, request.run_id)
+        status = _read_rattish_run_artifact(path).get("status")
+    except WorkflowLogError:
+        return False
+    if status == "running":
+        return False
+    return store.cancel(
+        request.workflow_id,
+        request.run_id,
+        request.node_id,
+        f"The workflow run ended ({status}).",
+    )
 
 
 def _approval_waiter_is_live(request: ApprovalRequest) -> bool:
@@ -2880,11 +3032,14 @@ def _rattish_ui_run_status(document: Mapping[str, Any]) -> str:
     return str(status) if status in {"running", "stopped"} else "error"
 
 
-def _rattish_run_summary(document: Mapping[str, Any], path: Path) -> dict[str, Any]:
+def _rattish_run_summary(
+    document: Mapping[str, Any], path: Path, *, awaiting_approval: bool = False
+) -> dict[str, Any]:
     return {
         "id": str(document["run_id"]),
         "logPath": str(path),
         "status": _rattish_ui_run_status(document),
+        "awaitingApproval": awaiting_approval and document["status"] == "running",
         "startedAt": document.get("started_at"),
         "finishedAt": None if document["status"] == "running" else document.get("finished_at"),
         "durationSeconds": float(document.get("duration_ms", 0)) / 1000,
@@ -3258,8 +3413,18 @@ def list_workflow_run_logs_payload(
     base = _data_dir(data_dir)
     rattish_paths = _rattish_run_artifact_paths(base, workflow_id)
     if rattish_paths:
+        documents = [(_read_rattish_run_artifact(path), path) for path in rattish_paths]
+        # A run blocked on an approval gate is still running, but the UI says why it waits.
+        awaiting_ids = (
+            {request.run_id for request in ApprovalStore(base).list_pending(workflow_id)}
+            if any(document["status"] == "running" for document, _ in documents)
+            else set()
+        )
         runs = [
-            _rattish_run_summary(_read_rattish_run_artifact(path), path) for path in rattish_paths
+            _rattish_run_summary(
+                document, path, awaiting_approval=str(document["run_id"]) in awaiting_ids
+            )
+            for document, path in documents
         ]
         if status:
             runs = [run for run in runs if run["status"] == status]
@@ -4954,6 +5119,8 @@ def _rattish_plan_payload(
             if diagnostic.get("details", {}).get("secret")
         }
     )
+    bindings_by_node = {node["id"]: _rattish_plan_bindings(node) for node in nodes}
+    nodes_by_id = {node["id"]: node for node in nodes}
     return {
         "kind": "rattish",
         "runnable": bool(nodes) and deployment.ready,
@@ -4962,11 +5129,11 @@ def _rattish_plan_payload(
         "destructiveActions": destructive_actions,
         "providerRequirements": providers,
         "requiredSecrets": required_secrets,
-        "bindings": [],
+        "bindings": [binding for node in nodes for binding in bindings_by_node[node["id"]]],
         "triggerContext": trigger_context or {},
         "generations": [
             {
-                "index": 0,
+                "index": index,
                 "nodes": [
                     {
                         "id": node["id"],
@@ -4975,16 +5142,102 @@ def _rattish_plan_payload(
                         "detail": _rattish_node_detail(node),
                         "sideEffects": [effect.replace("_", " ") for effect in node["effects"]],
                         "workingDir": node["configuration"].get("working_dir"),
-                        "bindings": [],
+                        "bindings": bindings_by_node[node["id"]],
                     }
-                    for node in nodes
+                    for node in (nodes_by_id[node_id] for node_id in generation)
                 ],
             }
+            for index, generation in enumerate(_rattish_plan_generations(nodes))
         ],
         "diagnostics": diagnostics,
         "inputs": _rattish_workflow_inputs(compiled.ir["workflow"]["inputs"]),
         "compilationFingerprint": compiled.ir["source"]["compilation_fingerprint"],
     }
+
+
+def _rattish_plan_generations(nodes: list[dict[str, Any]]) -> list[list[str]]:
+    """Order nodes by when they can first run: start nodes, then routes and needs."""
+    predecessors = {
+        node["id"]: {
+            *node["readiness"]["needs"],
+            *node["readiness"]["incoming_route_sources"],
+        }
+        - {node["id"]}
+        for node in nodes
+    }
+    level: dict[str, int] = {node["id"]: 0 for node in nodes if not node["readiness"]["needs"]}
+    while len(level) < len(nodes):
+        pending = [node_id for node_id in predecessors if node_id not in level]
+        ready = [node_id for node_id in pending if predecessors[node_id] <= level.keys()]
+        if not ready:
+            # Cycles have no complete order, so place them after a predecessor that runs.
+            ready = [node_id for node_id in pending if predecessors[node_id] & level.keys()]
+        if not ready:
+            # Nothing routes to these nodes, so they never run. List them last.
+            last = max(level.values(), default=-1) + 1
+            level.update({node_id: last for node_id in pending})
+            break
+        level.update(
+            {
+                node_id: 1 + max(level[item] for item in predecessors[node_id] if item in level)
+                for node_id in ready
+            }
+        )
+    generations: list[list[str]] = [[] for _ in range(max(level.values(), default=-1) + 1)]
+    for node in nodes:
+        generations[level[node["id"]]].append(node["id"])
+    return [generation for generation in generations if generation]
+
+
+def _rattish_plan_bindings(node: Mapping[str, Any]) -> list[dict[str, Any]]:
+    bindings = []
+    for binding in node["bindings"]:
+        source = binding["source"]
+        reference = source.get("reference") if source["kind"] == "reference" else None
+        if reference is not None:
+            parts = [reference["root"], reference["symbol"]]
+            if reference.get("channel"):
+                parts.append(reference["channel"])
+            expression = ".".join(str(part) for part in parts if part is not None) + "".join(
+                f".{item['value']}" if item["kind"] == "member" else f"[{item['value']}]"
+                for item in reference["path"]
+            )
+            producer = reference["symbol"] if reference["root"] == "node" else reference["root"]
+        elif source["kind"] == "literal":
+            expression = json.dumps(source["value"], ensure_ascii=False, default=str)
+            producer = "literal"
+        else:
+            expression = "expression"
+            producer = "expression"
+        delivery = binding.get("delivery") or {}
+        bindings.append(
+            {
+                "id": f"{node['id']}:{binding['name']}",
+                "destinationNode": node["id"],
+                "destinationField": binding["name"],
+                "expression": expression,
+                "producer": producer,
+                "sourceType": _rattish_schema_type(binding.get("source_schema")),
+                "destinationType": _rattish_schema_type(binding.get("destination_schema")),
+                "status": "valid",
+                "resolutionPhase": (
+                    "runtime" if reference is not None and reference["root"] == "node" else "start"
+                ),
+                "coercion": "string" if delivery.get("kind") == "environment" else None,
+                "readiness": None,
+            }
+        )
+    return bindings
+
+
+def _rattish_schema_type(schema: Any) -> str:
+    if isinstance(schema, Mapping):
+        schema_type = schema.get("type")
+        if isinstance(schema_type, list):
+            return " | ".join(str(item) for item in schema_type)
+        if schema_type:
+            return str(schema_type)
+    return "any"
 
 
 def _rattish_node_detail(node: dict[str, Any]) -> str:
@@ -5006,8 +5259,14 @@ def _rattish_node_detail(node: dict[str, Any]) -> str:
     return str(node["runtime_handler"])
 
 
-def _rattish_run_payload(result: RattishRunResult) -> dict[str, Any]:
-    return _rattish_artifact_ui_payload(result.document, result.path)
+def _rattish_run_payload(
+    result: RattishRunResult, *, include_log_text: bool = True
+) -> dict[str, Any]:
+    payload = _rattish_artifact_ui_payload(result.document, result.path)
+    if not include_log_text:
+        # logText repeats rattishRun as indented text; clients can read logPath instead.
+        payload.pop("logText")
+    return payload
 
 
 def _rattish_run_graph_snapshot(document: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -5103,6 +5362,20 @@ def _rattish_run_graph_snapshot(document: Mapping[str, Any]) -> dict[str, Any] |
     }
 
 
+_RATTISH_STATUS_SEVERITY = {"success": 0, "allowed_failure": 1, "error": 2}
+
+
+def _rattish_activation_summary(counts: Mapping[str, int]) -> str | None:
+    total = counts["total"]
+    if total < 2:
+        return None
+    if counts["error"]:
+        return f"{counts['error']} of {total} failed"
+    if counts["allowed_failure"]:
+        return f"{counts['allowed_failure']} of {total} failed (allowed)"
+    return f"{total} runs succeeded"
+
+
 def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dict[str, Any]:
     run_events = _rattish_ui_events(document)
     completed_events = {
@@ -5125,24 +5398,60 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
         completed_event = completed_events.get((node_id, record["run_number"]), {})
         output = record["output"]
         error = record["error"]
-        success = record["outcome"] != "failure"
+        success = record["outcome"] == "success"
+        record_status = {"success": "success", "allowed_failure": "allowed_failure"}.get(
+            record["outcome"], "error"
+        )
         output_text = json.dumps(output, ensure_ascii=False, default=str)
         exit_code = output.get("exit_code") if isinstance(output, Mapping) else None
         stdout = output.get("stdout") if isinstance(output, Mapping) else None
         stderr = output.get("stderr") if isinstance(output, Mapping) else None
         error_message = error.get("message") if isinstance(error, Mapping) else None
+        if (
+            not success
+            and exit_code
+            and (
+                not error_message
+                or re.fullmatch(r"(?:Command|Script) exited with status \d+\.", error_message)
+            )
+        ):
+            from gofer.rattish.runtime import command_failure_message
+
+            error_message = command_failure_message(
+                "Command", exit_code, stdout or "", stderr or ""
+            )
+            error = {**(error or {}), "message": error_message}
+        if not success and error_message:
+            # Timeline rows otherwise read only "Activation N failure."
+            for event in run_events:
+                if (
+                    event.get("nodeId") == node_id
+                    and event.get("type") == "node_completed"
+                    and event.get("runNumber") == record["run_number"]
+                ):
+                    event["message"] = error_message
+
         node_outputs[node_id] = {
             "success": success,
+            "outcome": record["outcome"],
             "output": output_text,
             "data": output,
             "exitCode": exit_code,
             "error": error_message,
         }
         duration_ms = record["duration_ms"]
-        previous_attempts = run_nodes.get(node_id, {}).get("attempts", [])
+        previous = run_nodes.get(node_id, {})
+        previous_attempts = previous.get("attempts", [])
+        counts = dict(
+            previous.get("activationCounts")
+            or {"total": 0, "success": 0, "allowed_failure": 0, "error": 0}
+        )
+        counts["total"] += 1
+        counts[record_status] += 1
         run_nodes[node_id] = {
             "nodeId": node_id,
-            "status": "error" if not success else "success",
+            "status": record_status,
+            "outcome": record["outcome"],
             "startedAt": record["started_at"],
             "finishedAt": record["finished_at"],
             "durationMs": duration_ms,
@@ -5168,7 +5477,17 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
                 },
             ],
             "data": {"message": error_message},
+            "activationCounts": counts,
+            "activationSummary": _rattish_activation_summary(counts),
         }
+        if (
+            _RATTISH_STATUS_SEVERITY.get(str(previous.get("status")), -1)
+            > _RATTISH_STATUS_SEVERITY[record_status]
+        ):
+            # A node card summarizes every activation, so a later success must not hide
+            # an earlier failure.
+            for field_name in ("status", "outcome", "exitCode", "error", "message", "data"):
+                run_nodes[node_id][field_name] = previous[field_name]
     active: dict[tuple[str, int], dict[str, Any]] = {}
     for event in run_events:
         node_id = event["nodeId"]
@@ -5216,7 +5535,7 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
     }
 
 
-def _rattish_event_message(event: Mapping[str, Any]) -> str:
+def _rattish_event_message(event: Mapping[str, Any], error_message: str | None = None) -> str:
     event_type = str(event.get("type") or "event")
     if event.get("message"):
         return str(event["message"])
@@ -5229,8 +5548,22 @@ def _rattish_event_message(event: Mapping[str, Any]) -> str:
     if event_type == "node_completed":
         return f"Activation {event.get('run_number')} {event.get('outcome')}."
     if event_type == "workflow_completed":
-        return f"Workflow {event.get('status')}."
+        status = str(event.get("status"))
+        label = _RATTISH_RUN_STATUS_LABELS.get(status, status)
+        if status != "passed" and error_message:
+            return f"Workflow {label}: {error_message}"
+        return f"Workflow {label}."
     return "Workflow started."
+
+
+_RATTISH_RUN_STATUS_LABELS = {
+    "passed": "passed",
+    "failed": "failed",
+    "stopped": "stopped",
+    "preflight_failed": "failed preflight",
+    "invalid_inputs": "rejected its inputs",
+    "interrupted": "was interrupted",
+}
 
 
 def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -5239,6 +5572,10 @@ def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     }
     result: list[dict[str, Any]] = []
     attempts: dict[tuple[str | None, int | None], int] = {}
+    run_error = document.get("error")
+    run_error_message = (
+        str(run_error.get("message") or "") if isinstance(run_error, Mapping) else ""
+    ) or None
     for event in document["events"]:
         key = (event.get("node_id"), event.get("run_number"))
         record = runs.get(key)
@@ -5264,7 +5601,9 @@ def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
                     else "stopped"
                     if event["type"] == "node_stopped" or event.get("status") == "stopped"
                     else "completed"
-                    if event.get("outcome") in {"success", "allowed_failure"}
+                    if event.get("outcome") == "success"
+                    else "allowed_failure"
+                    if event.get("outcome") == "allowed_failure"
                     else "failed"
                     if event.get("outcome") == "failure"
                     else "completed"
@@ -5273,13 +5612,20 @@ def _rattish_ui_events(document: Mapping[str, Any]) -> list[dict[str, Any]]:
                     if event.get("status")
                     else "started"
                 ),
-                "message": _rattish_event_message(event),
+                "message": _rattish_event_message(event, run_error_message),
                 "activationLineageId": event.get("activation_lineage_id")
                 or (record.get("activation_lineage_id") if record else None),
                 "activationGroupId": group_id,
                 "durationMs": record.get("duration_ms")
                 if record and event["type"] == "node_completed"
                 else None,
+                **(
+                    {"errorCode": run_error.get("code")}
+                    if event["type"] == "workflow_completed"
+                    and event.get("status") != "passed"
+                    and isinstance(run_error, Mapping)
+                    else {}
+                ),
             }
         )
     return result

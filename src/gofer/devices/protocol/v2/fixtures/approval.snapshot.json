@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000101",
+  "id": "10000000-0000-4000-8000-000000000106",
+  "sequence": 106,
+  "type": "approval.snapshot",
+  "payload": {
+    "remote_allowed": true,
+    "approvals": [
+      {
+        "approval_id": "00000000-0000-4000-8000-000000000007",
+        "action_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": "swarm",
+        "title": "Attachment previews \u00b7 Raticode",
+        "summary": "Merge the reviewed branch\nRecommended: proceed",
+        "requested_at": "2026-10-26T12:00:00+00:00",
+        "instruction_required": true
+      }
+    ]
+  }
+}

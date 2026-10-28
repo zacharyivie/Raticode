@@ -1,6 +1,6 @@
 import { reportThemeContext } from "./reportThemes.js";
 import { apiUrl } from "./api.js";
-import { inspectThreadScopes, threadIsArchived } from "./threadActivity.js";
+import { inspectThreadScopes, organizeThreads, threadIndexEntry } from "./threadActivity.js";
 import { conversationRepository } from "./conversationRepository.js";
 
 const indexKey = "gofer-flow-chat-threads";
@@ -12,7 +12,7 @@ const read = (storage, key, fallback) => { try { return JSON.parse(storage.getIt
 export function reconcileDesktopThread(local, remote) {
   if (!local) return remote.metadata;
   const base = remote.base_metadata || remote.metadata;
-  const fields = ["provider", "model", "effort", "projectRoot", "projectName", "scopeMode", "permissionsByProvider"];
+  const fields = ["provider", "model", "effort", "projectRoot", "projectName", "scopeMode", "permissionsByProvider", "resources"];
   const unchanged = fields.every(key => JSON.stringify(local[key]) === JSON.stringify(base[key]));
   let result = remote.context_modified && unchanged
     ? { ...local, ...Object.fromEntries(fields.filter(key => key in remote.metadata).map(key => [key, remote.metadata[key]])) }
@@ -60,6 +60,29 @@ export function mergeDeviceMessages(current, incoming) {
   return orderDeviceMessages([...byId.values()]);
 }
 
+// Phones allowed to use Raticode see these settings. The backend keeps only its
+// allowlisted display and default choices; agent tool defaults stay here.
+const PHONE_SETTING_SECTIONS = ["appearance", "general", "assistant", "editor", "terminal", "memory"];
+
+export function phoneSettings(settings = {}) {
+  const assistant = { ...settings.assistant };
+  delete assistant.resources;
+  return { appearance: settings.appearance, general: settings.general, assistant, editor: settings.editor,
+    terminal: settings.terminal, memory: { reportFormat: settings.memory?.reportFormat } };
+}
+
+export function applyPhoneSettings(settings, changes = []) {
+  const next = structuredClone(settings);
+  for (const change of changes) {
+    for (const [key, value] of Object.entries(change.values || {})) {
+      const [section, field, ...rest] = key.split(".");
+      if (rest.length || !field || !PHONE_SETTING_SECTIONS.includes(section)) continue;
+      next[section] = { ...(next[section] || {}), [field]: value };
+    }
+  }
+  return next;
+}
+
 export function startDeviceWorkspaceSync({ storage = window.localStorage, repository = conversationRepository(), interval = 5000, getContext = () => ({}), deleteThread = null } = {}) {
   const host = window;
   if (!host.goferDesktop?.workspace?.pathGrantForApi) return () => {};
@@ -70,6 +93,7 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
   const sent = new Map();
   const peers = new Map();
   const runningByThread = new Map();
+  let appliedSettings = [];
   async function action(body) {
     const response = await fetch(apiUrl("/devices"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
     const result = await response.json();
@@ -98,7 +122,7 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
     if (JSON.stringify(metadata) !== JSON.stringify(local) || additions.length || typeof remote.running === "boolean") {
       storage.setItem(metaKey(id), JSON.stringify(metadata));
       const index = read(storage, indexKey, []);
-      const entry = { id, updatedAt: metadata.updatedAt, projectRoot: metadata.projectRoot || "", scopeIndexed: true };
+      const entry = threadIndexEntry(metadata);
       const nextIndex = index.some(t => t.id === id) ? index.map(t => t.id === id ? entry : t) : [entry, ...index];
       storage.setItem(indexKey, JSON.stringify(nextIndex.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))));
       emit("gofer:device-thread-sync", { metadata, messages: additions, running: remote.running, activeTurn: remote.active_turn });
@@ -154,7 +178,11 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
           projects.push({ root, name: labels[root] || root.split(/[\\/]/).pop(), grantId: workspace.pathGrantForApi(root) });
         }
         if (memory.secondBrainEnabled) await workspace.trustProjectRoot?.(memory.secondBrainRoot);
-        const scopes = await inspectThreadScopes(index.map(entry => read(storage, metaKey(entry.id), entry)), workspace);
+        const stored = index.map(entry => read(storage, metaKey(entry.id), entry));
+        const scopes = await inspectThreadScopes(stored, workspace);
+        const groups = organizeThreads(stored, { running: new Set([...runningByThread].filter(([, running]) => running).map(([id]) => id)), ...scopes });
+        const pinnedIds = new Set(groups.pinned.map(entry => entry.id));
+        const archivedIds = new Set(groups.archived.map(entry => entry.id));
         for (const entry of index) {
           if (stopped) return;
           const metadata = read(storage, metaKey(entry.id), typeof entry.title === "string" ? entry : null);
@@ -165,11 +193,12 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
               grantId: workspace.pathGrantForApi(metadata.projectRoot),
               workspaceGrants: Object.fromEntries(projects.filter(p => p.grantId).map(p => [p.root, p.grantId])) },
             remReportTheme: reportThemeContext(memory),
+            remBrowser: { target: settings.browser?.agentBrowser || "raticode" },
             remSecondBrain: { enabled: memory.secondBrainEnabled === true, root: memory.secondBrainRoot,
               format: memory.secondBrainFormat,
               grantId: workspace.pathGrantForApi(memory.secondBrainRoot) },
           };
-          const mobileGroup = metadata.pinned && !metadata.archived ? "pinned" : threadIsArchived(metadata, scopes.missingRoots, scopes.branches) ? "archived" : "active";
+          const mobileGroup = pinnedIds.has(entry.id) ? "pinned" : archivedIds.has(entry.id) ? "archived" : "active";
           const sharedMetadata = { ...metadata, mobileGroup };
           const fingerprint = JSON.stringify({ metadata, workflow, mobileGroup, revision: revisions.get(entry.id) });
           const key = `${peer}:${entry.id}`;
@@ -180,6 +209,18 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
           await importThread(result);
           revisions.set(entry.id, result.revision);
           sent.set(key, JSON.stringify({ metadata: read(storage, metaKey(entry.id), metadata), workflow, mobileGroup, revision: result.revision }));
+        }
+      }
+      if ((status.desktop_control_peers || []).length) {
+        const desktop = getContext();
+        if (desktop.settings) {
+          const { changes = [] } = await action({ action: "settings_exchange", settings: phoneSettings(desktop.settings), applied: appliedSettings });
+          // Applying is idempotent; acknowledge after the window saved the change.
+          appliedSettings = [];
+          if (changes.length && desktop.updateSettings) {
+            desktop.updateSettings(changes);
+            appliedSettings = changes.map(change => change.id);
+          }
         }
       }
       emit("gofer:device-sync-status", "");

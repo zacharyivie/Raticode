@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "./api.js";
 import { startPolling } from "./refresh.js";
-import { disconnectWorkflowRunRecords, exactWorkflowRunStopPath, markWorkflowRunReviewed, mergeWorkflowRunRecords, readWorkflowRunRecords, writeWorkflowRunRecords } from "./workflowRuns.js";
+import { disconnectWorkflowRunRecords, exactWorkflowRunStopPath, markWorkflowRunReviewed, mergeWorkflowRunRecords, pruneUnlistedWorkflowRuns, readWorkflowRunRecords, writeWorkflowRunRecords } from "./workflowRuns.js";
 
 export function workflowRunContext(workflow) {
   return { workflowId: workflow.id, workflowName: workflow.name, projectPath: workflow.projectRoot || "", worktreePath: workflow.projectRoot || "", sourcePath: workflow.sourcePath || "" };
@@ -57,7 +57,9 @@ export function useWorkflowRunRegistry(workflows) {
             const failure = results.find(result => result.status === "rejected");
             if (failure) throw failure.reason;
             const [recent, active] = results.map(result => result.value);
-            updates.push({ workflow, runs: [...(recent.runs || []), ...(active.runs || [])] });
+            const listed = recent.runs || [];
+            const total = Number(recent.pagination?.total);
+            updates.push({ workflow, runs: [...listed, ...(active.runs || [])], listed, complete: Number.isFinite(total) && listed.length >= total });
           } catch (error) { failedIds.push(workflow.id); failures.push(error.message); }
         }
       }));
@@ -71,7 +73,13 @@ export function useWorkflowRunRegistry(workflows) {
         const observed = new Set(updates.flatMap(({ workflow, runs }) => runs.map(run => JSON.stringify([workflow.id, run.runId || run.id]))));
         // A successful scan with a missing formerly active run cannot confirm
         // that it is still running, and cannot imply successful completion.
-        let next = current.map(run => observed.has(JSON.stringify([run.workflowId, run.runId])) ? run : disconnectWorkflowRunRecords([run])[0]);
+        // Prune before disconnecting so a run submitted during this scan gets
+        // one more scan to appear before it can be dropped.
+        let next = current;
+        for (const { workflow, listed, complete } of updates) {
+          if (listed) next = pruneUnlistedWorkflowRuns(next, workflow.id, listed, { complete });
+        }
+        next = next.map(run => observed.has(JSON.stringify([run.workflowId, run.runId])) ? run : disconnectWorkflowRunRecords([run])[0]);
         for (const id of failedIds) next = disconnectWorkflowRunRecords(next, id);
         if (queue.status === "rejected") next = next.map(run => run.queueRun ? disconnectWorkflowRunRecords([run])[0] : run);
         for (const { workflow, runs } of updates) next = mergeWorkflowRunRecords(next, runs, workflowRunContext(workflow));

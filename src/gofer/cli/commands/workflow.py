@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.commands import rattish as rattish_commands
 from gofer.core.agent import AgentConfig
 from gofer.core.approvals import ApprovalRequest, ApprovalStore
 from gofer.core.bundles import (
@@ -83,6 +84,7 @@ from gofer.core.workflow import (
     masked_workflow_parameters,
     resolve_workflow_parameters,
 )
+from gofer.rattish.workspaces import list_registered_workflows
 from gofer.subscriptions.acp_providers import AcpSubscription
 from gofer.subscriptions.antigravity import AntigravitySubscription
 from gofer.subscriptions.claude_code import ClaudeCodeSubscription
@@ -143,6 +145,25 @@ def _resolve_workflow(name: str, data_dir: Path | None) -> AgenticWorkflow:
     if path.suffix == ".toml" and path.exists():
         return AgenticWorkflow.from_file(path)
     return find_workflow(name, data_dir)
+
+
+def _resolve_rattish_source(name: str, data_dir: Path | None) -> Path | None:
+    """Return the Rattish entrypoint for a .rattish path, workflow folder, or registered ID."""
+    path = Path(name).expanduser()
+    if path.suffix == ".rattish" and path.is_file():
+        return path
+    if path.is_dir() and (path / "workflow.rattish").is_file():
+        return path / "workflow.rattish"
+    if path.suffix in {".toml", ".rattish"}:
+        return None
+    try:
+        registered = list_registered_workflows(registry_dir=data_dir)
+    except (OSError, ValueError):
+        return None
+    return next(
+        (item.entrypoint for item in registered if item.workflow_id == name),
+        None,
+    )
 
 
 def _resolve_workflow_with_path(name: str, data_dir: Path | None) -> tuple[AgenticWorkflow, Path]:
@@ -1105,7 +1126,9 @@ def _operation_from_options(
 
 @app.command("run")
 def run(
-    workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
+    workflow: str = typer.Argument(
+        ..., help="Workflow ID, .rattish file, workflow folder, or TOML file"
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate without executing"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show each node's output"),
     trigger_json: str | None = typer.Option(
@@ -1136,6 +1159,17 @@ def run(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Execute a workflow by name or file path."""
+    rattish_source = _resolve_rattish_source(workflow, data_dir)
+    if rattish_source is not None:
+        workflow_inputs = {
+            **_parse_param_values(param, params_json),
+            **_parse_param_values(input_, inputs_json),
+        }
+        if dry_run:
+            rattish_commands.preflight(rattish_source, output_format="text", data_dir=data_dir)
+            return
+        rattish_commands.execute_rattish_run(rattish_source, workflow_inputs, data_dir=data_dir)
+        return
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
@@ -1339,6 +1373,12 @@ def resume(
     """Resume a failed or stopped workflow run."""
     if from_node and only_node:
         raise typer.BadParameter("--from-node and --only-node cannot be used together")
+    if _resolve_rattish_source(workflow, data_dir) is not None:
+        console.print(
+            "[red]Resuming Rattish workflow runs is not supported yet. "
+            f"Start a new run with: gof workflow run {workflow}[/red]"
+        )
+        raise typer.Exit(1)
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
@@ -1629,16 +1669,24 @@ def _find_approval_request(
     run_id: str,
     node_id: str,
     workflow_id: str | None,
-) -> ApprovalRequest | None:
+) -> ApprovalRequest:
+    """Find one approval. A closed one is returned so deciding it explains why it is closed."""
     if workflow_id:
         request = store.get(workflow_id, run_id, node_id)
-        return request if request is not None and request.decision is None else None
+        if request is None:
+            raise ValueError(f"Approval {node_id!r} for run {run_id!r} was not found.")
+        return request
     matches = [
         request
-        for request in store.list_pending()
+        for request in store.list_requests()
         if request.run_id == run_id and request.node_id == node_id
     ]
-    return matches[0] if len(matches) == 1 else None
+    candidates = [request for request in matches if request.status == "pending"] or matches
+    if not candidates:
+        raise ValueError(f"Approval {node_id!r} for run {run_id!r} was not found.")
+    if len(candidates) > 1:
+        raise ValueError("More than one workflow has this approval; pass --workflow.")
+    return candidates[0]
 
 
 def _approval_waiter_is_live(request: ApprovalRequest) -> bool:
@@ -1729,7 +1777,7 @@ def approvals(
     requests = (
         all_loaded_requests
         if all_requests
-        else [request for request in all_loaded_requests if request.decision is None]
+        else [request for request in all_loaded_requests if request.status == "pending"]
     )
     if not requests:
         console.print("No approvals" if all_requests else "No pending approvals")
@@ -1751,8 +1799,12 @@ def approvals(
                 request.workflow_id,
                 request.run_id,
                 request.node_id,
-                "decided" if decision is not None else "pending",
-                (f"{decision.decision} by {decision.decided_by}" if decision is not None else ""),
+                request.status,
+                (
+                    f"{decision.decision} by {decision.decided_by}"
+                    if decision is not None
+                    else request.cancelled_reason or ""
+                ),
                 request.message,
             )
         else:
@@ -1782,11 +1834,8 @@ def approve(
 ) -> None:
     """Approve a pending approval gate."""
     store = ApprovalStore(data_dir)
-    request = _find_approval_request(store, run_id, node_id, workflow)
-    if request is None:
-        console.print("[red]Pending approval not found or not unique; pass --workflow.[/red]")
-        raise typer.Exit(1)
     try:
+        request = _find_approval_request(store, run_id, node_id, workflow)
         decided = store.decide(
             request.workflow_id,
             run_id,
@@ -1818,11 +1867,8 @@ def reject(
 ) -> None:
     """Reject a pending approval gate."""
     store = ApprovalStore(data_dir)
-    request = _find_approval_request(store, run_id, node_id, workflow)
-    if request is None:
-        console.print("[red]Pending approval not found or not unique; pass --workflow.[/red]")
-        raise typer.Exit(1)
     try:
+        request = _find_approval_request(store, run_id, node_id, workflow)
         decided = store.decide(
             request.workflow_id,
             run_id,

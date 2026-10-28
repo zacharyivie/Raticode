@@ -66,8 +66,8 @@ export default function ProjectSearch({ rootPath, active, focusRequest, onOpenFi
   }
   return (
     <section id="sidebar-panel-search" role="tabpanel" aria-labelledby="sidebar-tab-search" hidden={!active} className={`min-h-0 min-w-0 flex-1 flex-col text-ink ${active ? "flex" : "hidden"}`}>
-      <div className="flex h-7 shrink-0 items-center justify-between px-2">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">Search</span>
+      <div className="ui-panel-header">
+        <span className="ui-section-title">Search</span>
         <button type="button" aria-label="Refresh search" title="Refresh search" disabled={!query || !rootPath} onClick={() => setRefresh((value) => value + 1)} className="rounded p-1 text-muted hover:text-ink disabled:opacity-40"><RefreshCw size={14} /></button>
       </div>
       <fieldset disabled={replacing || disabled} className="min-w-0 space-y-2 px-2 pb-2">

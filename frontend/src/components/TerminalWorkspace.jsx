@@ -697,12 +697,19 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
       void bridge.write(sessionIdRef.current, "\x03").catch(() => {});
       return false;
     });
+    // Only tell the shell about real grid changes. Pixel-level resizes during a
+    // panel drag would otherwise make the shell redraw its prompt every frame.
+    let sentSize = "";
+    const resizeSession = () => {
+      const size = `${terminal.cols}x${terminal.rows}`;
+      if (!sessionIdRef.current || size === sentSize) return;
+      sentSize = size;
+      void bridge.resize(sessionIdRef.current, terminal.cols, terminal.rows).catch(() => {});
+    };
     const resizeObserver = new ResizeObserver(() => {
       if (!activeRef.current || !container.offsetWidth || !container.offsetHeight) return;
       fitAddon.fit();
-      if (sessionIdRef.current) {
-        void bridge.resize(sessionIdRef.current, terminal.cols, terminal.rows).catch(() => {});
-      }
+      resizeSession();
     });
     resizeObserver.observe(container);
 
@@ -721,7 +728,7 @@ function TerminalSession({ active, onCwdChange, onLabelChange, projectRoot, sett
         onLabelChange?.(tabKey, session.shell);
         onCwdChange?.(tabKey, session.cwd);
         fitAddon.fit();
-        void bridge.resize(session.id, terminal.cols, terminal.rows).catch(() => {});
+        resizeSession();
       },
     });
 

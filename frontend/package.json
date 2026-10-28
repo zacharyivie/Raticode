@@ -39,7 +39,10 @@
     "test:pairing-browser": "node browser-tests/run-paired-devices.cjs",
     "test:usage-browser": "node browser-tests/run-usage.cjs",
     "test:organizations-browser": "node browser-tests/run-organizations.cjs",
-    "test:organizations-visual": "node browser-tests/run-organizations-visual.cjs"
+    "test:organizations-visual": "node browser-tests/run-organizations-visual.cjs",
+    "test:second-brain-visual": "node browser-tests/run-second-brain-visual.cjs",
+    "test:second-brain-browser": "node browser-tests/run-second-brain.cjs",
+    "test:rem-home-visual": "node browser-tests/run-rem-home-visual.cjs"
   },
   "build": {
     "appId": "com.goferflow.desktop",
@@ -187,7 +190,7 @@
     "@vitejs/plugin-react": "^5.2.0",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.2.1",
-    "electron": "^41.10.7",
+    "electron": "^45.1.0",
     "electron-builder": "^26.15.3",
     "eslint": "^9.16.0",
     "eslint-plugin-react": "^7.37.2",

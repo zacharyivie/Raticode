@@ -86,7 +86,7 @@ node implement-ticket:
     Return only JSON matching the requested output schema.
   needs: ticket-loop
   with:
-    ticket-path: node.ticket-loop.output.file_path
+    ticket-path: node.ticket-loop.output.path
     ticket-content: node.ticket-loop.output.file_content
     review-findings:
       from: node.review-ticket.output.findings
@@ -100,7 +100,7 @@ node report-blocked:
   command: printf 'Ticket %s needs user specification: %s\n' "$TICKET_FILE" "$QUESTION"
   needs: implement-ticket
   with:
-    ticket-file: node.ticket-loop.output.file_name
+    ticket-file: node.ticket-loop.output.name
     question: node.implement-ticket.output.question
   to: stop-ticket-loop
 
@@ -133,7 +133,7 @@ node review-ticket:
     JSON matching the requested output schema.
   needs: implement-ticket
   with:
-    ticket-path: node.ticket-loop.output.file_path
+    ticket-path: node.ticket-loop.output.path
     ticket-content: node.ticket-loop.output.file_content
   to:
     - commit-ticket when node.review-ticket.output.approved == true
@@ -150,7 +150,7 @@ node commit-ticket:
     fi
   needs: review-ticket
   with:
-    ticket-file: node.ticket-loop.output.file_name
+    ticket-file: node.ticket-loop.output.name
     ticket-index: node.ticket-loop.output.index
     ticket-count: node.count-tickets.output.stdout
   to: approve-merge when node.commit-ticket.output.stdout contains "all-complete"

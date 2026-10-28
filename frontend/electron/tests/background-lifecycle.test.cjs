@@ -31,6 +31,8 @@ test('cold startup creates the shell while backend and terminal readiness are pe
   const context = {
     shellPathReady: new Promise(resolve => { releaseShellPath = resolve; }),
     BrowserWindow: {}, session: {}, protocol: { handle() {} }, startReportPdfService: async () => ({ env: {} }),
+    startAgentBrowserService: async () => ({}), agentBrowser: { handle() {} }, agentBrowserCapabilities: {},
+    removeLegacyAgentBrowserConnection() {}, getGoferDataDir: () => '/data',
     app: { whenReady: () => ({ then: callback => { readyCallback = callback; } }),
       getPath: () => '/logs', getVersion: () => 'test', on() {} },
     createAppLog: () => ({ write() {}, emergency() {} }),
@@ -58,9 +60,10 @@ test('cold startup creates the shell while backend and terminal readiness are pe
 
 test('reopening shows the retained window, and closing all windows does not stop services', () => {
   let show = 0, focus = 0, restore = 0, quit = 0, allClosed;
+  const mainWindow = { isDestroyed: () => false, isMinimized: () => true,
+    show: () => show++, focus: () => focus++, restore: () => restore++ };
   const context = {
-    mainWindow: { isDestroyed: () => false, isMinimized: () => true,
-      show: () => show++, focus: () => focus++, restore: () => restore++ },
+    mainWindow, shownWindows: new WeakSet([mainWindow]), lastWindowArgs: null, createWindow() {},
     isQuitting: false, isSmokeTest: false,
     app: { on: (_name, callback) => { allClosed = callback; }, quit: () => quit++ },
   };
@@ -74,4 +77,53 @@ test('reopening shows the retained window, and closing all windows does not stop
   allClosed(); assert.equal(quit, 0);
   context.isQuitting = true;
   allClosed(); assert.equal(quit, 1);
+});
+
+
+test('API session returns backend readiness data before startup globals are populated', async () => {
+  const start = source.indexOf('    apiSession: async () => {');
+  const end = source.indexOf('    installDownloadedUpdate,', start);
+  let resolveBackend;
+  const context = { backendReady: new Promise(resolve => { resolveBackend = resolve; }), activeApiBaseUrl: undefined, activeUiApiToken: undefined };
+  const handler = vm.runInNewContext(`({${source.slice(start, end)}}).apiSession`, context);
+  const pending = handler();
+  resolveBackend({ apiBaseUrl: 'http://127.0.0.1:43210', apiToken: 'session-token' });
+  const session = await pending;
+  assert.equal(session.apiBaseUrl, 'http://127.0.0.1:43210');
+  assert.equal(session.apiToken, 'session-token');
+});
+
+test('a destroyed window comes back hidden, and opening it from the tray maximizes it once', () => {
+  const start = source.indexOf('  mainWindow.on("closed",');
+  const end = source.indexOf('\n}\n\n// Choose the API origin', start);
+  const handlers = {}, contentHandlers = {}, timers = [], created = [];
+  const window = { on: (name, callback) => { handlers[name] = callback; },
+    webContents: { on: (name, callback) => { contentHandlers[name] = callback; } } };
+  const context = {
+    mainWindow: window, window, terminalOwnerId: 1, browsers: { closeForOwner() {} }, closeTerminalsForOwner() {},
+    isQuitting: false, isSmokeTest: false, lastWindowArgs: ['http://127.0.0.1:43210', 'token'], Date,
+    setTimeout: callback => timers.push(callback), createWindow: (...args) => created.push(args),
+  };
+  vm.runInNewContext(source.slice(start, end), context);
+  handlers.closed();
+  assert.equal(context.mainWindow, undefined);
+  timers.shift()();
+  // Values come from the VM realm, so compare their JSON form.
+  assert.equal(JSON.stringify(created), JSON.stringify([['http://127.0.0.1:43210', 'token', { show: false }]]));
+
+  let reloads = 0;
+  context.mainWindow = { isDestroyed: () => false, webContents: { isDestroyed: () => false, reload: () => reloads++ } };
+  for (let i = 0; i < 5; i += 1) contentHandlers['render-process-gone']({}, { reason: 'crashed' });
+  contentHandlers['render-process-gone']({}, { reason: 'clean-exit' });
+  timers.forEach(callback => callback());
+  assert.equal(reloads, 3, 'crash reloads are capped per hour');
+
+  let maximized = 0, shown = 0;
+  const hidden = { isDestroyed: () => false, isMinimized: () => false, maximize: () => maximized++,
+    show: () => shown++, focus() {}, restore() {} };
+  const opened = { mainWindow: hidden, shownWindows: new WeakSet(), lastWindowArgs: null, createWindow() {}, isQuitting: false };
+  const showStart = source.indexOf('function showMainWindow()');
+  const showEnd = source.indexOf('function createBackgroundTray()', showStart);
+  vm.runInNewContext(`${source.slice(showStart, showEnd)}\nshowMainWindow(); showMainWindow();`, opened);
+  assert.deepEqual([maximized, shown], [1, 2]);
 });

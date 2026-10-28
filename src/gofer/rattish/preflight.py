@@ -224,6 +224,11 @@ def _configuration_is_dynamic(node: Mapping[str, Any], field_name: str) -> bool:
     return contains_template(node["configuration"].get(field_name))
 
 
+def _may_be_created_upstream(node: Mapping[str, Any]) -> bool:
+    """Whether a node waits on `needs` that may create its input earlier in the run."""
+    return bool(node["readiness"]["needs"])
+
+
 def _agent_provider_available(
     node: Mapping[str, Any], context: PreflightContext
 ) -> PreflightFailure | None:
@@ -298,6 +303,9 @@ def _agent_prompt_path_readable(
                 {"path": str(path)},
             )
         return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may write the prompt. The agent reports it when it runs.
+        return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
         f"Agent prompt file {path} is unavailable or unreadable.",
@@ -313,6 +321,9 @@ def _agent_working_dir_available(
     path = project_path(context.project_root, node["configuration"]["working_dir"])
     if path.is_dir() and os.access(path, os.R_OK | os.X_OK):
         return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may create the folder. The agent reports it when it runs.
+        return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
         f"Agent working directory {path} is unavailable or inaccessible.",
@@ -327,6 +338,9 @@ def _local_vector_source_readable(
         return None
     path = project_path(context.project_root, node["configuration"]["source_path"])
     if path.exists() and os.access(path, os.R_OK):
+        return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may create the source. The node reports it when it runs.
         return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
@@ -394,6 +408,9 @@ def _local_search_index_readable(
         return None
     path = project_path(context.project_root, node["configuration"]["index_path"])
     if path.is_file() and os.access(path, os.R_OK):
+        return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # An upstream local-vectorize may build the index. The search reports it when it runs.
         return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
@@ -464,6 +481,9 @@ def _bash_working_dir_available(
     )
     if path.is_dir() and os.access(path, os.R_OK | os.X_OK):
         return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may create the folder. The command reports it when it runs.
+        return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
         f"Bash working directory {path} is unavailable or inaccessible.",
@@ -479,6 +499,9 @@ def _read_path_readable(
     path = _project_path(context.project_root, node["configuration"]["path"])
     if path.is_file() and os.access(path, os.R_OK):
         return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may create the file. The read reports it when it runs.
+        return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
         f"Input file {path} is unavailable or unreadable.",
@@ -493,6 +516,9 @@ def _folder_path_readable(
         return None
     path = project_path(context.project_root, node["configuration"]["path"])
     if path.is_dir() and os.access(path, os.R_OK | os.X_OK):
+        return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may create the folder. The node reports it when it runs.
         return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
@@ -523,6 +549,9 @@ def _prompt_template_readable(
                 str(exc),
                 {"path": str(path)},
             )
+        return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may write the template. The node reports it when it runs.
         return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
@@ -741,6 +770,9 @@ def _script_readable(node: Mapping[str, Any], context: PreflightContext) -> Pref
     path = _project_path(context.project_root, node["configuration"]["script_path"])
     if path.is_file() and os.access(path, os.R_OK):
         return None
+    if not path.exists() and _may_be_created_upstream(node):
+        # A required upstream node may write the script. The node reports it when it runs.
+        return None
     return PreflightFailure(
         "RATTISH_PREFLIGHT_RESOURCE_MISSING",
         f"Script file {path} is unavailable or unreadable.",
@@ -772,6 +804,9 @@ def _source_readable(node: Mapping[str, Any], context: PreflightContext) -> Pref
         return None
     source = project_path(context.project_root, node["configuration"]["source_path"])
     if source.is_symlink():
+        return None
+    if path_kind(source) == "missing" and _may_be_created_upstream(node):
+        # A required upstream node may create the source. The node reports it when it runs.
         return None
     if path_kind(source) != "missing" and os.access(source, os.R_OK):
         if node["runtime_handler"] != "raticode.move_file" or os.access(
@@ -821,7 +856,11 @@ def _destination_ready(
             f"Destination parent for {destination} is not writable.",
             {"path": str(destination)},
         )
-    if not parent.exists() and not configuration.get("create_dirs", False):
+    if (
+        not parent.exists()
+        and not configuration.get("create_dirs", False)
+        and not _may_be_created_upstream(node)
+    ):
         return PreflightFailure(
             "RATTISH_PREFLIGHT_DESTINATION_INVALID",
             f"Destination parent {parent} is missing and create-dirs is false.",
@@ -852,7 +891,7 @@ def _delete_target_ready(
         return None
     target = project_path(context.project_root, configuration["path"])
     kind = path_kind(target)
-    if kind == "missing" and not configuration["missing_ok"]:
+    if kind == "missing" and not configuration["missing_ok"] and not _may_be_created_upstream(node):
         return PreflightFailure(
             "RATTISH_PREFLIGHT_RESOURCE_MISSING",
             f"Delete target {target} is missing.",

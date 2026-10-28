@@ -79,7 +79,7 @@ def commit_message_command(
         binary_path=binary,
         data_dir=directory,
         working_dir=directory,
-        resources=AgentResources(shell=read_diff_file, web=False),
+        resources=AgentResources.none().model_copy(update={"shell": read_diff_file}),
     )
     # The ordinary chat builder grants write access for coding. Remove those grants.
     while "--add-dir" in command:
@@ -666,7 +666,7 @@ async def _generate_cli_commit(
                 permission_mode=permission_mode,
                 timeout=150,
                 cancel_event=cancel_event,
-                resources=AgentResources(shell=False, web=False),
+                resources=AgentResources.none(),
                 max_output_bytes=1024 * 1024,
             )
             if provider == "grok"
@@ -679,7 +679,7 @@ async def _generate_cli_commit(
                 permission_mode=permission_mode,
                 timeout=150,
                 cancel_event=cancel_event,
-                resources=AgentResources(shell=False, web=False),
+                resources=AgentResources.none(),
                 max_output_bytes=1024 * 1024,
             )
         )

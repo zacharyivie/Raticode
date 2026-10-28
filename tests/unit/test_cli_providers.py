@@ -173,6 +173,39 @@ def swarm_resources(url: str = "http://localhost:1234/tool", **kwargs: Any) -> A
     return AgentResources.model_validate({"mcpServers": [{"name": "swarm", "url": url}], **kwargs})
 
 
+@pytest.mark.parametrize("provider", ["cursor", "copilot", "opencode"])
+def test_conversation_tool_free_mode_disables_native_tools(provider):
+    with cli_invocation(
+        provider, [provider], AgentResources(shell=False, web=False), read_only=True, tool_free=True
+    ) as (command, env):
+        if provider == "cursor":
+            assert command[command.index("--allowed-tools") + 1] == ""
+            config = json.loads((Path(env["CURSOR_CONFIG_DIR"]) / "cli-config.json").read_text())
+            assert config["permissions"]["allow"] == []
+            assert "Mcp(*)" in config["permissions"]["deny"]
+        elif provider == "copilot":
+            assert command[command.index("--available-tools") + 1] == ""
+            assert "read" in [command[i + 1] for i, v in enumerate(command) if v == "--deny-tool"]
+        else:
+            assert json.loads(env["OPENCODE_PERMISSION"]) == {"*": "deny"}
+
+
+@pytest.mark.parametrize("provider", ["cursor", "copilot", "opencode"])
+@pytest.mark.parametrize("agents", [True, False])
+def test_subagents_switch_reaches_native_task_tools(provider, agents):
+    with cli_invocation(provider, [provider], AgentResources(agents=agents)) as (command, env):
+        if provider == "cursor":
+            native = command[command.index("--allowed-tools") + 1].split(",")
+            assert ("task_tool_call" in native) is agents
+        elif provider == "copilot":
+            excluded = [command[i + 1] for i, v in enumerate(command) if v == "--excluded-tools"]
+            assert excluded == ([] if agents else ["task"])
+        else:
+            permission = json.loads(env["OPENCODE_PERMISSION"])
+            assert permission["task"] == ("allow" if agents else "deny")
+            assert permission["lsp"] == "allow"
+
+
 @pytest.mark.parametrize("provider", ["copilot", "opencode"])
 def test_trusted_endpoint_mismatch_rejects_before_spawn(provider):
     with pytest.raises(ValueError, match="trusted"):
@@ -251,7 +284,10 @@ def test_opencode_config_preserves_auth_environment_and_exact_tool_grants(monkey
     monkeypatch.setenv("EXAMPLE_AUTH_TOKEN", "test-value")
     url = "http://localhost:1234/turn"
     with cli_invocation(
-        "opencode", ["opencode"], swarm_resources(url, shell=False), trusted_swarm_url=url
+        "opencode",
+        ["opencode"],
+        swarm_resources(url, shell=False, web=False),
+        trusted_swarm_url=url,
     ) as (_, env):
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         assert config["theme"] == "custom"
@@ -284,7 +320,10 @@ def test_cursor_plugin_contains_only_owned_config_and_cleans_on_failure():
             }
             raise RuntimeError("spawn failed")
     assert not path.parent.exists()
-    with cli_invocation("cursor", ["cursor-agent"], AgentResources(shell=False)) as (command, env):
+    with cli_invocation("cursor", ["cursor-agent"], AgentResources(shell=False, web=False)) as (
+        command,
+        env,
+    ):
         assert "--disable-project-configs" in command
         native = command[command.index("--allowed-tools") + 1]
         assert "shell_tool_call" not in native and "fetch_tool_call" not in native

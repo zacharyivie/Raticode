@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from gofer.core.executor import NodeOutput
 from gofer.core.operations import OperationType
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits, byte_len
 from gofer.core.runner import RunnerQueueStore
-from gofer.rattish.editor import RattishRevisionConflict
+from gofer.rattish.editor import RattishEditorError, RattishRevisionConflict
 from gofer.ui import api as api_module
 from gofer.ui.api import (
     WorkflowAlreadyExistsError,
@@ -278,6 +279,86 @@ def test_open_project_payload_discovers_existing_rattish_workflows(tmp_path: Pat
     ]
 
 
+def test_discovered_rattish_workflows_report_declared_names_and_first_error(
+    tmp_path: Path,
+) -> None:
+    app_data = tmp_path / "app-data"
+    project = tmp_path / "project"
+    valid_root = project / ".raticode" / "nightly-build"
+    broken_root = project / ".raticode" / "broken-build"
+    valid_root.mkdir(parents=True)
+    broken_root.mkdir(parents=True)
+    (valid_root / "workflow.rattish").write_text(
+        'Rattish: 1\n\nWorkflow:\n  name: "Nightly Build"\n',
+        encoding="utf-8",
+    )
+    (broken_root / "workflow.rattish").write_text(
+        'Rattish: 1\n\nWorkflow:\n  name: "Broken Build"\n\nNode bad:\n  type: not-a-type\n',
+        encoding="utf-8",
+    )
+
+    workflows = {
+        workflow["id"]: workflow
+        for workflow in open_project_payload(project, registry_dir=app_data)["workflows"]
+    }
+
+    # The folder name is only the ID; the list shows the name the file declares.
+    assert workflows["nightly-build"]["name"] == "Nightly Build"
+    assert workflows["broken-build"]["name"] == "Broken Build"
+    assert workflows["broken-build"]["invalid"] is True
+    assert workflows["broken-build"]["validationError"] == (
+        "Line 7: No node contract is available for 'not-a-type'."
+    )
+
+
+def test_rename_and_duplicate_registered_rattish_workflows(tmp_path: Path) -> None:
+    app_data = tmp_path / "app-data"
+    project = tmp_path / "project"
+    project.mkdir()
+    created = create_registered_workflow_payload("Release", project, registry_dir=app_data)
+    workflow_root = Path(created["workflowRoot"])
+    (workflow_root / "notes.md").write_text("keep me\n", encoding="utf-8")
+    (workflow_root / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+
+    renamed = rename_workflow_payload("release", "Release Train", app_data)
+
+    assert (renamed["id"], renamed["name"]) == ("release", "Release Train")
+    assert 'name: "Release Train"' in Path(created["sourcePath"]).read_text(encoding="utf-8")
+
+    first = duplicate_workflow_payload("release", None, app_data)
+    second = duplicate_workflow_payload("release", None, app_data)
+
+    assert (first["id"], first["name"]) == ("release-train-copy", "Release Train copy")
+    assert second["name"] == "Release Train copy 2"
+    first_root = Path(first["workflowRoot"])
+    assert first_root.parent == workflow_root.parent
+    assert 'name: "Release Train copy"' in (first_root / "workflow.rattish").read_text(
+        encoding="utf-8"
+    )
+    assert (first_root / "notes.md").read_text(encoding="utf-8") == "keep me\n"
+    # Duplicates carry the same files a bundle would, so ignored secrets stay behind.
+    assert not (first_root / ".env").exists()
+    assert {workflow["name"] for workflow in list_workflow_payloads(app_data)["workflows"]} == {
+        "Release Train",
+        "Release Train copy",
+        "Release Train copy 2",
+    }
+
+
+def test_duplicate_invalid_rattish_workflow_explains_the_error(tmp_path: Path) -> None:
+    app_data = tmp_path / "app-data"
+    project = tmp_path / "project"
+    project.mkdir()
+    created = create_registered_workflow_payload("Fragile", project, registry_dir=app_data)
+    Path(created["sourcePath"]).write_text(
+        'Rattish: 1\n\nWorkflow:\n  name: "Fragile"\n\nNode bad:\n  type: not-a-type\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkflowCreateError, match="Fix this workflow before duplicating it"):
+        duplicate_workflow_payload("fragile", None, app_data)
+
+
 def test_rattish_document_api_analyzes_and_saves_with_revisions(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -454,6 +535,7 @@ Node things:
 
     assert """Node asdf:
   type: approval-gate
+  message: "Approve this step to continue."
   to:
     - things
 
@@ -470,6 +552,160 @@ Node things:
     assert mutated["graph"]["nodes"][0]["type"] == "approval-gate"
     assert mutated["graph"]["edges"][0]["from"] == "asdf"
     assert mutated["graph"]["edges"][0]["to"] == "things"
+    assert mutated["compilation"]["state"] == "valid"
+
+
+def _graph_editor_workflow(tmp_path: Path, name: str, source: str) -> dict[str, Any]:
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    registered = create_registered_workflow_payload(name, project, registry_dir=tmp_path)
+    Path(registered["sourcePath"]).write_text(source, encoding="utf-8")
+    return open_rattish_document_payload(registered["id"], tmp_path)
+
+
+_GRAPH_EDITOR_SOURCE = """Rattish: 1
+
+Workflow:
+  name: Graph Only
+
+Node prepare:
+  type: bash-command
+  command: echo ready
+  to: review
+
+Node review:
+  type: bash-command
+  command: echo review
+"""
+
+
+def test_rattish_graph_add_node_compiles_without_writing_rattish(tmp_path: Path) -> None:
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", _GRAPH_EDITOR_SOURCE)
+    assert opened["compilation"]["state"] == "valid"
+
+    # Older clients sent an empty command; the editor must still produce compiling source.
+    added = mutate_rattish_document_payload(
+        "graph-only",
+        [
+            {
+                "kind": "add_node",
+                "node": "node-3",
+                "node_type": "bash-command",
+                "fields": {"command": ""},
+            }
+        ],
+        opened["sourceRevision"],
+        tmp_path,
+    )
+
+    assert added["compilation"]["state"] == "valid"
+    assert 'command: "echo \\"node-3 ran\\""' in added["source"]
+    assert [node["id"] for node in added["graph"]["nodes"]] == ["prepare", "review", "node-3"]
+
+
+def test_rattish_graph_type_changes_always_compile(tmp_path: Path) -> None:
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", _GRAPH_EDITOR_SOURCE)
+    create_registered_workflow_payload("Child", tmp_path / "project", registry_dir=tmp_path)
+    with pytest.raises(RattishEditorError, match="set its Interface version"):
+        mutate_rattish_document_payload(
+            "graph-only",
+            [{"kind": "change_node_type", "node": "review", "node_type": "workflow"}],
+            opened["sourceRevision"],
+            tmp_path,
+        )
+    child = open_rattish_document_payload("child", tmp_path)
+    mutate_rattish_document_payload(
+        "child",
+        [
+            {
+                "kind": "set_field",
+                "target": "workflow",
+                "field": "interface-version",
+                "valueSource": "1",
+            }
+        ],
+        child["sourceRevision"],
+        tmp_path,
+    )
+    node_types = [contract["nodeType"] for contract in opened["nodeContracts"]]
+    assert {"agent", "loop", "workflow", "notification"} <= set(node_types)
+
+    revision = opened["sourceRevision"]
+    for node_type in node_types:
+        if node_type == "break":
+            continue
+        mutated = mutate_rattish_document_payload(
+            "graph-only",
+            [{"kind": "change_node_type", "node": "review", "node_type": node_type}],
+            revision,
+            tmp_path,
+        )
+        assert mutated["compilation"]["state"] == "valid", (node_type, mutated["diagnostics"])
+        assert mutated["graph"]["nodes"][1]["type"] == node_type
+        revision = mutated["sourceRevision"]
+
+
+def test_rattish_graph_break_uses_the_upstream_loop(tmp_path: Path) -> None:
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", _GRAPH_EDITOR_SOURCE)
+    looped = mutate_rattish_document_payload(
+        "graph-only",
+        [{"kind": "change_node_type", "node": "prepare", "node_type": "loop"}],
+        opened["sourceRevision"],
+        tmp_path,
+    )
+    broken = mutate_rattish_document_payload(
+        "graph-only",
+        [{"kind": "change_node_type", "node": "review", "node_type": "break"}],
+        looped["sourceRevision"],
+        tmp_path,
+    )
+
+    assert broken["compilation"]["state"] == "valid"
+    assert "loop: prepare" in broken["source"]
+
+
+def test_rattish_graph_edits_cannot_make_a_valid_workflow_invalid(tmp_path: Path) -> None:
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", _GRAPH_EDITOR_SOURCE)
+    source_path = Path(opened["sourcePath"])
+
+    with pytest.raises(RattishEditorError, match="would make the workflow invalid"):
+        mutate_rattish_document_payload(
+            "graph-only",
+            [{"kind": "set_field", "target": {"node": "prepare"}, "field": "command", "value": ""}],
+            opened["sourceRevision"],
+            tmp_path,
+        )
+    with pytest.raises(RattishEditorError, match="must run after a Loop node"):
+        mutate_rattish_document_payload(
+            "graph-only",
+            [{"kind": "change_node_type", "node": "prepare", "node_type": "break"}],
+            opened["sourceRevision"],
+            tmp_path,
+        )
+
+    assert source_path.read_text(encoding="utf-8") == _GRAPH_EDITOR_SOURCE
+
+
+def test_rattish_graph_edits_can_repair_an_invalid_workflow(tmp_path: Path) -> None:
+    invalid = _GRAPH_EDITOR_SOURCE.replace("command: echo review", 'command: ""')
+    opened = _graph_editor_workflow(tmp_path, "Graph Only", invalid)
+    assert opened["compilation"]["state"] == "invalid"
+
+    repaired = mutate_rattish_document_payload(
+        "graph-only",
+        [
+            {
+                "kind": "set_field",
+                "target": {"node": "review"},
+                "field": "command",
+                "value": "echo ok",
+            }
+        ],
+        opened["sourceRevision"],
+        tmp_path,
+    )
+
+    assert repaired["compilation"]["state"] == "valid"
 
 
 def test_workflow_payload_includes_valid_node_binding_explanations(tmp_path: Path) -> None:
@@ -3572,3 +3808,202 @@ def test_project_discovery_keeps_compile_errors_in_project_context(
     assert "permission denied" in broken["validationError"]
     assert "secret" not in broken["validationError"]
     assert not healthy["invalid"]
+
+
+def _registered_rattish(tmp_path: Path, source: str) -> tuple[Path, str]:
+    app_data = tmp_path / "app-data"
+    project = tmp_path / "project"
+    project.mkdir()
+    created = create_registered_workflow_payload("Audit", project, registry_dir=app_data)
+    Path(created["sourcePath"]).write_text(source, encoding="utf-8")
+    return app_data, created["id"]
+
+
+def test_rattish_runs_cannot_be_resumed_and_do_not_start_a_new_run(tmp_path: Path) -> None:
+    app_data, workflow_id = _registered_rattish(
+        tmp_path,
+        "Rattish: 1\n\nWorkflow:\n  name: Audit\n\nNode first:\n"
+        "  type: bash-command\n  command: printf ok\n",
+    )
+
+    with pytest.raises(WorkflowRunError, match="not supported yet"):
+        anyio.run(
+            lambda: resume_workflow_payload(
+                workflow_id, app_data, run_id="does-not-exist", from_node="no-such-node"
+            )
+        )
+
+    assert list_workflow_run_logs_payload(workflow_id, app_data)["runs"] == []
+
+
+def test_rattish_sync_run_uses_cli_run_ids_and_omits_duplicate_log_text(tmp_path: Path) -> None:
+    app_data, workflow_id = _registered_rattish(
+        tmp_path,
+        "Rattish: 1\n\nWorkflow:\n  name: Audit\n\nNode first:\n"
+        "  type: bash-command\n  command: printf ok\n",
+    )
+
+    run = anyio.run(lambda: run_workflow_payload(workflow_id, app_data))
+
+    assert re.fullmatch(r"\d{8}T\d{12}Z-[0-9a-f]{12}", run["runId"])
+    assert "logText" not in run
+    assert run["rattishRun"]["status"] == "passed"
+
+
+def test_rattish_node_status_keeps_allowed_and_earlier_failures_visible(tmp_path: Path) -> None:
+    app_data, workflow_id = _registered_rattish(
+        tmp_path,
+        """Rattish: 1
+
+Workflow:
+  name: Audit
+
+Node risky:
+  type: bash-command
+  command: exit 3
+  allow-fail: true
+  to: items
+
+Node items:
+  type: loop
+  needs: risky
+  source: {"type": "count", "count": 3}
+  to: work
+
+Node work:
+  type: bash-command
+  needs: items
+  with:
+    index: node.items.output.index
+  command: test "$INDEX" != 0
+""",
+    )
+
+    run = anyio.run(lambda: run_workflow_payload(workflow_id, app_data))
+    nodes = run["runNodes"]
+
+    assert run["success"] is False
+    assert nodes["risky"]["status"] == "allowed_failure"
+    assert nodes["work"]["status"] == "error"
+    assert nodes["work"]["activationCounts"]["total"] == 3
+    assert nodes["work"]["activationSummary"] == "1 of 3 failed"
+    failed = [event for event in run["runEvents"] if event["status"] == "failed"]
+    assert failed and all(event["message"] != "Activation 1 failure." for event in failed)
+    risky_completed = [
+        event
+        for event in run["runEvents"]
+        if event["nodeId"] == "risky" and event["type"] == "node_completed"
+    ]
+    assert [event["status"] for event in risky_completed] == ["allowed_failure"]
+
+
+def test_rattish_run_level_failure_reason_reaches_the_timeline(tmp_path: Path) -> None:
+    app_data, workflow_id = _registered_rattish(
+        tmp_path,
+        "Rattish: 1\n\nWorkflow:\n  name: Audit\n\nNode first:\n"
+        "  type: bash-command\n  command: printf ok\n",
+    )
+
+    run = anyio.run(lambda: run_workflow_payload(workflow_id, app_data, inputs={"nope": 1}))
+
+    [completed] = [event for event in run["runEvents"] if event["type"] == "workflow_completed"]
+    assert completed["status"] == "failed"
+    assert completed["errorCode"] == "RATTISH_WORKFLOW_INPUT_INVALID"
+    assert completed["message"].startswith("Workflow rejected its inputs: ")
+    assert "nope" in completed["message"]
+
+
+def test_rattish_plan_orders_nodes_by_routes_and_needs_and_lists_bindings(
+    tmp_path: Path,
+) -> None:
+    app_data, workflow_id = _registered_rattish(
+        tmp_path,
+        """Rattish: 1
+
+Workflow:
+  name: Audit
+
+Node build:
+  type: bash-command
+  command: printf ok
+  to: test
+
+Node test:
+  type: bash-command
+  command: printf ok
+  needs: build
+  with:
+    built: node.build.output.stdout
+  to: publish
+
+Node publish:
+  type: bash-command
+  command: printf ok
+  needs: test
+""",
+    )
+
+    plan = anyio.run(lambda: run_workflow_payload(workflow_id, app_data, dry_run=True))
+
+    assert [[node["id"] for node in item["nodes"]] for item in plan["generations"]] == [
+        ["build"],
+        ["test"],
+        ["publish"],
+    ]
+    [binding] = plan["bindings"]
+    assert binding["destinationNode"] == "test"
+    assert binding["expression"] == "node.build.output.stdout"
+    assert plan["generations"][1]["nodes"][0]["bindings"] == [binding]
+
+
+def test_rattish_run_list_reports_runs_waiting_for_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_data, workflow_id = _registered_rattish(
+        tmp_path,
+        "Rattish: 1\n\nWorkflow:\n  name: Audit\n\nNode first:\n"
+        "  type: bash-command\n  command: printf ok\n",
+    )
+    run = anyio.run(lambda: run_workflow_payload(workflow_id, app_data))
+    path = Path(run["logPath"])
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document.update(status="running", runner_pid=os.getpid())
+    path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(api_module, "is_rattish_run_active", lambda run_id: True)
+    ApprovalStore(app_data).create_or_update(
+        ApprovalRequest(
+            workflow_id=workflow_id, run_id=run["runId"], node_id="gate", message="Ship?"
+        )
+    )
+
+    [listed] = list_workflow_run_logs_payload(workflow_id, app_data)["runs"]
+
+    assert listed["status"] == "running"
+    assert listed["awaitingApproval"] is True
+
+
+def test_rattish_approval_for_a_finished_run_is_closed_and_refused(tmp_path: Path) -> None:
+    app_data, workflow_id = _registered_rattish(
+        tmp_path,
+        "Rattish: 1\n\nWorkflow:\n  name: Audit\n\nNode first:\n"
+        "  type: bash-command\n  command: exit 4\n",
+    )
+    run = anyio.run(lambda: run_workflow_payload(workflow_id, app_data))
+    # A request left behind by an older runner or a crash.
+    ApprovalStore(app_data).create_or_update(
+        ApprovalRequest(
+            workflow_id=workflow_id, run_id=run["runId"], node_id="gate", message="Ship?"
+        )
+    )
+
+    with pytest.raises(api_module.WorkflowApprovalError, match="run ended"):
+        decide_workflow_approval_payload(
+            workflow_id, run["runId"], "gate", "rejected", app_data, notes="late"
+        )
+    [approval] = list_workflow_approvals_payload(workflow_id, app_data)["approvals"]
+    assert approval["status"] == "cancelled"
+    assert approval["decision"] is None
+    assert list_workflow_approvals_payload(workflow_id, app_data, include_decided=False) == {
+        "workflowId": workflow_id,
+        "approvals": [],
+    }

@@ -24,6 +24,7 @@ from gofer.core.resources import DEFAULT_RESOURCE_LIMITS
 from gofer.subscriptions.acp_config import acp_session_config
 from gofer.subscriptions.acp_providers import require_acp_permissions
 from gofer.subscriptions.base import Subscription
+from gofer.subscriptions.tool_trace import normalize_tool_trace
 from gofer.subscriptions.usage import track_invocation
 from gofer.utils.atomic_output import mkdir_without_links
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
@@ -131,6 +132,7 @@ async def stream_antigravity(
     second_brain_cli_path: Path | None = None,
     session_id: str | None = None,
     session_dir: Path | None = None,
+    tool_free: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     command = antigravity_command(
         executable, model=model, effort=effort, permission_mode=permission_mode
@@ -145,6 +147,24 @@ async def stream_antigravity(
         session_dir=session_dir,
     ) as (process_cwd, workspace_args):
         command += workspace_args
+        if tool_free:
+            if session_id or workspace_args:
+                raise ValueError(
+                    "Tool-free conversations cannot resume or receive workspace grants"
+                )
+            # Rem's caller supplies a disposable workspace, never a project.
+            agents = process_cwd / ".agents" / "agents"
+            agents.mkdir(parents=True, exist_ok=True)
+            (agents / "raticode-rem-conversation.md").write_text(
+                "---\nname: raticode-rem-conversation\n"
+                "description: Rem conversation decisions without tools\n"
+                "tools: []\nmainAgent: true\nsubagent: false\n"
+                "commandExecutionPolicy: off\nmcpServers: []\nskills: []\nplugins: []\n"
+                "---\nReturn the requested structured conversation decision. "
+                "All work must be delegated through the decision, never performed here.\n",
+                encoding="utf-8",
+            )
+            command += ["--agent", "raticode-rem-conversation", "--disable-slash-commands"]
         if workspace_args and not session_id:
             prompt = (
                 f"The user's project and working directory is {cwd.resolve()}. "
@@ -211,15 +231,27 @@ async def stream_antigravity(
                                 seen_steps.add(index)
                                 name = step.get("tool_name")
                                 if isinstance(name, str) and name:
-                                    yield {
-                                        "type": "thought",
-                                        "text": name.replace("_", " "),
-                                        "trace": {
+                                    info = step.get("tool_info") or {}
+                                    if not isinstance(info, dict):
+                                        raise ValueError
+                                    trace = normalize_tool_trace(
+                                        {
                                             "kind": "tool",
                                             "id": str(index),
                                             "title": name.replace("_", " "),
-                                            "status": "completed",
-                                        },
+                                            "phase": "result",
+                                            "status": "failed"
+                                            if info.get("error")
+                                            else "completed",
+                                            "input": info.get("parameters"),
+                                            "output": info.get("output"),
+                                            "error": info.get("error"),
+                                        }
+                                    )
+                                    yield {
+                                        "type": "thought",
+                                        "text": name.replace("_", " "),
+                                        "trace": trace,
                                     }
                     except (ValueError, TypeError):
                         parse_error = "Antigravity emitted malformed stream output"
@@ -258,6 +290,9 @@ async def stream_antigravity(
 
 class AntigravitySubscription(Subscription):
     provider = "antigravity"
+
+    def __init__(self, *, tool_free: bool = False) -> None:
+        self.tool_free = tool_free
 
     def is_available(self) -> bool:
         return resolve_provider_executable("antigravity") is not None
@@ -309,6 +344,7 @@ class AntigravitySubscription(Subscription):
             model=provider_settings.model if provider_settings else None,
             effort=provider_settings.effort if provider_settings else None,
             permission_mode=provider_settings.approval_mode if provider_settings else None,
+            tool_free=self.tool_free,
             timeout=timeout,
             cancel_event=cancel_event,
             max_output_bytes=max_output_bytes

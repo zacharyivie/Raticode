@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import builtins
 import json
 import secrets
 import sqlite3
@@ -392,37 +391,3 @@ class DeviceRegistry:
     def save_listener_port(self, port: int) -> None:
         with self.transaction():
             self.db.execute("INSERT OR REPLACE INTO config VALUES ('listener_port',?)", (port,))
-
-    def save_relay(self, peer: str, origin: str, *, outbound: bool = False) -> None:
-        from gofer.devices.pairing import relay_origin
-
-        checked = relay_origin(origin)
-        with self.transaction():
-            self._row(peer)
-            self.db.execute(
-                "INSERT OR REPLACE INTO relay_origins VALUES (?,?,?)",
-                (peer, checked, int(outbound)),
-            )
-
-    def relay_channels(self) -> builtins.list[dict[str, Any]]:
-        with self.lock:
-            result = []
-            for row in self.db.execute(
-                "SELECT p.*,r.origin,r.outbound FROM peers p JOIN relay_origins r ON "
-                "r.peer=p.device_id WHERE p.state IN ('confirmed','active')"
-            ):
-                ready = self.ready(row["device_id"], row["pin"], row["role"])
-                result.append(
-                    {
-                        "peer": row["device_id"],
-                        "origin": row["origin"],
-                        "outbound": bool(row["outbound"]),
-                        "receive": ready["initiator_topic"]
-                        if row["outbound"]
-                        else ready["responder_topic"],
-                        "send": ready["responder_topic"]
-                        if row["outbound"]
-                        else ready["initiator_topic"],
-                    }
-                )
-            return result

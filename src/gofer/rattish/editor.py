@@ -28,6 +28,7 @@ from gofer.rattish.workspaces import (
     RattishWorkspaceError,
     RegisteredWorkflow,
     find_registered_workflow,
+    list_registered_workflows,
     read_workflow_metadata,
     update_registered_workflow_name,
     write_workflow_metadata,
@@ -175,10 +176,18 @@ class RattishEditorService:
                 raise RattishEditorError(
                     "The graph cannot edit source until the workflow declaration can be parsed."
                 )
+            was_valid = not self._compile_errors(workflow, source, data_dir=data_dir)
+            subflow_paths = (
+                _subflow_paths(workflow, data_dir)
+                if any(mutation.get("node_type") == "workflow" for mutation in mutations)
+                else ()
+            )
             updated = source
             applied: list[dict[str, Any]] = []
             for mutation in mutations:
-                updated, mutation_edits = _apply_source_mutation(updated, ast, mutation)
+                updated, mutation_edits = _apply_source_mutation(
+                    updated, ast, mutation, subflow_paths=subflow_paths
+                )
                 applied.extend(mutation_edits)
                 recovered = parse_rattish_recovering(updated, source_id=workflow.entrypoint.name)
                 if recovered.ast is None:
@@ -187,6 +196,14 @@ class RattishEditorService:
                         f"Mutation {mutation_name!r} made the workflow declaration unreadable."
                     )
                 ast = recovered.ast
+            # Graph edits must never turn a compiling workflow into one that does not compile.
+            if was_valid:
+                errors = self._compile_errors(workflow, updated, data_dir=data_dir)
+                if errors:
+                    raise RattishEditorError(
+                        "This change was not saved because it would make the workflow invalid: "
+                        f"{errors[0].message}"
+                    )
             try:
                 write_workflow_source(workflow, updated)
             except RattishWorkspaceError as exc:
@@ -314,6 +331,34 @@ class RattishEditorService:
         }
 
     @staticmethod
+    def _compile_errors(
+        workflow: RegisteredWorkflow, source: str, *, data_dir: Path
+    ) -> list[RattishDiagnostic]:
+        try:
+            recovered = parse_rattish_recovering(source, source_id=workflow.entrypoint.name)
+        except RattishError as exc:
+            return [item for item in exc.diagnostics if item.severity == "error"]
+        if recovered.ast is None or recovered.diagnostics:
+            return list(recovered.diagnostics) or [
+                _editor_diagnostic(workflow.entrypoint, "The workflow could not be parsed.")
+            ]
+        try:
+            compile_rattish_source(
+                source,
+                workflow.entrypoint,
+                data_dir=data_dir,
+                workflow_id=workflow.workflow_id,
+                project_root=workflow.project_root,
+            )
+        except RattishError as exc:
+            return [item for item in exc.diagnostics if item.severity == "error"] or [
+                _editor_diagnostic(workflow.entrypoint, str(exc))
+            ]
+        except RattishArtifactError as exc:
+            return [_editor_diagnostic(workflow.entrypoint, str(exc))]
+        return []
+
+    @staticmethod
     def _workflow(workflow_id: str, data_dir: Path) -> RegisteredWorkflow:
         try:
             return find_registered_workflow(workflow_id, registry_dir=data_dir)
@@ -363,6 +408,8 @@ def _apply_source_mutation(
     source: str,
     ast: Mapping[str, Any],
     mutation: Mapping[str, Any],
+    *,
+    subflow_paths: tuple[str, ...] = (),
 ) -> tuple[str, list[dict[str, Any]]]:
     kind = str(mutation.get("kind", ""))
     if kind in {"set_field", "remove_field"}:
@@ -444,10 +491,15 @@ def _apply_source_mutation(
         fields = mutation.get("fields", {})
         if not isinstance(fields, Mapping):
             raise RattishEditorError("add_node fields must be an object.")
+        authored = {
+            _mutation_identifier(field, "field"): value
+            for field, value in fields.items()
+            if value not in ("", None)
+        }
+        starters = _starter_fields(ast, node_id, node_type, set(authored), subflow_paths)
         lines = [f"Node {node_id}:", f"  type: {node_type}"]
-        for field, value in fields.items():
-            field_name = _mutation_identifier(field, "field")
-            lines.append(_render_field("  ", field_name, _render_json_value(value)))
+        for field_name, value in {**starters, **authored}.items():
+            lines.append(_render_field("  ", field_name, _render_starter_value(value)))
         prefix = "\n" if source.endswith(("\n", "\r")) else "\n\n"
         replacement = prefix + "\n".join(lines) + "\n"
         offset = len(source.encode("utf-8"))
@@ -559,7 +611,20 @@ def _apply_source_mutation(
                 else {}
             )
         }
-        edits = [_span_edit(type_field["value"]["span"], next_type)]
+        kept = {
+            entry["name"]["canonical"]
+            for entry in declaration["entries"]
+            if entry["kind"] == "field" and entry["name"]["canonical"] not in removable
+        }
+        starters = _starter_fields(
+            ast, declaration["name"]["canonical"], next_type, kept, subflow_paths
+        )
+        indent = " " * (int(type_field["span"]["start"]["column"]) - 1)
+        added = "".join(
+            "\n" + _render_field(indent, field, _render_starter_value(value))
+            for field, value in starters.items()
+        )
+        edits = [_span_edit(type_field["value"]["span"], next_type + added)]
         edits.extend(
             _line_removal_edit(source, entry["span"])
             for entry in declaration["entries"]
@@ -568,6 +633,133 @@ def _apply_source_mutation(
         return _apply_byte_edits(source, edits), [_edit_payload(edit) for edit in edits]
 
     raise RattishEditorError(f"Unsupported Rattish source mutation {kind!r}.")
+
+
+_DEFAULT_PROVIDER = "codex"
+
+
+class _SourceValue(str):
+    """A starter value that is already Rattish source, such as a node identifier."""
+
+
+def _render_starter_value(value: Any) -> str:
+    return str(value) if isinstance(value, _SourceValue) else _render_json_value(value)
+
+
+_STARTER_FIELDS: dict[str, dict[str, Any]] = {
+    "agent": {"prompt": "Describe what this step should do."},
+    "approval-gate": {"message": "Approve this step to continue."},
+    "copy-file": {"source-path": "input.txt", "destination-path": "output.txt"},
+    "delete-file": {"path": "output.txt"},
+    "file": {"path": "input.txt"},
+    "folder": {"path": "output"},
+    "http-request": {"url": "https://example.com"},
+    "local-search": {"index-path": ".raticode/index", "query": "search terms"},
+    "local-vectorize": {"source-path": "docs", "index-path": ".raticode/index"},
+    "loop": {"source": {"type": "count", "count": 1}},
+    "move-file": {"source-path": "input.txt", "destination-path": "output.txt"},
+    "open-resource": {"target": "https://example.com"},
+    "prompt-file": {"output-path": "prompt.md"},
+    "python-script": {"script-path": "script.py"},
+    "read-file": {"path": "input.txt"},
+    "shell-script": {"script-path": "script.sh"},
+    "write-file": {"path": "output.txt"},
+}
+
+
+def _starter_fields(
+    ast: Mapping[str, Any],
+    node_id: str,
+    node_type: str,
+    present: set[str],
+    subflow_paths: tuple[str, ...],
+) -> dict[str, Any]:
+    """Return placeholder values that let a new or retyped node compile."""
+    starters = dict(_STARTER_FIELDS.get(node_type, {}))
+    if node_type == "bash-command":
+        starters["command"] = f'echo "{node_id} ran"'
+    elif node_type in {"agent", "common-llm-task"}:
+        starters = {"provider": _SourceValue(_workflow_provider(ast)), **starters}
+    elif node_type == "break":
+        loop = _upstream_loop(ast, node_id.lower())
+        if loop is None:
+            raise RattishEditorError(
+                "A Break node must run after a Loop node. Add a Loop node and route it "
+                "to this node first."
+            )
+        starters["loop"] = _SourceValue(loop)
+    elif node_type == "workflow" and not present & {"workflow-id", "workflow-path"}:
+        if not subflow_paths:
+            raise RattishEditorError(
+                "A Workflow node runs another workflow in this project. Create one and set "
+                "its Interface version in Workflow settings first."
+            )
+        starters["workflow-path"] = subflow_paths[0]
+    return {field: value for field, value in starters.items() if field not in present}
+
+
+def _workflow_provider(ast: Mapping[str, Any]) -> str:
+    for node in ast["nodes"]:
+        for entry in node["entries"]:
+            if entry["kind"] == "field" and entry["name"]["canonical"] == "provider":
+                provider = _field_identifier(entry)
+                if provider:
+                    return provider
+    return _DEFAULT_PROVIDER
+
+
+def _upstream_loop(ast: Mapping[str, Any], node_id: str) -> str | None:
+    """Return the nearest loop node whose routes reach ``node_id``."""
+    parents: dict[str, list[str]] = {}
+    types: dict[str, str | None] = {}
+    for node in ast["nodes"]:
+        source_id = node["name"]["canonical"]
+        for entry in node["entries"]:
+            if entry["kind"] == "field" and entry["name"]["canonical"] == "type":
+                types[source_id] = _field_identifier(entry)
+            elif entry["kind"] == "routes":
+                for route in entry["routes"]:
+                    parents.setdefault(route["target"]["canonical"], []).append(source_id)
+    queue = list(parents.get(node_id, []))
+    seen = {node_id}
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        if types.get(current) == "loop":
+            return current
+        queue.extend(parents.get(current, []))
+    return None
+
+
+def _subflow_paths(workflow: RegisteredWorkflow, data_dir: Path) -> tuple[str, ...]:
+    """Return callable workflows in the project, relative to the project root.
+
+    A workflow can only be called once it declares an interface version.
+    """
+    base = workflow.project_root.resolve()
+    paths: list[str] = []
+    for candidate in list_registered_workflows(registry_dir=data_dir):
+        entrypoint = candidate.entrypoint.resolve()
+        if (
+            candidate.workflow_id.lower() == workflow.workflow_id.lower()
+            or entrypoint == workflow.entrypoint.resolve()
+            or not entrypoint.is_relative_to(base)
+        ):
+            continue
+        try:
+            source = entrypoint.read_text(encoding="utf-8")
+            child = parse_rattish_recovering(source, source_id=entrypoint.name).ast
+        except (OSError, UnicodeError, RattishError):
+            continue
+        if child is None or not any(
+            entry["kind"] == "field" and entry["name"]["canonical"] == "interface-version"
+            for entry in child["workflow"]["entries"]
+        ):
+            continue
+        paths.append(entrypoint.relative_to(base).as_posix())
+    return tuple(paths)
 
 
 def _mutation_declaration(ast: Mapping[str, Any], target: Any) -> Mapping[str, Any]:

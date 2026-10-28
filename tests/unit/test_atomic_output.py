@@ -10,6 +10,98 @@ import pytest
 from gofer.utils.atomic_output import atomic_binary_output
 
 
+@pytest.fixture(params=["var", "tmp", "etc"])
+def macos_alias(tmp_path, monkeypatch, request):
+    from gofer.utils import atomic_output
+
+    canonical = tmp_path.resolve() / "private" / request.param
+    canonical.mkdir(parents=True)
+    alias = tmp_path.resolve() / request.param
+    alias.symlink_to(canonical, target_is_directory=True)
+    monkeypatch.setattr(atomic_output.sys, "platform", "darwin")
+    monkeypatch.setattr(atomic_output, "_MACOS_DIRECTORY_ALIASES", ((alias, canonical),))
+    return alias, canonical
+
+
+def test_safe_file_lifecycle_through_macos_system_alias(macos_alias):
+    from gofer.utils.atomic_output import (
+        mkdir_without_links,
+        open_binary_input,
+        remove_tree_without_links,
+        scandir_without_links,
+        unlink_without_links,
+    )
+
+    alias, canonical = macos_alias
+    directory = alias / "workspace"
+    mkdir_without_links(directory, exclusive=True)
+    with atomic_binary_output(directory / "report.html", exclusive=True) as output:
+        output.write(b"report")
+    with open_binary_input(directory / "report.html") as source:
+        assert source.read() == b"report"
+    with scandir_without_links(directory) as entries:
+        assert [entry.name for entry in entries] == ["report.html"]
+    unlink_without_links(directory / "report.html")
+    with atomic_binary_output(directory / "another.html") as output:
+        output.write(b"another report")
+    remove_tree_without_links(directory)
+    assert not list(canonical.iterdir())
+    assert alias.is_symlink()
+
+
+@pytest.mark.parametrize("operation", ["read", "write", "mkdir", "scan", "unlink", "rmtree"])
+def test_safe_file_helpers_reject_links_below_macos_alias(macos_alias, tmp_path, operation):
+    from gofer.utils import atomic_output
+
+    alias, canonical = macos_alias
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    if operation == "rmtree":
+        (outside / "tree").mkdir()
+    sentinel = outside / "tree" / "keep" if operation == "rmtree" else outside / "keep"
+    sentinel.write_bytes(b"private")
+    (canonical / "swapped").symlink_to(outside, target_is_directory=True)
+    parent = alias / "swapped"
+    with pytest.raises(OSError):
+        if operation == "read":
+            with atomic_output.open_binary_input(parent / "keep"):
+                pytest.fail("must not read through a swapped parent")
+        elif operation == "write":
+            with atomic_binary_output(parent / "keep"):
+                pytest.fail("must not write through a swapped parent")
+        elif operation == "mkdir":
+            atomic_output.mkdir_without_links(parent / "created")
+        elif operation == "scan":
+            with atomic_output.scandir_without_links(parent):
+                pytest.fail("must not scan through a swapped parent")
+        elif operation == "unlink":
+            atomic_output.unlink_without_links(parent / "keep")
+        else:
+            atomic_output.remove_tree_without_links(parent / "tree")
+    assert sentinel.read_bytes() == b"private"
+    assert list(outside.iterdir()) == [outside / "tree" if operation == "rmtree" else sentinel]
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_system_alias_does_not_accept_unexpected_target(
+    macos_alias, tmp_path, monkeypatch, platform
+):
+    from gofer.utils import atomic_output
+
+    alias, canonical = macos_alias
+    monkeypatch.setattr(atomic_output.sys, "platform", platform)
+    if platform == "darwin":
+        outside = tmp_path.resolve() / "outside"
+        outside.mkdir()
+        alias.unlink()
+        alias.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        with atomic_binary_output(alias / "report.html"):
+            pytest.fail("must reject an unrecognized alias")
+    assert not list(canonical.iterdir())
+    assert not (alias / "report.html").exists()
+
+
 def test_atomic_output_replaces_links_without_modifying_their_targets(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.write_bytes(b"original")

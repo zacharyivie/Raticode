@@ -27,6 +27,14 @@ test("phone model selection preserves desktop thread identity, resources and his
   assert.deepEqual(reconcileDesktopThread(null, remote), remote.metadata);
 });
 
+test("phone resource toggles apply unless desktop changed resources first", () => {
+  const local = { id: "same", model: "a", resources: { shell: true, browser: false } };
+  const remote = { metadata: { ...local, resources: { shell: true, browser: true } }, base_metadata: local, context_modified: true };
+  assert.deepEqual(reconcileDesktopThread(local, remote).resources, { shell: true, browser: true });
+  const edited = { ...local, resources: { shell: false, browser: false } };
+  assert.deepEqual(reconcileDesktopThread(edited, remote).resources, edited.resources);
+});
+
 test("a stale mirror cannot undo desktop configuration", () => {
   const local = { id: "same", model: "new", resources: { mcp: ["local"] } };
   assert.equal(reconcileDesktopThread(local, { metadata: { model: "old" }, context_modified: false }), local);
@@ -179,4 +187,46 @@ test("phone sync bumps only new user messages and completion, not thoughts or re
     assert.equal(timestamps[3], timestamps[2]);
     assert.ok(timestamps[4] > timestamps[3]);
   } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
+test("phones see display settings only and their changes go through normal settings", async () => {
+  const { applyPhoneSettings, phoneSettings, startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const settings = { appearance: { theme: "light" }, assistant: { provider: "codex", resources: { mcpServers: [{ command: "/bin/tool" }] } },
+    browser: { remConfirm: "signed-in" }, memory: { reportFormat: "md", secondBrainRoot: "/private" } };
+  const shared = phoneSettings(settings);
+  assert.equal(shared.assistant.resources, undefined);
+  assert.equal(shared.browser, undefined);
+  assert.deepEqual(shared.memory, { reportFormat: "md" });
+  const changed = applyPhoneSettings(settings, [{ id: "a", values: { "appearance.theme": "dark", "browser.remConfirm": "never", "assistant.provider.x": 1 } }]);
+  assert.equal(changed.appearance.theme, "dark");
+  assert.equal(changed.browser.remConfirm, "signed-in");
+  assert.equal(settings.appearance.theme, "light");
+
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const host = new EventTarget();
+  const storage = { getItem: () => null, setItem: () => {} };
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "" } } });
+  globalThis.window = host;
+  const exchanges = [];
+  const applied = [];
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: [], desktop_control_peers: ["phone"] }) };
+    const body = JSON.parse(options.body);
+    exchanges.push(body);
+    return { ok: true, json: async () => ({ changes: exchanges.length === 1 ? [{ id: "change", values: { "appearance.theme": "dark" } }] : [] }) };
+  };
+  let stop;
+  try {
+    for (let tick = 0; tick < 2; tick += 1) await new Promise((resolve, reject) => {
+      host.addEventListener("gofer:device-sync-status", event => event.detail ? reject(new Error(event.detail)) : resolve(), { once: true });
+      if (!stop) stop = startDeviceWorkspaceSync({ storage, repository: { all: async () => [] }, interval: 1,
+        getContext: () => ({ settings, updateSettings: changes => applied.push(...changes) }) });
+    });
+    assert.deepEqual(applied.map(change => change.id), ["change"]);
+    assert.deepEqual(exchanges[0].applied, []);
+    assert.deepEqual(exchanges[1].applied, ["change"]);
+    assert.equal(exchanges[0].settings.assistant.resources, undefined);
+  } finally {
+    stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch;
+  }
 });

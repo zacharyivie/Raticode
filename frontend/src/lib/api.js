@@ -80,13 +80,14 @@ export async function ensureGoferApiToken(_fetchImpl, { refresh = false } = {}) 
     .then(async () => {
       const session = await window.goferDesktop?.apiSession?.();
       const token = typeof session?.apiToken === "string" ? session.apiToken : launchCapability();
-      if (token) {
-        window.__goferSessionToken = token;
-        if (typeof session?.apiBaseUrl === "string") window.__goferSessionBaseUrl = session.apiBaseUrl;
-      }
+      if (typeof session?.apiBaseUrl === "string" && session.apiBaseUrl) window.__goferSessionBaseUrl = session.apiBaseUrl;
+      if (token) window.__goferSessionToken = token;
       return token;
     })
-    .catch(() => "")
+    .catch(error => {
+      if (window.goferDesktop?.apiSession) throw new Error("The desktop backend is unavailable. Retry when it is ready.", { cause: error });
+      return "";
+    })
     .finally(() => {
       window.__goferApiTokenPromise = undefined;
     });

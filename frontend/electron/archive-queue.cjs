@@ -76,6 +76,8 @@ function createArchiveQueue({ createWorker = () => new Worker(path.join(__dirnam
     worker = undefined;
     await finishedWorker?.terminate();
   }
-  return { archive, close };
+  // A deletion barrier waits for every already queued save before erasing it.
+  const forget = (root, ids) => archive(root, { id: "rem-history-reset" }, ids, { deleted: true, forget: true });
+  return { archive, forget, close };
 }
 module.exports = { createArchiveQueue };

@@ -1,5 +1,11 @@
 # Experimental device messaging and fleet work
 
+> **October 26, 2026:** The ntfy relay was removed. Phones and desktops connect
+> only over the local network. Relay, topic and quota material below is historical.
+> Invitation `relay` and topic fields remain only for wire compatibility and name the
+> unresolvable `https://relay.invalid`. See the mobile repository's
+> `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
+
 The paired-device backend now accepts application records after a mutually
 pinned TLS 1.3 session, exact binding echo and durable ready acknowledgment.
 The same TLS carrier is used for local TCP and HTTPS ntfy topics. ntfy is an
@@ -150,3 +156,7 @@ The updated wire extension pages thread snapshots at 50 entries or 45 KB and his
 The authenticated loopback workspace export now joins each accepted request to its existing native ChatJobs journal. It projects provider thought events, structured tool traces, final text, failures, file-change summaries and running state into the renderer's normal conversation message shapes. Stable request/event IDs let deltas replace their earlier text and let a final reply replace the existing text-only mirror without duplicate messages. User messages retain `origin: phone`, including after desktop edits. A local journal revision changes the renderer sync token as work progresses. Reconciliation remains on its five-second interval.
 
 The renderer can stop or steer an active phone turn using the same existing local ChatSteering endpoints. It never reposts a phone prompt to start another job. Unpairing, revocation and desktop history removal continue to control export. Diagnostic projection is limited to the local API, and diagnostics are excluded from outgoing workspace text mirrors and mobile dispatch context. TLS, receipt semantics and mobile capabilities are unchanged. Existing journals permit recovery after the renderer or backend restarts; missing historical journals cannot reconstruct traces that were never saved.
+
+## Background parity, October 27, 2026
+
+Phone polling requests use a bounded recent replay window instead of the lifetime inbox, so long background sync cannot exhaust the 100,000-event quota. `src/gofer/devices/remote_control.py` answers phone approval and swarm events only after the per-phone **Allow approvals and swarm controls** opt-in, which is off by default and stored in `device_remote_control`. Workflow decisions reuse `decide_workflow_approval_payload` with `decided_by="phone"`; swarm actions reuse the swarm manager's `control`, `message` and `human_response` paths. Every approval decision must match the current action digest. Thread resource changes only toggle existing resources and need an explicit `set_resources` flag. The provider catalog is read on a worker thread, never on the device event loop. Electron reloads a crashed hidden renderer up to three times an hour and restores a hidden main window if a page-initiated close destroys it, so tray mode keeps phone sync running. See the mobile repository's `docs/mobile-desktop-v2.md` background parity extension.

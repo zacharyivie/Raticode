@@ -23,9 +23,40 @@ Changes since the `v0.3.8` tag.
   editing commands, language workers and terminal shell selection.
 - Shortcut validation, reduced-motion preferences, automatic thought collapsing,
   and report theme import/export.
+- Rem's Browser tool drives Raticode's own browser tabs in the background, so you
+  keep working while several threads test pages in parallel. Settings > Browser can
+  switch Rem back to an external Playwright browser, visible or headless.
+- The integrated browser behaves like a full browser: links that open new tabs,
+  sign-in pop-ups, per-site permission prompts, a downloads list, a security
+  indicator with site information, friendly error and certificate pages, history
+  with address-bar suggestions, bookmarks, reopen closed tab, per-site zoom,
+  printing, Save as PDF, HTTP sign-in, spell checking and audio muting. Restored
+  tabs keep their back/forward history, and long-hidden tabs free their memory.
+- Share a browser tab with Rem, pause Rem, or take over a tab Rem opened. Rem's
+  tabs show what it did, outline the elements it uses, and ask before it submits
+  forms, uploads files or runs scripts on signed-in pages. Rem can answer page
+  dialogs, read same-origin frames and upload files from its project.
+- A redesigned Rem Tools menu with switches, search and add forms, backed by a
+  shared library of skills and MCP servers. Agents add entries with `gof rem`;
+  the menu also finds Raticode, Agents, Claude and Codex skill folders.
+  Skills now include their descriptions and are readable by every provider.
+- A Plugins settings section for the left sidebar. Show or hide each plugin,
+  drag plugins into order in the sidebar or settings, and lock their positions.
+  File explorer is always shown. Rem, Swarms, Organizations and Second Brain
+  are experimental: they stay listed but are off until turned on.
 
 ### Fixed
 
+- Fill in provider allowances without extra setup. Cursor, Antigravity, Grok
+  and OpenCode's Claude or ChatGPT sign-ins report usage from the signed-in
+  CLI. Allowances refresh in the background and after provider activity.
+  Copilot Free's elapsed reset dates no longer mark fresh readings out of date,
+  and Cursor runs record tokens.
+- Keep Claude usage current without handling Claude credentials. Claude Code
+  reports its five-hour, weekly and model-specific limits through its own
+  `/usage` command, with hooks and MCP servers disabled for the check. Each
+  Claude turn in Raticode updates the limits at no extra cost, and checks back
+  off after failures so Claude's rate-limited usage service is not overloaded.
 - Replace pasted and dragged files with their incoming contents, refresh open
   editors, and confirm deletion of multiple selected files with their count.
 - Preserve both source and destination when replacement fails. Refuse folder
@@ -38,9 +69,34 @@ Changes since the `v0.3.8` tag.
 - Run file/media browser regressions in release validation, install their FFmpeg
   prerequisite and isolate the fixture's clipboard and saved state. Wait for
   lazy syntax coloring and media playback to become ready on busy release runners.
+- Show each workflow's real state in the Workflows sidebar: running, failed,
+  stopped or invalid with its first compile error, instead of always "Ready".
+  Show the name the workflow file declares, and when it last ran.
+- Rename and duplicate Rattish workflows from the sidebar. Duplicates leave
+  files excluded by `.raticodeignore` behind.
+- List runs newest first with their age and duration, and drop runs the
+  backend has deleted. Fit small graphs at normal size when they open.
 
 ### Security
 
+- Rem's browser access is now granted per turn and bound to its thread, and it
+  ends when the turn ends or the Browser switch is off. The long-lived
+  `browser-control.json` credential is no longer written and is deleted.
+- Rem browses in its own profile. It uses your sign-ins only on sites you list
+  in Settings > Browser. Local HTML previews run in a temporary profile.
+- Pages can no longer open studio tabs, zoom or navigate by dispatching fake
+  input; pop-ups need a real click. Downloads go through a managed list, files
+  that can run code wait for review, and Rem's downloads are blocked by default.
+- Upgrade Electron from 41.10.7 to 45.1.0 (Chromium 146 to 156). Electron 41
+  stopped receiving Chromium security fixes in August 2026, so web pages ran on
+  an engine ten releases behind Chrome.
+- Integrated browser tabs present a consistent identity. They send the
+  `Sec-CH-UA` client hint headers Electron omits, matching what page scripts
+  report. Opted-in sites get detailed hints through `Accept-CH` and
+  `Critical-CH`. The user agent uses Chrome's reduced format and
+  `Accept-Language` matches the page's languages. Google sign-in no longer
+  reports "This browser or app may not be secure", and sign-in pop-ups no
+  longer announce Electron and Raticode.
 - Upgrade locked urllib3 to 2.8.0 to address three streaming and HTTPS proxy
   advisories. Review and retain its MIT license notice.
 - Remove the vulnerable braces dependency chain by migrating the CSS build to

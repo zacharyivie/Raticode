@@ -27,7 +27,6 @@ async def pair_desktop(registry: DeviceRegistry, uri: str) -> str:
     # User explicitly consented to this QR identity before calling.
     registry.propose(peer, pin, "desktop", invite["expires_at"], outbound=True)
     registry.save_endpoint(peer, endpoint)
-    registry.save_relay(peer, invite["relay"], outbound=True)
     return await _connect(registry, peer, pin, endpoint, "pair", raw, invite)
 
 

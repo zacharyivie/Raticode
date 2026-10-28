@@ -230,6 +230,9 @@ const defaultSettings = {
 };
 const minZoom = 0.45;
 const maxZoom = 1.8;
+// Fitting a whole graph never enlarges it; a one-node workflow stays readable
+// at its normal size instead of filling the canvas.
+export const graphFitMaxZoom = 1;
 const graphWorldSize = 20000;
 const graphWorldOffset = graphWorldSize / 2;
 const nodeWidth = 220;
@@ -1011,6 +1014,7 @@ export default function DagCanvas({
   const deleteSelectedNodeRef = useRef(null);
   const nodeDragMovedRef = useRef(false);
   const nodeDragSelectionRef = useRef([]);
+  const nodeDragRef = useRef(null);
   const [selectedNodeId, setSelectedNodeId] = useState();
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [draggingNodeId, setDraggingNodeId] = useState(null);
@@ -1049,6 +1053,7 @@ export default function DagCanvas({
   const [outlineFocusRequest, setOutlineFocusRequest] = useState(null);
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 });
   const workflowNodesRef = useRef([]);
+  const initialFitWorkflowIdRef = useRef(null);
   const [minimapDragging, setMinimapDragging] = useState(false);
   const [mapOpen, setMapOpen] = useState(false);
   const [mapTab, setMapTab] = useState("outline");
@@ -1079,6 +1084,9 @@ export default function DagCanvas({
 
   const invalidWorkflow = Boolean(workflow.invalid);
   const rattishMode = Boolean(rattishDocument);
+  // Rattish runs resolve relative paths against the project, not the app data folder.
+  const pathBaseDir =
+    workflow.sourceFormat === "rattish" && workflow.projectRoot ? workflow.projectRoot : dataDir;
   const editingDisabled = invalidWorkflow || readOnly;
   const validationDiagnostics = workflowValidationDiagnostics(workflow);
   const blockingValidationErrors = validationDiagnostics.filter(
@@ -1097,6 +1105,7 @@ export default function DagCanvas({
   );
   workflowNodesRef.current = workflowNodes;
   const workflowEdges = useMemo(() => workflow.edges ?? [], [workflow.edges]);
+  const needsLinks = useMemo(() => rattishNeedsLinks(workflowNodes, workflowEdges), [workflowEdges, workflowNodes]);
   const edgeDiagnostics = useMemo(
     () => diagnosticsByTarget(validationDiagnostics, "edge"),
     [validationDiagnostics],
@@ -1140,17 +1149,18 @@ export default function DagCanvas({
           approval.runId === selectedRunId,
       ) ?? null
     : null;
-  const pendingApproval = useMemo(() => {
-    const pendingApprovals = approvalState?.approvals?.filter(
-      (approval) => approval.status === "pending" && nodesById[approval.nodeId],
-    ) ?? [];
-    if (!pendingApprovals.length) return null;
-    return pendingApprovals
+  const pendingApprovals = useMemo(() => {
+    return (
+      approvalState?.approvals?.filter(
+        (approval) => approval.status === "pending" && nodesById[approval.nodeId],
+      ) ?? []
+    )
       .slice()
       .sort((first, second) =>
         String(first.requestedAt || "").localeCompare(String(second.requestedAt || "")),
-      )[0];
+      );
   }, [approvalState?.approvals, nodesById]);
+  const pendingApproval = pendingApprovals[0] ?? null;
   const pendingApprovalNode = pendingApproval ? nodesById[pendingApproval.nodeId] : null;
   const workflowLogText =
     logState?.text || runResult?.logText || formatWorkflowRunLog(runResult);
@@ -1243,18 +1253,34 @@ export default function DagCanvas({
     setDraftEdge(null);
     setKeyboardConnectionFrom(null);
     setOutlineFocusRequest(null);
+    nodeDragRef.current = null;
     setDraggingNodeId(null);
     setPanningPointerId(null);
     setSelectionBox(null);
     const rect = canvasRef.current?.getBoundingClientRect();
     const nodes = workflowNodesRef.current;
+    initialFitWorkflowIdRef.current = nodes.length ? workflow.id : null;
     setViewport(nodes.length
       ? fitViewportToNodes(nodes, {
           width: rect?.width || 960,
           height: rect?.height || 640,
-        })
+        }, { maxZoom: graphFitMaxZoom })
       : { x: 0, y: 0, scale: 1 });
   }, [workflow.id]);
+
+  // Source documents often load after the canvas opens. Fit once when the
+  // first nodes arrive so the graph does not sit at an arbitrary origin, unless
+  // the user already moved the empty canvas.
+  useEffect(() => {
+    if (initialFitWorkflowIdRef.current === workflow.id || !workflowNodes.length) return;
+    initialFitWorkflowIdRef.current = workflow.id;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const fitted = fitViewportToNodes(workflowNodes, {
+      width: rect?.width || 960,
+      height: rect?.height || 640,
+    }, { maxZoom: graphFitMaxZoom });
+    setViewport((current) => (current.x === 0 && current.y === 0 && current.scale === 1 ? fitted : current));
+  }, [workflow.id, workflowNodes]);
 
   useEffect(() => {
     if (selectedNodeId && !nodesById[selectedNodeId]) {
@@ -1377,7 +1403,7 @@ export default function DagCanvas({
           fitViewportToNodes(workflowNodes, {
             width: rect?.width || 960,
             height: rect?.height || 640,
-          }),
+          }, { maxZoom: graphFitMaxZoom }),
         );
       }
     }
@@ -1544,13 +1570,13 @@ export default function DagCanvas({
     };
   }
 
-  function fitNodes(nodes) {
+  function fitNodes(nodes, options) {
     if (!nodes.length) return;
-    setViewport(fitViewportToNodes(nodes, canvasViewportSize()));
+    setViewport(fitViewportToNodes(nodes, canvasViewportSize(), options));
   }
 
   function fitGraph() {
-    fitNodes(workflowNodes);
+    fitNodes(workflowNodes, { maxZoom: graphFitMaxZoom });
   }
 
   function fitSelection() {
@@ -1592,7 +1618,6 @@ export default function DagCanvas({
           kind: "add_node",
           node: nodeId,
           node_type: "bash-command",
-          fields: { command: "" },
         },
       ])).then((document) => {
         if (!document) return;
@@ -1973,11 +1998,25 @@ export default function DagCanvas({
 
   function handleNodePointerDown(event, nodeId) {
     if (event.button !== 0) return;
+    // Stop the browser from starting a text selection while the node is dragged.
+    event.preventDefault();
+    window.getSelection?.()?.removeAllRanges();
     setNodeContextMenu(null);
     event.currentTarget.setPointerCapture(event.pointerId);
     nodeDragMovedRef.current = false;
     const nextSelection = selectedNodeIds.includes(nodeId) ? selectedNodeIds : [nodeId];
     nodeDragSelectionRef.current = nextSelection;
+    const moving = new Set(nextSelection);
+    nodeDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      origins: new Map(
+        workflowNodes
+          .filter((node) => moving.has(node.id))
+          .map((node) => [node.id, { x: node.x ?? 0, y: node.y ?? 0 }]),
+      ),
+    };
     setSelectedNodeId(nodeId);
     setSelectedNodeIds(nextSelection);
     setSelectedEdgeId(null);
@@ -1985,29 +2024,31 @@ export default function DagCanvas({
     setDraggingNodeId(nodeId);
   }
 
-  function handleNodePointerMove(event, nodeId) {
-    if (draggingNodeId !== nodeId) return;
-    if (Math.abs(event.movementX) > 1 || Math.abs(event.movementY) > 1) {
+  function handleNodePointerMove(event) {
+    const drag = nodeDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.buttons === 0) {
+      // The release happened outside the node, so finish the drag instead of following hover.
+      handleNodePointerUp(event);
+      return;
+    }
+    event.preventDefault();
+    // Position from the drag origin, not per-event deltas, so missed or scaled
+    // pointer events cannot make the node drift away from the cursor.
+    const screenDx = event.clientX - drag.startX;
+    const screenDy = event.clientY - drag.startY;
+    if (Math.abs(screenDx) > 2 || Math.abs(screenDy) > 2) {
       nodeDragMovedRef.current = true;
     }
-    const movingNodeIds = nodeDragSelectionRef.current.length
-      ? nodeDragSelectionRef.current
-      : [nodeId];
-    const movingSet = new Set(movingNodeIds);
-    const dx = event.movementX / viewport.scale;
-    const dy = event.movementY / viewport.scale;
+    const dx = screenDx / viewport.scale;
+    const dy = screenDy / viewport.scale;
 
     onWorkflowChange({
       ...workflow,
-      nodes: workflowNodes.map((node) =>
-        movingSet.has(node.id)
-          ? {
-              ...node,
-              x: (node.x ?? 0) + dx,
-              y: (node.y ?? 0) + dy,
-            }
-          : node,
-      ),
+      nodes: workflowNodes.map((node) => {
+        const origin = drag.origins.get(node.id);
+        return origin ? { ...node, x: origin.x + dx, y: origin.y + dy } : node;
+      }),
     });
   }
 
@@ -2022,6 +2063,7 @@ export default function DagCanvas({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    nodeDragRef.current = null;
     setDraggingNodeId(null);
     nodeDragSelectionRef.current = [];
   }
@@ -2035,7 +2077,7 @@ export default function DagCanvas({
     if (node.type === "file") {
       const path = node.operation?.path;
       if (path) {
-        setFilePreviewPath(resolveDisplayPath(path, dataDir));
+        setFilePreviewPath(resolveDisplayPath(path, pathBaseDir));
       }
       return;
     }
@@ -2480,7 +2522,7 @@ export default function DagCanvas({
               <Play size={17} />
             </button>
             <button
-              className="grid h-8 w-8 place-items-center rounded-lg border border-line bg-white text-muted transition hover:border-slate-300 hover:bg-slate-50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+              className="grid h-8 w-8 place-items-center rounded-lg border border-line bg-white text-muted transition enabled:text-red-600 enabled:hover:border-red-200 enabled:hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={stopDisabled ?? (invalidWorkflow || !workflowHasRunningRuns || Boolean(runState?.stopping))}
               title={stopTitle}
               type="button"
@@ -2502,7 +2544,7 @@ export default function DagCanvas({
                 <div
                   aria-atomic="true"
                   aria-live={notice.type === "error" ? "assertive" : "polite"}
-                  className={`validation-pop absolute right-0 top-10 z-40 w-64 max-w-[calc(100vw-2rem)] rounded-lg border px-3 py-2 text-sm font-medium shadow-panel ${
+                  className={`validation-pop absolute left-0 top-10 z-40 w-72 max-w-[calc(100vw-2rem)] rounded-lg border px-3 py-2 text-sm font-medium shadow-panel ${
                     notice.type === "error"
                       ? "border-red-200 bg-red-50 text-red-700"
                       : "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -2587,7 +2629,7 @@ export default function DagCanvas({
             </button>
             <button
               className="hidden"
-              title="Import workflow TOML or bundle"
+              title="Import legacy workflow or bundle"
               type="button"
               onClick={() => importInputRef.current?.click()}
             >
@@ -2705,7 +2747,7 @@ export default function DagCanvas({
           onWheel={handleCanvasWheel}
         >
           <WorkflowTriggerStrip
-            dataDir={dataDir}
+            dataDir={pathBaseDir}
             runContinuously={workflow.runContinuously}
             schedule={workflow.schedule}
             webhooks={workflow.webhooks}
@@ -2745,6 +2787,35 @@ export default function DagCanvas({
                   </marker>
                 </defs>
                 <g transform={`translate(${graphWorldOffset} ${graphWorldOffset})`}>
+                  {needsLinks.map((link) => {
+                    const from = nodesById[link.from];
+                    const to = nodesById[link.to];
+                    if (!from || !to) return null;
+                    const geometry = edgeGeometry(from, to, false, 0);
+                    return (
+                      <g key={link.id} aria-label={`${link.to} needs ${link.from}`} role="img">
+                        <path
+                          d={geometry.path}
+                          fill="none"
+                          markerEnd="url(#arrowhead)"
+                          stroke="#94a3b8"
+                          strokeDasharray="5 5"
+                          strokeLinecap="round"
+                          strokeWidth="2"
+                          style={{ pointerEvents: "none" }}
+                        />
+                        <text
+                          x={geometry.label.x}
+                          y={geometry.label.y}
+                          className="fill-slate-500 text-[12px] font-medium"
+                          style={{ pointerEvents: "none" }}
+                          textAnchor="middle"
+                        >
+                          needs
+                        </text>
+                      </g>
+                    );
+                  })}
                   {workflowEdges.map((edge) => {
                     const from = nodesById[edge.from];
                     const to = nodesById[edge.to];
@@ -2844,10 +2915,12 @@ export default function DagCanvas({
                   key={node.id}
                   node={{
                     ...node,
-                    meta: nodeMetaFromOperation(node.operation ?? defaultOperation(node.type), dataDir),
+                    meta: nodeMetaFromOperation(node.operation ?? defaultOperation(node.type), pathBaseDir),
                   }}
                   selected={selectedNodeIds.includes(node.id)}
                   status={nodeStatuses[node.id]}
+                  statusSummary={runNodes?.[node.id]?.activationSummary}
+                  autoStart={isRattishAutoStartNode(node)}
                   zIndex={nodeStackIndex(node.id, {
                     draggingNodeId,
                     selectedNodeId,
@@ -2899,6 +2972,7 @@ export default function DagCanvas({
               approval={pendingApproval}
               node={pendingApprovalNode}
               onDecideApproval={onDecideApproval}
+              pendingCount={pendingApprovals.length}
             />
           ) : null}
           {!invalidWorkflow ? (
@@ -3133,7 +3207,7 @@ function InvalidWorkflowCanvas({ workflow }) {
               Invalid workflow TOML
             </h3>
             <button
-              className="mt-1 block max-w-full truncate text-left text-xs text-red-700/80 underline-offset-2 transition hover:text-red-800 hover:underline dark:text-red-200/70 dark:hover:text-red-100"
+              className="mt-1 block max-w-full truncate text-left text-xs text-red-700/80 underline-offset-2 transition hover:text-red-800 hover:underline dark:text-red-200/70 dark:hover:text-red-200"
               title={sourcePath}
               type="button"
               onClick={openSourcePath}
@@ -3151,7 +3225,7 @@ function InvalidWorkflowCanvas({ workflow }) {
           </button>
         </div>
         <div className="workflow-scrollbar min-h-0 overflow-y-auto px-4 py-3">
-          <pre className="whitespace-pre-wrap font-mono text-xs leading-5 text-red-900 dark:text-red-100">
+          <pre className="whitespace-pre-wrap font-mono text-xs leading-5 text-red-900 dark:text-red-200">
             {message}
           </pre>
         </div>
@@ -3169,13 +3243,13 @@ function WorkflowTriggerStrip({ dataDir, runContinuously, schedule, webhooks, wa
     <div className="pointer-events-none absolute left-5 top-5 z-20 flex max-w-[calc(100%-40px)] flex-wrap gap-2">
       {runContinuously ? (
         <div className="inline-flex items-center gap-2 rounded-lg border border-line bg-white/90 px-3 py-2 text-xs font-medium text-ink shadow-sm backdrop-blur dark:bg-[#252526]/95">
-          <RefreshCw size={14} className="text-teal-600" />
+          <RefreshCw size={14} className="text-indigo-600" />
           <span className="truncate">Runs continuously</span>
         </div>
       ) : null}
       {!runContinuously && schedule ? (
         <div className="inline-flex items-center gap-2 rounded-lg border border-line bg-white/90 px-3 py-2 text-xs font-medium text-ink shadow-sm backdrop-blur dark:bg-[#252526]/95">
-          <CalendarDays size={14} className="text-teal-600" />
+          <CalendarDays size={14} className="text-indigo-600" />
           <span className="truncate">
             Starts on schedule: {schedule.cron_expression}
           </span>
@@ -3183,7 +3257,7 @@ function WorkflowTriggerStrip({ dataDir, runContinuously, schedule, webhooks, wa
       ) : null}
       {!runContinuously && watch ? (
         <div className="inline-flex items-center gap-2 rounded-lg border border-line bg-white/90 px-3 py-2 text-xs font-medium text-ink shadow-sm backdrop-blur dark:bg-[#252526]/95">
-          <FolderOpen size={14} className="text-teal-600" />
+          <FolderOpen size={14} className="text-indigo-600" />
           <span className="truncate">
             Starts when files change: {watchPath}{watch.glob ? `/${watch.glob}` : ""}
             {watch.mode ? ` (${watch.mode})` : ""}
@@ -3195,7 +3269,7 @@ function WorkflowTriggerStrip({ dataDir, runContinuously, schedule, webhooks, wa
           key={triggerId}
           className="inline-flex items-center gap-2 rounded-lg border border-line bg-white/90 px-3 py-2 text-xs font-medium text-ink shadow-sm backdrop-blur dark:bg-[#252526]/95"
         >
-          <Webhook size={14} className="text-teal-600" />
+          <Webhook size={14} className="text-indigo-600" />
           <span className="truncate">
             API trigger: {triggerId}
             {config.source ? ` (${config.source})` : ""}
@@ -3346,6 +3420,23 @@ function formatWorkflowRunLog(result) {
   return lines.join("\n").trim();
 }
 
+// Rattish starts every node without needs, so the canvas marks those nodes.
+export function isRattishAutoStartNode(node) {
+  const projection = node?.rattish;
+  if (!projection || projection.status === "invalid") return false;
+  return !(projection.needs ?? projection.readiness?.needs ?? []).length;
+}
+
+// Needs that no route already draws, shown as dashed readiness links.
+export function rattishNeedsLinks(nodes, edges) {
+  const routed = new Set(edges.map((edge) => `${edge.from}\u0000${edge.to}`));
+  return nodes.flatMap((node) =>
+    (node.rattish?.needs ?? [])
+      .filter((needed) => !routed.has(`${needed}\u0000${node.id}`))
+      .map((needed) => ({ id: `${node.id}:needs:${needed}`, from: needed, to: node.id })),
+  );
+}
+
 function getNodeStatuses(nodes, runResult, logText, runNodes = {}, runEvents = []) {
   const statuses = {};
 
@@ -3368,7 +3459,9 @@ function getNodeStatuses(nodes, runResult, logText, runNodes = {}, runEvents = [
       if (output.skipped) {
         statuses[nodeId] = "skipped";
       } else {
-        statuses[nodeId] = output.success ? "success" : "error";
+        statuses[nodeId] = output.success
+          ? "success"
+          : output.outcome === "allowed_failure" ? "allowed_failure" : "error";
       }
     }
   }
@@ -3385,7 +3478,7 @@ function getNodeStatuses(nodes, runResult, logText, runNodes = {}, runEvents = [
 }
 
 function normalizeRunStatus(status) {
-  if (["running", "success", "error", "disconnected"].includes(status)) return status;
+  if (["running", "success", "error", "allowed_failure", "disconnected"].includes(status)) return status;
   if (["queued", "started", "retried"].includes(status)) return status;
   if (status === "completed") return "success";
   if (status === "failed") return "error";
@@ -3515,7 +3608,7 @@ function ToolbarRunSelector({
           <div className="workflow-scrollbar max-h-60 overflow-y-auto py-1">
             <button
               className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition hover:bg-slate-50 ${
-                selectedRunId ? "" : "bg-teal-50"
+                selectedRunId ? "" : "bg-indigo-50"
               }`}
               type="button"
               onClick={() => {
@@ -3531,7 +3624,7 @@ function ToolbarRunSelector({
                 <div
                   key={run.id}
                   className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition hover:bg-slate-50 ${
-                    selectedRunId === run.id ? "bg-teal-50" : ""
+                    selectedRunId === run.id ? "bg-indigo-50" : ""
                   }`}
                 >
                   <button
@@ -3725,7 +3818,7 @@ export function RunTimelinePanel({
         }}
       >
         <div className="flex min-w-0 items-center gap-2">
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-teal-100 bg-teal-50 text-teal-700">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-indigo-100 bg-indigo-50 text-indigo-700">
             <Terminal size={15} />
           </span>
           <div className="min-w-0">
@@ -3744,7 +3837,7 @@ export function RunTimelinePanel({
                 className={`h-7 rounded-md border px-2 text-[11px] font-medium transition ${
                   selectedRunId
                     ? "border-line bg-white text-muted hover:bg-slate-50"
-                    : "border-teal-200 bg-teal-50 text-teal-700"
+                    : "border-indigo-200 bg-indigo-50 text-indigo-700"
                 }`}
                 type="button"
                 onClick={() => {
@@ -3776,7 +3869,7 @@ export function RunTimelinePanel({
                         <div
                           key={run.id}
                           className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition hover:bg-slate-50 ${
-                            selectedRunId === run.id ? "bg-teal-50" : ""
+                            selectedRunId === run.id ? "bg-indigo-50" : ""
                           }`}
                         >
                           <button
@@ -3804,16 +3897,16 @@ export function RunTimelinePanel({
                             >
                               <Square size={12} fill="currentColor" strokeWidth={1.7} />
                             </button>
-                          ) : (
+                          ) : onResumeRun ? (
                             <button
-                              className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-teal-700 transition hover:border-teal-200 hover:bg-teal-50 disabled:cursor-not-allowed disabled:opacity-40"
+                              className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-indigo-700 transition hover:border-indigo-200 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40"
                               title="Resume this run"
                               type="button"
-                              onClick={() => onResumeRun?.(run.id, {})}
+                              onClick={() => onResumeRun(run.id, {})}
                             >
                               <Repeat2 size={13} />
                             </button>
-                          )}
+                          ) : null}
                           {run.hasTriggerReplay ? (
                             <button
                               className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-blue-700 transition hover:border-blue-200 hover:bg-blue-50"
@@ -3853,7 +3946,7 @@ export function RunTimelinePanel({
                       <label className="grid gap-1">
                         <span className="font-medium text-muted">Keep latest runs</span>
                         <input
-                          className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-teal-300"
+                          className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-brand"
                           min="0"
                           type="number"
                           value={resolvedRetentionSettings.keepLast}
@@ -3865,7 +3958,7 @@ export function RunTimelinePanel({
                       <label className="grid gap-1">
                         <span className="font-medium text-muted">Keep runs for days</span>
                         <input
-                          className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-teal-300"
+                          className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-brand"
                           min="0"
                           type="number"
                           value={resolvedRetentionSettings.keepDays}
@@ -3877,7 +3970,7 @@ export function RunTimelinePanel({
                       <label className="grid gap-1">
                         <span className="font-medium text-muted">Keep failed runs for days</span>
                         <input
-                          className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-teal-300"
+                          className="h-8 rounded-md border border-line px-2 text-ink outline-none focus:border-brand"
                           min="0"
                           type="number"
                           value={resolvedRetentionSettings.keepFailedDays}
@@ -4068,10 +4161,14 @@ export function RunTimelinePanel({
 }
 
 function RunHistoryActions({ onReplayRun, onResumeRun, run, selectedNodeId }) {
-  const canResume = run?.id && run.status !== "running";
-  const canReplay = canResume && run?.hasTriggerReplay;
+  const finished = run?.id && run.status !== "running";
+  // Omitting onResumeRun hides resume actions for runs the backend cannot resume.
+  const canResume = finished && Boolean(onResumeRun);
+  const canReplay = finished && run?.hasTriggerReplay;
+  if (!onResumeRun && !run?.hasTriggerReplay) return null;
   return (
     <div className="grid gap-1 border-b border-line bg-slate-50 px-2 py-2">
+      {onResumeRun ? <>
       <button
         className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs font-medium text-ink transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
         disabled={!canResume}
@@ -4102,6 +4199,7 @@ function RunHistoryActions({ onReplayRun, onResumeRun, run, selectedNodeId }) {
         <Route size={13} />
         <span className="truncate">Rerun from selected node</span>
       </button>
+      </> : null}
       <button
         className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs font-medium text-ink transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
         disabled={!canReplay}
@@ -4167,7 +4265,7 @@ function LogFilterInput({ label, onChange, value }) {
   return (
     <input
       aria-label={label}
-      className="h-7 w-full rounded-md border border-line bg-white px-2 text-[11px] font-normal text-ink outline-none transition placeholder:text-muted/70 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10 dark:bg-[#1e1e1e]"
+      className="h-7 w-full rounded-md border border-line bg-white px-2 text-[11px] font-normal text-ink outline-none transition placeholder:text-muted/70 focus:border-brand focus:ring-2 focus:ring-brand/15 dark:bg-[#1e1e1e]"
       placeholder={label}
       type="text"
       value={value}
@@ -4236,7 +4334,7 @@ function parseTimelineRows(events = []) {
       fanOut: fanOut === "" ? "" : String(fanOut),
       message: event?.message ?? "",
       node: event?.nodeId ?? "",
-      status: event?.status ?? "",
+      status: String(event?.status ?? "").replaceAll("_", " "),
     };
   });
 }
@@ -4278,6 +4376,8 @@ function RunStatusDot({ status }) {
         ? "bg-teal-500"
       : status === "error"
         ? "bg-red-500"
+        : status === "allowed_failure"
+          ? "bg-orange-400"
         : status === "stopped"
           ? "bg-amber-500"
           : "bg-slate-400";
@@ -4348,7 +4448,7 @@ function RunNodeInspector({ nodeRun }) {
         <div className="space-y-2">
           <div className="workflow-scrollbar flex max-h-28 flex-wrap gap-1 overflow-auto rounded-md border border-line bg-slate-50 p-2">
             <button
-              className={`rounded border px-2 py-1 text-[11px] ${selectedFanOutIndex === null ? "border-teal-400 bg-teal-50 text-teal-700" : "border-line bg-white text-slate-600"}`}
+              className={`rounded border px-2 py-1 text-[11px] ${selectedFanOutIndex === null ? "border-indigo-400 bg-indigo-50 text-indigo-700" : "border-line bg-white text-slate-600"}`}
               type="button"
               onClick={() => setSelectedFanOutIndex(null)}
             >
@@ -4357,7 +4457,7 @@ function RunNodeInspector({ nodeRun }) {
             {fanOutItems.map((item) => (
               <button
                 key={item.index}
-                className={`rounded border px-2 py-1 text-[11px] ${Number(selectedFanOutIndex) === Number(item.index) ? "border-teal-400 bg-teal-50 text-teal-700" : "border-line bg-white text-slate-600"}`}
+                className={`rounded border px-2 py-1 text-[11px] ${Number(selectedFanOutIndex) === Number(item.index) ? "border-indigo-400 bg-indigo-50 text-indigo-700" : "border-line bg-white text-slate-600"}`}
                 type="button"
                 onClick={() => setSelectedFanOutIndex(item.index)}
               >
@@ -4587,6 +4687,8 @@ function WorkflowNode({
   onDoubleClick,
   selected,
   status,
+  statusSummary,
+  autoStart = false,
   onPointerDown,
   onPointerMove,
   onPointerUp,
@@ -4614,7 +4716,7 @@ function WorkflowNode({
 
   return (
     <article
-      className={`absolute w-[220px] rounded-lg border bg-white p-3 shadow-node transition ${readOnly ? "cursor-default" : "cursor-grab active:cursor-grabbing"} ${borderClass}`}
+      className={`absolute w-[220px] select-none rounded-lg border bg-white p-3 shadow-node transition ${readOnly ? "cursor-default" : "cursor-grab active:cursor-grabbing"} ${borderClass}`}
       style={{ left: node.x, top: node.y, zIndex }}
       title={title}
       onDoubleClick={(event) => {
@@ -4637,6 +4739,9 @@ function WorkflowNode({
       onPointerUp={(event) => {
         if (!readOnly) onPointerUp(event, node.id);
       }}
+      onPointerCancel={(event) => {
+        if (!readOnly) onPointerUp(event);
+      }}
       onContextMenu={(event) => {
         if (!readOnly) onContextMenu?.(event, node.id);
       }}
@@ -4649,8 +4754,24 @@ function WorkflowNode({
         onPointerUp={(event) => onConnectorPointerUp?.(event, node.id)}
       /> : null}
       <div className="min-w-0">
-        <h3 className="truncate text-sm font-semibold leading-5">{node.label}</h3>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <h3 className="truncate text-sm font-semibold leading-5">{node.label}</h3>
+          {autoStart ? (
+            <span
+              className="flex shrink-0 items-center gap-0.5 rounded border border-emerald-200 bg-emerald-50 px-1 py-0.5 text-[9px] font-semibold uppercase leading-3 text-emerald-800"
+              title="Runs when the workflow starts because it has no needs"
+            >
+              <Play size={8} aria-hidden="true" />
+              start
+            </span>
+          ) : null}
+        </div>
         <p className="mt-1 truncate text-xs leading-5 text-muted">{node.meta}</p>
+        {statusSummary ? (
+          <p className="truncate text-[11px] font-medium leading-4 text-slate-600" title={statusSummary}>
+            {statusSummary}
+          </p>
+        ) : null}
       </div>
       <div className="mt-3 flex items-end justify-between gap-2">
         <span className={`relative grid h-8 w-8 shrink-0 place-items-center rounded-lg text-white ${style.accent}`}>
@@ -4662,7 +4783,7 @@ function WorkflowNode({
           ) : null}
         </span>
         <span className={`rounded-md border px-2 py-1 text-[11px] font-medium ${style.chip}`}>
-          {node.type}
+          {node.rattish?.type || node.type}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {hasError || hasWarning ? (
@@ -4731,7 +4852,7 @@ export function NodeRenameDialog({ initialLabel, onCancel, onRename }) {
     <Dialog
       description="Update the label shown on the graph."
       onClose={onCancel}
-      overlayClassName="fixed inset-0 z-[95] grid place-items-center bg-slate-950/25 px-4"
+      overlayClassName="fixed inset-0 z-[95] grid place-items-center ui-scrim px-4"
       panelClassName="w-full max-w-sm rounded-lg border border-line bg-white shadow-panel"
       title="Rename node"
     >
@@ -4755,7 +4876,7 @@ export function NodeRenameDialog({ initialLabel, onCancel, onRename }) {
             <span className="text-xs font-medium text-muted">Node label</span>
             <input
               autoFocus
-              className="mt-1 h-10 w-full rounded-lg border border-line px-3 text-sm outline-none transition focus:border-teal-500"
+              className="mt-1 h-10 w-full rounded-lg border border-line px-3 text-sm outline-none transition focus:border-brand"
               value={label}
               onChange={(event) => setLabel(event.target.value)}
             />
@@ -4770,7 +4891,7 @@ export function NodeRenameDialog({ initialLabel, onCancel, onRename }) {
             Cancel
           </button>
           <button
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={!label.trim()}
             title="Confirm node rename"
             type="submit"
@@ -4790,7 +4911,7 @@ export function FilesystemTrustPrompt({ parentPath, onCancel, onConfirm }) {
     <Dialog
       description={parentPath}
       onClose={onCancel}
-      overlayClassName="absolute inset-0 z-50 grid place-items-center bg-slate-950/20 px-4 backdrop-blur-sm"
+      overlayClassName="absolute inset-0 z-50 grid place-items-center ui-scrim px-4 backdrop-blur-sm"
       panelClassName="w-full max-w-lg rounded-lg border border-line bg-white p-5 shadow-panel"
       title="Trust files"
     >
@@ -4900,15 +5021,17 @@ function NodeStatusBadge({ status }) {
   const className = {
     success: "border-emerald-200 bg-emerald-50 text-emerald-700",
     error: "border-red-200 bg-red-50 text-red-700",
+    allowed_failure: "border-orange-200 bg-orange-50 text-orange-700",
     stopped: "border-amber-200 bg-amber-50 text-amber-700",
     skipped: "border-slate-200 bg-slate-50 text-slate-500",
     reused: "border-teal-200 bg-teal-50 text-teal-700",
     disconnected: "border-slate-200 bg-slate-50 text-slate-500",
   }[status];
 
+  const label = status === "allowed_failure" ? "allowed failure" : status;
   return (
-    <span className={`rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${className}`} title={status}>
-      {status}
+    <span className={`rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${className}`} title={label}>
+      {label}
     </span>
   );
 }
@@ -8448,7 +8571,7 @@ function fieldDiagnosticState(diagnostics = []) {
   };
 }
 
-function fieldBorderClass(diagnostics = [], base = "border-line focus:border-teal-500") {
+function fieldBorderClass(diagnostics = [], base = "border-line focus:border-brand") {
   const { severity } = fieldDiagnosticState(diagnostics);
   if (severity === "error") return "border-red-300 focus:border-red-500 focus:ring-red-100";
   if (severity === "warning") return "border-amber-300 focus:border-amber-500 focus:ring-amber-100";
@@ -8938,17 +9061,33 @@ function WorkflowSettingsSection({ children, title }) {
   );
 }
 
-export function ApprovalDecisionOverlay({ approval, node, onDecideApproval }) {
+// Each approvals poll returns new arrays, so reset drafts on a stable identity instead.
+function approvalIdentity(approval) {
+  if (!approval) return "";
+  return [approval.workflowId, approval.runId, approval.nodeId, approval.requestedAt].join("\n");
+}
+
+function formatApprovalRequestedAt(requestedAt) {
+  if (!requestedAt) return "";
+  const date = new Date(requestedAt);
+  if (Number.isNaN(date.getTime())) return String(requestedAt);
+  return date.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" });
+}
+
+export function ApprovalDecisionOverlay({ approval, node, onDecideApproval, pendingCount = 1 }) {
   const [notes, setNotes] = useState("");
   const [approver, setApprover] = useState(approval?.approvers?.[0] || "ui");
   const [dismissed, setDismissed] = useState(false);
+  const identity = approvalIdentity(approval);
+  const defaultApprover = approval?.approvers?.[0] || "ui";
   useEffect(() => {
     setNotes("");
-    setApprover(approval?.approvers?.[0] || "ui");
+    setApprover(defaultApprover);
     setDismissed(false);
-  }, [approval?.runId, approval?.nodeId, approval?.approvers]);
+  }, [identity, defaultApprover]);
   if (!approval || dismissed) return null;
   const nodeLabel = node?.label || node?.id || approval.nodeId;
+  const requestedAt = formatApprovalRequestedAt(approval.requestedAt);
   return (
     <Dialog
       description={`${nodeLabel}: ${approval.message}`}
@@ -8971,10 +9110,20 @@ export function ApprovalDecisionOverlay({ approval, node, onDecideApproval }) {
             <div className="min-w-0">
               <h2 className="text-lg font-semibold text-ink">Approval Required</h2>
               <p className="truncate text-sm text-slate-600">{nodeLabel}</p>
+              <p className="truncate text-xs text-slate-600" title={approval.runId}>
+                Run <span className="font-mono">{approval.runId}</span>
+                {requestedAt ? ` · requested ${requestedAt}` : ""}
+                {pendingCount > 1 ? ` · ${pendingCount} approvals waiting, oldest first` : ""}
+              </p>
             </div>
           </div>
         </div>
         <div className="space-y-4 px-5 py-5">
+          {approval.subject ? (
+            <p className="break-words text-sm text-slate-600">
+              <span className="font-medium text-ink">Subject:</span> {approval.subject}
+            </p>
+          ) : null}
           <div className="max-h-[180px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-slate-50 px-3 py-3 text-sm leading-6 text-ink">
             {approval.message}
           </div>
@@ -8982,7 +9131,7 @@ export function ApprovalDecisionOverlay({ approval, node, onDecideApproval }) {
             <label className="space-y-1 text-xs font-medium text-slate-600">
               <span>Approver</span>
               <input
-                className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none transition placeholder:text-muted/70 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10"
+                className="h-10 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none transition placeholder:text-muted/70 focus:border-brand focus:ring-2 focus:ring-brand/15"
                 placeholder="Approver identity"
                 value={approver}
                 onChange={(event) => setApprover(event.target.value)}
@@ -8991,7 +9140,7 @@ export function ApprovalDecisionOverlay({ approval, node, onDecideApproval }) {
             <label className="space-y-1 text-xs font-medium text-slate-600">
               <span>Notes</span>
               <textarea
-                className="min-h-[82px] w-full resize-y rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition placeholder:text-muted/70 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10"
+                className="min-h-[82px] w-full resize-y rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition placeholder:text-muted/70 focus:border-brand focus:ring-2 focus:ring-brand/15"
                 placeholder="Decision notes"
                 value={notes}
                 onChange={(event) => setNotes(event.target.value)}
@@ -9026,9 +9175,12 @@ export function ApprovalDecisionOverlay({ approval, node, onDecideApproval }) {
 function ApprovalRuntimePanel({ approval, onDecideApproval }) {
   const [notes, setNotes] = useState("");
   const [approver, setApprover] = useState(approval?.approvers?.[0] || "ui");
+  const identity = approvalIdentity(approval);
+  const defaultApprover = approval?.approvers?.[0] || "ui";
   useEffect(() => {
-    setApprover(approval?.approvers?.[0] || "ui");
-  }, [approval?.runId, approval?.nodeId, approval?.approvers]);
+    setNotes("");
+    setApprover(defaultApprover);
+  }, [identity, defaultApprover]);
   if (!approval) return null;
   const decision = approval.decision;
   const pending = approval.status === "pending";
@@ -9040,6 +9192,9 @@ function ApprovalRuntimePanel({ approval, onDecideApproval }) {
           <span className="font-mono text-[11px] text-muted">{approval.runId}</span>
         </div>
         <div className="whitespace-pre-wrap break-words leading-5">{approval.message}</div>
+        {approval.subject ? (
+          <div className="break-words text-[11px] text-muted">Subject: {approval.subject}</div>
+        ) : null}
         <div className="grid grid-cols-2 gap-2 text-[11px] text-muted">
           <span>Requested</span>
           <span className="truncate text-right">{approval.requestedAt || "-"}</span>
@@ -9073,13 +9228,13 @@ function ApprovalRuntimePanel({ approval, onDecideApproval }) {
         {pending ? (
           <div className="space-y-2 pt-1">
             <input
-              className="h-8 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none transition placeholder:text-muted/70 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10"
+              className="h-8 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none transition placeholder:text-muted/70 focus:border-brand focus:ring-2 focus:ring-brand/15"
               placeholder="Approver identity"
               value={approver}
               onChange={(event) => setApprover(event.target.value)}
             />
             <textarea
-              className="min-h-[72px] w-full resize-y rounded-md border border-line bg-white px-2 py-1.5 text-xs text-ink outline-none transition placeholder:text-muted/70 focus:border-teal-500 focus:ring-2 focus:ring-teal-500/10"
+              className="min-h-[72px] w-full resize-y rounded-md border border-line bg-white px-2 py-1.5 text-xs text-ink outline-none transition placeholder:text-muted/70 focus:border-brand focus:ring-2 focus:ring-brand/15"
               placeholder="Decision notes"
               value={notes}
               onChange={(event) => setNotes(event.target.value)}
@@ -9290,12 +9445,23 @@ function useCommittedDraft({ enterCommits = true, format, onCommit, parse, value
     if (!parsed.ok) return false;
 
     const normalized = format(parsed.value);
-    const changed = normalized !== committedRef.current;
+    const previous = committedRef.current;
+    const changed = normalized !== previous;
     committedRef.current = normalized;
     draftRef.current = normalized;
     setDraft(normalized);
     setConflict(false);
-    if (changed) onCommit(parsed.value);
+    const result = changed ? onCommit(parsed.value) : undefined;
+    // A rejected save resolves to null; show the saved value again unless the user kept typing.
+    if (typeof result?.then === "function") {
+      void result.then((saved) => {
+        if (saved !== null || committedRef.current !== normalized) return;
+        committedRef.current = previous;
+        if (draftRef.current !== normalized) return;
+        draftRef.current = previous;
+        setDraft(previous);
+      });
+    }
     return true;
   }
 
@@ -9607,7 +9773,7 @@ export function TextFileDialog({ mode, path, onClose }) {
     <Dialog
       description={path}
       onClose={onClose}
-      overlayClassName="fixed inset-0 z-[80] grid place-items-center bg-slate-950/35 px-4"
+      overlayClassName="fixed inset-0 z-[80] grid place-items-center ui-scrim px-4"
       panelClassName="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-line bg-white shadow-panel"
       panelProps={{ "aria-busy": loading || saving || undefined }}
       title={readOnly ? "Preview file" : "Edit file"}
@@ -9643,7 +9809,7 @@ export function TextFileDialog({ mode, path, onClose }) {
             </div>
           ) : (
             <textarea
-              className="h-[52vh] min-h-[320px] w-full resize-none rounded-lg border border-line bg-slate-50 p-3 font-mono text-xs leading-5 text-ink outline-none transition focus:border-teal-500 read-only:bg-slate-50"
+              className="h-[52vh] min-h-[320px] w-full resize-none rounded-lg border border-line bg-slate-50 p-3 font-mono text-xs leading-5 text-ink outline-none transition focus:border-brand read-only:bg-slate-50"
               readOnly={readOnly}
               spellCheck={false}
               value={content}
@@ -9662,7 +9828,7 @@ export function TextFileDialog({ mode, path, onClose }) {
           </button>
           {!readOnly ? (
             <button
-              className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
               disabled={loading || saving || Boolean(error)}
               type="button"
               onClick={saveFile}
@@ -9843,7 +10009,7 @@ export function PathPickerDialog({ currentPath, label, onClose, onSelect }) {
     <Dialog
       description="Browse the local workspace and select a path"
       onClose={onClose}
-      overlayClassName="fixed inset-0 z-[70] grid place-items-center bg-slate-950/35 px-4"
+      overlayClassName="fixed inset-0 z-[70] grid place-items-center ui-scrim px-4"
       panelClassName="flex max-h-[78vh] w-full max-w-[680px] flex-col rounded-lg border border-line bg-white shadow-panel"
       panelProps={{ "aria-busy": loading || undefined }}
       title={`Choose ${titleLabel.toLowerCase()}`}
@@ -9864,7 +10030,7 @@ export function PathPickerDialog({ currentPath, label, onClose, onSelect }) {
                 {pathCopied ? <Check size={13} /> : <Copy size={13} />}
               </button>
               <button
-                className="min-w-0 truncate text-left text-xs text-teal-700 underline-offset-2 transition hover:text-teal-800 hover:underline disabled:cursor-not-allowed disabled:text-muted disabled:no-underline"
+                className="min-w-0 truncate text-left text-xs text-indigo-700 underline-offset-2 transition hover:text-indigo-800 hover:underline disabled:cursor-not-allowed disabled:text-muted disabled:no-underline"
                 disabled={!directory}
                 title={directory}
                 type="button"
@@ -9964,7 +10130,7 @@ export function PathPickerDialog({ currentPath, label, onClose, onSelect }) {
                   }
                 >
                   {entry.isDirectory ? (
-                    <FolderOpen className="text-teal-600" size={16} />
+                    <FolderOpen className="text-indigo-600" size={16} />
                   ) : (
                     <FileText className="text-muted" size={16} />
                   )}
@@ -10015,7 +10181,7 @@ export function PathPickerDialog({ currentPath, label, onClose, onSelect }) {
               Cancel
             </button>
             <button
-              className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
               disabled={!selectedPath}
               type="button"
               onClick={() => onSelect(selectedPath)}
@@ -10169,7 +10335,7 @@ function CronExpressionField({
   return (
     <div className="relative">
       <span className="text-xs font-medium text-muted">{label}</span>
-      <div className={`mt-1 flex h-10 overflow-hidden rounded-lg border bg-white transition focus-within:border-teal-500 ${fieldBorderClass(diagnostics, "border-line")}`}>
+      <div className={`mt-1 flex h-10 overflow-hidden rounded-lg border bg-white transition focus-within:border-brand ${fieldBorderClass(diagnostics, "border-line")}`}>
         <input
           aria-describedby={hasFieldDiagnostics ? diagnosticId : undefined}
           aria-invalid={fieldDiagnosticState(diagnostics).severity === "error" || undefined}
@@ -10195,7 +10361,7 @@ function CronExpressionField({
             <label className="block">
               <span className="text-xs font-medium text-muted">Recurrence</span>
               <select
-                className="mt-1 h-9 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none transition focus:border-teal-500"
+                className="mt-1 h-9 w-full rounded-lg border border-line bg-white px-3 text-sm outline-none transition focus:border-brand"
                 value={recurrence}
                 onChange={(event) => setRecurrence(event.target.value)}
               >
@@ -10209,7 +10375,7 @@ function CronExpressionField({
               <label className="block">
                 <span className="text-xs font-medium text-muted">Date</span>
                 <input
-                  className="mt-1 h-9 w-full rounded-lg border border-line bg-white px-2 text-sm outline-none transition focus:border-teal-500"
+                  className="mt-1 h-9 w-full rounded-lg border border-line bg-white px-2 text-sm outline-none transition focus:border-brand"
                   type="date"
                   value={date}
                   onChange={(event) => setDate(event.target.value)}
@@ -10218,7 +10384,7 @@ function CronExpressionField({
               <label className="block">
                 <span className="text-xs font-medium text-muted">Time</span>
                 <input
-                  className="mt-1 h-9 w-full rounded-lg border border-line bg-white px-2 text-sm outline-none transition focus:border-teal-500"
+                  className="mt-1 h-9 w-full rounded-lg border border-line bg-white px-2 text-sm outline-none transition focus:border-brand"
                   type="time"
                   value={time}
                   onChange={(event) => setTime(event.target.value)}
@@ -10240,7 +10406,7 @@ function CronExpressionField({
                 Cancel
               </button>
               <button
-                className="h-8 rounded-lg border border-teal-700 bg-teal-700 px-3 text-sm font-medium text-white transition hover:bg-teal-800"
+                className="h-8 rounded-lg border border-brand bg-brand px-3 text-sm font-medium text-white transition hover:bg-indigo-700"
                 type="button"
                 onClick={() => {
                   onChange(generatedCron);
@@ -10374,7 +10540,7 @@ function RuntimeReferenceField({ label, onChange, value }) {
         aria-describedby={state.error || state.conflict ? messageId : undefined}
         aria-invalid={state.error || undefined}
         className={`mt-1 h-10 w-full rounded-lg border bg-white px-3 font-mono text-sm outline-none transition ${
-          state.error ? "border-red-400 focus:border-red-500" : "border-line focus:border-teal-600"
+          state.error ? "border-red-400 focus:border-red-500" : "border-line focus:border-brand"
         }`}
         placeholder="{{inputs.value}}"
         type="text"
@@ -10545,7 +10711,7 @@ function ToggleField({
           aria-describedby={hasFieldDiagnostics ? diagnosticId : undefined}
           aria-invalid={fieldDiagnosticState(diagnostics).severity === "error" || undefined}
           checked={usesRuntimeReference ? false : Boolean(checked)}
-          className="h-4 w-4 accent-teal-700"
+          className="h-4 w-4 accent-indigo-600"
           disabled={disabled}
           type="checkbox"
           onChange={(event) => onChange(event.target.checked)}
@@ -10553,7 +10719,7 @@ function ToggleField({
       </label>
       {allowRuntimeReference && !disabled ? (
         <button
-          className="mt-1 text-xs font-medium text-teal-700 hover:text-teal-900"
+          className="mt-1 text-xs font-medium text-indigo-700 hover:text-indigo-800"
           type="button"
           onClick={() => onChange(usesRuntimeReference ? false : "{{inputs.value}}")}
         >
@@ -10810,7 +10976,7 @@ function InputMappingField({ nodeType, onChange, sourceOptions, value }) {
             className="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)_32px] gap-2"
           >
             <select
-              className="h-9 min-w-0 rounded-lg border border-line bg-white px-2 text-xs outline-none transition focus:border-teal-500"
+              className="h-9 min-w-0 rounded-lg border border-line bg-white px-2 text-xs outline-none transition focus:border-brand"
               value={key}
               onChange={(event) => updateEntry(index, event.target.value, source)}
             >
@@ -10821,7 +10987,7 @@ function InputMappingField({ nodeType, onChange, sourceOptions, value }) {
               ))}
             </select>
             <select
-              className="h-9 min-w-0 rounded-lg border border-line bg-white px-2 text-xs outline-none transition focus:border-teal-500"
+              className="h-9 min-w-0 rounded-lg border border-line bg-white px-2 text-xs outline-none transition focus:border-brand"
               value={source}
               onChange={(event) => updateEntry(index, key, event.target.value)}
             >

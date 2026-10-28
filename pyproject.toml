@@ -25,6 +25,9 @@ dependencies = [
     "referencing>=0.35",
     "tzdata>=2026.2",
     "watchdog>=6.0.0",
+    "pypdf>=6.1",
+    "fastembed>=0.7",
+    "bibtexparser>=1.4,<2",
     "vosk>=0.3.45; sys_platform != 'darwin'",
     "vosk==0.3.44; sys_platform == 'darwin'",
 ]
@@ -79,7 +82,12 @@ strict = true
 python_version = "3.11"
 
 [[tool.mypy.overrides]]
-module = ["networkx", "networkx.*", "tomli_w", "apscheduler", "apscheduler.*", "openpyxl", "openpyxl.*", "vosk", "vosk.*", "tink", "tink.*", "segno", "segno.*"]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
+module = ["networkx", "networkx.*", "tomli_w", "apscheduler", "apscheduler.*", "openpyxl", "openpyxl.*", "vosk", "vosk.*", "tink", "tink.*", "segno", "segno.*", "fastembed", "fastembed.*", "bibtexparser", "bibtexparser.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

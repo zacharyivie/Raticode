@@ -153,6 +153,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     settings: () => invokeDesktop("gofer:rem-settings"),
     configure: (key, value) => invokeDesktop("gofer:configure-rem", { key, value, grantId: typeof value === "string" ? grantForPath(value) : "" }),
     archive: (thread, messages, deleted = false) => invokeDesktop("gofer:archive-rem", { thread, messages, deleted }),
+    forget: (threadIds) => invokeDesktop("gofer:forget-rem", { threadIds }),
   },
   getDataDir: () => ipcRenderer.invoke("gofer:get-data-dir"),
   appearance: {
@@ -258,7 +259,8 @@ contextBridge.exposeInMainWorld("goferBrowser", {
   platform: process.platform,
   preloadPath: readBrowserPreloadPath(),
   create: (options = {}) => createBrowser(options),
-  adopt: (id, webContentsId) => browserAction(id, "adopt", {
+  adopt: (id, webContentsId, clientId = "") => browserAction(id, "adopt", {
+    clientId: typeof clientId === "string" ? clientId : "",
     webContentsId: Number.isFinite(webContentsId) ? webContentsId : -1,
   }),
   back: (id) => browserAction(id, "back"),
@@ -267,9 +269,13 @@ contextBridge.exposeInMainWorld("goferBrowser", {
   find: (id, text, options = {}) => browserAction(id, "find", { text, forward: options.forward !== false, newSearch: options.newSearch !== false }),
   stopFind: (id) => browserAction(id, "stop-find"),
   forward: (id) => browserAction(id, "forward"),
-  navigate: (id, url) => browserAction(id, "navigate", { url }),
+  goToIndex: (id, index) => browserAction(id, "go-to-index", { index: Number.isInteger(index) ? index : -1 }),
+  historyEntries: (id) => browserAction(id, "history-entries"),
+  home: (id) => browserAction(id, "home"),
+  navigate: (id, url, options = {}) => browserAction(id, "navigate", { url, typed: options.typed === true }),
   openExternal: (id) => browserAction(id, "open-external"),
   reload: (id) => browserAction(id, "reload"),
+  reloadHard: (id) => browserAction(id, "reload", { hard: true }),
   setPreferences: (id, preferences = {}) => browserAction(id, "set-preferences", {
     ...(preferences.applicationKeybindings
       ? { applicationKeybindings: browserKeybindings(preferences.applicationKeybindings) }
@@ -279,11 +285,64 @@ contextBridge.exposeInMainWorld("goferBrowser", {
       : "",
   }),
   stop: (id) => browserAction(id, "stop"),
+  viewport: (id, width, height) => browserAction(id, "viewport", {
+    height: Number.isFinite(height) ? height : 0,
+    width: Number.isFinite(width) ? width : 0,
+  }),
+  zoom: (id, direction) => browserAction(id, "zoom", direction === 0 ? { reset: true } : { direction: direction > 0 ? 1 : -1 }),
+  mute: (id, muted) => browserAction(id, "mute", { muted: muted === true }),
+  toggleDevTools: (id) => browserAction(id, "toggle-devtools"),
+  print: (id) => browserAction(id, "print"),
+  savePdf: (id) => browserAction(id, "save-pdf"),
+  savePage: (id) => browserAction(id, "save-page"),
+  bookmark: (id) => browserAction(id, "bookmark"),
+  allowCertificate: (id) => browserAction(id, "allow-certificate"),
+  openBlockedPopup: (id, index) => browserAction(id, "open-blocked-popup", { index: Number.isInteger(index) ? index : -1 }),
+  allowPopups: (id) => browserAction(id, "allow-popups"),
+  dismissBlockedPopups: (id) => browserAction(id, "dismiss-blocked-popups"),
+  siteInfo: (id) => browserAction(id, "site-info"),
+  sitePermission: (id, key, value) => browserAction(id, "site-permission", {
+    key: typeof key === "string" ? key.slice(0, 80) : "",
+    value: ["allow", "block"].includes(value) ? value : "",
+  }),
+  clearSiteData: (id) => browserAction(id, "clear-site-data"),
+  pageContext: (id, selection = "") => browserAction(id, "page-context", { selection: typeof selection === "string" ? selection.slice(0, 20000) : "" }),
+  shareWithRem: (id, threadId, label = "Rem") => browserAction(id, "share-with-rem", {
+    threadId: typeof threadId === "string" ? threadId.slice(0, 200) : "",
+    label: typeof label === "string" ? label.slice(0, 60) : "Rem",
+  }),
+  stopSharing: (id) => browserAction(id, "stop-sharing"),
+  takeOver: (id) => browserAction(id, "take-over"),
+  pauseRem: (id, paused) => browserAction(id, "pause-rem", { paused: paused === true }),
+  respondPrompt: (id, requestId, response) => browserAction(id, "prompt-response", {
+    requestId: typeof requestId === "string" ? requestId.slice(0, 100) : "",
+    response: promptResponse(response),
+  }),
+  library: (action, options = {}) => ipcRenderer.invoke("gofer:browser-library", {
+    ...(options && typeof options === "object" && !Array.isArray(options) ? options : {}),
+    action: typeof action === "string" ? action : "",
+  }),
+  setPolicy: (policy = {}) => ipcRenderer.invoke("gofer:browser-policy", { policy: policy && typeof policy === "object" ? policy : {} }),
+  onAgentClose: (callback) => subscribeToBrowserEvent("gofer:browser-agent-close", callback),
+  onAgentOpen: (callback) => subscribeToBrowserEvent("gofer:browser-agent-open", callback),
   onCommand: (callback) => subscribeToBrowserEvent("gofer:browser-command", callback),
+  onDownloads: (callback) => subscribeToBrowserEvent("gofer:browser-downloads", callback),
+  onLibraryChanged: (callback) => subscribeToBrowserEvent("gofer:browser-library-changed", callback),
   onOpenFile: (callback) => subscribeToBrowserEvent("gofer:browser-open-file", callback),
   onOpenTab: (callback) => subscribeToBrowserEvent("gofer:browser-open-tab", callback),
+  onPrompt: (callback) => subscribeToBrowserEvent("gofer:browser-prompt", callback),
   onState: (callback) => subscribeToBrowserEvent("gofer:browser-state", callback),
 });
+
+// Only plain values cross the bridge; credentials go straight to the main process.
+function promptResponse(value) {
+  if (typeof value === "string") return value.slice(0, 40);
+  if (value && typeof value === "object") {
+    if (typeof value.username === "string") return { username: value.username.slice(0, 1024), password: String(value.password ?? "").slice(0, 4096) };
+    if (Number.isInteger(value.index)) return { index: value.index };
+  }
+  return null;
+}
 
 contextBridge.exposeInMainWorld("goferTerminal", {
   create: (options = {}) => createTerminal(options),
@@ -333,6 +392,9 @@ async function createBrowser(options = {}) {
     grantId: grantForPath(targetPath),
     ...(typeof options.openBrowserBinding === "string" && options.openBrowserBinding
       ? { openBrowserBinding: options.openBrowserBinding.slice(0, 120) }
+      : {}),
+    ...(options.history && Array.isArray(options.history.entries)
+      ? { history: { index: Number(options.history.index) || 0, entries: options.history.entries.slice(-25) } }
       : {}),
     path: targetPath,
     url: typeof options.url === "string" ? options.url : "",
@@ -551,6 +613,7 @@ function selectPath(options = {}) {
   if (options.fileOnly === true) {
     payload.fileOnly = true;
   }
+  if (options.save === true) payload.save = true;
   return invokeDesktop("gofer:select-path", payload).then((payload) =>
     payload && typeof payload.path === "string" ? payload.path : null
   );

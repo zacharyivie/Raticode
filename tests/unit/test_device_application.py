@@ -189,7 +189,7 @@ async def test_real_desktop_exchange_dispatches_once_and_returns_response(tmp_pa
     invitations = Invitations(target)
     listener = DeviceListener(target, invitations, application)
     port = await listener.start()
-    invite = invitations.create("Test", "https://ntfy.sh", {"host": "127.0.0.1", "port": port})
+    invite = invitations.create("Test", {"host": "127.0.0.1", "port": port})
 
     async def confirm() -> None:
         while not target.list():
@@ -568,7 +568,12 @@ def test_connection_sync_is_opt_in_and_keeps_thread_context(application):
             payload={"after_sequence": None, "limit": 100, "include_connection": True},
         ),
     )[-1]["payload"]
-    assert result["connection"] == {"lan_endpoint": app.lan_endpoint, "rem_ready": True}
+    assert result["connection"] == {
+        "lan_endpoint": app.lan_endpoint,
+        "rem_ready": True,
+        "remote_control": False,
+        "desktop_control": False,
+    }
     assert result["threads"][0]["project_id"] == project
     assert result["threads"][0]["resource_ids"] == [resource]
     assert result["threads"][0]["can_create"] is True
@@ -683,13 +688,11 @@ def test_remove_pairing_clears_access_but_retains_request_deduplication(applicat
     app.handle(peer, request)
     app.workspace.enable(peer, True)
     registry.save_endpoint(peer, {"host": "192.168.1.10", "port": 44233})
-    registry.save_relay(peer, "https://ntfy.sh")
     if revoked:
         registry.revoke(peer)
     app.remove_peer(peer, revoked_only=revoked)
     assert registry.list() == []
     assert registry.trusted_pins() == frozenset()
-    assert registry.relay_channels() == []
     assert app.grants() == []
     assert app.workspace.enabled() == []
     assert app.claim() is None

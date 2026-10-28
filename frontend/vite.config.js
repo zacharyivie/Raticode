@@ -1,10 +1,14 @@
-import { defineConfig } from "vite";
+import { createLogger, defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { developmentApiProxy } from "./dev/api-proxy.js";
 import { bundleBudget } from "./benchmarks/bundle-budget.js";
 
 const apiBaseUrl = process.env.VITE_API_BASE_URL || "http://127.0.0.1:8765";
 
+const apiProxy = developmentApiProxy(apiBaseUrl, createLogger());
+
 export default defineConfig({
+  customLogger: apiProxy.customLogger,
   base: "./",
   build: {
     chunkSizeWarningLimit: 500,
@@ -27,10 +31,7 @@ export default defineConfig({
   }],
   server: {
     proxy: {
-      "/api": {
-        target: apiBaseUrl,
-        changeOrigin: true,
-      },
+      "/api": apiProxy.proxy,
     },
   },
 });

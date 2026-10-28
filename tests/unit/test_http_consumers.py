@@ -14,8 +14,6 @@ import pytest
 
 from gofer.core import provider_usage, provider_usage_reports
 from gofer.core.http import read_response_bytes
-from gofer.devices.framing import Frame
-from gofer.devices.relay import NtfyRelay, RelayError
 from gofer.ui import organization_gateways, organization_packages, report_outputs
 from gofer.ui.second_brain import serve_stdio
 
@@ -94,40 +92,6 @@ def test_http_consumers_require_complete_response(monkeypatch, name, framing, tr
         assert result
         if name == "package":
             assert base64.b64decode(result["COMPANY.md"]) == b"# Test company"
-
-
-@pytest.mark.parametrize("operation", ["poll", "publish"])
-@pytest.mark.parametrize(
-    "framing,truncated",
-    [("fixed", False), ("chunked", False), ("eof", False), ("fixed", True), ("chunked", True)],
-)
-async def test_relay_requires_complete_response(monkeypatch, operation, framing, truncated):
-    relay = NtfyRelay("https://relay.example.test")
-    topic = "opaque_topic_01234567890123456789"
-    raw = Frame(
-        "12345678-1234-1234-1234-123456789abc", "resume", "initiator_to_responder", 0, b"tls"
-    ).encode()
-    event = {"event": "message", "id": "message1", "topic": topic, "message": raw.decode()}
-    body = (json.dumps(event) + "\n").encode() if operation == "poll" else b"{}"
-
-    class Opener:
-        def open(self, *args: Any, **kwargs: Any) -> http.client.HTTPResponse:
-            return wire_response(body, framing, truncated)
-
-    monkeypatch.setattr(relay, "_opener", Opener())
-    call = relay.poll(topic) if operation == "poll" else relay.publish(topic, raw)
-    if truncated:
-        with pytest.raises(RelayError, match="^relay_unavailable_or_invalid$"):
-            await call
-    else:
-        result = await call
-        if operation == "poll":
-            assert result is not None
-            assert len(result) == 1
-            assert result[0].frame == raw
-            assert result[0].id == "message1"
-        else:
-            assert result is None
 
 
 @pytest.mark.parametrize("framing", ["fixed", "chunked", "eof"])

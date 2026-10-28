@@ -44,6 +44,7 @@ async function main() {
         if (body.action === "revoke") peer.state = "revoked";
         if (["unpair", "remove_revoked"].includes(body.action)) state.peers = state.peers.filter(p => p.device_id !== body.device_id);
         if (body.action === "share_workspace") state.workspace_peers = body.enabled ? [peer.device_id] : [];
+        if (body.action === "remote_control") state.remote_control_peers = body.enabled ? [peer.device_id] : [];
         if (body.action === "invite") return response.end(JSON.stringify({ uri: "raticode://pair?v=2&data=TEST_ONLY", expires_at: Math.floor(Date.now() / 1000) + 300, qr: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" }));
         if (body.action === "preview") return response.end(JSON.stringify({ name: "Disposable desktop", fingerprint: pin, expires_at: Math.floor(Date.now() / 1000) + 300 }));
         if (body.action === "pair") state.outbound = "awaiting_peer_confirmation";
@@ -95,11 +96,10 @@ async function main() {
   assert.equal(actions.filter(a => a.action === "invite").length, 0);
   state.experimental_network = true;
   state.lan_available = false;
-  state.relay_enabled = true;
   await wait("document.body.textContent.includes('Direct LAN is unavailable')");
-  state.relay_error = "relay_rate_limited";
-  await wait("document.body.textContent.includes('The relay is rate limited')");
-  state.relay_error = null;
+  await wait("document.body.textContent.includes('This computer has no local network address')");
+  assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Create QR code').disabled"), true);
+  assert.equal(await evaluate("document.body.textContent.includes('Relay')"), false);
   state.lan_available = true;
   await wait("document.body.textContent.includes('Local network available')");
   await click("Create QR code");
@@ -192,7 +192,12 @@ async function main() {
   await click("Close setup");
   await click("Dismiss result");
   await evaluate("document.querySelectorAll('details').forEach(d => d.open = false)");
-  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 1);
+  // Thread sync plus the remote-control opt-in, which starts off.
+  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 2);
+  assert.equal(await evaluate("document.querySelectorAll('input[type=checkbox]')[1].checked"), false);
+  await evaluate("document.querySelectorAll('input[type=checkbox]')[1].click()");
+  await wait("document.querySelectorAll('input[type=checkbox]')[1].checked");
+  assert.deepEqual([actions.at(-1).action, actions.at(-1).enabled], ["remote_control", true]);
   assert.equal(await evaluate("Array.from(document.querySelectorAll('pre')).filter(i => i.checkVisibility()).length"), 0);
   await screenshot("phone-light");
   await evaluate("document.documentElement.classList.add('dark')");

@@ -86,7 +86,7 @@ test("graph trackpad scrolling pans both axes; explicit zoom ignores a zero vert
 
 test("studio reset zoom handles Command+0 and Ctrl+0 outside graph focus", () => {
   let zoom = 140, prevented = 0;
-  const context = { matchesKeybinding: (event, binding) => matchesKeybinding(event, binding, "MacIntel"), setTextZoom: value => { zoom = value; }, eventTargetsGraphVisualization: () => false, textZoomDirection: () => 0 };
+  const context = { matchesKeybinding: (event, binding) => matchesKeybinding(event, binding, "MacIntel"), setTextZoom: value => { zoom = value; }, eventTargetsGraphVisualization: () => false, textZoomDirection: () => 0, browserChromeOwnsShortcut: () => false };
   vm.runInNewContext(appSource.slice(appSource.indexOf("    function handleTextZoomKeydown("), appSource.indexOf("    function handleTextZoomWheel(")), context);
   for (const modifier of ["metaKey", "ctrlKey"]) {
     zoom = 140;

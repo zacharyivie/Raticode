@@ -22,7 +22,15 @@ const router = createHashRouter([
   },
 ]);
 
-ReactDOM.createRoot(document.getElementById("root")).render(
+// Vite re-runs this entry during hot updates. Reuse the existing React root so an
+// edit never leaves an old copy of the app running against the same page.
+const root = import.meta.hot?.data.root ?? ReactDOM.createRoot(document.getElementById("root"));
+if (import.meta.hot) {
+  import.meta.hot.data.root = root;
+  import.meta.hot.dispose(() => router.dispose());
+}
+
+root.render(
   <React.StrictMode>
     <AppCrashBoundary>
       <RouterProvider router={router} />

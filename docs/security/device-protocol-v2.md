@@ -1,5 +1,11 @@
 # Device protocol v2 feasibility and desktop integration decisions
 
+> **October 26, 2026:** The ntfy relay was removed. Phones and desktops connect
+> only over the local network. Relay, topic and quota material below is historical.
+> Invitation `relay` and topic fields remain only for wire compatibility and name the
+> unresolvable `https://relay.invalid`. See the mobile repository's
+> `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
+
 This is the retained protocol-milestone report. The subsequent
 [desktop enrollment implementation and setup](device-pairing.md) has separate
 verification evidence and does not satisfy independent review.
