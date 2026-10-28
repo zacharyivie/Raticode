@@ -73,6 +73,9 @@ Changes since the `v0.3.9` tag.
   files excluded by `.raticodeignore` behind.
 - List runs newest first with their age and duration, and drop runs the
   backend has deleted. Fit small graphs at normal size when they open.
+- Update locked anyio, pydantic, python-dotenv, tzdata, mypy, globals, wait-on,
+  autoprefixer and eslint-plugin-react-hooks, and the release workflow's GitHub
+  Actions. ESLint stays on 9.x until eslint-plugin-react supports ESLint 10.
 - Update release browser tests for the grouped thread list, real workflow
   status, the new phone controls and Electron 45, and let release packaging
   rebuild native modules for Electron 45.
@@ -105,6 +108,10 @@ Changes since the `v0.3.9` tag.
 - Review and record licenses for the Second Brain dependencies. Ship upstream
   license texts for loguru, flatbuffers and tokenizers, whose wheels omit them,
   and include onnxruntime's third-party notices.
+- Build and test with Node.js 22.23.4, which fixes the October 21, 2026 Node.js
+  security release (including a Brotli decoder out-of-bounds write and TLS
+  hostname verification bypasses). The desktop app's Electron 45.1.0 already
+  bundles the patched Node.js 24.22.1.
 
 ## 0.3.9 - 2026-10-03
 

@@ -43,7 +43,10 @@ export default [
     },
     rules: {
       ...react.configs.recommended.rules,
-      ...reactHooks.configs.recommended.rules,
+      // react-hooks 7 adds React Compiler rules to "recommended". The studio does
+      // not use the compiler, so keep the classic hook rules.
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "warn",
       "react/react-in-jsx-scope": "off",
       "react/prop-types": "off",
     },

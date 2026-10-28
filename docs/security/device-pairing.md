@@ -218,7 +218,7 @@ Run with nvm selected first:
 
 ```bash
 source "$HOME/.nvm/nvm.sh"
-nvm use 22.12.0
+nvm use 22.23.4
 npm --prefix frontend test
 npm --prefix frontend run lint
 npm --prefix frontend run check:build

@@ -46,7 +46,7 @@ def terms(query: str) -> list[str]:
 
 def excerpt(message: dict[str, Any], query: str = "") -> dict[str, Any]:
     """Keep source IDs and report links, and mark shortened source text explicitly."""
-    result = {
+    result: dict[str, Any] = {
         k: message[k]
         for k in ("id", "role", "sender", "kind", "created_at", "work")
         if k in message

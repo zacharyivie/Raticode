@@ -128,7 +128,7 @@ def operation_field_enum_values(field_name: str) -> list[object]:
     values: set[object] = set()
     for model in OPERATION_MODELS.values():
         field = model.model_fields.get(field_name)
-        if field is None:
+        if field is None or field.annotation is None:
             continue
         schema = TypeAdapter(field.annotation).json_schema()
 

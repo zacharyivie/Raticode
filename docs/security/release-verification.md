@@ -55,6 +55,17 @@ onnxruntime, numpy, tokenizers and huggingface-hub. See
 `packaging/licenses/README.md` for the supplied loguru, flatbuffers and tokenizers
 notices and the onnxruntime third-party notices.
 
+The toolchain moves from Node.js 22.12.0 to 22.23.4 for the October 21, 2026
+Node.js security release (CVE-2026-111497 Brotli out-of-bounds write and the TLS,
+DNS and HTTP fixes). `.nvmrc`, both workflow `node-version` pins, `engines` and
+`packageManager` agree. Electron 45.1.0 already embeds Node.js 24.22.1, a patched
+release, so the shipped runtime needed no change.
+
+eslint-plugin-react-hooks 7 adds React Compiler rules to its recommended set.
+The studio does not use the compiler, so `eslint.config.js` keeps the two classic
+hook rules from 5.x. ESLint itself stays on 9.x because eslint-plugin-react
+7.37.5 declares no ESLint 10 support; do not force it with `--legacy-peer-deps`.
+
 ### 0.3.9 dependency repairs
 
 The 0.3.9 lock upgrades urllib3 to 2.8.0 for GHSA-vxq7-64xx-v4gw,
@@ -79,7 +90,7 @@ References: [urllib3 streaming advisory](https://github.com/urllib3/urllib3/secu
 
 `@electron/asar` 4.3.0 removes the old glob/inflight path from active ASAR packaging;
 `@electron/get` 5.1.0 removes global-agent/boolean from the builder download path.
-These explicit overrides require the pinned Node 22.12.0 toolchain. Linux unpacked
+These explicit overrides require the pinned Node 22.23.4 toolchain. Linux unpacked
 packaging and native node-pty rebuilds exercise the actual consumer APIs.
 
 The frontend `.npmrc` omits peer-only packages. This excludes the unused Squirrel

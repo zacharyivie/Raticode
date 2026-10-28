@@ -13,7 +13,7 @@ The worktree initially had no Python or Node dependencies. `uv venv .venv` faile
 
 To proceed without network or manifest changes, copied installed dependency files from `/home/doonk/Projects/Raticode/Raticode/.venv/lib/python3.14/site-packages/` into the local venv, replaced local `_editable_impl_gofer_flow.pth` with the absolute assignment `src` path, and copied its Ruff binary to local `.venv/bin/ruff`. Copied that project's `frontend/node_modules/` into the assignment's ignored dependency directory. These are local copies, not symlinks to source code. Both copy commands exited 0. This is an installed-environment baseline, not a reproducible clean-install result. Lockfile installation remains unverified.
 
-Before every npm command group: `source /home/doonk/.nvm/nvm.sh && nvm use`, selecting root `.nvmrc` Node v22.12.0 and npm 10.9.0. `node-env.log` records versions. No live LLM CLI was called. Existing pytest test doubles and temporary fixture workflows are authorized test inputs, not user workflow execution.
+Before every npm command group: `source /home/doonk/.nvm/nvm.sh && nvm use`, selecting root `.nvmrc` Node v22.23.4 and npm 10.9.9. `node-env.log` records versions. No live LLM CLI was called. Existing pytest test doubles and temporary fixture workflows are authorized test inputs, not user workflow execution.
 
 ## Requirement-derived checks
 

@@ -729,7 +729,7 @@ class DesktopControl:
             rem.instruct(thread, {"request_id": request, "body": _text(params.get("body"), 20000)})
             return self._rem_thread(thread)
         if op == "rem.task.create":
-            fields = {
+            fields: dict[str, Any] = {
                 key: params[key]
                 for key in ("title", "type", "prompt", "schedule", "execution_mode")
                 if key in params

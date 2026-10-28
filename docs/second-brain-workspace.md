@@ -193,7 +193,7 @@ receipts. It does not create fake progress or generated claims. Native export se
 uses the desktop Save dialog and grants the selected parent without writing a file.
 
 Run the Python suite, Ruff and mypy from the repository root. In `frontend`, select
-Node 22.12.0 with nvm, then run `npm test`, `npm run lint` and `npm run build`.
+Node 22.23.4 with nvm, then run `npm test`, `npm run lint` and `npm run build`.
 `npm run test:second-brain-browser` exercises real API persistence and filesystem operations
 through Electron using temporary folders and a deterministic test provider. It makes no
 paid provider calls. `npm run test:second-brain-visual` audits light/dark and desktop/narrow

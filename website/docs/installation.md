@@ -71,7 +71,7 @@ The CLI binary includes the Python backend. Commands that invoke scripts or codi
 
 ## Install from source
 
-Source development needs Python 3.11 or newer and the Node version in the repository's `.nvmrc`. The current checkout selects Node 22.12.0 and npm 10.9.0.
+Source development needs Python 3.11 or newer and the Node version in the repository's `.nvmrc`. The current checkout selects Node 22.23.4 and npm 10.9.9.
 
 ```bash
 git clone https://github.com/zacharyivie/Raticode.git

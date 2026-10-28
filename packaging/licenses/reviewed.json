@@ -564,7 +564,7 @@
     },
     "anyio": {
       "license": "MIT",
-      "version": "4.14.2"
+      "version": "4.15.1"
     },
     "apscheduler": {
       "license": "MIT",
@@ -804,11 +804,11 @@
     },
     "pydantic": {
       "license": "MIT",
-      "version": "2.13.4"
+      "version": "2.14.1"
     },
     "pydantic-core": {
       "license": "MIT",
-      "version": "2.46.4"
+      "version": "2.50.1"
     },
     "pydantic-settings": {
       "license": "MIT",
@@ -852,7 +852,7 @@
     },
     "python-dotenv": {
       "license": "BSD-3-Clause",
-      "version": "1.2.2"
+      "version": "1.2.4"
     },
     "pywin32-ctypes": {
       "license": "BSD-3-Clause",
@@ -928,15 +928,15 @@
     },
     "typing-extensions": {
       "license": "PSF-2.0",
-      "version": "4.15.0"
+      "version": "4.16.0"
     },
     "typing-inspection": {
       "license": "MIT",
-      "version": "0.4.2"
+      "version": "0.4.4"
     },
     "tzdata": {
       "license": "Apache-2.0",
-      "version": "2026.2"
+      "version": "2026.6"
     },
     "tzlocal": {
       "license": "MIT",
