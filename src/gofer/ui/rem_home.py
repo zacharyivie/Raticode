@@ -1074,6 +1074,11 @@ class RemHome:
                     return
                 row = db.execute("SELECT body FROM runs WHERE id=?", (run["id"],)).fetchone()
                 current = json.loads(row[0]) if row else None
+                # Updates are delivered concurrently. Once the run has moved on, for
+                # example a blocked review that recovery later completed, this update
+                # is stale and must not land after the newer one.
+                if current and current["state"] != entry["state"]:
+                    return
                 if (
                     current
                     and entry["state"] == "succeeded"

@@ -2352,6 +2352,27 @@ def test_obsolete_project_change_block_recovers_review_once_without_repeating_wo
     assert home.store.conversation()["messages"][-1]["body"] == "Implemented and tested."
 
 
+def test_stale_outcome_delivered_late_does_not_follow_the_newer_one(
+    home: RemHome, tmp_path: Path
+):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = task["active_run"]
+    home._update(run["id"], state="verifying", worker_result="Implemented and tested.")
+    home._finish(run["id"], "blocked", "The project changed during review.", 0)
+    # Recovery resumes the review under a new epoch.
+    home._update(run["id"], state="verifying", epoch=1)
+    home._finish(run["id"], "succeeded", "Implemented and tested.", 1)
+    stale, newer = home.store.outbox()
+    assert (stale["state"], newer["state"]) == ("blocked", "succeeded")
+    # Concurrent delivery threads can finish in either order.
+    home._deliver(newer)
+    home._deliver(stale)
+    assert home.store.outbox() == []
+    bodies = [m["body"] for m in home.store.conversation()["messages"]]
+    assert bodies[-1] == "Implemented and tested."
+    assert not any("The project changed during review." in body for body in bodies)
+
+
 def test_essential_user_question_includes_saved_result_in_main_chat(home: RemHome, tmp_path: Path):
     task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
     run = task["active_run"]
