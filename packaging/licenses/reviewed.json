@@ -965,6 +965,10 @@
     "websockets": {
       "license": "BSD-3-Clause",
       "version": "17.1"
+    },
+    "win32-setctime": {
+      "license": "MIT license",
+      "version": "1.2.0"
     }
   }
 }
