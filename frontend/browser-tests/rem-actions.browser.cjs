@@ -64,14 +64,15 @@ async function main() {
   win.webContents.on("console-message", details => { if(details.level === "error") errors.push(details.message); });
   await win.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/rem-actions-test`);
   const evaluate = source => win.webContents.executeJavaScript(source,true);
-  const wait = async source => { const deadline = Date.now()+8000; while(!await evaluate(source)) { if(Date.now()>deadline) throw new Error(`Missing condition: ${source}\n${await evaluate('document.body.innerText')}`); await new Promise(resolve=>setTimeout(resolve,30)); } };
+  const wait = async source => { const deadline = Date.now()+8000; while(!await evaluate(`Boolean(${source})`)) { if(Date.now()>deadline) throw new Error(`Missing condition: ${source}\n${await evaluate('document.body.innerText')}`); await new Promise(resolve=>setTimeout(resolve,30)); } };
   const draft = async value => evaluate(`(() => { const input=document.querySelector('textarea'); input.focus(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,${JSON.stringify(value)}); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
   const enter = modifiers => { win.webContents.sendInputEvent({type:"keyDown",keyCode:"Return",modifiers}); win.webContents.sendInputEvent({type:"keyUp",keyCode:"Return",modifiers}); };
   await wait("document.querySelector('[data-assistant-home]')");
   await draft("Check provider discovery"); enter(["control"]);
-  await wait("window.requests.length === 1 && document.querySelector('[data-thread-launching]')");
+  // A background thread joins the collapsed Running group while its turn runs.
+  await wait("window.requests.length === 1 && document.querySelector('[data-thread-group=\"running\"]')");
   assert.equal(await evaluate("!!document.querySelector('[data-assistant-home]') && document.querySelector('textarea').value === ''"),true);
-  assert.equal(await evaluate("!!document.querySelector('[data-thread-launching] [title=\"Rem response running\"]')"),true);
+  assert.equal(await evaluate("document.querySelector('[data-thread-group=\"running\"] .rem-thread-count').textContent"),"1 thread");
   const artifact = path.join(__dirname,"../artifacts/rem-actions"); fs.mkdirSync(artifact,{recursive:true});
   fs.writeFileSync(path.join(artifact,"rat-action-and-background-thread.png"),(await win.webContents.capturePage()).toPNG());
   await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.includes('Debug provider discovery')).click()");

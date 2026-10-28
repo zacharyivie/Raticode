@@ -143,7 +143,7 @@ class Swarms:
     def __init__(self, root: str) -> None:
         self.root = root
         self.calls: list[tuple[str, Any]] = []
-        self.swarm = {
+        self.swarm: dict[str, Any] = {
             "id": "swarm1",
             "name": "Previews",
             "agents": [{"id": "lead", "name": "Lead"}],
@@ -198,7 +198,8 @@ def test_approvals_and_swarms_need_desktop_opt_in(application, tmp_path):
     sequence = iter(range(10, 100))
 
     def send(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return app.handle(peer, request(kind, next(sequence), payload))[-1]
+        response: dict[str, Any] = app.handle(peer, request(kind, next(sequence), payload))[-1]
+        return response
 
     locked = send("approval.request", {})
     assert locked["payload"] == {"remote_allowed": False, "approvals": []}

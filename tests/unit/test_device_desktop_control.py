@@ -371,7 +371,7 @@ def test_settings_round_trip_through_the_desktop_window(phone):
         "desktop.action", "settings.update", {"changes": {"appearance.theme": "dark"}}
     )
     assert unavailable["code"] == "unavailable"
-    window = {
+    window: dict[str, dict[str, Any]] = {
         "appearance": {"theme": "light", "reducedMotion": "system"},
         "assistant": {"provider": "codex", "model": "model-a", "swarmAccessEnabled": True},
         "browser": {"remConfirm": "signed-in"},

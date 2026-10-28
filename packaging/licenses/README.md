@@ -25,6 +25,17 @@ Desktop installers also carry it in their resources/third-party-licenses folder.
   That commit and the npm package declare MIT but contain no license file.
   The supplied notice records the author and declaration with standard MIT terms
   from SPDX license-list-data v3.27.0. It is not represented as an upstream file.
+* loguru 0.7.3: its wheel and sdist omit the MIT license. The supplied notice is
+  copied verbatim from https://raw.githubusercontent.com/Delgan/loguru/0.7.3/LICENSE.
+* flatbuffers 25.12.19: its wheel omits the Apache-2.0 license and it has no sdist.
+  The supplied notice is copied verbatim from
+  https://raw.githubusercontent.com/google/flatbuffers/v25.12.19/LICENSE.
+* tokenizers 0.23.2: its wheel omits the Apache-2.0 license. The supplied notice is
+  copied from `tokenizers/LICENSE` in the locked sdist after checking its uv.lock hash.
+* py-rust-stemmers 0.1.8 declares no license metadata. Its wheel's LICENSE is MIT.
+* bibtexparser 1.4.4 is dual-licensed "LGPLv3 or BSD"; Raticode uses it under BSD.
+* onnxruntime ships its third-party notices in ThirdPartyNotices.txt; the collector
+  copies it alongside the onnxruntime license.
 * The local lodash.isequal adapter is application code and uses the application
   license. Lodash itself has its own MIT notice in the bundle.
 * openpyxl and et-xmlfile supply their complete licenses in wheel metadata;

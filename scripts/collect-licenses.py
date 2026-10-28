@@ -21,7 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def notice_file(path: Path) -> bool:
     return bool(
-        re.search(r"(^|[._-])(licen[cs]es?|copying|notices?|copyright)([._-]|$)", path.name, re.I)
+        # ThirdPartyNotices.txt (onnxruntime and others) has no separator before "Notices".
+        re.search(
+            r"(^|[._-]|thirdparty)(licen[cs]es?|copying|notices?|copyright)([._-]|$)",
+            path.name,
+            re.I,
+        )
     )
 
 

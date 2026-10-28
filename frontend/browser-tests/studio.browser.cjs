@@ -297,7 +297,8 @@ async function exerciseRemSteering() {
 
 async function exerciseConversationEfficiency() {
   await evaluate(() => {
-    const threads = Array.from({ length: 8 }, (_, i) => ({ id: `efficiency-${i}`, title: `Efficiency thread ${i}`, updatedAt: new Date().toISOString(), projectRoot: "/workspace", provider: "codex", model: "gpt-5.6-sol" }));
+    // The thread home lists the seven most recently read threads; older ones are archived.
+    const threads = Array.from({ length: 7 }, (_, i) => ({ id: `efficiency-${i}`, title: `Efficiency thread ${i}`, updatedAt: new Date().toISOString(), projectRoot: "/workspace", provider: "codex", model: "gpt-5.6-sol" }));
     localStorage.setItem("gofer-flow-chat-threads", JSON.stringify(threads.map(({ id, updatedAt }) => ({ id, updatedAt }))));
     for (const thread of threads) {
       localStorage.setItem(`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread));
@@ -339,7 +340,7 @@ async function exerciseConversationEfficiency() {
     await evaluate(() => document.querySelector("button[title='Back to active threads']").click());
     await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
   }
-  for (let i = 0; i < 8; i++) { await open(i); await back(); }
+  for (let i = 0; i < 7; i++) { await open(i); await back(); }
   assert.equal(await evaluate(() => window.__conversationReads["gofer-flow-chat-thread:efficiency-0"]), 1, "Initial visit parses history once");
   await open(0);
   assert.equal(await evaluate(() => window.__conversationReads["gofer-flow-chat-thread:efficiency-0"]), 1, "Revisiting migrated history reads IndexedDB, not legacy localStorage");
@@ -431,7 +432,7 @@ async function exerciseThreadSearchNavigation() {
     const thread = { id: "search-navigation", title: "Search navigation", updatedAt: new Date(Date.now() - 11 * 86400000).toISOString(), projectRoot: "/workspace", provider: "codex" };
     const other = { ...thread, id: "search-other", title: "Another thread" };
     localStorage.setItem("gofer-flow-chat-threads", JSON.stringify([thread, other].map(({ id, updatedAt }) => ({ id, updatedAt }))));
-    localStorage.setItem(`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread));
+    localStorage.setItem(`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify({ ...thread, archived: true }));
     localStorage.setItem(`gofer-flow-chat-thread-meta:${other.id}`, JSON.stringify(other));
     localStorage.setItem(`gofer-flow-chat-thread:${other.id}`, JSON.stringify([{ id: "other-0", role: "assistant", body: "Other thread marker" }]));
     const messages = Array.from({ length: 200 }, (_, i) => ({ id: `search-${i}`, role: "assistant", body: `Message ${i}\n\nMore context for this message.` }));
@@ -444,7 +445,7 @@ async function exerciseThreadSearchNavigation() {
   await windowRef.reload();
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
   assert.equal(await evaluate(() => document.querySelector("[data-assistant-home]").textContent.includes("Search navigation")), false, "Archived thread stays out of the active list");
-  assert.equal(await evaluate(() => [...document.querySelectorAll("[data-assistant-home] button")].find(button => button.textContent.includes("Archived threads"))?.getAttribute("aria-expanded")), "false");
+  assert.equal(await evaluate(() => document.querySelector("[data-assistant-home] [data-thread-group='archived'] button[aria-expanded]")?.getAttribute("aria-expanded")), "false");
   const search = async (query, failRead = false) => {
     await evaluate(() => document.querySelector("button[aria-label='Search threads']").click());
     await evaluate(value => {
@@ -602,7 +603,7 @@ async function exerciseMonacoEditor() {
     .find((button) => button.textContent.trim() === "Run workflow").click());
   await waitFor(() => evaluate(() => !document.querySelector("[role='dialog']")));
   await waitFor(() => evaluate(() => [...document.querySelectorAll("[role='button']")]
-    .some((button) => button.textContent.includes("Rattish editor") && button.textContent.includes("Success"))));
+    .some((button) => button.textContent.includes("Rattish editor") && button.textContent.includes("Succeeded"))));
   await openRattishWorkflowFile();
   await waitFor(() => evaluate(() => Boolean(document.querySelector(".monaco-editor"))));
   assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Search files']"))), false);
@@ -814,14 +815,15 @@ async function exerciseDesignRegressions() {
   // The thread home is just the thread list; Rem's introduction lives in Rem's home.
   assert.equal(await evaluate(() => Boolean(document.querySelector("[data-assistant-home] h2, [data-assistant-home] .rem-avatar"))), false);
   assert.doesNotMatch(await evaluate(() => document.querySelector("[data-assistant-home]").textContent), /Your coding agent in Raticode/);
+  // The thread home groups threads (Pinned, Unread, Read, Running, Archived).
   assert.equal(
-    await evaluate(() => document.querySelector("[data-assistant-home] section[aria-label='Active threads'] h3")?.textContent.trim()),
-    "Active threads",
+    await evaluate(() => Boolean(document.querySelector("[data-assistant-home] section[aria-label='Threads'] [data-thread-group='archived']"))),
+    true,
   );
   assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='New thread']"))), true);
   assert.equal(await evaluate(() => Boolean(document.querySelector("button[title='Back to active threads']"))), false);
   await evaluate(() => document.querySelector("button[title='Active threads']").click());
-  await waitFor(() => evaluate(() => Boolean(document.querySelector("section[aria-label='Active threads'] h3"))));
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("section[aria-label='Threads'] [data-thread-group]"))));
   await evaluate(() => document.querySelector("button[title='Active threads']").click());
 
   const composerLayout = await evaluate(() => {
@@ -1784,7 +1786,10 @@ function routeApi(pathname, response) {
         logText: "prepare: ready",
         nodeOutputs: { prepare: { data: { stdout: "ready" }, output: "ready", success: true } },
         runEvents: [],
+        runId: "rattish-editor-run-1",
         runNodes: { prepare: { status: "success" } },
+        startedAt: "2026-01-01T00:00:00Z",
+        finishedAt: "2026-01-01T00:00:01Z",
         status: "success",
         success: true,
         workflowId: "rattish-editor",

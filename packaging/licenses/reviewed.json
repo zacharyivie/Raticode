@@ -578,6 +578,10 @@
       "license": "MIT",
       "version": "26.1.0"
     },
+    "bibtexparser": {
+      "license": "LGPLv3 or BSD",
+      "version": "1.4.4"
+    },
     "boolean-py": {
       "license": "BSD-2-Clause",
       "version": "5.0"
@@ -588,7 +592,7 @@
     },
     "certifi": {
       "license": "MPL-2.0",
-      "version": "2026.7.22"
+      "version": "2026.10.23"
     },
     "cffi": {
       "license": "MIT-0",
@@ -597,6 +601,10 @@
     "charset-normalizer": {
       "license": "MIT",
       "version": "3.5.1"
+    },
+    "click": {
+      "license": "BSD-3-Clause",
+      "version": "8.5.0"
     },
     "colorama": {
       "license": "License :: OSI Approved :: BSD License",
@@ -618,13 +626,45 @@
       "license": "MIT",
       "version": "2.0.0"
     },
+    "fastembed": {
+      "license": "Apache-2.0",
+      "version": "0.9.1"
+    },
     "filelock": {
       "license": "MIT",
-      "version": "3.32.6"
+      "version": "4.2.4"
+    },
+    "flatbuffers": {
+      "license": "Apache 2.0",
+      "version": "25.12.19"
+    },
+    "fsspec": {
+      "license": "BSD-3-Clause",
+      "version": "2026.9.0"
     },
     "greenlet": {
       "license": "MIT AND PSF-2.0",
       "version": "3.5.1"
+    },
+    "h11": {
+      "license": "MIT",
+      "version": "0.16.0"
+    },
+    "hf-xet": {
+      "license": "Apache-2.0",
+      "version": "1.6.0"
+    },
+    "httpcore": {
+      "license": "BSD-3-Clause",
+      "version": "1.0.9"
+    },
+    "httpx": {
+      "license": "BSD-3-Clause",
+      "version": "0.28.1"
+    },
+    "huggingface-hub": {
+      "license": "Apache-2.0",
+      "version": "1.33.0"
     },
     "idna": {
       "license": "BSD-3-Clause",
@@ -650,6 +690,10 @@
       "license": "Apache-2.0",
       "version": "30.4.4"
     },
+    "loguru": {
+      "license": "License :: OSI Approved :: MIT License",
+      "version": "0.7.3"
+    },
     "macholib": {
       "license": "MIT",
       "version": "1.16.4"
@@ -661,6 +705,10 @@
     "mdurl": {
       "license": "License :: OSI Approved :: MIT License",
       "version": "0.1.2"
+    },
+    "mmh3": {
+      "license": "MIT License\n\nCopyright (c) 2011-2026 Hajime Senuma\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.",
+      "version": "5.3.1"
     },
     "msgpack": {
       "license": "Apache-2.0",
@@ -677,6 +725,14 @@
     "networkx": {
       "license": "BSD-3-Clause",
       "version": "3.6.1"
+    },
+    "numpy": {
+      "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "version": "2.4.6"
+    },
+    "onnxruntime": {
+      "license": "MIT License",
+      "version": "1.30.0"
     },
     "openpyxl": {
       "license": "MIT",
@@ -697,6 +753,10 @@
     "pefile": {
       "license": "MIT",
       "version": "2024.8.26"
+    },
+    "pillow": {
+      "license": "MIT-CMU",
+      "version": "13.0.0"
     },
     "pip": {
       "license": "MIT",
@@ -725,6 +785,14 @@
     "prompt-toolkit": {
       "license": "License :: OSI Approved :: BSD License",
       "version": "3.0.52"
+    },
+    "protobuf": {
+      "license": "3-Clause BSD License",
+      "version": "7.36.2"
+    },
+    "py-rust-stemmers": {
+      "license": "",
+      "version": "0.1.8"
     },
     "py-serializable": {
       "license": "Apache-2.0",
@@ -761,6 +829,10 @@
     "pyparsing": {
       "license": "MIT",
       "version": "3.3.2"
+    },
+    "pypdf": {
+      "license": "BSD-3-Clause",
+      "version": "6.21.3"
     },
     "pytest": {
       "license": "MIT",
@@ -816,7 +888,7 @@
     },
     "setuptools": {
       "license": "MIT",
-      "version": "84.0.0"
+      "version": "84.2.1"
     },
     "shellingham": {
       "license": "ISC License",
@@ -833,6 +905,10 @@
     "srt": {
       "license": "MIT",
       "version": "3.5.3"
+    },
+    "tokenizers": {
+      "license": "License :: OSI Approved :: Apache Software License",
+      "version": "0.23.2"
     },
     "tomli": {
       "license": "MIT",

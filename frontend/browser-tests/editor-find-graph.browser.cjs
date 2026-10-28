@@ -26,7 +26,8 @@ app.whenReady().then(async () => {
   const errors = [];
   win.webContents.on("console-message", ({ level, message }) => { if (level === "error") errors.push(message); });
   await win.loadURL(server.resolvedUrls.local[0]);
-  const evaluate = fn => win.webContents.executeJavaScript(`(${fn})()`);
+  // DOM nodes carry React internals that Electron cannot clone; report them as found.
+  const evaluate = fn => win.webContents.executeJavaScript(`Promise.resolve((${fn})()).then(value => value instanceof Node || value instanceof NodeList ? true : value)`);
   const verifyContrast = async () => {
     const { colors, background } = await evaluate(() => {
       const graph = document.querySelector(".scm-history-graph");
@@ -45,7 +46,7 @@ app.whenReady().then(async () => {
     }
   };
   for (let i = 0; i < 150; i++) {
-    if (await evaluate(() => document.querySelector(".monaco-editor textarea"))) break;
+    if (await evaluate(() => Boolean(document.querySelector(".monaco-editor textarea")))) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "History").click());

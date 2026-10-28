@@ -69,12 +69,12 @@ async function run() {
   await until(`document.querySelector('.report-theme-gallery').scrollLeft>0`);
   await click("+ New theme"); await change("Theme description","Marine field journal");
   assert.ok(await js(`document.querySelector('.report-theme-heading').nextElementSibling.matches('.report-theme-editor')`));
-  assert.ok(await js(`document.querySelector('[aria-label="Transcribe message locally"]') && document.querySelector('[aria-label="Attach files"]')`));
+  assert.ok(await js(`Boolean(document.querySelector('[aria-label="Transcribe message locally"]') && document.querySelector('[aria-label="Attach files"]'))`));
   const composerImage=await win.webContents.capturePage(); fs.writeFileSync(path.join(os.tmpdir(),"raticode-report-theme-composer.png"),composerImage.toPNG());
   await click("Generate preview");
   await until(`document.querySelector('.report-theme-progress')?.textContent.includes('Choosing the marine palette')`);
-  assert.ok(await js(`document.querySelector('.report-theme-spinner')`));
-  assert.equal(await js(`document.querySelector('iframe[title="New report theme preview"]')`), null);
+  assert.ok(await js(`Boolean(document.querySelector('.report-theme-spinner'))`));
+  assert.equal(await js(`Boolean(document.querySelector('iframe[title="New report theme preview"]'))`), false);
   themeJob = { ...themeJob, progress:"Laying out the sample report", updatedAt: 99 };
   await until(`document.querySelector('.report-theme-progress')?.textContent.includes('Laying out the sample report')`);
   assert.ok(await js(`!document.body.textContent.includes('Choosing the marine palette')`));

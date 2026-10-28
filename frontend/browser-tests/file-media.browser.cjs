@@ -86,7 +86,7 @@ app.whenReady().then(async () => {
   win.webContents.setZoomFactor(1);
   const evaluate = fn => win.webContents.executeJavaScript(`(${fn})()`);
   const evalArgs = (fn, ...args) => win.webContents.executeJavaScript(`(${fn})(...${JSON.stringify(args)})`);
-  async function waitFor(fn) { for (let i = 0; i < 250; i++) { if (await evaluate(fn)) return; await new Promise(resolve => setTimeout(resolve, 40)); } console.log(await evaluate(() => ({ text: document.body.innerText, focused: document.activeElement?.getAttribute("title"), tree: [...document.querySelectorAll('[role="treeitem"]')].map(item => ({ path: item.dataset.path, selected: item.getAttribute("aria-selected"), visible: item.checkVisibility() })) }))); throw new Error(`Timed out: ${fn}`); }
+  async function waitFor(fn) { for (let i = 0; i < 250; i++) { if (await evaluate(`() => Promise.resolve((${fn})()).then(Boolean)`)) return; await new Promise(resolve => setTimeout(resolve, 40)); } console.log(await evaluate(() => ({ text: document.body.innerText, focused: document.activeElement?.getAttribute("title"), tree: [...document.querySelectorAll('[role="treeitem"]')].map(item => ({ path: item.dataset.path, selected: item.getAttribute("aria-selected"), visible: item.checkVisibility() })) }))); throw new Error(`Timed out: ${fn}`); }
   await waitFor(() => document.querySelector('[title$="/a/note.txt"]'));
   await evaluate(() => document.querySelector('[title$="/a/note.txt"]').focus());
   await waitFor(() => !document.querySelector('[aria-label="Copy selected file"]').disabled);

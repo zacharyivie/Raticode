@@ -1,13 +1,13 @@
 /* global __dirname, process, console, clearTimeout, setTimeout, window, document, KeyboardEvent, Event, HTMLInputElement */
-const { app, BrowserWindow, ipcMain, clipboard, session: electronSession, Menu, shell, webContents } = require("electron");
+const { app, BrowserWindow, ipcMain, clipboard, dialog, session: electronSession, Menu, shell, webContents } = require("electron");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { pathToFileURL, fileURLToPath } = require("node:url");
-const vm = require("node:vm");
-const utils = require("../electron/browser-utils.cjs");
+const os = require("node:os");
+const { createBrowserSessions } = require("../electron/browser-sessions.cjs");
+const { createBrowserStore } = require("../electron/browser-store.cjs");
 const { installPermissionPolicy } = require("../electron/studio-policy.cjs");
-const { createIpcSecurity, isSafeExternalUrl } = require("../electron/security.cjs");
+const { createIpcSecurity } = require("../electron/security.cjs");
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("no-sandbox");
 app.commandLine.appendSwitch("disable-setuid-sandbox");
@@ -42,16 +42,18 @@ app.whenReady().then(async () => {
   const policy = { indexPath: path.join(frontend, "dist/index.html"), devServerUrl: url, isProduction: false };
   installPermissionPolicy(electronSession.fromPartition("persist:raticode-browser"), win.webContents.session, () => win.webContents, policy);
   const security = createIpcSecurity({ appRoots: [frontend], getDataDir: () => "/fixture", devServerUrl: url, isProduction: false, getMainWebContents: () => win.webContents });
-  const native = { ...utils, isSafeExternalUrl, Menu, shell, webContents, path, fs, pathToFileURL, fileURLToPath, crypto: require("node:crypto"), process: { platform: "darwin" }, mainWindow: win,
-    browserSessions: new Map(), browserOwnersWithCleanup: new WeakSet(), resolveExactPath: value => value };
-  vm.createContext(native);
-  const main = fs.readFileSync(path.join(frontend, "electron/main.js"), "utf8");
-  vm.runInContext(main.slice(main.indexOf("function createBrowser("), main.indexOf("async function createTerminal(")), native);
+  const browserData = fs.mkdtempSync(path.join(os.tmpdir(), "rem-mac-ui-browser-"));
+  const browsers = createBrowserSessions({
+    app, Menu, clipboard, dialog, shell, session: electronSession, webContents,
+    getMainWindow: () => win, resolvePath: value => value, platform: "darwin",
+    store: createBrowserStore(browserData), quarantineDir: path.join(browserData, "quarantine"),
+  });
   const data = { "/fixture/sample.ts": "const value: number = 1;\nconsole.log(value);\n", "/fixture/sample.py": "print(  'python')\n" };
   function handle(channel, action) { ipcMain.handle(channel, security.secureHandler(action)); }
-  handle("gofer:browser-create", native.createBrowser);
-  handle("gofer:browser-action", native.browserAction);
-  handle("gofer:browser-owner-zoom", native.browserOwnerZoom);
+  handle("gofer:browser-create", browsers.createBrowser);
+  handle("gofer:browser-action", browsers.browserAction);
+  handle("gofer:browser-owner-zoom", browsers.ownerZoom);
+  handle("gofer:browser-library", browsers.browserLibrary);
   handle("gofer:read-text-file", (_event, options) => ({ content: data[options.targetPath] || "" }));
   handle("gofer:write-text-file", (_event, options) => { data[options.targetPath] = options.content; return {}; });
   handle("gofer:clipboard-read", () => clipboard.readText());
@@ -70,8 +72,9 @@ app.whenReady().then(async () => {
   console.log("Loading Mac UI fixture", url);
   await win.loadURL(url);
   console.log("Loaded fixture document");
-  const evaluate = fn => win.webContents.executeJavaScript(`(${fn})()`);
-  async function waitFor(fn) { for (let i = 0; i < 300; i++) { if (await evaluate(fn)) return; await new Promise(resolve => setTimeout(resolve, 50)); } console.log(await evaluate(() => ({ body: document.body.textContent.slice(-2000), ready: window.fixtureReady, state: window.fileStateFixture }))); console.log(errors); throw Error(`Timed out waiting for ${fn}`); }
+  // DOM nodes carry React internals that Electron cannot clone; report them as found.
+  const evaluate = fn => win.webContents.executeJavaScript(`Promise.resolve((${fn})()).then(value => value instanceof Node || value instanceof NodeList ? true : value)`);
+  async function waitFor(fn) { for (let i = 0; i < 300; i++) { if (await evaluate(`() => Promise.resolve((${fn})()).then(Boolean)`)) return; await new Promise(resolve => setTimeout(resolve, 50)); } console.log(await evaluate(() => ({ body: document.body.textContent.slice(-2000), ready: window.fixtureReady, state: window.fileStateFixture }))); console.log(errors); throw Error(`Timed out waiting for ${fn}`); }
   console.log("Waiting for editors and guest");
   await waitFor(() => window.fileStateFixture && !window.fileStateFixture.loading && document.querySelector("webview"));
   // Utility typography must still override the authored input font reset.
@@ -136,8 +139,8 @@ app.whenReady().then(async () => {
   // General Edit commands follow the composer through the native bridge.
   await evaluate(() => { const input = document.querySelector('[aria-label="Composer fixture"]'); input.focus(); input.select(); document.querySelector('[data-menu-trigger="Edit"]').click(); });
   await evaluate(() => [...document.querySelectorAll('[role="menu"] button')].find(button => button.textContent.includes("Copy")).click());
-  for (let i = 0; i < 50 && clipboard.readText() !== "composer text"; i++) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(clipboard.readText(), "composer text");
+  for (let i = 0; i < 50 && await clipboard.readText() !== "composer text"; i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(await clipboard.readText(), "composer text");
   clipboard.writeText("focused paste");
   await evaluate(() => { const input = document.querySelector('[aria-label="Composer fixture"]'); input.focus(); input.select(); document.querySelector('[data-menu-trigger="Edit"]').click(); });
   await evaluate(() => [...document.querySelectorAll('[role="menu"] button')].find(button => button.textContent.includes("Paste")).click());
@@ -181,7 +184,7 @@ app.whenReady().then(async () => {
   await evaluate(() => document.querySelector('[data-menu-trigger="Edit"]').click());
   // Production browser IPC and found-in-page events, including Cmd+F dispatched in the guest.
   await waitFor(() => [...document.querySelectorAll('section[aria-label="Integrated browser"] button')].some(button => button.getAttribute("aria-label") === "Find in Page" && !button.disabled));
-  const guest = [...native.browserSessions.values()][0].contents;
+  const guest = webContents.getAllWebContents().find(contents => contents.getType() === "webview");
   guest.focus(); guest.sendInputEvent({ type: "keyDown", keyCode: "F", modifiers: ["meta"] }); guest.sendInputEvent({ type: "keyUp", keyCode: "F", modifiers: ["meta"] });
   await waitFor(() => document.querySelector('[aria-label="Find text in page"]'));
   await evaluate(() => { const field = document.querySelector('[aria-label="Find text in page"]'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set; setter.call(field, "needle"); field.dispatchEvent(new Event("input", { bubbles: true })); });

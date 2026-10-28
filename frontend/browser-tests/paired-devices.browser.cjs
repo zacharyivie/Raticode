@@ -192,9 +192,10 @@ async function main() {
   await click("Close setup");
   await click("Dismiss result");
   await evaluate("document.querySelectorAll('details').forEach(d => d.open = false)");
-  // Thread sync plus the remote-control opt-in, which starts off.
-  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 2);
+  // Thread sync plus the remote-control and desktop-control opt-ins, which start off.
+  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 3);
   assert.equal(await evaluate("document.querySelectorAll('input[type=checkbox]')[1].checked"), false);
+  assert.equal(await evaluate("document.querySelectorAll('input[type=checkbox]')[2].checked"), false);
   await evaluate("document.querySelectorAll('input[type=checkbox]')[1].click()");
   await wait("document.querySelectorAll('input[type=checkbox]')[1].checked");
   assert.deepEqual([actions.at(-1).action, actions.at(-1).enabled], ["remote_control", true]);

@@ -31,7 +31,7 @@ app.whenReady().then(async () => {
   };
   const until = async fn => {
     for (let i = 0; i < 150; i++) {
-      if (await evaluate(fn)) return;
+      if (await evaluate(`() => Promise.resolve((${fn})()).then(Boolean)`)) return;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     console.error(await evaluate(() => ({ models: window.commitDiffMonaco?.editor.getModels().map(model => ({ uri: model.uri.toString(), disposed: model.isDisposed() })), editors: window.commitDiffMonaco?.editor.getDiffEditors().length, body: document.body.textContent.slice(-1000) })), errors);

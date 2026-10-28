@@ -39,7 +39,7 @@ async function main(){
  const errors=[];win.webContents.on('console-message',d=>{if(d.level==='error')errors.push(d.message);});
  await win.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/phone-review`);
  const evaluate=s=>win.webContents.executeJavaScript(s,true);
- async function wait(s){const end=Date.now()+15000;while(!await evaluate(s)){if(Date.now()>end)throw new Error('Missing '+s+'\n'+await evaluate('document.body.innerText'));await new Promise(r=>setTimeout(r,100));}}
+ async function wait(s){const end=Date.now()+15000;while(!await evaluate(`Boolean(${s})`)){if(Date.now()>end)throw new Error('Missing '+s+'\n'+await evaluate('document.body.innerText'));await new Promise(r=>setTimeout(r,100));}}
  await wait("[...document.querySelectorAll('button')].some(b=>b.textContent.includes('Mobile conversation review'))");
  await evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Mobile conversation review')).click()");
  await wait("document.querySelector('[aria-label=\"Sent from your phone\"]')");
