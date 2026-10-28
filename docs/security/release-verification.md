@@ -1,8 +1,8 @@
 # Dependency and release verification
 
 The security refresh upgrades Electron to 45.1.0 (Chromium 156), React Router
-to 7.18.3, Vite to 7.3.6 with its React plugin 5.2.0, pydantic-settings to
-2.15.0, and setuptools to 84.0.0. The lockfiles also contain patched transitive packages.
+to 7.18.3, Vite to 7.3.7 with its React plugin 5.2.0, pydantic-settings to
+2.15.0, and setuptools to 84.2.1. The lockfiles also contain patched transitive packages.
 React 18 and the studio's existing routes and appearance are unchanged.
 
 The full npm audit includes Electron even though npm classifies it as a development
@@ -34,6 +34,26 @@ updates for review. Python installation and backend builds use `--locked` with
 uv 0.11.21. A manifest change without its updated lock therefore fails the build.
 
 ## Packaging deprecations
+
+### 0.4.0 dependency repairs
+
+The full audit failed on the Second Brain dependency closure and on aging locks.
+fastembed 0.8.1 capped Pillow below 13, so the lock moves to fastembed 0.9.1 and
+Pillow 13.0.0. The `TextEmbedding` constructor and `embed`/`query_embed` calls
+Raticode uses are unchanged. pypdf moves to 6.21.3, filelock to 4.2.4, msgpack to
+1.2.4, certifi to 2026.10.23 and setuptools to 84.2.1. In the frontend lock,
+undici (both copies), Vite 7.3.7, source-map-js, follow-redirects, shell-quote,
+fast-uri and joi move to patched releases within their existing ranges. No
+advisory exception or severity downgrade was added.
+
+node-abi moves to 4.40.0 so `@electron/rebuild` recognizes Electron 45.1.0 when
+electron-builder rebuilds node-pty. Older node-abi releases stop packaging with
+"Could not detect abi for version 45.1.0".
+
+The license collector now reviews the Second Brain runtime closure, including
+onnxruntime, numpy, tokenizers and huggingface-hub. See
+`packaging/licenses/README.md` for the supplied loguru, flatbuffers and tokenizers
+notices and the onnxruntime third-party notices.
 
 ### 0.3.9 dependency repairs
 

@@ -3,26 +3,30 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
-## 0.3.9 - Unreleased
+## 0.4.0 - Unreleased
 
-Changes since the `v0.3.8` tag.
+Changes since the `v0.3.9` tag.
 
 ### Added
 
-- Resume provider conversations across turns and restarts, with incremental
-  prompts, duplicate-send protection and context-aware provider handoffs.
-  Cursor can retry its observed malformed-response error in the same session.
-- Git history graphs with branch, remote and tag filters, ancestry search,
-  tracking badges and adjustable history limits.
-- Animated image, video and audio previews with seeking and playback controls.
-  Pause playback when its editor tab becomes inactive.
-- Explorer range selection with Shift-click, group dragging, copy/cut across
-  projects, native file drops and duplicate-file decisions. Keep both, replace
-  or cancel; apply the choice to duplicates within the same paste or drop.
-- Recover unsaved editor drafts after restart. Add browser-page Find, shared
-  editing commands, language workers and terminal shell selection.
-- Shortcut validation, reduced-motion preferences, automatic thought collapsing,
-  and report theme import/export.
+- Rem's home, opened from the rat-face tab: one continuous conversation plus the
+  work Rem is responsible for. Rem answers simple questions directly and starts a
+  linked worker thread for anything else. Tasks can run once or on a schedule,
+  are grouped as Working on, Needs you, Coming up, Paused and Done, and show
+  their progress, checks and review threads.
+- A Second Brain library of local folders with exact and semantic search,
+  collections, saved searches, pinned passages, cited research and reports.
+  Brains are independent of projects; closing one never deletes its folder.
+- Use Raticode from a paired phone. Per-phone opt-ins, both off by default,
+  allow answering workflow and swarm approvals and controlling swarms, or
+  talking to Rem, managing its tasks, running organizations, checking usage and
+  changing display settings. Work still runs on the desktop under its approval
+  policies; files, terminals, the browser and credentials stay there.
+- Preview a workflow run before starting it, including its inputs, file access
+  and how many items each loop will process.
+- Rattish validation warns about resource limits, such as bounded watch queues
+  and file-scan limits.
+- A public website with installation, workflow, node and feature documentation.
 - Rem's Browser tool drives Raticode's own browser tabs in the background, so you
   keep working while several threads test pages in parallel. Settings > Browser can
   switch Rem back to an external Playwright browser, visible or headless.
@@ -45,6 +49,11 @@ Changes since the `v0.3.8` tag.
   File explorer is always shown. Rem, Swarms, Organizations and Second Brain
   are experimental: they stay listed but are off until turned on.
 
+### Changed
+
+- Paired phones and desktops connect only over the local network. The internet
+  relay has been removed.
+
 ### Fixed
 
 - Fill in provider allowances without extra setup. Cursor, Antigravity, Grok
@@ -57,18 +66,6 @@ Changes since the `v0.3.8` tag.
   `/usage` command, with hooks and MCP servers disabled for the check. Each
   Claude turn in Raticode updates the limits at no extra cost, and checks back
   off after failures so Claude's rate-limited usage service is not overloaded.
-- Replace pasted and dragged files with their incoming contents, refresh open
-  editors, and confirm deletion of multiple selected files with their count.
-- Preserve both source and destination when replacement fails. Refuse folder
-  replacement when destination files change during copying, including nested
-  edits that leave the destination folder's own timestamp unchanged.
-- Preserve resource and permission settings across provider changes, validate
-  MCP configuration, renew project access and handle missing worktrees safely.
-- Improve provider image handling, reasoning/answer separation, bounded protocol
-  records and provider error reporting.
-- Run file/media browser regressions in release validation, install their FFmpeg
-  prerequisite and isolate the fixture's clipboard and saved state. Wait for
-  lazy syntax coloring and media playback to become ready on busy release runners.
 - Show each workflow's real state in the Workflows sidebar: running, failed,
   stopped or invalid with its first compile error, instead of always "Ready".
   Show the name the workflow file declares, and when it last ran.
@@ -76,6 +73,9 @@ Changes since the `v0.3.8` tag.
   files excluded by `.raticodeignore` behind.
 - List runs newest first with their age and duration, and drop runs the
   backend has deleted. Fit small graphs at normal size when they open.
+- Update release browser tests for the grouped thread list, real workflow
+  status, the new phone controls and Electron 45, and let release packaging
+  rebuild native modules for Electron 45.
 
 ### Security
 
@@ -97,6 +97,53 @@ Changes since the `v0.3.8` tag.
   `Accept-Language` matches the page's languages. Google sign-in no longer
   reports "This browser or app may not be secure", and sign-in pop-ups no
   longer announce Electron and Raticode.
+- Upgrade locked Pillow to 13.0.0 through fastembed 0.9.1, pypdf to 6.21.3,
+  filelock to 4.2.4, msgpack to 1.2.4, certifi to 2026.10.23 and setuptools to
+  84.2.1 to address their published advisories.
+- Upgrade the frontend's locked undici, Vite 7.3.7, source-map-js,
+  follow-redirects, shell-quote, fast-uri and joi to patched releases.
+- Review and record licenses for the Second Brain dependencies. Ship upstream
+  license texts for loguru, flatbuffers and tokenizers, whose wheels omit them,
+  and include onnxruntime's third-party notices.
+
+## 0.3.9 - 2026-10-03
+
+Changes since the `v0.3.8` tag.
+
+### Added
+
+- Resume provider conversations across turns and restarts, with incremental
+  prompts, duplicate-send protection and context-aware provider handoffs.
+  Cursor can retry its observed malformed-response error in the same session.
+- Git history graphs with branch, remote and tag filters, ancestry search,
+  tracking badges and adjustable history limits.
+- Animated image, video and audio previews with seeking and playback controls.
+  Pause playback when its editor tab becomes inactive.
+- Explorer range selection with Shift-click, group dragging, copy/cut across
+  projects, native file drops and duplicate-file decisions. Keep both, replace
+  or cancel; apply the choice to duplicates within the same paste or drop.
+- Recover unsaved editor drafts after restart. Add browser-page Find, shared
+  editing commands, language workers and terminal shell selection.
+- Shortcut validation, reduced-motion preferences, automatic thought collapsing,
+  and report theme import/export.
+
+### Fixed
+
+- Replace pasted and dragged files with their incoming contents, refresh open
+  editors, and confirm deletion of multiple selected files with their count.
+- Preserve both source and destination when replacement fails. Refuse folder
+  replacement when destination files change during copying, including nested
+  edits that leave the destination folder's own timestamp unchanged.
+- Preserve resource and permission settings across provider changes, validate
+  MCP configuration, renew project access and handle missing worktrees safely.
+- Improve provider image handling, reasoning/answer separation, bounded protocol
+  records and provider error reporting.
+- Run file/media browser regressions in release validation, install their FFmpeg
+  prerequisite and isolate the fixture's clipboard and saved state. Wait for
+  lazy syntax coloring and media playback to become ready on busy release runners.
+
+### Security
+
 - Upgrade locked urllib3 to 2.8.0 to address three streaming and HTTPS proxy
   advisories. Review and retain its MIT license notice.
 - Remove the vulnerable braces dependency chain by migrating the CSS build to
