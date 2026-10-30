@@ -34,7 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 devices = [
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
     "pyOpenSSL==26.4.0",
     "tink==1.16.1",
     "keyring==25.7.0",
@@ -44,7 +44,7 @@ xlsx = [
     "openpyxl>=3.1",
 ]
 dev = [
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
     "pyOpenSSL==26.4.0",
     "tink==1.16.1",
     "keyring==25.7.0",
