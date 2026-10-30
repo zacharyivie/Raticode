@@ -27,7 +27,7 @@ dependencies = [
     "watchdog>=6.0.0",
     "pypdf>=6.1",
     "fastembed>=0.7",
-    "bibtexparser>=1.4,<2",
+    "bibtexparser>=2.1.0,<3",
     "vosk>=0.3.45; sys_platform != 'darwin'",
     "vosk==0.3.44; sys_platform == 'darwin'",
 ]
