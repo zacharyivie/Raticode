@@ -38,6 +38,16 @@ def device_id(value: Any) -> str:
     return value
 
 
+DEFAULT_DESKTOP_NAME = "Raticode Desktop"
+
+
+def display_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    label = " ".join("".join(c for c in value if c.isprintable()).split())[:80]
+    return label or None
+
+
 class DeviceRegistry:
     def __init__(
         self,
@@ -49,6 +59,7 @@ class DeviceRegistry:
     ) -> None:
         self.clock = clock
         self.lock = threading.RLock()
+        self.directory = directory
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = directory / "devices.sqlite3"
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -68,6 +79,8 @@ class DeviceRegistry:
                 capabilities TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS endpoints (
                 device_id TEXT PRIMARY KEY, value TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS peer_names (
+                device_id TEXT PRIMARY KEY, name TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS config (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
               CREATE TABLE IF NOT EXISTS relay_origins (peer TEXT PRIMARY KEY, origin TEXT NOT NULL,
                 outbound INTEGER NOT NULL);
@@ -110,6 +123,10 @@ class DeviceRegistry:
     @contextmanager
     def transaction(self) -> Iterator[None]:
         with self.lock:
+            if self.db.in_transaction:
+                # Joins the caller's transaction on this thread; the lock excludes others.
+                yield
+                return
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 yield
@@ -145,9 +162,10 @@ class DeviceRegistry:
                 "DELETE FROM peers WHERE state IN ('pending','outbound_pending') AND expires<=?",
                 (self.clock(),),
             )
-            self.db.execute(
-                "DELETE FROM endpoints WHERE device_id NOT IN (SELECT device_id FROM peers)"
-            )
+            for table in ("endpoints", "peer_names"):
+                self.db.execute(
+                    f"DELETE FROM {table} WHERE device_id NOT IN (SELECT device_id FROM peers)"
+                )
             if self.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0] >= MAX_PEERS:
                 raise PairingError("peer_quota")
             try:
@@ -271,9 +289,11 @@ class DeviceRegistry:
 
     def list(self) -> list[dict[str, Any]]:
         with self.lock:
+            names = dict(self.db.execute("SELECT device_id,name FROM peer_names").fetchall())
             return [
                 {
                     "device_id": r["device_id"],
+                    "name": names.get(r["device_id"]),
                     "fingerprint": r["pin"].hex(),
                     "role": r["role"],
                     "state": "expired"
@@ -372,6 +392,23 @@ class DeviceRegistry:
             self.reconnect_pin(peer)
             self.db.execute("INSERT OR REPLACE INTO endpoints VALUES (?,?)", (peer, value))
 
+    def save_name(self, peer: str, name: Any, *, chosen: bool = True) -> None:
+        """A display label only; trust always comes from the pinned identity.
+
+        A name the user typed into an invitation is ``chosen``; a peer's own
+        announcement only fills in a missing or placeholder name.
+        """
+        label = display_name(name)
+        if label is None:
+            return
+        with self.transaction():
+            self._row(peer)
+            self.db.execute(
+                "INSERT INTO peer_names VALUES (?,?) ON CONFLICT(device_id) DO UPDATE SET "
+                "name=excluded.name WHERE ? OR name=?",
+                (peer, label, chosen, DEFAULT_DESKTOP_NAME),
+            )
+
     def endpoint(self, peer: str) -> dict[str, Any]:
         with self.lock:
             self.reconnect_pin(peer)
@@ -391,3 +428,13 @@ class DeviceRegistry:
     def save_listener_port(self, port: int) -> None:
         with self.transaction():
             self.db.execute("INSERT OR REPLACE INTO config VALUES ('listener_port',?)", (port,))
+
+    def tailnet_enabled(self) -> bool:
+        """The user's opt-in to also listen on this desktop's Tailscale address."""
+        with self.lock:
+            row = self.db.execute("SELECT value FROM config WHERE name='tailnet'").fetchone()
+            return bool(row and row[0])
+
+    def save_tailnet_enabled(self, enabled: bool) -> None:
+        with self.transaction():
+            self.db.execute("INSERT OR REPLACE INTO config VALUES ('tailnet',?)", (int(enabled),))

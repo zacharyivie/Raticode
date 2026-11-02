@@ -486,7 +486,8 @@ function selectableEfforts(model, configuredEffort) {
   return options;
 }
 
-export function ProviderAuthentication({ provider, disabled = false, alwaysShow = false }) {
+/** Runs a provider's own browser sign-in and announces completion to every provider view. */
+export function useProviderSignIn(providerId) {
   const [pending, setPending] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
@@ -498,13 +499,13 @@ export function ProviderAuthentication({ provider, disabled = false, alwaysShow 
     let timer;
     async function poll() {
       try {
-        const response = await fetch(apiUrl(`/provider/auth?provider=${encodeURIComponent(provider.id)}`));
+        const response = await fetch(apiUrl(`/provider/auth?provider=${encodeURIComponent(providerId)}`));
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "Could not check sign-in status.");
         if (!active) return;
         if (result.status === "complete") {
           setPending(false);
-          // Every picker shares this event, including settings, Rem and agent editors.
+          // Every picker shares this event, including settings, Rem, agent editors and usage.
           window.dispatchEvent(new CustomEvent("raticode:providers-changed", { detail: { refresh: true } }));
           return;
         }
@@ -520,7 +521,7 @@ export function ProviderAuthentication({ provider, disabled = false, alwaysShow 
     }
     void poll();
     return () => { active = false; window.clearTimeout(timer); };
-  }, [pending, provider?.id]);
+  }, [pending, providerId]);
   async function authenticate(action = "start") {
     const current = ++generation.current;
     setError("");
@@ -529,7 +530,7 @@ export function ProviderAuthentication({ provider, disabled = false, alwaysShow 
     try {
       const response = await fetch(apiUrl("/provider/auth"), {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: provider.id, action }),
+        body: JSON.stringify({ provider: providerId, action }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Could not start sign-in.");
@@ -538,6 +539,11 @@ export function ProviderAuthentication({ provider, disabled = false, alwaysShow 
       if (generation.current === current) { setPending(false); setError(failure.message || "Could not start sign-in."); }
     } finally { if (generation.current === current) setStarting(false); }
   }
+  return { pending, starting, error, authenticate };
+}
+
+export function ProviderAuthentication({ provider, disabled = false, alwaysShow = false }) {
+  const { pending, starting, error, authenticate } = useProviderSignIn(provider?.id);
   if (provider?.discoveryStatus === "access_denied") return <div className="space-y-2 rounded-xl border border-line bg-white px-3 py-2 text-xs">
     <p className="text-muted">{provider.error || "This account does not have access to the provider's model catalog."}</p>
     <div className="flex flex-wrap items-center gap-3">

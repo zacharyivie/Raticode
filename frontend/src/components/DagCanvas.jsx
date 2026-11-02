@@ -3900,7 +3900,8 @@ export function RunTimelinePanel({
                           ) : onResumeRun ? (
                             <button
                               className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line bg-white text-indigo-700 transition hover:border-indigo-200 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40"
-                              title="Resume this run"
+                              disabled={run.resume ? !run.resume.allowed : false}
+                              title={run.resume && !run.resume.allowed ? run.resume.reason : "Resume this run"}
                               type="button"
                               onClick={() => onResumeRun(run.id, {})}
                             >
@@ -4163,7 +4164,9 @@ export function RunTimelinePanel({
 function RunHistoryActions({ onReplayRun, onResumeRun, run, selectedNodeId }) {
   const finished = run?.id && run.status !== "running";
   // Omitting onResumeRun hides resume actions for runs the backend cannot resume.
-  const canResume = finished && Boolean(onResumeRun);
+  // Rattish runs say whether they can resume, and resume only where they stopped.
+  const resume = run?.resume;
+  const canResume = finished && Boolean(onResumeRun) && (!resume || resume.allowed);
   const canReplay = finished && run?.hasTriggerReplay;
   if (!onResumeRun && !run?.hasTriggerReplay) return null;
   return (
@@ -4172,13 +4175,14 @@ function RunHistoryActions({ onReplayRun, onResumeRun, run, selectedNodeId }) {
       <button
         className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs font-medium text-ink transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
         disabled={!canResume}
-        title="Resume this run"
+        title={resume && !resume.allowed ? resume.reason : "Resume this run"}
         type="button"
         onClick={() => onResumeRun?.(run.id, {})}
       >
         <Repeat2 size={13} />
         <span className="truncate">Resume</span>
       </button>
+      {resume ? null : <>
       <button
         className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs font-medium text-ink transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
         disabled={!canResume}
@@ -4199,6 +4203,7 @@ function RunHistoryActions({ onReplayRun, onResumeRun, run, selectedNodeId }) {
         <Route size={13} />
         <span className="truncate">Rerun from selected node</span>
       </button>
+      </>}
       </> : null}
       <button
         className="flex h-8 items-center gap-2 rounded-md px-2 text-left text-xs font-medium text-ink transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"

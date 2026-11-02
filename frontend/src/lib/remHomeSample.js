@@ -83,19 +83,36 @@ function messages() {
   return [
     { id: "m-1", role: "user", created_at: ago(60 * 24 + 40), body: "Compare a few vector search options for Second Brain?" },
     { id: "m-2", role: "rem", created_at: ago(60 * 24 + 40), body: "On it. I'll save a cited comparison to Second Brain.", work: { task_id: "task-vector-db", run_id: "run-vector-1", thread_id: "thread-vector-worker" } },
-    { id: "m-3", role: "rem", created_at: ago(60 * 22), body: "Done. Short version: SQLite full-text search plus a small vector index is plenty for now.", work: { task_id: "task-vector-db", run_id: "run-vector-1", thread_id: "thread-vector-worker" } },
+    {
+      id: "m-3", role: "rem", kind: "task_update", created_at: ago(60 * 22),
+      body: "Done. Short version: SQLite full-text search plus a small vector index is plenty for now.\n\n[vector-search-options](</home/rem/Projects/second-brain/Reports/vector-search-options.html>)",
+      work: { task_id: "task-vector-db", run_id: "run-vector-1", thread_id: "thread-vector-worker" },
+      details: "| Option | Setup | Recall@10 |\n|---|---|---|\n| SQLite FTS5 + sqlite-vec | none | 0.91 |\n| LanceDB | small | 0.93 |\n| Qdrant | server | 0.94 |\n\n```rem-chart\n{\"type\":\"bar\",\"title\":\"Recall@10\",\"labels\":[\"SQLite\",\"LanceDB\",\"Qdrant\"],\"series\":[{\"name\":\"Recall\",\"values\":[0.91,0.93,0.94]}]}\n```\n\n```python\n# Index a note\ndb.execute(\"INSERT INTO notes VALUES (?, ?)\", (path, text))\n```",
+      suggestions: ["Set up the SQLite option", "What would make Qdrant worth it?"],
+      meta: { provider: "claude_code", model: "claude-sonnet-5-5", seconds: 6.4 },
+      result: {
+        title: "Compare vector search options", type: "research", state: "succeeded", thread_id: "thread-vector-worker",
+        checks: { passed: 3, failed: 0, total: 3 },
+        artifacts: [{ name: "vector-search-options.html", title: "Vector search for Second Brain", path: "/home/rem/Projects/second-brain/Reports/vector-search-options.html", link: "[vector-search-options](</home/rem/Projects/second-brain/Reports/vector-search-options.html>)", kind: "html", size: 41230 }],
+        sources: [
+          { url: "https://www.sqlite.org/fts5.html", title: "SQLite FTS5 Extension", kind: "cited" },
+          { url: "https://lancedb.github.io/lancedb/", title: "LanceDB", kind: "read" },
+          { url: "https://qdrant.tech/documentation/", title: "Qdrant Documentation", kind: "found" },
+        ],
+      },
+    },
     { id: "m-4", role: "rem", created_at: ago(95), body: "Morning! Dependencies look clean. The CSV export is stuck: it needs a test database. Want me to set one up?", work: { task_id: "task-csv-export", run_id: "run-csv-1", thread_id: "thread-csv-worker" } },
     { id: "m-5", role: "user", created_at: ago(15), body: "Not yet. Can you research local-first sync engines for the mobile app?" },
     { id: "m-6", role: "rem", created_at: ago(14), body: "Started a research thread. I'll check its sources before calling it done.", work: { task_id: "task-sync-research", run_id: "run-sync-1", thread_id: "thread-sync-worker" } },
     { id: "m-7", role: "user", created_at: ago(8), body: "Also the scheduler test keeps flaking, fix it?" },
     { id: "m-8", role: "rem", created_at: ago(7), body: "Yep. Done when it passes 20 runs in a row.", work: { task_id: "task-flaky-test", run_id: "run-flaky-1", thread_id: "thread-flaky-worker" } },
     { id: "m-9", role: "user", created_at: ago(1), body: "What's running?" },
-    { id: "m-10", role: "rem", created_at: ago(1), body: "Two things. The sync research is being checked, and the test fix is on its second pass." },
+    { id: "m-10", role: "rem", created_at: ago(1), body: "Two things. The sync research is being checked, and the test fix is on its second pass.", suggestions: ["How long will the sync research take?", "Show me the flaky test"], meta: { provider: "claude_code", model: "claude-sonnet-5-5", seconds: 3.1 } },
   ];
 }
 
 export function remHomeScene(scene = "busy") {
-  const conversation = { id: "rem-supervisor", provider: "claude_code", model: "claude-opus-5-5", turn_state: scene === "replying" ? "replying" : "idle" };
+  const conversation = { id: "rem-supervisor", provider: "claude_code", model: "claude-opus-5-5", turn_state: scene === "replying" ? "replying" : "idle", turn_label: scene === "replying" ? "Reading earlier messages" : null };
   if (scene === "empty") return { conversation, messages: [], tasks: [] };
   if (scene === "replying") return { conversation, messages: [...messages(), { id: "m-11", role: "user", created_at: ago(0), body: "Remind me Friday to send the release notes." }], tasks: tasks() };
   return { conversation, messages: messages(), tasks: tasks() };

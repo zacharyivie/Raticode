@@ -53,8 +53,12 @@ const {
   readGitStatus,
   readGitBranches,
   readGitWorktrees,
+  readGitLocation,
+  invalidateGitReads,
   removeGitWorktree,
 } = require("./git-status.cjs");
+const { createGitWatcher } = require("./git-watch.cjs");
+const gitWatcher = createGitWatcher({ locate: (projectRoot) => readGitLocation(projectRoot) });
 const {
   createAgentBrowserController,
   createCapabilityRegistry,
@@ -63,6 +67,7 @@ const {
 } = require("./agent-browser.cjs");
 const { createBrowserSessions } = require("./browser-sessions.cjs");
 const { createBrowserStore } = require("./browser-store.cjs");
+const { createOpenWith } = require("./open-with.cjs");
 const { PARTITIONS: BROWSER_PARTITIONS } = require("./browser-policy.cjs");
 const { searchProject, replaceProject } = require("./project-search.cjs");
 const { createAppLog } = require("./app-log.cjs");
@@ -76,6 +81,7 @@ let logsClosing = false;
 const REPORT_THEMES = ["auto", "light", "dark", "sepia", "vaporwave", "steam", "carbon", "botanical", "blueprint", "arcade", "sakura", "deep-sea", "solarpunk", "noir", "candy-lab", "cosmic"];
 let applicationLog;
 const { registerIpcHandlers } = require("./ipc-handlers.cjs");
+const { BACKEND_FEATURES, featureEnv, featureStates, readFeatureChoices, writeFeatureChoice } = require("./feature-preview.cjs");
 const { inspectPath, missingRecentFiles, missingThreadRoots } = require("./path-info.cjs");
 const safeFiles = require("./safe-files.cjs");
 const { migrateSource } = require("./rattish-migration.cjs");
@@ -110,8 +116,8 @@ const VITE_DEV_SERVER_URL =
 const BACKEND_READY_PREFIX = "GOFER_UI_READY ";
 const ELECTRON_READY_MESSAGE = "GOFER_ELECTRON_READY";
 const BACKEND_EXECUTABLE_NAME = process.platform === "win32" ? "gof.exe" : "gof";
-const LATEST_RELEASE_URL =
-  "https://api.github.com/repos/zacharyivie/Raticode/releases/latest";
+// Release downloads avoid the REST API's 60 requests/hour limit for anonymous callers.
+const RELEASES_URL = "https://github.com/zacharyivie/Raticode/releases";
 const isProduction =
   app.isPackaged || process.env.GOFER_ELECTRON_MODE === "production";
 const isSmokeTest = process.env.GOFER_ELECTRON_SMOKE_TEST === "1";
@@ -354,7 +360,7 @@ function startBackend(port = 0) {
     const child = spawn(backendCommand.command, args, {
       cwd: repoRoot,
       env: {
-        ...process.env,
+        ...featureEnv(featureChoices(), process.env),
         ...reportPdfService?.env,
         GOFER_DESKTOP_GRANT_SECRET: desktopGrantSecret,
         GOFER_UI_EMIT_READY_TOKEN: "1",
@@ -613,8 +619,10 @@ app.whenReady().then(async () => {
   process.on("uncaughtExceptionMonitor", (error) => applicationLog.emergency(error.stack || error.message));
   process.on("unhandledRejection", (error) => applicationLog.write("error", "desktop", error?.stack || error));
   app.on("web-contents-created", (_event, contents) => {
-    contents.once("destroyed", () => mediaPreviews.closeOwner(contents.id));
-    contents.on("render-process-gone", () => mediaPreviews.closeOwner(contents.id));
+    contents.once("destroyed", () => { mediaPreviews.closeOwner(contents.id); gitWatcher.closeOwner(contents.id); });
+    contents.on("render-process-gone", () => { mediaPreviews.closeOwner(contents.id); gitWatcher.closeOwner(contents.id); });
+    // A reload drops the page's listeners, so its repository watches go too.
+    contents.on("did-navigate", () => gitWatcher.closeOwner(contents.id));
     contents.on("console-message", (details) => {
       if (contents !== mainWindow?.webContents && contents !== backendErrorWindow?.webContents) return;
       const { level, message } = details;
@@ -792,6 +800,8 @@ function setupIpcHandlers() {
     },
     developerInfo,
     developerAction,
+    featurePreview,
+    setFeaturePreview,
     rendererLog,
     remSettings,
     configureRem,
@@ -819,6 +829,8 @@ function setupIpcHandlers() {
     gitFileBaseline,
     gitHistory,
     gitWorktrees,
+    gitWatch,
+    gitUnwatch,
     gitWorktreeAdd,
     gitWorktreeRemove,
     grantPath,
@@ -840,6 +852,7 @@ function setupIpcHandlers() {
     missingRecentFiles: (_event, options = {}) => missingRecentFiles(options.paths),
     missingThreadRoots: (_event, options = {}) => missingThreadRoots(options.paths),
     readBinaryPreview,
+    readAttachmentFile,
     openMediaPreview: (event, options = {}) => mediaPreviews.open(resolveExactPath(options.targetPath, { grantId: options.grantId, mustExist: true }), event.sender.id),
     closeMediaPreview: (event, options = {}) => mediaPreviews.close(options.id, event.sender.id),
     readTextFile,
@@ -884,6 +897,7 @@ const browsers = createBrowserSessions({
   resolvePath: (targetPath, options) => resolveExactPath(targetPath, options),
   store: createBrowserStore(path.join(app.getPath("userData"), "browser")),
   log: (level, message) => applicationLog?.write(level, "browser", message),
+  openWith: createOpenWith(),
   quarantineDir: path.join(app.getPath("userData"), "browser", "quarantine"),
 });
 
@@ -1391,7 +1405,7 @@ async function installDownloadedUpdate() {
 }
 
 async function openUpdateRelease() {
-  await shell.openExternal("https://github.com/zacharyivie/Raticode/releases/latest");
+  await shell.openExternal(`${RELEASES_URL}/latest`);
   return { opened: true };
 }
 
@@ -1451,12 +1465,15 @@ async function checkLatestReleaseFallback() {
     };
   }
 
-  const response = await fetch(LATEST_RELEASE_URL, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": `Raticode/${app.getVersion()}`,
-    },
-  });
+  let response;
+  try {
+    response = await fetch(`${RELEASES_URL}/latest/download/${updateMetadataFileName()}`, {
+      headers: { "User-Agent": `Raticode/${currentVersion}` },
+    });
+  } catch (error) {
+    const reason = error?.cause?.message || error?.message || String(error);
+    throw new Error(`Could not reach GitHub to check for updates: ${reason}`);
+  }
   if (response.status === 404) {
     return {
       available: false,
@@ -1473,33 +1490,71 @@ async function checkLatestReleaseFallback() {
     };
   }
   if (!response.ok) {
-    throw new Error(`GitHub releases API returned ${response.status}`);
+    throw new Error(updateCheckHttpError(response));
   }
-  const release = await response.json();
+  const release = parseUpdateMetadata(await response.text());
+  if (!release.version) {
+    throw new Error("GitHub returned update information without a version.");
+  }
   return {
-    available: compareVersions(normalizeVersion(release.tag_name), normalizeVersion(currentVersion)) > 0,
+    available: compareVersions(release.version, normalizeVersion(currentVersion)) > 0,
     checking: false,
     downloading: false,
     downloaded: false,
     error: "",
     info: {
-      version: normalizeVersion(release.tag_name || release.name || ""),
-      releaseName: release.name || release.tag_name || "",
-      releaseDate: release.published_at || "",
+      version: release.version,
+      releaseName: release.releaseName || `v${release.version}`,
+      releaseDate: release.releaseDate,
       installerUrl: macInstallerUrl(release),
     },
     progress: null,
   };
 }
 
+function updateMetadataFileName() {
+  if (process.platform === "darwin") return "latest-mac.yml";
+  if (process.platform === "linux") return "latest-linux.yml";
+  return "latest.yml";
+}
+
+// electron-builder writes flat metadata; read only the fields the manual check needs.
+function parseUpdateMetadata(text) {
+  const field = (name) => {
+    const match = String(text).match(new RegExp(`^${name}:[ \\t]*['"]?([^'"\\r\\n]*)['"]?[ \\t]*$`, "m"));
+    return match ? match[1].trim() : "";
+  };
+  const version = field("version");
+  return {
+    version: /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) ? version : "",
+    releaseName: field("releaseName"),
+    releaseDate: field("releaseDate"),
+    files: Array.from(String(text).matchAll(/^[ \t]*-[ \t]+url:[ \t]*['"]?([^'"\r\n]+?)['"]?[ \t]*$/gm), match => match[1]),
+  };
+}
+
+function updateCheckHttpError(response) {
+  const header = (name) => response.headers?.get?.(name) || "";
+  if (response.status === 403 || response.status === 429) {
+    const resetSeconds = Number(header("x-ratelimit-reset"));
+    if (header("x-ratelimit-remaining") === "0" && resetSeconds > 0) {
+      const resetTime = new Date(resetSeconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      return `GitHub's rate limit for this network was reached. Try again after ${resetTime}.`;
+    }
+    const retryAfter = Number(header("retry-after"));
+    if (retryAfter > 0) {
+      return `GitHub is limiting update checks from this network. Try again in ${Math.ceil(retryAfter / 60)} minute${retryAfter > 60 ? "s" : ""}.`;
+    }
+    return `GitHub refused the update check (HTTP ${response.status}). A VPN, proxy or firewall may be blocking it, or GitHub may be limiting requests from this network.`;
+  }
+  return `GitHub returned HTTP ${response.status} while checking for updates.`;
+}
+
 function macInstallerUrl(release) {
-  if (process.platform !== "darwin") return "";
-  const version = normalizeVersion(release.tag_name);
-  const name = `Raticode-${version}-${process.arch}.dmg`;
-  const trustedUrls = ["Raticode", "gofer-flow"].map(repository =>
-    `https://github.com/zacharyivie/${repository}/releases/download/${encodeURIComponent(release.tag_name)}/${name}`);
-  const asset = Array.isArray(release.assets) && release.assets.find((item) => item.name === name);
-  return trustedUrls.includes(asset?.browser_download_url) ? asset.browser_download_url : "";
+  if (process.platform !== "darwin" || !release.version) return "";
+  const name = `Raticode-${release.version}-${process.arch}.dmg`;
+  if (!Array.isArray(release.files) || !release.files.includes(name)) return "";
+  return `${RELEASES_URL}/download/v${release.version}/${name}`;
 }
 
 function isNoPublishedVersionsError(error) {
@@ -1790,6 +1845,26 @@ async function readBinaryPreview(_event, options = {}) {
   };
 }
 
+// Reads any file for a chat attachment. The limit matches the chat's per-file limit.
+async function readAttachmentFile(_event, options = {}) {
+  if (!options.targetPath || typeof options.targetPath !== "string") {
+    throw new Error("A path is required.");
+  }
+  const targetPath = resolveExactPath(options.targetPath, {
+    grantId: options.grantId,
+    mustExist: true,
+  });
+  const name = path.basename(targetPath);
+  const content = await safeFiles.readFile(targetPath, { maxBytes: 20 * 1024 * 1024 }).catch(error => {
+    if (error.code === "ERR_FILE_TOO_LARGE") throw new Error(`${name} is larger than 20 MB.`);
+    throw error;
+  });
+  const type = imageMimeType(targetPath)
+    || (path.extname(targetPath).toLowerCase() === ".pdf" ? "application/pdf" : "")
+    || (content.subarray(0, 8192).includes(0) ? "application/octet-stream" : "text/plain");
+  return { name, type, data: content.toString("base64"), ...pathHandle(targetPath) };
+}
+
 function imageMimeType(targetPath) {
   const types = {
     ".avif": "image/avif", ".bmp": "image/bmp", ".gif": "image/gif",
@@ -1897,6 +1972,24 @@ async function developerAction(_event, { action } = {}) {
   }
   throw new Error("Unknown developer action.");
 }
+function featurePreviewFile() {
+  return path.join(app.getPath("userData"), "feature-preview.json");
+}
+function featureChoices() {
+  return readFeatureChoices(featurePreviewFile());
+}
+function featurePreview() {
+  return featureStates(featureChoices(), process.env);
+}
+// The backend reads these features at startup, so a change restarts it.
+async function setFeaturePreview(_event, { id, enabled } = {}) {
+  if (!Object.hasOwn(BACKEND_FEATURES, id) || typeof enabled !== "boolean") throw new Error("Unknown feature preview.");
+  if (featurePreview()[id] === enabled) return { features: featurePreview() };
+  if (!await prepareLifecycle("change a feature preview")) return { cancelled: true, features: featurePreview() };
+  writeFeatureChoice(featurePreviewFile(), id, enabled);
+  await replaceBackendWindow();
+  return { features: featurePreview() };
+}
 function rendererLog(_event, { message } = {}) {
   applicationLog?.write("error", "renderer", String(message || ""));
 }
@@ -1946,6 +2039,8 @@ async function gitRepoAction(_event, options = {}) {
   const projectRoot = await resolveGitProjectDirectory(options);
   try { return await gitRepositoryAction(projectRoot, options.action, options.value, { authorizeTarget: (target) => resolveGitProjectDirectory({ projectRoot: target, grantId: getIpcSecurity().grantForPath(target) }) }); }
   catch (error) { return { ...await readGitStatus(projectRoot), error: String(error.stderr || error.message).replace(/^Command failed:[^\n]*\n?/, "").trim() }; }
+  // Commits, branch deletes and cleanups change what other open views show. Previews only read.
+  finally { if (!/(^|-)preview$|^commit-diff$|^stash-list$/.test(String(options.action))) notifyGitChanged(projectRoot, ["index", "refs", "worktrees"]); }
 }
 
 async function gitFileAction(_event, options = {}) {
@@ -2024,6 +2119,34 @@ async function gitWorktrees(_event, options = {}) {
   }
 }
 
+async function gitWatch(event, options = {}) {
+  const projectRoot = await resolveGitProjectDirectory(options);
+  const sender = event.sender;
+  try {
+    const result = await gitWatcher.watch(projectRoot, {
+      ownerId: sender.id,
+      onChange: (kinds, watchId) => {
+        // Branch lists are cached for a few seconds. Agents and terminals change
+        // them outside this process, so the next read must see the new state.
+        if (kinds.includes("refs") || kinds.includes("worktrees")) invalidateGitReads();
+        if (!sender.isDestroyed()) sender.send("gofer:git-changed", { watchId, kinds });
+      },
+    });
+    return { active: true, ...result };
+  } catch {
+    return { active: false };
+  }
+}
+
+function gitUnwatch(event, options = {}) {
+  gitWatcher.unwatch(typeof options.watchId === "string" ? options.watchId : "", event.sender.id);
+  return { ok: true };
+}
+
+function notifyGitChanged(projectRoot, kinds) {
+  void gitWatcher.notify(projectRoot, kinds).catch(() => {});
+}
+
 async function gitWorktreeAdd(_event, options = {}) {
   const projectRoot = await resolveGitProjectDirectory(options);
   if (typeof options.targetPath !== "string" || !options.targetPath.trim()) throw new Error("A worktree folder is required.");
@@ -2032,6 +2155,7 @@ async function gitWorktreeAdd(_event, options = {}) {
   const targetStat = await fs.promises.stat(targetPath);
   if (!targetStat.isDirectory()) throw new Error("The worktree target must be a folder.");
   const result = await addGitWorktree(projectRoot, targetPath, options.branch.trim(), { createBranch: options.createBranch === true, startPoint: options.startPoint });
+  notifyGitChanged(projectRoot, ["refs", "worktrees"]);
   const handle = pathHandle(targetPath);
   return { ...result, createdPath: targetPath, grantId: handle.grantId };
 }
@@ -2050,7 +2174,9 @@ async function gitWorktreeRemove(_event, options = {}) {
         mustExist: true,
       });
   if (path.resolve(targetPath) === path.resolve(projectRoot)) throw new Error("The current worktree cannot be removed.");
-  return removeGitWorktree(projectRoot, targetPath, { force: options.force === true });
+  const result = await removeGitWorktree(projectRoot, targetPath, { force: options.force === true });
+  if (!result?.requiresForce) notifyGitChanged(projectRoot, ["refs", "worktrees"]);
+  return result;
 }
 
 async function resolveGitProjectDirectory(options = {}) {

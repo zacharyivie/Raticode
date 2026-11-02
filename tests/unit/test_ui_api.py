@@ -3819,19 +3819,23 @@ def _registered_rattish(tmp_path: Path, source: str) -> tuple[Path, str]:
     return app_data, created["id"]
 
 
-def test_rattish_runs_cannot_be_resumed_and_do_not_start_a_new_run(tmp_path: Path) -> None:
+def test_rattish_resume_refuses_node_options_and_missing_runs_without_running(
+    tmp_path: Path,
+) -> None:
     app_data, workflow_id = _registered_rattish(
         tmp_path,
         "Rattish: 1\n\nWorkflow:\n  name: Audit\n\nNode first:\n"
         "  type: bash-command\n  command: printf ok\n",
     )
 
-    with pytest.raises(WorkflowRunError, match="not supported yet"):
+    with pytest.raises(WorkflowRunError, match="resume where they stopped"):
         anyio.run(
             lambda: resume_workflow_payload(
                 workflow_id, app_data, run_id="does-not-exist", from_node="no-such-node"
             )
         )
+    with pytest.raises(WorkflowRunError, match="does-not-exist"):
+        anyio.run(lambda: resume_workflow_payload(workflow_id, app_data, run_id="does-not-exist"))
 
     assert list_workflow_run_logs_payload(workflow_id, app_data)["runs"] == []
 
@@ -3969,7 +3973,9 @@ def test_rattish_run_list_reports_runs_waiting_for_approval(
     document = json.loads(path.read_text(encoding="utf-8"))
     document.update(status="running", runner_pid=os.getpid())
     path.write_text(json.dumps(document), encoding="utf-8")
-    monkeypatch.setattr(api_module, "is_rattish_run_active", lambda run_id: True)
+    import gofer.rattish.run_service as run_service
+
+    monkeypatch.setattr(run_service, "is_rattish_run_active", lambda run_id: True)
     ApprovalStore(app_data).create_or_update(
         ApprovalRequest(
             workflow_id=workflow_id, run_id=run["runId"], node_id="gate", message="Ship?"

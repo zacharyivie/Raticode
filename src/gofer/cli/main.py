@@ -1,4 +1,14 @@
+# ruff: noqa: E402
 from __future__ import annotations
+
+import sys
+
+if sys.argv[1:2] == ["slot"]:
+    # Command slot wrappers and the Claude Code hook run on every gated command
+    # and shell call. Loading the full CLI first would add most of a second.
+    from gofer.core.command_slots import main as _slot_main
+
+    raise SystemExit(_slot_main(sys.argv[2:]))
 
 from importlib.metadata import version
 from pathlib import Path

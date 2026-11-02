@@ -12,7 +12,7 @@
 .usage-filters label { display: flex; align-items: center; gap: 8px; }
 .usage-filters select { padding: 4px 6px; border: 1px solid rgb(var(--color-line)); border-radius: 4px; color: rgb(var(--color-ink)); background: transparent; }
 .usage-row-head { display: grid; grid-template-columns: 1fr 1.25fr; gap: 20px; padding: 0 22px 8px 0; font-size: 10px; color: rgb(var(--color-muted)); border-bottom: 1px solid rgb(var(--color-line)); }
-.usage-account { border-bottom: 1px solid rgb(var(--color-line)); }
+.usage-account-row { border-bottom: 1px solid rgb(var(--color-line)); }
 .usage-account > summary { position: relative; display: grid; grid-template-columns: 1fr 1.25fr; gap: 20px; align-items: start; padding: 16px 22px 16px 0; list-style: none; cursor: pointer; }
 .usage-account > summary::-webkit-details-marker { display: none; }
 .usage-account > summary:hover { background: rgb(var(--color-brand) / .035); }
@@ -69,6 +69,15 @@
 .usage-credential-field > .usage-field-help { margin-top: 6px; }
 .usage-remove-credential { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 11px; color: rgb(var(--color-muted)); }
 .usage-remove-credential input { accent-color: rgb(var(--color-brand)); }
+.usage-dashboard .usage-attention { padding: 10px 12px; margin-bottom: 14px; border-left: 2px solid rgb(var(--color-brand)); background: rgb(var(--color-brand) / .07); }
+.usage-sign-in { display: flex; flex-direction: column; gap: 9px; padding: 12px 14px; margin: 0 0 14px; border: 1px solid rgb(var(--color-brand) / .35); border-radius: 6px; background: rgb(var(--color-brand) / .05); overflow-wrap: anywhere; }
+.usage-sign-in code { padding: 1px 5px; border-radius: 3px; background: rgb(var(--color-line) / .55); font-size: 11px; }
+.usage-sign-in-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.usage-sign-in-primary { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 5px; background: rgb(var(--color-brand-solid)); color: rgb(var(--color-on-brand)); font-weight: 600; }
+.usage-sign-in-primary:hover { opacity: .92; }
+.usage-sign-in-primary:disabled { opacity: .6; cursor: wait; }
+.usage-dashboard .usage-sign-in-alt { color: rgb(var(--color-muted)); font-size: 11px; }
+.usage-dashboard .usage-sign-in .usage-error { margin-bottom: 0; }
 .usage-save-credentials { padding: 7px 11px; background: rgb(var(--color-brand)); color: white; border-radius: 4px; font-weight: 500; font-size: 11px; }
 .usage-credential-form fieldset:disabled { opacity: .55; }
 .usage-dashboard .usage-credential-saved { margin-top: 10px; font-size: 11px; }

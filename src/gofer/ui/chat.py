@@ -35,6 +35,9 @@ from watchdog.events import (
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
+from gofer.core.command_slots import ROOT_ENV as COMMAND_SLOTS_ROOT_ENV
+from gofer.core.command_slots import claude_settings
+from gofer.core.command_slots import turn_environment as command_slot_environment
 from gofer.core.prompt_envelope import (
     AgentResources,
     claude_native_tools,
@@ -64,12 +67,14 @@ from gofer.rattish.artifacts import (
 from gofer.subscriptions.acp_providers import ACP_PROVIDERS, acp_command, stream_acp
 from gofer.subscriptions.acp_transport import AcpTransportError
 from gofer.subscriptions.antigravity import antigravity_command, stream_antigravity
+from gofer.subscriptions.claude_code import claude_print_input
 from gofer.subscriptions.cli_providers import (
     ADDITIONAL_PROVIDERS,
     CliOutput,
     check_cursor_plugins,
     cli_command,
     cli_invocation,
+    cli_prompt_input,
     stream_cli,
 )
 from gofer.subscriptions.codex import codex_exec_input
@@ -83,7 +88,12 @@ from gofer.ui.second_brain import second_brain_rules, with_second_brain
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links, open_binary_input
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
-from gofer.utils.process import env_with_executable_on_path, run_subprocess, stream_subprocess
+from gofer.utils.process import (
+    env_with_executable_on_path,
+    git_push_blocked_environment,
+    run_subprocess,
+    stream_subprocess,
+)
 from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
 
 ProviderName = Literal[
@@ -125,6 +135,8 @@ class _ClaudeTraceState:
     message_id: str | None = None
     message_sequence: int = 0
     streamed_assistant_message: bool = False
+    # Interactive threads show answer text as it arrives instead of per block.
+    stream_text: bool = False
 
 
 class ChatProviderError(ValueError):
@@ -1141,7 +1153,7 @@ async def run_workflow_chat(
         provider=provider,
         model=model,
         effort=effort,
-        messages=messages,
+        messages=_without_narration(messages),
         binary_path=binary_path,
         data_dir=resolved_data_dir,
         working_dir=resolved_working_dir,
@@ -1177,6 +1189,7 @@ async def run_workflow_chat(
         image_paths=image_paths,
         permission_mode=permission_mode,
         network_access=((workflow or {}).get("remManagedTask") or {}).get("networkAccess") is True,
+        read_only=((workflow or {}).get("remManagedTask") or {}).get("readOnly") is True,
         trusted_swarm_url=trusted_swarm_url,
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
@@ -1205,10 +1218,10 @@ async def run_workflow_chat(
                     if answer:
                         parsed_answer = retained_text(answer)
 
+    private_config: Path | None = None
     try:
-        stdin = None
-        if provider == "codex":
-            command, stdin = codex_exec_input(command)
+        command, private_config = _private_mcp_config(provider, command)
+        command, stdin = _prompt_via_stdin(provider, command)
         returncode, stdout, stderr = await run_subprocess(
             command,
             stdin=stdin,
@@ -1222,6 +1235,9 @@ async def run_workflow_chat(
         raise ChatProviderError(str(exc)) from exc
     except OSError as exc:
         raise ChatProviderError(f"Could not start '{binary}' CLI: {exc}") from exc
+    finally:
+        if private_config is not None:
+            shutil.rmtree(private_config, ignore_errors=True)
 
     if protocol.buffer:
         observe_stdout("\n")
@@ -1239,6 +1255,79 @@ async def run_workflow_chat(
             "role": "assistant",
             "body": final_message or stdout or stderr,
         },
+    }
+
+
+def codex_scratch_command(command: list[str], scratch: Path) -> list[str]:
+    """Make the scratch folder Codex's only writable workspace.
+
+    Additional directories are dropped so Raticode's data stays read-only too.
+    The final argument is the prompt and is never rewritten.
+    """
+    flags, prompt = command[:-1], command[-1:]
+    result: list[str] = []
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag in {"--add-dir", "--sandbox", "--cd"} and index + 1 < len(flags):
+            if flag == "--sandbox":
+                result += ["--sandbox", "workspace-write"]
+            elif flag == "--cd":
+                result += ["--cd", str(scratch)]
+            index += 2
+            continue
+        result.append(flag)
+        index += 1
+    return [*result, *prompt]
+
+
+def _command_slot_environment(
+    workflow: dict[str, Any] | None,
+    data_dir: Path,
+    gofer_cli_path: Path | None,
+    conversation_id: str | None,
+) -> dict[str, str]:
+    """Queue this turn's tests and builds with every other thread's and Rem task's."""
+    context = workflow or {}
+    thread = str(context.get("chatThreadId") or conversation_id or "")
+    title = " ".join(str(context.get("chatThreadTitle") or "").split())
+    return command_slot_environment(
+        data_dir,
+        gofer_cli_path,
+        thread_id=thread,
+        label=title or (f"thread {thread[:8]}" if thread else "Rem thread"),
+    )
+
+
+def _claude_allows_shell(command: list[str]) -> bool:
+    """Only unrestricted shells get the hook, since it rewrites commands to start with gof."""
+    if "--allowedTools" not in command:
+        return False
+    tools = []
+    for item in command[command.index("--allowedTools") + 1 :]:
+        if item.startswith("-"):
+            break
+        tools.append(item)
+    return "Bash" in tools
+
+
+def scratch_environment(scratch: Path) -> dict[str, str]:
+    """Point temp files and tool caches at the scratch folder."""
+    temp = scratch / "tmp"
+    temp.mkdir(parents=True, exist_ok=True)
+    pytest_options = os.environ.get("PYTEST_ADDOPTS", "")
+    if "no:cacheprovider" not in pytest_options:
+        pytest_options = f"{pytest_options} -p no:cacheprovider".strip()
+    return {
+        "TMPDIR": str(temp),
+        "TMP": str(temp),
+        "TEMP": str(temp),
+        "MYPY_CACHE_DIR": str(scratch / "mypy-cache"),
+        "RUFF_CACHE_DIR": str(scratch / "ruff-cache"),
+        "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
+        "PYTEST_ADDOPTS": pytest_options,
+        "XDG_CACHE_HOME": str(scratch / "cache"),
+        "npm_config_cache": str(scratch / "npm-cache"),
     }
 
 
@@ -1262,15 +1351,20 @@ async def stream_workflow_chat(
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
     trusted_rem_artifacts_url: str | None = None,
+    trusted_scratch_dir: Path | None = None,
     unlimited_output: bool = False,
     include_agent_messages: bool = False,
     conversation_id: str | None = None,
     reset_session: bool = False,
+    fork_from: str | None = None,
+    trust_data_dir: bool = True,
     _session: ChatSession | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
+    # fork_from names the thread this one was forked from; with_chat_session uses it.
     turn_started_at = monotonic()
     if cancel_event is not None and cancel_event.is_set():
         return
+    messages = _without_narration(messages)
     if provider not in {
         "codex",
         "claude_code",
@@ -1324,6 +1418,11 @@ async def stream_workflow_chat(
     workflow = with_second_brain(workflow, gofer_cli_path)
     workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
     workflow = _with_browser(workflow, gofer_cli_path, resolved_data_dir, resolved_working_dir)
+    slot_env = _command_slot_environment(
+        workflow, resolved_data_dir, gofer_cli_path, conversation_id
+    )
+    if slot_env:
+        workflow = {**(workflow or {}), "remCommandSlots": True}
     compacted = False
     if _session is None:
         messages, compacted = await _compact_chat_messages_if_needed(
@@ -1337,9 +1436,10 @@ async def stream_workflow_chat(
             limits=limits,
             cancel_event=cancel_event,
         )
-    elif _session.handoff:
-        # Only compact history being imported from another provider. Keep the
-        # current request and its attachments verbatim, even when very large.
+    elif _session.handoff or (not _session.resumed and len(messages) > 1):
+        # Compact history imported from another provider or re-sent to a new
+        # session (forks, edits, project changes). Keep the current request and
+        # its attachments verbatim, even when very large.
         latest_user = next(
             (
                 index
@@ -1380,7 +1480,7 @@ async def stream_workflow_chat(
         yield {
             "type": "compaction",
             "message": "Compacting Rem context for provider handoff"
-            if _session is not None
+            if _session is not None and _session.handoff
             else "Compacting Rem context",
             # A native handoff summary belongs to the destination session. A
             # thread-wide checkpoint would alter user hashes on the next turn
@@ -1407,7 +1507,8 @@ async def stream_workflow_chat(
     if cancel_event is not None and cancel_event.is_set():
         return
     extra_paths = _trusted_workflow_paths(workflow, resolved_working_dir)
-    if provider in ADDITIONAL_PROVIDERS:
+    if provider in ADDITIONAL_PROVIDERS or not trust_data_dir:
+        # Without the data folder, path-restricted CLIs still need to read skills.
         extra_paths += _skill_read_paths(workflow)
     command = _build_chat_command(
         provider=provider,
@@ -1420,7 +1521,9 @@ async def stream_workflow_chat(
         extra_paths=extra_paths,
         image_paths=image_paths,
         permission_mode=permission_mode,
+        trust_data_dir=trust_data_dir,
         network_access=((workflow or {}).get("remManagedTask") or {}).get("networkAccess") is True,
+        read_only=((workflow or {}).get("remManagedTask") or {}).get("readOnly") is True,
         trusted_swarm_url=trusted_swarm_url,
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
@@ -1435,16 +1538,44 @@ async def stream_workflow_chat(
             else None
         ),
     )
+    if slot_env and provider == "claude_code" and _claude_allows_shell(command):
+        # Lets the hook queue tests that PATH wrappers can't see, like .venv/bin/pytest.
+        command += ["--settings", claude_settings(Path(slot_env[COMMAND_SLOTS_ROOT_ENV]))]
 
     native_id = _session.native_id if _session else None
+    # OpenCode options must precede the "--" that ends its --file values.
+    opencode_options = (
+        command.index("--") if provider == "opencode" and "--" in command else len(command) - 1
+    )
+    fork_from = _session.fork_from if _session else None
     if native_id and provider == "codex":
         command[-1:-1] = ["resume", native_id]
     elif native_id and provider in {"claude_code", "cursor"}:
         command += ["--resume", native_id]
     elif native_id and provider == "opencode":
-        command[-1:-1] = ["--session", native_id]
+        command[opencode_options:opencode_options] = ["--session", native_id]
+    # Copy the parent thread's session instead of re-sending its history.
+    elif fork_from and provider == "claude_code":
+        command += ["--resume", fork_from, "--fork-session"]
+    elif fork_from and provider == "codex":
+        command[-1:-1] = ["fork", fork_from]
+    elif fork_from and provider == "opencode":
+        command[opencode_options:opencode_options] = ["--session", fork_from, "--fork"]
     elif _session and provider == "copilot":
         command += ["--session-id", native_id or str(uuid.uuid4())]
+    process_cwd = resolved_working_dir
+    process_env: dict[str, str] = dict(slot_env)
+    if (workflow or {}).get("remBlockGitPush") is True:
+        # Organization employees (and other managed agents) may commit but never push.
+        process_env.update(git_push_blocked_environment())
+    if trusted_scratch_dir is not None and provider == "codex" and permission_mode == "read-only":
+        # Read-only Codex sandboxes have nowhere to write temp files or caches,
+        # so checks like pytest and mypy fail. Run from a private scratch folder
+        # instead: only it and temp are writable, and the project stays read-only.
+        trusted_scratch_dir.mkdir(parents=True, exist_ok=True)
+        command = codex_scratch_command(command, trusted_scratch_dir)
+        process_cwd = trusted_scratch_dir
+        process_env = {**slot_env, **scratch_environment(trusted_scratch_dir)}
 
     project_root = _chat_project_root(workflow)
     project_tracker = _ChatProjectTracker(project_root)
@@ -1549,7 +1680,11 @@ async def stream_workflow_chat(
     protocol_lines = ProtocolLines()
     parse_error: str | None = None
     provider_payloads: list[dict[str, Any]] = []
-    claude_trace_state = _ClaudeTraceState() if provider == "claude_code" else None
+    claude_trace_state = (
+        _ClaudeTraceState(stream_text=(workflow or {}).get("remStreamText") is True)
+        if provider == "claude_code"
+        else None
+    )
     if provider == "antigravity":
         agy_source = stream_antigravity(
             prompt,
@@ -1561,6 +1696,7 @@ async def stream_workflow_chat(
             permission_mode=permission_mode,
             executable=binary_path,
             resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
+            env=slot_env or None,
             cancel_event=cancel_event,
             max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
             trusted_swarm_url=trusted_swarm_url,
@@ -1594,6 +1730,7 @@ async def stream_workflow_chat(
             executable=binary_path,
             image_paths=image_paths,
             resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
+            env=slot_env or None,
             cancel_event=cancel_event,
             max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
             trusted_swarm_url=trusted_swarm_url,
@@ -1621,14 +1758,18 @@ async def stream_workflow_chat(
                 await check_cursor_plugins(binary_path, cancel_event)
             if cancel_event is not None and cancel_event.is_set():
                 return
+            prompt_command, stdin = cli_prompt_input(provider, command)
             with cli_invocation(
                 provider,
-                command,
+                prompt_command,
                 resources,
+                env=slot_env or None,
                 read_only=((workflow or {}).get("remManagedTask") or {}).get("readOnly") is True,
                 structured_output="remManagedTask" in (workflow or {}),
                 trusted_swarm_url=trusted_swarm_url,
-                extra_paths=_unique_existing_directories([resolved_data_dir, *extra_paths]),
+                extra_paths=_unique_existing_directories(
+                    [*([resolved_data_dir] if trust_data_dir else []), *extra_paths]
+                ),
                 second_brain_cli_path=gofer_cli_path
                 if (
                     ((workflow or {}).get("remSecondBrain") or {}).get("enabled") is True
@@ -1650,6 +1791,7 @@ async def stream_workflow_chat(
                     max_output_bytes=None
                     if unlimited_output
                     else limits.max_subprocess_output_bytes,
+                    stdin=stdin,
                 )
                 try:
                     async for event in source:
@@ -1673,13 +1815,18 @@ async def stream_workflow_chat(
             project_tracker.close()
         return
     try:
-        exec_command, stdin = codex_exec_input(command) if provider == "codex" else (command, None)
+        exec_command, private_config = _private_mcp_config(provider, command)
+    except OSError as exc:
+        project_tracker.close()
+        raise ChatProviderError(f"Could not prepare '{binary}' CLI: {exc}") from exc
+    try:
+        exec_command, stdin = _prompt_via_stdin(provider, exec_command)
         provider_stream: AsyncIterator[Any] = stream_subprocess(
             exec_command,
             stdin=stdin,
             cancel_event=cancel_event,
-            cwd=resolved_working_dir,
-            env=env_with_executable_on_path(binary_path),
+            cwd=process_cwd,
+            env=env_with_executable_on_path(binary_path, process_env),
             timeout=None,
             max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
             protocol_stdout=True,
@@ -1688,7 +1835,8 @@ async def stream_workflow_chat(
             provider_stream = stream_codex_turn(
                 command,
                 control=steering,
-                cwd=resolved_working_dir,
+                cwd=process_cwd,
+                env=process_env,
                 cancel_event=cancel_event,
                 max_output_bytes=None if unlimited_output else limits.max_subprocess_output_bytes,
             )
@@ -1727,6 +1875,9 @@ async def stream_workflow_chat(
                             claude_trace_state,
                             include_agent_messages=include_agent_messages,
                         ):
+                            if trace.get("kind") == "text_delta":
+                                yield _text_delta_event(trace, provider, model, effort)
+                                continue
                             turn_edits.observe(trace)
                             yield {
                                 "type": "thought",
@@ -1770,6 +1921,9 @@ async def stream_workflow_chat(
                         claude_trace_state,
                         include_agent_messages=include_agent_messages,
                     ):
+                        if trace.get("kind") == "text_delta":
+                            yield _text_delta_event(trace, provider, model, effort)
+                            continue
                         turn_edits.observe(trace)
                         yield {
                             "type": "thought",
@@ -1835,6 +1989,22 @@ async def stream_workflow_chat(
         if close_stream is not None:
             await close_stream()
         project_tracker.close()
+        if private_config is not None:
+            shutil.rmtree(private_config, ignore_errors=True)
+
+
+def _text_delta_event(
+    trace: dict[str, Any], provider: str, model: str, effort: str | None
+) -> dict[str, Any]:
+    # Same shape as ACP answer chunks: the UI joins thoughts with one stream ID.
+    return {
+        "type": "thought",
+        "provider": provider,
+        "model": model,
+        "effort": effort,
+        "text": trace["text"],
+        "deltaStreamId": trace["streamId"],
+    }
 
 
 def _complete_json_lines(buffer: str, chunk: str) -> tuple[list[str], str]:
@@ -1996,11 +2166,10 @@ def _claude_stream_event_trace_entries(
                 }
             ]
         if block_type == "text":
-            state.blocks[index] = {
-                "kind": "text",
-                "text_parts": [str(block.get("text") or "")],
-            }
-            return []
+            text = str(block.get("text") or "")
+            stream_id = f"claude-text-{state.message_id or state.message_sequence}-{index}"
+            state.blocks[index] = {"kind": "text", "id": stream_id, "text_parts": [text]}
+            return [_text_delta(stream_id, text)] if state.stream_text and text else []
         if block_type not in {"tool_use", "server_tool_use"}:
             return []
         tool_name = _trace_text(block.get("name")) or "Tool"
@@ -2033,7 +2202,10 @@ def _claude_stream_event_trace_entries(
             return []
         delta_type = delta.get("type")
         if block_state.get("kind") == "text" and delta_type == "text_delta":
-            block_state["text_parts"].append(str(delta.get("text") or ""))
+            text = str(delta.get("text") or "")
+            block_state["text_parts"].append(text)
+            if state.stream_text and text:
+                return [_text_delta(str(block_state["id"]), text)]
         elif block_state.get("kind") == "tool" and delta_type == "input_json_delta":
             block_state["input_parts"].append(str(delta.get("partial_json") or ""))
         return []
@@ -2055,6 +2227,9 @@ def _claude_stream_event_trace_entries(
             }
         ]
     if block_state.get("kind") == "text":
+        if state.stream_text:
+            # The deltas already delivered this text.
+            return []
         body = _trace_text("".join(block_state.get("text_parts") or []))
         return [{"kind": "summary", "title": "Summary", "body": body}] if body else []
 
@@ -2071,6 +2246,10 @@ def _claude_stream_event_trace_entries(
     }
     entry.update(_shell_trace_metadata(tool_name, tool_input, provider="claude_code"))
     return [entry]
+
+
+def _text_delta(stream_id: str, text: str) -> dict[str, Any]:
+    return {"kind": "text_delta", "streamId": stream_id, "text": text}
 
 
 def _claude_streamed_tool_input(block_state: dict[str, Any]) -> Any:
@@ -2525,7 +2704,11 @@ def _messages_with_attachment_paths(
     thread_id = str((workflow or {}).get("chatThreadId") or "").strip()
     prepared: list[dict[str, Any]] = []
     image_paths: list[Path] = []
-    for message in messages:
+    latest_user = max(
+        (index for index, message in enumerate(messages) if message.get("role", "user") == "user"),
+        default=-1,
+    )
+    for position, message in enumerate(messages):
         item = dict(message)
         raw_attachments = item.pop("attachments", None)
         attachments = raw_attachments if isinstance(raw_attachments, list) else []
@@ -2533,14 +2716,23 @@ def _messages_with_attachment_paths(
         for index, attachment in enumerate(attachments, start=1):
             if not isinstance(attachment, dict) or not thread_id:
                 raise ChatMediaError("An attached file is missing its chat thread reference.")
-            path = resolve_chat_attachment(
-                attachment,
-                data_dir=data_dir,
-                thread_id=thread_id,
-            )
+            try:
+                path = resolve_chat_attachment(
+                    attachment,
+                    data_dir=data_dir,
+                    thread_id=thread_id,
+                )
+            except ChatMediaError:
+                if position == latest_user:
+                    raise
+                # An earlier message's file can be gone (an expired phone upload,
+                # say). Say so instead of failing every later turn in the thread.
+                name = html.escape(str(attachment.get("name") or "file"), quote=True)
+                references.append(f"[Attachment no longer available: {name}]")
+                continue
             name = html.escape(str(attachment.get("name") or path.name), quote=True)
             media_type = html.escape(
-                str(attachment.get("type") or "application/octet-stream"),
+                str(attachment.get("type") or attachment.get("mime") or "application/octet-stream"),
                 quote=True,
             )
             escaped_path = html.escape(str(path), quote=True)
@@ -2576,7 +2768,15 @@ def _build_chat_command(
     trusted_organization_url: str | None = None,
     trusted_rem_artifacts_url: str | None = None,
     network_access: bool = False,
+    read_only: bool = False,
+    trust_data_dir: bool = True,
 ) -> list[str]:
+    """Build a provider command.
+
+    trust_data_dir=False leaves the app data folder out of the extra writable
+    directories. Swarm agents use it so they can't edit the swarm database or
+    other agents' worktrees.
+    """
     if image_paths and provider not in IMAGE_ATTACHMENT_PROVIDERS:
         raise ChatProviderError(f"{provider} image attachments are not supported by this adapter")
     if provider == "antigravity":
@@ -2611,7 +2811,9 @@ def _build_chat_command(
     if provider == "codex":
         data_dir = data_dir or get_data_dir()
         working_dir = working_dir or Path.cwd()
-        trusted_paths = _unique_existing_directories([data_dir, *(extra_paths or [])])
+        trusted_paths = _unique_existing_directories(
+            [*([data_dir] if trust_data_dir else []), *(extra_paths or [])]
+        )
         command = [
             binary_path or "codex",
             "exec",
@@ -2732,7 +2934,9 @@ def _build_chat_command(
         return command
 
     data_dir = data_dir or get_data_dir()
-    trusted_paths = _unique_existing_directories([data_dir, *(extra_paths or [])])
+    trusted_paths = _unique_existing_directories(
+        [*([data_dir] if trust_data_dir else []), *(extra_paths or [])]
+    )
     command = [
         binary_path or "claude",
         "--print",
@@ -2744,10 +2948,10 @@ def _build_chat_command(
             provider, "dontAsk" if permission_mode is None else permission_mode
         ),
     ]
-    allowed_tools = ["Read", "Edit", "Write"]
+    allowed_tools = ["Read"] if read_only else ["Read", "Edit", "Write"]
     if resources is not None:
-        command += resource_cli_args(provider, resources, working_dir)
-        allowed_tools = claude_native_tools(resources)
+        command += resource_cli_args(provider, resources, working_dir, read_only=read_only)
+        allowed_tools = claude_native_tools(resources, read_only=read_only)
         allowed_tools += [
             f"mcp__{server.name}__*" for server in resources.mcpServers if server.enabled
         ]
@@ -2763,6 +2967,45 @@ def _build_chat_command(
     if effort:
         command += ["--effort", effort]
     return command
+
+
+def _private_mcp_config(provider: str, command: list[str]) -> tuple[list[str], Path | None]:
+    """Move Claude Code's inline MCP configuration from argv into a private file.
+
+    Raticode's own MCP servers authorize each turn by a token in their URL. Any account
+    on the computer can read another process's command line, so the configuration goes
+    in a file only this account can read. Remove the returned folder once the process
+    has exited.
+    """
+    if provider != "claude_code" or "--mcp-config" not in command:
+        return command, None
+    index = command.index("--mcp-config") + 1
+    if index >= len(command) or not command[index].lstrip().startswith("{"):
+        return command, None
+    folder = Path(tempfile.mkdtemp(prefix="raticode-mcp-"))
+    try:
+        config = folder / "mcp.json"
+        descriptor = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(command[index])
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return [*command[:index], str(config), *command[index + 1 :]], folder
+
+
+def _prompt_via_stdin(provider: str, command: list[str]) -> tuple[list[str], bytes | None]:
+    """Move a CLI prompt from argv to stdin.
+
+    Linux rejects any single argument over 128 KB, and long Rem threads exceed it.
+    """
+    if provider == "codex":
+        return codex_exec_input(command)
+    if provider == "claude_code":
+        return claude_print_input(command)
+    if provider in ADDITIONAL_PROVIDERS:
+        return cli_prompt_input(provider, command)
+    return command, None
 
 
 def _with_browser(
@@ -3024,9 +3267,7 @@ async def _summarize_chat_messages(
     usage_metadata: dict[str, Any] = {}
     usage_status = "failed"
     try:
-        stdin = None
-        if provider == "codex":
-            command, stdin = codex_exec_input(command)
+        command, stdin = _prompt_via_stdin(provider, command)
         returncode, stdout, stderr = await run_subprocess(
             command,
             stdin=stdin,
@@ -3081,6 +3322,11 @@ def _limits_from_workflow(
     if not isinstance(raw_limits, dict):
         return limits
     return ResourceLimits(**{**limits.model_dump(), **raw_limits})
+
+
+def _without_narration(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop in-progress narration and tool steps; each turn keeps its final reply."""
+    return [message for message in messages if message.get("kind") != "thought"]
 
 
 def _messages_transcript(messages: list[dict[str, Any]]) -> str:
@@ -3163,6 +3409,26 @@ def build_chat_prompt(
             "search remains fine when web search is on."
         )
     )
+    web_guidance = (
+        "When you answer from the web, link each source you rely on as a Markdown link "
+        "titled with its page name. Raticode shows the pages you searched and read as "
+        "source cards under your reply. When a picture would help, such as a product, "
+        "place, person, chart or diagram, embed one real image from a page you read with "
+        "![short description](https://...). Use only image addresses you saw in fetched "
+        "pages or results, never guessed ones. To find them, ask your fetch tool for the "
+        "page's main image URLs. Put a YouTube watch link on its own line to show it as a "
+        "video card."
+        if resources.web
+        else ""
+    )
+    slot_guidance = (
+        "Tests, builds and browser test runs share a few slots with other Rem threads and "
+        "tasks on this computer, so a command may print that it is waiting before it starts. "
+        "Let it wait rather than cancelling or rerunning it, and give such commands a long "
+        "timeout (10 minutes) or run them in the background."
+        if (workflow or {}).get("remCommandSlots") and resources.shell
+        else ""
+    )
     global_scope = ((workflow or {}).get("remThreads") or {}).get("global") is True
     scope_tools = ""
     if global_scope:
@@ -3182,6 +3448,8 @@ Current turn tools: {tool_settings}.
 These are the current requested settings. Check the tools available in this turn;
 earlier messages about missing tools may describe a previous configuration.
 {browser_guidance}
+{web_guidance}
+{slot_guidance}
 {scope_tools}
 
 {commit_instructions}

@@ -10,18 +10,17 @@ const { scanProject } = require("../project-search.cjs");
 const safeFiles = require("../safe-files.cjs");
 const source = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
 
-test("canonical Mac installer URLs and legacy redirects pass, foreign or mismatched URLs fail", () => {
+test("Mac installer URLs point at the canonical repository and require a listed installer", () => {
   const context = { process: { platform: "darwin", arch: "arm64" } };
-  vm.runInNewContext(source.slice(source.indexOf("function macInstallerUrl("), source.indexOf("async function openPath(")), context);
+  vm.runInNewContext(source.match(/^const RELEASES_URL = .*$/m)[0] + "\n"
+    + source.slice(source.indexOf("function macInstallerUrl("), source.indexOf("async function openPath(")), context);
   const name = "Raticode-0.3.8-arm64.dmg";
-  for (const repo of ["Raticode", "gofer-flow"]) {
-    const url = `https://github.com/zacharyivie/${repo}/releases/download/v0.3.8/${name}`;
-    const release = { tag_name: "v0.3.8", assets: [{ name, browser_download_url: url }] };
-    assert.equal(context.macInstallerUrl(release), url);
-    for (const bad of [url.replace("zacharyivie", "attacker"), `${url}?download=other`, url.replace("v0.3.8", "v0.3.7")]) {
-      release.assets[0].browser_download_url = bad; assert.equal(context.macInstallerUrl(release), "");
-    }
+  const release = { version: "0.3.8", files: [name] };
+  assert.equal(context.macInstallerUrl(release), `https://github.com/zacharyivie/Raticode/releases/download/v0.3.8/${name}`);
+  for (const files of [[], ["Raticode-0.3.8-x64.dmg"], [`${name}?download=other`], ["Raticode-0.3.7-arm64.dmg"]]) {
+    assert.equal(context.macInstallerUrl({ version: "0.3.8", files }), "");
   }
+  assert.equal(context.macInstallerUrl({ version: "", files: [name] }), "");
 });
 
 test("case-insensitive same-entry rename preserves requested casing, distinct entries and hardlinks are protected", async () => {

@@ -35,9 +35,12 @@ import {
   PageOverlay,
   PromptBar,
   RemChip,
+  MENU_ITEM_CLASS,
   SecurityChip,
   SiteInfoPopover,
+  usePopupMenu,
 } from "./BrowserPanels.jsx";
+import { askRemPageText } from "../lib/browserAskRem.js";
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
 import {
   addressWithCompletion,
@@ -69,6 +72,7 @@ export default function IntegratedBrowser({
   onClose,
   onCycleTab,
   onNewTab,
+  onOpenFile,
   onReopenClosedTab,
   onShareWithRem,
   onShowDiff,
@@ -114,6 +118,7 @@ export default function IntegratedBrowser({
   const [siteInfo, setSiteInfo] = useState(null);
   const [historyMenu, setHistoryMenu] = useState(null);
   const [activeDownloads, setActiveDownloads] = useState(0);
+  const [downloadArrivals, setDownloadArrivals] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const [discarded, setDiscarded] = useState(false);
   const [state, setState] = useState({
@@ -256,7 +261,7 @@ export default function IntegratedBrowser({
       case "reopen-closed-tab": onReopenClosedTabRef.current?.(); break;
       case "history": setLibraryView("history"); break;
       case "bookmark": if (id) void bridge?.bookmark?.(id).catch(() => {}); break;
-      case "ask-rem": askRemRef.current?.(command.selection || ""); break;
+      case "ask-rem": askRemRef.current?.(command.selection || "", command.element || null); break;
       default: break;
     }
   }
@@ -325,8 +330,16 @@ export default function IntegratedBrowser({
   useEffect(() => {
     if (!bridge?.onDownloads) return undefined;
     const count = (downloads = []) => setActiveDownloads(downloads.filter((item) => item.state === "progressing" || item.state === "quarantined").length);
-    void bridge.library?.("downloads").then((result) => count(result?.downloads)).catch(() => {});
-    return bridge.onDownloads((payload) => count(payload?.downloads));
+    // Animate the toolbar icon when a download finishes after this tab opened.
+    let finished = null;
+    const update = (downloads = []) => {
+      count(downloads);
+      const done = new Set(downloads.filter((item) => item.state === "completed" || item.state === "quarantined").map((item) => item.id));
+      if (finished && [...done].some((id) => !finished.has(id))) setDownloadArrivals((value) => value + 1);
+      finished = done;
+    };
+    void bridge.library?.("downloads").then((result) => { if (!finished) update(result?.downloads); }).catch(() => {});
+    return bridge.onDownloads((payload) => update(payload?.downloads));
   }, [bridge]);
 
   useEffect(() => {
@@ -562,12 +575,12 @@ export default function IntegratedBrowser({
     try { setSiteInfo(await bridge.siteInfo(id)); } catch { /* View closed. */ }
   }
 
-  async function askRem(selection = "") {
+  async function askRem(selection = "", element = null) {
     const id = sessionIdRef.current;
     if (!id || !onAskRem) return;
     let context = { url: state.url, title: state.title, selection, text: "" };
     try { context = await bridge.pageContext(id, selection); } catch { /* Use what the tab knows. */ }
-    onAskRem(context);
+    onAskRem({ url: context.url, title: context.title, text: askRemPageText({ ...context, element }) });
   }
   askRemRef.current = askRem;
 
@@ -599,7 +612,7 @@ export default function IntegratedBrowser({
     { label: "Developer tools", icon: Code, run: () => run("toggleDevTools"), disabled: !state.ready },
     { separator: true },
     { label: state.muted ? "Unmute tab" : "Mute tab", icon: state.muted ? Volume2 : VolumeX, run: () => run("mute", !state.muted), disabled: !state.ready },
-    ...(onAskRem && !isPreview ? [{ label: "Ask Rem about this page", icon: MessageSquare, run: () => void askRem(""), disabled: !state.ready }] : []),
+    ...(onAskRem && (!isPreview || /^file:/i.test(String(state.url || ""))) ? [{ label: "Ask Rem about this page", icon: MessageSquare, run: () => void askRem(""), disabled: !state.ready }] : []),
     ...(canShareWithRem && !isRemTab && !isPreview && !agent ? [{ label: "Share this tab with Rem…", icon: Share2, run: () => onShareWithRem?.({ id: sessionIdRef.current, url: state.url, title: state.title }), disabled: !canUseWebFeatures }] : []),
   ];
 
@@ -676,7 +689,7 @@ export default function IntegratedBrowser({
           />
         ) : null}
         <BrowserButton label={activeDownloads ? `Downloads (${activeDownloads} need attention or in progress)` : "Downloads"} onClick={() => setLibraryView((view) => (view === "downloads" ? "" : "downloads"))}>
-          <span className="relative"><Download size={14} />{activeDownloads ? <span className="absolute -right-1.5 -top-1.5 grid h-3 min-w-3 place-items-center rounded-full bg-brand px-0.5 text-[8px] font-bold text-white">{activeDownloads}</span> : null}</span>
+          <span key={downloadArrivals} className={`relative ${downloadArrivals ? "browser-download-arrived" : ""}`}><Download size={14} />{activeDownloads ? <span className="absolute -right-1.5 -top-1.5 grid h-3 min-w-3 place-items-center rounded-full bg-brand px-0.5 text-[8px] font-bold text-white">{activeDownloads}</span> : null}</span>
         </BrowserButton>
         <BrowserButton
           disabled={!state.canOpenExternal}
@@ -721,6 +734,7 @@ export default function IntegratedBrowser({
           bridge={bridge}
           view={libraryView}
           onClose={() => setLibraryView("")}
+          onOpenFile={onOpenFile ? (path) => { setLibraryView(""); onOpenFile(path); } : undefined}
           onOpenUrl={(url) => { setLibraryView(""); go(url); }}
           onViewChange={setLibraryView}
         />
@@ -791,39 +805,6 @@ function BrowserButton({ children, disabled = false, expanded, label, onClick })
 // dependency or focus would jump back to the first item mid-navigation.
 // `includeParent` keeps clicks on the menu's trigger from closing and
 // immediately reopening it.
-function usePopupMenu(menuRef, onClose, { includeParent = false } = {}) {
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => {
-    menuRef.current?.querySelector("[role=menuitem]:not([disabled])")?.focus();
-    const close = (event) => {
-      const inside = includeParent ? menuRef.current?.parentElement : menuRef.current;
-      if (!inside?.contains(event.target)) onCloseRef.current();
-    };
-    window.addEventListener("pointerdown", close, true);
-    return () => window.removeEventListener("pointerdown", close, true);
-  }, [menuRef, includeParent]);
-  return (event) => {
-    const enabled = [...(menuRef.current?.querySelectorAll("[role=menuitem]:not([disabled])") || [])];
-    if (!enabled.length) return;
-    const index = enabled.indexOf(document.activeElement);
-    const next = {
-      ArrowDown: (index + 1) % enabled.length,
-      ArrowUp: index <= 0 ? enabled.length - 1 : index - 1,
-      Home: 0,
-      End: enabled.length - 1,
-    }[event.key];
-    if (next !== undefined) { event.preventDefault(); enabled[next].focus(); return; }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      onCloseRef.current({ restoreFocus: true });
-    }
-  };
-}
-
-const MENU_ITEM_CLASS = "browser-menu-item flex w-full items-center gap-2 px-3 py-1.5 text-left text-ink disabled:opacity-40";
-
 function BrowserMenu({ items, onClose }) {
   const menuRef = useRef(null);
   const handleKeyDown = usePopupMenu(menuRef, (options) => {

@@ -13,6 +13,12 @@ from gofer.core.provider_capabilities import CLI_PROVIDERS
 from gofer.ui import rem_home_provider as provider_module
 
 
+@pytest.fixture(autouse=True)
+def no_cli_probes(monkeypatch: pytest.MonkeyPatch):
+    """Keep these tests from running the real provider CLIs' --help."""
+    monkeypatch.setattr(provider_module, "no_saved_session", lambda name: [])
+
+
 @pytest.mark.parametrize("provider", CLI_PROVIDERS)
 def test_conversation_provider_has_no_working_project_or_resource_grants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
@@ -36,6 +42,12 @@ def test_conversation_provider_has_no_working_project_or_resource_grants(
             )
 
     monkeypatch.setattr(provider_module, "Agent", Agent)
+    # Never probe a real CLI here; the probe has its own test.
+    monkeypatch.setattr(
+        provider_module,
+        "no_saved_session",
+        lambda name: ["--no-saved-session"] if name in {"codex", "claude_code"} else [],
+    )
     result = provider_module.generate_decision(
         "Say hello",
         {"provider": provider, "model": "cli-default", "resources": {"shell": True}},
@@ -47,6 +59,9 @@ def test_conversation_provider_has_no_working_project_or_resource_grants(
     assert settings.tools == [] and settings.mcp_servers == []
     assert observed["config"].working_dir != tmp_path
     assert not observed["config"].working_dir.exists()
+    if provider in {"codex", "claude_code"}:
+        # The prompt carries Rem's memories, so the CLI shouldn't keep the session.
+        assert "--no-saved-session" in settings.extra_args
     if provider == "codex":
         assert settings.sandbox_mode == "read-only"
         assert "features.shell_tool=false" in settings.extra_args
@@ -167,6 +182,31 @@ def test_only_backend_artifact_endpoint_receives_save_permission(tmp_path: Path)
     assert not any('tools.save_report.approval_mode="approve"' in arg for arg in untrusted)
 
 
+def test_read_only_claude_rem_task_can_save_report_but_not_edit(tmp_path: Path):
+    from gofer.core.prompt_envelope import AgentResources
+    from gofer.ui.chat import _build_chat_command
+
+    resources = AgentResources.model_validate(
+        {"mcpServers": [{"name": "rem_artifacts", "url": "http://127.0.0.1:1234/private"}]}
+    )
+    args = _build_chat_command(
+        provider="claude_code",
+        model="cli-default",
+        prompt="Research",
+        data_dir=tmp_path,
+        working_dir=tmp_path,
+        resources=resources,
+        permission_mode="dontAsk",
+        read_only=True,
+    )
+    # Plan mode refuses every writing MCP tool, including the granted report saver.
+    assert args[args.index("--permission-mode") + 1] == "dontAsk"
+    allowed = args[args.index("--allowedTools") + 1 : args.index("--add-dir")]
+    assert "mcp__rem_artifacts__*" in allowed
+    native = args[args.index("--tools") + 1].split(",")
+    assert not {"Edit", "Write", "NotebookEdit"} & {*allowed, *native}
+
+
 @pytest.mark.parametrize("permission", ["workspace-write", "read-only"])
 @pytest.mark.parametrize("network", [True, False])
 def test_codex_network_access_preserves_filesystem_permissions(tmp_path, permission, network):
@@ -185,3 +225,45 @@ def test_codex_network_access_preserves_filesystem_permissions(tmp_path, permiss
     assert ("sandbox_workspace_write.network_access=true" in command) is (
         network and permission == "workspace-write"
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"reply":"Hi"}',
+        '```json\n{"reply":"Hi"}\n```',
+        'Here is my decision:\n{"reply":"Hi"}\nLet me know.',
+        'I checked {the report}. {"reply":"Hi"}',
+    ],
+)
+def test_decision_parser_tolerates_prose_around_json(text: str):
+    assert provider_module.parse_decision(text) == {"reply": "Hi"}
+
+
+@pytest.mark.parametrize("text", ["", "   ", "I'll look into that report first.", "[1, 2]"])
+def test_decision_parser_reports_unreadable_replies_without_parser_text(text: str):
+    with pytest.raises(provider_module.MalformedDecision) as raised:
+        provider_module.parse_decision(text)
+    assert "Expecting value" not in str(raised.value)
+    assert raised.value.text == text
+
+
+def test_conversation_provider_reads_json_after_prose(tmp_path: Path, monkeypatch):
+    class Agent:
+        def __init__(self, config, subscription):
+            pass
+
+        async def run(self, **kwargs):
+            return AgentResult(
+                agent_id="Rem",
+                success=True,
+                output="",
+                message='I need the report first.\n{"reply":"Started."}',
+                exit_code=0,
+                duration_seconds=0,
+            )
+
+    monkeypatch.setattr(provider_module, "Agent", Agent)
+    assert provider_module.generate_decision(
+        "Fix it", {"provider": "claude_code"}, threading.Event(), tmp_path
+    ) == {"reply": "Started."}

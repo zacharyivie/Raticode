@@ -9,14 +9,22 @@ pageClass: docs-layout
 Organize long-running work around employees, projects, goals, and an explicit review process.
 
 ::: warning Experimental
-Organizations is disabled by default. Quit the app completely and launch it with `RATICODE_EXPERIMENTAL_ORGANIZATIONS=1` in its environment to opt in. Removing the variable and restarting hides the feature while preserving its data. Evaluate supervised tasks before relying on unattended work.
+Organizations is off by default. Turn it on in **Settings > Developer > Feature Preview**; Raticode restarts its backend to apply the change. Turning it off hides the feature and keeps its data. A backend started without the desktop app reads `RATICODE_EXPERIMENTAL_ORGANIZATIONS=1` instead. Evaluate supervised tasks before relying on unattended work.
 :::
 
 ## Define the organization
 
 Organizations is global: you do not need to select a project to open it or manage it through Rem. Create the organization, then configure employees, reporting lines, teams, goals, initiatives, and owned projects.
 
-A project can be owned by only one organization. Each employee has instructions, provider/model/effort choices, workspace allowlists, resources, budgets, and turn controls. Define narrow roles and review those settings before starting work.
+A project can be owned by only one organization. Each employee has instructions, provider/model/effort choices, workspace allowlists, resources, budgets, and run limits. Define narrow roles and review those settings before starting work.
+
+## Where employees work
+
+By default each task runs in its own Git worktree on an `org/<task>` branch, created from the project's current commit. Employees never edit your project folder, so several employees can work at once and your own uncommitted changes are safe. A task's branch and worktree appear on the task; when the task is done or cancelled, Raticode commits anything left in the worktree, removes it, and keeps the branch for you to review and merge from Source Control. Folders that aren't Git repositories run in place.
+
+**Settings > Where employees work > Directly in the project folder** turns this off. Employees then take turns in the folder itself, and a run starts only when the folder has no uncommitted changes.
+
+`git push` fails inside employee runs unless you clear **Block git push in employee runs**. This guards against mistakes; an employee with unrestricted shell access could undo it.
 
 ## Tasks and independent review
 
@@ -24,7 +32,13 @@ Operations contains the work queue, task filters, activity, routines, execution 
 
 Plan approval and completion acceptance are separate decisions. Tasks can have an independent reviewer, and reviews can accept, reject, or request revision. Completion of a dependency can wake waiting work. A cancelled task stays cancelled until explicitly reopened.
 
-The queue explains why a task is waiting, including employee holds, unmet dependencies, review, workspace contention, or budget limits. Start work preserves individual employee holds; **Resume all employees** is a separate action.
+The queue explains why a task is waiting, including employee holds, unmet dependencies, review, workspace contention, or budget limits. Blocked tasks say why and what to do next. Start work preserves individual employee holds; **Resume all employees** is a separate action.
+
+**Start work** first shows what will run: the tasks that can start, backlog tasks that won't, plans still waiting for approval, employees and their permission modes, and the monthly limits. Nothing starts until you confirm. Approve a plan from the task itself, where its description is visible. Keep planned work in **Backlog**; Start never runs it until you move it to **To do**.
+
+**Pause** stops running tasks and returns them to To do; they run again on the next Start, and the interrupted run doesn't count against the task's run limit. Delegated work (swarms, paired desktops, HTTPS gateways) stays blocked for review instead.
+
+Open a run under **Runs and artifacts** on a task to read what the employee did.
 
 ## Routines and evidence
 
@@ -36,22 +50,26 @@ Rehearsal estimates queue order using copied state and a supplied clock. It call
 
 ## Budgets and destinations
 
-Configure turn reservations and supported dollar limits at the relevant organization, employee, initiative, and task levels. Operations shows both configured concurrency and the service ceiling of eight turns.
+Set monthly run, token and dollar limits at the organization, employee and initiative level, plus a run limit per task. New organizations start with 200 runs a month; 0 means unlimited. Codex and several other providers don't report dollar cost, so a dollar budget pauses their work after the first run; use a token or run limit for them. A run already in progress can go past what's left. Operations shows how many employees can actually work at once and why.
 
-Missing cost coverage under a dollar limit can pause further work. Observed dollar limits can overshoot while a turn is already in flight. Native provider children and unrestricted shell processes are not sandboxed by organizational accounting.
+Each employee run can create at most 5 tasks for others (**Tasks one run can create**), nested at most 3 levels deep (**Delegation depth**). Native provider children and unrestricted shell processes are not sandboxed by organizational accounting.
 
 Managed destinations can include local workflows, swarms, paired desktops, or an explicitly trusted HTTPS job gateway. Workflow validation previews inputs, resources, source and IR hashes, and completion checks. Launch authorization binds that reviewed contract. Editing a task plan clears its authorization; previewing it does not run it.
 
 ## Recovery and history
 
-Every organization starts paused after a restart. Interrupted or uncertain external work retains its receipt and reservation; it is not silently replayed. Use **Check stopped executions**, or **Confirm stopped after inspection** with evidence when automatic confirmation is impossible.
+Every organization starts paused after a restart, and the pause reason says so. Interrupted or uncertain external work retains its receipt and reservation; it is not silently replayed. Use **Check stopped executions**, or **Confirm stopped after inspection** with evidence when automatic confirmation is impossible.
 
 Configuration history supports revision-aware restore previews. Restoring configuration does not undo file changes, spending, or task history. Permission changes revoke affected claims, while changes to owned workspaces pause the organization.
+
+**Archive organization** (in Settings, while paused) hides a company and releases its project folders for other organizations. History and work records are kept; **Restore organization** reclaims the folders.
 
 **Export template** creates a reusable company definition, not an operational backup. An operational backup is a consistent SQLite snapshot; it excludes OS-keyring credential values. Restore with the application closed and retain the original database for rollback.
 
 ## Use Rem
 
 When enabled, organization management tools are available in both global and project threads. Ask Rem to inspect an organization before changing it, and state which configuration or task you want changed. Read-only and plan sessions cannot mutate organizations, and workflow execution still requires authorization.
+
+Rem can't start an organization by itself. When Rem asks to start one, resume all employees, archive it, or change settings that widen what employees may do (full-access or bypass-permission modes, credential grants, execution destinations, allowing push, editing the project folder directly), the Organizations tab shows the request and nothing changes until you approve it. Rem can't store credential values; enter them under **Operations > Protected credentials**. A paired phone can't start an organization whose active employees run without a sandbox.
 
 See [Swarms](./swarms.md), [Desktop fleet](./fleet.md), and [Permissions and local data](./security.md).

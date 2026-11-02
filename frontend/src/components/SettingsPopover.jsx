@@ -33,11 +33,20 @@ import ProviderSettings from "./ProviderSettings.jsx";
 import CommitMessageSettings from "./CommitMessageSettings.jsx";
 import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
+import { FEATURE_PREVIEWS } from "../lib/featurePreview.js";
 import "./SettingsPopover.css";
 import { PLUGIN_ICONS } from "./pluginIcons.js";
 import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
 import { ARCHIVE_RETENTION_OPTIONS } from "../lib/threadActivity.js";
 import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevices.js";
+import {
+  BOTTOM_PANEL_STARTUP_OPTIONS,
+  LAYOUT_PRESETS,
+  PANE_SIDE_OPTIONS,
+  TERMINAL_LOCATION_OPTIONS,
+  activeLayoutPreset,
+  workspacePaneOrder,
+} from "../lib/layoutPresets.js";
 import {
   DEFAULT_APP_SETTINGS,
   KEYBINDING_COMMANDS,
@@ -45,19 +54,21 @@ import {
   eventToKeybinding,
   formatKeybinding,
   keybindingConflictIds,
+  saveAppSettings,
 } from "../lib/settings.js";
 import {
   DEFAULT_PLUGIN_SETTINGS,
   PLUGIN_DRAG_TYPE,
-  SIDEBAR_PLUGINS,
   dropPlacement,
   enabledPlugins,
+  listedPlugins,
   movePlugin,
-  orderedPlugins,
+  pluginAvailable,
   pluginEnabled,
   resolvePluginActivity,
   stepPlugin,
   withPluginEnabled,
+  withPluginPreview,
 } from "../lib/plugins.js";
 
 const INITIAL_ACTIVITY_IDS = ["rem", "workflows", "files", "search", "source-control", "organizations", "second-brain"];
@@ -258,7 +269,13 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   });
   if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied", element: <ProviderSettings key="providers" providerState={providerState} /> }];
   if (category === "usage") return [{ searchText: "Usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh", element: <UsageDashboard key="usage" /> }];
-  if (category === "developer") return [{ searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> }];
+  if (category === "developer") return [
+    {
+      searchText: `Feature Preview experimental preview try turn on enable ${FEATURE_PREVIEWS.map((feature) => feature.label).join(" ")}`,
+      element: <FeaturePreviewSettings key="feature-preview" settings={settings} onChange={onChange} />,
+    },
+    { searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> },
+  ];
   if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown theme gallery generation provider model effort screenshot", element: <RemMemorySettings audioInputDeviceId={settings.devices.audioInputId} key="memory" value={settings.memory} onChange={onChange} providerState={providerState} /> }];
   if (category === "general") return [
     row("dataDir", "Application data directory", "Stores global Raticode state, run artifacts, and registries.", (
@@ -297,7 +314,7 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     )),
     {
       searchText: "Devices paired devices phone mobile desktop pairing QR trust revoke",
-      element: <div key="paired-devices" className="pt-4"><PairedDevices /></div>,
+      element: <PairedDevices key="paired-devices" />,
     },
   ];
   if (category === "editor") return [
@@ -331,18 +348,13 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("scrollback", "Scrollback lines", "Maximum number of terminal lines retained in memory.", <NumberControl value={settings.terminal.scrollback} min={100} max={100000} step={100} onCommit={(value) => onChange("terminal.scrollback", value)} />),
   ];
   if (category === "assistant") return assistantRows(settings, onChange, row, providerState);
-  if (category === "layout") return [
-    row("workflowPane", "Project pane width", "Default and current width of the left project pane.", <NumberControl value={settings.layout.workflowPaneWidth} min={240} max={420} suffix="px" onCommit={(value) => onChange("layout.workflowPaneWidth", value)} />),
-    row("assistantPane", "Rem pane width", "Default and current width of Rem's chat pane.", <NumberControl value={settings.layout.assistantPaneWidth} min={300} max={520} suffix="px" onCommit={(value) => onChange("layout.assistantPaneWidth", value)} />),
-    row("bottomPanel", "Bottom panel height", "Height used for Problems, Run Timeline, Runs, and Terminal.", <NumberControl value={settings.layout.bottomPanelHeight} min={140} max={480} suffix="px" onCommit={(value) => onChange("layout.bottomPanelHeight", value)} />),
-    row("inspector", "Graph inspector width", "Width of the node and workflow inspector.", <NumberControl value={settings.layout.graphInspectorWidth} min={280} max={520} suffix="px" onCommit={(value) => onChange("layout.graphInspectorWidth", value)} />),
-  ];
+  if (category === "layout") return layoutRows(settings, onChange, row);
   if (category === "plugins") return [
     row("pluginLock", "Lock plugin order", "Keep plugins in place so they cannot be dragged in the sidebar or here.", (
       <SwitchControl checked={settings.plugins.locked} onChange={(value) => onChange("plugins.locked", value)} />
     )),
     {
-      searchText: `Plugins sidebar order drag reorder show hide enable disable experimental ${SIDEBAR_PLUGINS.map((plugin) => plugin.label).join(" ")}`,
+      searchText: `Plugins sidebar order drag reorder show hide enable disable ${listedPlugins(settings.plugins).map((plugin) => plugin.label).join(" ")}`,
       element: <PluginSettings key="plugin-list" value={settings.plugins} onChange={onChange} />,
     },
   ];
@@ -359,6 +371,11 @@ function assistantRows(settings, onChange, row, providerState) {
   const model = models.find((item) => item.id === settings.assistant.model)
     ?? models.find((item) => item.id === provider?.defaultModel)
     ?? models[0];
+  const chatProvider = availableProviders.find((item) => item.id === settings.assistant.chatProvider);
+  const chatModels = chatProvider?.models ?? [];
+  const chatModel = chatModels.find((item) => item.id === settings.assistant.chatModel)
+    ?? chatModels.find((item) => item.id === chatProvider?.defaultModel)
+    ?? chatModels[0];
   return [
     { searchText: "Rem commit messages provider model auto commit changes template format", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
     row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
@@ -366,17 +383,118 @@ function assistantRows(settings, onChange, row, providerState) {
     row("autoHideThoughts", "Auto-hide thoughts", "Collapse thoughts when Rem replies. You can reopen them at any time.", <SwitchControl checked={settings.assistant.autoHideThoughts} onChange={(value) => onChange("assistant.autoHideThoughts", value)} />),
     row("avatarAnimation", "Animate Rem", "Greet you when Rem’s home opens, then blink while seated. Respects reduced motion.", <SwitchControl checked={settings.assistant.avatarAnimated} onChange={(value) => onChange("assistant.avatarAnimated", value)} />),
     row("swarmAccess", "Swarm access", "Let Rem manage project teams and runs when asked. Instructions load on demand. Changes apply to the next message.", <SwitchControl checked={settings.assistant.swarmAccessEnabled} onChange={(value) => onChange("assistant.swarmAccessEnabled", value)} />),
+    row("maxWorkers", "Rem task workers", "How many Rem tasks and phone turns can run at once. Each idle worker uses about 0.5 GB of memory, and all of them share your provider's usage limits. 0 picks a number from this computer's cores and memory.", <NumberControl value={settings.assistant.maxWorkers} min={0} max={16} onCommit={(value) => onChange("assistant.maxWorkers", Math.round(value))} />),
+    row("commandSlots", "Queue tests and builds", "Tests, builds and browser test runs from all Rem tasks and threads wait for a free slot, so many agents can work at once without overloading this computer. On Linux, agents also get less CPU than your own apps when both are busy.", <SwitchControl checked={settings.assistant.commandSlotsEnabled} onChange={(value) => onChange("assistant.commandSlotsEnabled", value)} />),
+    ...(settings.assistant.commandSlotsEnabled ? [
+      row("testSlots", "Test runs at once", "0 picks a number from this computer's cores.", <NumberControl value={settings.assistant.testSlots} min={0} max={16} onCommit={(value) => onChange("assistant.testSlots", Math.round(value))} />),
+      row("buildSlots", "Builds at once", "0 picks a number from this computer's cores.", <NumberControl value={settings.assistant.buildSlots} min={0} max={16} onCommit={(value) => onChange("assistant.buildSlots", Math.round(value))} />),
+      row("browserSlots", "Browser test runs at once", "0 runs one at a time.", <NumberControl value={settings.assistant.browserSlots} min={0} max={16} onCommit={(value) => onChange("assistant.browserSlots", Math.round(value))} />),
+    ] : []),
     row("resources", "Rem resources", "Defaults copied into new threads. Each thread can change its own selection.", <RemResources value={settings.assistant.resources} memory={settings.memory} onChange={(value) => onChange("assistant.resources", value)} />, { stacked: true }),
-    row("provider", "Default provider", "Used for Rem’s next message and as the default for new tasks and threads.", (
+    row("provider", "Default provider", "Used for new tasks and threads, and for Rem’s chat unless it has its own provider below.", (
       <SelectControl disabled={loading || !availableProviders.length} value={provider?.id ?? settings.assistant.provider} onChange={(value) => onChange("assistant.provider", value)} options={availableProviders.map((item) => [item.id, item.displayName ?? item.id])} />
     )),
-    row("model", "Default model", "Used for Rem’s next message. Existing task and thread selections stay unchanged.", (
+    row("model", "Default model", "Used for new tasks and threads. Existing task and thread selections stay unchanged.", (
       <SelectControl disabled={!models.length} value={model?.id ?? settings.assistant.model} onChange={(value) => onChange("assistant.model", value)} options={models.map((item) => [item.id, item.displayName ?? item.id])} />
     )),
-    row("effort", "Default reasoning effort", "Reasoning level for Rem’s next message and new tasks and threads.", (
+    row("effort", "Default reasoning effort", "Reasoning level for new tasks and threads.", (
       <SelectControl disabled={!model?.efforts?.length} value={settings.assistant.effort || model?.defaultEffort || ""} onChange={(value) => onChange("assistant.effort", value)} options={(model?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
     )),
+    row("chatProvider", "Rem chat provider", "Who writes Rem’s replies in its chat. A faster model or lower effort here makes chat quicker, while tasks and threads keep the defaults above.", (
+      <SelectControl
+        disabled={loading || !availableProviders.length}
+        value={chatProvider?.id ?? ""}
+        onChange={(value) => { onChange("assistant.chatProvider", value); onChange("assistant.chatModel", ""); onChange("assistant.chatEffort", ""); }}
+        options={[["", "Same as tasks and threads"], ...availableProviders.map((item) => [item.id, item.displayName ?? item.id])]}
+      />
+    )),
+    ...(chatProvider ? [
+      row("chatModel", "Rem chat model", "Model for Rem’s chat replies.", (
+        <SelectControl disabled={!chatModels.length} value={chatModel?.id ?? settings.assistant.chatModel} onChange={(value) => { onChange("assistant.chatModel", value); onChange("assistant.chatEffort", ""); }} options={chatModels.map((item) => [item.id, item.displayName ?? item.id])} />
+      )),
+      row("chatEffort", "Rem chat reasoning effort", "Low or medium keeps chat replies quick.", (
+        <SelectControl disabled={!chatModel?.efforts?.length} value={settings.assistant.chatEffort || chatModel?.defaultEffort || ""} onChange={(value) => onChange("assistant.chatEffort", value)} options={(chatModel?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
+      )),
+    ] : []),
   ];
+}
+
+function layoutRows(settings, onChange, row) {
+  const layout = settings.layout;
+  const change = (key) => (value) => onChange(`layout.${key}`, value);
+  return [
+    row("arrangement", "Arrangement", "Choose where the project files and Rem sit around the editor. Applies right away.", (
+      <LayoutPresetPicker layout={layout} onChange={onChange} />
+    ), { stacked: true }),
+    row("projectPaneSide", "Project pane side", "Dock the activity bar and file explorer to the left or right edge of the window.", (
+      <SelectControl label="Project pane side" value={layout.projectPaneSide} onChange={change("projectPaneSide")} options={PANE_SIDE_OPTIONS} />
+    )),
+    row("assistantPaneSide", "Rem pane side", "Dock Rem's chat to the left or right of the editor. On the same side as the project pane, Rem sits between it and the editor.", (
+      <SelectControl label="Rem pane side" value={layout.assistantPaneSide} onChange={change("assistantPaneSide")} options={PANE_SIDE_OPTIONS} />
+    )),
+    row("terminalLocation", "Terminal location", "Open terminals in the bottom panel, or in one editor tab you can split and drag beside your files. Switching closes open terminals.", (
+      <SelectControl label="Terminal location" value={layout.terminalLocation} onChange={change("terminalLocation")} options={TERMINAL_LOCATION_OPTIONS} />
+    )),
+    row("projectPaneAtStartup", "Show project pane at startup", "When off, Raticode starts with only the activity bar. Toggle the pane from the View menu or the keyboard.", (
+      <SwitchControl label="Show project pane at startup" checked={layout.projectPaneAtStartup} onChange={change("projectPaneAtStartup")} />
+    )),
+    row("assistantPaneAtStartup", "Show Rem at startup", "When off, Rem stays hidden until you open it, giving the editor more room.", (
+      <SwitchControl label="Show Rem at startup" checked={layout.assistantPaneAtStartup} onChange={change("assistantPaneAtStartup")} />
+    )),
+    row("bottomPanelAtStartup", "Open at startup", "Expand the bottom panel on this view when Raticode starts. A terminal in an editor tab opens there instead.", (
+      <SelectControl label="Open at startup" value={layout.bottomPanelAtStartup} onChange={change("bottomPanelAtStartup")} options={BOTTOM_PANEL_STARTUP_OPTIONS} />
+    )),
+    row("compactWidth", "Compact window width", "Windows narrower than this show one side pane at a time. 0 always shows both.", (
+      <NumberControl value={layout.compactWidth} min={0} max={2000} step={50} suffix="px" onCommit={change("compactWidth")} />
+    )),
+    row("workflowPane", "Project pane width", "Default and current width of the project pane.", <NumberControl value={layout.workflowPaneWidth} min={240} max={420} suffix="px" onCommit={change("workflowPaneWidth")} />),
+    row("assistantPane", "Rem pane width", "Default and current width of Rem's chat pane.", <NumberControl value={layout.assistantPaneWidth} min={300} max={520} suffix="px" onCommit={change("assistantPaneWidth")} />),
+    row("bottomPanel", "Bottom panel height", "Height used for Problems, Run Timeline, Runs, and Terminal.", <NumberControl value={layout.bottomPanelHeight} min={140} max={480} suffix="px" onCommit={change("bottomPanelHeight")} />),
+    row("inspector", "Graph inspector width", "Width of the node and workflow inspector.", <NumberControl value={layout.graphInspectorWidth} min={280} max={520} suffix="px" onCommit={change("graphInspectorWidth")} />),
+    row("resetLayout", "Reset layout", "Restore every layout setting on this page to its default.", (
+      <button
+        className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-line bg-white text-xs text-ink transition hover:bg-slate-50"
+        type="button"
+        onClick={() => Object.keys(DEFAULT_APP_SETTINGS.layout).forEach((key) => onChange(`layout.${key}`, DEFAULT_APP_SETTINGS.layout[key]))}
+      >
+        <RotateCcw aria-hidden="true" size={13} />
+        Reset layout
+      </button>
+    )),
+  ];
+}
+
+// Thumbnails draw each arrangement with the same rules the workspace uses.
+function LayoutPresetPicker({ layout, onChange }) {
+  const selected = activeLayoutPreset(layout);
+  return (
+    <div role="radiogroup" aria-label="Arrangement" className="layout-presets">
+      {LAYOUT_PRESETS.map((preset) => {
+        const checked = preset.id === selected;
+        return (
+          <button
+            key={preset.id}
+            aria-checked={checked}
+            className="layout-preset"
+            role="radio"
+            type="button"
+            onClick={() => {
+              onChange("layout.projectPaneSide", preset.projectPaneSide);
+              onChange("layout.assistantPaneSide", preset.assistantPaneSide);
+            }}
+          >
+            <span aria-hidden="true" className="layout-preset-thumbnail">
+              {workspacePaneOrder(preset).map((pane) => (
+                <span key={pane} className={`layout-preset-pane layout-preset-pane--${pane}`} data-side={pane === "project" ? preset.projectPaneSide : undefined} />
+              ))}
+            </span>
+            <span className="text-xs font-semibold text-ink">{preset.label}</span>
+            <span className="text-[10px] leading-4 text-muted">{preset.description}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function keybindingRows(settings, onChange) {
@@ -435,9 +553,10 @@ function PathControl({ onChoose, value }) {
   );
 }
 
-function SelectControl({ disabled = false, onChange, options, value }) {
+function SelectControl({ disabled = false, label, onChange, options, value }) {
   return (
     <select
+      aria-label={label}
       className="h-8 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none transition focus:border-brand disabled:cursor-not-allowed disabled:opacity-50"
       disabled={disabled}
       value={value}
@@ -611,12 +730,13 @@ function deviceErrorMessage(error) {
   return error instanceof Error ? error.message : "The microphone could not be opened.";
 }
 
-function SwitchControl({ checked, label, onChange }) {
+function SwitchControl({ checked, disabled = false, label, onChange }) {
   return (
     <button
       aria-checked={checked}
       aria-label={label}
-      className="ml-auto grid h-7 w-10 place-items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+      className="ml-auto grid h-7 w-10 place-items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:cursor-wait disabled:opacity-50"
+      disabled={disabled}
       role="switch"
       type="button"
       onClick={() => onChange(!checked)}
@@ -637,11 +757,76 @@ function SwitchControl({ checked, label, onChange }) {
   );
 }
 
+// Every experimental feature has a switch here, and only here. Backend
+// features need the desktop app, which restarts the backend to apply them.
+function FeaturePreviewSettings({ onChange, settings }) {
+  const bridge = globalThis.window?.goferDesktop?.features;
+  const [backend, setBackend] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (bridge) void bridge.get().then(setBackend).catch((cause) => setError(cause.message));
+  }, [bridge]);
+  const features = FEATURE_PREVIEWS.filter((feature) => feature.plugin || bridge);
+  const restarts = (feature) => Boolean(feature.backend && bridge);
+  const enabled = (feature) => (!feature.plugin || pluginAvailable(settings.plugins, feature.plugin))
+    && (!restarts(feature) || backend?.[feature.id] === true);
+
+  async function change(feature, next) {
+    setError("");
+    const preview = feature.plugin ? withPluginPreview(settings.plugins, feature.plugin, next) : settings.plugins.preview;
+    if (!restarts(feature)) { onChange("plugins.preview", preview); return; }
+    // A restart reloads this window, so store the plugin choice first. Live
+    // settings change only once the backend agrees, so the Organizations
+    // availability check cannot undo the choice mid-restart.
+    saveAppSettings({ ...settings, plugins: { ...settings.plugins, preview } });
+    setBusy(feature.id);
+    try {
+      const result = await bridge.set(feature.id, next);
+      setBackend(result.features);
+      if (result.cancelled) saveAppSettings(settings);
+      else onChange("plugins.preview", preview);
+    } catch (cause) {
+      saveAppSettings(settings);
+      setError(cause.message);
+    } finally { setBusy(""); }
+  }
+
+  return (
+    <div className="py-3">
+      <p className="text-xs font-semibold text-ink">Feature Preview</p>
+      <p className="mt-1 max-w-[54ch] text-[10px] leading-4 text-muted">
+        Try features that are still in development. A feature that is off is hidden everywhere in Raticode.
+      </p>
+      <ul aria-label="Feature Preview" className="mt-3 divide-y divide-line rounded-lg border border-line">
+        {features.map((feature) => (
+          <li key={feature.id} className="flex items-center gap-2.5 px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-ink">{feature.label}</p>
+              <p className="mt-0.5 text-[10px] leading-4 text-muted">
+                {feature.description}{restarts(feature) ? " Changing this restarts the backend." : ""}
+              </p>
+            </div>
+            <SwitchControl
+              checked={enabled(feature)}
+              disabled={Boolean(busy) || (restarts(feature) && !backend)}
+              label={`Preview ${feature.label}`}
+              onChange={(next) => void change(feature, next)}
+            />
+          </li>
+        ))}
+      </ul>
+      {error ? <p role="alert" className="mt-2 text-[10px] text-red-700">{error}</p> : null}
+    </div>
+  );
+}
+
 function PluginSettings({ onChange, value }) {
   const [drag, setDrag] = useState(null);
   const listRef = useRef(null);
-  const plugins = orderedPlugins(value);
-  const order = plugins.map((plugin) => plugin.id);
+  const plugins = listedPlugins(value);
+  const order = value.order;
+  const shownIds = plugins.map((plugin) => plugin.id);
   const locked = value.locked;
   const customized = Object.keys(value.enabled).length > 0
     || order.some((id, index) => id !== DEFAULT_PLUGIN_SETTINGS.order[index]);
@@ -656,7 +841,7 @@ function PluginSettings({ onChange, value }) {
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold text-ink">Sidebar plugins</p>
           <p className="mt-1 max-w-[54ch] text-[10px] leading-4 text-muted">
-            Choose which plugins appear in the left sidebar and drag them into order. File explorer is always shown. Experimental plugins are off until you turn them on.
+            Choose which plugins appear in the left sidebar and drag them into order. File explorer is always shown.
           </p>
         </div>
         <button
@@ -710,7 +895,7 @@ function PluginSettings({ onChange, value }) {
                 onKeyDown={(event) => {
                   if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
                   event.preventDefault();
-                  reorder(stepPlugin(order, plugin.id, event.key === "ArrowUp" ? -1 : 1));
+                  reorder(stepPlugin(order, plugin.id, event.key === "ArrowUp" ? -1 : 1, shownIds));
                   window.setTimeout(() => listRef.current?.querySelector?.(`[aria-label="Move ${plugin.label}"]`)?.focus(), 0);
                 }}
               ><GripVertical aria-hidden="true" size={14} /></button>
@@ -718,10 +903,7 @@ function PluginSettings({ onChange, value }) {
                 <Icon aria-hidden="true" size={15} strokeWidth={1.5} />
               </span>
               <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-1.5 text-xs font-semibold text-ink">
-                  {plugin.label}
-                  {plugin.experimental ? <span className="rounded-full bg-amber-50 px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-amber-700">Experimental</span> : null}
-                </p>
+                <p className="text-xs font-semibold text-ink">{plugin.label}</p>
                 <p className="mt-0.5 truncate text-[10px] leading-4 text-muted" title={plugin.description}>{plugin.description}</p>
               </div>
               {plugin.required ? (
@@ -926,11 +1108,11 @@ function categoryKeywords(category) {
     terminal: "font line cursor blink scrollback shell",
     providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
     usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
-    assistant: "commit messages auto commit template format default scope current directory global projects rem provider model effort codex claude conversation skills tools mcp servers resources swarm access teams runs",
+    assistant: "commit messages auto commit template format default scope current directory global projects rem provider model effort chat faster speed codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
-    developer: "developer diagnostics logs logging app data storage version backend restart tools",
-    layout: "width pane sidebar panel inspector",
-    plugins: "plugins sidebar rail activity bar icons order reorder drag lock unlock show hide enable disable experimental",
+    developer: "developer diagnostics logs logging app data storage version backend restart tools feature preview experimental",
+    layout: "width pane sidebar panel inspector arrangement preset position side left right swap mirror dock chat rem files explorer project activity bar terminal tab editor startup open hidden compact narrow reset",
+    plugins: "plugins sidebar rail activity bar icons order reorder drag lock unlock show hide enable disable",
   }[category] ?? "";
 }
 

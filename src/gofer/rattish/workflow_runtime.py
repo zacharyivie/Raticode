@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import heapq
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +46,8 @@ class NodeRunRecord:
     finished_at: str
     duration_ms: int
     result: NodeExecutionResult
+    # The run this result was copied from when a resumed run reused it.
+    reused_from: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +106,8 @@ class _WorkflowScheduler:
         data_dir: Path,
         notification_adapter: NotificationAdapter | None,
         on_node_event: NodeEventCallback | None,
+        replay: Sequence[Mapping[str, Any]] = (),
+        replay_source: str | None = None,
     ) -> None:
         self.ir = ir
         self.nodes = {node["id"]: node for node in ir["nodes"]}
@@ -135,6 +140,28 @@ class _WorkflowScheduler:
         self.error: RuntimeErrorInfo | None = None
         self.loops: dict[str, _LoopState] = {}
         self.deferred_loop_failures: list[RuntimeErrorInfo] = []
+        # Resume replays an earlier run's records in their saved order. The k-th
+        # start of a node in one activation group and lineage is that key's k-th
+        # record, so loops, joins and cycles rebuild the same scheduler state.
+        # Finished results are reused. Other work is held until nothing more can
+        # be replayed, so live results can't reorder the replay. Later starts may
+        # still reuse records (a loop can finish iterations after one failed), but
+        # never in a lineage where live work has completed, since its results may
+        # differ from the earlier run's.
+        self.replay_source = replay_source
+        self.replaying = bool(replay)
+        self.dirty_lineages: set[str] = set()
+        self.replay_records: dict[tuple[str, str, str], list[tuple[int, Mapping[str, Any]]]] = {}
+        for index, prior in enumerate(replay):
+            key = (prior["node_id"], prior["activation_group_id"], prior["activation_lineage_id"])
+            self.replay_records.setdefault(key, []).append((index, prior))
+        self.replay_starts: dict[tuple[str, str, str], int] = {}
+        self.replay_ready: list[tuple[int, str, _Activation, int, Mapping[str, Any]]] = []
+        self.replay_held: list[
+            tuple[str, _Activation, int, dict[str, Any], dict[str, str], dict[str, Any]]
+        ] = []
+        self.reused = 0
+        self.reusable = sum(1 for prior in replay if prior["outcome"] in _REUSABLE)
 
     async def run(self) -> WorkflowExecutionResult:
         completion_capacity = sum(
@@ -153,6 +180,15 @@ class _WorkflowScheduler:
                 if self.error is not None:
                     task_group.cancel_scope.cancel()
                     break
+                if self.replay_ready:
+                    self._replay_next()
+                    # Let a stop request cancel a long replay.
+                    await anyio.sleep(0)
+                    if self.error is None:
+                        self._start_runnable(task_group, send)
+                    continue
+                if self.replaying:
+                    self._finish_replay(task_group, send)
                 if not self._running_count():
                     self._start_runnable(task_group, send)
                     if self.error is not None or not self._running_count():
@@ -227,8 +263,7 @@ class _WorkflowScheduler:
                     return
                 self.pending[node_id].pop(activation.group_id)
                 self.running_groups[node_id].add(activation.group_id)
-                task_group.start_soon(
-                    self._run_activation,
+                arguments = (
                     node_id,
                     activation,
                     self.run_counts[node_id],
@@ -242,9 +277,72 @@ class _WorkflowScheduler:
                     {
                         **self.errors_by_lineage.get(activation.lineage_id, {}),
                     },
-                    send,
                 )
+                if self._replayed(node_id, activation, self.run_counts[node_id]):
+                    pass
+                elif self.replaying:
+                    self.replay_held.append(arguments)
+                else:
+                    task_group.start_soon(self._run_activation, *arguments, send)
                 made_progress = True
+
+    def _replayed(self, node_id: str, activation: _Activation, run_number: int) -> bool:
+        """Queue a saved result for this start, if the earlier run has one to reuse."""
+        if self.replay_source is None or self.reused >= self.reusable:
+            return False
+        key = (node_id, activation.group_id, activation.lineage_id)
+        occurrence = self.replay_starts.get(key, 0)
+        self.replay_starts[key] = occurrence + 1
+        prior = self.replay_records.get(key, [])
+        if (
+            activation.lineage_id in self.dirty_lineages
+            or occurrence >= len(prior)
+            or prior[occurrence][1]["outcome"] not in _REUSABLE
+        ):
+            return False
+        index, record = prior[occurrence]
+        heapq.heappush(self.replay_ready, (index, node_id, activation, run_number, record))
+        return True
+
+    def _replay_next(self) -> None:
+        _, node_id, activation, run_number, prior = heapq.heappop(self.replay_ready)
+        error = prior.get("error")
+        result = NodeExecutionResult(
+            node_id,
+            prior["outcome"],
+            prior["output"],
+            RuntimeErrorInfo(
+                error["kind"], error["code"], error["message"], dict(error.get("details") or {})
+            )
+            if error
+            else None,
+        )
+        self.reused += 1
+        self._process_completion(
+            _Completion(
+                activation,
+                NodeRunRecord(
+                    node_id,
+                    run_number,
+                    activation.lineage_id,
+                    activation.group_id,
+                    prior["started_at"],
+                    prior["finished_at"],
+                    prior["duration_ms"],
+                    result,
+                    reused_from=self.replay_source,
+                ),
+            )
+        )
+
+    def _finish_replay(
+        self, task_group: anyio.abc.TaskGroup, send: anyio.abc.ObjectSendStream[_Completion]
+    ) -> None:
+        """Start the work replay could not reuse. Nothing is reused after this."""
+        self.replaying = False
+        held, self.replay_held = self.replay_held, []
+        for arguments in held:
+            task_group.start_soon(self._run_activation, *arguments, send)
 
     async def _run_activation(
         self,
@@ -360,6 +458,8 @@ class _WorkflowScheduler:
         lineage_errors = self.errors_by_lineage.setdefault(lineage_id, {})
         self.running_groups[node_id].discard(completion.activation.group_id)
         self.records.append(record)
+        if self.replay_source is not None and record.reused_from is None:
+            self.dirty_lineages.add(lineage_id)
         self._emit_node_event(
             "node_completed",
             node_id,
@@ -368,6 +468,7 @@ class _WorkflowScheduler:
             record,
             outcome=result.outcome,
             message=result.error.message if result.error else "",
+            **({"reused": True} if record.reused_from else {}),
         )
         if result.outcome == "success":
             self.latest_outputs[node_id] = result.output
@@ -467,6 +568,8 @@ class _WorkflowScheduler:
             state.active_groups.add(group_id)
             scoped_outputs = {**state.parent_outputs, state.node_id: item}
             loop_lineages = {**state.parent_lineages, state.node_id: state.lineage_id}
+            if state.parent_lineage_id in self.dirty_lineages:
+                self.dirty_lineages.add(group_id)
             self.satisfied_by_lineage[group_id] = {
                 *self.satisfied_by_lineage.get(state.parent_lineage_id, set()),
                 state.node_id,
@@ -708,6 +811,9 @@ class _WorkflowScheduler:
         return outputs, None
 
 
+_REUSABLE = frozenset({"success", "allowed_failure"})
+
+
 async def execute_workflow(
     ir: Mapping[str, Any],
     *,
@@ -720,8 +826,14 @@ async def execute_workflow(
     notification_adapter: NotificationAdapter | None = None,
     run_id: str | None = None,
     on_node_event: NodeEventCallback | None = None,
+    replay: Sequence[Mapping[str, Any]] = (),
+    replay_source: str | None = None,
 ) -> WorkflowExecutionResult:
-    """Execute one validated Rattish IR workflow using routed activation semantics."""
+    """Execute one validated Rattish IR workflow using routed activation semantics.
+
+    ``replay`` holds an earlier run's saved node records, in their saved order,
+    for a resumed run; ``replay_source`` is that run's ID.
+    """
     _require_validated_ir(ir)
     validate_ir_invariants(ir)
     if not ir["nodes"]:
@@ -748,6 +860,8 @@ async def execute_workflow(
         data_dir or get_data_dir(),
         notification_adapter,
         on_node_event,
+        replay,
+        replay_source,
     )
     if run_id is not None:
         scheduler.run_id = run_id

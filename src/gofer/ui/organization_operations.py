@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from gofer.ui.organization_store import OrganizationConfig, Task, now
+from gofer.ui.organization_store import OrganizationConfig, Task, now, project_identity
 from gofer.utils.atomic_output import open_binary_input
 
 
@@ -47,6 +47,10 @@ class Routine(BaseModel):
             raise ValueError("Invalid overlap or missed-run policy")
         Task.model_validate(self.task)
         return self
+
+
+# A queued routine never stacks up more open occurrences than this.
+MAX_QUEUED_OCCURRENCES = 3
 
 
 def next_occurrence(routine: dict[str, Any], at: datetime) -> str | None:
@@ -84,14 +88,16 @@ def trigger_routine(
         for t in tasks
         if t.get("routineId") == routine["id"] and t["status"] not in {"done", "cancelled"}
     ]
-    if pending and routine["overlap"] == "skip":
+    if pending and (routine["overlap"] == "skip" or len(pending) >= MAX_QUEUED_OCCURRENCES):
         routine["lastOccurrence"] = occurrence
         receipt = {
             "id": receipt_id,
             "routineId": routine["id"],
             "at": now(),
             "skipped": True,
-            "reason": "Previous occurrence is still open",
+            "reason": "Previous occurrence is still open"
+            if routine["overlap"] == "skip"
+            else f"{MAX_QUEUED_OCCURRENCES} occurrences are already waiting",
         }
         receipts[receipt_id] = receipt
         return receipt
@@ -149,12 +155,20 @@ def _read_evidence(
 ) -> tuple[Path, bytes]:
     source = Path(path).resolve()
     roots = [Path(r).resolve() for r in org["config"]["projectRoots"]]
+    # A task's worktree is a checkout of an owned project; its files count as project files.
+    worktrees = [
+        (Path(t["worktree"]["root"]).resolve(), t["worktree"]["repository"])
+        for t in (org.get("runtime") or {}).get("tasks", [])
+        if t.get("worktree")
+    ]
     if employee_id:
         employee = next((e for e in org["config"]["employees"] if e["id"] == employee_id), None)
         if employee is None:
             raise ValueError("Evidence owner is no longer an employee")
         if employee.get("workspacePaths") is not None:
             roots = [root for root in roots if str(root) in employee["workspacePaths"]]
+    allowed = {project_identity(str(root))[0] for root in roots}
+    roots += [tree for tree, repository in worktrees if project_identity(repository)[0] in allowed]
     if not any(source.is_relative_to(root) for root in roots):
         raise ValueError("Evidence file must be inside an allowed organization workspace")
     if not source.is_file() or source.stat().st_size > 10_000_000:
@@ -210,6 +224,12 @@ def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None =
     initiative: dict[str, Any] = next(
         (p for p in config["projects"] if p["id"] == task["project"]), {}
     )
+    try:
+        from gofer.ui.organization_execution import reservation
+
+        reserved = reservation(org, task)
+    except ValueError:
+        reserved = 1
     for name, policy in (
         ("company", config),
         (f"employee:{employee['id']}", employee),
@@ -218,11 +238,23 @@ def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None =
         account = accounts.get(name, {})
         if policy.get("monthlyTurnLimit") and account.get("turns", 0) >= policy["monthlyTurnLimit"]:
             return f"Monthly turn limit: {name}"
+        if (
+            policy.get("monthlyTurnLimit")
+            and account.get("turns", 0) + reserved > policy["monthlyTurnLimit"]
+        ):
+            return f"Waiting for monthly run capacity: {name}"
+        if policy.get("monthlyTokenLimit"):
+            if account.get("unknownTokenTurns"):
+                return f"Token counts unavailable: {name}"
+            if account.get("tokens", 0) >= policy["monthlyTokenLimit"]:
+                return f"Monthly token limit: {name}"
         if policy.get("monthlyBudgetUsd"):
             if account.get("unknownCostTurns"):
                 return f"Cost coverage unavailable: {name}"
             if account.get("costUsd", 0) >= policy["monthlyBudgetUsd"]:
                 return f"Monthly budget reached: {name}"
+    if runtime.get("archived"):
+        return "Organization is archived"
     if runtime["state"] != "running":
         return "Organization is paused"
     return "Ready"
@@ -247,11 +279,36 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
             >= budget * org["config"].get("budgetWarningPercent", 80) / 100
         ):
             warnings.append({"scope": key, "reason": "Budget warning threshold reached"})
-        if account.get("unknownCostTurns"):
-            warnings.append({"scope": key, "reason": "Some turns have unknown cost"})
+        if account.get("unknownCostTurns") and budget:
+            warnings.append(
+                {
+                    "scope": key,
+                    "reason": "The provider doesn't report dollar cost, so this dollar budget "
+                    "pauses work. Use a token or run limit instead.",
+                }
+            )
+    config = org["config"]
+    roots = {
+        *config.get("projectRoots", []),
+        *(p["workspacePath"] for p in config["projects"] if p.get("workspacePath")),
+        *(t["workspacePath"] for t in tasks if t.get("workspacePath")),
+    }
+    isolated = config.get("workspaceIsolation", "worktree") == "worktree" and all(
+        project_identity(root)[0].startswith("git:") for root in roots
+    )
+    available = max(1, sum(not e["paused"] for e in config["employees"]))
+    effective = min(8, config["maxConcurrency"], available, 8 if isolated else max(1, len(roots)))
+    note = (
+        f"Up to {effective} at once: each employee runs one task at a time"
+        + ("" if isolated else ", and tasks in the same project folder take turns")
+        + (f"; {available} employees are available" if available < config["maxConcurrency"] else "")
+        + "."
+    )
     return {
-        "configuredConcurrency": org["config"]["maxConcurrency"],
-        "effectiveConcurrency": min(8, org["config"]["maxConcurrency"]),
+        "configuredConcurrency": config["maxConcurrency"],
+        "effectiveConcurrency": effective,
+        "concurrencyNote": note,
+        "isolation": config.get("workspaceIsolation", "worktree"),
         "serviceConcurrency": 8,
         "taskReasons": reasons,
         "budgetWarnings": warnings,
@@ -269,10 +326,12 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
             "Employee and delegated tasks share turn reservations and cancellation lineage. "
             "Use owner-granted destinations for swarm, paired desktop or HTTPS gateway work."
         ),
-        "isolation": (
-            "Workspace grants restrict managed tools; "
-            "provider shell permissions govern filesystem access."
-        ),
+        "isolationNote": (
+            "Each task runs in its own git worktree and branch; the project folder is not edited."
+            if isolated
+            else "Employees edit the project folder directly and need a clean checkout to start."
+        )
+        + (" git push is blocked in employee runs." if config.get("blockGitPush", True) else ""),
     }
 
 

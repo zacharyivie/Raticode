@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import unicodedata
@@ -15,21 +16,36 @@ from uuid import NAMESPACE_URL, uuid5
 from gofer.devices.registry import PairingError
 
 
-def attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
+def attachments(message: dict[str, Any], *, desktop: bool = False) -> list[dict[str, Any]]:
+    """Attachment metadata for phones, or with ``desktop`` the copy the desktop keeps.
+
+    The desktop copy also records the media type under the desktop's own key and
+    the saved file name, so later desktop turns can resend the file.
+    """
     result = []
     raw = message.get("attachments", [])
     for item in (raw if isinstance(raw, list) else [])[:8]:
         if not isinstance(item, dict):
             continue
-        result.append(
-            {
-                "id": str(item.get("id", ""))[:180],
-                "name": str(item.get("name", "Attachment"))[:160],
-                "size": max(0, min(10485760, int(item.get("size", 0) or 0))),
-                "mime": str(item.get("mime", "application/octet-stream"))[:120],
-            }
-        )
+        # Desktop messages name the media type "type"; phone uploads say "mime".
+        mime = str(item.get("mime") or item.get("type") or "application/octet-stream")[:120]
+        storage = str(item.get("storageName", ""))
+        entry = {
+            "id": str(item.get("id", ""))[:180],
+            "name": str(item.get("name", "Attachment"))[:160],
+            "size": max(0, min(10485760, int(item.get("size", 0) or 0))),
+            "mime": mime,
+        }
+        if desktop:
+            entry["type"] = mime
+            if re.fullmatch(r"[0-9a-f]{32}-[^/\\]{1,200}", storage):
+                entry["storageName"] = storage
+        result.append(entry)
     return result
+
+
+# Desktop's buildChatItems hides these rows from the visible conversation.
+HIDDEN_KINDS = frozenset({"memory", "continuation-context"})
 
 
 def presentation(message: dict[str, Any], *, bounded: bool = True) -> dict[str, Any]:
@@ -359,8 +375,12 @@ class DeviceWorkspace:
                         "role": message["role"],
                         "body": message["body"],
                         **presentation(message, bounded=False),
+                        # Kept so phone history can leave it out; never sent to the phone.
                         **(
-                            {"attachments": attachments(message)}
+                            {"kind": message["kind"]} if message.get("kind") in HIDDEN_KINDS else {}
+                        ),
+                        **(
+                            {"attachments": attachments(message, desktop=True)}
                             if message.get("attachments")
                             else {}
                         ),
@@ -535,7 +555,7 @@ class DeviceWorkspace:
                     recovered = []
                     for file_id in event["payload"]["attachment_ids"]:
                         try:
-                            offer, _ = self.app.files.content(peer, thread, file_id)
+                            offer = self.app.files.metadata(peer, thread, file_id)
                             recovered.append(
                                 {
                                     "id": file_id,
@@ -643,6 +663,10 @@ class DeviceWorkspace:
             parts = []
             rich = payload.get("include_presentation", False)
             history = self.desktop_messages(peer, thread) if rich else self.messages(peer, thread)
+            # Hidden context (compaction memory, continuation notes) stays in the stored copy
+            # for providers but is not part of the conversation, as on the desktop. Leaving it
+            # out before paging keeps page indexes stable and keeps it from splitting thoughts.
+            history = [m for m in history if m.get("kind") not in HIDDEN_KINDS]
             for message in history:
                 body = message["body"]
                 for offset in range(0, max(1, len(body)), 4000):
@@ -709,7 +733,10 @@ class DeviceWorkspace:
                     },
                 )
             ]
-        if payload["expected_revision"] != context.get("revision", 1):
+        # Read state never conflicts with settings or placement, so marking a thread
+        # read or unread neither needs the current revision nor changes it.
+        reading = kind == "thread.manage" and payload["action"] in {"read", "unread"}
+        if not reading and payload["expected_revision"] != context.get("revision", 1):
             return reject("conflict", "Thread settings changed. Refresh and choose again.")
         previous_context = context
         value = self.value(peer, thread)
@@ -721,9 +748,22 @@ class DeviceWorkspace:
             if not value or peer not in self.enabled():
                 return reject("unauthorized", "Only shared desktop threads can be organized here.")
             action = payload["action"]
+            stamp = datetime.fromtimestamp(self.app.registry.clock(), UTC).isoformat()
+            previous = value.get("organization", {})
+            # Read state is kept apart from placement so either change leaves the other.
+            read_state = {k: previous[k] for k in ("unread", "readAt") if k in previous}
             if action == "delete":
                 value["delete_requested"] = True
+            elif reading:
+                read_state = (
+                    {"unread": False, "readAt": stamp} if action == "read" else {"unread": True}
+                )
+                placement = {k: v for k, v in previous.items() if k not in ("unread", "readAt")}
+                value["organization"] = {**placement, **read_state}
             else:
+                if action == "archive":
+                    # Archiving is a decision about the thread, so it counts as reading it.
+                    read_state = {"unread": False, "readAt": stamp}
                 value["organization"] = {
                     "pinned": action == "pin",
                     "archived": action == "archive",
@@ -732,10 +772,12 @@ class DeviceWorkspace:
                     else "archived"
                     if action == "archive"
                     else "active",
-                    "updatedAt": datetime.fromtimestamp(self.app.registry.clock(), UTC).isoformat(),
+                    "updatedAt": stamp,
+                    **read_state,
                 }
-            context = {**context, "revision": context.get("revision", 1) + 1}
-            value["revision"] = context["revision"]
+            if not reading:
+                context = {**context, "revision": context.get("revision", 1) + 1}
+            value["revision"] = context.get("revision", 1)
             self.put(peer, thread, value)
         else:
             try:
@@ -840,7 +882,13 @@ class DeviceWorkspace:
         return context
 
     def details(
-        self, peer: str, thread: str, context: dict[str, Any], *, resources: bool = False
+        self,
+        peer: str,
+        thread: str,
+        context: dict[str, Any],
+        *,
+        resources: bool = False,
+        activity: bool = False,
     ) -> dict[str, Any]:
         value = self.value(peer, thread) or {}
         meta = {**value.get("metadata", {}), **value.get("organization", {})}
@@ -880,6 +928,15 @@ class DeviceWorkspace:
                 else "active",
             ),
             "updated_at": str(meta.get("updatedAt") or "")[:80],
+            # Only phones that ask receive these; older phones reject unknown fields.
+            **(
+                {
+                    "unread": meta.get("unread") is True,
+                    "read_at": str(meta.get("readAt") or "")[:80],
+                }
+                if activity
+                else {}
+            ),
         }
 
     def scope_context(self, context: dict[str, Any], identifier: str | None) -> dict[str, Any]:

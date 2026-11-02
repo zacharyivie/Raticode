@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000161",
+  "id": "10000000-0000-4000-8000-000000000161",
+  "sequence": 161,
+  "type": "desktop.read",
+  "payload": {
+    "op": "media.preview",
+    "params": {
+      "url": "https://example.com/guide"
+    }
+  }
+}

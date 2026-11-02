@@ -27,10 +27,12 @@ def native_cli(monkeypatch, tmp_path):
 
     async def subprocess(command, **kwargs):
         provider = command[0]
-        flag = "-p" if provider in {"claude_code", "cursor", "copilot"} else None
-        prompt = command[command.index(flag) + 1] if flag else command[-1]
+        prompt = command[command.index("-p") + 1] if provider == "copilot" else command[-1]
         if provider == "codex":
             assert command[-1] == "-"
+            prompt = kwargs["stdin"].decode("utf-8")
+        if provider in {"claude_code", "cursor", "opencode"}:
+            assert "-p" not in command
             prompt = kwargs["stdin"].decode("utf-8")
         if provider == "antigravity":
             prompt = json.loads(kwargs["stdin"])["message"]["content"]
@@ -43,7 +45,10 @@ def native_cli(monkeypatch, tmp_path):
             "antigravity": "--conversation",
             "copilot": "--session-id",
         }[provider]
-        if resume_flag in command:
+        forking = {"--fork-session", "--fork"} & set(command) or (
+            provider == "codex" and "fork" in command
+        )
+        if resume_flag in command and not forking:
             native = command[command.index(resume_flag) + 1]
         else:
             ids[provider] = ids.get(provider, 0) + 1
@@ -142,6 +147,141 @@ async def test_followup_resumes_native_context_and_omits_seen_messages(
     if provider == "cursor":
         configs = [c[3]["env"]["CURSOR_CONFIG_DIR"] for c in native_cli]
         assert configs[0] == configs[1] and Path(configs[0]).exists()
+
+
+def _resumed_from(provider: str, command: list[str]) -> tuple[str, bool]:
+    """Return the native session a command continues and whether it forks it."""
+    flag = {"claude_code": "--resume", "codex": "resume", "opencode": "--session"}[provider]
+    if provider == "codex" and "fork" in command:
+        return command[command.index("fork") + 1], True
+    native = command[command.index(flag) + 1]
+    return native, bool({"--fork-session", "--fork"} & set(command))
+
+
+@pytest.mark.parametrize("provider", ["claude_code", "codex", "opencode"])
+async def test_fork_copies_parent_session_instead_of_resending_history(
+    provider, native_cli, tmp_path
+):
+    parent = [{"role": "user", "body": "Parent request"}]
+    parent_id = (await turn(tmp_path, provider, parent))[-1]["sessionId"]
+    history = parent + [{"role": "assistant", "body": "Parent reply"}]
+    forked = history + [{"role": "user", "body": "Fork request"}]
+
+    first = await turn(tmp_path, provider, forked, conversation_id="thread-b", fork_from="thread-a")
+
+    prompt = native_cli[-1][2]
+    assert _resumed_from(provider, native_cli[-1][1]) == (parent_id, True)
+    assert "Fork request" in prompt
+    assert "Parent request" not in prompt and "Parent reply" not in prompt
+    assert "You are Rem" not in prompt
+    assert first[-1]["sessionResumed"] is True
+    fork_id = first[-1]["sessionId"]
+    assert fork_id != parent_id
+
+    await turn(
+        tmp_path,
+        provider,
+        forked + [{"role": "assistant", "body": "Answer"}, {"role": "user", "body": "Next"}],
+        conversation_id="thread-b",
+        fork_from="thread-a",
+    )
+    assert _resumed_from(provider, native_cli[-1][1]) == (fork_id, False)
+    # The parent keeps its own session.
+    await turn(tmp_path, provider, history + [{"role": "user", "body": "Parent next"}])
+    assert _resumed_from(provider, native_cli[-1][1]) == (parent_id, False)
+
+
+async def test_opencode_stdin_prompt_drops_file_value_separator(tmp_path):
+    command = chat.cli_command("opencode", "Prompt", image_paths=[tmp_path / "a.png"])
+    assert command[-2:] == ["--", "Prompt"]
+    args, stdin = chat.cli_prompt_input("opencode", command)
+    assert args[-1].startswith("--file=") and stdin == b"Prompt"
+
+
+@pytest.mark.parametrize("provider", ["claude_code", "codex", "opencode"])
+async def test_fork_resends_history_when_parent_session_cannot_be_copied(
+    provider, native_cli, tmp_path
+):
+    first = [{"role": "user", "body": "Parent request"}]
+    await turn(tmp_path, provider, first)
+    await turn(
+        tmp_path,
+        provider,
+        first + [{"role": "assistant", "body": "Answer"}, {"role": "user", "body": "Later"}],
+    )
+    # Forked from the first reply: the parent session has also seen "Later".
+    forked = first + [
+        {"role": "assistant", "body": "Answer"},
+        {"role": "user", "body": "Fork request"},
+    ]
+    events = await turn(
+        tmp_path, provider, forked, conversation_id="thread-b", fork_from="thread-a"
+    )
+
+    command, prompt = native_cli[-1][1], native_cli[-1][2]
+    assert not {"--fork-session", "--fork", "fork", "resume", "--resume", "--session"} & set(
+        command
+    )
+    assert "Parent request" in prompt and "Fork request" in prompt and "Later" not in prompt
+    assert events[-1]["sessionResumed"] is False
+
+
+@pytest.mark.parametrize("provider", ["cursor", "copilot", "antigravity"])
+async def test_fork_without_native_support_resends_history(provider, native_cli, tmp_path):
+    parent = [{"role": "user", "body": "Parent request"}]
+    await turn(tmp_path, provider, parent)
+    forked = parent + [
+        {"role": "assistant", "body": "Parent reply"},
+        {"role": "user", "body": "Fork request"},
+    ]
+    events = await turn(
+        tmp_path, provider, forked, conversation_id="thread-b", fork_from="thread-a"
+    )
+
+    prompt = native_cli[-1][2]
+    assert "Parent request" in prompt and "Parent reply" in prompt and "Fork request" in prompt
+    assert events[-1]["sessionResumed"] is False
+
+
+async def test_new_session_compacts_long_history_and_drops_narration(
+    native_cli, monkeypatch, tmp_path
+):
+    from gofer.core.provider_context import PROVIDER_CONTEXT_TOKENS
+
+    monkeypatch.setitem(PROVIDER_CONTEXT_TOKENS, "claude_code", 10_000)
+    summaries = []
+
+    async def summarize(**options):
+        summaries.append(options["messages"][0]["body"])
+        return "Summary of earlier work"
+
+    monkeypatch.setattr(chat, "_summarize_chat_messages", summarize)
+    history = [
+        {"role": "user", "body": "Early request"},
+        {"role": "assistant", "kind": "thought", "body": "Running pytest " * 10},
+        {"role": "assistant", "body": "Huge reply " + "x" * 200_000},
+    ]
+    events = await turn(
+        tmp_path, "claude_code", [*history, {"role": "user", "body": "Edited request"}]
+    )
+
+    prompt = native_cli[-1][2]
+    assert any(event["type"] == "compaction" for event in events)
+    assert "Summary of earlier work" in prompt and "Edited request" in prompt
+    assert len(prompt) < 50_000
+    assert summaries and not any("Running pytest" in source for source in summaries)
+
+
+async def test_narration_is_not_resent_to_a_new_session(native_cli, tmp_path):
+    messages = [
+        {"role": "user", "body": "Early request"},
+        {"role": "assistant", "kind": "thought", "body": "Tool step narration"},
+        {"role": "assistant", "body": "Final reply"},
+        {"role": "user", "body": "Next request"},
+    ]
+    await turn(tmp_path, "claude_code", messages)
+    prompt = native_cli[-1][2]
+    assert "Final reply" in prompt and "Tool step narration" not in prompt
 
 
 async def test_native_session_under_symlinked_data_root(native_cli, tmp_path):
@@ -479,11 +619,15 @@ async def test_large_provider_handoffs_compact_only_imported_history(
     assert not any(e["type"] == "compaction" for e in followed)
 
 
-async def test_fork_and_edit_start_fresh_without_raticode_compaction(
+async def test_fork_and_edit_start_fresh_and_keep_history_that_fits(
     native_cli, monkeypatch, tmp_path
 ):
+    checked = []
+
     async def compact(**kwargs):
-        pytest.fail("Forks and edits leave compaction to their new provider session")
+        # History re-sent to a new session is checked against the budget.
+        checked.append(kwargs["messages"])
+        return kwargs["messages"], False
 
     monkeypatch.setattr(chat, "_compact_chat_messages_if_needed", compact)
     first = [{"role": "user", "body": "Original premise"}]
@@ -504,6 +648,7 @@ async def test_fork_and_edit_start_fresh_without_raticode_compaction(
     edited = (await turn(tmp_path, "codex", messages, reset_session=True))[-1]
     assert edited["sessionId"] not in {original["sessionId"], forked["sessionId"]}
     assert edited["sessionResumed"] is False
+    assert len(checked) == 2 and all(len(history) == 2 for history in checked)
 
 
 async def test_provider_handoff_detection_migrates_existing_references(
@@ -873,3 +1018,40 @@ async def test_cursor_chat_recovery_invokes_native_resume(native_cli, monkeypatc
     assert events[-1]["recoveryAttempts"] == 1
     assert commands[1][commands[1].index("--resume") + 1] == "cursor-original"
     assert any(event["type"] == "recovery" for event in events)
+
+
+async def test_claude_mcp_capability_urls_stay_off_the_command_line(
+    native_cli, monkeypatch, tmp_path
+):
+    # Raticode's MCP servers authorize a turn by a token in their URL. Other accounts
+    # can read any process's command line, so Claude gets the configuration as a file.
+    capability = "http://127.0.0.1:9/synthetic-capability-token-0123456789"
+    workflow = {
+        "projectRoot": str(tmp_path / "project"),
+        "remResources": {"mcpServers": [{"name": "tracker", "type": "http", "url": capability}]},
+    }
+    fake = chat.stream_subprocess
+    seen: dict[str, Any] = {}
+
+    async def inspect(command, **kwargs):
+        config = Path(command[command.index("--mcp-config") + 1])
+        seen.update(
+            argv=" ".join(command),
+            path=config,
+            mode=config.stat().st_mode & 0o777,
+            folder_mode=config.parent.stat().st_mode & 0o777,
+            servers=json.loads(config.read_text())["mcpServers"],
+        )
+        async for event in fake(command, **kwargs):
+            yield event
+
+    monkeypatch.setattr(chat, "stream_subprocess", inspect)
+    events = await turn(
+        tmp_path, "claude_code", [{"role": "user", "body": "Hi"}], workflow=workflow
+    )
+    assert events[-1]["type"] == "final"
+    assert capability not in seen["argv"]
+    assert seen["servers"]["tracker"]["url"] == capability
+    assert (seen["mode"], seen["folder_mode"]) == (0o600, 0o700)
+    # The file is gone once the provider exits.
+    assert not seen["path"].exists() and not seen["path"].parent.exists()

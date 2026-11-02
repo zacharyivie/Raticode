@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import threading
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -26,11 +28,36 @@ and resources, and starts in the chosen project. Do not perform its task in this
 A tool receipt means the action is queued; Raticode applies it when this turn finishes.
 """
 
+WORKTREE_INSTRUCTIONS = """Git worktrees inside an open project folder count as open projects,
+including worktrees created during this turn. Pass the worktree's absolute path.
+"""
 
-def thread_tools(global_scope: bool, projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+HANDOFF_INSTRUCTIONS = """Earlier in this turn you called select_project, and Raticode moved this
+thread to {name} ({root}). You are now working in that directory. That part of the user's
+request is complete, and so are the steps you took before selecting it, such as creating
+this folder or worktree: do not repeat them, and do not try to switch projects again.
+Continue with any remaining work here. If nothing remains, tell the user the thread now
+works in {root}.
+"""
+
+GIT_TIMEOUT_SECONDS = 10
+
+
+def thread_tools(
+    global_scope: bool, projects: list[dict[str, Any]], *, worktrees: bool = False
+) -> list[dict[str, Any]]:
     if not projects:
         return []
-    root = {"type": "string", "enum": [project["root"] for project in projects]}
+    roots = [project["root"] for project in projects]
+    root: dict[str, Any] = {"type": "string", "enum": roots}
+    if worktrees:
+        # Clients read the tool list once per session, so a fixed enum would
+        # reject worktrees created later in the turn. The call checks the path.
+        root = {
+            "type": "string",
+            "description": "An open project root, or a git worktree inside one. "
+            "Open projects: " + ", ".join(roots),
+        }
     tools = [
         {
             "name": "start_thread",
@@ -69,9 +96,36 @@ def thread_tools(global_scope: bool, projects: list[dict[str, Any]]) -> list[dic
     return tools
 
 
+def _git_worktrees(project: Path) -> set[Path]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode:
+        return set()
+    return {
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in result.stdout.splitlines()
+        if line.startswith("worktree ")
+    }
+
+
 class ThreadActions:
-    def __init__(self, config: dict[str, Any], messages: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        messages: list[dict[str, Any]],
+        *,
+        worktrees: bool = False,
+    ) -> None:
         self.projects = {item["root"]: item for item in config.get("projects", [])}
+        self.worktrees = worktrees
         self.global_scope = config.get("global") is True
         self.latest_user = next(
             (
@@ -84,12 +138,49 @@ class ThreadActions:
         self.events: list[dict[str, Any]] = []
         self.lock = threading.Lock()
 
+    def _worktree_project(self, value: str) -> dict[str, Any] | None:
+        """Admit a git worktree that appeared inside an open project during the turn.
+
+        The open project's grant already covers every folder inside it, so the
+        worktree reuses that grant. Worktrees elsewhere still need the user to open them.
+        """
+        target = Path(value)
+        if not self.worktrees or not target.is_absolute():
+            return None
+        try:
+            canonical = target.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if not canonical.is_dir():
+            return None
+        for project in list(self.projects.values()):
+            try:
+                parent = Path(project["root"]).resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if canonical == parent or not canonical.is_relative_to(parent):
+                continue
+            if canonical in _git_worktrees(parent):
+                found = {
+                    "root": str(canonical),
+                    "name": canonical.name,
+                    "grantId": project.get("grantId"),
+                }
+                self.projects[found["root"]] = found
+                return found
+        return None
+
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             root = arguments.get("projectRoot")
-            if not isinstance(root, str) or root not in self.projects:
+            project = (
+                (self.projects.get(root) or self._worktree_project(root))
+                if isinstance(root, str)
+                else None
+            )
+            if project is None:
                 raise ValueError("Choose one of the open projects.")
-            project = self.projects[root]
+            root = project["root"]
             if name == "select_project":
                 if not self.global_scope:
                     raise ValueError("Only global threads can select their own project.")
@@ -128,8 +219,16 @@ class ThreadActions:
 
 
 async def stream_with_thread_tools(
-    source: Callable[..., AsyncGenerator[dict[str, Any], None]], **kwargs: Any
+    source: Callable[..., AsyncGenerator[dict[str, Any], None]],
+    *,
+    worktrees: bool = False,
+    **kwargs: Any,
 ) -> AsyncGenerator[dict[str, Any], None]:
+    """Run a Rem turn with thread tools, then apply the queued project handoff.
+
+    With ``worktrees``, the tools also accept git worktrees created inside an
+    open project after the turn started.
+    """
     workflow = dict(kwargs.get("workflow") or {})
     config = workflow.get("remThreads") or {}
     if not config.get("projects") and not config.get("global"):
@@ -137,19 +236,28 @@ async def stream_with_thread_tools(
             async for event in stream:
                 yield event
         return
-    actions = ThreadActions(config, kwargs.get("messages") or [])
+    actions = ThreadActions(config, kwargs.get("messages") or [], worktrees=worktrees)
+    base_instructions = INSTRUCTIONS + (WORKTREE_INSTRUCTIONS if worktrees else "")
     server = SwarmToolServer()
     url = server.register(
         actions.call,
-        thread_tools(actions.global_scope, list(actions.projects.values())),
-        INSTRUCTIONS,
+        thread_tools(actions.global_scope, list(actions.projects.values()), worktrees=worktrees),
+        base_instructions,
     )
     try:
         resources = dict(workflow.get("remResources") or {})
         resources["mcpServers"] = [
             item for item in resources.get("mcpServers", []) if item.get("name") != "rem_threads"
         ] + [{"name": "rem_threads", "type": "http", "url": url}]
-        instructions = INSTRUCTIONS
+        instructions = base_instructions
+        handoff = config.get("handoff")
+        if isinstance(handoff, dict):
+            # The continuation is a fresh provider session that replays the same
+            # request, so it has to be told the selection already happened.
+            instructions = (
+                HANDOFF_INSTRUCTIONS.format(name=handoff["name"], root=handoff["root"])
+                + instructions
+            )
         if config.get("spawned"):
             instructions += (
                 "This is already the requested new thread. "
@@ -187,9 +295,13 @@ async def stream_with_thread_tools(
             projectRoot=project["root"],
             projectName=project["name"],
             remResources=resources,
-            remThreads={**config, "global": False},
-            remThreadInstructions="Project selected. Continue the task in this directory.\n"
-            + INSTRUCTIONS,
+            # A worktree found during the turn stays open for the continuation.
+            remThreads={
+                **config,
+                "projects": list(actions.projects.values()),
+                "global": False,
+                "handoff": {"root": project["root"], "name": project["name"]},
+            },
         )
         # Rebuild the provider invocation so cwd, project instructions, and edit tracking agree.
         continuation = dict(kwargs, workflow=workflow)
@@ -209,7 +321,9 @@ async def stream_with_thread_tools(
             }
         )
         yield action
-        async with aclosing(stream_with_thread_tools(source, **continuation)) as stream:
+        async with aclosing(
+            stream_with_thread_tools(source, worktrees=worktrees, **continuation)
+        ) as stream:
             async for event in stream:
                 yield event
     finally:

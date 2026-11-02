@@ -1,7 +1,18 @@
 import { loadConversationMessages, saveConversationMessages, removeConversationMessages } from "./conversationStorage.js";
 
-export const CONVERSATION_PAGE_SIZE = 40;
+// History pages count conversation messages; thoughts and hidden context are extra.
+export const CONVERSATION_PAGE_SIZE = 15;
+const SEARCH_PAGE_SIZE = 40;
 const keyFor = id => `gofer-flow-chat-thread:${id}`;
+// 0: thought, loaded on demand. 1: counted message. 2: hidden context.
+export const laneOf = message => message.kind === "thought" ? 0 : message.kind === "memory" || message.kind === "continuation-context" ? 2 : 1;
+// Index of the first row of the latest page: everything after the message
+// that precedes its `limit` conversation messages.
+export function pageStart(messages, limit = CONVERSATION_PAGE_SIZE) {
+  let start = messages.length;
+  for (let count = 0; start > 0; start -= 1) if (laneOf(messages[start - 1]) === 1 && ++count > limit) break;
+  return start;
+}
 const normalize = text => String(text ?? "").normalize("NFKC").toLowerCase();
 const grams = text => {
   const result = new Set();
@@ -28,12 +39,24 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
   const durable = Boolean(indexedDB);
   function db() {
     if (!database) database = new Promise((resolve, reject) => {
-      const request = indexedDB.open(name, 1);
-      request.onupgradeneeded = () => {
-        const messages = request.result.createObjectStore("messages", { keyPath: ["threadId", "id"] });
-        messages.createIndex("order", ["threadId", "sequence"], { unique: true });
-        messages.createIndex("search", "grams", { multiEntry: true });
-        request.result.createObjectStore("threads", { keyPath: "id" });
+      const request = indexedDB.open(name, 2);
+      request.onupgradeneeded = ({ oldVersion }) => {
+        let messages;
+        if (oldVersion < 1) {
+          messages = request.result.createObjectStore("messages", { keyPath: ["threadId", "id"] });
+          messages.createIndex("order", ["threadId", "sequence"], { unique: true });
+          messages.createIndex("search", "grams", { multiEntry: true });
+          request.result.createObjectStore("threads", { keyPath: "id" });
+        } else messages = request.transaction.objectStore("messages");
+        messages.createIndex("lane", ["threadId", "lane", "sequence"], { unique: true });
+        if (oldVersion < 1) return;
+        const cursor = messages.openCursor();
+        cursor.onsuccess = () => {
+          const row = cursor.result;
+          if (!row) return;
+          row.update({ ...row.value, lane: laneOf(row.value.message) });
+          row.continue();
+        };
       };
       request.onsuccess = () => { request.result.onversionchange = () => request.result.close(); resolve(request.result); };
       request.onerror = () => { database = null; reject(request.error); };
@@ -46,7 +69,9 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
     pending = result.catch(() => {});
     return result;
   }
-  async function write(id, messages, removed = [], context) {
+  // `resequence` saves `messages` in the given order after everything already
+  // stored, for a thread whose stored order no longer matches its true order.
+  async function write(id, messages, removed = [], context, { resequence = false } = {}) {
     const database = await db();
     const tx = database.transaction(["messages", "threads"], "readwrite");
     const done = committed(tx);
@@ -59,7 +84,7 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
         const messageId = message.id;
         const previous = await requestValue(records.get([id, messageId]));
         const text = normalize(message.body);
-        records.put({ threadId: id, id: messageId, sequence: previous?.sequence ?? ++meta.sequence, message, text, grams: grams(text) });
+        records.put({ threadId: id, id: messageId, sequence: (!resequence && previous?.sequence) || ++meta.sequence, lane: laneOf(message), message, text, grams: grams(text) });
       }
       if (context !== undefined) meta.context = context;
       threads.put(meta);
@@ -76,31 +101,41 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
     }
     migrated.add(id);
   }
-  async function rows(id, { before = Infinity, after = 0, limit = Infinity, direction = "prev" } = {}) {
-    const database = await db();
-    const tx = database.transaction("messages");
-    const range = IDBKeyRange.bound([id, after], [id, before], true, true);
-    return new Promise((resolve, reject) => {
-      const result = [];
-      const request = tx.objectStore("messages").index("order").openCursor(range, direction);
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor || result.length >= limit) { resolve(direction === "prev" ? result.reverse() : result); return; }
-        result.push(cursor.value); cursor.continue();
-      };
-    });
-  }
+  // Read paths load on demand to keep them out of the App chunk.
+  const read = async (name, ...args) => (await import("./conversationPages.js"))[name](await db(), ...args);
   return {
     durable,
-    save(id, messages, previous = [], persisted = previous) {
+    save(id, messages, previous = [], persisted = previous, { resequence = false } = {}) {
       if (!durable) { saveConversationMessages(keyFor(id), messages, storage); return true; }
       const ids = new Set(messages.map(message => message.id));
       const removed = previous.filter(message => !ids.has(message.id)).map(message => message.id);
-      const changed = messages.filter(message => !persisted.includes(message));
-      return enqueue(async () => { await migrate(id); await write(id, changed, removed); return true; });
+      const changed = resequence ? messages : messages.filter(message => !persisted.includes(message));
+      return enqueue(async () => {
+        await migrate(id);
+        if (changed.length || removed.length) await write(id, changed, removed, undefined, { resequence });
+        return true;
+      });
     },
+    // Returns `limit` conversation messages with their hidden context. Earlier
+    // thought runs come back as `thoughts` placeholders; see `thoughts()`.
     async page(id, before = Infinity, limit = CONVERSATION_PAGE_SIZE) {
+      await pending;
+      if (!durable) {
+        const all = loadConversationMessages(keyFor(id), storage);
+        const end = Math.min(before, all.length);
+        const start = pageStart(all.slice(0, end), limit);
+        return { messages: all.slice(start, end), before: start, hasMore: start > 0, thoughts: [] };
+      }
+      await enqueue(() => migrate(id));
+      return read("readPage", id, before, limit);
+    },
+    // Durable storage only: other pages have no thought placeholders.
+    async thoughts(id, ids) {
+      await pending;
+      return read("readMessages", id, ids);
+    },
+    // Every stored row, thoughts included, for the search viewport.
+    async older(id, before = Infinity, limit = SEARCH_PAGE_SIZE) {
       await pending;
       if (!durable) {
         const all = loadConversationMessages(keyFor(id), storage);
@@ -109,18 +144,15 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
         return { messages: all.slice(start, end), before: start, hasMore: start > 0 };
       }
       await enqueue(() => migrate(id));
-      const entries = await rows(id, { before, limit: limit + 1 });
-      const hasMore = entries.length > limit;
-      if (hasMore) entries.shift();
-      return { messages: entries.map(row => row.message), before: entries[0]?.sequence ?? 0, hasMore };
+      return read("readOlder", id, before, limit);
     },
     async all(id) {
       await pending;
       if (!durable) return loadConversationMessages(keyFor(id), storage);
       await enqueue(() => migrate(id));
-      return (await rows(id)).map(row => row.message);
+      return (await read("rows", id)).map(row => row.message);
     },
-    async around(id, messageId, limit = CONVERSATION_PAGE_SIZE) {
+    async around(id, messageId, limit = SEARCH_PAGE_SIZE) {
       await pending;
       await enqueue(() => migrate(id));
       const half = Math.floor(limit / 2);
@@ -132,20 +164,9 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
         const end = Math.min(all.length, start + limit);
         return { messages: all.slice(start, end), before: start, after: end, hasMore: start > 0, hasNewer: end < all.length };
       }
-      const database = await db();
-      const match = await requestValue(database.transaction("messages").objectStore("messages").get([id, messageId]));
-      if (!match) throw new Error("The matching message is no longer available.");
-      const previous = await rows(id, { before: match.sequence, limit: half + 1 });
-      const hasMore = previous.length > half;
-      if (hasMore) previous.shift();
-      const remaining = limit - previous.length - 1;
-      const following = await rows(id, { after: match.sequence, limit: remaining + 1, direction: "next" });
-      const hasNewer = following.length > remaining;
-      if (hasNewer) following.pop();
-      const entries = [...previous, match, ...following];
-      return { messages: entries.map(row => row.message), before: entries[0].sequence, after: entries.at(-1).sequence, hasMore, hasNewer };
+      return read("readAround", id, messageId, limit);
     },
-    async newer(id, after, limit = CONVERSATION_PAGE_SIZE) {
+    async newer(id, after, limit = SEARCH_PAGE_SIZE) {
       await pending;
       await enqueue(() => migrate(id));
       if (!durable) {
@@ -153,10 +174,7 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
         const end = Math.min(all.length, after + limit);
         return { messages: all.slice(after, end), after: end, hasNewer: end < all.length };
       }
-      const entries = await rows(id, { after, limit: limit + 1, direction: "next" });
-      const hasNewer = entries.length > limit;
-      if (hasNewer) entries.pop();
-      return { messages: entries.map(row => row.message), after: entries.at(-1)?.sequence ?? after, hasNewer };
+      return read("readNewer", id, after, limit);
     },
     checkpoint(id, messages, throughId) {
       const context = { messages, throughId };
@@ -176,19 +194,8 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
         else storage.removeItem(contextKey(id));
       }
       if (durable && context) {
-        const database = await db();
-        const boundary = await requestValue(database.transaction("messages").objectStore("messages").get([id, context.throughId]));
-        if (boundary) {
-          const following = (await rows(id, { after: boundary.sequence })).map(row => row.message);
-          const merged = new Map(following.map(message => [message.id, message]));
-          const currentBoundary = current.findIndex(message => message.id === context.throughId);
-          const unsaved = currentBoundary >= 0 ? current.slice(currentBoundary + 1) : current;
-          for (const message of unsaved) if (!merged.has(message.id)) {
-            const saved = await requestValue(database.transaction("messages").objectStore("messages").get([id, message.id]));
-            if (!saved || saved.sequence > boundary.sequence) merged.set(message.id, message);
-          }
-          return [...context.messages, ...merged.values()];
-        }
+        const checkpointed = await read("readCheckpoint", id, context, current);
+        if (checkpointed) return checkpointed;
       }
       const all = await this.all(id);
       // Include unsaved messages after a failed write; never silently omit the user's request.
@@ -214,13 +221,7 @@ export function createConversationRepository({ indexedDB = globalThis.indexedDB,
       if (!durable) {
         for (const thread of threads) for (const message of loadConversationMessages(keyFor(thread.id), storage)) add({ threadId: thread.id, id: message.id, message, text: normalize(message.body) });
       } else {
-        const database = await db();
-        const store = database.transaction("messages").objectStore("messages");
-        const candidates = needle.length >= 3 ? store.index("search").openCursor(IDBKeyRange.only(needle.slice(0, 3))) : store.openCursor();
-        await new Promise((resolve, reject) => {
-          candidates.onerror = () => reject(candidates.error);
-          candidates.onsuccess = () => { const cursor = candidates.result; if (!cursor) return resolve(); add(cursor.value); cursor.continue(); };
-        });
+        await read("searchRows", needle, add);
       }
       const ordered = [...matches.values()].sort((a, b) => String(b.thread.updatedAt).localeCompare(String(a.thread.updatedAt)));
       return { results: ordered.slice(offset, offset + limit), hasMore: ordered.length > offset + limit };

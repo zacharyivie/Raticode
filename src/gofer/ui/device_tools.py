@@ -9,10 +9,15 @@ from uuid import UUID
 
 from gofer.ui.swarm_tools import SwarmToolServer
 
+# The device protocol's job.submit intent limit; longer text fails on the wire.
+MAX_WORK_TEXT = 4000
+
 INSTRUCTIONS = """Raticode fleet tools report authenticated paired-device evidence.
 Use fleet_status to inspect machines and freshness. Unknown/stale is not up or down.
-Use fleet_send only for work the user authorized on a paired desktop, with its
-target-local thread and project grants. A mobile device cannot execute work.
+Devices with state "indirect" are paired with another desktop ("via"), not this one.
+Use fleet_send only for work the user authorized on a paired desktop, with a
+thread_id and project_id from that desktop's shared_threads in fleet_status.
+A mobile device or an indirect device cannot receive work from here.
 Keep the same request_id on a retry. A queued receipt is not completion; inspect
 fleet_work_status. Never retry outcome_unknown as new work without a user decision.
 Pairing and authorization changes require the local Settings UI.
@@ -58,7 +63,7 @@ def fleet_tools(
                         "thread_id": {"type": "string"},
                         "project_id": {"type": "string"},
                         "request_id": {"type": "string"},
-                        "text": {"type": "string", "maxLength": 16000},
+                        "text": {"type": "string", "maxLength": MAX_WORK_TEXT},
                     },
                     "required": ["device_id", "thread_id", "project_id", "request_id", "text"],
                     "additionalProperties": False,
@@ -127,7 +132,7 @@ class FleetActions:
             if str(UUID(arguments[key])) != arguments[key]:
                 raise ValueError("Fleet identifiers must be canonical UUIDs")
         if name == "fleet_send":
-            if not arguments["text"].strip() or len(arguments["text"]) > 16000:
+            if not arguments["text"].strip() or len(arguments["text"]) > MAX_WORK_TEXT:
                 raise ValueError("Supply a bounded work request")
             return self.control.action({"action": "send", "kind": "job.submit", **arguments})
         result = self.control.action({"action": "work_status", **arguments})

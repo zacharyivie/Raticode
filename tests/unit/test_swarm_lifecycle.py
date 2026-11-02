@@ -412,7 +412,7 @@ def test_startup_does_not_recover_terminal_runs(tmp_path, state):
         recovered.close()
 
 
-def test_legacy_recovery_keeps_independent_work_runnable_and_is_idempotent(tmp_path):
+def test_legacy_recovery_stays_paused_with_independent_work_ready_and_is_idempotent(tmp_path):
     data = tmp_path / "data"
     manager = SwarmManager(data, start_runtime=False)
     sid = team(manager, tmp_path)
@@ -435,7 +435,9 @@ def test_legacy_recovery_keeps_independent_work_runnable_and_is_idempotent(tmp_p
         manager = SwarmManager(data, start_runtime=False)
         try:
             run = manager.get(tmp_path, sid)["run"]
-            assert run["state"] == "running"  # Coordinator's initial task is independent.
+            # Nothing restarts unattended. The orchestrator's task is ready once resumed.
+            assert run["state"] == "paused"
+            assert "Application restarted" in run["pauseReason"]
             assert manager._dispatchable(run, run["messages"][0], "lead")
             assert run["attempts"][0]["state"] == "uncertain"
             assert len(run["humanInbox"]) == 1

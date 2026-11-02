@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sys
 import threading
 import time
 import uuid
@@ -18,6 +20,11 @@ from typing import Any, Literal, cast
 import anyio
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import ValidationError  # type: ignore[import-untyped]
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 from gofer.core.approvals import ApprovalStore, NotificationAdapter
 from gofer.rattish.artifacts import (
@@ -57,6 +64,10 @@ class RattishRunArtifactError(RuntimeError):
     """Raised when a completed run artifact cannot be published."""
 
 
+class RattishResumeRefused(RuntimeError):
+    """Raised with a sentence for the user when a run can't be resumed."""
+
+
 @dataclass(frozen=True, slots=True)
 class RattishRunResult:
     document: dict[str, Any]
@@ -76,6 +87,222 @@ class RattishRunResult:
 def is_rattish_run_active(run_id: str) -> bool:
     with _active_rattish_ids_lock:
         return run_id in _active_rattish_ids
+
+
+def effective_run_status(document: Mapping[str, Any]) -> str:
+    """A saved status, with a run whose runner is gone reported as interrupted."""
+    status = str(document.get("status"))
+    if status != "running":
+        return status
+    pid = document.get("runner_pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return "interrupted"
+    if pid == os.getpid():
+        return (
+            "running" if is_rattish_run_active(str(document.get("run_id", ""))) else "interrupted"
+        )
+    if os.name == "nt":
+        # Windows os.kill(pid, 0) terminates a process. A foreign owner
+        # cannot be reconciled by this runner; report unknown instead.
+        return "interrupted"
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return "interrupted"
+    return "running"
+
+
+# Resume semantics. A resumed run is a new run of the same saved source. It
+# replays the earlier run's finished node results in their saved order, so the
+# scheduler reaches the state the earlier run was in, then runs for real only
+# what had not finished: the failed activation, activations a stop or crash cut
+# off (these may have partly run), and everything they lead to. The earlier run
+# is never changed. Anything replay can't rebuild exactly is refused.
+RESUMABLE_STATUSES = frozenset({"failed", "stopped", "interrupted"})
+# Errors the reused results themselves cause; replaying them ends the same way.
+_DETERMINISTIC_ERROR_KINDS = frozenset({"workflow_control", "budget", "output_validation"})
+_resuming: set[tuple[str, str]] = set()
+
+
+def resume_refusal(document: Mapping[str, Any], ir: Mapping[str, Any] | None) -> str | None:
+    """Why this run can't be resumed against the current compiled source, or None.
+
+    ``document`` is a run record as read, with ``effective_run_status`` applied
+    then. Its liveness is never checked again here: a copy read while the run was
+    going must not count as interrupted once that run has finished.
+    """
+    status = str(document.get("status"))
+    if status == "running":
+        return "This run is still going. Stop it before resuming."
+    if status == "passed":
+        return "This run finished successfully, so there is nothing to resume."
+    if status in NEVER_STARTED_STATUSES:
+        return "This run never started its steps. Start a new run instead."
+    if status not in RESUMABLE_STATUSES:
+        return "This run can't be resumed."
+    error = document.get("error") or {}
+    if (
+        error.get("kind") in _DETERMINISTIC_ERROR_KINDS
+        or error.get("code") == "RATTISH_RUN_RECORD_INVALID"
+    ):
+        return (
+            "This run ended because of how the workflow is built, so resuming it would "
+            "end the same way. Fix the workflow and start a new run."
+        )
+    if document.get("input_names"):
+        return (
+            "This run was started with inputs, and their values aren't saved. "
+            "Start a new run instead."
+        )
+    if document.get("trigger_event_count"):
+        return (
+            "This run was started by an event whose details aren't saved. Start a new run instead."
+        )
+    snapshot = document.get("compiled_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return "This run was saved by an older version of Raticode and can't be resumed."
+    if ir is None:
+        return "The workflow has errors now. Fix it, then start a new run."
+    saved = document.get("source") or {}
+    if ir["source"]["source_fingerprint"] != saved.get("source_fingerprint") or ir["source"][
+        "compilation_fingerprint"
+    ] != saved.get("compilation_fingerprint"):
+        return (
+            "The workflow changed after this run, so its saved results may not fit. "
+            "Start a new run instead."
+        )
+    reused = {
+        record["node_id"]
+        for record in document.get("runs") or []
+        if record.get("outcome") in {"success", "allowed_failure"}
+    }
+    for node in ir["nodes"]:
+        if node["id"] in reused and (node.get("configuration") or {}).get("memory") == "run":
+            return (
+                f"Agent {node['id']!r} remembers earlier turns only while its run is going, "
+                "and those turns aren't saved, so this run can't be resumed."
+            )
+    return None
+
+
+def resume_rerun_nodes(document: Mapping[str, Any]) -> list[str]:
+    """Nodes a resume runs again because they failed or were cut off mid-run."""
+    nodes = {
+        record["node_id"]
+        for record in document.get("runs") or []
+        if record.get("outcome") == "failure"
+    }
+    open_activations: dict[tuple[Any, ...], str] = {}
+    for event in document.get("events") or []:
+        key = (
+            event.get("node_id"),
+            event.get("activation_group_id"),
+            event.get("activation_lineage_id"),
+            event.get("run_number"),
+        )
+        if event.get("type") in {"node_started", "node_retried"}:
+            open_activations[key] = str(event.get("node_id"))
+        elif event.get("type") == "node_completed":
+            open_activations.pop(key, None)
+    return sorted(nodes | set(open_activations.values()))
+
+
+# Statuses of runs whose steps never started, so they redid nothing.
+NEVER_STARTED_STATUSES = frozenset({"preflight_failed", "invalid_inputs"})
+
+
+def resumed_run_id(document: Mapping[str, Any]) -> str | None:
+    """The run this record resumed, if it counts as resuming that run.
+
+    A resume whose steps never started (its pre-run checks failed, for example)
+    reused and redid nothing, so it doesn't stop the earlier run from resuming.
+    """
+    earlier = (document.get("resumed_from") or {}).get("run_id")
+    if not earlier or document.get("status") in NEVER_STARTED_STATUSES:
+        return None
+    return str(earlier)
+
+
+def resumed_child(directory: Path, run_id: str) -> str | None:
+    """The run that already resumed ``run_id``, if one exists."""
+    if not directory.is_dir():
+        return None
+    for path in directory.glob("*.json"):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if isinstance(document, dict) and resumed_run_id(document) == run_id:
+            return str(document.get("run_id"))
+    return None
+
+
+async def resume_rattish_run(
+    source_path: Path,
+    document: Mapping[str, Any],
+    *,
+    data_dir: Path | None = None,
+    **options: Any,
+) -> RattishRunResult:
+    """Resume a saved run as a new run. See the resume semantics above.
+
+    Refuses a run that another run already resumed, so finished work is never
+    redone by resuming the same run twice. Resume the newer run instead.
+    """
+    resolved_data_dir = data_dir or get_data_dir()
+    workflow_id = str(document["workflow"]["id"])
+    run_id = str(document["run_id"])
+    directory = _run_path(
+        resolved_data_dir, workflow_id, run_id, source_path=source_path.expanduser().resolve()
+    ).parent
+    key = (workflow_id, run_id)
+    with _active_rattish_ids_lock:
+        if key in _resuming:
+            raise RattishResumeRefused("This run is already being resumed.")
+        _resuming.add(key)
+    try:
+        with _resume_claim(resolved_data_dir, key):
+            child = resumed_child(directory, run_id)
+            if child is not None:
+                raise RattishResumeRefused(
+                    f"This run was already resumed as run {child}. Resume that run instead."
+                )
+            return await run_rattish_file(
+                source_path, data_dir=resolved_data_dir, resume_from=document, **options
+            )
+    finally:
+        with _active_rattish_ids_lock:
+            _resuming.discard(key)
+
+
+@contextmanager
+def _resume_claim(data_dir: Path, key: tuple[str, str]) -> Iterator[None]:
+    """Hold one run's resume against every Raticode process, not only this one.
+
+    The CLI, the desktop, a paired phone and schedules can each start a resume.
+    The OS releases a file lock when its holder exits, so a crash never leaves
+    the run impossible to resume.
+    """
+    root = data_dir / "radish" / "resume-locks"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    name = hashlib.sha256("\0".join(key).encode("utf-8")).hexdigest()
+    descriptor = os.open(root / f"{name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            if sys.platform == "win32":
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise RattishResumeRefused("This run is already being resumed.") from error
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager
@@ -103,8 +330,12 @@ async def run_rattish_file(
     cancel_event: threading.Event | None = None,
     on_started: Callable[[RattishRunResult], None] | None = None,
     expected_revision: str | None = None,
+    resume_from: Mapping[str, Any] | None = None,
 ) -> RattishRunResult:
-    """Run one source file through the same boundary used by CLI and Studio."""
+    """Run one source file through the same boundary used by CLI and Studio.
+
+    Use ``resume_rattish_run`` to pass ``resume_from``, the saved run to resume.
+    """
     started_at = datetime.now(UTC).isoformat()
     started_clock = time.monotonic()
     resolved_data_dir = data_dir or get_data_dir()
@@ -114,6 +345,18 @@ async def run_rattish_file(
             "Workflow source changed after run preparation. "
             "Review and run the saved revision again."
         )
+    if resume_from is not None:
+        if workflow_inputs or trigger_events:
+            raise RattishResumeRefused("A resumed run uses the saved run's inputs only.")
+        # Checked against this compile, so the source can't change in between.
+        refusal = resume_refusal(resume_from, compiled.ir)
+        if refusal is not None:
+            raise RattishResumeRefused(refusal)
+    resumed: dict[str, Any] | None = (
+        {"run_id": str(resume_from["run_id"]), "rerun_nodes": resume_rerun_nodes(resume_from)}
+        if resume_from is not None
+        else None
+    )
     runtime_handlers = handlers or DEFAULT_NODE_HANDLERS
     runtime_subscriptions = (
         subscriptions if subscriptions is not None else default_provider_subscriptions()
@@ -153,6 +396,8 @@ async def run_rattish_file(
                     started_at=started_at,
                     finished_at=started_at,
                     duration_ms=0,
+                    resumed=resumed,
+                    trigger_event_count=len(trigger_events or ()),
                 )
                 live["events"] = live["events"][:1]
                 live["runner_pid"] = os.getpid()
@@ -206,6 +451,8 @@ async def run_rattish_file(
                             notification_adapter=notification_adapter,
                             run_id=run_id,
                             on_node_event=publish_node_event,
+                            replay=list((resume_from or {}).get("runs") or []),
+                            replay_source=resumed["run_id"] if resumed else None,
                         )
                     group.cancel_scope.cancel()
                 stopped = execution is None and cancel_event is not None and cancel_event.is_set()
@@ -242,6 +489,8 @@ async def run_rattish_file(
             started_at=started_at,
             finished_at=finished_at,
             duration_ms=round((time.monotonic() - started_clock) * 1000),
+            resumed=resumed,
+            trigger_event_count=len(trigger_events or ()),
         )
         if live is not None:
             # Keep the observed event order and completed work even after cancellation.
@@ -257,6 +506,16 @@ async def run_rattish_file(
             if execution is None:
                 document["runs"] = live["runs"]
                 document["latest_node_outputs"] = live["latest_node_outputs"]
+        if resumed is not None and resume_from is not None:
+            reused = sum(1 for record in document["runs"] if record.get("reused_from_run_id"))
+            reusable = sum(
+                1
+                for record in resume_from.get("runs") or []
+                if record.get("outcome") in {"success", "allowed_failure"}
+            )
+            document["resumed_from"].update(
+                reused_runs=reused, not_reused_runs=max(0, reusable - reused)
+            )
         path = _run_path(
             resolved_data_dir,
             compiled.ir["workflow"]["id"],
@@ -353,6 +612,8 @@ def _run_document(
     started_at: str,
     finished_at: str,
     duration_ms: int,
+    resumed: dict[str, Any] | None = None,
+    trigger_event_count: int = 0,
 ) -> dict[str, Any]:
     ir = compiled.ir
     runs = [_node_run_document(record) for record in execution.runs] if execution else []
@@ -377,7 +638,7 @@ def _run_document(
             "status": status,
         }
     )
-    return {
+    document: dict[str, Any] = {
         "run_artifact_version": RUN_ARTIFACT_VERSION,
         "run_id": run_id,
         "status": status,
@@ -405,11 +666,15 @@ def _run_document(
         "outputs": execution.outputs if execution is not None else {},
         "latest_node_outputs": execution.latest_node_outputs if execution is not None else {},
         "error": _runtime_error_document(error),
+        "trigger_event_count": trigger_event_count,
     }
+    if resumed is not None:
+        document["resumed_from"] = dict(resumed)
+    return document
 
 
 def _node_run_document(record: NodeRunRecord) -> dict[str, Any]:
-    return {
+    document: dict[str, Any] = {
         "node_id": record.node_id,
         "run_number": record.run_number,
         "activation_lineage_id": record.activation_lineage_id,
@@ -421,6 +686,9 @@ def _node_run_document(record: NodeRunRecord) -> dict[str, Any]:
         "output": record.result.output,
         "error": _runtime_error_document(record.result.error),
     }
+    if record.reused_from is not None:
+        document["reused_from_run_id"] = record.reused_from
+    return document
 
 
 def _runtime_error_document(error: RuntimeErrorInfo | None) -> dict[str, Any] | None:
@@ -438,6 +706,18 @@ def new_run_id() -> str:
     """Return a sortable run ID shared by every surface that starts Rattish runs."""
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{timestamp}-{uuid.uuid4().hex[:12]}"
+
+
+def run_artifact_path(source_path: Path, run_id: str, *, data_dir: Path | None = None) -> Path:
+    """Where a run of this source file is saved."""
+    resolved_data_dir = data_dir or get_data_dir()
+    compiled = compile_rattish_file(source_path, data_dir=resolved_data_dir)
+    return _run_path(
+        resolved_data_dir,
+        compiled.ir["workflow"]["id"],
+        run_id,
+        source_path=compiled.source_path,
+    )
 
 
 def _run_path(

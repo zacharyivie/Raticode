@@ -48,7 +48,7 @@ export function taskActivity(task, now = new Date()) {
   const last = task?.last_run;
   if (last && ["blocked", "outcome_unknown", "failed"].includes(last.state) && !last.acknowledged) {
     const info = runState(last.state, last.needs_user);
-    return { kind: "attention", label: last.summary_short || info.label, spinning: false, tone: info.tone };
+    return { kind: "attention", label: plainMarkdown(last.summary_short) || info.label, spinning: false, tone: info.tone };
   }
   if (task?.state === "paused") return { kind: "paused", label: "Paused", spinning: false, tone: "neutral" };
   if (task?.next_occurrence_at) return { kind: "scheduled", label: `Next ${formatWhen(task.next_occurrence_at, now)}`, spinning: false, tone: "neutral" };
@@ -154,17 +154,28 @@ export function formatWhen(iso, now = new Date(), { past = false } = {}) {
 }
 
 export function dayLabel(iso, now = new Date()) {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return "";
   const days = dayDiff(date, now);
   if (days === 0) return "Today";
   if (days === -1) return "Yesterday";
   return date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", ...(date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}) });
 }
 
-export function messageTime(iso) {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? "" : timeOf(date);
+// The stamp under each message: the time for today's messages, the day and time for
+// older ones, and the full date for hover and screen readers. Null when the date is unusable.
+export function messageStamp(iso, now = new Date()) {
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return null;
+  const time = `${date.getHours() % 12 || 12}:${String(date.getMinutes()).padStart(2, "0")} ${date.getHours() < 12 ? "AM" : "PM"}`;
+  const days = dayDiff(date, now);
+  const year = date.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {};
+  const day = days === 0 ? "" : days === -1 ? "Yesterday" : date.toLocaleDateString(undefined, { month: "short", day: "numeric", ...year });
+  return {
+    iso: date.toISOString(),
+    label: day ? `${day}, ${time}` : time,
+    full: `${date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}, ${time}`,
+  };
 }
 
 // Task updates are new messages; acknowledgements remain in their original place.
@@ -176,7 +187,21 @@ export function taskMessages(messages = [], taskId) {
   return messages.filter(message => message.work?.task_id === taskId);
 }
 
+// Rem writes Markdown. Places that show its text as one plain line keep link
+// labels and drop the markup, so a link never shows as "[label](</long/path>)".
+const MARKDOWN_LINK = /(!?)\[([^\]]*)\]\((?:<[^>\n]*>|[^()\s]*(?:\([^()\s]*\)[^()\s]*)*)(?:\s+"[^"\n]*")?\)/g;
+export function plainMarkdown(text = "") {
+  return String(text ?? "")
+    .replace(MARKDOWN_LINK, (_, image, label) => label || (image ? "" : _))
+    .replace(/<((?:https?|mailto):[^>\s]+)>/gi, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/(\*\*|__)(?=\S)([^\n]*?\S)\1/g, "$2")
+    .replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])/g, "$1$2")
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "");
+}
+
 export function taskRecap(text = "") {
+  text = plainMarkdown(text);
   if (text.length <= 320) return text;
   const short = text.slice(0, 317);
   const sentence = [...short.matchAll(/[.!?](?=\s|$)/g)].at(-1)?.index;
@@ -185,14 +210,15 @@ export function taskRecap(text = "") {
   return `${short.slice(0, space > 0 ? space : short.length)}…`;
 }
 
-// Messages grouped under day separators, in sequence order.
+// Messages grouped under day separators, in sequence order. A message without a usable
+// date stays with the messages around it; only leading ones get an "Earlier" group.
 export function messagesByDay(messages = [], now = new Date()) {
   const groups = [];
   for (const message of messages) {
-    const label = dayLabel(message.created_at, now) || "Earlier";
+    const label = dayLabel(message.created_at, now);
     const current = groups.at(-1);
-    if (current?.label === label) current.messages.push(message);
-    else groups.push({ label, messages: [message] });
+    if (current && (!label || current.label === label)) current.messages.push(message);
+    else groups.push({ key: message.id, label: label || "Earlier", messages: [message] });
   }
   return groups;
 }
@@ -229,10 +255,42 @@ export function latestWorkMessageIds(messages = []) {
   return new Set(latest.values());
 }
 
+// Unchecked criteria are not failures, so "0 of 5 passed" would mislead when
+// the review never ran. Counts are split by outcome and empty parts omitted.
 export function criteriaSummary(criteria) {
   if (!Array.isArray(criteria) || !criteria.length) return "";
-  const passed = criteria.filter(item => item.result === "pass").length;
-  return `${passed} of ${criteria.length} checks passed`;
+  const total = criteria.length;
+  const count = result => criteria.filter(item => item.result === result).length;
+  const passed = count("pass");
+  const failed = count("fail");
+  const unchecked = total - passed - failed;
+  if (unchecked === total) return total === 1 ? "Not checked yet" : `${total} checks not run yet`;
+  if (!failed && !unchecked) return `${passed} of ${total} checks passed`;
+  return [
+    `${passed} of ${total} passed`,
+    failed ? `${failed} failed` : "",
+    unchecked ? `${unchecked} not checked` : "",
+  ].filter(Boolean).join(", ");
+}
+
+// Desktop notifications for runs that finished since the previous poll. Only a
+// run seen active before can notify, so the first load and old results stay quiet.
+export function finishedRunNotifications(previous, tasks) {
+  if (!Array.isArray(previous) || !Array.isArray(tasks)) return [];
+  const active = new Set();
+  for (const task of previous) {
+    for (const run of [task.active_run, task.last_run]) if (run?.id && runState(run.state).active) active.add(run.id);
+  }
+  const notices = [];
+  for (const task of tasks) {
+    const run = task.last_run;
+    if (task.deleted_at || !run?.id || !active.has(run.id) || runState(run.state).active || task.active_run?.id === run.id) continue;
+    if (run.state === "cancelled") continue;
+    const info = runState(run.state, run.needs_user);
+    const summary = String(run.state === "succeeded" ? taskRecap(run.summary_short || "") : plainMarkdown(run.summary_short)).trim();
+    notices.push({ tag: `rem-run-${run.id}`, taskId: task.id, title: `${info.label}: ${task.title}`, body: summary.length > 180 ? `${summary.slice(0, 179)}…` : summary });
+  }
+  return notices;
 }
 
 // Editor drafts keep raw strings; they only become a request on save.

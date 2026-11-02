@@ -1,3 +1,5 @@
+import { askRemAboutFiles } from "./fileAttachments.js";
+
 export function installRemActions(editor, getContext) {
   const actions = ["ask", "explain"].map(mode => editor.addAction?.({
     id: `raticode.rem.${mode}`,
@@ -14,6 +16,14 @@ export function installRemActions(editor, getContext) {
         startLine: selection.startLineNumber, endLine: selection.endLineNumber,
       } }));
     },
+  }));
+  // The whole file on disk; an older Git version shown in a diff isn't a file to attach.
+  if (!getContext().version) actions.push(editor.addAction?.({
+    id: "raticode.rem.file",
+    label: "Ask Rem about this file",
+    contextMenuGroupId: "9_rem",
+    contextMenuOrder: 3,
+    run: () => askRemAboutFiles([getContext().path]),
   }));
   return { dispose: () => actions.forEach(action => action?.dispose()) };
 }

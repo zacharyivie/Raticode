@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { expiredArchivedThreads, inspectThreadScopes, organizeThreads, threadIndexEntry, threadIsArchived, threadScopeKey } from "./threadActivity.js";
+import { expiredArchivedThreads, inspectThreadScopes, mergeTaskThreadMetadata, organizeThreads, threadIndexEntry, threadIsArchived, threadScopeBadge, threadScopeKey } from "./threadActivity.js";
 
 const now = Date.parse("2026-09-15T12:00:00Z");
 const at = minutes => new Date(now - minutes * 60000).toISOString();
@@ -119,4 +119,41 @@ test("scope inspection shares in-flight requests, caches remounts and bounds bra
   assert.equal(maximum, 4);
   await inspectThreadScopes(entries, workspace, { force: true });
   assert.equal(calls, 24);
+});
+
+test("thread scope badges name the project folder or global scope", () => {
+  assert.deepEqual(threadScopeBadge({ projectRoot: "C:\\Users\\me\\notes\\", projectBranch: "dev" }), { label: "notes", title: "C:\\Users\\me\\notes\\ (dev)" });
+  assert.deepEqual(threadScopeBadge({ scopeMode: "global", projectRoot: "/stale" }), { label: "Global", title: "Global scope" });
+  assert.equal(threadScopeBadge({ projectRoot: "  " }), null);
+});
+
+test("Rem task threads keep the desktop's archive and read state until new activity", () => {
+  const server = { id: "task", title: "Task", managedRunId: "run", archived: false, updatedAt: at(60) };
+  const local = { ...server, title: "Old title", pinned: false, archived: true, unread: false, readAt: at(30), updatedAt: at(30) };
+  const quiet = mergeTaskThreadMetadata(local, server);
+  assert.equal(quiet.title, "Task", "The Rem service still owns the thread's details");
+  assert.equal(quiet.archived, true, "A user's archive survives a sync without activity");
+  assert.equal(quiet.readAt, local.readAt);
+  assert.equal(quiet.updatedAt, local.updatedAt, "The desktop's later activity time is kept");
+  const step = mergeTaskThreadMetadata(local, server, { activity: true, now: at(5) });
+  assert.equal(step.archived, false, "New activity unarchives the thread");
+  assert.equal(step.unread, false, "A running step is not an unseen completion");
+  assert.equal(step.updatedAt, at(5));
+  const done = mergeTaskThreadMetadata(local, server, { activity: true, completed: true, now: at(1) });
+  assert.deepEqual([done.archived, done.unread, done.updatedAt], [false, true, at(1)]);
+  assert.equal(organizeThreads([threadIndexEntry(done)]).unread[0].id, "task");
+  assert.equal(organizeThreads([threadIndexEntry(quiet)]).archived[0].id, "task");
+});
+
+test("threads Rem's old completion policy archived return to the list once", () => {
+  const legacy = { id: "task", title: "Task", managedRunId: "run", archived: true, archivedAt: at(90), unread: true, updatedAt: at(100) };
+  const restored = mergeTaskThreadMetadata(legacy, legacy);
+  assert.equal(restored.archived, false);
+  assert.equal("archivedAt" in restored, false, "The marker is dropped so a later archive by the user sticks");
+  assert.deepEqual(ids(organizeThreads([threadIndexEntry(restored)]).unread), ["task"]);
+  assert.equal(mergeTaskThreadMetadata(null, legacy).archived, false, "A first sync never applies the old policy");
+  const userArchived = { ...restored, archived: true };
+  assert.equal(mergeTaskThreadMetadata(userArchived, { ...legacy, archived: false, archivedAt: undefined }).archived, true);
+  // A backend that still reports the old stamp can't undo the user's later archive.
+  assert.equal(mergeTaskThreadMetadata(userArchived, legacy).archived, true);
 });

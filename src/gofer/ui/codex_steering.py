@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from gofer.core.command_slots import scoped_command
 from gofer.subscriptions.codex import codex_exec_input
 from gofer.subscriptions.usage import normalize_usage
 from gofer.utils.process import (
@@ -176,11 +177,13 @@ async def stream_codex_turn(
     cwd: Path,
     cancel_event: threading.Event | None,
     max_output_bytes: int | None,
+    env: dict[str, str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
+    child_env = build_subprocess_env(env_with_executable_on_path(command[0], env))
     process = await asyncio.create_subprocess_exec(
-        *_app_server_command(command),
+        *scoped_command(_app_server_command(command), child_env),
         cwd=cwd,
-        env=build_subprocess_env(env_with_executable_on_path(command[0])),
+        env=child_env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

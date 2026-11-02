@@ -39,8 +39,11 @@ requests, then grant again without fleet delegation for chat-only access.
 
 Desktop-to-desktop initiation uses the invitation's persisted LAN endpoint. The
 responder does not infer an initiator's listening address from a connection's
-source port. Set that desktop's private listening host/port explicitly in Settings
-before initiating in the reverse direction. Endpoint changes remain local actions.
+source port. Each desktop session instead ends with a pinned `fleet.request`
+`advertise` record naming the sender's own listener and display name, so the
+reverse direction works without typing an address (see Fleet mesh below). A
+manual address in Settings remains available and is replaced by the next
+announcement.
 Mobile devices cannot receive worker requests. Jobs check the receiving desktop's
 ID, exact granted project UUID and policy revision. Both request IDs and job IDs
 have immutable content checks and lifetime deduplication.
@@ -92,7 +95,8 @@ requires a fresh authenticated snapshot and expires after sixty seconds. Missing
 or stale evidence is unknown; it is not proof of downtime. Running jobs are
 reported from actual device work plus the backend's active ChatJobs snapshot.
 The local status API uses `running_jobs: null` when no fresh inventory exists.
-There is no idle fleet heartbeat through the public relay.
+Paired desktops refresh each other every thirty seconds over the LAN; there is no
+relay heartbeat.
 
 ## File transport revision
 
@@ -114,6 +118,13 @@ remote IDs never accept arbitrary paths or symlinks. Scoped snapshot creation
 requires operating-system support for descriptor-relative no-follow opens. On
 unsupported platforms it fails closed, rather than using unsafe path traversal.
 Cross-platform snapshot support is therefore a remaining verification gate.
+
+Rem's chat gives each phone with **Use Raticode from this phone** a private file
+channel, a UUID derived from both device IDs. File events on it are accepted only
+from that phone and only while desktop control is on. Files Rem names in a reply
+are offered only to the phone that sent the request, and only from Rem's projects,
+the projects shared with that phone, or the Second Brain folder. They use the same
+scoped snapshot.
 
 Public ntfy's free daily message allowance makes large file transfer slow or
 impractical. A 16 KiB application chunk spans several TLS carrier frames. Prefer
@@ -160,3 +171,78 @@ The renderer can stop or steer an active phone turn using the same existing loca
 ## Background parity, October 27, 2026
 
 Phone polling requests use a bounded recent replay window instead of the lifetime inbox, so long background sync cannot exhaust the 100,000-event quota. `src/gofer/devices/remote_control.py` answers phone approval and swarm events only after the per-phone **Allow approvals and swarm controls** opt-in, which is off by default and stored in `device_remote_control`. Workflow decisions reuse `decide_workflow_approval_payload` with `decided_by="phone"`; swarm actions reuse the swarm manager's `control`, `message` and `human_response` paths. Every approval decision must match the current action digest. Thread resource changes only toggle existing resources and need an explicit `set_resources` flag. The provider catalog is read on a worker thread, never on the device event loop. Electron reloads a crashed hidden renderer up to three times an hour and restores a hidden main window if a page-initiated close destroys it, so tray mode keeps phone sync running. See the mobile repository's `docs/mobile-desktop-v2.md` background parity extension.
+
+## Fleet mesh, October 29, 2026
+
+Every desktop session now starts with a `sync.request` whose `after_sequence` is
+the highest outbox sequence already received from that peer. Before this, a
+desktop never acknowledged anything: the responder replayed its whole outbox at
+one record per 200 ms tick on every session and never pruned it. A 100-event
+backlog made each exchange take about twenty seconds, and about 1500 events
+exceeded the 300-second exchange deadline, so fleet work stopped for good. The
+session listener also resumes a phone at its cursor instead of sequence zero.
+The same `sync.snapshot` tells the requesting desktop which threads the peer has
+granted it (thread, title, project, provider and model). Settings and the Rem
+fleet tools use those IDs for `job.submit`; nobody copies UUIDs between machines.
+
+Fleet status probes are read-only and are not journaled as delegated work, so
+polling no longer consumes the 100,000-request lifetime quota. The latest fleet
+and sync snapshot per peer replace each other in `device_peer_snapshots` and no
+longer crowd work answers out of `device_remote_results`. A status request waits
+up to five seconds for fresh answers instead of returning the previous snapshot.
+
+After the answer arrives, the session sends a desktop-only `fleet.request`
+extension, `advertise: {name, lan_endpoint}`, and waits up to three seconds for
+its reply. The receiver accepts it only from an active desktop peer, validates a
+private or loopback address with the existing endpoint rules, and ignores a
+loopback address unless its own listener is loopback-only. A name typed into an
+invitation is kept; an announcement only fills in a missing or default name. An
+older desktop rejects the extension after it has already answered, so mixed
+versions keep working in one direction until both are updated.
+
+`fleet.snapshot` now lists devices paired with a reporting desktop that this
+desktop is not paired with, named `"<name> (via <desktop>)"`, within the
+existing frozen device fields. A phone paired with one desktop therefore sees
+every machine in the fleet. Freshness still applies at each hop; an indirect
+device is reachable only while the reporting desktop's evidence is fresh. Its
+local status entries have `state: "indirect"` and a `via` device ID.
+
+Work still goes only to directly paired desktops, under that desktop's own local
+grant. A desktop does not forward work to its peers: that would let one pairing
+borrow another desktop's grants, which the pairing model rules out. To send work
+to a machine listed "via" another desktop, pair with it directly, or ask Rem on
+the desktop that is paired with it.
+
+## Run threads on another desktop, October 29, 2026
+
+A thread can run on any directly paired desktop. The composer's **Run on** menu,
+next to the permissions menu, lists them; the choice is fixed once the thread has
+a message. The receiving desktop must first turn on **Run threads from this
+desktop** for that peer in Paired devices. It is off by default, is stored in
+`device_thread_hosts`, and turning it off revokes every thread that peer started.
+
+While it is on, the receiving window publishes its open projects and provider
+policies as a hosting template grant (`host_template`), built by the local API
+from canonical, granted paths with `shared_context`, the same as phone thread
+sync. The main desktop reads that desktop's `catalog.snapshot`, picks the project
+whose folder name matches the thread's project (otherwise the first open
+project), and sends `thread.create` with the template ID. The receiving desktop
+applies the requested provider, model, effort and permission mode through the
+existing phone `configure_context` checks. The main desktop records the remote
+thread in `device_remote_threads`; later turns reuse it, so the receiving
+desktop's provider keeps the conversation's context.
+
+Each turn is one pinned session. It sends `chat.submit`, polls
+`thread.history.request` with presentation once a second in the same session
+(separate connections would exceed the listener's per-address admission rate),
+streams settled thoughts and tool steps from the receiving desktop's turn
+journal, and finishes with the `chat.message` text after a terminal
+`request.status`. Stop and steering send `request.cancel` in that session.
+Interactive snapshots are not stored in `device_remote_results`. Phone turns in a
+desktop thread with a machine follow the same path from the main desktop.
+
+Limits: messages are capped at the protocol's 4000 characters, attachments are
+not sent, Rem cannot start child threads from a remote thread, and the receiving
+desktop's window does not list these threads; they run in its backend.
+
+

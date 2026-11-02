@@ -2,8 +2,8 @@
 
 The runtime lives in the backend, never in the renderer. Real LAN networking
 requires an explicit experimental opt-in. Independent review remains required
-for production release. Devices connect only over the local network; there is no
-internet relay.
+for production release. Devices connect over the local network, or over the
+user's own Tailscale network when they opt in; there is no internet relay.
 """
 
 from __future__ import annotations
@@ -11,14 +11,15 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import ipaddress
+import logging
 import os
 import socket
 import sqlite3
 import threading
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from gofer.devices.application import DeviceApplication
 from gofer.devices.client import exchange, pair_desktop, reconnect_desktop
@@ -26,6 +27,19 @@ from gofer.devices.pairing import Invitations, parse_invitation
 from gofer.devices.registry import DeviceRegistry, PairingError
 from gofer.devices.service import DeviceListener
 from gofer.devices.storage import OSSecretStore, SecretStore, StorageError
+from gofer.devices.tailnet import Detection, detect
+
+# Seconds between Tailscale checks while the opt-in is on. A desktop that is not
+# listening yet checks sooner, so starting Tailscale after Raticode still works.
+TAILNET_RECHECK = 120
+TAILNET_RETRY = 20
+
+# Seconds between automatic fleet refreshes. Snapshots stay fresh for sixty.
+FLEET_REFRESH = 30
+# How long a status request waits for paired desktops to answer.
+FLEET_WAIT = 5
+
+logger = logging.getLogger(__name__)
 
 
 def default_device_host(network_enabled: bool) -> str:
@@ -65,9 +79,12 @@ class DeviceControl:
         self.chat_source: Any = None
         self.bridge: Any = None
         self.remote_tasks: dict[tuple[str, str], concurrent.futures.Future[str]] = {}
+        # The request handler and the background loop both start exchanges.
+        self.tasks_lock = threading.Lock()
         self.port: int | None = None
         self.error: str | None = None
-        self.last_fleet_refresh = 0.0
+        self.fleet_probed: dict[str, float] = {}
+        self.fleet_due = False
         self.lock = threading.RLock()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(
@@ -75,6 +92,15 @@ class DeviceControl:
         )
         self.thread.start()
         self.outbound: concurrent.futures.Future[str] | None = None
+        # Tailscale state. Guarded by its own lock, which is never held while
+        # waiting on the device loop, so the loop may take it.
+        self.tailnet_lock = threading.Lock()
+        self.tailnet_task: concurrent.futures.Future[None] | None = None
+        self.tailnet_host: str | None = None
+        self.tailnet_detection: Detection | None = None
+        self.tailnet_error: str | None = None
+        self.tailnet_checked: float | None = None
+        self.tailnet_due = 0.0
         self.configuration_error: str | None = None
         try:
             address = ipaddress.ip_address(self.host)
@@ -88,8 +114,8 @@ class DeviceControl:
                 raise PairingError("experimental_network_opt_in_required")
         except ValueError:
             self.configuration_error = (
-                "Device listener disabled. Configure a local IP address and explicitly opt "
-                "in to experimental networking for LAN access, then restart the desktop."
+                "Device listener disabled. Configure a local IP address and turn on Phone "
+                "and desktop pairing in Settings > Developer > Feature Preview."
             )
             self.error = self.configuration_error
         if self.configuration_error is None and (self.directory / "devices.sqlite3").exists():
@@ -142,9 +168,13 @@ class DeviceControl:
                 if ipaddress.ip_address(self.host).is_loopback
                 else {"host": self.host, "port": port}
             )
+            application.listener_endpoint = {"host": self.host, "port": port}
             self._apply_services()
             self._start_chat()
             asyncio.run_coroutine_threadsafe(self._remote_loop(), self.loop)
+            if registry.tailnet_enabled():
+                # Detection runs a short subprocess; never make startup wait for it.
+                self._tailnet_start()
             self.error = None
 
     def status(self) -> dict[str, Any]:
@@ -176,6 +206,8 @@ class DeviceControl:
                 "device_id": self.registry.identity.device_id if self.registry else None,
                 "fingerprint": self.registry.identity.pin.hex() if self.registry else None,
                 "peers": self.registry.list() if self.registry else [],
+                # Cached evidence only; status polling never opens a connection.
+                "fleet": self.application.fleet() if self.application else [],
                 "dispatch_error": getattr(self.bridge, "error", None),
                 "rem_ready": self.bridge is not None and not getattr(self.bridge, "error", None),
                 "lan_host": self.host if self.listener else None,
@@ -187,11 +219,210 @@ class DeviceControl:
                 "desktop_control_peers": self.application.desktop.enabled()
                 if self.application
                 else [],
+                "thread_host_peers": self.application.hosting() if self.application else [],
                 "outbound": outbound,
                 "invitation_available": bool(self.invitations and self.invitations.current),
+                "tailnet": self._tailnet_status(),
             }
 
+    def _tailnet_status(self) -> dict[str, Any]:
+        enabled = bool(
+            self.experimental_network and self.registry and self.registry.tailnet_enabled()
+        )
+        with self.tailnet_lock:
+            detection, error, checked = (
+                self.tailnet_detection,
+                self.tailnet_error,
+                self.tailnet_checked,
+            )
+            host, running = (
+                self.tailnet_host,
+                bool(self.tailnet_task and not self.tailnet_task.done()),
+            )
+        if not enabled:
+            state = "off"
+        elif host:
+            state = "listening"
+        elif error:
+            state = "error"
+        elif detection is None or running:
+            state = "checking"
+        else:
+            state = "not_detected" if detection.state == "running" else detection.state
+        return {
+            "enabled": enabled,
+            "state": state,
+            "host": host,
+            "port": self.port if host else None,
+            "addresses": list(detection.addresses) if detection and enabled else [],
+            "dns_name": detection.dns_name if detection and enabled else None,
+            "tailnet": detection.tailnet if detection and enabled else None,
+            "source": detection.source if detection and enabled else None,
+            "checked_at": checked if enabled else None,
+            "error": error if enabled else None,
+        }
+
+    def _tailnet_start(self) -> concurrent.futures.Future[None]:
+        """Start one Tailscale check, or join the one already running. Any thread."""
+        with self.tailnet_lock:
+            if self.tailnet_task is None or self.tailnet_task.done():
+                self.tailnet_task = asyncio.run_coroutine_threadsafe(
+                    self._tailnet_refresh(), self.loop
+                )
+            return self.tailnet_task
+
+    async def _tailnet_refresh(self) -> None:
+        """Bind or release the Tailscale address to match the saved choice."""
+        registry = self.registry
+        if registry is None:
+            return
+        try:
+            while True:
+                wanted = self.experimental_network and registry.tailnet_enabled()
+                detection = await asyncio.to_thread(detect) if wanted else None
+                # The user may have switched while the check ran; follow the latest choice.
+                if wanted == (self.experimental_network and registry.tailnet_enabled()):
+                    break
+            await self._tailnet_apply(detection)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("Tailscale check failed: %s", type(error).__name__)
+            with self.tailnet_lock:
+                self.tailnet_error = "check_failed"
+        finally:
+            self.tailnet_due = time.monotonic() + (
+                TAILNET_RECHECK if self.tailnet_host else TAILNET_RETRY
+            )
+
+    async def _tailnet_apply(self, detection: Detection | None) -> None:
+        listener, port = self.listener, self.port
+        host = str(ipaddress.ip_address(detection.host)) if detection and detection.host else None
+        error = None
+        if host != self.tailnet_host and listener is not None and port is not None:
+            if self.tailnet_host is not None:
+                await listener.remove_host(self.tailnet_host)
+                with self.tailnet_lock:
+                    self.tailnet_host = None
+            if host is not None:
+                try:
+                    # Same port as the LAN listener, so one access rule covers both.
+                    await listener.add_host(host, port)
+                    with self.tailnet_lock:
+                        self.tailnet_host = host
+                except OSError:
+                    error = "listen_failed"
+        with self.tailnet_lock:
+            self.tailnet_detection = detection
+            self.tailnet_error = error
+            self.tailnet_checked = time.time() if detection is not None else None
+        if self.application is not None:
+            self.application.tailnet_endpoint = (
+                {"host": self.tailnet_host, "port": port}
+                if self.tailnet_host and port is not None
+                else None
+            )
+
+    def _tailnet_action(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            if self.registry is None:
+                raise StorageError("protected_device_service_unavailable")
+            if not self.experimental_network:
+                raise PairingError("experimental_network_opt_in_required")
+            if body.get("action") == "tailnet":
+                if not isinstance(body.get("enabled"), bool):
+                    raise PairingError("invalid_tailnet_choice")
+                self.registry.save_tailnet_enabled(body["enabled"])
+            task = self._tailnet_start()
+        # Wait outside the lock, so status polling keeps answering during the check.
+        try:
+            task.result(timeout=15)
+        except concurrent.futures.TimeoutError:
+            pass
+        with self.lock:
+            return self.status()
+
+    def _reachable(self, peer: str) -> bool:
+        assert self.registry is not None
+        try:
+            endpoint = self.registry.endpoint(peer)
+        except ValueError:
+            return False
+        return self.experimental_network or ipaddress.ip_address(endpoint["host"]).is_loopback
+
+    def _dispatch(
+        self, key: tuple[str, str], peer: str, event: dict[str, Any]
+    ) -> concurrent.futures.Future[str]:
+        """Run one exchange per key. Runs on any thread and never takes ``self.lock``."""
+        assert self.registry is not None and self.application is not None
+        with self.tasks_lock:
+            running = self.remote_tasks.get(key)
+            if running is not None and not running.done():
+                return running
+            for finished in [k for k, task in self.remote_tasks.items() if task.done()]:
+                del self.remote_tasks[finished]
+            app = self.application
+            task = self.remote_tasks[key] = asyncio.run_coroutine_threadsafe(
+                exchange(
+                    self.registry,
+                    peer,
+                    event,
+                    partial(app.remote_result, peer),
+                    preface=[app.acknowledgment(peer)],
+                    trailer=[app.advertisement(peer)],
+                ),
+                self.loop,
+            )
+            return task
+
+    def _refresh_fleet(
+        self, *, force: bool = False, requested: bool = False
+    ) -> list[concurrent.futures.Future[str]]:
+        """Ask paired desktops for their fleet. Never takes ``self.lock``.
+
+        The background loop asks each desktop every ``FLEET_REFRESH`` seconds. A
+        status request also asks any desktop without a fresh answer right away.
+        """
+        if self.registry is None or self.application is None:
+            return []
+        now = self.registry.clock()
+        started = []
+        for fleet_peer in self.application.fleet():
+            peer = fleet_peer["device_id"]
+            if (
+                fleet_peer["state"] != "active"
+                or fleet_peer["role"] != "desktop"
+                or not self._reachable(peer)
+            ):
+                continue
+            elapsed = now - self.fleet_probed.get(peer, 0.0)
+            stale = fleet_peer["reachability"] != "reachable"
+            if not force and elapsed < (5 if requested and stale else FLEET_REFRESH):
+                continue
+            self.fleet_probed[peer] = now
+            try:
+                started.append(
+                    self._dispatch((peer, "fleet"), peer, self.application.fleet_probe(peer))
+                )
+            except ValueError:
+                continue
+        return started
+
+    def _fleet_status(self) -> dict[str, Any]:
+        with self.lock:
+            if self.registry is None or self.application is None:
+                raise StorageError("protected_device_service_unavailable")
+            pending = self._refresh_fleet(requested=True)
+        if pending:
+            # Answer with what the desktops say now, not the previous snapshot.
+            concurrent.futures.wait(pending, timeout=FLEET_WAIT)
+        with self.lock:
+            assert self.registry is not None and self.application is not None
+            return {"devices": self.application.fleet(), "observed_at": self.registry.clock()}
+
     def action(self, body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("action") == "fleet_status":
+            return self._fleet_status()
+        if body.get("action") in ("tailnet", "tailnet_check"):
+            return self._tailnet_action(body)
         with self.lock:
             action = body.get("action")
             if action == "enable":
@@ -199,27 +430,6 @@ class DeviceControl:
                 return self.status()
             if self.registry is None or self.invitations is None:
                 raise StorageError("protected_device_service_unavailable")
-            if action == "fleet_status":
-                assert self.application is not None
-                now = self.registry.clock()
-                if now - self.last_fleet_refresh >= 30:
-                    self.last_fleet_refresh = now
-                    for fleet_peer in self.registry.list():
-                        if fleet_peer["state"] == "active" and fleet_peer["role"] == "desktop":
-                            try:
-                                self.registry.endpoint(fleet_peer["device_id"])
-                                self.action(
-                                    {
-                                        "action": "send",
-                                        "device_id": fleet_peer["device_id"],
-                                        "thread_id": None,
-                                        "request_id": str(uuid4()),
-                                        "kind": "fleet.request",
-                                    }
-                                )
-                            except ValueError:
-                                continue
-                return {"devices": self.application.fleet(), "observed_at": now}
             if action == "set_endpoint":
                 from gofer.devices.pairing import lan_endpoint
 
@@ -253,17 +463,7 @@ class DeviceControl:
                     else self.application.queue_remote(peer, body)
                 )
                 key = (peer, event["request_id"] + (":cancel" if action == "cancel_work" else ""))
-                if key not in self.remote_tasks or self.remote_tasks[key].done():
-                    app = self.application
-                    self.remote_tasks[key] = asyncio.run_coroutine_threadsafe(
-                        exchange(
-                            self.registry,
-                            peer,
-                            event,
-                            partial(app.remote_result, peer),
-                        ),
-                        self.loop,
-                    )
+                self._dispatch(key, peer, event)
                 return {"device_id": peer, "request_id": event["request_id"], "state": "queued"}
             if action == "offer_file":
                 assert self.application is not None
@@ -297,6 +497,17 @@ class DeviceControl:
                     raise PairingError("invalid_desktop_control_choice")
                 self.application.desktop.enable(str(body.get("device_id", "")), body["enabled"])
                 return self.status()
+            if action == "host_threads":
+                assert self.application is not None
+                if not isinstance(body.get("enabled"), bool):
+                    raise PairingError("invalid_thread_hosting_choice")
+                self.application.enable_hosting(str(body.get("device_id", "")), body["enabled"])
+                return self.status()
+            if action == "host_template":
+                assert self.application is not None
+                # The local API builds this context from canonical, granted project paths.
+                self.application.host_template(str(body.get("device_id", "")), body["context"])
+                return {"saved": True}
             if action == "settings_exchange":
                 assert self.application is not None
                 return self.application.desktop.exchange_settings(
@@ -363,7 +574,11 @@ class DeviceControl:
                 )
                 import segno
 
-                result["qr"] = segno.make(result["uri"], micro=False).svg_data_uri(scale=4)
+                # segno leaves the background transparent by default, which turns
+                # into dark-on-dark in dark mode; paint an opaque white field.
+                result["qr"] = segno.make(result["uri"], micro=False).svg_data_uri(
+                    scale=4, dark="#000", light="#fff", omitsize=True
+                )
                 return result
             if action == "cancel_invitation":
                 self.invitations.cancel()
@@ -401,6 +616,7 @@ class DeviceControl:
                 self.outbound = asyncio.run_coroutine_threadsafe(
                     pair_desktop(self.registry, uri), self.loop
                 )
+                self.outbound.add_done_callback(self._outbound_done)
             elif action == "reconnect":
                 peer = str(body.get("device_id", ""))
                 endpoint = self.registry.endpoint(peer)
@@ -414,6 +630,7 @@ class DeviceControl:
                 self.outbound = asyncio.run_coroutine_threadsafe(
                     reconnect_desktop(self.registry, peer, endpoint), self.loop
                 )
+                self.outbound.add_done_callback(self._outbound_done)
             elif action == "cancel_pairing":
                 if self.outbound is not None:
                     self.outbound.cancel()
@@ -421,33 +638,39 @@ class DeviceControl:
                 raise PairingError("unknown_device_action")
             return self.status()
 
+    def _outbound_done(self, future: concurrent.futures.Future[str]) -> None:
+        # A new or resumed pairing introduces this desktop's address right away.
+        if not future.cancelled() and future.exception() is None:
+            self.fleet_due = True
+
     async def _remote_loop(self) -> None:
+        last_retry = 0.0
         while True:
-            if self.application is not None and self.registry is not None:
-                for peer, event in self.application.queued_remote():
-                    try:
-                        endpoint = self.registry.endpoint(peer)
-                        if (
-                            not self.experimental_network
-                            and not ipaddress.ip_address(endpoint["host"]).is_loopback
-                        ):
-                            continue
-                    except ValueError:
-                        continue
-                    key = (peer, event["request_id"])
-                    if key not in self.remote_tasks or self.remote_tasks[key].done():
-                        # The exact durable request is retried on a fresh authenticated session.
-                        app = self.application
-                        self.remote_tasks[key] = asyncio.run_coroutine_threadsafe(
-                            exchange(
-                                self.registry,
-                                peer,
-                                event,
-                                partial(app.remote_result, peer),
-                            ),
-                            self.loop,
-                        )
-            await asyncio.sleep(30)
+            try:
+                if self.application is not None and self.registry is not None:
+                    now = self.registry.clock()
+                    if now - last_retry >= 30:
+                        last_retry = now
+                        for peer, event in self.application.queued_remote():
+                            if self._reachable(peer):
+                                # The exact durable request is retried on a fresh
+                                # authenticated session.
+                                self._dispatch((peer, event["request_id"]), peer, event)
+                    # Paired desktops keep each other's status, address and shared
+                    # threads current, so any device in the fleet sees the others.
+                    due, self.fleet_due = self.fleet_due, False
+                    self._refresh_fleet(force=due)
+                    if (
+                        self.experimental_network
+                        and time.monotonic() >= self.tailnet_due
+                        and (self.registry.tailnet_enabled() or self.tailnet_host)
+                    ):
+                        # Picks up Tailscale starting late or its address changing.
+                        self._tailnet_start()
+            except Exception as error:  # noqa: BLE001
+                # Keep retrying and refreshing; one bad tick must not end the loop.
+                logger.warning("Paired device background work failed: %s", type(error).__name__)
+            await asyncio.sleep(5)
 
     def attach_services(
         self,

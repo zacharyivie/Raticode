@@ -10,6 +10,38 @@ export function threadIndexEntry(thread) {
     pinned: Boolean(thread.pinned), unread: Boolean(thread.unread), readAt: thread.readAt, scopeIndexed: true };
 }
 
+// A short label for where a thread works: its project folder name, or Global.
+export function threadScopeBadge(thread) {
+  if (thread?.scopeMode === "global") return { label: "Global", title: "Global scope" };
+  const root = String(thread?.projectRoot || "").trim();
+  if (!root) return null;
+  const label = root.replaceAll("\\", "/").split("/").filter(Boolean).at(-1) || root;
+  const branch = thread.projectBranch ? ` (${thread.projectBranch})` : "";
+  return { label, title: `${root}${branch}` };
+}
+
+// New activity brings an archived thread back. A finished turn is unread until
+// the user opens the thread; the window marks it read if it is already on screen.
+export function threadActivityPatch({ completed = false, now = new Date().toISOString() } = {}) {
+  return { archived: false, updatedAt: now, ...(completed ? { unread: true } : {}) };
+}
+
+// The desktop owns how a Rem task thread is organized and whether it was read;
+// the Rem service that runs it reports everything else.
+const LOCAL_TASK_THREAD_FIELDS = ["pinned", "archived", "unread", "readAt"];
+
+export function mergeTaskThreadMetadata(local, server, { activity = false, completed = false, now } = {}) {
+  // Only Rem's old completion policy stamped archivedAt; the user never chose it.
+  const { archivedAt, ...metadata } = server;
+  let result = { ...metadata, ...(archivedAt ? { archived: false } : {}) };
+  if (local) {
+    result = { ...result, ...Object.fromEntries(LOCAL_TASK_THREAD_FIELDS.filter(key => key in local).map(key => [key, local[key]])) };
+    if (local.archivedAt) result.archived = false;
+    if (String(local.updatedAt || "") > String(result.updatedAt || "")) result.updatedAt = local.updatedAt;
+  }
+  return activity || completed ? { ...result, ...threadActivityPatch({ completed, now }) } : result;
+}
+
 export function threadReadTime(thread) {
   return String(thread.readAt || "") > String(thread.updatedAt || "") ? thread.readAt : thread.updatedAt || "";
 }

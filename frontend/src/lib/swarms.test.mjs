@@ -84,3 +84,21 @@ test("swarm requests include separate grants for selected agent repositories", a
     assert.equal(body.workspacePaths, undefined);
   } finally { globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
 });
+
+test("swarm helpers label states, flag attention and count usage per agent", async () => {
+  const { runStateLabel, swarmAttention, agentUsage, parseChecks, formatChecks, fullAccessAgents, swarmOverview } = await import("./swarms.js");
+  assert.equal(runStateLabel("completing"), "Finishing");
+  assert.equal(runStateLabel("retry_wait"), "retry wait");
+  assert.deepEqual(swarmAttention({ state: "running", humanInbox: [{ state: "pending" }, { state: "addressed" }] }), { waiting: 1, label: "1 waiting for you" });
+  assert.equal(swarmAttention({ state: "paused", replanRequired: true }).label, "Stalled");
+  const usage = agentUsage({ attempts: [
+    { ownerId: "a", startedAt: "x", usageHistory: [{ input_tokens: 5, output_tokens: 1 }], usage: null },
+    { ownerId: "a", startedAt: "x", usage: { input_tokens: 10, output_tokens: 2 } },
+  ] }, [{ id: "a", name: "A" }]);
+  assert.deepEqual({ ...usage[0], agent: undefined }, { agent: undefined, turns: 3, input: 15, output: 3, unreported: 1 });
+  const checks = [["npm", "test"], ["ruff", "check", "src dir"]];
+  assert.deepEqual(parseChecks(formatChecks(checks)), checks);
+  assert.deepEqual(parseChecks("\n  \n"), []);
+  assert.deepEqual(fullAccessAgents([{ permissionMode: "bypassPermissions" }, { permissionMode: "plan" }]).length, 1);
+  assert.equal(swarmOverview({ state: "paused", replanRequired: true, objectives: [] }, []).title, "Stalled: needs a new plan");
+});

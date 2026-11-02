@@ -5,6 +5,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from gofer.core.provider_permissions import provider_permission_args
+from gofer.devices.registry import device_id
 from gofer.ui.device_chat import validate_context
 
 
@@ -67,6 +68,10 @@ def shared_context(
             },
         },
     }
+    machine = metadata.get("machine")
+    if isinstance(machine, str) and machine:
+        # A paired desktop runs this thread; phone turns go there too.
+        context["machine"] = device_id(machine)
     if working:
         context["project_path"] = str(working)
         context = validate_context(context)

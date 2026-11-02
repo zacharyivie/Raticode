@@ -4,6 +4,8 @@ const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const os = require('node:os');
+const { featureEnv, featureStates, readFeatureChoices, writeFeatureChoice } = require('../feature-preview.cjs');
 
 const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
 const startupSource = source.slice(source.indexOf('function startBackend('), source.indexOf('function getBackendCommand()'));
@@ -19,7 +21,10 @@ function harness(t) {
   const context = {
     reportPdfService: { env: { RATICODE_REPORT_PDF_URL: 'http://127.0.0.1:1234/pdf', RATICODE_REPORT_PDF_TOKEN: 'pdf-test-token' } },
     backendPathGrants: { reset() {} },
-    process: { env: {}, stderr: { write() {} } },
+    process: { env: { RATICODE_EXPERIMENTAL_ORGANIZATIONS: '1' }, stderr: { write() {} } },
+    featureEnv,
+    // Settings turned pairing on and Organizations off.
+    featureChoices: () => ({ 'device-network': true, organizations: false }),
     console: { log() {} },
     setTimeout, clearTimeout,
     // Keep the old deadline available so this test also fails against the old code.
@@ -34,6 +39,9 @@ function harness(t) {
       // The backend alone may grant and revoke Rem's browser access.
       assert.equal(options.env.GOFER_BROWSER_SERVICE_URL, 'http://127.0.0.1:4100/browser');
       assert.equal(options.env.GOFER_BROWSER_ADMIN_TOKEN, 'b'.repeat(64));
+      // Feature Preview choices replace the inherited environment.
+      assert.equal(options.env.RATICODE_DEVICE_EXPERIMENTAL_NETWORK, '1');
+      assert.equal('RATICODE_EXPERIMENTAL_ORGANIZATIONS' in options.env, false);
       return child;
     },
     createBackendLogStream: () => null,
@@ -108,4 +116,22 @@ test('backend crash after readiness still reaches crash handling', async t => {
   child.emit('exit', 1, null);
   assert.equal(crashes.length, 1);
   assert.match(crashes[0].message, /Backend exited with code 1/);
+});
+
+test('feature preview choices persist and fall back to the launch environment', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-features-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'feature-preview.json');
+  const env = { RATICODE_EXPERIMENTAL_ORGANIZATIONS: '1' };
+  assert.deepEqual(readFeatureChoices(file), {});
+  assert.deepEqual(featureStates({}, env), { organizations: true, 'device-network': false });
+  writeFeatureChoice(file, 'device-network', true);
+  writeFeatureChoice(file, 'organizations', false);
+  assert.deepEqual(readFeatureChoices(file), { 'device-network': true, organizations: false });
+  assert.deepEqual(featureStates(readFeatureChoices(file), env), { organizations: false, 'device-network': true });
+  assert.throws(() => writeFeatureChoice(file, 'swarms', true), /Unknown feature preview/);
+  assert.throws(() => writeFeatureChoice(file, 'organizations', 'yes'), /Choose on or off/);
+  fs.writeFileSync(file, '{not json');
+  assert.deepEqual(readFeatureChoices(file), {});
+  assert.deepEqual(featureEnv({}, env), env);
 });

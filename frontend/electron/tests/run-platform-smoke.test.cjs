@@ -12,7 +12,7 @@ for (const platform of ["linux", "win32", "darwin"]) {
     const release = path.resolve(__dirname, "../../release");
     const prefix = { linux: "linux", win32: "win", darwin: "mac" }[platform];
     const unpacked = path.join(release, `${prefix}-unpacked`);
-    const env = { ELECTRON_RUN_AS_NODE: "1", CI: "true" };
+    const env = { ELECTRON_RUN_AS_NODE: "1", CI: "true", WAYLAND_DISPLAY: "wayland-1" };
     vm.runInNewContext(source, {
       __dirname,
       console,
@@ -20,6 +20,7 @@ for (const platform of ["linux", "win32", "darwin"]) {
       require: (name) => {
         if (name === "electron") return "/fixture/electron";
         if (name === "node:path") return path;
+        if (name === "./background-display.cjs") return require(name);
         if (name === "node:child_process") return {
           spawnSync: (...args) => { calls.push(args); return { status: 0 }; },
         };
@@ -42,7 +43,10 @@ for (const platform of ["linux", "win32", "darwin"]) {
       const fixture = launchArgs.pop();
       fixtures.push(path.basename(fixture));
       assert.equal(path.dirname(fixture), __dirname);
-      assert.deepEqual(launchArgs, platform === "linux" ? ["-a", "/fixture/electron", "--no-sandbox"] : []);
+      assert.deepEqual(launchArgs, platform === "linux"
+        ? ["-a", "-s", "-screen 0 1920x1080x24", "/fixture/electron", "--ozone-platform=x11", "--no-sandbox"]
+        : []);
+      assert.equal(options.env.WAYLAND_DISPLAY, platform === "linux" ? undefined : "wayland-1");
       assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined);
       assert.equal(options.env.CI, "true");
       assert.equal(options.env.RATICODE_SMOKE_ASAR, path.join(unpacked, "app.asar"));

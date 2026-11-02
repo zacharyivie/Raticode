@@ -200,7 +200,7 @@ file hashes. Publication verifies that manifest, the successful main run and eve
 remote asset before changing draft visibility. Verification of a downloaded artifact is:
 
 ```sh
-gh attestation verify ./ARTIFACT --repo zacharyivie/gofer-flow
+gh attestation verify ./ARTIFACT --repo zacharyivie/Raticode
 ```
 
 Repository administrators must restrict `v*` tag creation and protect release

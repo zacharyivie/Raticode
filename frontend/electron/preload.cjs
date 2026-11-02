@@ -149,6 +149,10 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     action: (action) => invokeDesktop("gofer:developer-action", { action }),
     log: (message) => invokeDesktop("gofer:renderer-log", { message }),
   },
+  features: {
+    get: () => invokeDesktop("gofer:feature-preview"),
+    set: (id, enabled) => invokeDesktop("gofer:set-feature-preview", { id, enabled }),
+  },
   rem: {
     settings: () => invokeDesktop("gofer:rem-settings"),
     configure: (key, value) => invokeDesktop("gofer:configure-rem", { key, value, grantId: typeof value === "string" ? grantForPath(value) : "" }),
@@ -209,6 +213,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     gitWorktrees: (projectRoot) => gitWorktrees(projectRoot),
     addWorktree: (options = {}) => addWorktree(options),
     removeWorktree: (options = {}) => removeWorktree(options),
+    watchGit: (projectRoot, handlers = {}) => watchGit(projectRoot, handlers),
     pathGrantForApi: (targetPath) =>
       grantForPath(targetPath),
     grantUserPath: (targetPath) => invokeDesktop("gofer:grant-user-path", { targetPath }),
@@ -241,6 +246,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
     closePreview: (id) => invokeDesktop("gofer:close-media-preview", { id: typeof id === "string" ? id : "" }),
     readPreview: (targetPath) =>
       readBinaryPreview(targetPath),
+    readAttachment: (targetPath) => invokeDesktop("gofer:read-attachment-file", { targetPath: typeof targetPath === "string" ? targetPath : "", grantId: grantForPath(targetPath) }),
     read: (targetPath) =>
       readTextFile(targetPath),
     write: (options = {}) =>
@@ -503,6 +509,35 @@ function gitHistory(projectRoot, options = {}) {
 
 function gitWorktrees(projectRoot) {
   return invokeDesktop("gofer:git-worktrees", { grantId: grantForPath(projectRoot), projectRoot });
+}
+
+// Returns a stop function at once. The main process watches only Git metadata,
+// and sends just the changed categories, never paths or file contents.
+function watchGit(projectRoot, { onChange, onReady } = {}) {
+  let watchId = "";
+  let stopped = false;
+  const listener = (_event, payload) => {
+    if (!stopped && watchId && payload?.watchId === watchId && typeof onChange === "function") {
+      onChange({ kinds: Array.isArray(payload.kinds) ? payload.kinds.filter((kind) => typeof kind === "string") : [] });
+    }
+  };
+  ipcRenderer.on("gofer:git-changed", listener);
+  invokeDesktop("gofer:git-watch", { grantId: grantForPath(projectRoot), projectRoot: typeof projectRoot === "string" ? projectRoot : "" })
+    .then((result) => {
+      if (stopped) {
+        if (result?.watchId) invokeDesktop("gofer:git-unwatch", { watchId: result.watchId }).catch(() => {});
+        return;
+      }
+      watchId = result?.active ? String(result.watchId || "") : "";
+      if (typeof onReady === "function") onReady(watchId ? result.mode : "unavailable");
+    })
+    .catch(() => { if (!stopped && typeof onReady === "function") onReady("unavailable"); });
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    ipcRenderer.removeListener("gofer:git-changed", listener);
+    if (watchId) invokeDesktop("gofer:git-unwatch", { watchId }).catch(() => {});
+  };
 }
 
 function addWorktree(options = {}) {

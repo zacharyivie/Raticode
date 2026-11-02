@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gofer-flow"
-version = "0.4.0"
+version = "0.5.0"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
@@ -25,7 +25,7 @@ dependencies = [
     "referencing>=0.35",
     "tzdata>=2026.4",
     "watchdog>=6.0.0",
-    "pypdf>=6.1",
+    "pypdf>=6.21.4",
     "fastembed>=0.7",
     "bibtexparser>=1.4,<2",
     "vosk>=0.3.45; sys_platform != 'darwin'",

@@ -20,3 +20,5 @@
 .org-sidebar-hint, .org-sidebar-error { padding: 14px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .org-sidebar-hint { color: rgb(var(--color-muted)); }
 .org-sidebar-error { color: #eb9f9b; }
+.org-sidebar-list small.org-sidebar-reason { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.org-sidebar-list > .org-sidebar-toggle { display: block; padding: 8px 9px; font-size: 11px; color: rgb(var(--color-muted)); }

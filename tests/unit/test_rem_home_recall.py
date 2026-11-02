@@ -27,7 +27,8 @@ def linked_run(store: RemHomeStore, config=None, project=None):
             state="succeeded", artifacts=[{"path": "/reports/youtube.html", "sha256": "digest"}]
         )
         store.put(db, "runs", run)
-        store.archive_run_threads(db, run)
+        thread = store.get(db, "threads", run["thread_id"])
+        store.put(db, "threads", {**thread, "archived": True})
     return run
 
 
@@ -158,3 +159,20 @@ def test_recall_validates_controller_read_requests():
         Recall.model_validate({"threads": [{"thread_id": "id", "path": "/etc/passwd"}]})
     with pytest.raises(ValueError):
         Recall(queries=["query"] * 4)
+
+
+def test_restart_returns_threads_the_old_completion_policy_archived(tmp_path: Path):
+    store = RemHomeStore(tmp_path)
+    run = linked_run(store)
+    other = linked_run(store)
+    with store.connect() as db:
+        # The old policy archived finished task threads and stamped archivedAt.
+        legacy = store.get(db, "threads", run["thread_id"])
+        store.put(db, "threads", {**legacy, "archived": True, "archivedAt": "2026-10-30T00:00:00Z"})
+    RemHomeStore(tmp_path)
+    with store.read() as db:
+        restored = store.get(db, "threads", run["thread_id"])
+        untouched = store.get(db, "threads", other["thread_id"])
+    assert restored["archived"] is False
+    assert "archivedAt" not in restored
+    assert untouched["archived"] is True

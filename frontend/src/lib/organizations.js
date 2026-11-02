@@ -127,7 +127,7 @@ export function configurationChanges(before, after, path = "") {
 export const TASK_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 export const TASK_PRIORITIES = ["critical", "high", "medium", "low"];
 export const STATUS_LABELS = { backlog: "Backlog", todo: "To do", in_progress: "In progress", in_review: "In review",
-  blocked: "Blocked", done: "Done", cancelled: "Cancelled", approval: "Needs approval" };
+  blocked: "Blocked", done: "Done", cancelled: "Cancelled", approval: "Needs approval", attention: "Needs you" };
 const GROUP_ORDER = ["approval", "in_progress", "in_review", "todo", "blocked", "backlog", "done", "cancelled"];
 
 export const plural = (count, noun, many = `${noun}s`) => `${count} ${count === 1 ? noun : many}`;
@@ -163,8 +163,45 @@ export function actorLabel(actor = "", employees = []) {
 }
 
 export function employeeStatus(employee, tasks = []) {
-  if (tasks.some(task => task.assignee === employee.id && task.claim)) return "working";
+  const own = tasks.filter(task => task.assignee === employee.id);
+  if (own.some(task => task.claim)) return "working";
+  if (own.some(task => ["blocked", "in_review"].includes(task.status))) return "attention";
   return employee.paused ? "paused" : "available";
+}
+
+// Codex and the CLI-managed providers don't report dollar cost, so dollar budgets pause them.
+const COST_REPORTING = new Set(["claude_code"]);
+export const reportsCost = provider => COST_REPORTING.has(provider);
+const DANGEROUS_MODES = new Set(["danger-full-access", "bypassPermissions"]);
+export const dangerousPermission = mode => DANGEROUS_MODES.has(mode);
+
+// What needs the user right now, for the overview strip.
+export function attentionSummary(tasks = [], runtime = {}) {
+  const open = tasks.filter(isOpenTask);
+  return {
+    blocked: open.filter(task => task.status === "blocked").length,
+    review: open.filter(task => task.status === "in_review").length,
+    approval: open.filter(needsApproval).length,
+    requests: Object.values(runtime.consentRequests || {}).filter(request => request.status === "pending").length,
+    running: open.filter(task => task.claim).length,
+  };
+}
+
+// The current UTC month's company totals.
+export function monthUsage(runtime = {}, now = new Date()) {
+  const account = runtime.usage?.[now.toISOString().slice(0, 7)]?.company || {};
+  return { runs: account.turns || 0, tokens: account.tokens ?? null, cost: account.turns ? usageCost(account) : formatUsd(0) };
+}
+
+// One readable line per stored provider event of a run.
+export function transcriptEntries(events = []) {
+  return events.map((event, index) => {
+    const body = event.message?.body ?? event.text ?? event.delta ?? event.error ?? event.command ?? event.summary;
+    const label = { thought: "Thinking", final: "Final answer", error: "Error", usage: "Usage", tool: "Tool", tool_call: "Tool", command: "Command" }[event.type]
+      || (event.type ? event.type.replaceAll("_", " ").replace(/^./, c => c.toUpperCase()) : "Update");
+    const detail = event.type === "usage" ? Object.entries(event.usage || {}).map(([key, value]) => `${key}: ${value}`).join(", ") : body;
+    return { key: event.sequence ?? index, label, text: typeof detail === "string" ? detail : JSON.stringify(detail ?? event) };
+  });
 }
 
 // Approval-gated tasks lead the queue; other groups follow the task lifecycle.
@@ -176,11 +213,12 @@ export function taskGroups(tasks) {
 
 const FIELD_LABELS = {
   name: "Name", slug: "Package slug", description: "Purpose", instructions: "Instructions", goals: "Goals",
-  employees: "Employees", projects: "Initiatives", projectRoots: "Raticode projects", teams: "Teams", title: "Title", role: "Role", reportsTo: "Reports to",
+  employees: "Employees", projects: "Initiatives", projectRoots: "Project folders", teams: "Teams", title: "Title", role: "Role", reportsTo: "Reports to",
   provider: "Provider", model: "Model", effort: "Effort", permissionMode: "Permission mode", resources: "Tools",
   skills: "Skills", paused: "Paused", heartbeatSeconds: "Heartbeat", memory: "Persistent memory",
-  monthlyBudgetUsd: "Monthly budget", monthlyTurnLimit: "Monthly turn limit", maxConcurrency: "Concurrent employees",
-  maxTaskTurns: "Turns per task", turnTimeoutSeconds: "Turn timeout", remSecondBrain: "Second Brain",
+  monthlyBudgetUsd: "Monthly budget", monthlyTurnLimit: "Monthly run limit", maxConcurrency: "Concurrent employees",
+  maxTaskTurns: "Runs per task", turnTimeoutSeconds: "Run time limit", monthlyTokenLimit: "Monthly token limit",
+  maxChildTasksPerTurn: "Tasks one run can create", maxDelegationDepth: "Delegation depth", workspaceIsolation: "Workspace isolation", blockGitPush: "Block git push", remSecondBrain: "Second Brain",
   remReportTheme: "Report theme", packageFiles: "Package files", metadata: "Metadata", owner: "Owner",
   manager: "Manager", workspacePath: "Workspace folder", mcpServers: "MCP servers", shell: "Run commands", web: "Search the web",
 };
@@ -227,6 +265,12 @@ export function activityEntries(events, tasks = []) {
     if (event.kind === "configuration_restored") Object.assign(entry, { text: `Restored revision ${payload.restoredFrom} as revision ${payload.revision}`, detail: payload.reason || "" });
     if (event.kind === "organization_control") entry.text = payload.state === "running" ? "Started work" : "Paused work";
     if (event.kind === "runtime_recovered") Object.assign(entry, { text: "Paused after Raticode restarted", detail: payload.reason || "" });
+    if (event.kind === "consent_requested") Object.assign(entry, { text: "Asked for your approval", detail: payload.summary || "" });
+    if (event.kind === "consent_decided") Object.assign(entry, { text: payload.decision === "approve" ? "Approved Rem's request" : "Declined Rem's request", detail: payload.error || "" });
+    if (event.kind === "organization_archived") entry.text = "Archived the organization";
+    if (event.kind === "organization_restored") entry.text = "Restored the organization from the archive";
+    if (event.kind === "worktree_created") Object.assign(entry, { text: `Created a worktree for ${taskTitle(payload, tasks)}`, detail: payload.branch ? `Branch ${payload.branch}` : "" });
+    if (event.kind === "worktree_released") Object.assign(entry, { text: `Finished the worktree for ${taskTitle(payload, tasks)}`, detail: payload.branch ? `Branch ${payload.branch}` : "" });
     if (event.kind === "dispatch") Object.assign(entry, { actor: payload.employeeId ? `employee:${payload.employeeId}` : event.actor, text: `Started a turn on ${taskTitle(payload, tasks)}` });
     if (event.kind === "turn_finished") {
       if (payload.discarded) Object.assign(entry, { text: "Discarded a turn", detail: payload.reason || "" });

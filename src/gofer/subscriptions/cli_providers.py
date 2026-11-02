@@ -419,6 +419,30 @@ def cli_command(
     return command
 
 
+# Linux rejects any single argument over 128 KB.
+ARGUMENT_PROMPT_LIMIT = 96 * 1024
+
+
+def cli_prompt_input(provider: str, command: list[str]) -> tuple[list[str], bytes | None]:
+    """Move a cli_command prompt to stdin, avoiding OS command-line size limits.
+
+    Cursor and OpenCode read piped stdin as the prompt when none is given. Copilot
+    documents piped stdin as a prompt source too, but keeps its long-proven argument
+    unless the prompt would exceed the OS limit.
+    """
+    if provider == "opencode":
+        rest, prompt = command[:-1], command[-1]
+        # The end-of-options marker only separates --file values from the prompt.
+        if rest and rest[-1] == "--":
+            rest = rest[:-1]
+        return rest, prompt.encode("utf-8")
+    index = command.index("-p")
+    prompt = command[index + 1]
+    if provider == "copilot" and len(prompt.encode("utf-8")) <= ARGUMENT_PROMPT_LIMIT:
+        return command, None
+    return [*command[:index], *command[index + 2 :]], prompt.encode("utf-8")
+
+
 async def check_cursor_plugins(
     executable: str, cancel_event: threading.Event | None = None
 ) -> None:
@@ -676,6 +700,7 @@ async def stream_cli(
     cancel_event: threading.Event | None = None,
     timeout: float | None = None,
     max_output_bytes: int | None = DEFAULT_RESOURCE_LIMITS.max_subprocess_output_bytes,
+    stdin: bytes | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     # Trust only the selected working directory for this invocation.
     # Tool permissions remain controlled by cli_invocation.
@@ -688,6 +713,7 @@ async def stream_cli(
     stderr = ""
     source = stream_subprocess(
         command,
+        stdin=stdin,
         cwd=cwd,
         env=env,
         cancel_event=cancel_event,
@@ -815,6 +841,7 @@ class CliSubscription(Subscription):
     ) -> AgentResult:
         start = time.monotonic()
         command = self._build_command(prompt, tools, mcp_servers, extra_paths, provider_settings)
+        command, stdin = cli_prompt_input(self.provider, command)
         thoughts: list[str] = []
         final: dict[str, Any] = {
             "exitCode": 1,
@@ -839,6 +866,7 @@ class CliSubscription(Subscription):
                 timeout=timeout,
                 cancel_event=cancel_event,
                 max_output_bytes=max_output_bytes,
+                stdin=stdin,
             ):
                 if event["type"] == "thought":
                     thoughts.append(event["text"])

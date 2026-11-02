@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -118,14 +119,42 @@ def test_release_metadata_uses_agpl_3_only() -> None:
 
 
 def test_release_metadata_uses_canonical_repository() -> None:
-    repository = "https://github.com/zacharyivie/gofer-flow"
+    repository = "https://github.com/zacharyivie/Raticode"
     frontend_package = _read_json(REPO_ROOT / "frontend" / "package.json")
 
     assert frontend_package["homepage"] == repository
     assert frontend_package["build"]["publish"] == [
-        {"provider": "github", "owner": "zacharyivie", "repo": "gofer-flow"}
+        {"provider": "github", "owner": "zacharyivie", "repo": "Raticode"}
     ]
     assert repository in (REPO_ROOT / "scripts" / "package-cli-linux.sh").read_text(encoding="utf8")
+    assert f'RELEASES_URL = "{repository}/releases"' in (
+        REPO_ROOT / "frontend" / "electron" / "main.js"
+    ).read_text(encoding="utf8")
+
+    # Every repository link a release ships or publishes must name the same
+    # repository, so updates, packages and crash reports never split.
+    release_files = [
+        "frontend/package.json",
+        "frontend/electron/main.js",
+        "scripts/bump-version.cjs",
+        "scripts/package-cli-linux.sh",
+        "packaging/arch/PKGBUILD",
+        "packaging/arch/.SRCINFO",
+        "packaging/arch-cli/PKGBUILD",
+        "packaging/arch-cli/.SRCINFO",
+        "packaging/licenses/README.md",
+        "docs/releasing.md",
+        "docs/security/release-verification.md",
+        "website/.vitepress/config.ts",
+        "website/data/releases.ts",
+    ]
+    for name in release_files:
+        text = (REPO_ROOT / name).read_text(encoding="utf8")
+        for owner_repo in re.findall(
+            r"github\.com/zacharyivie/([A-Za-z0-9_.-]*[A-Za-z0-9_-])", text
+        ):
+            assert owner_repo.removesuffix(".git") == "Raticode", f"{name}: {owner_repo}"
+        assert "--repo zacharyivie/" not in text or "--repo zacharyivie/Raticode" in text, name
 
 
 def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path) -> None:
@@ -163,7 +192,7 @@ def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path)
     assert "pkgver = 1.2.3" in arch_srcinfo
     assert (
         "source_x86_64 = Raticode-1.2.3-x86_64.AppImage::"
-        "https://github.com/zacharyivie/gofer-flow/releases/download/v1.2.3/"
+        "https://github.com/zacharyivie/Raticode/releases/download/v1.2.3/"
         "Raticode-1.2.3-x86_64.AppImage"
     ) in arch_srcinfo
     assert f"sha256sums_x86_64 = {appimage_sha.lower()}" in arch_srcinfo
@@ -176,9 +205,35 @@ def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path)
     assert "pkgver = 1.2.3" in cli_srcinfo
     assert (
         "source_x86_64 = gof-linux-x64-1.2.3::"
-        "https://github.com/zacharyivie/gofer-flow/releases/download/v1.2.3/gof-linux-x64"
+        "https://github.com/zacharyivie/Raticode/releases/download/v1.2.3/gof-linux-x64"
     ) in cli_srcinfo
     assert f"sha256sums_x86_64 = {cli_sha}" in cli_srcinfo
+
+
+def test_bump_version_moves_manifests_off_the_previous_repository_address(
+    tmp_path: Path,
+) -> None:
+    repo = _copy_release_fixture(tmp_path)
+    for package in ("arch", "arch-cli"):
+        manifest = repo / "packaging" / package / ".SRCINFO"
+        manifest.write_text(
+            manifest.read_text(encoding="utf8").replace(
+                "zacharyivie/Raticode", "zacharyivie/gofer-flow"
+            ),
+            encoding="utf8",
+        )
+
+    result = _run(["node", "scripts/bump-version.cjs", "1.2.5"], cwd=repo)
+
+    assert result.returncode == 0, result.stderr
+    for package, asset in (
+        ("arch", "Raticode-1.2.5-x86_64.AppImage"),
+        ("arch-cli", "gof-linux-x64"),
+    ):
+        srcinfo = (repo / "packaging" / package / ".SRCINFO").read_text(encoding="utf8")
+        assert (
+            f"https://github.com/zacharyivie/Raticode/releases/download/v1.2.5/{asset}" in srcinfo
+        )
 
 
 def test_bump_version_without_checksums_keeps_existing_checksum_values(tmp_path: Path) -> None:

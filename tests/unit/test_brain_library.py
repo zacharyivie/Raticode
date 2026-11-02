@@ -626,7 +626,13 @@ def test_additional_research_adapters_disable_writes_shell_and_web(library, monk
     async def plugins(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(cli_providers, "cli_command", lambda *args, **kwargs: [provider])
+    monkeypatch.setattr(
+        cli_providers,
+        "cli_command",
+        lambda name, prompt, **kwargs: (
+            [name, prompt] if name == "opencode" else [name, "-p", prompt]
+        ),
+    )
     monkeypatch.setattr(cli_providers, "cli_invocation", invocation)
     monkeypatch.setattr(cli_providers, "stream_cli", events)
     monkeypatch.setattr(cli_providers, "check_cursor_plugins", plugins)

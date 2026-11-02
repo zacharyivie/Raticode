@@ -19,6 +19,8 @@ function installPermissionPolicy(remoteSession, studioSession, getStudio, option
     const requestingUrl = details.requestingUrl || details.securityOrigin;
     if (requestingUrl && requestingUrl !== "file:///" && requestingUrl !== "file://" && !isStudioDocument(requestingUrl, options)) return false;
     if (permission === "clipboard-sanitized-write") return true;
+    // Rem tells the user when background work finishes or needs them.
+    if (permission === "notifications") return true;
     if (permission !== "media") return false;
     // Transcription needs audio only. Electron's check callback uses mediaType,
     // while the request callback supplies mediaTypes.

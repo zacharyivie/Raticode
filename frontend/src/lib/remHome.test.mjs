@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changesActiveWork, conversationMessages, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messagesByDay, newTaskDraft, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus } from "./remHome.js";
+import { changesActiveWork, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus } from "./remHome.js";
 
 const NOW = new Date(2026, 9, 7, 10, 0); // Wednesday, 7 October 2026, 10:00 local
 const at = (days, hour, minute = 0) => new Date(2026, 9, 7 + days, hour, minute).toISOString();
@@ -63,6 +63,24 @@ test("tasks group by what they need, hiding deleted tasks and empty groups", () 
 test("messages split by day in order", () => {
   const days = messagesByDay([{ id: 1, created_at: at(-1, 9) }, { id: 2, created_at: at(0, 8) }, { id: 3, created_at: at(0, 9) }], NOW);
   assert.deepEqual(days.map(day => [day.label, day.messages.map(message => message.id)]), [["Yesterday", [1]], ["Today", [2, 3]]]);
+});
+
+test("messages without a usable date stay with their neighbors", () => {
+  const days = messagesByDay([{ id: "a" }, { id: "b", created_at: "soon" }, { id: "c", created_at: at(0, 8) }, { id: "d", created_at: null }, { id: "e", created_at: at(0, 9) }, { id: "f", created_at: at(-1, 9) }, { id: "g", created_at: at(0, 10) }], NOW);
+  assert.deepEqual(days.map(day => [day.key, day.label, day.messages.map(message => message.id)]),
+    [["a", "Earlier", ["a", "b"]], ["c", "Today", ["c", "d", "e"]], ["f", "Yesterday", ["f"]], ["g", "Today", ["g"]]]);
+});
+
+test("each message has a time stamp, with the day on older messages", () => {
+  const today = messageStamp(at(0, 9, 5), NOW);
+  assert.equal(today.label, "9:05 AM");
+  assert.equal(today.iso, at(0, 9, 5));
+  assert.match(today.full, /Wednesday.*October.*7.*2026, 9:05 AM/);
+  assert.equal(messageStamp(at(0, 14), NOW).label, "2:00 PM");
+  assert.equal(messageStamp(at(-1, 23, 59), NOW).label, "Yesterday, 11:59 PM");
+  assert.match(messageStamp(at(-6, 0, 30), NOW).label, /^Oct 1, 12:30 AM$/);
+  assert.match(messageStamp(new Date(2025, 11, 31, 8).toISOString(), NOW).label, /^Dec 31, 2025, 8:00 AM$/);
+  for (const value of [undefined, null, "", "not a date", "2026-13-45T99:00:00Z"]) assert.equal(messageStamp(value, NOW), null, String(value));
 });
 
 test("operational problems are updates, while essential questions need the user", () => {
@@ -153,4 +171,47 @@ test("only the newest message for a run shows live status", () => {
     { id: "finished-a", work: work("a") },
   ]);
   assert.deepEqual([...live].sort(), ["finished-a", "queued-b"]);
+});
+
+test("check counts separate failures from checks that never ran", () => {
+  const criteria = results => results.map((result, index) => ({ id: String(index), result }));
+  assert.equal(criteriaSummary([]), "");
+  assert.equal(criteriaSummary(criteria(["unknown", "unknown", "unknown", "unknown", "unknown"])), "5 checks not run yet");
+  assert.equal(criteriaSummary(criteria(["unknown"])), "Not checked yet");
+  assert.equal(criteriaSummary(criteria(["pass", "pass"])), "2 of 2 checks passed");
+  assert.equal(criteriaSummary(criteria(["pass", "fail", "unknown"])), "1 of 3 passed, 1 failed, 1 not checked");
+  assert.equal(criteriaSummary(criteria(["fail", "fail"])), "0 of 2 passed, 2 failed");
+});
+
+test("one-line recaps show Rem's link labels instead of Markdown", () => {
+  const report = "/home/me/Projects/second-brain/reports/rem/Reports/Raticode/launch plan.html";
+  assert.equal(plainMarkdown(`The [cited report](<${report}>) covers it.`), "The cited report covers it.");
+  assert.equal(plainMarkdown("Uses **Claude Code with `opus` at high effort** and *one* setting."), "Uses Claude Code with opus at high effort and one setting.");
+  assert.equal(plainMarkdown("[Cat](https://en.wikipedia.org/wiki/Cat_(disambiguation)) ![A cat](https://x/c.jpg) <https://example.com>"), "Cat A cat https://example.com");
+  assert.equal(plainMarkdown("2*3*4 keeps snake_case_names and [notes](notes.md \"Notes\")"), "2*3*4 keeps snake_case_names and notes");
+  // Shortening never cuts a link in half, because the markup goes first.
+  const recap = taskRecap(`${"Checked the build. ".repeat(14)}[Download the APK](</home/me/Raticode Mobile/apks/app.apk>) is ready.`);
+  assert.ok(recap.length <= 320);
+  assert.doesNotMatch(recap, /\]\(|<\/home/);
+  const blocked = { id: "t", title: "Audit", last_run: { id: "r", state: "blocked", summary_short: `Saved the [audit](<${report}>) but \`npm test\` failed.` } };
+  assert.equal(taskActivity(blocked).label, "Saved the audit but npm test failed.");
+  const before = { ...blocked, active_run: { id: "r", state: "executing" }, last_run: { id: "r", state: "executing" } };
+  assert.equal(finishedRunNotifications([before], [blocked])[0].body, "Saved the audit but npm test failed.");
+});
+
+test("only runs seen working before notify when they finish", () => {
+  const running = { id: "t1", title: "Digest", active_run: { id: "r1", state: "verifying" }, last_run: { id: "r1", state: "verifying" } };
+  const done = { id: "t1", title: "Digest", active_run: null, last_run: { id: "r1", state: "succeeded", summary_short: "Saved today's digest." } };
+  const stuck = { id: "t2", title: "Assess Rem", active_run: null, last_run: { id: "r2", state: "blocked", needs_user: false, summary_short: "The save tool was refused." } };
+  const stuckBefore = { ...stuck, active_run: { id: "r2", state: "executing" }, last_run: { id: "r2", state: "executing" } };
+  assert.deepEqual(finishedRunNotifications(null, [done]), []);
+  assert.deepEqual(finishedRunNotifications([done], [done]), []);
+  assert.deepEqual(finishedRunNotifications([running, stuckBefore], [done, stuck]), [
+    { tag: "rem-run-r1", taskId: "t1", title: "Done: Digest", body: "Saved today's digest." },
+    { tag: "rem-run-r2", taskId: "t2", title: "Couldn't finish: Assess Rem", body: "The save tool was refused." },
+  ]);
+  const cancelled = { ...done, last_run: { id: "r1", state: "cancelled" } };
+  assert.deepEqual(finishedRunNotifications([running], [cancelled]), []);
+  const waiting = { ...running, active_run: { id: "r1", state: "queued", waiting_reason: "Waiting for the 03:00 run before checking again" }, last_run: { id: "r1", state: "queued" } };
+  assert.deepEqual(finishedRunNotifications([running], [waiting]), []);
 });

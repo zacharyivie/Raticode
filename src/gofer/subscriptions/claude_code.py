@@ -8,6 +8,12 @@ from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.subscriptions.base import Subscription
 
 
+def claude_print_input(command: list[str]) -> tuple[list[str], bytes]:
+    """Deliver print-mode prompts intact without OS command-line size limits."""
+    index = command.index("-p")
+    return [*command[:index], *command[index + 2 :]], command[index + 1].encode("utf-8")
+
+
 class ClaudeCodeSubscription(Subscription):
     provider = "claude_code"
     # Print mode cannot read a prompt file outside the workspace without extra permissions.

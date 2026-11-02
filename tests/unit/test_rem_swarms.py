@@ -204,7 +204,7 @@ def test_rem_long_context_is_retrievable_without_bloating_summaries(access: RemS
     assert context not in json.dumps(invoke(access, "list"))
 
 
-def test_rem_can_read_and_answer_human_inbox_but_plan_mode_cannot(access):
+def test_rem_reads_the_human_inbox_but_approvals_are_left_to_the_user(access):
     sid = create(access)
     run = invoke(access, "start", sid, task="Inspect")["run"]
     access.manager._tokens["worker"] = (access.project, sid, "worker", run["id"])
@@ -221,10 +221,52 @@ def test_rem_can_read_and_answer_human_inbox_but_plan_mode_cannot(access):
     assert invoke(readonly, "read", sid, section="human_inbox")["total"] == 1
     with pytest.raises(ValueError, match="read-only"):
         invoke(readonly, "human_response", sid, notificationId=item["id"], decision="proceed")
-    invoke(access, "human_response", sid, notificationId=item["id"], decision="proceed")
-    assert invoke(access, "read", sid, section="human_inbox")["items"][0]["state"] == "addressed"
+    # An agent asked the user. Rem must not approve on the user's behalf.
+    with pytest.raises(ValueError, match="human inbox"):
+        invoke(access, "human_response", sid, notificationId=item["id"], decision="proceed")
+    assert invoke(access, "read", sid, section="human_inbox")["items"][0]["state"] == "pending"
+    access.manager.execution(
+        access.project,
+        sid,
+        {"action": "human_response", "notificationId": item["id"], "decision": "proceed"},
+    )
+    answered = invoke(access, "read", sid, section="human_inbox")["items"][0]
+    assert answered["state"] == "addressed" and answered["respondedBy"] == "user"
     messages = invoke(access, "read", sid, section="board")["items"]
     assert messages[-1]["recipientIds"] == ["worker"]
+
+
+def test_rem_answers_recovery_items_as_rem(access):
+    sid = create(access)
+    invoke(access, "start", sid, task="Inspect")
+    with access.manager._lock:
+        swarm = access.manager._get(access.project, sid)
+        swarm["run"]["attempts"].append(
+            {"id": "lost", "ownerId": "worker", "milestoneId": None, "state": "uncertain"}
+        )
+        access.manager._request_approval(
+            swarm,
+            "worker",
+            {
+                "description": "Interrupted execution; effects unknown.",
+                "recommendedAction": "Inspect the workspace",
+                "attemptId": "lost",
+                "kind": "recovery",
+            },
+        )
+        access.manager._save(swarm)
+    item = invoke(access, "read", sid, section="human_inbox")["items"][0]
+    invoke(
+        access,
+        "human_response",
+        sid,
+        notificationId=item["id"],
+        decision="proceed",
+        resolution="dismiss",
+        instruction="The process had exited",
+    )
+    answered = invoke(access, "read", sid, section="human_inbox")["items"][0]
+    assert answered["state"] == "addressed" and answered["respondedBy"] == "rem"
 
 
 def test_rem_workspace_grants_are_private_and_revalidated(tmp_path: Path) -> None:
@@ -307,28 +349,26 @@ def test_rem_completion_uses_runtime_checks(access: RemSwarmAccess) -> None:
         invoke(readonly, "complete", sid)
     with pytest.raises(ValueError, match="milestones"):
         invoke(access, "complete", sid)
-    invoke(
-        access,
-        "objectives",
-        sid,
-        revision=0,
-        objectives=[
-            {
-                "id": "o",
-                "title": "Review",
-                "milestones": [
-                    {
-                        "id": "m",
-                        "title": "Inspect",
-                        "ownerId": "worker",
-                        "status": "accepted",
-                        "evidence": "User inspected the result",
-                        "waiverReason": "User reviewed artifact",
-                    }
-                ],
-            }
-        ],
-    )
+    objectives = [
+        {
+            "id": "o",
+            "title": "Review",
+            "milestones": [
+                {
+                    "id": "m",
+                    "title": "Inspect",
+                    "ownerId": "worker",
+                    "status": "accepted",
+                    "evidence": "User inspected the result",
+                    "waiverReason": "User reviewed artifact",
+                }
+            ],
+        }
+    ]
+    # Only the user at the desktop can waive verification.
+    with pytest.raises(ValueError, match="from the desktop"):
+        invoke(access, "objectives", sid, revision=0, objectives=objectives)
+    access.manager.objectives(access.project, sid, {"revision": 0, "objectives": objectives})
     with pytest.raises(ValueError, match="deliveries"):
         invoke(access, "complete", sid)
     with access.manager._lock:

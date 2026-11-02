@@ -7,6 +7,7 @@ const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { createBrowserSessions, remOwnerForThread, sameProfile, sanitizePromptResponse } = require("../browser-sessions.cjs");
 const { createBrowserStore } = require("../browser-store.cjs");
 const { PARTITIONS } = require("../browser-policy.cjs");
@@ -72,7 +73,10 @@ class FakeContents extends EventEmitter {
       restore: async (history) => { contents.restored = history; contents.entries = history.entries; contents.index = history.index; contents.url = history.entries[history.index].url; },
     };
     this.debugger = { isAttached: () => false, detach: () => {} };
+    this.mainFrame = { name: "main" };
+    this.downloads = [];
   }
+  downloadURL(url) { this.downloads.push(url); }
   go(index) { this.index = index; this.url = this.entries[index].url; this.emit("did-navigate", {}, this.url); }
   getType() { return "webview"; }
   isDestroyed() { return false; }
@@ -100,7 +104,7 @@ class FakeContents extends EventEmitter {
   input(type = "mouseDown") { this.emit("input-event", {}, { type }); }
 }
 
-function harness({ policy, dialog: dialogOverrides = {} } = {}) {
+function harness({ policy, dialog: dialogOverrides = {}, openWith = null } = {}) {
   const profiles = Object.fromEntries(Object.values(PARTITIONS).map((name) => [name, new FakeProfile(name)]));
   const owner = Object.assign(new EventEmitter(), {
     id: 1,
@@ -118,6 +122,7 @@ function harness({ policy, dialog: dialogOverrides = {} } = {}) {
   const store = createBrowserStore(path.join(directory, "profile"), { writeDelayMs: 1 });
   const opened = [];
   const messages = [];
+  const menus = [];
   const app = {
     getPath: (name) => (name === "downloads" ? downloads : directory),
     getLocale: () => "en-US",
@@ -126,7 +131,7 @@ function harness({ policy, dialog: dialogOverrides = {} } = {}) {
   };
   const browsers = createBrowserSessions({
     app,
-    Menu: { buildFromTemplate: (template) => ({ template, popup() {} }) },
+    Menu: { buildFromTemplate: (template) => { menus.push(template); return { template, popup() {} }; } },
     clipboard: { writeText() {} },
     dialog: {
       showMessageBoxSync: () => 0,
@@ -142,6 +147,7 @@ function harness({ policy, dialog: dialogOverrides = {} } = {}) {
       return target;
     },
     store,
+    openWith,
     quarantineDir: path.join(directory, "quarantine"),
     platform: "linux",
     chromeVersion: "156.0.8078.49",
@@ -170,7 +176,7 @@ function harness({ policy, dialog: dialogOverrides = {} } = {}) {
     return { session, contents, id: session.id };
   }
   const sent = (channel) => owner.sent.filter(([name]) => name === channel).map(([, payload]) => payload);
-  return { app, browsers, profiles, owner, event, open, openRem, sent, store, directory, downloads, opened, contentsById, messages };
+  return { app, browsers, profiles, owner, event, open, openRem, sent, store, directory, downloads, opened, contentsById, messages, menus };
 }
 
 test("tabs present a consistent Chromium identity and Electron's own to Google sign-in", async () => {
@@ -405,6 +411,103 @@ test("downloads: Rem is blocked by default and dangerous files wait for review",
   await assert.rejects(browsers.browserLibrary(null, { action: "download", command: "open", id: entry.id }), /Only finished/);
   await browsers.browserLibrary(null, { action: "download", command: "keep", id: entry.id });
   assert.equal(fs.readFileSync(path.join(downloads, "setup.exe"), "utf8"), "MZ");
+});
+
+test("downloads: finished files list system apps and open only with one of them", async () => {
+  const launched = [];
+  const openWith = {
+    listApps: async (filePath) => [{ id: "kate.desktop", name: "Kate", isDefault: true, path: filePath }],
+    openWith: async (filePath, appId) => { launched.push([filePath, appId]); },
+  };
+  const { open, profiles, browsers, downloads } = harness({ openWith });
+  const web = open({ url: "https://example.com/" });
+  const item = fakeDownload("notes.txt");
+  profiles[PARTITIONS.user].emit("will-download", { preventDefault() {} }, item, web.contents);
+  const pending = (await browsers.browserLibrary(null, { action: "downloads" })).downloads[0];
+  await assert.rejects(browsers.browserLibrary(null, { action: "download-apps", id: pending.id }), /Only finished/);
+  fs.writeFileSync(item.savePath, "hello");
+  item.emit("done", {}, "completed");
+  const { apps } = await browsers.browserLibrary(null, { action: "download-apps", id: pending.id });
+  assert.deepEqual(apps.map((app) => app.path), [path.join(downloads, "notes.txt")]);
+  await browsers.browserLibrary(null, { action: "download", command: "open-with", id: pending.id, appId: "kate.desktop" });
+  assert.deepEqual(launched, [[path.join(downloads, "notes.txt"), "kate.desktop"]]);
+  fs.rmSync(item.savePath);
+  await assert.rejects(browsers.browserLibrary(null, { action: "download", command: "open-with", id: pending.id, appId: "kate.desktop" }), /moved or deleted/);
+  assert.equal(launched.length, 1);
+});
+
+test("Ask Rem about this sends the right-clicked element, but not one from another frame", () => {
+  const { open, menus, sent } = harness();
+  const web = open({ url: "https://example.com/" });
+  const params = { x: 1, y: 1, selectionText: "", linkURL: "", mediaType: "none" };
+  web.contents.emit("ipc-message", { senderFrame: web.contents.mainFrame }, "gofer:browser-context-element", { tag: "button", path: "main > button#buy", text: "Buy now", html: `<button id="buy">${"x".repeat(9000)}</button>`, extra: "ignored" });
+  web.contents.emit("context-menu", {}, { ...params, frame: web.contents.mainFrame });
+  menus.at(-1).find((item) => item.label === "Ask Rem about this").click();
+  const { element } = sent("gofer:browser-command").at(-1);
+  assert.equal(element.tag, "button");
+  assert.equal(element.text, "Buy now");
+  assert.equal(element.html.length, 8000);
+  assert.equal(element.extra, undefined);
+  web.contents.emit("context-menu", {}, { ...params, frame: { name: "ad-frame" } });
+  menus.at(-1).find((item) => item.label === "Ask Rem about this").click();
+  assert.equal(sent("gofer:browser-command").at(-1).element, null);
+});
+
+test("Ask Rem about this works on local files the same way as on web pages", async () => {
+  const { open, menus, sent, directory, browsers, event } = harness();
+  const file = path.join(directory, "report.html");
+  fs.writeFileSync(file, "<h1>Report</h1>");
+  const params = { x: 1, y: 1, selectionText: "Quarterly total", linkURL: "", mediaType: "none" };
+  const asked = (tab) => {
+    tab.contents.emit("ipc-message", { senderFrame: tab.contents.mainFrame }, "gofer:browser-context-element", { tag: "td", text: "42" });
+    tab.contents.emit("context-menu", {}, { ...params, frame: tab.contents.mainFrame });
+    menus.at(-1).find((item) => item.label === "Ask Rem about this").click();
+    return sent("gofer:browser-command").at(-1);
+  };
+  for (const options of [{ path: file }, { url: file }, { url: "https://example.com/" }]) {
+    const tab = open(options);
+    const command = asked(tab);
+    assert.equal(command.action, "ask-rem");
+    assert.equal(command.id, tab.id);
+    assert.equal(command.selection, "Quarterly total");
+    assert.equal(command.element.tag, "td");
+  }
+  // The page context reads only the open document, through the isolated world.
+  const preview = open({ path: file });
+  const scripts = [];
+  preview.contents.title = "Report";
+  preview.contents.executeJavaScriptInIsolatedWorld = async (world, [script]) => { scripts.push([world, script.code]); return { selection: "", text: "Report" }; };
+  const context = await browsers.browserAction(event, { id: preview.id, action: "page-context" });
+  assert.deepEqual(context, { url: pathToFileURL(file).toString(), title: "Report", selection: "", text: "Report" });
+  assert.equal(scripts.length, 1);
+  assert.notEqual(scripts[0][0], 0, "the page's own scripts cannot see or change the request");
+  // A preview that has left its file offers nothing to ask about.
+  const blank = open({ path: file });
+  blank.contents.url = "about:blank";
+  blank.contents.emit("context-menu", {}, { ...params, frame: blank.contents.mainFrame });
+  assert.equal(menus.at(-1).some((item) => item.label === "Ask Rem about this"), false);
+});
+
+test("Save image as asks where to save, starting in Downloads", () => {
+  const { open, menus, profiles, downloads, browsers } = harness();
+  const web = open({ url: "https://example.com/" });
+  web.contents.emit("context-menu", {}, { x: 1, y: 1, mediaType: "image", srcURL: "https://files.test/cat.png", frame: web.contents.mainFrame });
+  menus.at(-1).find((item) => item.label === "Save image as…").click();
+  assert.deepEqual(web.contents.downloads, ["https://files.test/cat.png"]);
+  const image = fakeDownload("cat.png");
+  profiles[PARTITIONS.user].emit("will-download", { preventDefault() {} }, image, web.contents);
+  assert.deepEqual(image.dialog, { defaultPath: path.join(downloads, "cat.png"), title: "Save image" });
+  assert.equal(image.savePath, "");
+  // Cancelling the dialog leaves nothing in the list.
+  image.emit("done", {}, "cancelled");
+  return browsers.browserLibrary(null, { action: "downloads" }).then(({ downloads: listed }) => {
+    assert.equal(listed.length, 0);
+    // Ordinary downloads still save straight to Downloads.
+    const other = fakeDownload("cat.png");
+    profiles[PARTITIONS.user].emit("will-download", { preventDefault() {} }, other, web.contents);
+    assert.equal(other.dialog, undefined);
+    assert.equal(other.savePath, path.join(downloads, "cat.png"));
+  });
 });
 
 test("certificate errors can be bypassed only by the user, per certificate", () => {

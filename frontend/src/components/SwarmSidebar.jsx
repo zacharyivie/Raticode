@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Plus, RefreshCw, Users } from "lucide-react";
 import { startPolling } from "../lib/refresh.js";
-import { swarmRequest } from "../lib/swarms.js";
+import { runStateLabel, swarmAttention, swarmRequest } from "../lib/swarms.js";
 
 export default function SwarmSidebar({ rootPath, active, selectedId, onSelect }) {
   const [swarms, setSwarms] = useState([]);
@@ -31,7 +31,7 @@ export default function SwarmSidebar({ rootPath, active, selectedId, onSelect })
     </div>
     <div className="workflow-scrollbar min-h-0 overflow-y-auto">
       {error ? <p role="alert" className="px-2 py-3 text-xs text-red-600 dark:text-red-300">{error}</p> : null}
-      {loading && !swarms.length ? <p role="status" className="px-2 py-3 text-xs text-muted">Loading swarms...</p> : !swarms.length ? <div className="space-y-3 px-2 py-4 text-xs leading-5 text-muted"><p>No swarms in this project.</p><button type="button" className="ui-button ui-button--sm" onClick={() => onSelect("new")}><Plus size={13} aria-hidden="true" />Create a swarm</button></div> : swarms.map((swarm) => <button key={swarm.id} type="button" aria-current={swarm.id === selectedId ? "true" : undefined} className={`flex w-full items-start gap-2 rounded px-2 py-2 text-left text-xs hover:bg-slate-100 ${swarm.id === selectedId ? "bg-slate-100 text-ink" : "text-muted"}`} onClick={() => onSelect(swarm.id)}><Users size={15} className="mt-0.5 shrink-0" /><span className="min-w-0 flex-1"><span className="block truncate font-semibold text-ink">{swarm.name}</span><span className="block truncate">{swarm.agents?.length || 0} agents · {swarm.run?.state || "Ready"}</span></span></button>)}
+      {loading && !swarms.length ? <p role="status" className="px-2 py-3 text-xs text-muted">Loading swarms...</p> : !swarms.length ? <div className="space-y-3 px-2 py-4 text-xs leading-5 text-muted"><p>No swarms in this project.</p><button type="button" className="ui-button ui-button--sm" onClick={() => onSelect("new")}><Plus size={13} aria-hidden="true" />Create a swarm</button></div> : swarms.map((swarm) => <button key={swarm.id} type="button" aria-current={swarm.id === selectedId ? "true" : undefined} className={`flex w-full items-start gap-2 rounded px-2 py-2 text-left text-xs hover:bg-slate-100 ${swarm.id === selectedId ? "bg-slate-100 text-ink" : "text-muted"}`} onClick={() => onSelect(swarm.id)}><Users size={15} className="mt-0.5 shrink-0" /><span className="min-w-0 flex-1"><span className="block truncate font-semibold text-ink">{swarm.name}</span><span className="block truncate">{swarm.agents?.length || 0} agents · {runStateLabel(swarm.run?.state || "ready")}</span>{swarmAttention(swarm.run).label ? <span className="mt-0.5 block truncate font-semibold text-amber-700 dark:text-amber-300">{swarmAttention(swarm.run).label}</span> : null}</span></button>)}
 
     </div>
   </section>;

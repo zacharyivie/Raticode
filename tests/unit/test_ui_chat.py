@@ -5,6 +5,7 @@ import sys
 import threading
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -957,6 +958,80 @@ async def test_codex_large_prompt_reaches_real_child_stdin(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_claude_large_prompt_reaches_real_child_stdin(monkeypatch, tmp_path, streaming):
+    # Linux rejects any single argument over 128 KB with "Argument list too long".
+    script = tmp_path / "fake_claude.py"
+    script.write_text(
+        "import json, sys, hashlib\n"
+        "assert '--print' in sys.argv and '-p' not in sys.argv\n"
+        "assert max(map(len, sys.argv)) < 8192\n"
+        "prompt = sys.stdin.buffer.read().decode('utf-8')\n"
+        "assert 'REQUEST-END' in prompt and 'START-' in prompt\n"
+        "assert len(prompt) > 300000\n"
+        "print(json.dumps({'type':'result','session_id':'claude-1',"
+        "'result':hashlib.sha256(prompt.encode('utf-8')).hexdigest()}))\n"
+    )
+
+    async def no_compaction(**options):
+        return options["messages"], False
+
+    monkeypatch.setattr(chat, "_compact_chat_messages_if_needed", no_compaction)
+    monkeypatch.setattr(chat, "resolve_provider_executable", lambda _: sys.executable)
+    captured = []
+    real_build_command = chat._build_chat_command
+
+    def build_command(**options):
+        captured.append(options["prompt"])
+        command = real_build_command(**options)
+        assert command[command.index("-p") + 1] == options["prompt"]
+        return [sys.executable, str(script), *command[1:]]
+
+    monkeypatch.setattr(chat, "_build_chat_command", build_command)
+    body = "START-" + "Large context " * 25000 + "REQUEST-END"
+    options = dict(
+        provider="claude_code",
+        model="cli-default",
+        messages=[{"role": "user", "body": body}],
+        workflow=None,
+        working_dir=tmp_path,
+        data_dir=tmp_path,
+    )
+    if streaming:
+        result = [event async for event in stream_workflow_chat(**options)][-1]
+    else:
+        result = await run_workflow_chat(**options)
+    if streaming:
+        assert result["type"] == "final", result
+    assert result["message"]["body"] == sha256(captured[-1].encode("utf-8")).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_claude_compaction_summary_prompt_uses_stdin(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {}
+
+    async def capture_subprocess(command, **kwargs):
+        captured.update(command=command, stdin=kwargs["stdin"])
+        return 0, json.dumps({"type": "result", "result": "Summary"}), ""
+
+    monkeypatch.setattr(chat, "run_subprocess", capture_subprocess)
+    await chat._summarize_chat_messages(
+        provider="claude_code",
+        model="cli-default",
+        effort=None,
+        messages=[{"role": "user", "body": "START-" + "Old context " * 20000}],
+        binary_path="claude",
+        data_dir=tmp_path,
+        working_dir=tmp_path,
+        limits=chat.ResourceLimits(),
+    )
+
+    assert "-p" not in captured["command"]
+    assert max(map(len, captured["command"])) < 8192
+    assert "START-Old context" in captured["stdin"].decode("utf-8")
+
+
+@pytest.mark.asyncio
 async def test_stream_workflow_chat_ignores_unstructured_provider_diagnostics(
     monkeypatch, tmp_path
 ) -> None:
@@ -1169,6 +1244,59 @@ async def test_stream_workflow_chat_surfaces_partial_claude_trace_without_duplic
     assert traces[3]["phase"] == "result"
     assert traces[3]["output"] == "[workflow]"
     assert events[-1]["message"]["body"] == "Workflow inspected"
+
+
+def test_claude_text_streams_as_deltas_when_the_thread_asks() -> None:
+    def event(raw: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "stream_event", "event": raw}
+
+    def text_events(state: chat._ClaudeTraceState) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        for payload in [
+            event({"type": "message_start", "message": {"id": "msg-1"}}),
+            event(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                }
+            ),
+            event(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "Hello"},
+                }
+            ),
+            event(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": " there"},
+                }
+            ),
+            event({"type": "content_block_stop", "index": 0}),
+        ]:
+            entries += chat._claude_trace_entries(payload, state)
+        return entries
+
+    streamed = text_events(chat._ClaudeTraceState(stream_text=True))
+    assert streamed == [
+        {"kind": "text_delta", "streamId": "claude-text-msg-1-0", "text": "Hello"},
+        {"kind": "text_delta", "streamId": "claude-text-msg-1-0", "text": " there"},
+    ]
+    # Background workers keep one summary per finished block.
+    assert text_events(chat._ClaudeTraceState()) == [
+        {"kind": "summary", "title": "Summary", "body": "Hello there"}
+    ]
+    assert chat._text_delta_event(streamed[0], "claude_code", "sonnet", None) == {
+        "type": "thought",
+        "provider": "claude_code",
+        "model": "sonnet",
+        "effort": None,
+        "text": "Hello",
+        "deltaStreamId": "claude-text-msg-1-0",
+    }
 
 
 def test_claude_partial_trace_reports_activity_without_exposing_raw_thinking() -> None:
@@ -1881,3 +2009,193 @@ def test_rem_thread_tool_grant_requires_exact_server_url(
         assert any("start_thread" in arg for arg in approved)
     else:
         assert approved == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission", ["read-only", "workspace-write"])
+async def test_codex_review_scratch_keeps_project_read_only(
+    monkeypatch, tmp_path, permission
+) -> None:
+    monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/codex")
+    observed: dict[str, Any] = {}
+
+    async def fake_stream_subprocess(command, **kwargs):
+        observed.update(kwargs, command=command)
+        yield {"type": "chunk", "stream": "stdout", "text": "checked\n", "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
+
+    monkeypatch.setattr(chat, "stream_subprocess", fake_stream_subprocess)
+    project = tmp_path / "project"
+    project.mkdir()
+    scratch = tmp_path / "scratch"
+    events = [
+        event
+        async for event in stream_workflow_chat(
+            provider="codex",
+            model="cli-default",
+            messages=[{"role": "user", "body": "review"}],
+            workflow=None,
+            working_dir=project,
+            data_dir=tmp_path / "data",
+            permission_mode=permission,
+            trusted_scratch_dir=scratch,
+        )
+    ]
+    assert events[-1]["type"] == "final"
+    command = observed["command"]
+    sandbox = command[command.index("--sandbox") + 1]
+    if permission == "workspace-write":
+        # Only read-only reviewers are moved; ordinary workers are unchanged.
+        assert sandbox == "workspace-write"
+        assert command[command.index("--cd") + 1] == str(project)
+        assert observed["cwd"] == project
+        assert "TMPDIR" not in observed["env"]
+        return
+    assert sandbox == "workspace-write"
+    assert command[command.index("--cd") + 1] == str(scratch)
+    assert "--add-dir" not in command
+    assert observed["cwd"] == scratch
+    env = observed["env"]
+    assert env["TMPDIR"] == str(scratch / "tmp") and (scratch / "tmp").is_dir()
+    assert env["MYPY_CACHE_DIR"].startswith(str(scratch))
+    assert "no:cacheprovider" in env["PYTEST_ADDOPTS"]
+
+
+def test_codex_scratch_command_never_rewrites_the_prompt(tmp_path) -> None:
+    scratch = tmp_path / "scratch"
+    command = [
+        "codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--add-dir",
+        "/data",
+        "--cd",
+        "/project",
+        "--sandbox",
+    ]
+    assert chat.codex_scratch_command(command, scratch) == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        str(scratch),
+        "--sandbox",
+    ]
+
+
+async def _run_fake_claude(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workflow: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    """Run one turn through a fake Claude CLI that records its argv and environment."""
+    report = tmp_path / "report.json"
+    script = tmp_path / "fake_claude.py"
+    script.write_text(
+        "import json, os, sys\n"
+        f"report = open({str(report)!r}, 'w')\n"
+        "report.write(json.dumps({'argv': sys.argv, 'env': dict(os.environ)}))\n"
+        "report.close()\n"
+        "print(json.dumps({'type':'result','session_id':'claude-1','result':'done'}))\n"
+    )
+    gof = tmp_path / "trusted" / "gof"
+    gof.parent.mkdir()
+    gof.write_text("#!/bin/sh\n")
+    gof.chmod(0o755)
+
+    async def no_compaction(**options):
+        return options["messages"], False
+
+    prompts = []
+    real_build_command = chat._build_chat_command
+
+    def build_command(**options):
+        prompts.append(options["prompt"])
+        return [sys.executable, str(script), *real_build_command(**options)[1:]]
+
+    monkeypatch.setattr(chat, "_compact_chat_messages_if_needed", no_compaction)
+    monkeypatch.setattr(chat, "resolve_provider_executable", lambda _: sys.executable)
+    monkeypatch.setattr(chat, "ensure_local_gofer_cli", lambda _data_dir: gof)
+    monkeypatch.setattr(chat, "_build_chat_command", build_command)
+    events = [
+        event
+        async for event in stream_workflow_chat(
+            provider="claude_code",
+            model="cli-default",
+            messages=[{"role": "user", "body": "run the tests"}],
+            workflow=workflow,
+            working_dir=tmp_path,
+            data_dir=tmp_path,
+        )
+    ]
+    assert events[-1]["type"] == "final", events[-1]
+    return json.loads(report.read_text()), prompts[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="command slots are POSIX only")
+async def test_turns_queue_heavy_commands_through_wrappers_and_the_hook(monkeypatch, tmp_path):
+    from gofer.core import command_slots
+
+    seen, prompt = await _run_fake_claude(
+        monkeypatch,
+        tmp_path,
+        {"chatThreadId": "thread-1", "chatThreadTitle": "Fix login", "remResources": {}},
+    )
+    root = tmp_path / "command-slots"
+    env, argv = seen["env"], seen["argv"]
+    assert env["PATH"].split(":")[0] == str(root / "bin")
+    assert env[command_slots.ROOT_ENV] == str(root)
+    assert env[command_slots.LABEL_ENV] == "Fix login"
+    assert env[command_slots.ACTIVITY_ENV] == str(command_slots.activity_path(root, "thread-1"))
+    hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"]
+    assert hooks[0]["hooks"][0]["command"] == str(root / "hooks" / "claude-pre-tool-use")
+    assert "share a few slots with other Rem threads" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="command slots are POSIX only")
+async def test_turns_without_a_shell_or_with_queuing_off_skip_command_slots(monkeypatch, tmp_path):
+    from gofer.core import command_slots
+
+    seen, _ = await _run_fake_claude(
+        monkeypatch, tmp_path, {"chatThreadId": "t", "remResources": {"shell": False}}
+    )
+    # The hook rewrites commands to start with gof, which a turn without a
+    # shell may run, so it is left out.
+    assert "--settings" not in seen["argv"]
+    command_slots.write_settings(
+        tmp_path / "command-slots", command_slots.SlotSettings(enabled=False)
+    )
+    (tmp_path / "trusted" / "gof").unlink()
+    (tmp_path / "trusted").rmdir()
+    seen, prompt = await _run_fake_claude(monkeypatch, tmp_path, {"chatThreadId": "t2"})
+    assert command_slots.ROOT_ENV not in seen["env"]
+    assert "--settings" not in seen["argv"]
+    assert "share a few slots" not in prompt
+
+
+def test_unavailable_earlier_attachments_become_notes(tmp_path):
+    from gofer.ui.chat import _messages_with_attachment_paths
+    from gofer.ui.chat_media import ChatMediaError
+
+    workflow = {"chatThreadId": "thread"}
+    missing = {"name": "image.png", "type": "image/png", "id": "phone-file"}
+    prepared, images = _messages_with_attachment_paths(
+        [
+            {"role": "user", "body": "from my phone", "attachments": [missing]},
+            {"role": "assistant", "body": "nice"},
+            {"role": "user", "body": "what was in it?"},
+        ],
+        workflow=workflow,
+        data_dir=tmp_path,
+    )
+    assert prepared[0]["body"] == "from my phone\n\n[Attachment no longer available: image.png]"
+    assert images == []
+    # The message being sent now still has to attach its files.
+    with pytest.raises(ChatMediaError, match="attached file reference is invalid"):
+        _messages_with_attachment_paths(
+            [{"role": "user", "body": "now", "attachments": [missing]}],
+            workflow=workflow,
+            data_dir=tmp_path,
+        )

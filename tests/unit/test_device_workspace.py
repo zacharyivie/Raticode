@@ -241,7 +241,15 @@ def test_attachment_metadata_survives_transfer_removal_and_renderer_round_trip(
     )
     request = event(thread_id=thread, payload={"text": "", "attachment_ids": [identifier]})
     app.handle(peer, request)
-    expected = [{"id": identifier, "name": "README.md", "size": len(data), "mime": "text/markdown"}]
+    expected = [
+        {
+            "id": identifier,
+            "name": "README.md",
+            "size": len(data),
+            "mime": "text/markdown",
+            "type": "text/markdown",
+        }
+    ]
     app.files.cancel(peer, thread, identifier)
     exported = app.workspace.export(peer, thread)
     user = next(m for m in exported["messages"] if m["id"] == request["request_id"])
@@ -257,13 +265,76 @@ def test_attachment_metadata_survives_transfer_removal_and_renderer_round_trip(
             payload={"before": None, "include_presentation": True},
         ),
     )[0]["payload"]
-    assert (
-        next(m for m in rich["messages"] if m["id"] == request["request_id"])["attachments"]
-        == expected
-    )
+    # Phones get only the fields their protocol allows.
+    assert next(m for m in rich["messages"] if m["id"] == request["request_id"])["attachments"] == [
+        {key: value for key, value in expected[0].items() if key != "type"}
+    ]
     assert "README.md" not in str(
         app.registry.db.execute("SELECT value FROM device_message_attachments").fetchone()[0]
     )
+
+
+def test_saved_phone_attachment_reaches_desktop_and_later_turns(application, tmp_path):
+    import base64
+    import hashlib
+
+    app, peer = application
+    context, meta, shared = share(app, peer, tmp_path)
+    thread = shared["thread_id"]
+    identifier = str(uuid4())
+    data = b"png bytes"
+    app.files.offer(
+        peer,
+        thread,
+        {
+            "file_id": identifier,
+            "name": "photo.png",
+            "mime": "image/png",
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "expires_at": int(app.registry.clock()) + 3600,
+        },
+    )
+    app.files.receive(
+        peer,
+        thread,
+        {
+            "file_id": identifier,
+            "offset": 0,
+            "eof": True,
+            "data": base64.urlsafe_b64encode(data).rstrip(b"=").decode(),
+        },
+    )
+    request = event(thread_id=thread, payload={"text": "see photo", "attachment_ids": [identifier]})
+    app.handle(peer, request)
+    storage = f"{'a' * 32}-photo.png"
+    saved = {
+        "id": identifier,
+        "name": "photo.png",
+        "size": len(data),
+        "mime": "image/png",
+        "type": "image/png",
+        "storageName": storage,
+    }
+    app.record_attachments(peer, request["request_id"], [saved])
+    # The phone's own copy expires; the desktop keeps the saved file's name.
+    app.files.cancel(peer, thread, identifier)
+    exported = app.workspace.export(peer, thread)
+    user = next(m for m in exported["messages"] if m["id"] == request["request_id"])
+    assert user["attachments"] == [saved]
+    # The desktop publishes the thread back without losing the file name.
+    app.workspace.exchange(peer, meta, exported["messages"], context, exported["revision"])
+    again = app.workspace.export(peer, thread)
+    assert next(m for m in again["messages"] if m["id"] == request["request_id"])[
+        "attachments"
+    ] == [saved]
+    # Once that turn has run, the next turn's history carries the saved file.
+    with app.registry.transaction():
+        app.registry.db.execute(
+            "UPDATE device_work SET state='completed' WHERE request=?", (request["request_id"],)
+        )
+    history = app.history(peer, thread)
+    assert next(m for m in history if m["content"] == "see photo")["attachments"] == [saved]
 
 
 @pytest.mark.parametrize("role", ["controller", "desktop"])
@@ -359,6 +430,49 @@ def test_phone_organization_is_revisioned_and_preserves_context(application, tmp
     assert stale["payload"]["code"] == "conflict"
     assert not app.workspace.export(peer, thread)["delete_requested"]
     assert app.workspace.exchange(peer, meta, [], context, 1)["revision"] == 5
+
+
+def test_phone_read_state_reaches_the_desktop_and_archiving_marks_read(application, tmp_path):
+    app, peer = application
+    context, meta, shared = share(app, peer, tmp_path)
+    thread = shared["thread_id"]
+    # The desktop says this thread finished while the user was away.
+    app.workspace.exchange(peer, {**meta, "unread": True, "pinned": True}, [], context, 1)
+
+    def manage(sequence: int, action: str, revision: int) -> dict[str, Any]:
+        reply: dict[str, Any] = app.handle(
+            peer,
+            event(
+                "thread.manage",
+                sequence=sequence,
+                thread_id=thread,
+                payload={"action": action, "expected_revision": revision},
+            ),
+        )[0]
+        return reply
+
+    read = manage(0, "read", 2)
+    assert read["type"] == "thread.snapshot"
+    assert read["payload"]["group"] == "pinned", "Reading leaves the thread where it is"
+    assert read["payload"]["revision"] == 2, "Read state doesn't change the thread's revision"
+    remote = app.workspace.export(peer, thread)
+    assert remote["organization_modified"]
+    assert remote["metadata"]["unread"] is False and remote["metadata"]["readAt"]
+    assert remote["metadata"]["pinned"] is True
+    assert app.workspace.details(peer, thread, context, activity=True)["unread"] is False
+    # A read change made from an older view of the thread still applies.
+    assert manage(1, "unread", 1)["payload"]["group"] == "pinned"
+    assert app.workspace.export(peer, thread)["metadata"]["unread"] is True
+    archived = manage(2, "archive", 2)
+    assert archived["payload"]["group"] == "archived"
+    remote = app.workspace.export(peer, thread)["metadata"]
+    assert (remote["archived"], remote["unread"]) == (True, False), "Archiving marks it read"
+    assert remote["readAt"]
+    # Restoring keeps the read state the phone set.
+    assert archived["payload"]["revision"] == 3
+    manage(3, "restore", 3)
+    remote = app.workspace.export(peer, thread)["metadata"]
+    assert (remote["archived"], remote["unread"]) == (False, False)
 
 
 def test_phone_delete_waits_for_renderer_and_blocks_new_work(application, tmp_path):

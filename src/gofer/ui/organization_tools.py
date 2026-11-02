@@ -17,6 +17,7 @@ READ_ACTIONS = {
     "import_preview",
     "import_github_preview",
     "providers",
+    "run_events",
 } | READ_OPERATIONS
 
 TASK_EDIT_FIELDS = {
@@ -81,8 +82,20 @@ ACTION_HELP = {
         "public GitHub template, bounded to 16 MiB and 1,000 files."
     ),
     "import_github": "Same parameters as import_github_preview. Import a paused template.",
-    "control": "state=running/paused. Running authorizes eligible work; individual holds remain.",
-    "resume_all": "expectedRevision. Explicitly clear all employee holds.",
+    "control": (
+        "state=running/paused. Running authorizes eligible work; individual holds remain. "
+        "From Rem, starting returns needsUserConsent: the user approves it in the "
+        "Organizations tab. Tell the user that nothing has started yet."
+    ),
+    "resume_all": (
+        "expectedRevision. Explicitly clear all employee holds. From Rem, needs user consent."
+    ),
+    "archive": (
+        "archived (boolean, default true). Archive a paused company and release its projects, "
+        "or restore it. History is kept. From Rem, archiving needs user consent."
+    ),
+    "request_decide": "User-only requestId, decision=approve/decline for Rem's consent requests.",
+    "run_events": "taskId, turnId (an attempt ID). Stored transcript events of one employee run.",
     "task_create": (
         "Task fields from taskSchema, required title, optional idempotencyKey. "
         "execution={targetId: destination ID} requests managed delegation. "
@@ -138,8 +151,8 @@ ACTION_HELP = {
     ),
     "secret_reference": "id, account, optional revoked (boolean). Version an OS keyring reference.",
     "secret_store": (
-        "id, value. Store or rotate an OS keyring credential. Never echo the value or include it "
-        "in notes. Prefer protected UI entry when the value has not already been supplied."
+        "User-only id, value. Rem cannot store credential values: ask the user to enter them "
+        "under Operations > Protected credentials, then reference the stored ID."
     ),
     "backup": (
         "No parameters. Returns filename, base64 content and sha256 for a consistent SQLite "

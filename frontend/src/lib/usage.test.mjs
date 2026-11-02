@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { allowanceLabel, formatUsageAmount, formatUsageNumber, formatUsageTime, remainingPercent, usageDashboardUrl, usageStatus } from "./usage.js";
+import { allowanceLabel, formatUsageAmount, formatUsageNumber, formatUsageTime, remainingPercent, usageDashboardUrl, usageSignIn, usageStatus } from "./usage.js";
 
 test("usage retains missing values and the provider's units", () => {
   assert.equal(formatUsageNumber(null), "Not reported");
@@ -40,4 +40,12 @@ test("usage statuses and times do not hide incomplete snapshots", () => {
 test("provider links accept only secure external dashboard URLs", () => {
   assert.equal(usageDashboardUrl("https://claude.ai/settings/usage"), "https://claude.ai/settings/usage");
   for (const value of [null, "", "javascript:alert(1)", "file:///tmp/usage", "http://localhost"]) assert.equal(usageDashboardUrl(value), null);
+});
+
+test("sign-in help appears only for accounts that need it", () => {
+  assert.equal(usageSignIn({ provider: "claude_code", status: "available" }), null);
+  assert.equal(usageSignIn({ provider: "anthropic_api", status: "auth_required" }), null);
+  assert.deepEqual(usageSignIn({ provider: "claude_code", status: "auth_required" }), { browser: true, command: "claude auth login" });
+  assert.deepEqual(usageSignIn({ provider: "antigravity", status: "auth_required" }), { browser: false, command: "agy" });
+  assert.deepEqual(usageSignIn({ provider: "codex", profile: "work", status: "auth_required" }), { browser: false, command: null });
 });

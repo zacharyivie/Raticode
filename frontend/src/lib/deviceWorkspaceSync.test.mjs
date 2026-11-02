@@ -109,6 +109,19 @@ test("phone organization and automatic names preserve concurrent desktop edits",
   assert.deepEqual(reconcileDesktopThread(local, remote), local);
 });
 
+test("a read on the phone reaches desktop without undoing desktop placement, and a desktop read wins", () => {
+  const base = { id: "thread", title: "Work", pinned: false, archived: false, unread: true, updatedAt: "2026-11-01T10:00:00Z" };
+  const remote = { base_metadata: base, metadata: { ...base, unread: false, readAt: "2026-11-01T11:00:00Z" }, organization_modified: true };
+  assert.deepEqual(reconcileDesktopThread(base, remote), remote.metadata, "The phone's read is applied");
+  const pinned = { ...base, pinned: true };
+  assert.deepEqual(reconcileDesktopThread(pinned, remote), { ...pinned, unread: false, readAt: "2026-11-01T11:00:00Z" }, "A desktop pin made meanwhile stays");
+  const readHere = { ...base, unread: false, readAt: "2026-11-01T10:30:00Z" };
+  assert.deepEqual(reconcileDesktopThread(readHere, { ...remote, metadata: { ...base, unread: true } }), readHere, "A stale phone state can't make it unread again");
+  const archived = { base_metadata: base, metadata: { ...base, archived: true, unread: false, readAt: "2026-11-01T12:00:00Z" }, organization_modified: true };
+  const result = reconcileDesktopThread(base, archived);
+  assert.deepEqual([result.archived, result.unread], [true, false], "Archiving on the phone marks the thread read here");
+});
+
 test("renderer only acknowledges phone deletion after local archive and deletion succeed", async () => {
   const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
   const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
@@ -189,6 +202,95 @@ test("phone sync bumps only new user messages and completion, not thoughts or re
   } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
 });
 
+test("a turn from the phone brings an archived desktop thread back and reports its finish", async () => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const base = { id: "thread", title: "Work", updatedAt: "2026-09-23T10:00:00Z", projectRoot: "", archived: true };
+  const data = new Map([["gofer-flow-chat-threads", JSON.stringify([{ ...base, scopeIndexed: true }])], ["gofer-flow-chat-thread-meta:thread", JSON.stringify(base)]]);
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  let history = [], poll = 0;
+  const repository = { all: async () => history, save: async (_id, messages) => { history = messages; } };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const states = [
+    { running: false, messages: [] },
+    { running: true, messages: [{ id: "ask", role: "user", body: "Continue", origin: "phone" }] },
+    { running: false, messages: [{ id: "ask", role: "user", body: "Continue", origin: "phone" }, { id: "reply", role: "assistant", kind: "final", body: "Done" }] },
+  ];
+  const groups = [], synced = [];
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["paired"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_poll") {
+      const state = states[poll++];
+      return { ok: true, json: async () => ({ threads: [{ metadata: base, thread_id: "wire", revision: poll, ...state }] }) };
+    }
+    groups[poll - 1] = body.metadata.mobileGroup;
+    return { ok: true, json: async () => ({ metadata: body.metadata, messages: body.messages, revision: body.revision }) };
+  };
+  host.addEventListener("gofer:device-thread-sync", event => synced.push(event.detail));
+  const archived = [];
+  let stop;
+  try {
+    await new Promise((resolve, reject) => {
+      host.addEventListener("gofer:device-sync-status", event => {
+        if (event.detail) { stop?.(); reject(new Error(event.detail)); return; }
+        archived.push(JSON.parse(data.get("gofer-flow-chat-thread-meta:thread")).archived);
+        if (poll === states.length) { stop?.(); resolve(); }
+      });
+      stop = startDeviceWorkspaceSync({ storage, repository, interval: 5 });
+    });
+    assert.deepEqual(archived, [true, false, false], "Only new activity unarchives the thread");
+    assert.deepEqual(groups, ["archived", "active", "active"], "The phone sees the thread leave its archive");
+    assert.equal(synced.at(-1).completed, true, "The window marks the finish unread unless the thread is open");
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
+test("reading or archiving a thread on the phone marks it read on the desktop and tells the window", async () => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const base = { id: "thread", title: "Work", updatedAt: "2026-11-01T10:00:00Z", projectRoot: "", unread: true, archived: false, pinned: true };
+  const data = new Map([["gofer-flow-chat-threads", JSON.stringify([{ ...base, scopeIndexed: true }])], ["gofer-flow-chat-thread-meta:thread", JSON.stringify(base)]]);
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  const repository = { all: async () => [], save: async () => {} };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const read = { ...base, unread: false, readAt: "2026-11-01T11:00:00Z" };
+  const archived = { ...read, archived: true, pinned: false, mobileGroup: "archived", updatedAt: "2026-11-01T12:00:00Z" };
+  const states = [read, archived];
+  let poll = 0;
+  const sent = [], synced = [];
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["paired"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_poll") {
+      const metadata = states[poll++];
+      return { ok: true, json: async () => ({ threads: [{ metadata, base_metadata: poll === 1 ? base : read, organization_modified: true, thread_id: "wire", revision: poll, running: false, messages: [] }] }) };
+    }
+    sent.push(body.metadata);
+    return { ok: true, json: async () => ({ metadata: body.metadata, messages: [], revision: body.revision }) };
+  };
+  host.addEventListener("gofer:device-thread-sync", event => synced.push(event.detail.metadata));
+  const stored = [];
+  let stop;
+  try {
+    await new Promise((resolve, reject) => {
+      host.addEventListener("gofer:device-sync-status", event => {
+        if (event.detail) { stop?.(); reject(new Error(event.detail)); return; }
+        stored.push(JSON.parse(data.get("gofer-flow-chat-thread-meta:thread")));
+        if (poll === states.length) { stop?.(); resolve(); }
+      });
+      stop = startDeviceWorkspaceSync({ storage, repository, interval: 5 });
+    });
+    assert.deepEqual([stored[0].unread, stored[0].readAt, stored[0].pinned], [false, read.readAt, true], "Reading on the phone keeps the desktop pin");
+    assert.equal(synced[0].unread, false, "The window hears about the read so it can clear its own marker");
+    assert.deepEqual([stored[1].archived, stored[1].unread], [true, false]);
+    assert.equal(sent.at(-1).mobileGroup, "archived");
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
 test("phones see display settings only and their changes go through normal settings", async () => {
   const { applyPhoneSettings, phoneSettings, startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
   const settings = { appearance: { theme: "light" }, assistant: { provider: "codex", resources: { mcpServers: [{ command: "/bin/tool" }] } },
@@ -229,4 +331,79 @@ test("phones see display settings only and their changes go through normal setti
   } finally {
     stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch;
   }
+});
+
+test("phone sync leaves a Rem home task thread's running state to Rem home", async () => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const task = { id: "task", title: "Task", updatedAt: "2026-10-28T10:00:00Z", projectRoot: "/project", managedRunId: "run", managedRole: "execute" };
+  const chat = { id: "chat", title: "Chat", updatedAt: "2026-10-28T10:00:00Z", projectRoot: "/project" };
+  const data = new Map([["gofer-flow-chat-threads", JSON.stringify([task, chat])],
+    ["gofer-flow-chat-thread-meta:task", JSON.stringify(task)], ["gofer-flow-chat-thread-meta:chat", JSON.stringify(chat)]]);
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  const repository = { all: async () => [], save: async () => {} };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["paired"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_poll") return { ok: true, json: async () => ({ threads: [] }) };
+    return { ok: true, json: async () => ({ metadata: body.metadata, messages: [], revision: 1, running: false, active_turn: null }) };
+  };
+  const synced = new Map();
+  host.addEventListener("gofer:device-thread-sync", event => synced.set(event.detail.metadata.id, event.detail));
+  let stop;
+  try {
+    await new Promise((resolve, reject) => {
+      host.addEventListener("gofer:device-sync-status", event => {
+        stop?.();
+        if (event.detail) reject(new Error(event.detail)); else resolve();
+      });
+      stop = startDeviceWorkspaceSync({ storage, repository, interval: 5 });
+    });
+    assert.equal(synced.get("chat").running, false);
+    assert.ok(!synced.has("task") || synced.get("task").running === undefined);
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
+test("a running Rem task thread past the Read limit reaches the phone as active, not archived", async () => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  // Eight threads read together, like a bulk "mark read". The task thread sorts last.
+  const readAt = "2026-11-02T00:37:31Z";
+  const reads = Array.from({ length: 7 }, (_, index) => ({ id: `read-${index}`, title: `Read ${index}`, updatedAt: "2026-11-02T00:30:00Z", readAt, projectRoot: "/project" }));
+  const task = { id: "voice", title: "Voice assistant", updatedAt: "2026-11-01T20:50:10Z", readAt, projectRoot: "/project", managedRunId: "run", managedRole: "execute" };
+  const threads = [...reads, task];
+  const data = new Map([["gofer-flow-chat-threads", JSON.stringify(threads)], ...threads.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)])]);
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  const repository = { all: async () => [], save: async () => {} };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const groups = [];
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["paired"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_poll") return { ok: true, json: async () => ({ threads: [] }) };
+    if (body.metadata.id === "voice") groups.push(body.metadata.mobileGroup);
+    return { ok: true, json: async () => ({ metadata: body.metadata, messages: [], revision: 1, running: false, active_turn: null }) };
+  };
+  const synced = () => new Promise((resolve, reject) => host.addEventListener("gofer:device-sync-status", event => event.detail ? reject(new Error(event.detail)) : resolve(), { once: true }));
+  let stop;
+  try {
+    let done = synced();
+    stop = startDeviceWorkspaceSync({ storage, repository, interval: 5 });
+    await done;
+    assert.deepEqual(groups, ["archived"], "An idle thread past the Read limit is archived");
+    // Rem home reports the task thread running, as remHomeStore does on each poll.
+    host.dispatchEvent(new CustomEvent("gofer:device-thread-sync", { detail: { metadata: task, messages: [], running: true } }));
+    done = synced();
+    await done;
+    assert.deepEqual(groups, ["archived", "active"], "The phone puts it under Running instead of the archive");
+    host.dispatchEvent(new CustomEvent("gofer:device-thread-sync", { detail: { metadata: task, messages: [], running: false } }));
+    done = synced();
+    await done;
+    assert.deepEqual(groups, ["archived", "active", "archived"]);
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
 });

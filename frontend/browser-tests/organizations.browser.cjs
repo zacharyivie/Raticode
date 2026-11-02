@@ -1,4 +1,5 @@
 /* global __dirname, console, setTimeout, clearTimeout, process, fetch */
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -44,20 +45,20 @@ async function main() {
   async function wait(code) { const until = Date.now() + 8000; while (!await evaluate(code)) { if (Date.now() > until) throw new Error(`Missing: ${code}; UI: ${await evaluate("document.body.innerText")}`); await new Promise(resolve => setTimeout(resolve, 30)); } }
   if (process.env.RATICODE_TEST_ORGS_DISABLED === "1") {
     await win.loadURL(`http://127.0.0.1:${vite.httpServer.address().port}/organization-global-test`);
-    await wait("document.body.innerText.includes('Organizations is experimental and disabled')");
+    await wait("document.body.innerText.includes('Organizations is turned off')");
     assert.equal(await evaluate("document.querySelector('[aria-label=\"New organization\"]').disabled"), true);
     assert.equal(await evaluate("document.querySelectorAll('.org-sidebar-list button').length"), 0);
     assert.equal(await evaluate("fetch('/api/organizations', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'create', params:{config:{name:'Blocked'}}})}).then(r=>r.status)"), 403);
-    console.log("Organizations browser: default opt-out blocks creation and explains experimental access.");
+    console.log("Organizations browser: default opt-out blocks creation and points to Feature Preview.");
     return;
   }
   async function click(text) { await wait(`Array.from(document.querySelectorAll('button')).some(b => (b.textContent === ${JSON.stringify(text)} || b.getAttribute("aria-label") === ${JSON.stringify(text)}) && !b.disabled)`); await evaluate(`Array.from(document.querySelectorAll('button')).find(b => (b.textContent === ${JSON.stringify(text)} || b.getAttribute("aria-label") === ${JSON.stringify(text)}) && !b.disabled).click()`); }
   async function field(label, value) { await evaluate(`(() => { const label = [...document.querySelectorAll('label')].find(l => l.querySelector('span')?.textContent === ${JSON.stringify(label)}); const input = label.querySelector('input,textarea'); input.focus(); Object.getOwnPropertyDescriptor(input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', {bubbles:true})); })()`); }
   await wait("document.querySelector('.org-form') !== null");
   await field("Organization name", "Launch studio"); await field("Purpose", "Build and review releases");
-  await field("Maximum turns per task", "");
-  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Maximum turns')).querySelector('input').value"), "");
-  await field("Maximum turns per task", "25"); await evaluate("document.activeElement.blur()");
+  await field("Maximum runs per task", "");
+  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Maximum runs')).querySelector('input').value"), "");
+  await field("Maximum runs per task", "25"); await evaluate("document.activeElement.blur()");
   await click("Create organization"); await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Launch studio'");
   await click("Employee"); await field("Employee name", "Mira"); await field("Title", "Release engineer"); await field("Employee instructions", "Implement assigned releases and attach test evidence.");
   await field("Heartbeat interval in seconds, 0 disables", "");
@@ -65,7 +66,11 @@ async function main() {
   await field("Heartbeat interval in seconds, 0 disables", "0"); await evaluate("document.activeElement.blur()");
   await click("Save employee"); await wait("document.querySelector('.org-person strong')?.textContent === 'Mira'");
   await field("Assignment for Mira", "Verify the release checks"); await click("Assign work");
-  await click("Start work"); await click("Work"); await wait("document.querySelector('.org-work-group')?.textContent.includes('In review')");
+  // Start asks for confirmation and summarizes what will run.
+  await click("Start work"); await wait("document.querySelector('.org-start')?.textContent.includes('can start now')");
+  assert.ok(await evaluate("document.querySelector('.org-start').textContent.includes('Mira (')"));
+  await click("Start organization"); await wait("document.querySelector('.org-start') === null");
+  await click("Work"); await wait("document.querySelector('.org-work-group')?.textContent.includes('In review')");
   await evaluate("document.querySelector('.org-task-open').click()"); await wait("document.querySelector('.org-conversation')?.textContent.includes('test provider')");
   // Saved comments appear in the retained task conversation.
   await field("Comment", "Release evidence reviewed");
@@ -98,7 +103,10 @@ async function main() {
   await click("Save task"); await wait("document.querySelector('.org-conversation h3')?.textContent === 'Approval-gated follow-up'");
   await click("Back to work queue");
   await wait("document.querySelector('.org-work-group h4')?.textContent.includes('Needs approval')");
-  await click("Approve plan");
+  // Plans are approved from the task, where the description is visible.
+  assert.equal(await evaluate("[...document.querySelectorAll('.org-row-actions button')].some(b=>b.textContent==='Approve plan')"), false);
+  await click("Review plan"); await wait("document.querySelector('.org-conversation h3')?.textContent === 'Approval-gated follow-up'");
+  await click("Approve plan"); await click("Back to work queue");
   await wait("!document.querySelector('.org-work-group h4')?.textContent.includes('Needs approval')");
   await click("Activity"); await wait("document.querySelectorAll('.org-event').length > 0");
   assert.ok(await evaluate("document.querySelector('.org-activity').textContent.includes('Approved the plan')"));
@@ -211,7 +219,7 @@ async function main() {
     assert.equal(await evaluate("document.querySelectorAll('.org-sidebar-list button').length"), 2);
     assert.equal(await evaluate("document.querySelector('.org-toolbar h2').textContent"), "Launch studio");
   }
-  await click("Projects");
+  await click("Project folders");
   await wait("document.querySelector('.org-directory button') !== null");
   assert.ok(await evaluate(`document.querySelector('.org-directory').textContent.includes(${JSON.stringify(ready.project)})`));
   await click("Assign project"); await field("Project folder", otherProject); await click("Assign project and pause");
@@ -226,20 +234,20 @@ async function main() {
   await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Other studio'");
   await evaluate("[...document.querySelectorAll('.org-sidebar-list button')].find(b=>b.title==='Launch studio').click()");
   await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Launch studio'");
-  await click("Projects"); await wait("document.querySelectorAll('.org-directory li').length === 2");
+  await click("Project folders"); await wait("document.querySelectorAll('.org-directory li').length === 2");
   assert.ok(await evaluate(`document.querySelector('.org-directory li').textContent.includes(${JSON.stringify(thirdProject)})`));
   fs.writeFileSync(path.join(artifacts, "owned-projects-desktop.png"), (await win.webContents.capturePage()).toPNG());
   await click("New organization"); await field("Organization name", "Unassigned studio"); await click("Create organization");
   await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Unassigned studio'");
-  await click("Projects"); await wait("document.querySelector('.org-empty h3')?.textContent === 'No projects assigned'");
+  await click("Project folders"); await wait("document.querySelector('.org-empty h3')?.textContent === 'No projects assigned'");
   await wait("document.querySelectorAll('.org-sidebar-list button').length === 3");
   // New operating controls use the same real backend, without live provider calls.
   await evaluate("[...document.querySelectorAll('.org-sidebar-list button')].find(b=>b.title==='Launch studio').click()");
   await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Launch studio'");
   await click("Operations");
-  await field("Assumed seconds per turn", "");
-  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent==='Assumed seconds per turn').querySelector('input').value"), "");
-  await field("Assumed seconds per turn", "15"); await evaluate("document.activeElement.blur()");
+  await field("Assumed seconds per run", "");
+  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent==='Assumed seconds per run').querySelector('input').value"), "");
+  await field("Assumed seconds per run", "15"); await evaluate("document.activeElement.blur()");
   await click("Rehearse"); await wait("document.querySelector('.org-operation-table') !== null");
   await evaluate("[...document.querySelectorAll('summary')].find(s=>s.textContent==='Add a routine').click()");
   await field("Routine name", "Daily review"); await field("Task title", "Review routine output");
@@ -254,13 +262,13 @@ async function main() {
   await evaluate("[...document.querySelectorAll('summary')].find(s=>s.textContent==='Add or edit a destination').click()");
   await field("Destination ID", "bounded-team"); await field("Swarm ID", "fixture-swarm");
   await evaluate("document.querySelector('.org-operations fieldset input[type=checkbox]').click()");
-  await field("Reserved provider turns", "");
-  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent==='Reserved provider turns').querySelector('input').value"), "");
-  await field("Reserved provider turns", "3"); await evaluate("document.activeElement.blur()");
+  await field("Reserved provider runs", "");
+  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.querySelector('span')?.textContent==='Reserved provider runs').querySelector('input').value"), "");
+  await field("Reserved provider runs", "3"); await evaluate("document.activeElement.blur()");
   await click("Save destination");
   await wait("[...document.querySelectorAll('.org-routine strong')].some(s=>s.textContent==='bounded-team')");
-  assert.ok(await evaluate("document.querySelector('.org-operations').textContent.includes('3 reserved turns')"));
-  await click("Revoke destination");
+  assert.ok(await evaluate("document.querySelector('.org-operations').textContent.includes('3 reserved runs')"));
+  await click("Revoke destination"); await click("Revoke and pause");
   await wait("![...document.querySelectorAll('.org-routine strong')].some(s=>s.textContent==='bounded-team')");
   await evaluate("document.querySelector('.org-scroll').scrollTop = 0");
   await new Promise(resolve => setTimeout(resolve, 100));

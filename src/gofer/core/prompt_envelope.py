@@ -264,6 +264,8 @@ def resource_cli_args(
     provider: str,
     resources: AgentResources,
     working_dir: Path | None = None,
+    *,
+    read_only: bool = False,
 ) -> list[str]:
     if provider == "codex":
         args = [
@@ -324,7 +326,7 @@ def resource_cli_args(
             args += ["-c", f"mcp_servers.{server_names[server.name]}={{" + ",".join(fields) + "}"]
         return args
     if provider == "claude_code":
-        tools = claude_native_tools(resources)
+        tools = claude_native_tools(resources, read_only=read_only)
         servers: dict[str, Any] = {
             item.name: (
                 {"type": "stdio", "command": item.command, "args": item.args}
@@ -345,9 +347,11 @@ def resource_cli_args(
     raise ValueError(f"Resource configuration is unsupported by provider '{provider}'")
 
 
-def claude_native_tools(resources: AgentResources) -> list[str]:
+def claude_native_tools(resources: AgentResources, *, read_only: bool = False) -> list[str]:
     # Notebook edits and language-server queries ride along with file access.
-    tools = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep", "LSP"]
+    tools = ["Read", "Glob", "Grep", "LSP"]
+    if not read_only:
+        tools[1:1] = ["Edit", "Write", "NotebookEdit"]
     if resources.shell:
         tools.append("Bash")
     if resources.web:

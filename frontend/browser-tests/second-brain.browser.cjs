@@ -1,4 +1,5 @@
 /* global __dirname, console, process, setTimeout, clearTimeout, fetch */
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");

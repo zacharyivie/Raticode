@@ -1,5 +1,6 @@
 /* global __dirname, console, setTimeout, clearTimeout */
 /* Isolated UI regression: mock provider responses, real IndexedDB history. */
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -32,7 +33,7 @@ window.fetch = async (url, options) => {
 };
 const parent = {id:"parent",title:"Debug provider discovery",projectRoot:"/repo",projectName:"Raticode",provider:"codex",model:"cli-default",resources:{shell:true,web:false,skills:[],mcpServers:[]},permissionsByProvider:{codex:"default"},updatedAt:new Date().toISOString()};
 const history = Array.from({length:120},(_,i)=>({id:"m"+i,role:i%2?"assistant":"user",body:"History message "+i}));
-history[99] = {id:"m99",role:"assistant",kind:"thought",body:"Source-only fork thought",groupId:"trace",trace:{id:"read",kind:"tool",title:"Read",status:"complete"}};
+history[109] = {id:"m109",role:"assistant",kind:"thought",body:"Source-only fork thought",groupId:"trace",trace:{id:"read",kind:"tool",title:"Read",status:"complete"}};
 const repository = conversationRepository();
 await repository.save(parent.id,history);
 persistChatThreads([parent]);
@@ -76,23 +77,25 @@ async function main() {
   const artifact = path.join(__dirname,"../artifacts/rem-actions"); fs.mkdirSync(artifact,{recursive:true});
   fs.writeFileSync(path.join(artifact,"rat-action-and-background-thread.png"),(await win.webContents.capturePage()).toPNG());
   await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent.includes('Debug provider discovery')).click()");
-  await wait("document.querySelector('[data-message-id=\"m100\"]')");
+  await wait("document.querySelector('[data-message-id=\"m110\"]')");
   assert.equal(await evaluate("!!document.querySelector('[data-message-id=\"m0\"]')"),false);
   assert.equal(await evaluate("document.querySelector('[data-message-id^=\"thought-group-\"]').querySelectorAll('[aria-label=\"Fork thread from here\"]').length"),0);
-  await evaluate("document.querySelector('[data-message-id=\"m100\"]').parentElement.querySelector('[aria-label=\"Fork thread from here\"]').click()");
-  await wait("window.loadThreads().some(thread=>thread.forkedFromMessageId === 'm100') && document.body.innerText.includes('Thread forked.')");
-  const copied = await evaluate("(async()=>{const thread=window.loadThreads().find(t=>t.forkedFromMessageId==='m100');return {thread,messages:await window.repository.all(thread.id),original:await window.repository.all('parent')};})()");
-  assert.equal(copied.messages.length,101); assert.equal(copied.original.length,120);
+  await evaluate("document.querySelector('[data-message-id=\"m110\"]').parentElement.querySelector('[aria-label=\"Fork thread from here\"]').click()");
+  await wait("window.loadThreads().some(thread=>thread.forkedFromMessageId === 'm110') && document.body.innerText.includes('Thread forked.')");
+  const copied = await evaluate("(async()=>{const thread=window.loadThreads().find(t=>t.forkedFromMessageId==='m110');return {thread,messages:await window.repository.all(thread.id),original:await window.repository.all('parent')};})()");
+  assert.equal(copied.messages.length,111); assert.equal(copied.original.length,120);
   assert.equal(copied.messages[0].body,"History message 0");
-  assert.equal(copied.messages.at(-1).id,"m100");
+  assert.equal(copied.messages.at(-1).id,"m110");
   fs.writeFileSync(path.join(artifact,"forked-history.png"),(await win.webContents.capturePage()).toPNG());
   await wait("window.requests.length === 2");
   const sent = await evaluate("window.requests[1]");
   assert.equal(sent.conversationId,copied.thread.id);
-  assert.equal(sent.messages.length,101);
-  assert.equal(sent.messages.at(-1).body,"History message 100");
-  assert.equal(sent.messages.filter(message=>message.body === "History message 100").length,1);
-  assert.ok(!sent.messages.some(message=>message.body==='History message 101'));
+  // The fork keeps its thought, but tool steps and narration are never re-sent.
+  assert.equal(sent.messages.length,110);
+  assert.ok(!sent.messages.some(message=>message.body==="Source-only fork thought"));
+  assert.equal(sent.messages.at(-1).body,"History message 110");
+  assert.equal(sent.messages.filter(message=>message.body === "History message 110").length,1);
+  assert.ok(!sent.messages.some(message=>message.body==='History message 111'));
   await wait("document.body.innerText.includes('Mock reply') && !document.querySelector('[aria-label=\"Stop Rem\"]')");
   await draft("Try another approach"); enter([]);
   await wait("window.requests.length === 3");
@@ -110,11 +113,11 @@ async function main() {
   await wait("window.requests.length === 4 && document.querySelector('.rem-model-switch')");
   assert.equal(await evaluate("document.querySelector('.rem-model-switch').textContent"), "switched to Codex - sol - high");
   await wait("!document.querySelector('[aria-label=\"Stop Rem\"]')");
-  // Reopen after enough tool output to push the preceding user off the page.
-  await evaluate(`(async()=>{const id=${JSON.stringify(copied.thread.id)};const history=await window.repository.all(id);await window.repository.save(id,[...history,...Array.from({length:80},(_,i)=>({id:'extra-tool-'+i,role:'assistant',kind:'thought',groupId:'extra-tools',body:'Tool output '+i}))],history);})()`);
+  // Reopen after enough tool output and replies to push the preceding user off the page.
+  await evaluate(`(async()=>{const id=${JSON.stringify(copied.thread.id)};const history=await window.repository.all(id);await window.repository.save(id,[...history,...Array.from({length:80},(_,i)=>({id:'extra-tool-'+i,role:'assistant',kind:'thought',groupId:'extra-tools',body:'Tool output '+i})),...Array.from({length:20},(_,i)=>({id:'extra-note-'+i,role:'assistant',body:'Tool note '+i}))],history);})()`);
   await evaluate("document.querySelector('[aria-label=\"Back to active threads\"]').click()");
   await evaluate(`[...document.querySelectorAll('button')].find(button=>button.textContent.includes(${JSON.stringify(copied.thread.title)})).click()`);
-  await wait("document.body.innerText.includes('Tool output 79') && !document.querySelector('[aria-busy=\"true\"]')");
+  await wait("document.body.innerText.includes('Tool note 19') && !document.querySelector('[aria-busy=\"true\"]')");
   assert.equal(await evaluate("document.querySelectorAll('.rem-model-switch').length"), 0);
   await chooseModel("astra");
   await draft("Use Astra after a long tool trace"); enter([]);

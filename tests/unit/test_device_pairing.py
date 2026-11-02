@@ -8,6 +8,7 @@ import concurrent.futures
 import hashlib
 import json
 import secrets
+import urllib.parse
 from typing import Any
 from uuid import uuid4
 
@@ -464,6 +465,10 @@ def test_phone_invitation_requires_a_local_network_address(tmp_path, monkeypatch
         assert status["lan_available"]
         assert data["secret"] not in json.dumps(control.status())
         assert "data:image/svg+xml" in payload["qr"]
+        # Opaque black-on-white so phones can scan it in dark mode, and it scales.
+        qr = urllib.parse.unquote(payload["qr"])
+        assert "fill='#fff'" in qr and "stroke='#000'" in qr
+        assert "viewBox=" in qr
     finally:
         control.close()
 

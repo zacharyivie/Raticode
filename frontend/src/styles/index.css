@@ -334,7 +334,11 @@ select:not([multiple], [size]) {
   height: 100%;
 }
 
+/* xterm.css paints the viewport black and, being outside these layers, wins
+   without !important. Rows rarely fill the host exactly, so let the leftover
+   strip show the terminal background instead. */
 .terminal-host .xterm-viewport {
+  background-color: transparent !important;
   scrollbar-color: #a1a1aa transparent;
   scrollbar-width: thin;
 }
@@ -533,6 +537,9 @@ already carries an authored dark: variant for the same property.
 .dark .bg-white:not([class*="dark:bg-"]) {
   background-color: rgb(var(--color-surface));
 }
+
+/* Phone cameras need dark modules on a light field, whatever the theme. */
+.pairing-qr { background-color: #fff; color-scheme: light; }
 
 .dark :is(.bg-white\/70, .bg-white\/90):not([class*="dark:bg-"]) {
   background-color: rgb(var(--color-surface) / .9);
@@ -737,6 +744,31 @@ already carries an authored dark: variant for the same property.
 
 .studio-sidebar {
   background: rgb(var(--color-surface-muted));
+}
+
+/* Settings > Layout docks the side panes to either edge. CSS order moves them
+   without moving DOM nodes, which would reload the editor's webviews. Panes on
+   the same edge keep the project pane outermost. */
+.studio-panes > .studio-sidebar { order: 0; }
+.studio-panes .studio-chat { order: 3; }
+.studio-panes > section { order: 2; }
+.studio-panes[data-assistant-side="left"] .studio-chat {
+  order: 1;
+  border-left-width: 0;
+  border-right-width: 1px;
+}
+.studio-panes[data-assistant-side="left"] .studio-chat > [role="separator"] {
+  left: auto;
+  right: -3px;
+}
+.studio-panes[data-project-side="right"] > .studio-sidebar {
+  order: 4;
+  border-left-width: 1px;
+  border-right-width: 0;
+}
+.studio-panes[data-project-side="right"] > .studio-sidebar > [role="separator"] {
+  left: -3px;
+  right: auto;
 }
 
 .studio-topbar,
@@ -1036,6 +1068,25 @@ already carries an authored dark: variant for the same property.
   .rem-thread-launch { box-shadow: inset 3px 0 0 #6366f1; }
 }
 
+/* The browser's Downloads icon drops in and rings when a download finishes. */
+@keyframes browser-download-drop {
+  0% { transform: translateY(-7px); opacity: 0; color: rgb(var(--color-brand)); }
+  45% { transform: translateY(2px); opacity: 1; color: rgb(var(--color-brand)); }
+  65% { transform: translateY(-1px); color: rgb(var(--color-brand)); }
+  100% { transform: none; }
+}
+@keyframes browser-download-ring {
+  0% { transform: scale(.4); opacity: .7; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .browser-download-arrived > svg { animation: browser-download-drop 1100ms cubic-bezier(.2,.7,.2,1) both; }
+  .browser-download-arrived::after {
+    content: ""; position: absolute; inset: -3px; border-radius: 9999px; pointer-events: none;
+    border: 2px solid rgb(var(--color-brand)); animation: browser-download-ring 700ms ease-out 420ms both;
+  }
+}
+
 /* Thread groups: open lists first, then collapsed Running and Archived rows. */
 .rem-thread-group + .rem-thread-group { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgb(var(--color-line)); }
 .rem-thread-group-header { display: flex; align-items: center; gap: 4px; min-height: 28px; margin-bottom: 4px; border-radius: 8px; }
@@ -1050,8 +1101,39 @@ already carries an authored dark: variant for the same property.
   min-width: 18px; padding: 0 6px; border-radius: 999px; background: rgb(var(--color-ink) / .07);
   color: rgb(var(--color-muted)); font-size: 10px; line-height: 16px; letter-spacing: 0; text-align: center; font-variant-numeric: tabular-nums;
 }
+.rem-thread-scope {
+  min-width: 0; max-width: 60%; overflow: hidden; padding: 0 6px; border-radius: 999px; background: rgb(var(--color-ink) / .07);
+  color: rgb(var(--color-muted)); font-size: 10px; line-height: 15px; white-space: nowrap; text-overflow: ellipsis;
+}
 .rem-archive-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 4px; padding: 0 4px 0 12px; color: rgb(var(--color-muted)); font-size: 10px; }
 .rem-thread-group[data-thread-group="unread"] .rem-thread-count { background: rgb(59 130 246 / .14); color: rgb(var(--color-ink)); }
+.rem-thread-group-chevron, .rem-thread-group-action {
+  display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; gap: 4px; height: 24px; border-radius: 6px; color: rgb(var(--color-muted));
+}
+.rem-thread-group-chevron { width: 24px; }
+.rem-thread-group-action { padding: 0 6px; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.rem-thread-group-chevron:hover, .rem-thread-group-action:hover { color: rgb(var(--color-ink)); background: rgb(var(--color-ink) / .05); }
+.rem-thread-group-chevron:focus-visible, .rem-thread-group-action:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: -2px; }
+.rem-thread-group-toggle[aria-pressed="true"] { color: rgb(var(--color-brand)); }
+.rem-thread-selected { background: rgb(var(--color-brand) / .1); box-shadow: inset 0 0 0 1px rgb(var(--color-brand) / .45); }
+/* Selected-thread toolbar and right-click menu. */
+.rem-thread-selection {
+  position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 8px; padding: 4px 4px 4px 10px;
+  border: 1px solid rgb(var(--color-brand) / .35); border-radius: 10px; background: rgb(var(--color-raised)); color: rgb(var(--color-ink)); font-size: 11px;
+}
+.rem-thread-selection > span { margin-right: auto; font-weight: 600; }
+.rem-thread-selection button { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 7px; border-radius: 6px; font-weight: 500; }
+.rem-thread-selection button:hover { background: rgb(var(--color-ink) / .06); }
+.rem-thread-selection button:focus-visible, .rem-thread-menu button:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: -2px; }
+.rem-thread-selection-clear { width: 24px; justify-content: center; padding: 0 !important; color: rgb(var(--color-muted)); }
+.rem-thread-menu {
+  position: fixed; z-index: 120; min-width: 168px; padding: 4px; border: 1px solid rgb(var(--color-line)); border-radius: 10px;
+  background: rgb(var(--color-raised)); box-shadow: 0 12px 32px rgb(0 0 0 / .18);
+}
+.rem-thread-menu-heading { padding: 4px 8px 6px; color: rgb(var(--color-muted)); font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.rem-thread-menu button { display: block; width: 100%; padding: 6px 8px; border-radius: 6px; color: rgb(var(--color-ink)); font-size: 12px; text-align: left; }
+.rem-thread-menu button:hover, .rem-thread-menu button:focus { background: rgb(var(--color-ink) / .06); }
+.rem-thread-menu button[data-danger] { color: rgb(220 38 38); }
 
 /* Continuous ancestry lanes sit beside variable-height commit details. */
 .scm-history-graph { --scm-graph-background: rgb(var(--color-surface)); --scm-lane-0: #0067a5; --scm-lane-1: #956000; --scm-lane-2: #9f367c; --scm-lane-3: #007565; }

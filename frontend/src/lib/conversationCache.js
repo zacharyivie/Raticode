@@ -1,4 +1,21 @@
-import { mergeDeviceMessages } from "./deviceWorkspaceSync.js";
+import { mergeDeviceMessages } from "./deviceMessages.js";
+import { pageStart } from "./conversationRepository.js";
+
+// The server's transcript of a managed thread is in its true order, and its
+// copy of a message wins. A message only this window has stays right after the
+// server message it followed here, so a missing early message can't land last.
+export function mergeInServerOrder(local, server) {
+  const position = new Map(server.map((message, index) => [String(message.id), index]));
+  const after = new Map();
+  let anchor = -1;
+  for (const message of local) {
+    const index = position.get(String(message.id));
+    if (index !== undefined) { anchor = index; continue; }
+    if (!after.has(anchor)) after.set(anchor, []);
+    after.get(anchor).push(message);
+  }
+  return [...(after.get(-1) || []), ...server.flatMap((message, index) => [message, ...(after.get(index) || [])])];
+}
 // Only persisted inactive histories may be evicted. Active/running histories and
 // failed writes remain available even when they exceed the inactive budget.
 export function createConversationCache({ load, save, changed, maxInactive = 4, maxBytes = 8 * 1024 * 1024 }) {
@@ -37,6 +54,10 @@ export function createConversationCache({ load, save, changed, maxInactive = 4, 
   function flush() {
     for (const id of pending) {
       const entry = entries.get(id);
+      // A write in progress hasn't updated `persisted` yet. Saving now would
+      // write its messages again, so wait for it and save the rest then.
+      if (entry?.saving) continue;
+      pending.delete(id);
       if (entry) {
         const messages = entry.messages;
         const revision = entry.revision;
@@ -51,21 +72,29 @@ export function createConversationCache({ load, save, changed, maxInactive = 4, 
         const result = save(id, messages, known, entry.persisted);
         if (result?.then) {
           entry.dirty = true;
-          result.then(finish).catch(() => { entry.dirty = true; }).finally(publish);
+          entry.saving = true;
+          result.then(finish).catch(() => { entry.dirty = true; }).finally(() => {
+            entry.saving = false;
+            if (pending.has(id) && !batchDepth) flush();
+            else publish();
+          });
         } else {
           entry.dirty = result === false;
           finish(result);
         }
       }
     }
-    pending.clear();
     publish();
   }
   return {
     get,
+    // Keeps the rows of the latest history page; see pageStart.
     trim(id, limit) {
       const entry = entries.get(id);
-      if (entry && !entry.dirty) entries.set(id, { messages: entry.messages.slice(-limit), persisted: entry.messages.slice(-limit), dirty: false });
+      if (entry && !entry.dirty) {
+        const messages = entry.messages.slice(pageStart(entry.messages, limit));
+        entries.set(id, { messages, persisted: messages, dirty: false });
+      }
     },
     hydrate(id, messages, { recent = false, device = false, authoritative = false } = {}) {
       const entry = entries.get(id);
@@ -74,7 +103,7 @@ export function createConversationCache({ load, save, changed, maxInactive = 4, 
       if (recent) for (const message of messages) if (!merged.has(message.id)) merged.set(message.id, message);
       for (const message of current) merged.set(message.id, message);
       const combined = authoritative
-        ? [...new Map([...current, ...messages].map(message => [message.id, message])).values()]
+        ? mergeInServerOrder(current, messages)
         : device ? mergeDeviceMessages(current, messages) : [...merged.values()];
       if (entry) {
         entry.messages = combined;

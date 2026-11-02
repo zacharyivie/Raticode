@@ -1,5 +1,6 @@
 /* global __dirname, process, console, clearTimeout, window, performance, setTimeout */
 // Real Monaco, production editor component, generated text and no provider processes.
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const { app, BrowserWindow } = require("electron");
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");

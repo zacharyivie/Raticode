@@ -1,3 +1,4 @@
+require("./background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");

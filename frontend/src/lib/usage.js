@@ -64,3 +64,18 @@ export function usageDashboardUrl(value) {
     return url.protocol === "https:" ? url.href : null;
   } catch { return null; }
 }
+
+// Mirrors BROWSER_LOGIN_COMMANDS in provider_capabilities.py.
+const BROWSER_SIGN_IN = new Set(["claude_code", "codex", "cursor", "copilot"]);
+const SIGN_IN_COMMANDS = {
+  claude_code: "claude auth login", codex: "codex login", cursor: "cursor-agent login",
+  copilot: "copilot login", opencode: "opencode auth login", antigravity: "agy",
+};
+
+/** How a user can sign in to a provider account, or null when the account needs no sign-in. */
+export function usageSignIn(account) {
+  if (account?.status !== "auth_required" || account.provider?.endsWith("_api")) return null;
+  // A named profile has its own sign-in store; a default sign-in would not update it.
+  if (account.profile) return { browser: false, command: null };
+  return { browser: BROWSER_SIGN_IN.has(account.provider), command: SIGN_IN_COMMANDS[account.provider] || null };
+}

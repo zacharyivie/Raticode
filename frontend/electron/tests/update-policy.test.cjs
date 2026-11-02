@@ -8,7 +8,7 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
 function context(platform, signing, packaged = true, smoke = false) {
   const calls = [];
-  const state = { available: true, info: { installerUrl: "https://github.com/zacharyivie/gofer-flow/releases/download/v0.3.5/Raticode-0.3.5-arm64.dmg" } };
+  const state = { available: true, info: { installerUrl: "https://github.com/zacharyivie/Raticode/releases/download/v0.3.5/Raticode-0.3.5-arm64.dmg" } };
   const sandbox = {
     app: { isPackaged: packaged, getVersion: () => "0.2.6" },
     process: { platform, arch: "arm64" },
@@ -72,26 +72,103 @@ test("download rejection clears busy and automatic installation state", async ()
   assert.equal(sandbox.installUpdateAfterDownload, false);
 });
 
+const MAC_METADATA = `version: 0.4.0
+files:
+  - url: Raticode-0.4.0-arm64.zip
+    sha512: abc==
+    size: 235085848
+  - url: Raticode-0.4.0-arm64.dmg
+    sha512: def==
+    size: 235822411
+path: Raticode-0.4.0-arm64.zip
+sha512: abc==
+releaseDate: '2026-10-28T12:37:15.041Z'
+`;
+
+function fallbackContext({ platform = "darwin", arch = "arm64", version = "0.3.9", fetch } = {}) {
+  const requests = [];
+  const sandbox = {
+    app: { getVersion: () => version },
+    process: { platform, arch },
+    isSmokeTest: false,
+    fetch: async (url, options) => { requests.push({ url, options }); return fetch(url); },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    source.match(/^const RELEASES_URL = .*$/m)[0] + "\n"
+    + source.slice(source.indexOf("async function checkLatestReleaseFallback()"), source.indexOf("async function openPath(")),
+    sandbox,
+  );
+  return { sandbox, requests };
+}
+
+function metadataResponse(body, status = 200, headers = {}) {
+  return { ok: status >= 200 && status < 300, status, text: async () => body, headers: new Headers(headers) };
+}
+
 for (const arch of ["arm64", "x64"]) {
-  test(`Mac download selects ${arch} and rejects foreign assets`, () => {
-    const sandbox = { process: { platform: "darwin", arch } };
-    vm.runInNewContext(source.slice(source.indexOf("function macInstallerUrl("), source.indexOf("async function openPath(")), sandbox);
-    const name = `Raticode-0.3.5-${arch}.dmg`;
-    const url = `https://github.com/zacharyivie/gofer-flow/releases/download/v0.3.5/${name}`;
-    const release = { tag_name: "v0.3.5", assets: [{ name, browser_download_url: url }] };
-    assert.equal(sandbox.macInstallerUrl(release), url);
-    release.assets[0].browser_download_url = "https://example.com/installer.dmg";
-    assert.equal(sandbox.macInstallerUrl(release), "");
-    release.assets = [{ name: "wrong-arch.dmg", browser_download_url: url }];
-    assert.equal(sandbox.macInstallerUrl(release), "");
-    assert.equal(sandbox.macInstallerUrl({ tag_name: "v0.3.5" }), "");
+  test(`manual ${arch} Mac check reads release metadata without the rate-limited API`, async () => {
+    const { sandbox, requests } = fallbackContext({ arch, fetch: async () => metadataResponse(MAC_METADATA) });
+    const state = await sandbox.checkLatestReleaseFallback();
+    assert.deepEqual(requests.map(request => request.url), ["https://github.com/zacharyivie/Raticode/releases/latest/download/latest-mac.yml"]);
+    assert.equal(state.available, true);
+    assert.equal(state.error, "");
+    assert.equal(state.info.version, "0.4.0");
+    assert.equal(state.info.releaseDate, "2026-10-28T12:37:15.041Z");
+    // Only an installer listed in the metadata for this architecture is offered.
+    assert.equal(state.info.installerUrl, arch === "arm64"
+      ? "https://github.com/zacharyivie/Raticode/releases/download/v0.4.0/Raticode-0.4.0-arm64.dmg"
+      : "");
   });
 }
+
+test("manual check reports the current version as up to date and uses the platform metadata file", async () => {
+  const mac = await fallbackContext({ version: "0.4.0", fetch: async () => metadataResponse(MAC_METADATA) }).sandbox.checkLatestReleaseFallback();
+  assert.equal(mac.available, false);
+  for (const [platform, file] of [["linux", "latest-linux.yml"], ["win32", "latest.yml"]]) {
+    const { sandbox, requests } = fallbackContext({ platform, fetch: async () => metadataResponse("version: 0.4.0\n") });
+    const state = await sandbox.checkLatestReleaseFallback();
+    assert.ok(requests[0].url.endsWith(`/releases/latest/download/${file}`));
+    assert.equal(state.available, true);
+    assert.equal(state.info.installerUrl, "");
+  }
+});
+
+test("manual check rejects metadata whose version could redirect the installer link", async () => {
+  for (const body of ["files: []\n", "version: 0.4.0/../../evil\nfiles:\n  - url: Raticode-0.4.0/../../evil-arm64.dmg\n"]) {
+    const { sandbox } = fallbackContext({ fetch: async () => metadataResponse(body) });
+    await assert.rejects(sandbox.checkLatestReleaseFallback(), /without a version/);
+  }
+});
+
+test("manual check treats missing release metadata as no published release", async () => {
+  const { sandbox } = fallbackContext({ fetch: async () => metadataResponse("Not Found", 404) });
+  const state = await sandbox.checkLatestReleaseFallback();
+  assert.equal(state.available, false);
+  assert.equal(state.info.noReleases, true);
+});
+
+test("manual check explains rate limits, refusals and network failures", async () => {
+  const reset = Math.floor(Date.UTC(2026, 9, 28, 15, 5) / 1000);
+  const cases = [
+    [metadataResponse("", 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) }), /rate limit for this network was reached\. Try again after \S/],
+    [metadataResponse("", 429, { "retry-after": "120" }), /limiting update checks from this network\. Try again in 2 minutes\./],
+    [metadataResponse("", 429, { "retry-after": "30" }), /Try again in 1 minute\./],
+    [metadataResponse("", 403), /refused the update check \(HTTP 403\)\. A VPN, proxy or firewall/],
+    [metadataResponse("", 500), /GitHub returned HTTP 500 while checking for updates\./],
+  ];
+  for (const [response, message] of cases) {
+    const { sandbox } = fallbackContext({ fetch: async () => response });
+    await assert.rejects(sandbox.checkLatestReleaseFallback(), message);
+  }
+  const offline = fallbackContext({ fetch: async () => { throw new TypeError("fetch failed", { cause: new Error("getaddrinfo ENOTFOUND github.com") }); } });
+  await assert.rejects(offline.sandbox.checkLatestReleaseFallback(), /Could not reach GitHub to check for updates: getaddrinfo ENOTFOUND github\.com/);
+});
 
 test("manual update buttons describe the action accurately", () => {
   const appSource = fs.readFileSync(path.join(__dirname, "../../src/pages/App.jsx"), "utf8");
   const sandbox = {};
-  vm.runInNewContext(appSource.slice(appSource.indexOf("function updateButtonLabel("), appSource.indexOf("export function WorkflowHistoryDialog(")), sandbox);
+  vm.runInNewContext(appSource.slice(appSource.indexOf("function updateButtonLabel("), appSource.indexOf("export function ChatPane(")), sandbox);
   const state = { supported: false, platform: "darwin" };
   assert.equal(sandbox.updateButtonLabel(state), "Download Mac installer");
   assert.match(sandbox.updateButtonTitle(state), /manual installation/);

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -216,9 +218,27 @@ def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
     assert "checksums-windows.txt" in windows_checksum_run
 
 
-@pytest.mark.parametrize("audit_status", [0, 1, 2])
-def test_npm_audit_logs_failure_evidence_and_preserves_exit_status(
-    tmp_path: Path, audit_status: int
+REVIEWED_ADVISORY = (
+    '{"metadata":{"vulnerabilities":{"total":1}},"vulnerabilities":{"minimatch":'
+    '{"via":[{"source":1,"name":"minimatch",'
+    '"url":"https://github.com/advisories/GHSA-g3hv-75wg-m249"}],'
+    '"nodes":["node_modules/minimatch"]}}}'
+)
+NEW_ADVISORY = REVIEWED_ADVISORY.replace("GHSA-g3hv-75wg-m249", "GHSA-2222-3333-4444")
+
+
+@pytest.mark.parametrize(
+    ("report", "audit_status", "expected_status"),
+    [
+        ('{"metadata":{"vulnerabilities":{"total":0}},"vulnerabilities":{}}', 0, 0),
+        (REVIEWED_ADVISORY, 1, 0),
+        (NEW_ADVISORY, 1, 1),
+        ('{"error":{"code":"ENOTFOUND"}}', 1, 1),
+    ],
+    ids=["clean", "reviewed-build-tool", "new-advisory", "audit-error"],
+)
+def test_npm_audit_logs_failure_evidence_and_allows_only_reviewed_advisories(
+    tmp_path: Path, report: str, audit_status: int, expected_status: int
 ) -> None:
     if os.name == "nt":
         pytest.skip("Source validation runs in bash on Linux")
@@ -226,23 +246,29 @@ def test_npm_audit_logs_failure_evidence_and_preserves_exit_status(
     command = validation["Audit frontend and shipped Electron dependencies"]["run"]
     frontend = tmp_path / "frontend"
     frontend.mkdir()
+    (tmp_path / "scripts").mkdir()
+    shutil.copy2(REPO_ROOT / "scripts/check-npm-audit.py", tmp_path / "scripts")
+    (frontend / "package-lock.json").write_text(
+        '{"packages":{"":{},"node_modules/minimatch":{"version":"3.1.5","dev":true}}}'
+    )
+    shutil.copy2(REPO_ROOT / "frontend/npm-audit-exceptions.json", frontend)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    report = '{"metadata":{"vulnerabilities":{"total":1}}}'
     npm = bin_dir / "npm"
     npm.write_text(f"#!/bin/sh\nprintf '%s\\n' '{report}'\nexit {audit_status}\n")
     npm.chmod(0o755)
     result = subprocess.run(
-        ["bash", "-e", "-c", command],
+        ["bash", "-e", "-c", command.replace("python ", f"{shlex.quote(sys.executable)} ")],
         cwd=frontend,
         env={**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]},
         capture_output=True,
         text=True,
         check=False,
     )
-    assert result.returncode == audit_status
+    assert result.returncode == expected_status, result.stderr
     assert (tmp_path / "audit-evidence/npm-audit.json").read_text().strip() == report
-    assert result.stdout.strip() == (report if audit_status else "")
+    # A failed audit always prints its report, even when the exceptions cover it.
+    assert result.stdout.startswith(report) if audit_status else result.stdout == ""
 
 
 def test_release_security_gates_are_mandatory_and_publish_provenance() -> None:

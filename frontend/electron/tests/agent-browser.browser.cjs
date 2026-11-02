@@ -1,5 +1,6 @@
 // Drive real webview tabs through the agent browser controller: on screen,
 // behind another tab, and fully hidden, with two agents working at once.
+require("./background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const { app, BrowserWindow } = require("electron");

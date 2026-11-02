@@ -44,11 +44,12 @@ remain stable. This keeps installations, CLI callers, secrets, scheduler data,
 and OS application identity compatible. These are technical identifiers rather
 than product display names.
 
-Repository links use the existing `zacharyivie/gofer-flow` GitHub redirect, also
-used by this checkout's origin. Renaming the hosted repository is separate from
-editing this checkout. Release preparation uses the actual repository identity
-provided by GitHub Actions. A release must be built again after this rename;
-previous binaries and draft candidates are not Raticode builds.
+Repository links use the canonical `zacharyivie/Raticode` GitHub repository, also
+used by this checkout's origin and the desktop update check. GitHub redirects the
+previous `zacharyivie/gofer-flow` address, but release metadata must not rely on
+it. Release preparation uses the actual repository identity provided by GitHub
+Actions. Previous binaries and draft candidates built before the rename are not
+Raticode builds.
 
 ## Verify naming
 

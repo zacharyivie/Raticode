@@ -12,6 +12,8 @@ import {
 import { PROVIDER_PERMISSIONS, defaultPermissionMode } from "../lib/providerPermissions.js";
 import { audioInputConstraints } from "../lib/audioDevices.js";
 
+const menuClass = "ml-1 h-8 min-w-0 max-w-40 rounded-md border border-line bg-transparent px-1.5 text-xs text-ink outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50";
+
 export default function ChatComposer({
   inputLabel,
   placeholder,
@@ -38,6 +40,10 @@ export default function ChatComposer({
   permissionMode = defaultPermissionMode(provider),
   permissionOptions = PROVIDER_PERMISSIONS[provider] || [["default", "CLI default"]],
   onPermissionModeChange = () => {},
+  machine = "",
+  machines = [],
+  machineLocked = false,
+  onMachineChange = () => {},
 }) {
   const errorId = useId();
   const fileInputRef = useRef(null);
@@ -254,7 +260,7 @@ export default function ChatComposer({
             {permissionOptions.length ? (
               <select
                 aria-label="Rem permissions"
-                className="ml-1 h-8 min-w-0 max-w-40 rounded-md border border-line bg-transparent px-1.5 text-xs text-ink outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50"
+                className={menuClass}
                 disabled={sending}
                 value={permissionMode}
                 title={permissionOptions.find(([id]) => id === permissionMode)?.[2]}
@@ -263,6 +269,20 @@ export default function ChatComposer({
                 {permissionOptions.map(([id, label]) => (
                   <option key={id} value={id}>{label}</option>
                 ))}
+              </select>
+            ) : null}
+            {machines.length ? (
+              <select
+                aria-label="Run on"
+                className={menuClass}
+                disabled={sending || machineLocked}
+                value={machine}
+                title={machineLocked ? "This thread keeps running on the computer it started on" : "Computer that runs this thread"}
+                onChange={(event) => onMachineChange(event.target.value)}
+              >
+                <option value="">This computer</option>
+                {machines.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
+                {machine && !machines.some(({ id }) => id === machine) ? <option value={machine}>Unpaired computer</option> : null}
               </select>
             ) : null}
             <input

@@ -16,7 +16,15 @@ from gofer.core.provider_capabilities import CLI_PROVIDERS
 from gofer.ui.chat_jobs import ChatJobs
 from gofer.ui.chat_steering import ChatSteering
 from gofer.ui.rem_home import RemHome, Superseded, subject_hash
-from gofer.ui.rem_home_models import Recipe, RemConflict, Schedule, completion_recap, worker_config
+from gofer.ui.rem_home_models import (
+    Recipe,
+    RemConflict,
+    Schedule,
+    completion_recap,
+    occurrence_context,
+    worker_config,
+)
+from gofer.ui.rem_home_provider import MalformedDecision
 from gofer.ui.rem_home_store import RemHomeStore
 
 
@@ -182,9 +190,68 @@ def test_requested_worker_provider_and_model_reach_threads_and_review(
             model,
             "",
         )
-        assert metadata["archived"]
+        # Finished task threads stay in the thread list; the desktop marks them unread.
+        assert metadata["archived"] is False
     assert home.store.conversation()["conversation"]["model"] == "rem-model"
     assert home.store.conversation()["messages"][-1]["body"] == "Implemented and tested."
+
+
+def test_rem_chat_uses_its_own_selection_while_workers_keep_theirs(home: RemHome, tmp_path: Path):
+    observed = []
+    original = home.source
+
+    async def source(**kwargs):
+        observed.append(kwargs)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    home.configure(
+        {
+            "provider": "codex",
+            "model": "worker-model",
+            "effort": "high",
+            "chat_provider": "claude_code",
+            "chat_model": "chat-model",
+            "chat_effort": "low",
+        }
+    )
+    chat_selections = []
+
+    def generate(prompt, config, cancel):
+        chat_selections.append((config["provider"], config["model"], config["effort"]))
+        if "proactive task update" in prompt:
+            return {"summary": "Implemented and tested.", "needs_user": False}
+        assert "worker-model" in prompt and "chat-model" not in prompt
+        return {"reply": "Starting it.", "tasks": [recipe(tmp_path)]}
+
+    home.generate = generate
+    home.submit_message({"request_id": "split-selection", "body": "Build it"})
+    home._reply()
+    assert home.store.conversation()["conversation"]["model"] == "chat-model"
+    task = home.store.tasks()[0]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    for options in observed:
+        assert (options["provider"], options["model"]) == ("codex", "worker-model")
+    assert chat_selections and all(
+        selection == ("claude_code", "chat-model", "low") for selection in chat_selections
+    )
+
+
+def test_rem_chat_selection_follows_workers_until_chosen():
+    from gofer.ui.rem_home_models import chat_config
+
+    worker = {"provider": "codex", "model": "m", "effort": "high", "chat_provider": ""}
+    assert chat_config(worker) is worker
+    assert chat_config({**worker, "chat_provider": "claude_code"})["provider"] == "claude_code"
+    chosen = chat_config({**worker, "chat_provider": "claude_code"})
+    assert (chosen["model"], chosen["effort"]) == ("cli-default", "")
+
+
+def test_rem_rejects_an_unknown_chat_provider(home: RemHome):
+    with pytest.raises(ValueError, match="chat provider"):
+        home.configure({"provider": "codex", "chat_provider": "nope"})
 
 
 def test_worker_selection_resets_incompatible_defaults_and_preserves_grants():
@@ -359,6 +426,26 @@ def test_verification_ignores_dependencies_and_records_links_without_following_t
     assert subject_hash(project) != before
 
 
+def test_verification_ignores_compiled_workflow_caches(tmp_path: Path):
+    workflow = tmp_path / ".raticode" / "daily"
+    compiled = workflow / "compiled"
+    compiled.mkdir(parents=True)
+    (workflow / "workflow.rattish").write_text("Rattish: 1\n")
+    (compiled / "cache.json").write_text('{"workflow":"daily-4"}')
+    unrelated = tmp_path / "src" / "compiled"
+    unrelated.mkdir(parents=True)
+    (unrelated / "output.js").write_text("one")
+    before = subject_hash(tmp_path)
+    # Another app instance recompiling the workflow is not a project change.
+    (compiled / "cache.json").write_text('{"workflow":"daily-10"}')
+    assert subject_hash(tmp_path) == before
+    (unrelated / "output.js").write_text("two")
+    assert subject_hash(tmp_path) != before
+    before = subject_hash(tmp_path)
+    (workflow / "workflow.rattish").write_text("Rattish: 1\n# edited\n")
+    assert subject_hash(tmp_path) != before
+
+
 def test_verification_has_no_file_count_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     empty = tmp_path / "empty.txt"
     empty.touch()
@@ -494,8 +581,9 @@ def test_worker_completion_is_independently_verified_and_linked(home: RemHome, t
     assert messages[-1]["work"]["run_id"] == run["id"]
     for identity in (run["thread_id"], run["verification_thread_id"]):
         thread = home.store.thread(identity)
-        assert thread["metadata"]["archived"] is True
-        assert thread["metadata"]["archivedAt"]
+        # Finished task threads stay in the thread list; the desktop marks them unread.
+        assert thread["metadata"]["archived"] is False
+        assert "archivedAt" not in thread["metadata"]
         assert all("acceptance_criteria" not in m["body"] for m in thread["messages"])
     assert home.store.thread(run["thread_id"])["messages"][0]["body"] == created["prompt"]
     review_body = home.store.thread(run["verification_thread_id"])["messages"][-1]["body"]
@@ -591,7 +679,7 @@ def test_rem_discussion_follows_up_in_one_thread_without_project_snapshot(
         assert "acceptance_criteria" not in options["messages"][-1]["body"]
     thread = home.store.thread(run["thread_id"])
     assert [m["body"] for m in thread["messages"] if m["role"] == "user"] == [question, follow_up]
-    assert thread["metadata"]["archived"] is True
+    assert thread["metadata"]["archived"] is False
     assert not thread["running"]
     result = home.store.conversation()["messages"][-1]
     assert result["work"]["thread_id"] == run["thread_id"]
@@ -662,7 +750,7 @@ def test_rem_answers_worker_questions_and_completes_requested_few_turns(
     assert len(turns) == len(decisions) == 3
     assert not run["phase_label"]
     thread = home.store.thread(run["thread_id"])
-    assert thread["metadata"]["archived"] is True
+    assert thread["metadata"]["archived"] is False
     assert [m["body"] for m in thread["messages"] if m["role"] == "user"] == [
         "How is your day going?",
         *messages[:2],
@@ -794,7 +882,7 @@ def test_rem_answers_work_clarifications_before_independent_review(
         assert len(workers) == len(reviews) == 2
         assert "Use the project's existing test style" in workers[1]["messages"][-1]["body"]
         assert run["criteria"][0]["result"] == "pass"
-        assert home.store.thread(run["thread_id"])["metadata"]["archived"] is True
+        assert home.store.thread(run["thread_id"])["metadata"]["archived"] is False
 
 
 def test_attention_decision_needs_a_real_question_instead_of_a_generic_pause(home: RemHome):
@@ -912,11 +1000,11 @@ def test_edit_during_discussion_check_restarts_with_the_latest_question(
     run = wait_run(home, task["id"], {"succeeded", "blocked"})
     assert run["state"] == "succeeded", run
     assert prompts == ["Rem: How is the project?", "Rem: What is still unfinished?"]
-    assert home.store.thread(run["thread_id"])["metadata"]["archived"] is True
+    assert home.store.thread(run["thread_id"])["metadata"]["archived"] is False
     assert not any(m["body"] == "Old answer." for m in home.store.conversation()["messages"])
 
 
-def test_completion_archives_all_review_attempts_and_backfills_existing_runs(
+def test_completion_keeps_review_attempts_listed_and_restart_restores_old_archives(
     home: RemHome, tmp_path: Path
 ):
     task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
@@ -927,13 +1015,20 @@ def test_completion_archives_all_review_attempts_and_backfills_existing_runs(
         metadata = home.store.get(db, "threads", run["thread_id"])
         home.store.put(db, "threads", {**metadata, "id": extra, "managedRole": "verify"})
     finished = wait_run(home, task["id"], {"succeeded"})
-    assert home.store.thread(extra)["metadata"]["archived"] is True
+    assert not home.store.thread(extra)["metadata"].get("archived")
+    assert home.store.thread(finished["thread_id"])["metadata"]["archived"] is False
     with home.store.connect() as db:
-        thread = home.store.get(db, "threads", finished["thread_id"])
-        thread.pop("archived")
-        home.store.put(db, "threads", thread)
+        # Earlier builds archived finished runs' threads and stamped archivedAt.
+        for identity in (finished["thread_id"], extra):
+            thread = home.store.get(db, "threads", identity)
+            home.store.put(
+                db, "threads", {**thread, "archived": True, "archivedAt": finished["finished_at"]}
+            )
     restored = RemHomeStore(home.data_dir)
-    assert restored.thread(finished["thread_id"])["metadata"]["archived"] is True
+    for identity in (finished["thread_id"], extra):
+        metadata = restored.thread(identity)["metadata"]
+        assert metadata["archived"] is False
+        assert "archivedAt" not in metadata
     assert restored.thread(finished["thread_id"])["messages"]
 
 
@@ -1312,6 +1407,75 @@ def test_schedules_coalesce_misfires_and_do_not_overlap(home: RemHome, tmp_path:
     assert updated["active_run"]["task_id"] == task["id"]
 
 
+def test_repeated_runs_pick_up_after_the_last_accepted_run(home: RemHome, tmp_path: Path):
+    prompts: list[str] = []
+    source = home.source
+
+    def recording(**kwargs: Any) -> Any:
+        prompts.append(kwargs["agent_instructions"])
+        return source(**kwargs)
+
+    home.source = recording
+    task = home.create_task(
+        {
+            "request_id": "create",
+            **recipe(
+                tmp_path, schedule={"kind": "daily", "local_time": "09:00", "timezone": "UTC"}
+            ),
+        }
+    )["task"]
+    first_at = task["next_occurrence_at"]
+    clock = datetime.now(UTC) + timedelta(days=2)
+    home.store.due(clock)
+    first = wait_run(home, task["id"], {"succeeded"})
+    assert first["scheduled_for"] == first_at
+    assert first["previous_success"] is None
+    worker, review = prompts
+    context = json.loads(worker.split("Occurrence context:\n", 1)[1])
+    assert context["this_run_for"] == first_at
+    assert context["started_by"] == "schedule"
+    assert "new_since" not in context
+    assert "state the default you chose" in worker
+    assert '"occurrence"' in review
+
+    # A run that doesn't finish leaves the window open from the last accepted run.
+    clock += timedelta(days=2)
+    home.store.due(clock)
+    second = home.store.tasks()[0]["active_run"]
+    assert second["previous_success"]["run_id"] == first["id"]
+    home._finish(second["id"], "blocked", "Couldn't reach the source.")
+    clock += timedelta(days=2)
+    home.store.due(clock)
+    prompts.clear()
+    third = wait_run(home, task["id"], {"succeeded"})
+    assert third["id"] != second["id"]
+    assert third["previous_success"] == {
+        "run_id": first["id"],
+        "for": first_at,
+        "finished_at": first["finished_at"],
+        "summary": "Implemented and tested.",
+        "reports": [],
+    }
+    worker, review = prompts
+    context = json.loads(worker.split("Occurrence context:\n", 1)[1])
+    assert context["new_since"] == first_at
+    assert context["this_run_for"] == third["scheduled_for"] > first_at
+    assert context["previous_accepted_run"]["summary"] == "Implemented and tested."
+    assert f'"new_since": "{first_at}"' in review
+
+
+def test_one_off_work_gets_occurrence_context_only_after_a_success(home: RemHome, tmp_path: Path):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    first = wait_run(home, task["id"], {"succeeded"})
+    assert occurrence_context(first) is None
+    again = home.edit_task(task["id"], {"request_id": "again"}, "run")["run"]
+    context = occurrence_context(again)
+    assert context is not None
+    assert context["started_by"] == "request"
+    assert context["this_run_for"] == again["created_at"]
+    assert context["new_since"] == first["created_at"]
+
+
 def test_restart_never_replays_uncertain_write_and_recovers_conversation(
     home: RemHome, tmp_path: Path
 ):
@@ -1409,7 +1573,39 @@ def test_all_providers_execute_and_verify_using_selected_model(
     elif provider == "codex":
         assert observed[1]["permission_mode"] == "read-only"
     elif provider == "claude_code":
-        assert observed[1]["permission_mode"] == "plan"
+        assert all(o["permission_mode"] == "dontAsk" for o in observed)
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude_code"])
+def test_only_codex_reviewers_get_a_private_scratch_folder(
+    home: RemHome, tmp_path: Path, provider: str
+):
+    original = home.source
+    observed: list[dict[str, Any]] = []
+
+    async def source(**kwargs):
+        observed.append(kwargs)
+        scratch = kwargs.get("trusted_scratch_dir")
+        if scratch:
+            Path(scratch).mkdir(parents=True)
+            (Path(scratch) / "cache").write_text("x")
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    home.configure({"provider": provider})
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    assert wait_run(home, task["id"], {"succeeded", "blocked"})["state"] == "succeeded"
+    worker, review = observed
+    assert "trusted_scratch_dir" not in worker
+    if provider == "claude_code":
+        assert "trusted_scratch_dir" not in review
+        return
+    scratch = Path(review["trusted_scratch_dir"])
+    assert scratch.is_relative_to(home.data_dir / "rem-work" / "review-scratch")
+    assert review["permission_mode"] == "read-only"
+    assert str(scratch) in review["agent_instructions"]
+    assert not scratch.exists()
 
 
 @pytest.mark.parametrize("schedule", [None, {}, {"kind": "once"}])
@@ -1524,9 +1720,62 @@ def test_reviewer_must_cover_exact_current_criteria():
         [],
         [{"id": "wrong", "result": "pass", "evidence": "Test"}],
         [{"id": "check", "result": "pass", "evidence": ""}],
+        [{"id": "check", "result": "pass", "evidence": "Test"}] * 2,
     ]:
         with pytest.raises(ValueError):
             RemHome._verdict(json.dumps({"criteria": values}), item)
+
+
+def test_reviewer_placeholder_criterion_does_not_discard_the_review():
+    item = Recipe.model_validate(recipe(Path("/project"))).model_dump()
+    verdict = RemHome._verdict(
+        json.dumps(
+            {
+                "criteria": [
+                    {"id": "check", "result": "fail", "evidence": "Root cause unconfirmed"},
+                    {
+                        "id": "wait_placeholder_unused",
+                        "result": "unknown",
+                        "evidence": "Not a task criterion; ignore.",
+                    },
+                ]
+            }
+        ),
+        item,
+    )
+    assert verdict["criteria"] == [
+        {"id": "check", "result": "fail", "evidence": "Root cause unconfirmed"}
+    ]
+    assert "Root cause unconfirmed" in RemHome._review_summary(json.dumps(verdict), item)
+
+
+@pytest.mark.parametrize("readable_retry", [True, False])
+def test_unreadable_review_is_retried_once_in_a_fresh_session(
+    home: RemHome, tmp_path: Path, readable_retry: bool
+):
+    original = home.source
+    reviews: list[dict[str, Any]] = []
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" in kwargs["agent_instructions"]:
+            reviews.append(kwargs)
+            if len(reviews) == 1 or not readable_retry:
+                yield {"type": "final", "message": {"body": json.dumps({"criteria": []})}}
+                return
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert len(reviews) == 2
+    assert run["review_format_retry"] is True
+    if readable_retry:
+        assert run["state"] == "succeeded", run
+    else:
+        assert run["state"] == "blocked"
+        assert "The work is saved" in run["summary_short"]
+        assert "exactly once" in run["error_detail"]
 
 
 def test_thread_followup_invalidates_evidence_and_is_idempotent(home: RemHome, tmp_path: Path):
@@ -1617,6 +1866,184 @@ def test_same_project_workers_are_serialized(home: RemHome, tmp_path: Path):
     assert finished["waiting_reason"] is None
 
 
+def test_read_only_research_does_not_wait_for_same_project_work(home: RemHome, tmp_path: Path):
+    entered: list[str] = []
+    release = threading.Event()
+    original = home.source
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            entered.append(kwargs["workflow"]["chatThreadId"])
+            while not release.is_set() and not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.01)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    writer = home.create_task({"request_id": "writer", **recipe(tmp_path)})["task"]
+    first = home.create_task({"request_id": "r1", **recipe(tmp_path, type="research")})["task"]
+    second = home.create_task({"request_id": "r2", **recipe(tmp_path, type="research")})["task"]
+    try:
+        home.tick()
+        home.tick()
+        assert len(home.workers) == 3
+        deadline = time.monotonic() + 2
+        while len(entered) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(entered) == 3
+        for task in home.store.tasks():
+            assert not (task.get("active_run") or {}).get("waiting_reason")
+    finally:
+        release.set()
+    for task in (writer, first, second):
+        wait_run(home, task["id"], {"succeeded", "blocked"})
+
+
+def git(cwd: Path, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_concurrent_project_edits_use_a_temporary_worktree(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    project = tmp_path / "repo"
+    project.mkdir()
+    git(project, "init", "-q", "-b", "main")
+    (project / "README.md").write_text("hello\n")
+    git(project, "add", "-A")
+    git(project, "-c", "user.name=T", "-c", "user.email=t@e", "commit", "-qm", "init")
+    roots: list[str] = []
+    release = threading.Event()
+    original = home.source
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            root = Path(kwargs["workflow"]["projectRoot"])
+            roots.append(str(root))
+            if root != project:
+                assert "temporary git worktree" in kwargs["agent_instructions"]
+                (root / "feature.txt").write_text("isolated change\n")
+            while not release.is_set() and not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.01)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    first = home.create_task({"request_id": "first", **recipe(project)})["task"]
+    second = home.create_task({"request_id": "second", **recipe(project)})["task"]
+    for key in ("GIT_AUTHOR", "GIT_COMMITTER"):
+        monkeypatch.setenv(f"{key}_NAME", "Rem")
+        monkeypatch.setenv(f"{key}_EMAIL", "rem@example.com")
+    try:
+        home.tick()
+        home.tick()
+        deadline = time.monotonic() + 5
+        while len(roots) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(roots) == 2, roots
+        assert str(project) in roots
+        waiting = next(t for t in home.store.tasks() if t["id"] == second["id"])["active_run"]
+        assert not waiting.get("waiting_reason")
+    finally:
+        release.set()
+    for task in (first, second):
+        assert wait_run(home, task["id"], {"succeeded", "blocked"})["state"] == "succeeded"
+    finished = wait_run(home, second["id"], {"succeeded"})
+    assert not finished["worktree"]
+    assert finished["worktree_note"].startswith("Another task was changing")
+    isolated = next(r for r in roots if r != str(project))
+    assert not Path(isolated).exists()
+    branch = next(line.strip() for line in git(project, "branch").splitlines() if "rem/" in line)
+    assert branch in finished["worktree_note"]
+    assert git(project, "show", f"{branch}:feature.txt") == "isolated change"
+    assert not (project / "feature.txt").exists()
+    assert git(project, "worktree", "list").count("\n") == 0
+
+
+def test_rem_messages_carry_attachments_to_the_decision(home: RemHome, tmp_path: Path):
+    import base64
+
+    from gofer.ui.chat_media import store_chat_attachments
+
+    stored = store_chat_attachments(
+        {
+            "threadId": "rem-home",
+            "files": [
+                {
+                    "name": "notes.txt",
+                    "type": "text/plain",
+                    "data": base64.b64encode(b"long pasted reference").decode(),
+                }
+            ],
+        },
+        home.data_dir,
+    )["attachments"]
+    prompts: list[str] = []
+
+    def generate(prompt: str, config: dict[str, Any], cancel: threading.Event) -> dict[str, Any]:
+        prompts.append(prompt)
+        return {"reply": "Got it."}
+
+    home.generate = generate
+    home.submit_message({"request_id": "with-file", "body": "", "attachments": stored})
+    message = home.store.conversation()["messages"][0]
+    assert message["attachments"][0]["name"] == "notes.txt"
+    assert Path(message["attachments"][0]["path"]).read_text() == "long pasted reference"
+    home._reply()
+    assert "long pasted reference" in prompts[0]
+    with pytest.raises(ValueError):
+        home.submit_message(
+            {
+                "request_id": "forged",
+                "body": "x",
+                "attachments": [{"storageName": "0" * 32 + "-missing.txt", "name": "x"}],
+            }
+        )
+
+
+def test_rem_replies_attach_requested_files_from_open_folders(home: RemHome, tmp_path: Path):
+    project, brain, outside = tmp_path / "project", tmp_path / "brain", tmp_path / "outside"
+    for folder in (project, brain / "reports", outside):
+        folder.mkdir(parents=True)
+    report = brain / "reports" / "audit.html"
+    report.write_text("<p>Audit</p>")
+    (outside / "secret.txt").write_text("no")
+    (project / "link.txt").symlink_to(outside / "secret.txt")
+    home.configure(
+        {
+            "provider": "codex",
+            "model": "cli-default",
+            "projects": [{"root": str(project), "name": "Project"}],
+            "brain": {"root": str(brain), "enabled": True},
+        }
+    )
+    named = [str(report), str(outside / "secret.txt"), str(project / "link.txt"), "relative.md"]
+    home.generate = lambda p, c, e: {"reply": "Here's the audit.", "files": named}
+    home.submit_message({"request_id": "send-report", "body": "Send me the audit report"})
+    home._reply()
+    reply = home.store.conversation()["messages"][-1]
+    assert reply["id"] == "reply-send-report" and reply["reply_to"] == "send-report"
+    assert reply["files"] == [{"name": "audit.html", "size": 12, "path": str(report.resolve())}]
+    # Outside the open folders, a path Rem wasn't given counts as a guess.
+    assert "secret.txt: its path isn’t in our conversation" in reply["body"]
+    assert "link.txt: that file doesn’t exist" in reply["body"]
+
+    # A reply that starts a task carries its files in a separate message.
+    home.generate = lambda p, c, e: {
+        "reply": "Starting.",
+        "tasks": [recipe(project)],
+        "files": [str(report)],
+    }
+    home.submit_message({"request_id": "with-task", "body": "Fix it and send the audit"})
+    home._reply()
+    files = next(m for m in home.store.conversation()["messages"] if m["id"] == "files-with-task")
+    assert files["files"][0]["name"] == "audit.html" and files["reply_to"] == "with-task"
+
+
 def test_research_output_service_proves_destination_and_hash(home: RemHome, tmp_path: Path):
     from gofer.ui.rem_home_artifacts import artifact_tools, validate_artifacts
     from tests.unit.test_swarm_tools import request
@@ -1676,8 +2103,103 @@ def test_research_without_saved_artifact_cannot_be_accepted(home: RemHome, tmp_p
     task = home.create_task({"request_id": "create", **recipe(tmp_path, type="research")})["task"]
     run = wait_run(home, task["id"], {"succeeded", "blocked"})
     assert run["state"] == "blocked"
-    assert run["repair_count"] == 2
+    # The identical unsaved result after one follow-up stops the loop early.
+    assert run["repair_count"] == 1
+    assert "repeated the same result" in run["summary_short"]
     assert "No saved research" in run["summary_short"]
+
+
+def test_research_save_refused_by_provider_blocks_without_repeating(home: RemHome, tmp_path: Path):
+    workers = 0
+
+    async def source(**kwargs):
+        nonlocal workers
+        workers += 1
+        yield {
+            "type": "thought",
+            "trace": {
+                "id": "save-1",
+                "kind": "tool",
+                "title": "mcp__rem_artifacts__save_report",
+                "phase": "start",
+                "status": "running",
+            },
+        }
+        yield {
+            "type": "thought",
+            "trace": {
+                "id": "save-1",
+                "kind": "tool",
+                "title": "Tool result",
+                "phase": "result",
+                "status": "error",
+                "output": "Cannot call mcp__rem_artifacts__save_report while in plan mode.",
+            },
+        }
+        yield {"type": "final", "message": {"body": f"Draft ready but unsaved {workers}."}}
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path, type="research")})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "blocked"
+    assert workers == 1 and run["repair_count"] == 0
+    assert "refused the save tool" in run["summary_short"]
+    assert "plan mode" in run["summary_short"]
+
+
+def test_save_denial_ignores_successful_saves_and_unrelated_errors():
+    from gofer.ui.rem_home import save_denial
+
+    assert save_denial([]) is None
+    assert (
+        save_denial(
+            [
+                {
+                    "id": "a",
+                    "title": "Bash",
+                    "phase": "result",
+                    "status": "error",
+                    "output": "permission denied",
+                },
+                {
+                    "id": "b",
+                    "title": "save_report",
+                    "phase": "result",
+                    "status": "completed",
+                    "output": "saved",
+                },
+            ]
+        )
+        is None
+    )
+    assert (
+        save_denial(
+            [
+                {
+                    "id": "c",
+                    "title": "rem_artifacts.save_report",
+                    "phase": "result",
+                    "status": "failed",
+                    "error": "Tool use was denied by the user's permission mode",
+                }
+            ]
+        )
+        == "Tool use was denied by the user's permission mode"
+    )
+
+
+def test_outcome_update_drops_promises_rem_cannot_keep():
+    from gofer.ui.rem_home import drop_unbacked_promises
+
+    text = (
+        "The report is drafted but not saved. The worker's provider refused the save tool. "
+        "Next, I'll switch that thread out of plan mode. Use Run again to retry."
+    )
+    assert drop_unbacked_promises(text) == (
+        "The report is drafted but not saved. The worker's provider refused the save tool. "
+        "Use Run again to retry."
+    )
+    assert drop_unbacked_promises("I will fix it.") == ""
 
 
 def test_research_missing_report_gets_a_repair_turn_before_review(home: RemHome, tmp_path: Path):
@@ -1723,6 +2245,81 @@ def test_research_missing_report_gets_a_repair_turn_before_review(home: RemHome,
     assert run["state"] == "succeeded", run
     assert len(workers) == 2 and reviews == 1
     assert "rem_artifacts.save_report" in workers[1]
+
+
+def test_follow_up_keeps_the_report_saved_before_it(home: RemHome, tmp_path: Path):
+    from tests.unit.test_swarm_tools import request
+
+    original = home.source
+    workers: list[str] = []
+    reviews = 0
+
+    async def source(**kwargs):
+        nonlocal reviews
+        if "independent read-only reviewer" in kwargs["agent_instructions"]:
+            reviews += 1
+            if reviews == 1:
+                # The first review never starts, which blocks the run.
+                yield {"type": "error", "error": "Could not start 'claude' CLI"}
+                return
+        else:
+            workers.append(kwargs["messages"][-1]["body"])
+            if len(workers) == 1:
+                artifact = next(
+                    s
+                    for s in kwargs["workflow"]["remResources"]["mcpServers"]
+                    if s["name"] == "rem_artifacts"
+                )
+                request(
+                    artifact["url"],
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "save_report",
+                            "arguments": {
+                                "path": "findings.html",
+                                "content": "<!doctype html><html><body>Findings</body></html>",
+                            },
+                        },
+                    },
+                )
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path, type="research")})["task"]
+    blocked = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert blocked["state"] == "blocked", blocked
+    home.instruct(blocked["thread_id"], {"request_id": "continue", "body": "continue"})
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    # The follow-up is reviewed against the report it already has instead of
+    # being sent back to save that report again.
+    assert len(workers) == 2 and reviews == 2
+    assert not any("Please address these findings" in body for body in workers)
+    assert [a["epoch"] for a in run["artifacts"]] == [run["epoch"]]
+
+
+def test_requeued_runs_keep_saved_reports_but_not_superseded_ones():
+    from gofer.ui.rem_home_store import begin_cycle
+
+    run = {
+        "epoch": 2,
+        "config": {},
+        "recipe": {"acceptance_criteria": []},
+        "artifacts": [
+            {"path": "/reports/saved.html", "epoch": 0},
+            {"path": "/reports/late.html", "epoch": 1, "superseded": True},
+        ],
+    }
+    begin_cycle(run, "work")
+    assert [a["epoch"] for a in run["artifacts"]] == [3, 1]
+    begin_cycle(run, "review")
+    assert [a["epoch"] for a in run["artifacts"]] == [4, 1]
+    begin_cycle(run, "recover")
+    assert [a["epoch"] for a in run["artifacts"]] == [5, 1]
 
 
 def test_startup_waits_for_current_context_before_admitting_queued_work(
@@ -1814,10 +2411,21 @@ def test_rem_rebuilds_youtube_goal_and_passes_old_report_to_standalone_worker(ho
         assert "youtube-goal" in options["agent_instructions"]
         assert "Second Brain" in options["agent_instructions"]
     assert home.store.thread(run["thread_id"])["messages"][0]["body"] == goal
-    assert home.store.thread(run["thread_id"])["metadata"]["archived"]
+    assert home.store.thread(run["thread_id"])["metadata"]["archived"] is False
     later = home.edit_task(task["id"], {"request_id": "run-again"}, "run")["run"]
     assert home._work_root(later) == home._work_root(run)
     assert home._delegation_context(later, {})
+
+
+def test_worker_background_stays_fixed_for_a_run_attempt(home: RemHome, monkeypatch):
+    # Recall reads live chat. Changing text would resend all instructions on resume.
+    recalled = iter([{"recalled_context": [n]} for n in range(3)])
+    monkeypatch.setattr(home, "_delegation_context", lambda run, config: next(recalled))
+    run = {"id": "run-1", "epoch": 1}
+
+    first = home._worker_background(run, {})
+    assert home._worker_background(run, {}) == first == {"recalled_context": [0]}
+    assert home._worker_background({**run, "epoch": 2}, {}) == {"recalled_context": [1]}
 
 
 @pytest.mark.parametrize("mode", ["mixed", "exhausted", "cancelled"])
@@ -1938,7 +2546,7 @@ def test_review_launch_failure_resumes_review_without_repeating_development(
     assert finished["thread_id"] == blocked["thread_id"]
     assert finished["verification_thread_id"] == blocked["verification_thread_id"]
     assert len(workers) == 1 and len(reviews) == 2
-    assert home.store.thread(blocked["thread_id"])["metadata"]["archived"]
+    assert home.store.thread(blocked["thread_id"])["metadata"]["archived"] is False
 
 
 def test_main_chat_answer_resumes_blocked_worker_and_rechecks_work(home: RemHome, tmp_path: Path):
@@ -2352,9 +2960,7 @@ def test_obsolete_project_change_block_recovers_review_once_without_repeating_wo
     assert home.store.conversation()["messages"][-1]["body"] == "Implemented and tested."
 
 
-def test_stale_outcome_delivered_late_does_not_follow_the_newer_one(
-    home: RemHome, tmp_path: Path
-):
+def test_stale_outcome_delivered_late_does_not_follow_the_newer_one(home: RemHome, tmp_path: Path):
     task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
     run = task["active_run"]
     home._update(run["id"], state="verifying", worker_result="Implemented and tested.")
@@ -2465,6 +3071,107 @@ def test_workflow_follow_up_upgrades_research_scope_and_reuses_task_thread(
     assert all(m.get("worker_role") == "verify" for m in turns[1]["messages"])
     with home.store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
+
+
+def cards(home: RemHome, run_id: str) -> list[dict[str, Any]]:
+    """Conversation messages that show a task card for one run."""
+    return [
+        m
+        for m in home.store.conversation()["messages"]
+        if (m.get("work") or {}).get("run_id") == run_id
+    ]
+
+
+def test_chat_follow_up_after_a_finished_run_shows_the_task_once(home: RemHome, tmp_path: Path):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    first = wait_run(home, task["id"], {"succeeded"})
+    home.generate = lambda *args: {
+        "reply": "I’ll have the worker build a debug APK.",
+        "controls": [{"task_id": task["id"], "action": "follow_up", "message": "Build an APK"}],
+    }
+    home.submit_message({"request_id": "apk", "body": "Generate a new APK too."})
+    home._reply()
+    follow_up = home.store.tasks()[0]["active_run"]
+    assert follow_up["id"] != first["id"]
+    shown = cards(home, follow_up["id"])
+    assert [(m["id"], m["body"]) for m in shown] == [
+        ("reply-apk", "I’ll have the worker build a debug APK.")
+    ]
+    # The first run keeps its own card and updates; they're a different run.
+    assert any(m["id"] == f"queued-{first['id']}" for m in cards(home, first["id"]))
+
+
+def test_thread_follow_up_after_a_finished_run_shows_the_task_once(home: RemHome, tmp_path: Path):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"succeeded"})
+    follow_up = home.instruct(run["thread_id"], {"request_id": "again", "body": "Add a case"})
+    assert [m["body"] for m in cards(home, follow_up["run"]["id"])] == [
+        "I’ll follow up and check the result."
+    ]
+
+
+def test_one_reply_following_up_two_finished_tasks_keeps_one_card_for_each(
+    home: RemHome, tmp_path: Path
+):
+    first = home.create_task({"request_id": "a", **recipe(tmp_path, title="Task A")})["task"]
+    wait_run(home, first["id"], {"succeeded"})
+    second = home.create_task({"request_id": "b", **recipe(tmp_path, title="Task B")})["task"]
+    wait_run(home, second["id"], {"succeeded"})
+    home.generate = lambda *args: {
+        "reply": "I’ll follow up on both.",
+        "controls": [
+            {"task_id": first["id"], "action": "follow_up", "message": "Add a case"},
+            {"task_id": second["id"], "action": "follow_up", "message": "Add a case"},
+        ],
+    }
+    home.submit_message({"request_id": "both", "body": "Add a case to both."})
+    home._reply()
+    runs = {t["title"]: t["active_run"] for t in home.store.tasks()}
+    assert [m["body"] for m in cards(home, runs["Task A"]["id"])] == [
+        "I’ll follow up and check the result."
+    ]
+    assert [m["body"] for m in cards(home, runs["Task B"]["id"])] == ["I’ll follow up on both."]
+
+
+def test_follow_up_beside_a_new_task_keeps_one_card_for_each(home: RemHome, tmp_path: Path):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    wait_run(home, task["id"], {"succeeded"})
+    home.generate = lambda *args: {
+        "reply": "I’ll follow up and start the docs task.",
+        "controls": [{"task_id": task["id"], "action": "follow_up", "message": "Add a case"}],
+        "tasks": [recipe(tmp_path, title="Write the docs", prompt="Write the docs")],
+    }
+    home.submit_message({"request_id": "both", "body": "Add a case and write the docs."})
+    home._reply()
+    runs = {t["title"]: t["active_run"] for t in home.store.tasks()}
+    assert len(cards(home, runs["Check the feature"]["id"])) == 1
+    assert [m["body"] for m in cards(home, runs["Write the docs"]["id"])] == [
+        "I’ll follow up and start the docs task."
+    ]
+
+
+def test_legacy_started_notices_beside_a_reply_are_hidden(tmp_path: Path):
+    store = RemHomeStore(tmp_path)
+
+    def say(identity: str, body: str, run: str, title: str, at: str, **extra: Any) -> None:
+        work = {"task_id": "t", "run_id": run, "thread_id": "th", "title": title}
+        with store.connect() as db:
+            store.message(db, body, identity=identity, work=work, created_at=at, **extra)
+
+    # The old follow-up path wrote both of these in one transaction.
+    say("queued-r", "Started Align UI.", "r", "Align UI", "2026-11-01T11:50:45.093+00:00")
+    say("reply-a", "I’ll build the APK.", "r", "Align UI", "2026-11-01T11:50:45.094+00:00")
+    # A scheduled run's notice, its finish and a later reply are distinct updates.
+    say("queued-n", "Started Nightly.", "n", "Nightly", "2026-11-01T06:00:00+00:00")
+    say("finished-n", "Done.", "n", "Nightly", "2026-11-01T06:00:01+00:00", kind="task_update")
+    say("reply-b", "It's still running.", "n", "Nightly", "2026-11-01T06:05:00+00:00")
+    # A new task's acknowledgement is Rem's reply itself.
+    say("queued-k", "I’ll start the docs.", "k", "Docs", "2026-11-01T07:00:00+00:00")
+    say("reply-c", "Also noted.", "k", "Docs", "2026-11-01T07:00:01+00:00")
+    shown = [m["id"] for m in store.conversation()["messages"]]
+    assert shown == ["reply-a", "queued-n", "finished-n", "reply-b", "queued-k", "reply-c"]
+    with store.read() as db:
+        assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 7
 
 
 def test_repeated_occurrences_use_one_thread_per_task(home: RemHome, tmp_path: Path):
@@ -2626,6 +3333,65 @@ def test_conversation_decision_retries_temporary_provider_errors(
     home._reply()
     assert calls == 2
     assert home.store.conversation()["messages"][-1]["body"] == "Hello again."
+
+
+def test_conversation_asks_again_when_decision_is_not_json(home: RemHome):
+    """The screenshot's "Expecting value: line 1 column 1 (char 0)" reply."""
+    prompts: list[str] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise MalformedDecision("I'll look into that report first.")
+        return {"reply": "Started the fixes."}
+
+    home.generate = generate
+    home.submit_message({"request_id": "fix", "body": "Implement the report's proposals."})
+    home._reply()
+    assert len(prompts) == 2
+    assert "not the requested JSON object" in prompts[1]
+    assert home.store.conversation()["messages"][-1]["body"] == "Started the fixes."
+
+
+def test_unreadable_decision_explains_itself_without_parser_errors(home: RemHome):
+    calls = 0
+
+    def generate(prompt, config, cancel):
+        nonlocal calls
+        calls += 1
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    home.generate = generate
+    home.submit_message({"request_id": "fix", "body": "Implement the report's proposals."})
+    home._reply()
+    assert calls == 2
+    assert not home.store.tasks()
+    assert home.store.conversation()["conversation"]["turn_state"] == "idle"
+    error = home.store.conversation()["messages"][-1]["body"]
+    assert "Expecting value" not in error and "char 0" not in error
+    assert "couldn’t read my own reply" in error and "didn’t change anything" in error
+
+
+def test_outcome_update_never_promises_actions_rem_cannot_take(home: RemHome, tmp_path: Path):
+    prompts: list[str] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        return {
+            "summary": "The work is saved. Next, I'll switch that thread out of plan mode.",
+            "needs_user": False,
+        }
+
+    home.generate = generate
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    update = next(
+        m
+        for m in home.store.conversation()["messages"]
+        if m["id"].startswith(f"finished-{run['id']}")
+    )
+    assert update["body"] == "The work is saved."
+    assert "cannot change a thread's permission or plan mode" in prompts[-1]
 
 
 def test_outcome_commits_before_its_chat_summary_and_survives_restart(
@@ -2837,3 +3603,626 @@ def test_retitled_duplicate_proposal_continues_the_existing_task(home: RemHome, 
     home._reply()
     assert len(home.store.tasks()) == 1
     assert home.store.tasks()[0]["active_run"]["state"] == "queued"
+
+
+def test_rewriting_a_transcript_entry_keeps_its_place(tmp_path: Path):
+    # Workers read this order back as their conversation history.
+    store = RemHomeStore(tmp_path)
+    store.append_threads(
+        "worker",
+        [
+            {"id": "prompt", "role": "user", "body": "Investigate"},
+            {"id": "reply", "role": "assistant", "body": "Report"},
+            {"id": "review", "role": "user", "body": "Please address these findings"},
+        ],
+    )
+    store.append_thread("worker", {"id": "prompt", "role": "user", "body": "Investigate Rem"})
+    with store.read() as db:
+        rows = db.execute(
+            "SELECT body FROM thread_messages WHERE thread='worker' ORDER BY seq"
+        ).fetchall()
+    messages = [json.loads(row[0]) for row in rows]
+    assert [m["id"] for m in messages] == ["prompt", "reply", "review"]
+    assert messages[0]["body"] == "Investigate Rem"
+
+
+def test_the_newest_run_stays_last_after_an_older_run_changes(tmp_path: Path):
+    store = RemHomeStore(tmp_path)
+    with store.connect() as db:
+        task = store.add_task(db, Recipe.model_validate(recipe(type="research")))
+        older = store.add_run(db, task, "first", {})
+        older.update(state="succeeded")
+        store.put(db, "runs", older)
+        newer = store.add_run(db, task, "second", {})
+        newer.update(state="failed")
+        store.put(db, "runs", newer)
+        # Saving replaces the row, which used to make the older run look newest.
+        older["summary_short"] = "Delivered later"
+        store.put(db, "runs", older)
+        view = store.task_view(db, task)
+    assert view["last_run"]["id"] == newer["id"]
+    assert [run["id"] for run in view["recent_runs"]] == [newer["id"], older["id"]]
+
+
+def test_review_awaiting_a_scheduled_run_waits_instead_of_blocking(home: RemHome, tmp_path: Path):
+    original = home.source
+    reviews = 0
+    workers = 0
+    awaited = datetime.now(UTC) + timedelta(hours=6)
+
+    async def source(**kwargs):
+        nonlocal reviews, workers
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            workers += 1
+            async for event in original(**kwargs):
+                yield event
+            return
+        reviews += 1
+        assert "wait_until" in kwargs["agent_instructions"]
+        yield {
+            "type": "thought",
+            "trace": {
+                "id": f"review-{reviews}",
+                "category": "shell",
+                "phase": "result",
+                "status": "completed",
+                "exitCode": 0,
+                "output": "timer installed",
+            },
+        }
+        verdict: dict[str, Any] = {
+            "criteria": [
+                {"id": "check", "result": "pass", "evidence": "The digest exists now."}
+                if reviews > 1
+                else {"id": "check", "result": "unknown", "evidence": "Needs the 03:00 run."}
+            ],
+            "feedback": "",
+            "question_to_rem": "",
+        }
+        if reviews == 1:
+            verdict |= {"wait_until": awaited.isoformat(), "wait_for": "the 03:00 digest run"}
+        yield {"type": "final", "message": {"body": json.dumps(verdict)}}
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    deadline = time.monotonic() + 5
+    while True:
+        home.tick()
+        run = home.store.tasks()[0]["last_run"]
+        if run["state"] == "queued" and run.get("waiting_for"):
+            break
+        assert time.monotonic() < deadline, run
+        time.sleep(0.01)
+    assert run["waiting_for"] == "the 03:00 digest run"
+    assert datetime.fromisoformat(run["not_before"]) > awaited
+    assert run["repair_count"] == 0 and run["resume_review"] is True
+    home.tick()
+    run = home.store.tasks()[0]["last_run"]
+    assert run["state"] == "queued"
+    assert run["waiting_reason"] == "Waiting for the 03:00 digest run before checking again"
+
+    # Once the awaited time passes, only the review runs again.
+    home._update(run["id"], not_before=datetime.now(UTC).isoformat())
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    assert workers == 1 and reviews == 2
+    assert run.get("waiting_for") is None
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"wait_until": "not a time"},
+        {"wait_until": "2026-01-01T00:00:00"},
+        {"wait_for": ""},
+        {"result": "fail"},
+        {"far": True},
+        {"proof_waits": 3},
+    ],
+)
+def test_proof_wait_requires_a_bounded_future_event(patch: dict[str, Any]):
+    until = datetime.now(UTC) + (timedelta(days=30) if patch.get("far") else timedelta(hours=1))
+    verdict = {
+        "criteria": [{"id": "check", "result": patch.get("result", "unknown"), "evidence": "x"}],
+        "wait_until": patch.get("wait_until", until.isoformat()),
+        "wait_for": patch.get("wait_for", "the next run"),
+    }
+    run = {"proof_waits": patch.get("proof_waits", 0)}
+    assert RemHome._proof_wait(run, verdict) is None
+    soon = datetime.now(UTC) + timedelta(hours=1)
+    valid = {
+        "criteria": [{"id": "check", "result": "unknown", "evidence": "x"}],
+        "wait_until": soon.isoformat(),
+        "wait_for": "the next run",
+    }
+    assert RemHome._proof_wait({}, valid) == (soon + timedelta(minutes=30), "the next run")
+
+
+def test_settings_limit_workers_and_reach_every_thread(home: RemHome, tmp_path: Path):
+    from gofer.core.command_slots import read_settings, slots_root
+
+    with pytest.raises(ValueError):
+        home.configure({"provider": "codex", "command_slots": {"maxWorkers": 99}})
+    home.configure(
+        {"provider": "codex", "model": "cli-default", "command_slots": {"maxWorkers": 1, "test": 2}}
+    )
+    assert read_settings(slots_root(home.data_dir)).as_json() == {
+        "enabled": True,
+        "maxWorkers": 1,
+        "test": 2,
+        "build": 0,
+        "browser": 0,
+    }
+    # Callers that leave the field out keep the saved limits.
+    home.configure({"provider": "codex", "model": "cli-default"})
+    assert read_settings(slots_root(home.data_dir)).max_workers == 1
+
+    entered = threading.Event()
+    release = threading.Event()
+    original = home.source
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            entered.set()
+            while not release.is_set() and not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.01)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    first = home.create_task({"request_id": "first", **recipe(tmp_path / "a")})["task"]
+    second = home.create_task({"request_id": "second", **recipe(tmp_path / "b")})["task"]
+    try:
+        home.tick()
+        assert entered.wait(2)
+        home.tick()
+        assert len(home.workers) == 1
+        waiting = next(t for t in home.store.tasks() if t["id"] == second["id"])["active_run"]
+        assert waiting["waiting_reason"] == "Waiting for a free worker (1 task is running)"
+    finally:
+        release.set()
+    assert wait_run(home, first["id"], {"succeeded", "blocked"})["state"] == "succeeded"
+    assert wait_run(home, second["id"], {"succeeded", "blocked"})["state"] == "succeeded"
+
+
+def test_new_workers_wait_for_free_memory(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+
+    available = [8 * 1024**3]
+    monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: available[0])
+    entered = threading.Event()
+    release = threading.Event()
+    original = home.source
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            entered.set()
+            while not release.is_set() and not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.01)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    first = home.create_task({"request_id": "first", **recipe(tmp_path / "a")})["task"]
+    home.tick()
+    assert entered.wait(2)
+    available[0] = 1024**3
+    second = home.create_task({"request_id": "second", **recipe(tmp_path / "b")})["task"]
+    try:
+        home.tick()
+        waiting = next(t for t in home.store.tasks() if t["id"] == second["id"])["active_run"]
+        assert waiting["waiting_reason"] == "Waiting for free memory (1.0 GB available)"
+        assert len(home.workers) == 1
+    finally:
+        available[0] = 8 * 1024**3
+        release.set()
+    assert wait_run(home, first["id"], {"succeeded", "blocked"})["state"] == "succeeded"
+    assert wait_run(home, second["id"], {"succeeded", "blocked"})["state"] == "succeeded"
+
+
+def test_waiting_or_running_tests_keep_a_quiet_turn_alive(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+    from gofer.core.command_slots import activity_path, heartbeat, slots_root
+
+    monkeypatch.setattr(rem_home_module, "TURN_IDLE_SECONDS", 0.3)
+    monkeypatch.setattr("gofer.core.command_slots.HEARTBEAT_SECONDS", 0.05)
+    original = home.source
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            # A gated command reports progress through the turn's activity file,
+            # never through provider events.
+            path = activity_path(slots_root(home.data_dir), kwargs["workflow"]["chatThreadId"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with heartbeat(str(path)):
+                await asyncio.sleep(1)
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "succeeded", run
+
+
+def test_reply_keeps_details_follow_ups_and_timing(home: RemHome):
+    seen: list[dict[str, Any]] = []
+
+    def generate(prompt, config, cancel):
+        conversation = home.store.conversation()["conversation"]
+        seen.append(dict(conversation))
+        if len(seen) == 1:
+            return {"recall": {"queries": ["vector"]}}
+        # The chat reply streams into the conversation while it is written.
+        home._drafting.sink("Short ans")
+        seen.append(dict(home.store.conversation()["conversation"]))
+        return {
+            "reply": "Short answer.",
+            "details": "| Option | Score |\n|---|---|\n| A | 1 |",
+            "suggestions": ["Why A?", "why a?", " ", "Compare B", "Set it up", "Fourth"],
+            "tasks": [],
+            "memories": [],
+        }
+
+    home.generate = generate
+    home.submit_message({"request_id": "rich-reply", "body": "Which option?"})
+    home._reply()
+    assert seen[0]["turn_label"] == "Reading your message"
+    assert seen[1]["turn_label"] == "Reading earlier messages"
+    assert seen[2]["draft_reply"] == "Short ans"
+    reply = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-rich-reply")
+    assert reply["details"].startswith("| Option | Score |\n|---|---|")
+    assert reply["suggestions"] == ["Why A?", "Compare B", "Set it up"]
+    assert reply["meta"]["provider"] == "codex" and reply["meta"]["seconds"] >= 0
+    conversation = home.store.conversation()["conversation"]
+    assert conversation["turn_label"] is None and conversation["draft_reply"] is None
+    assert getattr(home._drafting, "sink", None) is None
+    # The chat prompt asks for the optional depth and follow-ups.
+    assert "details" in home.store.conversation()["messages"][-1]
+
+
+def test_task_update_carries_a_result_card(home: RemHome, tmp_path: Path):
+    from gofer.ui.rem_home_results import result_card
+
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = task["active_run"]
+    report = tmp_path / "vector-report.html"
+    report.write_text("<html><head><title>Vector &amp; search</title></head></html>")
+    with home.store.connect() as db:
+        current = home.store.get(db, "runs", run["id"])
+        current["worker_result"] = "Saved it. See [FTS5](https://www.sqlite.org/fts5.html)."
+        current["criteria"] = [{"id": "a", "result": "pass"}, {"id": "b", "result": "pass"}]
+        current["artifacts"] = [
+            {"path": str(report), "link": f"[vector-report](<{report}>)", "epoch": 0},
+            {"path": str(tmp_path / "gone.html"), "link": "[gone](</x>)", "epoch": 0},
+        ]
+        home.store.put(db, "runs", current)
+    home.store.append_thread(
+        run["thread_id"],
+        {
+            "id": "search-1",
+            "role": "assistant",
+            "worker_role": "execute",
+            "kind": "thought",
+            "body": "",
+            "trace": {
+                "kind": "tool",
+                "title": "WebSearch",
+                "input": json.dumps({"query": "sqlite vector"}),
+                "output": 'Links: [{"title":"LanceDB","url":"https://lancedb.com/"},'
+                '{"title":"Local","url":"http://192.168.1.2/admin"}]',
+            },
+        },
+    )
+    home.generate = lambda *args: {
+        "summary": "The comparison is ready.",
+        "details": "- SQLite is enough\n- I'll check again tomorrow",
+        "suggestions": ["Set up SQLite"],
+        "needs_user": False,
+    }
+    assert home._finish(run["id"], "succeeded", "Done.", epoch=run["epoch"])
+    home.deliver_outcomes()
+    update = next(
+        m for m in home.store.conversation()["messages"] if m["id"].startswith("finished-")
+    )
+    assert update["body"].startswith("The comparison is ready.")
+    assert f"[vector-report](<{report}>)" in update["body"]
+    # Promises nobody keeps are dropped line by line; the list stays a list.
+    assert update["details"] == "- SQLite is enough"
+    assert update["suggestions"] == ["Set up SQLite"]
+    card = update["result"]
+    assert card["checks"] == {"passed": 2, "failed": 0, "total": 2}
+    assert [a["title"] for a in card["artifacts"]] == ["Vector & search"]
+    assert card["artifacts"][0]["kind"] == "html" and card["artifacts"][0]["size"] > 0
+    assert [s["url"] for s in card["sources"]] == [
+        "https://www.sqlite.org/fts5.html",
+        "https://lancedb.com/",
+    ]
+    assert card["sources"][0]["kind"] == "cited" and card["thread_id"] == run["thread_id"]
+    # Without checks, files or sources there is nothing for a card to show.
+    empty = result_card({"recipe": {"title": "T"}, "criteria": []}, "succeeded", [])
+    assert not (empty["checks"]["total"] or empty["artifacts"] or empty["sources"])
+
+
+def test_turn_sources_need_web_use_and_skip_private_addresses():
+    from gofer.ui.rem_home_results import public_url, turn_sources
+
+    shell = {"trace": {"kind": "tool", "title": "Bash", "output": "https://example.com"}}
+    assert turn_sources([shell], "See https://example.com") == []
+    fetch = {
+        "worker_role": "execute",
+        "trace": {
+            "kind": "tool",
+            "title": "WebFetch",
+            "input": json.dumps({"url": "https://docs.example.com/guide#part"}),
+        },
+    }
+    review = {**fetch, "worker_role": "verify"}
+    sources = turn_sources(
+        [fetch, review], "Read https://docs.example.com/guide/. Also [A](https://a.example)."
+    )
+    assert [(s["url"], s["kind"]) for s in sources] == [
+        ("https://docs.example.com/guide#part", "cited"),
+        ("https://a.example", "cited"),
+    ]
+    for private in (
+        "http://localhost:3000",
+        "http://10.0.0.2/x",
+        "https://printer.local",
+        "ftp://x.com",
+    ):
+        assert public_url(private) == ""
+    assert public_url("https://example.com:8443/") == ""
+
+
+def test_draft_reply_reads_the_reply_string_as_it_arrives():
+    from gofer.ui.rem_home_provider import _StreamingClaude, draft_reply
+
+    assert draft_reply('{"reply":"Hel') == "Hel"
+    assert draft_reply('{"reply": "Line\\nTwo \\"q\\" \\u00e9 \\') == 'Line\nTwo "q" é '
+    assert draft_reply('{"reply":"Done.","tasks":[]}') == "Done."
+    assert draft_reply('{"recall":{"queries":["x"]}}') == ""
+    assert draft_reply('{"reply":"half \\u00') == "half "
+    seen: list[str] = []
+    claude = _StreamingClaude(seen.append)
+    delta = {
+        "type": "stream_event",
+        "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": '{"re'}},
+    }
+    line = json.dumps(delta)
+    message, _ = claude._parse_provider_output(line, "")
+    assert seen == ['{"re'] and message == line
+    final, _ = claude._parse_provider_output(json.dumps({"type": "result", "result": "{}"}), "")
+    assert final == "{}" and seen == ['{"re']
+
+
+def test_rem_attaches_any_readable_file_the_user_asked_for(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+
+    house = tmp_path / "home"
+    monkeypatch.setattr(rem_home_module.Path, "home", classmethod(lambda cls: house))
+    pictures = house / "Pictures" / "shots"
+    pictures.mkdir(parents=True)
+    shot = pictures / "desktop light.png"
+    shot.write_bytes(b"\x89PNG fake")
+    keys = house / ".ssh"
+    keys.mkdir()
+    (keys / "id_ed25519").write_text("PRIVATE")
+    unnamed = pictures / "other.png"
+    unnamed.write_bytes(b"x")
+    attached = home.data_dir / "chat-attachments" / "rem-home" / "a.txt"
+    attached.parent.mkdir(parents=True, exist_ok=True)
+    attached.write_text("mine")
+    own = home.data_dir / "rem-home.sqlite3"
+    named = [str(shot), str(keys / "id_ed25519"), str(unnamed), str(attached), str(own)]
+    home.generate = lambda p, c, e: {"reply": "Here they are.", "files": named}
+    # The request names the screenshot, the key, the attachment and Raticode's database;
+    # other.png is never mentioned.
+    home.submit_message(
+        {
+            "request_id": "any-file",
+            "body": f"Send {shot}, {attached} and {own}. Also {keys / 'id_ed25519'}?",
+        }
+    )
+    home._reply()
+    reply = home.store.conversation()["messages"][-1]
+    sent = {f["name"]: f for f in reply["files"]}
+    # Outside open projects and the Second Brain, by exact path from the conversation.
+    assert sent["desktop light.png"]["path"] == str(shot.resolve())
+    assert sent["a.txt"]["size"] == 4
+    # A credential file is sent only because this very message names its path.
+    assert "id_ed25519" in sent
+    assert "other.png: its path isn’t in our conversation" in reply["body"]
+    assert reply["reply_to"] == "any-file"
+
+    # The same key and Raticode's own data, named only earlier, are not sent again.
+    home.generate = lambda p, c, e: {
+        "reply": "Again.",
+        "files": [str(keys / "id_ed25519"), str(own)],
+    }
+    home.submit_message({"request_id": "again", "body": "Send those two again"})
+    home._reply()
+    again = home.store.conversation()["messages"][-1]
+    assert "files" not in again
+    assert "id_ed25519: it may hold passwords" in again["body"]
+    assert "rem-home.sqlite3: it may hold passwords" in again["body"]
+
+
+def test_reply_files_rules_for_files_outside_open_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+    from gofer.ui.rem_home import reply_files, sensitive_path
+
+    monkeypatch.setattr(rem_home_module.Path, "home", classmethod(lambda cls: tmp_path))
+    shot = tmp_path / "Pictures" / "shot.png"
+    shot.parent.mkdir()
+    shot.write_bytes(b"png")
+    # Without conversation records, only open folders count, as before.
+    files, refused = reply_files([str(shot)], {})
+    assert not files and "isn’t in an open project" in refused[0]
+    files, refused = reply_files([str(shot)], {}, records=f"see {shot}")
+    assert [f["name"] for f in files] == ["shot.png"] and not refused
+    unreadable = tmp_path / "Pictures" / "locked.png"
+    unreadable.write_bytes(b"x")
+    unreadable.chmod(0)
+    try:
+        if not os.access(unreadable, os.R_OK):
+            files, refused = reply_files([str(unreadable)], {}, records=str(unreadable))
+            assert "this account can’t read it" in refused[0]
+    finally:
+        unreadable.chmod(0o600)
+    assert sensitive_path(Path("/proc/self/environ"))
+    assert sensitive_path(tmp_path / ".aws" / "credentials")
+    assert sensitive_path(tmp_path / "project" / ".env.local")
+    assert not sensitive_path(shot)
+
+
+def test_agent_sign_ins_and_secret_files_need_the_request_to_name_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+    from gofer.ui.rem_home import reply_files, sensitive_path
+
+    house = tmp_path / "home"
+    monkeypatch.setattr(rem_home_module.Path, "home", classmethod(lambda cls: house))
+    codex = house / ".codex" / "auth.json"
+    claude = house / ".claude" / ".credentials.json"
+    for secret in (codex, claude):
+        secret.parent.mkdir(parents=True)
+        secret.write_text('{"token": "x"}')
+    # Recalled worker notes mention both files; the user only says "send them".
+    records = f"Worker notes: checked {codex} and {claude}."
+    files, refused = reply_files(
+        [str(codex), str(claude)], {}, records=records, request="send them"
+    )
+    assert files == []
+    assert all("may hold passwords, keys" in line for line in refused) and len(refused) == 2
+    # Named in the user's current message, each one is sent.
+    files, refused = reply_files(
+        [str(codex), str(claude)], {}, records=records, request=f"send {codex} and {claude}"
+    )
+    assert [f["name"] for f in files] == ["auth.json", ".credentials.json"] and not refused
+
+    for name in (
+        "auth.json",
+        "gcp-credentials.json",
+        "client_secret.json",
+        "tokens.json",
+        "cert.p12",
+        "store.pfx",
+        "id_ed25519",
+        "id_rsa.pub",
+        ".env.production",
+        "server.key",
+    ):
+        assert sensitive_path(tmp_path / "anywhere" / name), name
+    for name in ("desktop-light-result-card.png", "identity.md", "notes.txt", "author.json"):
+        assert not sensitive_path(tmp_path / "anywhere" / name), name
+    for folder in (".config/claude", ".config/github-copilot", ".gemini", ".cursor"):
+        assert sensitive_path(house / folder / "settings.json"), folder
+
+    # Raticode's data root, marked by its trusted tools folder, is protected around data_dir.
+    root = tmp_path / "state" / "data"
+    data = root / "gofer"
+    (root / ".gofer-trusted-bin").mkdir(parents=True)
+    (data / "chat-attachments").mkdir(parents=True)
+    assert sensitive_path(root / ".gofer-trusted-bin" / "gof", data)
+    assert sensitive_path(data / "rem-home.sqlite3", data)
+    assert not sensitive_path(data / "chat-attachments" / "photo.jpg", data)
+    # An ordinary folder holding data_dir isn't treated as Raticode's own.
+    plain = tmp_path / "Projects" / "Workflows"
+    plain.mkdir(parents=True)
+    assert not sensitive_path(tmp_path / "Projects" / "report.pdf", plain)
+    assert sensitive_path(plain / "registry.sqlite3", plain)
+
+
+def test_secret_files_inside_open_folders_need_the_request_to_name_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+    from gofer.ui.rem_home import names_path, reply_files
+
+    house = tmp_path / "home"
+    monkeypatch.setattr(rem_home_module.Path, "home", classmethod(lambda cls: house))
+    project = house / "Projects" / "app"
+    brain = house / "brain"
+    for folder in (project / "src", brain, house / ".ssh"):
+        folder.mkdir(parents=True)
+    # Synthetic credentials only.
+    env = project / ".env"
+    env.write_text("API_KEY=synthetic-not-a-real-key\n")
+    secret = project / "secret.txt"
+    secret.write_text("synthetic")
+    token = brain / "github-token.txt"
+    token.write_text("synthetic")
+    key = house / ".ssh" / "id_ed25519"
+    key.write_text("synthetic private key")
+    (house / ".ssh" / "id_ed25519.pub").write_text("synthetic public key")
+    code = project / "src" / "app.py"
+    code.write_text("print('hi')")
+    config = {
+        "projects": [{"root": str(project)}, {"root": str(house)}],
+        "brain": {"root": str(brain)},
+    }
+    paths = [str(env), str(secret), str(token), str(key), str(code)]
+
+    # Open folders, even the home folder, no longer release secret-looking files or
+    # credential stores to a reply the user didn't ask for by path.
+    files, refused = reply_files(paths, config, records="", request="send the project files")
+    assert [f["name"] for f in files] == ["app.py"]
+    assert len(refused) == 4 and all("may hold passwords, keys" in line for line in refused)
+    # Without records, as before, open folders still need no conversation mention.
+    files, refused = reply_files([str(code)], config)
+    assert [f["name"] for f in files] == ["app.py"] and not refused
+
+    # Naming the exact path, or its ~/ form, releases it.
+    files, refused = reply_files(
+        [str(env), str(key)], config, request=f"send {env} and ~/.ssh/id_ed25519."
+    )
+    assert [f["name"] for f in files] == [".env", "id_ed25519"] and not refused
+    # A longer path that starts with it doesn't: asking for the public key isn't
+    # asking for the private one.
+    files, refused = reply_files([str(key)], config, request=f"send {key}.pub")
+    assert files == [] and "may hold passwords, keys" in refused[0]
+    assert not names_path(f"/tmp{key}", str(key))
+    assert names_path(f"please send `{key}`, thanks", str(key))
+    assert not names_path(f"{key}-backup", str(key))
+
+
+def test_folders_opened_inside_protected_places_stay_shareable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+    from gofer.ui.rem_home import reply_files, sensitive_path
+
+    house = tmp_path / "home"
+    monkeypatch.setattr(rem_home_module.Path, "home", classmethod(lambda cls: house))
+    # A Second Brain kept in Raticode's data folder, and a skill folder opened as a project.
+    data = tmp_path / "data" / "gofer"
+    brain = data / "second-brains" / "notes"
+    skill = house / ".codex" / "skills" / "design"
+    for folder in (brain, skill):
+        folder.mkdir(parents=True)
+    note = brain / "plan.md"
+    note.write_text("plan")
+    guide = skill / "SKILL.md"
+    guide.write_text("skill")
+    sign_in = house / ".codex" / "config.toml"
+    sign_in.write_text("synthetic")
+    config = {"projects": [{"root": str(skill)}], "brain": {"root": str(brain)}}
+    files, refused = reply_files(
+        [str(note), str(guide)], config, records="", request="send them", data_dir=data
+    )
+    assert [f["name"] for f in files] == ["plan.md", "SKILL.md"] and not refused
+    # Only the opened folder is released: a broader open folder holding the agent's
+    # sign-in folder or Raticode's data doesn't release them.
+    assert not sensitive_path(guide, opened=skill.resolve())
+    assert sensitive_path(sign_in, opened=house.resolve())
+    assert sensitive_path(data / "rem-home.sqlite3", data, opened=tmp_path.resolve())

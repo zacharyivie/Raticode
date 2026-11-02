@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { apiUrl } from "../lib/api.js";
+import ConfirmButton from "./OrganizationConfirm.jsx";
 
 const blankTarget = { id: "", kind: "swarm", employees: [], swarmId: "", deviceId: "", threadId: "", projectId: "", url: "", secretRef: "", turnLimit: "1" };
 const Field = ({ label, children }) => <label className="org-field"><span>{label}</span>{children}</label>;
@@ -8,6 +10,14 @@ export default function OrganizationExecutionSettings({ organization, busy, onAc
   const [resolutions, setResolutions] = useState({});
   const [hook, setHook] = useState({ routineId: "", secretRef: "" });
   const [credential, setCredential] = useState({ id: "", value: "" });
+  // Paired desktops belong to the pairing Feature Preview, so offer them only while it is on.
+  const [pairing, setPairing] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(apiUrl("/devices"), { cache: "no-store" }).then(response => response.ok ? response.json() : null)
+      .then(status => { if (!cancelled) setPairing(status?.experimental_network === true); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const { config, runtime } = organization;
   const patch = values => setTarget(t => ({ ...t, ...values }));
   const targets = config.executionTargets || [];
@@ -21,14 +31,14 @@ export default function OrganizationExecutionSettings({ organization, busy, onAc
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   return <>
-    <section className="org-operation-section"><h4>Execution destinations</h4><p className="org-note">Grant a destination to selected employees. Tasks reserve its turn limit before starting. Each managed run uses one concurrent slot.</p>
-      {targets.map(t => <article key={t.id} className="org-routine"><div><strong>{t.id}</strong><p className="org-note">{t.kind} · {t.turnLimit} reserved turns · {t.employees.join(", ")}</p></div><div className="org-actions"><button className="org-button" disabled={busy} onClick={() => setTarget({ ...blankTarget, ...t, turnLimit: String(t.turnLimit) })}>Edit destination</button><button className="org-button" disabled={busy} onClick={() => onSave({ ...config, executionTargets: targets.filter(x => x.id !== t.id) }, `Revoked destination ${t.id}`, organization.revision)}>Revoke destination</button></div></article>)}
+    <section className="org-operation-section"><h4>Execution destinations</h4><p className="org-note">Grant a destination to selected employees. Tasks reserve its run limit before starting. Each managed run uses one concurrent slot.</p>
+      {targets.map(t => <article key={t.id} className="org-routine"><div><strong>{t.id}</strong><p className="org-note">{t.kind} · {t.turnLimit} reserved runs · {t.employees.join(", ")}</p></div><div className="org-actions"><button className="org-button" disabled={busy} onClick={() => setTarget({ ...blankTarget, ...t, turnLimit: String(t.turnLimit) })}>Edit destination</button><ConfirmButton label="Revoke destination" danger busy={busy} message="Revoking pauses the organization and stops work that uses it." confirmLabel="Revoke and pause" onConfirm={() => onSave({ ...config, executionTargets: targets.filter(x => x.id !== t.id) }, `Revoked destination ${t.id}`, organization.revision)} /></div></article>)}
       <details><summary>Add or edit a destination</summary><form className="org-form" onSubmit={async e => { e.preventDefault(); const value = { id: target.id, kind: target.kind, employees: target.employees, turnLimit: target.kind === "fleet" ? 1 : Number(target.turnLimit), ...(target.kind === "swarm" ? { swarmId: target.swarmId } : target.kind === "fleet" ? { deviceId: target.deviceId, threadId: target.threadId, projectId: target.projectId } : { url: target.url, secretRef: target.secretRef }) }; if (await onSave({ ...config, executionTargets: [...targets.filter(t => t.id !== value.id), value] }, `Saved execution destination ${value.id}`, organization.revision)) setTarget(blankTarget); }}>
         <Field label="Destination ID"><input value={target.id} onChange={e => patch({ id: e.target.value })} required pattern={"[A-Za-z0-9][A-Za-z0-9_\\-]{0,99}"} /></Field>
-        <Field label="Execution runtime"><select value={target.kind} onChange={e => patch({ kind: e.target.value })}><option value="swarm">Local swarm</option><option value="fleet">Paired desktop</option><option value="remote">HTTPS job gateway</option></select></Field>
+        <Field label="Execution runtime"><select value={target.kind} onChange={e => patch({ kind: e.target.value })}><option value="swarm">Local swarm</option>{(pairing || target.kind === "fleet") && <option value="fleet">Paired desktop</option>}<option value="remote">HTTPS job gateway</option></select></Field>
         <fieldset><legend>Employees allowed to use this destination</legend>{config.employees.map(employee => <label className="org-check" key={employee.id}><input type="checkbox" checked={target.employees.includes(employee.id)} onChange={e => patch({ employees: e.target.checked ? [...target.employees, employee.id] : target.employees.filter(id => id !== employee.id) })} />{employee.name}</label>)}</fieldset>
         {(target.kind === "swarm" ? [["swarmId", "Swarm ID"]] : target.kind === "fleet" ? [["deviceId", "Paired desktop ID"], ["threadId", "Granted thread ID"], ["projectId", "Target project ID"]] : [["url", "HTTPS gateway base URL"], ["secretRef", "Granted secret reference ID"]]).map(([key, label]) => <Field key={key} label={label}><input required value={target[key] || ""} onChange={e => patch({ [key]: e.target.value })} /></Field>)}
-        {target.kind !== "fleet" && <Field label="Reserved provider turns"><input inputMode="numeric" required value={target.turnLimit} onChange={e => patch({ turnLimit: e.target.value })} /></Field>}
+        {target.kind !== "fleet" && <Field label="Reserved provider runs"><input inputMode="numeric" required value={target.turnLimit} onChange={e => patch({ turnLimit: e.target.value })} /></Field>}
         <p className="org-note">Saving destination grants pauses the organization and stops active work. Start it again after reviewing the change.</p><button className="org-button" disabled={busy || !target.employees.length}>Save destination</button>
       </form></details>
       {!!unresolved.length && <div className="org-banner org-pause"><p>{unresolved.length} execution receipts need stop confirmation. New work is held.</p><button className="org-button" disabled={busy} onClick={() => onAction("execution_reconcile")}>Check stopped executions</button>{unresolved.map(a => <form className="org-form" key={a.id} onSubmit={e => { e.preventDefault(); onAction("execution_resolve", { attemptId: a.id, reason: resolutions[a.id], confirmStopped: true }); }}><p>{a.executionHandle.kind}: {a.executionHandle.error || "Waiting for target confirmation"}</p><Field label="Stop inspection evidence"><input required value={resolutions[a.id] || ""} onChange={e => setResolutions(r => ({ ...r, [a.id]: e.target.value }))} /></Field><button className="org-button" disabled={busy}>Confirm stopped after inspection</button></form>)}</div>}

@@ -486,4 +486,4 @@ Node echo:
         ["workflow", "resume", workflow.workflow_id, "--run-id", "x", "--data-dir", str(data_dir)],
     )
     assert resume.exit_code == 1
-    assert "not supported" in resume.output
+    assert "Run 'x' was not found." in resume.output

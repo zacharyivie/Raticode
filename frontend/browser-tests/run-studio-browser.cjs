@@ -1,6 +1,7 @@
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const electronPath = require("electron");
+const { backgroundLaunch } = require("../electron/tests/background-display.cjs");
 const childEnv = {
   ...process.env,
   ELECTRON_DISABLE_SANDBOX: "1",
@@ -10,7 +11,8 @@ delete childEnv.ELECTRON_RUN_AS_NODE;
 
 function runBrowserTest(script, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(electronPath, [script], { env: { ...childEnv, ...extraEnv }, stdio: "inherit" });
+    const launch = backgroundLaunch(electronPath, [script], { ...childEnv, ...extraEnv });
+    const child = spawn(launch.command, launch.args, { env: launch.env, stdio: "inherit" });
     child.on("exit", (code, signal) => {
       if (code === 0 && !signal) resolve();
       else reject(new Error(`Browser regression ${path.basename(script)} exited with ${signal || code}.`));

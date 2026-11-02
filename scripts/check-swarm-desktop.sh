@@ -14,12 +14,7 @@ case "${1:-all}" in
   frontend-test) npm --prefix frontend test ;;
   frontend-lint) npm --prefix frontend run lint ;;
   frontend-build) npm --prefix frontend run check:build ;;
-  browser)
-    if [[ -n "${DISPLAY:-}" ]]; then
-      npm --prefix frontend run test:pairing-browser
-    else
-      xvfb-run -a npm --prefix frontend run test:pairing-browser
-    fi ;;
+  browser) npm --prefix frontend run test:pairing-browser ;;
   all)
     for phase in backend-1 backend-2 backend-3 backend-4 backend-reconcile ruff mypy frontend-test frontend-lint frontend-build browser; do
       bash "$0" "$phase"

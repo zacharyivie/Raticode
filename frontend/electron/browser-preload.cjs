@@ -5,6 +5,7 @@ const { ipcRenderer } = require("electron");
 const LINK_CHANNEL = "gofer:browser-link-clicked";
 const NAVIGATION_CHANNEL = "gofer:browser-navigation";
 const ZOOM_CHANNEL = "gofer:browser-zoom";
+const CONTEXT_ELEMENT_CHANNEL = "gofer:browser-context-element";
 
 // Every handler below ignores events a page script dispatched itself
 // (isTrusted is false). Only real user input may open tabs, zoom or go back.
@@ -89,6 +90,41 @@ window.addEventListener("keydown", (event) => {
   event.preventDefault();
   ipcRenderer.send(NAVIGATION_CHANNEL, { action: "back" });
 }, true);
+
+// Ask Rem about this: describe the element the user right-clicked.
+window.addEventListener("contextmenu", (event) => {
+  if (!event.isTrusted) return;
+  ipcRenderer.send(CONTEXT_ELEMENT_CHANNEL, describeElement(event.composedPath()[0] || event.target));
+}, true);
+
+function describeElement(node) {
+  const element = node?.nodeType === 1 ? node : node?.parentElement;
+  if (!element?.tagName) return null;
+  const attribute = (name) => String(element.getAttribute?.(name) || "");
+  return {
+    tag: element.tagName.toLowerCase(),
+    path: elementPath(element),
+    role: attribute("role"),
+    label: attribute("aria-label"),
+    alt: attribute("alt"),
+    title: attribute("title"),
+    href: String(element.closest?.("a[href]")?.href || ""),
+    src: String(element.currentSrc || element.src || ""),
+    text: String(element.innerText || element.textContent || "").trim().slice(0, 8000),
+    html: String(element.outerHTML || "").slice(0, 8000),
+  };
+}
+
+function elementPath(element) {
+  const parts = [];
+  for (let current = element; current?.tagName && parts.length < 6; current = current.parentElement) {
+    const id = current.id ? `#${current.id}` : "";
+    const classes = [...(current.classList || [])].slice(0, 3).map((name) => `.${name}`).join("");
+    parts.unshift(`${current.tagName.toLowerCase()}${id}${classes}`);
+    if (id) break;
+  }
+  return parts.join(" > ");
+}
 
 function isEditableNode(node) {
   return Boolean(

@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import sqlite3
-import tempfile
 import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
+from gofer.core.command_slots import read_settings, slots_root
 from gofer.core.resources import ResourceLimits
-from gofer.devices.registry import device_id
+from gofer.devices.registry import PairingError, device_id
 from gofer.ui.chat import _messages_with_attachment_paths, stream_workflow_chat
 from gofer.ui.chat_jobs import ChatJobs
 from gofer.ui.chat_media import store_chat_attachments
@@ -148,8 +148,10 @@ class DeviceChatBridge:
                 await asyncio.sleep(0.25)
 
     def _tick(self) -> bool:
+        # Phone turns share Rem's worker limit from Settings > Rem.
+        limit = read_settings(slots_root(self.data_dir)).resolved()["maxWorkers"]
         with self._lock:
-            capacity = len(self._active) < 4
+            capacity = len(self._active) < limit
             active = list(self._active.items())
         for (thread, turn), (peer, request_id) in active:
             if not self.application.runnable(peer, request_id):
@@ -192,10 +194,7 @@ class DeviceChatBridge:
             self._active[key] = (request["peer"], event["request_id"])
 
         def run(emit: Callable[[dict[str, Any]], None]) -> None:
-            temporary: tempfile.TemporaryDirectory[str] | None = None
-
             async def consume() -> None:
-                nonlocal temporary
                 validated = validate_context(context)
                 provider, model = validated["provider"], validated["model"]
                 mode = validated["permission_mode"]
@@ -204,7 +203,11 @@ class DeviceChatBridge:
                     {"role": "user", "body": event["payload"]["text"]}
                 ]
                 messages = [
-                    {"role": item["role"], "body": item.get("body", item.get("content", ""))}
+                    {
+                        "role": item["role"],
+                        "body": item.get("body", item.get("content", "")),
+                        **({"attachments": item["attachments"]} if item.get("attachments") else {}),
+                    }
                     for item in messages
                 ]
                 if not self.application.runnable(request["peer"], event["request_id"]):
@@ -216,12 +219,12 @@ class DeviceChatBridge:
                     else str(working_dir)
                 )
                 local_workflow["chatThreadId"] = thread
+                local_workflow.setdefault("chatThreadTitle", context.get("title") or "")
                 files = request.get("attachments") or []
                 if files:
-                    temporary = tempfile.TemporaryDirectory(
-                        prefix="device-attachments-", dir=self.data_dir
-                    )
-                    attachment_dir = Path(temporary.name)
+                    # Save uploads with the desktop thread's own attachments. The
+                    # phone's copy expires, and later desktop turns resend this
+                    # message with its attachments.
                     stored = store_chat_attachments(
                         {
                             "threadId": thread,
@@ -234,14 +237,26 @@ class DeviceChatBridge:
                                 for item in files
                             ],
                         },
-                        attachment_dir,
+                        self.data_dir,
                     )
+                    saved = [
+                        {
+                            **attachment,
+                            "id": item.get("id") or attachment["id"],
+                            "mime": item["mime"],
+                        }
+                        for item, attachment in zip(files, stored["attachments"], strict=True)
+                    ]
+                    record = getattr(self.application, "record_attachments", None)
+                    if record is not None:
+                        record(request["peer"], event["request_id"], saved)
+                    latest = next(item for item in reversed(messages) if item["role"] == "user")
+                    latest["attachments"] = saved
+                if any(item.get("attachments") for item in messages):
                     # Existing media validation and attachment reference escaping
                     # apply equally to authenticated device uploads.
-                    latest = next(item for item in reversed(messages) if item["role"] == "user")
-                    latest["attachments"] = stored["attachments"]
                     messages, _ = _messages_with_attachment_paths(
-                        messages, workflow=local_workflow, data_dir=attachment_dir
+                        messages, workflow=local_workflow, data_dir=self.data_dir
                     )
                 chat_turn = self.steering.begin(
                     thread, turn, provider, model, data_dir=self.data_dir
@@ -296,12 +311,30 @@ class DeviceChatBridge:
                         elif output.get("type") == "new-thread":
                             spawn = getattr(self.application, "spawn_thread", None)
                             if spawn is not None:
-                                spawn(request["peer"], event["request_id"], output)
+                                try:
+                                    spawn(request["peer"], event["request_id"], output)
+                                except PairingError:
+                                    # Threads a paired desktop runs here have no desktop
+                                    # window thread to hang a child thread under.
+                                    pass
                         yield output
+
+                factory = thread_source
+                if context.get("machine") and self.fleet_control is not None:
+                    from gofer.devices.remote_threads import RemoteThreads
+
+                    remote = RemoteThreads(self.fleet_control)
+
+                    async def remote_source(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
+                        # The desktop thread runs on a paired desktop; so does this turn.
+                        async for output in remote.stream(machine=context["machine"], **options):
+                            yield output
+
+                    factory = remote_source
 
                 source = self.steering.stream(
                     chat_turn,
-                    thread_source,
+                    factory,
                     provider=provider,
                     model=model,
                     messages=messages,
@@ -363,8 +396,6 @@ class DeviceChatBridge:
                 self._complete(request, "", "dispatch_failed")
                 emit({"type": "error", "error": "Remote Rem dispatch failed; inspect desktop"})
             finally:
-                if temporary is not None:
-                    temporary.cleanup()
                 with self._lock:
                     self._active.pop(key, None)
 

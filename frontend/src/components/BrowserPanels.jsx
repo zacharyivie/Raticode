@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Bookmark,
   Bot,
+  ChevronDown,
   Clock,
   Cookie,
   Download,
@@ -24,6 +25,42 @@ import { downloadStatus, formatZoom, hostLabel, relativeTime } from "../lib/brow
 
 const BUTTON = "rounded-md border border-line bg-white px-2.5 py-1 text-xs font-medium text-ink hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brand disabled:opacity-40";
 const PRIMARY = "rounded-md bg-brand px-2.5 py-1 text-xs font-semibold text-white hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brand";
+
+// ---------------------------------------------------------------------------
+// Menus
+
+export function usePopupMenu(menuRef, onClose, { includeParent = false } = {}) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    menuRef.current?.querySelector("[role=menuitem]:not([disabled])")?.focus();
+    const close = (event) => {
+      const inside = includeParent ? menuRef.current?.parentElement : menuRef.current;
+      if (!inside?.contains(event.target)) onCloseRef.current();
+    };
+    window.addEventListener("pointerdown", close, true);
+    return () => window.removeEventListener("pointerdown", close, true);
+  }, [menuRef, includeParent]);
+  return (event) => {
+    const enabled = [...(menuRef.current?.querySelectorAll("[role=menuitem]:not([disabled])") || [])];
+    if (!enabled.length) return;
+    const index = enabled.indexOf(document.activeElement);
+    const next = {
+      ArrowDown: (index + 1) % enabled.length,
+      ArrowUp: index <= 0 ? enabled.length - 1 : index - 1,
+      Home: 0,
+      End: enabled.length - 1,
+    }[event.key];
+    if (next !== undefined) { event.preventDefault(); enabled[next].focus(); return; }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onCloseRef.current({ restoreFocus: true });
+    }
+  };
+}
+
+export const MENU_ITEM_CLASS = "browser-menu-item flex w-full items-center gap-2 px-3 py-1.5 text-left text-ink disabled:opacity-40";
 
 // ---------------------------------------------------------------------------
 // Address bar pieces
@@ -353,7 +390,7 @@ export function SiteInfoPopover({ info, onClose, onPermission, onClearData, onRe
 // ---------------------------------------------------------------------------
 // History, bookmarks, downloads and site data
 
-export function LibraryPanel({ view, onViewChange, onClose, onOpenUrl, bridge }) {
+export function LibraryPanel({ view, onViewChange, onClose, onOpenUrl, onOpenFile, bridge }) {
   const views = [["history", "History", History], ["bookmarks", "Bookmarks", Bookmark], ["downloads", "Downloads", Download], ["data", "Site data", Cookie]];
   const panelRef = useRef(null);
   useEffect(() => { panelRef.current?.focus(); }, []);
@@ -377,7 +414,7 @@ export function LibraryPanel({ view, onViewChange, onClose, onOpenUrl, bridge })
       <div className="min-h-0 flex-1 overflow-auto p-2">
         {view === "history" ? <HistoryView bridge={bridge} onOpenUrl={onOpenUrl} /> : null}
         {view === "bookmarks" ? <BookmarksView bridge={bridge} onOpenUrl={onOpenUrl} /> : null}
-        {view === "downloads" ? <DownloadsView bridge={bridge} /> : null}
+        {view === "downloads" ? <DownloadsView bridge={bridge} onOpenFile={onOpenFile} /> : null}
         {view === "data" ? <SiteDataView bridge={bridge} /> : null}
       </div>
     </div>
@@ -489,7 +526,7 @@ function BookmarkRow({ bridge, item, onOpenUrl }) {
   );
 }
 
-export function DownloadsView({ bridge }) {
+export function DownloadsView({ bridge, onOpenFile }) {
   const [downloads, setDownloads] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -498,7 +535,7 @@ export function DownloadsView({ bridge }) {
     const unsubscribe = bridge?.onDownloads?.((payload) => setDownloads(payload?.downloads || []));
     return () => { active = false; unsubscribe?.(); };
   }, [bridge]);
-  const act = (command, id) => bridge.library("download", { command, id }).then((result) => {
+  const act = (command, id, options = {}) => bridge.library("download", { command, id, ...options }).then((result) => {
     setDownloads(result?.downloads || []);
     setError("");
   }, (failure) => setError(failure.message));
@@ -532,7 +569,14 @@ export function DownloadsView({ bridge }) {
                 ) : null}
                 {item.state === "completed" ? (
                   <>
-                    <button className={BUTTON} type="button" onClick={() => void act("open", item.id)}>Open</button>
+                    <button className={BUTTON} type="button" onClick={() => (onOpenFile ? onOpenFile(item.path) : void act("open", item.id))}>Open</button>
+                    <OpenWithButton
+                      bridge={bridge}
+                      item={item}
+                      onError={setError}
+                      onOpenApp={(appId) => void act("open-with", item.id, { appId })}
+                      onOpenInRaticode={onOpenFile ? () => onOpenFile(item.path) : null}
+                    />
                     <button className={BUTTON} type="button" onClick={() => void act("show", item.id)}><FolderOpen aria-hidden="true" className="mr-1 inline" size={11} />Show in folder</button>
                   </>
                 ) : null}
@@ -550,6 +594,62 @@ export function DownloadsView({ bridge }) {
         })}
       </ul>
     </>
+  );
+}
+
+function OpenWithButton({ bridge, item, onError, onOpenApp, onOpenInRaticode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button aria-expanded={open} aria-haspopup="menu" className={BUTTON} type="button" onClick={() => setOpen((value) => !value)}>
+        Open with<ChevronDown aria-hidden="true" className="ml-1 inline" size={11} />
+      </button>
+      {open ? (
+        <OpenWithMenu
+          bridge={bridge}
+          item={item}
+          onClose={() => setOpen(false)}
+          onError={onError}
+          onOpenApp={onOpenApp}
+          onOpenInRaticode={onOpenInRaticode}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// Raticode is always offered first; the system's handlers load on demand.
+function OpenWithMenu({ bridge, item, onClose, onError, onOpenApp, onOpenInRaticode }) {
+  const menuRef = useRef(null);
+  const [apps, setApps] = useState(null);
+  const handleKeyDown = usePopupMenu(menuRef, (options) => {
+    if (options?.restoreFocus) menuRef.current?.parentElement?.querySelector("button[aria-expanded]")?.focus();
+    onClose();
+  }, { includeParent: true });
+  useEffect(() => {
+    let active = true;
+    bridge.library("download-apps", { id: item.id }).then(
+      (result) => { if (active) setApps(result?.apps || []); },
+      (failure) => { if (active) { setApps([]); onError(failure.message); } },
+    );
+    return () => { active = false; };
+  }, [bridge, item.id, onError]);
+  const pick = (action) => { onClose(); action(); };
+  return (
+    <div ref={menuRef} role="menu" aria-label={`Open ${item.filename} with`} className="absolute left-0 top-full z-50 mt-1 w-60 rounded-md border border-line bg-white py-1 text-xs shadow-lg" onKeyDown={handleKeyDown}>
+      <button role="menuitem" className={MENU_ITEM_CLASS} disabled={!onOpenInRaticode} tabIndex={-1} type="button" onClick={() => pick(onOpenInRaticode)}>
+        <span className="min-w-0 flex-1 truncate">Raticode</span>
+      </button>
+      <div className="my-1 border-t border-line" role="separator" />
+      {apps === null ? <p className="px-3 py-1.5 text-muted" role="status">Finding apps…</p> : null}
+      {apps?.length === 0 ? <p className="px-3 py-1.5 text-muted">No other apps found</p> : null}
+      {(apps || []).map((app) => (
+        <button key={app.id} role="menuitem" className={MENU_ITEM_CLASS} tabIndex={-1} type="button" onClick={() => pick(() => onOpenApp(app.id))}>
+          <span className="min-w-0 flex-1 truncate">{app.name}</span>
+          {app.isDefault ? <span className="shrink-0 text-[10px] text-muted">Default</span> : null}
+        </button>
+      ))}
+    </div>
   );
 }
 

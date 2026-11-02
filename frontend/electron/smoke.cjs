@@ -2,6 +2,7 @@ const { spawn } = require("node:child_process");
 const os = require("node:os");
 const path = require("node:path");
 const electronPath = require("electron");
+const { backgroundLaunch } = require("./tests/background-display.cjs");
 
 const READY_MESSAGE = "GOFER_ELECTRON_READY";
 const SMOKE_TIMEOUT_MS = 30000;
@@ -15,15 +16,16 @@ env.GOFER_DATA_DIR =
   env.GOFER_DATA_DIR || path.join(os.tmpdir(), "gofer-flow-electron-smoke");
 env.LIBGL_ALWAYS_SOFTWARE = env.LIBGL_ALWAYS_SOFTWARE || "1";
 
-const child = spawn(electronPath, [
+const launch = backgroundLaunch(electronPath, [
   "--no-sandbox",
   "--disable-gpu",
   "--disable-gpu-compositing",
   "--disable-gpu-rasterization",
   "--disable-dev-shm-usage",
   ".",
-], {
-  env,
+], env);
+const child = spawn(launch.command, launch.args, {
+  env: launch.env,
   stdio: ["ignore", "pipe", "pipe"],
 });
 

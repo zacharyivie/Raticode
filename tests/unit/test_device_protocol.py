@@ -509,7 +509,7 @@ def test_collection_exact_limit_is_accepted(collection) -> None:
 def test_canonical_mobile_contract_manifest() -> None:
     manifest = (CONTRACT / "SHA256SUMS").read_bytes()
     assert hashlib.sha256(manifest).hexdigest() == (
-        "4f39378f3639ff179e6c8b4fdca3357f320d842a8fa838c703cec1080354626d"
+        "c33adeff46024bfa4cccb4fb16a3a350f0bc208390e415e3fc9bd7323e7370d2"
     )
     for line in manifest.decode().splitlines():
         digest, relative = line.split("  ", 1)
@@ -571,6 +571,10 @@ def test_canonical_mobile_worker_grant_is_forbidden() -> None:
     [
         ("desktop.read", "op", "files.read"),
         ("desktop.action", "op", "terminal.run"),
+        # Workflows are viewed with reads and controlled with actions, never edited.
+        ("desktop.read", "op", "workflows.run"),
+        ("desktop.action", "op", "workflows.read"),
+        ("desktop.action", "op", "workflows.save"),
         ("desktop.action", "path", "/etc/passwd"),
         ("desktop.result", "parts", 0),
         ("desktop.result", "code", "crash"),

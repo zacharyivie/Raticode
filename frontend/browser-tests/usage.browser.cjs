@@ -1,5 +1,6 @@
 /* global __dirname, console, setTimeout, clearTimeout */
 // Real settings UI against deterministic usage responses. No provider calls.
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -35,6 +36,7 @@ function credentialConfig(provider, profile) {
   };
 }
 const requests = [];
+const authRequests = [];
 const stamp = "2026-09-24T16:00:00Z";
 const overview = {
   scope: "device", tracking_started_at: stamp, observed_at: stamp,
@@ -67,6 +69,13 @@ async function main() {
         if (request.url === "/usage-test") {
           response.setHeader("Content-Type", "text/html");
           return response.end(await server.transformIndexHtml("/usage-test", '<html><body><div id="root"></div><script type="module" src="/usage-entry.jsx"></script></body></html>'));
+        }
+        if (request.url.startsWith("/api/provider/auth")) {
+          let body = "";
+          for await (const chunk of request) body += chunk;
+          authRequests.push({ method: request.method, url: request.url, body: body ? JSON.parse(body) : null });
+          response.setHeader("Content-Type", "application/json");
+          return response.end(JSON.stringify({ status: request.method === "POST" ? "pending" : "complete" }));
         }
         if (request.url.startsWith("/api/provider/capabilities")) { response.setHeader("Content-Type", "application/json"); return response.end('{"providers":[]}'); }
         if (!request.url.startsWith("/api/usage/")) return next();
@@ -142,6 +151,21 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('.usage-account').textContent.includes('75% remaining')"), true);
   assert.equal(await evaluate("document.querySelector('.usage-account[data-status=stale]').textContent.includes('Out of date')"), true);
   assert.equal(await evaluate("document.body.textContent.includes('Sign in required')"), true);
+  // A signed-out account shows its sign-in action without expanding the row.
+  assert.equal(await evaluate("document.querySelector('.usage-attention').textContent.startsWith('1 account needs you to sign in')"), true);
+  assert.equal(await evaluate("document.querySelectorAll('.usage-sign-in').length"), 1);
+  assert.equal(await evaluate("document.querySelector('.usage-sign-in-primary').checkVisibility()"), true);
+  assert.equal(await evaluate("document.querySelector('.usage-sign-in').textContent.includes('copilot login')"), true);
+  await evaluate("document.querySelector('.usage-sign-in').scrollIntoView({ block: 'center' })");
+  await screenshot("sign-in-required-desktop");
+  const refreshesBeforeSignIn = requests.filter(request => request.url.startsWith("/api/usage/refresh")).length;
+  await click("Sign in to GitHub Copilot");
+  const deadline = Date.now() + 5000;
+  while (requests.filter(request => request.url.startsWith("/api/usage/refresh")).length === refreshesBeforeSignIn && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.deepEqual(authRequests[0], { method: "POST", url: "/api/provider/auth", body: { provider: "copilot", action: "start" } });
+  assert.equal(authRequests[1].url, "/api/provider/auth?provider=copilot");
+  assert.ok(requests.filter(request => request.url.startsWith("/api/usage/refresh")).length > refreshesBeforeSignIn, "Completing sign-in refreshes usage");
+  await wait("Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Refresh usage')");
   assert.equal(await evaluate("document.body.textContent.includes('Could not refresh')"), true);
   assert.equal(await evaluate("document.body.textContent.includes('45 requests remaining')"), true);
   await evaluate("document.querySelector('.usage-account summary').click()");

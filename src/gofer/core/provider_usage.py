@@ -12,6 +12,7 @@ import json
 import math
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -491,6 +492,28 @@ def _user_directory(
     return Path(os.environ.get(variable) or Path.home() / default).expanduser()
 
 
+def _macos_keychain_secret(service: str, account: str | None = None) -> str | None:
+    """Read a CLI's own default-account sign-in from the macOS login keychain.
+
+    Claude Code and cursor-agent keep their macOS sign-ins in the keychain
+    instead of the credential files used on Linux and Windows.
+    """
+    if sys.platform != "darwin":
+        return None
+    command = ["/usr/bin/security", "find-generic-password", "-s", service, "-w"]
+    if account:
+        command[2:2] = ["-a", account]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, timeout=5, check=False, stdin=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or len(result.stdout) > MAX_OUTPUT_BYTES:
+        return None
+    return result.stdout.decode("utf-8", "replace").strip() or None
+
+
 def _cursor_native_token(env: dict[str, str], profile: str | None) -> str | None:
     """Reuse the cursor-agent or Cursor app sign-in. Never refresh or write it."""
     if _account_env(env, "CURSOR_API_KEY", profile):
@@ -500,10 +523,28 @@ def _cursor_native_token(env: dict[str, str], profile: str | None) -> str | None
     if config is None:
         return None
     candidates: list[str] = []
-    if (data := _read_limited(config / "cursor" / "auth.json")) is not None:
-        payload = json.loads(data)
+
+    def add_login_file(path: Path) -> None:
+        data = _read_limited(path)
+        payload = json.loads(data) if data is not None else None
         if isinstance(payload, dict) and isinstance(payload.get("accessToken"), str):
             candidates.append(payload["accessToken"])
+
+    add_login_file(config / "cursor" / "auth.json")
+    if sys.platform == "win32" and not profile and os.environ.get("APPDATA"):
+        # cursor-agent keeps its Windows sign-in in %APPDATA%\Cursor, not ~/.config.
+        add_login_file(Path(os.environ["APPDATA"]) / "Cursor" / "auth.json")
+    if sys.platform == "darwin":
+        # On macOS, cursor-agent's file store is ~/.cursor/auth.json. It is used
+        # when AGENT_CLI_CREDENTIAL_STORE=file bypasses an unusable keychain.
+        # A profile only reads the home directory its own environment points at.
+        home = Path(env["HOME"]).expanduser() if env.get("HOME") else None
+        if home is None and not profile:
+            home = Path.home()
+        if home is not None:
+            add_login_file(home / ".cursor" / "auth.json")
+    if not profile and (secret := _macos_keychain_secret("cursor-access-token", "cursor-user")):
+        candidates.append(secret)
     app = (
         Path.home() / "Library" / "Application Support"
         if sys.platform == "darwin" and not profile
@@ -706,6 +747,11 @@ def _claude_native_token(env: dict[str, str], profile: str | None) -> str | None
         config_dir = config_dir or os.environ.get("CLAUDE_CONFIG_DIR")
     path = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
     data = _read_limited(path / ".credentials.json")
+    if not data and not config_dir:
+        # macOS keeps the default account in the keychain. A custom config
+        # directory uses a different, hashed keychain entry, so it is not guessed.
+        secret = _macos_keychain_secret("Claude Code-credentials")
+        data = secret.encode() if secret else None
     if not data:
         return None
     payload = json.loads(data)

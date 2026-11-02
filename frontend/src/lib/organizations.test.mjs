@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { historyByDate, teamMembers, teamGroups, projectPeople, employeeTree, reportingHierarchy, eligibleManagers, configurationChanges, newEmployee, taskGroups, changeLabel, activityEntries, actorLabel, formatUsd, usageCost, plural, initials, relativeDay } from "./organizations.js";
+import { historyByDate, teamMembers, teamGroups, projectPeople, employeeTree, reportingHierarchy, eligibleManagers, configurationChanges, newEmployee, taskGroups, changeLabel, activityEntries, actorLabel, formatUsd, usageCost, plural, initials, relativeDay, employeeStatus, attentionSummary, monthUsage, transcriptEntries, reportsCost, dangerousPermission } from "./organizations.js";
 
 test("configuration revisions group by local calendar date, retaining revision order", () => {
   const history = [
@@ -133,4 +133,42 @@ test("incremental activity retains earlier entries and deduplicates retried page
   assert.equal(first.length, 2);
   const entries = activityEntries([{ sequence: 4, actor: "user", kind: "comment", payload: { taskId: "a", comment: { body: "Compact comment" } } }]);
   assert.equal(entries[0].detail, "Compact comment");
+});
+
+test("employees with blocked or reviewable work show that they need the user", () => {
+  const tasks = [{ assignee: "a", status: "blocked" }, { assignee: "b", status: "todo", claim: "run" }, { assignee: "c", status: "done" }];
+  assert.equal(employeeStatus({ id: "a" }, tasks), "attention");
+  assert.equal(employeeStatus({ id: "b" }, tasks), "working");
+  assert.equal(employeeStatus({ id: "c", paused: true }, tasks), "paused");
+});
+test("the attention summary counts what waits for the user, including Rem's requests", () => {
+  const tasks = [{ status: "blocked" }, { status: "in_review" }, { status: "todo", approvalRequired: true, approvedRevision: null }, { status: "done", approvalRequired: true, approvedRevision: null }];
+  const runtime = { consentRequests: { a: { status: "pending" }, b: { status: "declined" } } };
+  assert.deepEqual(attentionSummary(tasks, runtime), { blocked: 1, review: 1, approval: 1, requests: 1, running: 0 });
+});
+test("monthly usage reports runs and tokens, and unknown cost when no run reported it", () => {
+  const runtime = { usage: { "2026-10": { company: { turns: 18, tokens: 3259125, costUsd: 0, unknownCostTurns: 18 } } } };
+  assert.deepEqual(monthUsage(runtime, new Date("2026-10-31T12:00:00Z")), { runs: 18, tokens: 3259125, cost: "Unknown" });
+  assert.deepEqual(monthUsage({}, new Date("2026-10-31T12:00:00Z")), { runs: 0, tokens: null, cost: "$0.00" });
+});
+test("run transcripts label provider events in plain words", () => {
+  const entries = transcriptEntries([
+    { sequence: 1, type: "thought", text: "Reading the plan" },
+    { sequence: 2, type: "usage", usage: { total_tokens: 12 } },
+    { sequence: 3, type: "final", message: { body: "Done." } },
+  ]);
+  assert.deepEqual(entries.map(e => [e.label, e.text]), [["Thinking", "Reading the plan"], ["Usage", "total_tokens: 12"], ["Final answer", "Done."]]);
+});
+test("cost reporting and dangerous permission modes are recognized", () => {
+  assert.equal(reportsCost("codex"), false);
+  assert.equal(reportsCost("claude_code"), true);
+  assert.equal(dangerousPermission("danger-full-access"), true);
+  assert.equal(dangerousPermission("workspace-write"), false);
+});
+test("consent and worktree events read as plain activity", () => {
+  const entries = activityEntries([
+    { sequence: 1, kind: "consent_requested", actor: "Rem:t", at: "2026-10-31T00:00:00Z", payload: { summary: "Start the organization" } },
+    { sequence: 2, kind: "worktree_created", actor: "system", at: "2026-10-31T00:00:01Z", payload: { taskId: "t", branch: "org/build-1234" } },
+  ], [{ id: "t", title: "Build" }]);
+  assert.deepEqual(entries.map(e => [e.text, e.detail]), [["Created a worktree for “Build”", "Branch org/build-1234"], ["Asked for your approval", "Start the organization"]]);
 });

@@ -1,0 +1,16 @@
+{
+  "exceptions": [
+    {
+      "advisory": "GHSA-g3hv-75wg-m249",
+      "package": "minimatch",
+      "expires": "2026-12-15",
+      "reason": "Fixed only in minimatch 11, which drops the callable export that eslint, eslint-plugin-react, dir-compare and filelist still require. Reached only through eslint and electron-builder, which match the repository's own patterns at build time and are not packaged into the app."
+    },
+    {
+      "advisory": "GHSA-3g3m-2fjr-6pw4",
+      "package": "glob",
+      "expires": "2026-12-15",
+      "reason": "Fixed in glob 14.0.2, but @electron/asar 4.3.0, its newest release, requires glob 13. Reached only through electron-builder at build time, where asar does not pass an AbortSignal, and not packaged into the app."
+    }
+  ]
+}

@@ -22,6 +22,7 @@ from gofer.subscriptions.cli_providers import (
     CliSubscription,
     cli_command,
     cli_invocation,
+    cli_prompt_input,
     stream_cli,
 )
 from gofer.ui.chat import ChatProviderError, _build_chat_command
@@ -472,7 +473,8 @@ async def test_rattish_compile_preflight_runtime_selects_actual_adapter(
     seen = []
 
     async def fake(command, **kwargs):
-        seen.append(command)
+        # Cursor and OpenCode receive the prompt on stdin.
+        seen.append([*command, (kwargs.get("stdin") or b"").decode()])
         output = (
             "Done"
             if provider == "copilot"
@@ -614,7 +616,8 @@ async def test_rem_stream_and_nonstream_preserve_context_and_cleanup(
         pass
 
     async def fake(command, **kwargs):
-        seen.append(command)
+        # Cursor and OpenCode receive the prompt on stdin.
+        seen.append([*command, (kwargs.get("stdin") or b"").decode()])
         if provider == "cursor":
             assert "--trust" in command
             assert kwargs["cwd"] == expected_cwd
@@ -858,3 +861,45 @@ async def test_stream_preserves_progress_and_tools_without_repeating_final(
         assert [e["text"] for e in events if e.get("text") == "Check the notes first."] == [
             "Check the notes first."
         ]
+
+
+@pytest.mark.parametrize("provider", ["cursor", "copilot", "opencode"])
+def test_long_cli_prompts_move_to_stdin(provider):
+    # Linux rejects any single argument over 128 KB with "Argument list too long".
+    prompt = "START-" + "Large context " * 20000
+    args, stdin = cli_prompt_input(provider, cli_command(provider, prompt, executable="cli"))
+    assert stdin == prompt.encode("utf-8")
+    assert "-p" not in args and max(map(len, args)) < 8192
+
+
+def test_short_copilot_prompts_keep_the_prompt_argument():
+    command = cli_command("copilot", "Short prompt", executable="copilot")
+    assert cli_prompt_input("copilot", command) == (command, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["cursor", "opencode"])
+async def test_cli_prompt_reaches_real_child_stdin(provider, tmp_path):
+    script = tmp_path / "fake_cli.py"
+    script.write_text(
+        "import json, sys\n"
+        "assert max(map(len, sys.argv)) < 8192\n"
+        "prompt = sys.stdin.read()\n"
+        "assert prompt.startswith('START-') and len(prompt) > 200000\n"
+        "print(json.dumps({'type': 'result', 'subtype': 'success', 'result': str(len(prompt)),"
+        " 'session_id': 's1'}))\n"
+    )
+    prompt = "START-" + "Large context " * 20000
+    args, stdin = cli_prompt_input(provider, cli_command(provider, prompt, executable="cli"))
+    events = [
+        event
+        async for event in stream_cli(
+            ["python3", str(script), *args[1:]],
+            "cursor",
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin"},
+            stdin=stdin,
+        )
+    ]
+    assert events[-1]["type"] == "final", events[-1]
+    assert events[-1]["message"]["body"] == str(len(prompt))

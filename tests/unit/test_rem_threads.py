@@ -1,5 +1,6 @@
 """Project handoffs use a fresh provider invocation and bounded thread tools."""
 
+import subprocess
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,18 @@ from gofer.ui.chat import _build_chat_command, build_chat_prompt
 
 def config(global_scope: bool = True) -> dict[str, Any]:
     return {"global": global_scope, "projects": [{"root": "/mobile", "name": "Mobile"}]}
+
+
+def git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
+
+
+def repository(path: Path) -> Path:
+    path.mkdir()
+    git(path, "init", "-q", "-b", "main")
+    identity = ["-c", "user.name=Rem", "-c", "user.email=rem@example.com"]
+    git(path, *identity, "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "a")
+    return path
 
 
 def test_thread_actions_validate_scope_authorization_and_deduplicate() -> None:
@@ -251,3 +264,148 @@ async def test_failed_turn_does_not_apply_queued_action(monkeypatch: pytest.Monk
         )
     ]
     assert [event["type"] for event in events] == ["error"]
+
+
+def test_select_project_accepts_worktree_created_after_the_turn_started(tmp_path: Path) -> None:
+    project = repository(tmp_path / "app")
+    actions = rem_threads.ThreadActions(
+        {"global": True, "projects": [{"root": str(project), "name": "app", "grantId": "g1"}]},
+        [],
+        worktrees=True,
+    )
+    plain = project / "docs"
+    plain.mkdir()
+    outside = tmp_path / "sibling"
+    git(project, "worktree", "add", "-q", "-b", "sibling", str(outside))
+    for root in (str(plain), str(outside), "relative/path", str(tmp_path / "missing")):
+        with pytest.raises(ValueError, match="open projects"):
+            actions.call("select_project", {"projectRoot": root})
+    # The agent creates the worktree mid-turn, after the tools were registered.
+    worktree = project / ".worktrees" / "fix"
+    git(project, "worktree", "add", "-q", "-b", "fix", str(worktree))
+    receipt = actions.call("select_project", {"projectRoot": str(worktree / ".." / "fix")})
+    assert receipt["projectRoot"] == str(worktree.resolve())
+    assert receipt["projectName"] == "fix"
+    assert actions.projects[str(worktree.resolve())]["grantId"] == "g1"
+
+
+def test_worktree_discovery_is_off_unless_requested(tmp_path: Path) -> None:
+    project = repository(tmp_path / "app")
+    worktree = project / ".worktrees" / "fix"
+    git(project, "worktree", "add", "-q", "-b", "fix", str(worktree))
+    projects = [{"root": str(project), "name": "app"}]
+    actions = rem_threads.ThreadActions({"global": True, "projects": projects}, [])
+    with pytest.raises(ValueError, match="open projects"):
+        actions.call("select_project", {"projectRoot": str(worktree)})
+    fixed = rem_threads.thread_tools(True, projects)
+    assert fixed[0]["inputSchema"]["properties"]["projectRoot"]["enum"] == [str(project)]
+    # Clients cache tool lists, so worktree-aware schemas cannot enumerate roots.
+    for tool in rem_threads.thread_tools(True, projects, worktrees=True):
+        root = tool["inputSchema"]["properties"]["projectRoot"]
+        assert "enum" not in root
+        assert str(project) in root["description"]
+
+
+@pytest.mark.asyncio
+async def test_handoff_to_new_worktree_keeps_it_open_with_parent_grant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeTools:
+        callback: Any = None
+        instructions = ""
+
+        def register(self, callback: Any, tools: Any, instructions: str) -> str:
+            FakeTools.callback = callback
+            FakeTools.instructions = instructions
+            return "local"
+
+        def revoke(self, url: str) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(rem_threads, "SwarmToolServer", FakeTools)
+    project = repository(tmp_path / "app")
+    worktree = project / ".worktrees" / "fix"
+    calls = []
+
+    async def source(**kwargs: Any) -> Any:
+        calls.append(deepcopy(kwargs))
+        if len(calls) == 1:
+            git(project, "worktree", "add", "-q", "-b", "fix", str(worktree))
+            FakeTools.callback("select_project", {"projectRoot": str(worktree)})
+        yield {"type": "final", "message": {"body": str(len(calls))}}
+
+    original: dict[str, Any] = {
+        "remThreads": {
+            "global": True,
+            "projects": [{"root": str(project), "name": "app", "grantId": "g1"}],
+        },
+        "remSwarmAccess": {"enabled": True, "grantId": "g1"},
+    }
+    events = [
+        event
+        async for event in rem_threads.stream_with_thread_tools(
+            source, worktrees=True, workflow=original, messages=[]
+        )
+    ]
+    assert [event["type"] for event in events] == ["project-scope", "final"]
+    assert events[0]["projectRoot"] == str(worktree.resolve())
+    assert "worktrees" not in calls[0]
+    continued = calls[1]["workflow"]
+    assert continued["projectRoot"] == str(worktree.resolve())
+    assert continued["remSwarmAccess"]["grantId"] == "g1"
+    assert [item["root"] for item in continued["remThreads"]["projects"]] == [
+        str(project),
+        str(worktree.resolve()),
+    ]
+    assert "created during this turn" in FakeTools.instructions
+    # Steering restarts reuse the caller's workflow, so it must keep the worktree too.
+    assert original["projectRoot"] == str(worktree.resolve())
+
+
+@pytest.mark.asyncio
+async def test_continuation_prompt_says_the_selection_already_happened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The continuation replays the same user request in a fresh provider session.
+    # Without this note, "create a worktree and switch to it" ran twice.
+    class FakeTools:
+        callback: Any = None
+
+        def register(self, callback: Any, *args: Any) -> str:
+            FakeTools.callback = callback
+            return "http://127.0.0.1/tools"
+
+        def revoke(self, url: str) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(rem_threads, "SwarmToolServer", FakeTools)
+    calls = []
+
+    async def source(**kwargs: Any) -> Any:
+        calls.append(deepcopy(kwargs))
+        if len(calls) == 1:
+            FakeTools.callback("select_project", {"projectRoot": "/mobile"})
+        yield {"type": "final", "message": {"body": "done"}}
+
+    original: dict[str, Any] = {"remThreads": config()}
+    messages = [{"role": "user", "body": "Create a worktree, then swap to it"}]
+    async for _event in rem_threads.stream_with_thread_tools(
+        source, workflow=original, messages=messages
+    ):
+        pass
+    note = "thread to Mobile (/mobile). You are now working in that directory."
+    first, second = (
+        build_chat_prompt("claude_code", "cli-default", messages, call["workflow"])
+        for call in calls
+    )
+    assert note not in first
+    assert note in second
+    assert "do not repeat them" in second
+    # A steering restart replays the request in the selected project too.
+    assert original["remThreads"]["handoff"] == {"root": "/mobile", "name": "Mobile"}

@@ -288,7 +288,11 @@ def test_budget_reservation_is_atomic_before_workflow_launch(setup: Any, tmp_pat
     manager.dispatch()
     assert not manager._active
     assert not (tmp_path / "should-not-run").exists()
-    assert "reservation" in call("read")["runtime"]["tasks"][0]["blockReason"]
+    # A monthly limit is temporary, so the task waits instead of being blocked.
+    current = call("read")
+    assert current["runtime"]["tasks"][0]["status"] == "todo"
+    reason = current["diagnostics"]["taskReasons"][task["id"]]
+    assert reason == "Waiting for monthly run capacity: company"
 
 
 def test_workflow_meter_counts_failed_invocations_and_refuses_extra(monkeypatch: Any) -> None:

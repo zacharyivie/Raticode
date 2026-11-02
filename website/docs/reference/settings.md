@@ -13,7 +13,7 @@ Open Settings from the app menu or use the configured shortcut. Search by a cont
 | Category | Controls and related guide |
 | --- | --- |
 | General | Application behavior and file autosave; [editor guide](../studio/editors.md) |
-| Devices | Experimental networking and paired-device management; [pairing guide](../advanced/mobile.md) |
+| Devices | Microphone and, with pairing turned on, paired-device management; [pairing guide](../advanced/mobile.md) |
 | Appearance | App colors and visual preferences; report styling is configured separately under Memory |
 | Editor | Code font, wrapping, indentation, and related editor behavior |
 | Browser | Home and search behavior; [integrated browser](../studio/browser.md) |
@@ -22,7 +22,7 @@ Open Settings from the app menu or use the configured shortcut. Search by a cont
 | Usage | Remaining allowances and usage measured in Raticode; [usage guide](../rem/usage.md) |
 | Rem | Chat and assistant preferences; [chat guide](../rem/chat.md) |
 | Memory | Second Brain, conversation archive, report output, and report themes |
-| Developer | Development and diagnostic controls |
+| Developer | Feature Preview switches for every experimental feature, plus diagnostic controls |
 | Layout | Workspace and pane presentation |
 | Keybindings | Assign, clear, or restore application shortcuts |
 

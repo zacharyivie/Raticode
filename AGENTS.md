@@ -93,3 +93,9 @@ Node step-2:
 - After code changes, run `mypy src tests`.
 - Run targeted pytest tests for the changed area; run the full suite when touching shared workflow execution, scheduling, or CLI behavior.
 - To run any npm commands make sure you first use nvm to select the correct version of npm for the project.
+- Real-Electron tests must not open windows on the developer's desktop. Each
+  `*.browser.cjs` entry script calls `runInBackgroundDisplay()` from
+  `frontend/electron/tests/background-display.cjs` before anything else, and
+  scripts that spawn Electron go through its `backgroundLaunch()`. On Linux this
+  runs Electron on a hidden Xvfb display (install `xvfb-run`). Set
+  `RATICODE_TEST_VISIBLE=1` only to watch a run.

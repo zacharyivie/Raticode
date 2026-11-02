@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
 
+from gofer.core import command_slots
 from gofer.core.agent import AgentResult
 from gofer.core.provider_profiles import ResolvedProviderSettings
 from gofer.subscriptions.base import Subscription
@@ -27,12 +29,19 @@ def isolated_gofer_data_dir(
     for path in (home, xdg_data, appdata, local_appdata):
         path.mkdir(parents=True, exist_ok=True)
 
+    # Agents run tests from inside Raticode, which exports its own settings such as
+    # the phone network opt-in, command slots and UI tokens. Tests set what they need.
+    for name in list(os.environ):
+        if name.startswith(("RATICODE_", "GOFER_")):
+            monkeypatch.delenv(name)
     monkeypatch.setenv("NVM_DIR", str(home / ".nvm"))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))
     monkeypatch.setenv("APPDATA", str(appdata))
     monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    # Fake providers must not start inside the user's real systemd session.
+    monkeypatch.setattr(command_slots, "_systemd_ready", False)
 
     return get_data_dir()
 

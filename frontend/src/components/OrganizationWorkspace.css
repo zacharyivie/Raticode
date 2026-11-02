@@ -60,7 +60,7 @@
 .org-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .org-status:is([data-state=running],[data-state=working],[data-state=done]) { color: var(--org-success); }
 .org-status:is([data-state=approval],[data-state=in_review],[data-state=paused]) { color: var(--org-warning); }
-.org-status[data-state=blocked] { color: var(--org-danger); }
+.org-status:is([data-state=blocked],[data-state=attention]) { color: var(--org-danger); }
 .org-tabs { display: flex; gap: 18px; padding: 0 24px; background: var(--org-panel); border-bottom: 1px solid rgb(var(--color-line)); overflow-x: auto; flex-shrink: 0; }
 .org-tabs button { display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; padding: 13px 2px 11px; border-bottom: 2px solid transparent; color: rgb(var(--color-muted)); font-size: 12px; white-space: nowrap; }
 .org-tabs button:hover { color: var(--org-accent); }
@@ -353,3 +353,21 @@ button.org-chart-person:hover { background: var(--org-soft); border-radius: 6px;
 .org-operations .org-routine .org-actions { border: 0; padding: 0; margin: 0; }
 .org-operations .org-table-scroll { max-width: 100%; }
 .org-operations .org-operation-section > .org-note { max-width: 76ch; }
+.org-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--org-warning); }
+.org-confirm > span { max-width: 42ch; }
+.org-attention { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: -12px 0 24px; font-size: 12px; color: rgb(var(--color-muted)); }
+.org-attention > :is(span,button) { display: inline-flex; align-items: center; gap: 7px; }
+.org-attention > button { color: var(--org-accent); }
+.org-attention > button:first-child:has(svg) { color: var(--org-warning); }
+.org-attention > button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.org-start { margin: 0 0 28px; padding: 18px 20px; border: 1px solid var(--org-accent); border-radius: 6px; background: var(--org-panel); }
+.org-start:focus-visible { outline: 2px solid var(--org-accent); outline-offset: 2px; }
+.org-start-facts { margin: 12px 0 16px; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 1.55; list-style: disc; }
+.org-start .org-banner { border: 0; padding-inline: 0; }
+.org-request strong { font-weight: 650; }
+.org-warning-text { color: var(--org-warning); }
+.org-attempt { padding: 8px 0; border-bottom: 1px solid rgb(var(--color-line)); }
+.org-transcript { max-height: 360px; overflow: auto; margin-top: 8px; padding: 10px 12px; border: 1px solid rgb(var(--color-line)); border-radius: 4px; }
+.org-transcript ol { display: grid; gap: 8px; margin: 0 0 10px; padding: 0; list-style: none; }
+.org-transcript strong { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: rgb(var(--color-muted)); }
+.org-field select[multiple] { min-height: 64px; }

@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000163",
+  "id": "10000000-0000-4000-8000-000000000163",
+  "sequence": 163,
+  "type": "desktop.action",
+  "payload": {
+    "op": "rem.memory.forget",
+    "params": {
+      "memory_id": "4f6c1d0e-7a1b-4c2d-9e3f-5a6b7c8d9e0f"
+    }
+  }
+}

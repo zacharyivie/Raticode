@@ -1,6 +1,7 @@
 /* global __dirname, console, setTimeout, clearTimeout, process, fetch */
 // Visual regression audit with a real isolated backend and a fake provider.
 // Run through run-organizations-visual.cjs. No user projects or providers are used.
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");

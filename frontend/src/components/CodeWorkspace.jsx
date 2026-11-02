@@ -5,15 +5,20 @@ import { languageForPath } from "../lib/editorLanguage.js";
 export { languageForPath } from "../lib/editorLanguage.js";
 import { pathWithin, pathMatchesChange } from "../lib/workspacePaths.js";
 import { resolveMarkdownLinkPath } from "../lib/fileLinks.js";
+import { isImagePath, mediaKind } from "../lib/mediaKind.js";
 export { resolveMarkdownLinkPath, markdownFileLinkTarget, filePathFromMarkdownUrl, resolveMarkdownFileLinkTarget, resolveMarkdownFileTarget } from "../lib/fileLinks.js";
 import { reconcileEditorLifetimes, closeEditorLifetimes, acceptsEditorState, retainOpenEditorStates } from "../lib/editorStateLifetime.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { parseCommitDiffPath } from "../lib/commitDiff.js";
+import { OPEN_TERMINAL_TAB_EVENT, TERMINAL_TAB_PATH, isTerminalTabPath, terminalInEditor } from "../lib/workspaceLayout.js";
 import CommitDiff from "./CommitDiff.jsx";
 import { installRemActions } from "../lib/editorRem.js";
+import { askRemAboutFiles, copyFilesForPaste } from "../lib/fileAttachments.js";
 import { installConflictControls } from "../lib/mergeConflicts.js";
 import {
   forwardRef,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -29,6 +34,7 @@ import {
   Bot,
   Play,
   Square,
+  Terminal as TerminalIcon,
   Volume2,
   VolumeX,
   Workflow,
@@ -59,6 +65,13 @@ import { pendingRemApprovals } from "../lib/browserUi.js";
 
 import { textEditorSessions, discardedSessionPaths, codeCloseProtection } from "../lib/codeEditorSessions.js";
 export { FILE_AUTOSAVE_DELAY_MS, codeCloseProtection, hasUnsavedCodeChanges, applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
+
+const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
+
+// Browser, workflow graph, commit and terminal tabs have no file behind them.
+function isVirtualTab(path, browserTabs, workflowTabs) {
+  return Boolean(browserTabs[path] || workflowTabs[path] || parseCommitDiffPath(path) || isTerminalTabPath(path));
+}
 
 const CodeWorkspace = forwardRef(function CodeWorkspace({
   active,
@@ -106,6 +119,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   onBeforeCloseWorkflowTabs,
   rattishDocuments = {},
   onSaveRattishDocument,
+  terminalProjectRoot = "",
 }, ref) {
   const textEditorRefs = useRef(new Map());
   const workspaceRef = useRef(null);
@@ -119,7 +133,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   const pendingDiffPath = navigationRequest !== appliedNavigationRequest && navigationRequest?.diff ? navigationRequest.path : null;
   // Git comparisons still need to show the original version of a deleted file.
   // Exclude new comparisons before the navigation effect records their mode.
-  const physicalPathsKey = JSON.stringify(openPaths.filter(path => !browserTabs[path] && !workflowTabs[path] && !parseCommitDiffPath(path) && !diffOnOpenPaths.has(path) && path !== pendingDiffPath));
+  const physicalPathsKey = JSON.stringify(openPaths.filter(path => !isVirtualTab(path, browserTabs, workflowTabs) && !diffOnOpenPaths.has(path) && path !== pendingDiffPath));
   const editorLifetimesRef = useRef(new Map());
   reconcileEditorLifetimes(editorLifetimesRef.current, openPaths);
   useEffect(() => {
@@ -183,7 +197,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   const [splitActivePath, setSplitActivePath] = useState("");
   const sourcePath = workflow?.sourcePath ?? "";
   const currentPath = activePath || openPaths[0] || "";
-  const localOpenPaths = openPaths.filter((path) => !browserTabs[path] && !workflowTabs[path] && !parseCommitDiffPath(path));
+  const localOpenPaths = openPaths.filter((path) => !isVirtualTab(path, browserTabs, workflowTabs));
   const splitPaths = useMemo(
     () => (splitGroup ? splitGroup.paths.filter((path) => openPaths.includes(path)) : []),
     [openPaths, splitGroup],
@@ -296,7 +310,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     setTabMenu(null);
   }
 
-  const currentVirtualDocument = Boolean(browserTabs[currentPath] || workflowTabs[currentPath] || parseCommitDiffPath(currentPath));
+  const currentVirtualDocument = isVirtualTab(currentPath, browserTabs, workflowTabs);
   useEffect(() => {
     if (!currentPath || currentVirtualDocument) {
       onActiveDocumentStateChange?.(null);
@@ -427,6 +441,30 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       : { ...current, [navigationRequest.path]: "edit" });
   }, [navigationRequest]);
 
+  // Settings > Layout can open every terminal in one editor tab. A reopened
+  // tab starts a new terminal workspace, so its request count restarts.
+  const editorTerminal = terminalInEditor(settings);
+  const [terminalRequest, setTerminalRequest] = useState(0);
+  const terminalTabRef = useRef(null);
+  terminalTabRef.current = ({ newTerminal = false, background = false } = {}) => {
+    const open = openPaths.includes(TERMINAL_TAB_PATH);
+    if (newTerminal) setTerminalRequest((current) => open ? current + 1 : 1);
+    else if (!open) setTerminalRequest(0);
+    if (!open) onOpenPathsChange?.([...openPaths, TERMINAL_TAB_PATH]);
+    if (!background) onActivePathChange?.(TERMINAL_TAB_PATH);
+  };
+  useEffect(() => {
+    const openTerminal = (event) => terminalTabRef.current(event.detail ?? {});
+    window.addEventListener(OPEN_TERMINAL_TAB_EVENT, openTerminal);
+    if (settings.layout?.bottomPanelAtStartup === "terminal" && editorTerminal) terminalTabRef.current({ background: true });
+    return () => window.removeEventListener(OPEN_TERMINAL_TAB_EVENT, openTerminal);
+  // The startup choice applies once, when the workspace first mounts.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!editorTerminal && openPaths.includes(TERMINAL_TAB_PATH)) finishClosingWorkspacePaths([TERMINAL_TAB_PATH]);
+  }, [editorTerminal, finishClosingWorkspacePaths, openPaths]);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -470,7 +508,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       || target === document.body
       || target === document.documentElement;
     if (!targetIsDocument && !workspaceRef.current?.contains(target)) return;
-    if (target?.closest?.("[role='dialog'], [role='menu']")) return;
+    if (target?.closest?.("[role='dialog'], [role='menu'], [data-terminal-workspace]")) return;
     const action = codeWorkspaceShortcutAction(event, {
       active,
       browserActive: Boolean(browserTabs[currentPath]),
@@ -511,6 +549,16 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     closeWorkspacePath(currentPath);
   }
 
+  function isLocalFileTab(path) {
+    return Boolean(path) && !isVirtualTab(path, browserTabs, workflowTabs);
+  }
+
+  async function runTabMenuAction(action) {
+    setTabMenu(null);
+    try { await action(); }
+    catch (error) { setFileDropError(error instanceof Error ? error.message : "That file action didn't work."); }
+  }
+
   function openTabMenu(event, path, groupPaths) {
     event.preventDefault();
     event.stopPropagation();
@@ -522,7 +570,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       groupPaths,
       left: Math.max(8, Math.min(requestedLeft, window.innerWidth - 184)),
       path,
-      top: Math.max(8, Math.min(requestedTop, window.innerHeight - 276)),
+      top: Math.max(8, Math.min(requestedTop, window.innerHeight - (isLocalFileTab(path) ? 400 : 276))),
     });
   }
 
@@ -561,11 +609,11 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           const isRattish = !browserTab && !graphTab && path === sourcePath;
           const dirty = workflowTab ? workflowTab.dirty : rattishDocuments[path] ? (rattishDocuments[path].dirty ?? rattishDocuments[path].document?.dirty) : isRattish ? rattishDirty : fileStates[path]?.dirty;
           const preview = !browserTab && !workflowTab && path === previewPath;
-          const folderLabel = commitDiff ? fileName(commitDiff.projectRoot) : workflowTab ? workflowTab.contextLabel || fileName(workflowTab.projectRoot || "") : browserTab ? "" : duplicateTabFolder(path, localOpenPaths);
+          const folderLabel = commitDiff ? fileName(commitDiff.projectRoot) : workflowTab ? workflowTab.contextLabel || fileName(workflowTab.projectRoot || "") : browserTab || isTerminalTabPath(path) ? "" : duplicateTabFolder(path, localOpenPaths);
           const label = workflowTab?.name || codeTabLabel(path, tabMetadata);
           const title = commitDiff ? `${label}\n${commitDiff.projectRoot}\n${commitDiff.hash}` : workflowTab ? [label, workflowTab.sourcePath, workflowTab.statusLabel].filter(Boolean).join("\n") : tabMetadata
             ? [label, tabMetadata.url].filter(Boolean).join("\n")
-            : path;
+            : isTerminalTabPath(path) ? label : path;
           return (
             <div
               key={path}
@@ -699,6 +747,16 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               <p role="status" className="text-sm text-ink">This file doesn&apos;t exist anymore</p>
               <button type="button" className="rounded border border-line px-4 py-2 text-xs text-ink hover:bg-slate-100 focus-visible:outline-brand" onClick={() => finishClosingWorkspacePaths([path])}>Close Tab</button>
             </section>
+          ) : isTerminalTabPath(path) ? (
+            <Suspense fallback={<p role="status" className="p-3 text-xs text-muted">Loading terminal...</p>}>
+              <TerminalWorkspace
+                active={active && selected}
+                newTerminalRequest={terminalRequest}
+                projectRoot={terminalProjectRoot}
+                settings={settings}
+                theme={theme}
+              />
+            </Suspense>
           ) : commitDiff ? <CommitDiff {...commitDiff} theme={theme} editorSettings={settings.editor} /> : workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
             <PreviewBrowser
               active={active && currentPath === path}
@@ -711,6 +769,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               savedHistory={browserTab?.history || null}
               onActivateTab={onActivePathChange}
               onAskRem={onAskRemAboutPage}
+              onOpenFile={onOpenPath ? (filePath) => onOpenPath(filePath) : undefined}
               onReopenClosedTab={onReopenClosedBrowserTab}
               onShareWithRem={onShareBrowserTab}
               applicationKeybindings={settings.keybindings}
@@ -935,6 +994,14 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
             Pin file
           </button>
           {onOpenGraph && !workflowTabs[tabMenu.path] && fileName(tabMenu.path) === "workflow.rattish" ? <button type="button" role="menuitem" className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" onClick={() => { onOpenGraph(tabMenu.path); setTabMenu(null); }}>Open graph</button> : null}
+          {isLocalFileTab(tabMenu.path) ? <>
+            <div className="my-1 border-t border-line" role="separator" />
+            <button type="button" role="menuitem" className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" onClick={() => { askRemAboutFiles([tabMenu.path]); setTabMenu(null); }}>Ask Rem about this</button>
+            <button type="button" role="menuitem" className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" onClick={() => void runTabMenuAction(() => copyFilesForPaste([{ path: tabMenu.path, name: fileName(tabMenu.path), isFile: true, isDirectory: false }]))}>Copy file</button>
+            <button type="button" role="menuitem" className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" onClick={() => void runTabMenuAction(() => navigator.clipboard.writeText(tabMenu.path))}>Copy path</button>
+            {window.goferDesktop?.workspace?.revealPath ? <button type="button" role="menuitem" className="flex h-7 w-full items-center rounded px-2 text-left hover:bg-slate-100" onClick={() => void runTabMenuAction(() => window.goferDesktop.workspace.revealPath(tabMenu.path))}>Reveal in file manager</button> : null}
+            <div className="my-1 border-t border-line" role="separator" />
+          </> : null}
           {["left", "right"].map(side => <button
             key={side}
             type="button"
@@ -2149,6 +2216,7 @@ function FileTypeIcon({ browserTab, path }) {
   const [faviconFailed, setFaviconFailed] = useState(false);
   useEffect(() => setFaviconFailed(false), [favicon]);
   if (parseCommitDiffPath(path)) return <GitCompareArrows aria-hidden="true" className="shrink-0 text-brand" size={14} />;
+  if (isTerminalTabPath(path)) return <TerminalIcon aria-hidden="true" className="shrink-0 text-brand" size={14} />;
   if (browserTab && favicon && !faviconFailed) {
     return (
       <img
@@ -2183,18 +2251,7 @@ export function isPdfPath(path) {
   return String(path ?? "").toLowerCase().endsWith(".pdf");
 }
 
-export function isImagePath(path) {
-  return [".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".webp"]
-    .some((extension) => String(path ?? "").toLowerCase().endsWith(extension));
-}
-
-export function mediaKind(path) {
-  if (isImagePath(path)) return "image";
-  const extension = String(path || "").split(".").at(-1).toLowerCase();
-  if (["mp4", "m4v", "mov", "webm", "ogv", "mkv", "avi"].includes(extension)) return "video";
-  if (["mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "aif", "aiff"].includes(extension)) return "audio";
-  return "";
-}
+export { isImagePath, mediaKind };
 
 export function codeDocumentMode(
   path,
@@ -2239,6 +2296,7 @@ export function browserViewTabMetadata(browserTab, viewState) {
 export function codeTabLabel(path, browserTab) {
   const commitDiff = parseCommitDiffPath(path);
   if (commitDiff) return `Diff ${commitDiff.hash.slice(0, 8)}`;
+  if (isTerminalTabPath(path)) return "Terminal";
   return browserTab ? browserTabLabel(browserTab) : fileName(path);
 }
 

@@ -6,6 +6,7 @@ checks out, resets, stages, or merges into the user's working directory.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -23,8 +24,35 @@ from typing import Any
 from gofer.utils.atomic_output import open_binary_input
 from gofer.utils.process import build_subprocess_env
 
+# Untracked files that look like credentials stay out of the start snapshot.
+# The snapshot becomes branch history in the user's repository and can be pushed.
+SECRET_FILE_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.keystore",
+    "*.jks",
+    "id_rsa*",
+    "id_dsa*",
+    "id_ecdsa*",
+    "id_ed25519*",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "credentials",
+    "credentials.json",
+    "*.credentials.json",
+    "secrets.*",
+    "*.secret",
+)
+# Worktree, bundle and commit operations can take minutes on large repositories.
+SLOW_GIT_SECONDS = 600
 
-def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
+
+def git(root: Path, *args: str, env: dict[str, str] | None = None, timeout: float = 30) -> str:
     result = subprocess.run(
         [
             "git",
@@ -44,7 +72,7 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
         env=build_subprocess_env(env, inherit_parent=env is None),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
     )
     if result.returncode:
         raise ValueError(result.stderr.strip() or "Git operation failed")
@@ -67,11 +95,18 @@ def prepare_run(root: Path, directory: Path, *, name: str = "") -> dict[str, Any
     # user's staging area and branch are untouched, including partial staging.
     with tempfile.TemporaryDirectory(prefix="swarm-index-") as temporary:
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(temporary) / "index"))
-        git(root, "read-tree", head if head else "--empty", env=env)
-        paths = ["."]
+        git(root, "read-tree", head if head else "--empty", env=env, timeout=SLOW_GIT_SECONDS)
+        excluded = sorted(
+            name
+            for name in git(
+                root, "ls-files", "-z", "--others", "--exclude-standard", env=env
+            ).split("\0")
+            if name and any(fnmatch.fnmatch(Path(name).name, p) for p in SECRET_FILE_PATTERNS)
+        )
+        paths = [".", *(f":(exclude,literal){name}" for name in excluded)]
         if directory.is_relative_to(root):
             paths.append(f":(exclude){directory.parent.parent.relative_to(root)}")
-        git(root, "add", "-A", "--", *paths, env=env)
+        git(root, "add", "-A", "--", *paths, env=env, timeout=SLOW_GIT_SECONDS)
         tree = git(root, "write-tree", env=env)
         baseline = head
         if head is None or tree != git(root, "rev-parse", f"{head}^{{tree}}"):
@@ -83,7 +118,7 @@ def prepare_run(root: Path, directory: Path, *, name: str = "") -> dict[str, Any
     destination = f"{label}-review" if label else "integration"
     path = directory / destination
     branch = f"raticode/swarm/{directory.name}/{destination if label else 'parent'}"
-    git(root, "worktree", "add", "-b", branch, str(path), baseline)
+    git(root, "worktree", "add", "-b", branch, str(path), baseline, timeout=SLOW_GIT_SECONDS)
     return {
         "mode": "git",
         "path": str(path),
@@ -92,6 +127,7 @@ def prepare_run(root: Path, directory: Path, *, name: str = "") -> dict[str, Any
         "revision": baseline,
         "directory": str(directory),
         "branch": branch,
+        "excludedFiles": excluded,
     }
 
 
@@ -111,7 +147,16 @@ def prepare_attempt(workspace: dict[str, Any], attempt_id: str) -> dict[str, str
             "baseRevision": git(path, "merge-base", base, "HEAD"),
         }
     branch = f"raticode/swarm/{Path(workspace['directory']).name}/attempt/{attempt_id}"
-    git(Path(workspace["path"]), "worktree", "add", "-b", branch, str(path), base)
+    git(
+        Path(workspace["path"]),
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        str(path),
+        base,
+        timeout=SLOW_GIT_SECONDS,
+    )
     return {"path": str(path), "branch": branch, "baseRevision": base}
 
 
@@ -235,8 +280,8 @@ def cleanup_run(workspace: dict[str, Any], attempts: list[dict[str, Any]]) -> di
         archive.mkdir(parents=True, exist_ok=True, mode=0o700)
         # HEAD includes unique commits, including detached conflict candidates.
         bundle = archive / "commits.bundle"
-        git(path, "bundle", "create", str(bundle), "HEAD")
-        git(path, "bundle", "verify", str(bundle))
+        git(path, "bundle", "create", str(bundle), "HEAD", timeout=SLOW_GIT_SECONDS)
+        git(path, "bundle", "verify", str(bundle), timeout=SLOW_GIT_SECONDS)
         patch = subprocess.run(
             ["git", "-c", "core.fsmonitor=false", "diff", "--binary", "HEAD"],
             cwd=path,
@@ -254,8 +299,7 @@ def cleanup_run(workspace: dict[str, Any], attempts: list[dict[str, Any]]) -> di
             if name and nested.is_dir() and not nested.is_symlink():
                 for parent, directories, names in os.walk(nested, followlinks=False):
                     archive_files.update(
-                        str((Path(parent) / item).relative_to(path))
-                        for item in directories + names
+                        str((Path(parent) / item).relative_to(path)) for item in directories + names
                     )
 
         def stamp(name: str) -> tuple[int, int, int, int, int]:
@@ -288,7 +332,7 @@ def cleanup_run(workspace: dict[str, Any], attempts: list[dict[str, Any]]) -> di
             or any(stamp(name) != before for name, before in stamps.items())
         ):
             raise ValueError("Child checkout changed during cleanup")
-        git(root, "worktree", "remove", "--force", str(path))
+        git(root, "worktree", "remove", "--force", str(path), timeout=SLOW_GIT_SECONDS)
         _delete_branch(root, branch, revision)
         removed.append(str(path))
         archives.append(str(archive))
@@ -304,8 +348,8 @@ def cleanup_run(workspace: dict[str, Any], attempts: list[dict[str, Any]]) -> di
         archive = directory / "retained" / "branches"
         archive.mkdir(parents=True, exist_ok=True, mode=0o700)
         bundle = archive / f"{hashlib.sha256(branch.encode()).hexdigest()}.bundle"
-        git(root, "bundle", "create", str(bundle), branch)
-        git(root, "bundle", "verify", str(bundle))
+        git(root, "bundle", "create", str(bundle), branch, timeout=SLOW_GIT_SECONDS)
+        git(root, "bundle", "verify", str(bundle), timeout=SLOW_GIT_SECONDS)
         _delete_branch(root, branch, revision)
         archives.append(str(bundle))
     return {"passed": True, "branch": parent_branch, "removed": removed, "archives": archives}
@@ -566,7 +610,7 @@ def integrate(
     reused = candidate is not None
     if candidate is None:
         candidate = Path(workspace["directory"]) / f"integration-{uuid.uuid4().hex}"
-        git(root, "worktree", "add", "--detach", str(candidate), before)
+        git(root, "worktree", "add", "--detach", str(candidate), before, timeout=SLOW_GIT_SECONDS)
     outcome: dict[str, Any] = {
         "path": str(candidate),
         "before": before,

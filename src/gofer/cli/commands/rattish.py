@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,12 @@ from gofer.rattish.diagnostics import RattishDiagnostic, RattishError, SourcePos
 from gofer.rattish.formatter import RattishFormatError, format_rattish_file
 from gofer.rattish.preflight import run_preflight
 from gofer.rattish.run_service import (
+    RattishResumeRefused,
     RattishRunArtifactError,
     RattishRunResult,
+    effective_run_status,
+    resume_rattish_run,
+    run_artifact_path,
     run_rattish_file,
 )
 from gofer.rattish.workspaces import (
@@ -287,6 +292,42 @@ def execute_rattish_run(
     _emit_run(result, output_format)
     if result.status == "invalid_inputs":
         raise typer.Exit(2)
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+def execute_rattish_resume(
+    source: Path,
+    run_id: str,
+    *,
+    output_format: str = "text",
+    data_dir: Path | None = None,
+) -> None:
+    """Resume a saved Rattish run as a new run and exit with that run's status."""
+    try:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id) is None:
+            raise RattishResumeRefused(f"Invalid run ID {run_id!r}.")
+        path = run_artifact_path(source, run_id.removesuffix(".json"), data_dir=data_dir)
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise RattishResumeRefused(f"Run {run_id!r} was not found.") from None
+        if isinstance(document, dict):
+            document["status"] = effective_run_status(document)
+        result = asyncio.run(resume_rattish_run(source, document, data_dir=data_dir))
+    except RattishResumeRefused as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    except RattishError as exc:
+        diagnostics = [item.to_json() for item in exc.diagnostics]
+        _emit(_error_payload("run", source, diagnostics), output_format)
+        raise typer.Exit(1)
+    except (RattishArtifactError, RattishRunArtifactError) as exc:
+        diagnostic = _artifact_diagnostic(source, exc).to_json()
+        _emit(_error_payload("run", source, [diagnostic]), output_format)
+        raise typer.Exit(2)
+
+    _emit_run(result, output_format)
     if not result.ok:
         raise typer.Exit(1)
 

@@ -1002,9 +1002,11 @@ thread grants, scoped files and authorized desktop fleet execution are available
 for experimental testing. See the
 [setup, recovery and verification guide](docs/security/device-pairing.md).
 
-Phone invitations require `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1` at desktop
-startup, including `electron:dev`. Without it, both phone networking and invitation
-creation are disabled. Phones connect only over the local network; there is no internet relay. Desktop
+Turn on **Phone and desktop pairing** in Settings > Developer > Feature Preview;
+the desktop restarts its backend to apply it. While it is off, Settings hides
+paired devices. A backend started without the desktop app, such as `gof ui serve`,
+reads `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1` instead, and the desktop uses that
+variable until you make a choice in Feature Preview. Phones connect only over the local network; there is no internet relay. Desktop
 creates a phone invitation only when it has a private address. Set
 `RATICODE_DEVICE_HOST` to the desktop's private LAN IP if it picks the wrong interface.
 
@@ -1019,7 +1021,7 @@ security, physical-device and distribution decisions.
 
 ### Phone conversations and LAN preference
 
-With `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1`, desktop selects its outgoing private IPv4 address for the device listener. `RATICODE_DEVICE_HOST` overrides it. The separate UI API stays on loopback. Updated phones learn the current LAN endpoint over encrypted sync and connect only over Wi-Fi. The ntfy relay was removed on October 26, 2026.
+With pairing turned on, desktop selects its outgoing private IPv4 address for the device listener. `RATICODE_DEVICE_HOST` overrides it. The separate UI API stays on loopback. Updated phones learn the current LAN endpoint over encrypted sync and connect only over Wi-Fi. The ntfy relay was removed on October 26, 2026.
 
 Confirm a phone in Paired devices to sync your desktop threads and projects by default. Identity, connection details, Unpair and Revoke appear directly under Phone. The phone uses your desktop provider settings and approval policies. Install and authenticate the selected provider on desktop first.
 

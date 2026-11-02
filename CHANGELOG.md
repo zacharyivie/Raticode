@@ -3,7 +3,109 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
-## 0.4.0 - Unreleased
+## 0.5.0 - Unreleased
+
+Changes since the `v0.4.0` tag.
+
+### Added
+
+- Pictures and videos Rem sends show right in its chat, on the desktop and the
+  phone. Click or tap a picture to see it large, or a video to play it. Web
+  images in chat open large too, with a button for the browser.
+- Rem's memory works more like ChatGPT's and Claude's, with any provider. Ask
+  Rem to change or forget something it remembers and it edits that memory
+  instead of saving a second one. A reply that saves, changes or forgets a
+  memory says so, with Undo. What Rem remembers can pause new saves or turn
+  memory off, add your own memories and copy them all, on the desktop and the
+  phone. Rem won't save anything that looks like a password, key or token. Task
+  workers on every provider now get your saved preferences, prompts send the
+  most relevant memories once there are many, and Claude Code and Codex no
+  longer keep copies of Rem's chat sessions on disk.
+- Rem can send you any file this computer's account can read, not only files in
+  an open project or the Second Brain, when you ask for it and its path is in
+  your conversation. Password and key folders, the coding agents' sign-ins
+  (such as `~/.claude` and `~/.codex`), files named like tokens, credentials or
+  keys, and Raticode's own data are sent only when your message names the
+  exact path.
+  Paired phones receive these files too.
+- When you ask Rem to send something it first has to find or make, such as "Send
+  me a video", the file now arrives with the task's update when it finishes,
+  instead of waiting for you to ask again. A phone that asked gets it too. It
+  goes through the same checks as any file Rem sends, and repeating schedules
+  never send files on their own.
+- Rem's chat shows richer results on the desktop and the phone. Finished tasks
+  get a card with their checks, saved reports and the web pages the work used.
+  Running tasks show Plan, Work, Check and Report with their checks and time.
+  Replies can open a Details section with tables, highlighted code and simple
+  charts, and offer up to three suggested replies. While Rem replies it says
+  what it is doing, and Claude Code replies appear as they are written. Each
+  reply has Copy, Ask about this and its model and time. Web images in chat now
+  load through Raticode, so sites don't see your computer's own request.
+- Optional Tailscale access for paired phones away from home. Off by default
+  under Paired devices. Raticode also listens on this computer's Tailscale
+  address and keeps the Wi-Fi connection, pairing and encryption unchanged.
+  Settings explains how to sign in with your own account and limit access to
+  Raticode's port. Raticode never signs in to Tailscale or changes its settings.
+- Run a Rem thread on another paired computer. Choose it in Run on, next to the
+  permissions menu, when you start a thread. The other computer opts in under
+  Paired devices, uses its own projects and sign-ins, and streams its progress
+  back. Turns sent from your phone in that thread run there too.
+- Feature Preview in Developer settings has a switch for every experimental
+  feature: Rem home, Swarms, Organizations, Second Brain, and phone and desktop
+  pairing. Features that are off are hidden everywhere else. Organizations and
+  pairing no longer need an environment variable at launch.
+- Rem's chat can use its own provider, model and effort in Settings > Rem, so
+  a fast model answers in chat while tasks and threads keep a stronger one.
+- Claude Code replies appear word by word in Rem threads instead of all at once.
+- Rem threads that use the web show cards for the pages Rem cited, read and
+  found, with titles and thumbnails, plus video cards for YouTube links. Rem is
+  told to show real images from pages it read when they help.
+
+### Fixed
+
+- A workflow run can't be resumed twice at once. The desktop, a paired phone
+  and `gof` used to be able to start the same resume together and redo finished
+  work. A crash never leaves a run unable to resume.
+- Rem's chat saves each reply once. A finished reply used to be written to
+  conversation storage a second time.
+- Crash reports, Linux packages and Arch packages link to the
+  `zacharyivie/Raticode` repository instead of its previous address.
+- Phone threads no longer show compaction memory or continuation notes as
+  messages, and those hidden rows no longer split a run of thoughts into two
+  groups.
+- A task's work thread is readable on the phone. The phone used to get the
+  newest 120 transcript records one by one, almost all of them tool and
+  thinking steps, so the instruction and the report fell out of view. The
+  desktop now folds each run of steps into one group, as its own thread pane
+  does, and sends replies whole instead of cut at 4,000 characters.
+- Source control updates on its own when worktrees are created or removed, by
+  Raticode, agents, swarms or `git worktree` in a terminal, and when commits or
+  staged changes land. History refreshes while it is open, and the refresh
+  button still works.
+- Pairing another computer has its own choice in Pair a device, with clear steps
+  to create an invitation link on one computer and paste it on the other.
+- Paired desktops work in both directions without typing an address, keep each
+  other's status current, and stay fast over time. Every paired machine,
+  including ones paired with another desktop, is listed on each desktop and
+  phone, and work can target threads the other desktop shared instead of
+  copied IDs.
+
+### Security
+
+- Rem no longer sends password and key folders, the coding agents' sign-ins,
+  files named like tokens, credentials or keys, or Raticode's own data just
+  because they sit in an open project or the Second Brain. Your message has
+  to name the exact path, and asking for `id_ed25519.pub` no longer releases
+  `id_ed25519`. Tapping a link to such a file on the phone is refused too.
+- Packaged desktop builds encrypt the built-in browser's cookies with the
+  computer's key store. Existing cookies keep working and are encrypted as
+  sites update them.
+- Raticode's data folder is private to your account, so other accounts on the
+  computer can't read conversations, job logs or databases.
+- Claude Code turns read their tool connections from a private file instead of
+  the command line, which other accounts on the computer can see.
+
+## 0.4.0 - 2026-10-28
 
 Changes since the `v0.3.9` tag.
 

@@ -1,5 +1,6 @@
 /* global requestAnimationFrame, DataTransfer, File, structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
 
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -108,6 +109,7 @@ async function run() {
   }
   if (process.env.GOFER_CHAT_ONLY === "1") {
     await exerciseConversationEfficiency();
+    await exerciseLazyThoughtHistory();
     clearTimeout(timeout);
     assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
     console.log("Browser conversation efficiency regressions passed.");
@@ -137,6 +139,7 @@ async function run() {
   await exercisePackagedMonacoWorker(baseUrl);
   await exerciseSourceControl();
   await exerciseConversationEfficiency();
+  await exerciseLazyThoughtHistory();
   await exerciseRemSteering();
 
   clearTimeout(timeout);
@@ -381,8 +384,8 @@ async function exerciseConversationEfficiency() {
   });
   assert.equal(history.filter((message) => message.kind === "thought").length, 100);
   assert.equal(history.at(-1).body, "Background response complete");
-  // Search finds the oldest message even though reopening loaded only 40 rows.
-  assert.equal(await evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("History for Efficiency thread 0")), false);
+  // Pages count conversation messages, so 100 thoughts don't push the first message out.
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("History for Efficiency thread 0")), true, "Thoughts do not count toward a history page");
   await evaluate(() => document.querySelector("button[aria-label='Search threads']").click());
   await waitFor(() => evaluate(() => document.activeElement?.getAttribute("aria-label") === "Search all thread history"));
   await evaluate(() => {
@@ -425,6 +428,45 @@ async function exerciseConversationEfficiency() {
   fs.writeFileSync("/tmp/rem-thread-history.png", (await windowRef.webContents.capturePage()).toPNG());
   console.log("Conversation fixture: 8 thread visits; one load per first visit; 100 thoughts in one chunk -> one history write; background completion and unread preserved.");
   await exerciseThreadSearchNavigation();
+}
+
+// A reopened thread shows its last 15 messages. Earlier turns' thoughts are
+// collapsed placeholders that read storage only when expanded.
+async function exerciseLazyThoughtHistory() {
+  await evaluate(() => {
+    const thread = { id: "lazy-thoughts", title: "Lazy thoughts", updatedAt: new Date().toISOString(), projectRoot: "/workspace", provider: "codex", model: "gpt-5.6-sol" };
+    const index = JSON.parse(localStorage.getItem("gofer-flow-chat-threads") || "[]");
+    localStorage.setItem("gofer-flow-chat-threads", JSON.stringify([{ id: thread.id, updatedAt: thread.updatedAt }, ...index]));
+    localStorage.setItem(`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread));
+    localStorage.setItem(`gofer-flow-chat-thread:${thread.id}`, JSON.stringify(Array.from({ length: 20 }, (_, turn) => [
+      { id: `lazy-u${turn}`, role: "user", body: `Question ${turn}` },
+      ...Array.from({ length: 5 }, (_, index) => ({ id: `lazy-t${turn}-${index}`, role: "assistant", kind: "thought", groupId: `lazy-turn-${turn}`, body: `Turn ${turn} thought ${index}` })),
+      { id: `lazy-a${turn}`, role: "assistant", body: `Answer ${turn}` },
+    ]).flat()));
+  });
+  await windowRef.reload();
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
+  await evaluate(() => [...document.querySelectorAll("[data-assistant-home] button")].find(button => button.textContent.includes("Lazy thoughts")).click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector('[data-message-id="lazy-a19"]')) && !document.querySelector(".rem-history-loader [role='status']")));
+  const shown = () => evaluate(() => {
+    const pane = document.querySelector("[data-chat-pane]");
+    return {
+      messages: pane.querySelectorAll('[data-message-id^="lazy-u"], [data-message-id^="lazy-a"]').length,
+      placeholders: [...pane.querySelectorAll("button[aria-expanded]")].filter(button => button.textContent.includes("Show thoughts")).length,
+      thoughtText: pane.textContent.includes(" thought "),
+    };
+  });
+  assert.deepEqual(await shown(), { messages: 15, placeholders: 8, thoughtText: false }, "Last 15 messages with collapsed, unloaded thoughts");
+  assert.equal(await evaluate(() => Boolean(document.querySelector('[data-message-id="lazy-u12"]'))), false);
+  await evaluate(() => [...document.querySelectorAll("[data-chat-pane] button[aria-expanded='false']")].filter(button => button.textContent.includes("Show thoughts")).at(-1).click());
+  await waitFor(() => evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("Turn 19 thought 4")));
+  assert.equal(await evaluate(() => document.querySelector("[data-chat-pane]").textContent.includes("Turn 18 thought")), false, "Expanding loads only that turn's thoughts");
+  await evaluate(() => document.querySelector(".rem-history-loader button").click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector('[data-message-id="lazy-u12"]')) && !document.querySelector(".rem-history-loader [role='status']")));
+  const earlier = await shown();
+  assert.equal(earlier.messages, 30, "Load earlier adds 15 messages");
+  assert.equal(earlier.placeholders, 14, "Earlier thoughts stay collapsed");
+  fs.writeFileSync("/tmp/rem-lazy-thoughts.png", (await windowRef.webContents.capturePage()).toPNG());
 }
 
 async function exerciseThreadSearchNavigation() {
@@ -1246,7 +1288,7 @@ async function exerciseSwarms() {
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Message to swarm']"))));
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent.includes("Builder")), true);
   assert.match(await evaluate(() => document.querySelector("[aria-label='Live overview']").textContent), /Needs attention/);
-  assert.equal(await evaluate(() => document.querySelector(".swarm-board-panel").open), false);
+  assert.equal(await evaluate(() => document.querySelector(".swarm-board-panel").open), true, "The message board starts open");
   assert.equal(await evaluate(() => document.querySelector(".swarm-diagnostics").open), false);
   const dashboardFixture = structuredClone(swarmFixture.run);
   async function captureDashboard(name, width = 0) {
@@ -1294,7 +1336,7 @@ async function exerciseSwarms() {
   assert.ok(historyRows.some(text => text.includes("delivery resolved") && !text.includes("Progress")), "Delivery audit records must render without interpreting their objects as objectives");
   assert.ok(historyRows.some(text => text.includes("Progress 0% → 80%") && text.includes("0 → 5 effort points")), "Objective updates retain weighted estimate history");
 
-  assert.match(await evaluate(() => document.querySelector("[aria-label='Execution and verification']").textContent), /Input tokens: Unknown.*Output tokens: 42/);
+  assert.match(await evaluate(() => document.querySelector("[aria-label='Execution and verification']").textContent), /Reported tokens\s*Unknown in · 42 out/);
   await evaluate(() => document.querySelector("[aria-label='Execution and verification'] summary").click());
   await waitFor(() => evaluate(() => document.querySelector("[aria-label='Execution and verification']").textContent.includes("Exit 1: python -m pytest")));
   await evaluate(() => {
@@ -1319,7 +1361,7 @@ async function exerciseSwarms() {
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Lead agent'] .swarm-agent-menu").open), false);
 
   assert.equal(await evaluate(() => ["Message board", "Run progress", "Agent roster"].every(label => document.querySelector(`[aria-label="${label}"]`).getBoundingClientRect().height > 0)), true, "Board, progress and agents appear together");
-  await evaluate(() => document.querySelector("[aria-label='Back to editor']").click());
+  await evaluate(() => document.querySelector("[aria-label='Close swarm']").click());
   await waitFor(() => evaluate(() => !document.querySelector("[aria-label='Swarm workspace']")));
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Editor tabs']").textContent), editorTabs, "Swarm navigation preserves workflow tabs");
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Editor tabs']").getBoundingClientRect().height > 0), true);
@@ -1388,11 +1430,13 @@ async function exerciseSwarms() {
   await evaluate(() => { document.querySelector("[aria-label='Lead agent'] .swarm-agent-details").open = true; });
   await waitFor(() => evaluate(() => document.querySelector("[aria-label='Lead agent']").textContent.includes("Reviewing the release changes")));
   await evaluate(() => document.querySelector("button[aria-label='Swarm settings']").click());
-  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").disabled), true, "An active run locks team edits");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button[type='submit']").disabled), true, "An active run locks team edits");
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Team details'] input").disabled), true);
   assert.equal(await evaluate(() => document.querySelector("[data-swarm-agent='lead']").disabled), true);
   await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Back to dashboard").click());
-  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Stop").click());
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Stop…").click());
+  assert.equal(swarmMutations.some((item) => item.body.action === "stop"), false, "Stop asks for confirmation first");
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Swarm workspace'] button")].find((button) => button.textContent === "Stop and clean up").click());
   await waitFor(() => swarmMutations.some((item) => item.body.action === "stop"));
   await evaluate(() => document.querySelector("button[aria-label='Swarm settings']").click());
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Team details'] select").value), "lead");
@@ -1465,7 +1509,7 @@ async function exerciseSwarms() {
   await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Add agent").click());
   assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent").length), 3);
   assert.equal(await evaluate(() => document.querySelector(".swarm-setup-agent[open] strong").textContent), "New agent");
-  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").disabled), true, "Incomplete agents cannot be saved");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button[type='submit']").disabled), true, "Incomplete agents cannot be saved");
   await evaluate(() => document.querySelector(".swarm-setup-agent[open] .swarm-setup-remove").click());
   assert.equal(await evaluate(() => document.querySelectorAll(".swarm-setup-agent").length), 2);
   await evaluate(() => {
@@ -1479,14 +1523,15 @@ async function exerciseSwarms() {
     select.value = "lead";
     select.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  await evaluate(() => document.querySelector(".swarm-setup-footer button").click());
+  await evaluate(() => document.querySelector(".swarm-setup-footer button[type='submit']").click());
   await waitFor(() => swarmMutations.some(item => item.body.maxConcurrency === 2));
   assert.equal(swarmMutations.at(-1).body.maxConcurrency, 2);
   assert.deepEqual(swarmMutations.at(-1).body.gitPermissions, { local: true, remote: true });
-  assert.equal(swarmMutations.at(-1).body.maxRunSeconds, undefined);
-  assert.equal(swarmMutations.at(-1).body.maxTurns, undefined);
-  assert.equal(swarmMutations.at(-1).body.maxRepairAttempts, undefined);
-  assert.equal(swarmMutations.at(-1).body.stallTurnLimit, undefined);
+  // Run limits are saved with the team; legacy values fall back to the defaults.
+  assert.equal(swarmMutations.at(-1).body.maxRunSeconds, 8 * 3600);
+  assert.equal(swarmMutations.at(-1).body.maxTurns, 100);
+  assert.equal(swarmMutations.at(-1).body.maxRepairAttempts, 3);
+  assert.equal(swarmMutations.at(-1).body.stallTurnLimit, 6);
   assert.equal(swarmMutations.at(-1).body.wakeIntervalSeconds, 90);
   assert.equal(swarmMutations.at(-1).body.agents.find(agent => agent.id === "builder").allowSteering, true);
   await waitFor(() => evaluate(() => !document.querySelector(".swarm-setup")));
@@ -1536,7 +1581,7 @@ async function exerciseSwarms() {
   swarmFixture.agents = swarmFixture.agents.filter(agent => agent.id !== "builder");
   swarmFixture.run.task = "Review the release. " + "Check the implementation and validation evidence. ".repeat(12);
   swarmFixture.run.configuration.agents[0].role = "Coordinate the team. " + "Review each change and keep the plan up to date. ".repeat(10);
-  await evaluate(() => document.querySelector("[aria-label='Back to editor']").click());
+  await evaluate(() => document.querySelector("[aria-label='Close swarm']").click());
   await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find(button => button.textContent.includes("Release team")).click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Builder agent']"))));
   assert.equal(await evaluate(() => Boolean(document.querySelector("[aria-label='Options for Builder']"))), false, "Removed snapshot agents cannot open empty settings");
@@ -1551,7 +1596,10 @@ async function exerciseSwarms() {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "Review the next release");
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Start run").click());
+  await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Review and start…").click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[aria-label='Review before starting']"))));
+  assert.equal(swarmMutations.some(item => item.path.endsWith("/start")), false, "Starting shows the launch review first");
+  await evaluate(() => [...document.querySelectorAll("[aria-label='Review before starting'] button")].find(button => button.textContent === "Start run").click());
   await waitFor(() => swarmMutations.some(item => item.path.endsWith("/start") && item.body.task === "Review the next release"));
   await waitFor(() => evaluate(() => document.querySelector(".swarm-run-heading h1").textContent === "Review the next release"));
   assert.equal(await evaluate(() => document.querySelector("[aria-label='Agent roster']").textContent.includes("Builder")), false, "New run uses the saved team");
@@ -1562,11 +1610,11 @@ async function exerciseSwarms() {
   // The first-run dashboard must keep its draft through settings navigation.
   swarmFixture.run = null;
   await evaluate(() => window.dispatchEvent(new Event("gofer:swarms-changed")));
-  await evaluate(() => document.querySelector("[aria-label='Back to editor']").click());
+  await evaluate(() => document.querySelector("[aria-label='Close swarm']").click());
   await evaluate(() => [...document.querySelectorAll("#sidebar-panel-swarms button")].find(button => button.textContent.includes("Release team")).click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector("#swarm-task"))));
   assert.equal(await evaluate(() => document.querySelector(".swarm-new-run").open), true);
-  assert.equal(await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Start run").disabled), true);
+  assert.equal(await evaluate(() => [...document.querySelectorAll("button")].find(button => button.textContent === "Review and start…").disabled), true);
   assert.equal(await evaluate(() => /mission|Build teamwork|Give your team a task/.test(document.querySelector(".swarm-dashboard").textContent)), false, "The dashboard has no promotional task copy");
   await evaluate(() => {
     const input = document.querySelector("#swarm-task");
@@ -1590,7 +1638,7 @@ async function exerciseSwarms() {
   fs.writeFileSync("/tmp/raticode-swarm-ready.png", (await windowRef.webContents.capturePage()).toPNG());
   await evaluate(() => document.querySelector("[aria-label='New swarm']").click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector(".swarm-setup-footer"))));
-  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button").textContent), "Create swarm");
+  assert.equal(await evaluate(() => document.querySelector(".swarm-setup-footer button[type='submit']").textContent), "Create swarm");
   await evaluate(() => {
     const input = document.querySelector("[aria-label='Team details'] input");
     input.focus();
@@ -1598,7 +1646,7 @@ async function exerciseSwarms() {
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   await evaluate(() => document.querySelector("[aria-label='Team details'] input").blur());
-  await evaluate(() => document.querySelector(".swarm-setup-footer button").click());
+  await evaluate(() => document.querySelector(".swarm-setup-footer button[type='submit']").click());
   await waitFor(() => swarmMutations.some(item => item.path === "/api/swarms" && item.body.name === "Review team"));
   assert.equal(swarmMutations.at(-1).body.agents.length, 1);
   assert.equal(swarmMutations.at(-1).body.agents[0].isOrchestrator, true);

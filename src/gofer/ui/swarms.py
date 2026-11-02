@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -44,6 +45,75 @@ def _now() -> str:
 
 class SwarmError(ValueError):
     """Invalid configuration, lifecycle transition or scoped tool operation."""
+
+
+# Run limits: name -> (default, minimum, maximum). Every run gets all of them.
+RUN_LIMITS: dict[str, tuple[int, int, int]] = {
+    "contextCharLimit": (48000, 8000, 200000),
+    "maxTurns": (200, 1, 10000),
+    "maxRunSeconds": (8 * 3600, 60, 7 * 24 * 3600),
+    "maxTurnSeconds": (3600, 60, 24 * 3600),
+    "stallTurnLimit": (6, 1, 100),
+    "maxRepairAttempts": (3, 0, 50),
+}
+MAX_SWARM_CONCURRENCY = 16
+MAX_CHARTER_CHARS = 8000
+MAX_ROLE_CHARS = 4000
+# Provider failures retry with backoff this many times before the run pauses.
+MAX_PROVIDER_RETRIES = 5
+# Errors that retrying cannot fix: the run pauses on the first one.
+_PERSISTENT_PROVIDER_ERROR = re.compile(
+    r"not logged in|please log ?in|log ?in again|login required|unauthori[sz]ed|"
+    r"authenticat|api key|credential|quota|usage limit|credit|billing|"
+    r"not available on path|is disabled|permission mode",
+    re.IGNORECASE,
+)
+# Permission modes that remove the provider's own sandbox or approval prompts.
+FULL_ACCESS_MODES = {"danger-full-access", "bypassPermissions"}
+
+
+def full_access_agents(agents: list[dict[str, Any]]) -> list[str]:
+    return [str(a.get("name")) for a in agents if a.get("permissionMode") in FULL_ACCESS_MODES]
+
+
+def configuration_hash(configuration: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()[:16]
+
+
+CONFIGURATION_KEYS = (
+    "name",
+    "charter",
+    "agents",
+    "wakeIntervalSeconds",
+    "maxConcurrency",
+    "gitPermissions",
+    "integrationChecks",
+    "maxTokens",
+    *RUN_LIMITS,
+)
+
+
+def saved_configuration(swarm: dict[str, Any]) -> dict[str, Any]:
+    return {key: swarm.get(key) for key in CONFIGURATION_KEYS}
+
+
+def running_seconds(run: dict[str, Any], now: float | None = None) -> float:
+    """Time spent in the running state, excluding pauses."""
+    total = float(run.get("runningSeconds", 0))
+    if run.get("state") == "running" and run.get("runningSince"):
+        total += max(0.0, (now or time.time()) - float(run["runningSince"]))
+    return total
+
+
+def set_run_state(run: dict[str, Any], state: str, *, at: float | None = None) -> None:
+    """Change run state and keep the running-time total that limits rely on."""
+    now = at or time.time()
+    if run.get("state") == "running" and state != "running":
+        run["runningSeconds"] = running_seconds(run, now)
+        run.pop("runningSince", None)
+    elif state == "running" and (run.get("state") != "running" or "runningSince" not in run):
+        run["runningSince"] = now
+    run["state"] = state
 
 
 def weighted_progress(milestones: list[dict[str, Any]]) -> dict[str, Any]:
@@ -131,7 +201,9 @@ class SwarmManager:
                 if run and run["state"] in {"running", "stopping", "paused"}:
                     run.setdefault("workspace", {"mode": "serial", "path": swarm["projectRoot"]})
                     was_running = run["state"] == "running"
-                    changed = run["state"] != "paused" and not run.get("recoveryGeneration")
+                    changed = was_running or (
+                        run["state"] != "paused" and not run.get("recoveryGeneration")
+                    )
                     if run.pop("integrationBusy", False):
                         changed = True
                         run["integration"] = {"passed": False, "error": "Integration interrupted"}
@@ -140,7 +212,16 @@ class SwarmManager:
                                 "passed": False,
                                 "error": "Integration interrupted",
                             }
-                    run["state"] = "stopped" if run["state"] == "stopping" else "paused"
+                    # Count running time only up to the last save, not the downtime.
+                    try:
+                        last_seen = datetime.fromisoformat(swarm["updatedAt"]).timestamp()
+                    except (KeyError, TypeError, ValueError):
+                        last_seen = None
+                    set_run_state(
+                        run,
+                        "stopped" if run["state"] == "stopping" else "paused",
+                        at=last_seen,
+                    )
                     for state in run["agentStates"].values():
                         if state["state"] == "working":
                             state.update(
@@ -199,17 +280,8 @@ class SwarmManager:
                             "Application restarted. Review interrupted deliveries before resuming."
                         )
                         self._event(run, "recovered", "system", {})
-                    if (
-                        was_running
-                        and run.get("humanInbox")
-                        and any(
-                            d["state"] == "queued" and self._dispatchable(run, m, d["agentId"])
-                            for m in run["messages"]
-                            for d in m["deliveries"]
-                        )
-                    ):
-                        run["state"] = "running"
-                        run.pop("pauseReason", None)
+                    # Interrupted runs always stay paused. The user reviews the
+                    # human inbox and resumes; nothing restarts unattended.
                 if run and run.get("idleDiagnosis", {}).get("state") == "working":
                     run["idleDiagnosis"]["state"] = "pending"
                 self._save(swarm)
@@ -342,8 +414,10 @@ class SwarmManager:
         )
 
     def _view(self, swarm: dict[str, Any]) -> dict[str, Any]:
+        swarm["configurationHash"] = configuration_hash(saved_configuration(swarm))
         run = swarm.get("run")
         if run:
+            run["elapsedSeconds"] = round(running_seconds(run), 1)
             milestones = []
             for objective in run["objectives"]:
                 objective["progress"] = weighted_progress(objective["milestones"])
@@ -438,6 +512,41 @@ class SwarmManager:
                 )
             ]
 
+    def delete(self, project_root: str | Path, swarm_id: str) -> dict[str, Any]:
+        """Remove a team and its run records. Review worktrees and branches stay."""
+        with self._lock:
+            swarm = self._get(project_root, swarm_id)
+            run = swarm.get("run") or {}
+            if run.get("state") in {"running", "paused", "stopping", "completing"}:
+                raise SwarmError("Stop the current run before deleting this swarm")
+            if (
+                swarm_id in self._terminal
+                or swarm_id in self._finalizing
+                or any(
+                    a["swarmId"] == swarm_id
+                    for a in [*self._active.values(), *self._checks.values()]
+                )
+            ):
+                raise SwarmError("Wait for workspace cleanup to finish before deleting this swarm")
+            runs = [run, *self._store.history(swarm_id, summaries=False)] if run else []
+            retained = [
+                {"path": w.get("path"), "branch": w.get("branch")}
+                for item in runs
+                for w in self._workspaces(item)
+                if w.get("mode") == "git" and w.get("path")
+            ]
+            with self._db:
+                for table, column in (
+                    ("swarms", "id"),
+                    ("swarm_summaries", "id"),
+                    ("swarm_history", "swarm_id"),
+                    ("swarm_items", "swarm_id"),
+                ):
+                    self._db.execute(f"DELETE FROM {table} WHERE {column}=?", (swarm_id,))
+            self._runnable.pop(swarm_id, None)
+            self._due.pop(swarm_id, None)
+            return {"id": swarm_id, "deleted": True, "retained": retained}
+
     def history_run(self, project_root: str | Path, swarm_id: str, run_id: str) -> dict[str, Any]:
         with self._lock:
             row = self._db.execute(
@@ -468,6 +577,10 @@ class SwarmManager:
                 agent[key] = str(agent.get(key, "")).strip()
                 if not agent[key]:
                     raise SwarmError(f"Agent {key} is required")
+            if len(agent["name"]) > 100 or len(agent["role"]) > MAX_ROLE_CHARS:
+                raise SwarmError(
+                    f"Agent names are limited to 100 characters and roles to {MAX_ROLE_CHARS}"
+                )
             workspace_path = agent.get("workspacePath")
             if workspace_path is not None and workspace_path != "":
                 if not isinstance(workspace_path, str) or not Path(workspace_path).is_absolute():
@@ -516,25 +629,43 @@ class SwarmManager:
             concurrency = int(payload.get("maxConcurrency", 3))
         except (TypeError, ValueError) as exc:
             raise SwarmError("Wake interval and concurrency must be integers") from exc
-        if not 10 <= interval <= 3600 or concurrency < 1:
-            raise SwarmError("Wake interval must be 10–3600 seconds; concurrency must be positive")
+        if not 10 <= interval <= 3600 or not 1 <= concurrency <= MAX_SWARM_CONCURRENCY:
+            raise SwarmError(
+                "Wake interval must be 10–3600 seconds; concurrency must be "
+                f"1–{MAX_SWARM_CONCURRENCY}"
+            )
         limits = {}
-        for key, default, maximum in (("contextCharLimit", 48000, 200000),):
+        for key, (default, minimum, maximum) in RUN_LIMITS.items():
             value = payload.get(key, default)
-            minimum = 8000 if key == "contextCharLimit" else 1
+            # Before run limits existed every team was saved with 0 for turns and
+            # elapsed time. That was never a choice, so it takes the default.
+            if key in {"maxTurns", "maxRunSeconds"} and value == 0:
+                value = default
             if type(value) is not int or not minimum <= value <= maximum:
                 raise SwarmError(f"{key} must be an integer between {minimum} and {maximum}")
             limits[key] = value
+        token_limit = payload.get("maxTokens")
+        if token_limit is not None and (
+            type(token_limit) is not int or not 1000 <= token_limit <= 10_000_000_000
+        ):
+            raise SwarmError("maxTokens must be empty or an integer of at least 1000")
+        charter = str(payload.get("charter", ""))
+        if len(charter) > MAX_CHARTER_CHARS:
+            raise SwarmError(f"The charter must be at most {MAX_CHARTER_CHARS} characters")
+        try:
+            checks = workspaces.validate_checks(payload.get("integrationChecks", []))
+            git_permissions = swarm_git.permissions(payload.get("gitPermissions"))
+        except ValueError as exc:
+            raise SwarmError(str(exc)) from exc
         return {
             **limits,
-            "gitPermissions": swarm_git.permissions(payload.get("gitPermissions")),
-            "integrationChecks": workspaces.validate_checks(payload.get("integrationChecks", [])),
+            "maxTokens": token_limit,
+            "gitPermissions": git_permissions,
+            "integrationChecks": checks,
             "name": name,
-            "charter": str(payload.get("charter", "")),
+            "charter": charter,
             "agents": agents,
             "wakeIntervalSeconds": interval,
-            "maxTurns": 0,
-            "maxRunSeconds": 0,
             "maxConcurrency": concurrency,
         }
 
@@ -568,6 +699,28 @@ class SwarmManager:
             swarm.update(configuration)
             self._save(swarm)
             return self._view(swarm)
+
+    @staticmethod
+    def _limit_reached(run: dict[str, Any]) -> str:
+        """Name the first run limit that has been reached, or return an empty string."""
+        config = run["configuration"]
+        # Runs saved before limits existed carry 0, which their snapshot keeps.
+        turns = config.get("maxTurns") or 0
+        if turns and run.get("turnCount", 0) >= turns:
+            return f"Turn limit reached ({turns} agent turns)."
+        seconds = config.get("maxRunSeconds") or 0
+        if seconds and running_seconds(run) >= seconds:
+            return f"Running-time limit reached ({round(seconds / 60)} minutes)."
+        tokens = config.get("maxTokens")
+        usage = run.get("usage") or {}
+        used = sum(
+            value
+            for value in (usage.get("reported_input_tokens"), usage.get("reported_output_tokens"))
+            if isinstance(value, (int, float))
+        )
+        if tokens and used >= tokens:
+            return f"Token limit reached ({used:,} of {tokens:,} reported tokens)."
+        return ""
 
     def _orchestrator(self, swarm: dict[str, Any]) -> str:
         agents = swarm["run"]["configuration"]["agents"] if swarm.get("run") else swarm["agents"]
@@ -633,6 +786,10 @@ class SwarmManager:
             path = Path(project)
             if not path.is_dir():
                 raise SwarmError(f"Agent workspace folder is unavailable: {project}")
+            if path.resolve().is_relative_to((self.data_dir / "workspaces").resolve()):
+                raise SwarmError(
+                    "An agent workspace can't be inside another swarm run's worktrees: " + project
+                )
             if self.authorize_workspace:
                 self.authorize_workspace(path, (grants or {}).get(project))
 
@@ -662,6 +819,8 @@ class SwarmManager:
         workspace_grants: dict[str, str] | None = None,
         organization_scope: dict[str, Any] | None = None,
         expected_configuration: dict[str, Any] | None = None,
+        expected_configuration_hash: str | None = None,
+        confirm_full_access: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(task, str) or not task.strip():
             raise SwarmError("A nonempty run task is required")
@@ -670,8 +829,18 @@ class SwarmManager:
             if (
                 expected_configuration is not None
                 and self._configuration(swarm) != expected_configuration
+            ) or (
+                expected_configuration_hash is not None
+                and configuration_hash(saved_configuration(swarm)) != expected_configuration_hash
             ):
                 raise SwarmError("Swarm configuration changed before launch; review and retry")
+            unrestricted = full_access_agents(swarm["agents"])
+            if unrestricted and not confirm_full_access and organization_scope is None:
+                raise SwarmError(
+                    "These agents run without a sandbox or approval prompts: "
+                    + ", ".join(unrestricted)
+                    + ". Review the team and confirm full access to start."
+                )
             if any(
                 a["swarmId"] == swarm_id for a in [*self._active.values(), *self._checks.values()]
             ):
@@ -716,6 +885,8 @@ class SwarmManager:
             if organization_scope:
                 run["organization"] = copy.deepcopy(organization_scope)
                 run["configuration"]["maxConcurrency"] = 1
+            if unrestricted:
+                self._event(run, "full_access_confirmed", "user", {"agents": unrestricted})
             run["state"] = "paused"
             self._save(swarm)
             try:
@@ -734,7 +905,7 @@ class SwarmManager:
                 run.update(state="failed", failureReason=f"Workspace preparation failed: {exc}")
                 self._save(swarm)
                 raise SwarmError(run["failureReason"]) from exc
-            run["state"] = "running"
+            set_run_state(run, "running")
             self._post(swarm, "user", {"body": task, "recipientId": self._orchestrator(swarm)})
             self._event(swarm["run"], "started", "user", {"task": task})
             self._save(swarm)
@@ -757,18 +928,31 @@ class SwarmManager:
                     raise SwarmError("Workspace cleanup is already running")
                 run.pop("cleanup", None)
             elif action == "pause" and run["state"] == "running":
-                run["state"] = "paused"
-            elif action == "resume" and run["state"] in {"paused", "stopped"}:
+                set_run_state(run, "paused")
+                run["pauseReason"] = "Paused by the user."
+            elif action == "resume" and run["state"] == "paused":
                 if run.get("organization"):
                     raise SwarmError("Resume managed work through its organization task")
                 if run.get("cleanup") or swarm_id in self._terminal:
                     raise SwarmError(
                         "This run has been cleaned up. Start a new run from its parent branch."
                     )
+                if run.get("replanRequired"):
+                    raise SwarmError(
+                        "The orchestrator stalled. Record a changed plan before resuming."
+                    )
+                if limit := self._limit_reached(run):
+                    raise SwarmError(limit + " Start a new run with higher limits to continue.")
                 self._validate_agent_projects(
                     swarm["projectRoot"], run["configuration"]["agents"], workspace_grants
                 )
-                run["state"] = "running"
+                set_run_state(run, "running")
+                for state in run["agentStates"].values():
+                    # A resume is a deliberate retry of providers that needed attention.
+                    if state.get("state") == "retry_wait" and state.get("retryPaused"):
+                        state.update(retryAt=0, consecutiveFailures=0)
+                        state.pop("retryPaused", None)
+                run.pop("idleRecovery", None)
                 self._dispatch_assignments(swarm)
                 run.pop("pauseReason", None)
             elif action == "stop" and (
@@ -780,7 +964,7 @@ class SwarmManager:
                     for a in [*self._active.values(), *self._checks.values()]
                     if a["swarmId"] == swarm_id
                 ]
-                run["state"] = "stopping" if active else "stopped"
+                set_run_state(run, "stopping" if active else "stopped")
                 for item in active:
                     item["cancel"].set()
             else:
@@ -822,7 +1006,9 @@ class SwarmManager:
         )
         self._event(run, "approval_requested", actor, {"notificationId": inbox[-1]["id"]})
 
-    def _respond_approval(self, swarm: dict[str, Any], payload: dict[str, Any]) -> None:
+    def _respond_approval(
+        self, swarm: dict[str, Any], payload: dict[str, Any], origin: str = "user"
+    ) -> None:
         run = swarm["run"]
         item = next(
             (i for i in run.get("humanInbox", []) if i["id"] == payload.get("notificationId")), None
@@ -831,6 +1017,11 @@ class SwarmManager:
             raise SwarmError("Unknown human inbox notification")
         if item["state"] != "pending":
             return  # A repeated response must not schedule a second turn.
+        if origin == "rem" and item["kind"] != "recovery":
+            raise SwarmError(
+                "An agent asked the user for this decision. Ask the user to answer it in "
+                "the swarm's human inbox."
+            )
         decision = payload.get("decision")
         instruction = str(payload.get("instruction", "")).strip()
         if decision not in {"proceed", "redirect"} or (decision == "redirect" and not instruction):
@@ -865,6 +1056,7 @@ class SwarmManager:
             next_steps = f"{action}. {next_steps}"
         item.update(
             state="addressed",
+            respondedBy=origin,
             nextSteps=next_steps,
             decision=decision,
             instruction=instruction,
@@ -939,7 +1131,12 @@ class SwarmManager:
     ) -> dict[str, Any]:
         with self._lock:
             swarm = self._get(project_root, swarm_id)
-            self._run(swarm)
+            run = self._run(swarm)
+            if run["state"] not in {"running", "paused"}:
+                raise SwarmError(
+                    f"This run is {run['state']}; messages can't reach its agents. "
+                    "Start a new run instead."
+                )
             self._post(swarm, "user", payload)
             self._save(swarm)
             return self._view(swarm)
@@ -1075,7 +1272,9 @@ class SwarmManager:
             self._save(swarm)
             return self._view(swarm)
 
-    def _objectives(self, swarm: dict[str, Any], actor: str, payload: dict[str, Any]) -> None:
+    def _objectives(
+        self, swarm: dict[str, Any], actor: str, payload: dict[str, Any], origin: str = "user"
+    ) -> None:
         run = swarm["run"]
         if actor not in {"user", self._orchestrator(swarm)}:
             raise SwarmError(
@@ -1183,9 +1382,15 @@ class SwarmManager:
                 if old.get("waiver") and old.get("attemptId") == milestone["attemptId"]:
                     milestone["waiver"] = old["waiver"]
                 if waiver:
-                    if actor != "user" or not isinstance(waiver, str) or not waiver.strip():
+                    if (
+                        actor != "user"
+                        or origin != "user"
+                        or not isinstance(waiver, str)
+                        or not waiver.strip()
+                    ):
                         raise SwarmError(
-                            "Only the user may explicitly waive verification with a reason"
+                            "Only the user may explicitly waive verification with a reason, "
+                            "from the desktop"
                         )
                     milestone["waiver"] = {"reason": waiver.strip(), "actorId": actor, "at": _now()}
                 if milestone["status"] == "accepted":
@@ -1240,6 +1445,7 @@ class SwarmManager:
                 "after": objectives,
                 "reason": str(payload.get("reason", "")),
                 "revision": run["revision"],
+                "origin": origin if actor == "user" else "agent",
             },
         )
 
@@ -1306,12 +1512,29 @@ class SwarmManager:
         state = run["agentStates"][agent_id]
         failures = int(state.get("consecutiveFailures", 0)) + 1
         delay = min(300, 10 * 2 ** min(failures - 1, 5))
+        # Retrying can't fix sign-in, quota or setup errors, and a provider that
+        # keeps failing shouldn't be relaunched forever. Pause and ask the user.
+        needs_user = failures > MAX_PROVIDER_RETRIES or bool(
+            _PERSISTENT_PROVIDER_ERROR.search(error)
+        )
         state.update(
             state="retry_wait",
             consecutiveFailures=failures,
-            retryAt=time.time() + delay,
+            retryAt=0 if needs_user else time.time() + delay,
             retryAttemptId=attempt["id"],
         )
+        if needs_user:
+            state["retryPaused"] = True
+            if run["state"] == "running":
+                set_run_state(run, "paused")
+            agent = next(
+                (a["name"] for a in run["configuration"]["agents"] if a["id"] == agent_id),
+                agent_id,
+            )
+            run["pauseReason"] = (
+                f"{agent}'s provider failed {failures} time{'s' if failures != 1 else ''}"
+                f" and needs attention: {error[:300]}. Fix the provider, then resume."
+            )
         attempt.update(
             state="pending",
             recovery={
@@ -1329,7 +1552,12 @@ class SwarmManager:
                     and delivery.get("executionAttemptId") == attempt["id"]
                     and delivery["state"] == "uncertain"
                 ):
-                    delivery.update(state="queued", reason=f"Continuing after {delay}s backoff")
+                    delivery.update(
+                        state="queued",
+                        reason="Waiting for the run to resume"
+                        if needs_user
+                        else f"Continuing after {delay}s backoff",
+                    )
                     delivery.pop("steeringAttempted", None)
         self._event(
             run,
@@ -1465,7 +1693,9 @@ class SwarmManager:
                     "Accepted revision is missing from the integration workspace"
                 ) from exc
 
-    def _repair(self, swarm: dict[str, Any], actor: str, payload: dict[str, Any]) -> None:
+    def _repair(
+        self, swarm: dict[str, Any], actor: str, payload: dict[str, Any], origin: str = "user"
+    ) -> None:
         if actor not in {"user", self._orchestrator(swarm)}:
             raise SwarmError("Only the orchestrator or user may request a repair")
         run = swarm["run"]
@@ -1483,6 +1713,14 @@ class SwarmManager:
         if milestone["status"] in {"accepted", "cancelled"}:
             raise SwarmError("Reopen the milestone before repairing")
         repairs = int(attempt.get("repairCount", 0)) + 1
+        limit = run["configuration"].get("maxRepairAttempts")
+        # Runs saved before this limit existed have none. A user at the desktop
+        # may approve a repair past the limit; agents and Rem may not.
+        if limit is not None and repairs > limit and (actor != "user" or origin != "user"):
+            raise SwarmError(
+                f"This assignment has used all {limit} repair attempts. Use request_approval "
+                "so the user can decide whether to repair it again, change it or cancel it."
+            )
         attempt["state"] = "superseded"
         milestone.update(attemptId=_id(), status="ready", evidence="")
         self._dispatch_assignments(swarm)
@@ -1493,7 +1731,10 @@ class SwarmManager:
         )
         run["revision"] += 1
         self._event(
-            run, "repair_requested", actor, {"attemptId": replacement["id"], "reason": reason}
+            run,
+            "repair_requested",
+            actor,
+            {"attemptId": replacement["id"], "reason": reason, "origin": origin},
         )
 
     def _replan(self, swarm: dict[str, Any], actor: str, payload: dict[str, Any]) -> None:
@@ -1507,7 +1748,12 @@ class SwarmManager:
         self._event(run, "replanned", actor, {"reason": reason})
 
     def execution(
-        self, project_root: str | Path, swarm_id: str, payload: dict[str, Any]
+        self,
+        project_root: str | Path,
+        swarm_id: str,
+        payload: dict[str, Any],
+        *,
+        origin: str = "user",
     ) -> dict[str, Any]:
         """User-facing execution controls share the member runtime's validation."""
         with self._lock:
@@ -1531,11 +1777,11 @@ class SwarmManager:
             with self._lock:
                 swarm = self._get(project_root, swarm_id)
                 if payload.get("action") == "human_response":
-                    self._respond_approval(swarm, payload)
+                    self._respond_approval(swarm, payload, origin)
                 elif payload.get("action") == "resolve_attempt":
                     self._resolve_attempt(swarm, payload)
                 elif payload.get("action") == "repair":
-                    self._repair(swarm, "user", payload)
+                    self._repair(swarm, "user", payload, origin)
                 elif payload.get("action") == "replan":
                     self._replan(swarm, "user", payload)
                 else:
@@ -2003,7 +2249,8 @@ class SwarmManager:
             "roster": [
                 {
                     **{k: a[k] for k in ("id", "name", "role", "isOrchestrator")},
-                    "workspacePath": self._agent_project(run, a["id"]),
+                    # Name the repository, not the user's own checkout path.
+                    "repository": Path(self._agent_project(run, a["id"])).name,
                 }
                 for a in run["configuration"]["agents"]
             ],
@@ -2079,12 +2326,17 @@ class SwarmManager:
         return context
 
     def objectives(
-        self, project_root: str | Path, swarm_id: str, payload: dict[str, Any]
+        self,
+        project_root: str | Path,
+        swarm_id: str,
+        payload: dict[str, Any],
+        *,
+        origin: str = "user",
     ) -> dict[str, Any]:
         with self._lock:
             swarm = self._get(project_root, swarm_id)
             self._run(swarm)
-            self._objectives(swarm, "user", payload)
+            self._objectives(swarm, "user", payload, origin)
             self._save(swarm)
             cleanup = self._reserve_accepted_cleanup(swarm["run"])
             result = self._view(swarm)
@@ -2292,10 +2544,11 @@ class SwarmManager:
                             "Verify the combined integration revision before completing: "
                             + workspace["path"]
                         )
-                run["state"] = (
+                set_run_state(
+                    run,
                     "completing"
                     if any(w.get("mode") == "git" for w in self._workspaces(run))
-                    else "completed"
+                    else "completed",
                 )
                 self._event(
                     run,
@@ -2319,6 +2572,11 @@ class SwarmManager:
 
     def _instructions(self, swarm: dict[str, Any], agent: dict[str, Any], token: str) -> str:
         git_permissions = swarm_git.permissions(swarm["run"]["configuration"].get("gitPermissions"))
+        configured = swarm["run"]["configuration"]
+        run_limits = {
+            key: default if configured.get(key) is None else configured[key]
+            for key, (default, _, _) in RUN_LIMITS.items()
+        }
         return f"""You are {agent["name"]}, an agent in the {swarm["name"]} swarm.
 Your role: {agent["role"]}. Charter: {swarm["charter"]}.
 Run task: {swarm["run"]["task"]}.
@@ -2365,7 +2623,7 @@ assigned agent repository.
 Repair conflicts in a new assignment based on current integration, never overwrite workers.
 Call integrate without a milestone to verify the final combined revision.
 repair (orchestrator only): milestoneId, attemptId, reason explaining the changed approach.
-Repair attempts have no application-imposed count limit.
+Each assignment allows {run_limits["maxRepairAttempts"]} repairs. After that, use request_approval.
 Old attempts retain their files, results and audit trail.
 request_approval: description, recommendedAction, optional requestId for deduplication.
 Use for every decision that requires human approval. End your turn after requesting it.
@@ -2382,7 +2640,11 @@ Each Git assignment runs in its own worktree. The application integrates accepte
 in the single parent branch/worktree and preserves the user's checkout.
 All child worktrees and branches are removed at run end. Unfinished work is archived
 outside the parent checkout. Only the parent branch/worktree remains for user review.
-These are not security sandboxes.
+These are not security sandboxes. Never edit, commit in or push from the original project
+folders named as projectRoot; they only identify repositories. Work only in your workspace.
+Run limits: {run_limits["maxTurns"]} agent turns, {run_limits["maxRunSeconds"] // 60} minutes of
+running time, and {run_limits["maxTurnSeconds"] // 60} minutes per turn. The run pauses when
+a limit is reached or after {run_limits["stallTurnLimit"]} turns in a row without progress.
 Non-Git projects use serial turns. Do not create provider-native children; the concurrency
 budget counts app-managed turns and cannot observe or enforce native child capacity.
 Provider sessions are recorded when reported; interrupted sessions are not automatically resumed.
@@ -2414,11 +2676,24 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
         ):
             return False
         if any(i["state"] == "pending" for i in run.get("humanInbox", [])):
-            run.update(
-                state="paused", pauseReason="Human review is required. Open the human inbox."
-            )
+            set_run_state(run, "paused")
+            run["pauseReason"] = "Human review is required. Open the human inbox."
             self._save(swarm)
             return True
+        signature = self._progress_signature(run)
+        if (run.get("idleRecovery") or {}).get("signature") == signature:
+            # The orchestrator already had a turn to unblock exactly this state and
+            # changed nothing. Prompting again would loop, so stop and ask the user.
+            set_run_state(run, "paused")
+            run.update(
+                replanRequired=True,
+                pauseReason="The orchestrator stalled: nothing changed after it was asked "
+                "to unblock the run. Record a changed plan, then resume.",
+            )
+            self._event(run, "stalled", "system", {"reason": "idle_recovery"})
+            self._save(swarm)
+            return True
+        run["idleRecovery"] = {"signature": signature, "at": _now()}
         self._post(
             swarm,
             "system",
@@ -2493,9 +2768,11 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
             resource_limits=self.resource_limits,
             cancel_event=cancel,
             agent_instructions=prompt,
-            permission_mode="read-only"
-            if agent["provider"] == "codex"
-            else agent.get("permissionMode"),
+            # Diagnosis only reads records; never give it the agent's write access.
+            permission_mode={"codex": "read-only", "claude_code": "plan"}.get(
+                agent["provider"], "default"
+            ),
+            trust_data_dir=False,
         ):
             if event["type"] in {"final", "error"}:
                 if event.get("error") or event["type"] == "error":
@@ -2642,9 +2919,14 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     }
                     scope = run.get("organization")
                     if scope and run["turnCount"] >= scope["turnLimit"] and not busy:
-                        run.update(
-                            state="paused", pauseReason="Organization turn reservation exhausted"
-                        )
+                        set_run_state(run, "paused")
+                        run["pauseReason"] = "Organization turn reservation exhausted"
+                        self._save(swarm)
+                        continue
+                    if not scope and (limit := self._limit_reached(run)):
+                        set_run_state(run, "paused")
+                        run["pauseReason"] = limit + " Agents already working finish their turn."
+                        self._event(run, "limit_reached", "system", {"reason": limit})
                         self._save(swarm)
                         continue
                     if self._recover_idle(swarm):
@@ -2657,7 +2939,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             if m["createdAt"] > (run["lastCheckedAt"] or "")
                             and m["senderId"] not in {"system", self._orchestrator(swarm)}
                         ]
-                        if (unread or busy) and not any(
+                        if unread and not any(
                             d["state"] == "queued" and d["agentId"] == self._orchestrator(swarm)
                             for m in run["messages"]
                             for d in m["deliveries"]
@@ -2835,6 +3117,10 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
         tool_url: str | None = None
         launched = False
         turn_attempt_id: str | None = None
+        board_mark = 0
+        timed_out = threading.Event()
+        deadline: threading.Timer | None = None
+        turn_limit = 0.0
         started_at = time.monotonic()
         progress_before = ""
         saw_final = False
@@ -2855,9 +3141,9 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                         and run["turnCount"]
                         and (cost is None or cost >= scope["budgetUsd"])
                     ):
-                        run.update(
-                            state="paused",
-                            pauseReason="Organization reservation exhausted or cost unavailable",
+                        set_run_state(run, "paused")
+                        run["pauseReason"] = (
+                            "Organization reservation exhausted or cost unavailable"
                         )
                         self._save(swarm)
                         return
@@ -2895,6 +3181,8 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     active["attemptId"] = turn_attempt_id
                 launched = True
                 progress_before = self._progress_signature(run)
+                board_mark = len(run["messages"])
+                turn_limit = float(run["configuration"].get("maxTurnSeconds") or 0)
                 self._tokens[token] = (root, swarm_id, agent_id, run["id"])
                 self._turn_tokens.add(token)
                 inbox: list[dict[str, Any]] = []
@@ -3041,6 +3329,15 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     {"name": "swarm", "type": "http", "url": tool_url}
                 )
             kwargs: dict[str, Any] = {}
+            if turn_limit:
+                # A hung provider must not hold its slot and worktree forever.
+                def expire() -> None:
+                    timed_out.set()
+                    cancel.set()
+
+                deadline = threading.Timer(turn_limit, expire)
+                deadline.daemon = True
+                deadline.start()
             if agent["allowSteering"] and agent["provider"] == "codex":
                 from gofer.ui.codex_steering import CodexTurnControl
 
@@ -3057,6 +3354,11 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     "id": f"swarm-{swarm_id}-{agent_id}",
                     "projectRoot": str(working_dir),
                     "remResources": resources,
+                    # Without remote permission, shell `git push` fails too, not just
+                    # the managed tool. The chat runner applies this to the process.
+                    "remBlockGitPush": not swarm_git.permissions(
+                        run["configuration"].get("gitPermissions")
+                    )["remote"],
                     **({"organizationRun": run["organization"]} if run.get("organization") else {}),
                 },
                 working_dir=working_dir,
@@ -3066,6 +3368,9 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                 agent_instructions=prompt,
                 permission_mode=agent.get("permissionMode"),
                 trusted_swarm_url=tool_url,
+                # Agents get their worktree, not the app's data folder with the
+                # swarm database and other agents' worktrees.
+                trust_data_dir=False,
                 **kwargs,
             ):
                 with self._lock:
@@ -3125,6 +3430,15 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
         except Exception as exc:
             error = str(exc)
         finally:
+            if deadline is not None:
+                deadline.cancel()
+            if timed_out.is_set():
+                minutes = round(turn_limit / 60)
+                limit_text = f"{minutes} minutes" if minutes else f"{turn_limit:g} seconds"
+                error = (
+                    f"The turn ran longer than {limit_text} and was stopped. "
+                    "Review its workspace before retrying."
+                )
             if tool_url and self._http:
                 self._http.revoke(tool_url)
             with self._lock:
@@ -3184,6 +3498,17 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                             run["stalledTurns"] = run.get("stalledTurns", 0) + 1
                         else:
                             run["stalledTurns"] = 0
+                        stall_limit = run["configuration"].get("stallTurnLimit")
+                        if stall_limit and run["stalledTurns"] >= stall_limit:
+                            set_run_state(run, "paused")
+                            run.update(
+                                replanRequired=True,
+                                pauseReason=f"No progress in {run['stalledTurns']} turns in a "
+                                "row. Record a changed plan, then resume.",
+                            )
+                            self._event(
+                                run, "stalled", "system", {"stalledTurns": run["stalledTurns"]}
+                            )
                     for message in run["messages"]:
                         for delivery in message["deliveries"]:
                             if delivery["agentId"] == agent_id and delivery["state"] in {
@@ -3206,7 +3531,15 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                         run["state"] = "stopped"
                     elif failed and not cancel.is_set() and run["state"] in {"running", "paused"}:
                         self._schedule_retry(current, agent_id, attempt, error or "Provider failed")
-                    elif run["state"] == "running" and agent_id != self._orchestrator(current):
+                    elif (
+                        run["state"] == "running"
+                        and agent_id != self._orchestrator(current)
+                        # A milestone update or message already told the orchestrator.
+                        and not any(
+                            m["senderId"] == agent_id and m.get("actionable")
+                            for m in run["messages"][board_mark:]
+                        )
+                    ):
                         self._post(
                             current,
                             "system",

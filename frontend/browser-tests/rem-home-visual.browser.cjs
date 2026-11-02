@@ -1,11 +1,16 @@
 /* global __dirname, console, setTimeout, clearTimeout, process */
 // Visual and interaction audit of the Rem home (task sidebar + conversation).
 // Run through run-rem-home-visual.cjs. Scenes use explicit fixtures; no backend or providers.
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, protocol } = require("electron");
+const { execFileSync } = require("node:child_process");
+const { createMediaPreviews } = require("../electron/media-preview.cjs");
+// The media scene serves real files through the app's own preview protocol.
+protocol.registerSchemesAsPrivileged([{ scheme: "raticode-media", privileges: { standard: true, secure: true, stream: true } }]);
 const root = path.resolve(__dirname, "..");
 const out = process.env.CAPTURE_DIR || path.join(os.tmpdir(), "raticode-rem-home-visual");
 fs.mkdirSync(out, { recursive: true });
@@ -26,7 +31,26 @@ window.__opened = [];
 window.addEventListener("gofer:rem-open-thread", event => window.__opened.push(event.detail.threadId));
 // The offline scene exercises the real request path against a backend without the Rem service.
 const nativeFetch = window.fetch.bind(window);
-if (scene === "history") {
+if (scene === "media") {
+  // Rem replies with a picture, a video, a file that has since gone and a text file.
+  const urls = JSON.parse(new URLSearchParams(location.search).get("media"));
+  const [picture, video] = Object.keys(urls);
+  const folder = picture.slice(0, picture.lastIndexOf("/"));
+  window.goferDesktop = { textFiles: {
+    openPreview: async target => { if (!urls[target]) throw new Error("ENOENT"); return { id: target, url: urls[target] }; },
+    closePreview: async () => {},
+  } };
+  const files = [picture, video, folder + "/gone.png", folder + "/notes.txt"].map(file => ({ name: file.split("/").at(-1), size: 48213, path: file }));
+  const messages = [
+    { id: "ask", role: "user", body: "Send me the chart and the demo video.", created_at: new Date().toISOString() },
+    { id: "reply", role: "rem", body: "Here are the chart and the demo.", files, created_at: new Date().toISOString() },
+  ];
+  window.fetch = async input => {
+    const url = String(input);
+    const payload = url.endsWith("/conversation") ? { conversation: { id: "rem", turn_state: "idle" }, messages } : url.endsWith("/tasks") ? { tasks: [] } : {};
+    return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+  };
+} else if (scene === "history") {
   window.__history = remHomeScene("busy");
   const work = { task_id: "task-vector-db", run_id: "run-vector-1", thread_id: "thread-vector-worker" };
   window.__history.messages = [
@@ -72,6 +96,13 @@ async function main() {
     }); },
   }] });
   await vite.listen();
+  const media = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rem-home-media-")));
+  const ffmpeg = (args, name) => execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args, "-threads", "1", path.join(media, name)]);
+  ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=640x400:rate=5:duration=1", "-frames:v", "1"], "chart.png");
+  ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=640x360:rate=15:duration=4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"], "demo.mp4");
+  const previews = createMediaPreviews();
+  protocol.handle("raticode-media", request => previews.handle(request));
+  const mediaUrls = Object.fromEntries(["chart.png", "demo.mp4"].map(name => [path.join(media, name), previews.open(path.join(media, name), 0).url]));
   const base = `http://127.0.0.1:${vite.httpServer.address().port}/rem-home-test`;
   win = new BrowserWindow({ width: 1440, height: 900, show: true, webPreferences: { nodeIntegration: false, contextIsolation: true } });
   const errors = [];
@@ -96,7 +127,7 @@ async function main() {
     for (const width of (process.env.CAPTURE_WIDTHS || "1440,980").split(",").map(Number)) {
       for (const scene of scenes) {
         win.setSize(width, 900);
-        await win.loadURL(`${base}?scene=${scene}`); await sleep(900);
+        await win.loadURL(`${base}?scene=${scene}${scene === "media" ? `&media=${encodeURIComponent(JSON.stringify(mediaUrls))}` : ""}`); await sleep(900);
         await evaluate(`document.documentElement.classList.toggle('dark', ${theme === "dark"})`); await sleep(200);
         const tag = `${theme}-${width}-${scene}`;
         if (scene === "history") {
@@ -130,6 +161,14 @@ async function main() {
           assert.match(await evaluate("document.querySelector('.rem-home-notice')?.textContent || ''"), /Preview threads/);
           await click("Dismiss");
           await shot(tag);
+          // Every message carries its time; back-to-back Rem replies are split by a faint rule.
+          assert.equal(await evaluate("[...document.querySelectorAll('[data-message-id]')].every(el => el.querySelector('time.rem-msg-time')?.textContent.trim())"), true, `Time stamp missing in ${tag}`);
+          // m-4 joins them only when the fixture's "22 hours ago" and "95 minutes ago" fall on the same day.
+          const follows = await evaluate("[...document.querySelectorAll('[data-follows]')].map(el => el.previousElementSibling?.dataset.role === 'rem' && el.dataset.role === 'rem' ? el.dataset.messageId : 'wrong')");
+          assert.ok(follows.includes("m-3") && follows.every(id => ["m-3", "m-4"].includes(id)), `Rem dividers in ${tag}: ${follows}`);
+          assert.equal(await evaluate("getComputedStyle(document.querySelector('[data-follows] .rem-msg-body')).borderTopStyle"), "solid");
+          await evaluate("document.querySelector('.rem-stream').scrollTop = 0");
+          await shot(`${tag}-earlier`);
         }
         if (scene === "running") {
           await openTask("Local-first sync engines");
@@ -212,10 +251,28 @@ async function main() {
         if (scene === "offline") {
           await sleep(400);
           assert.equal(await evaluate("__rem.getState().status"), "offline");
-          assert.equal(await evaluate("document.querySelector('.rem-composer textarea + button').disabled"), true);
+          assert.equal(await evaluate("document.querySelector('.rem-composer button[aria-label=\"Send\"]').disabled"), true);
           await shot(tag);
         }
         if (scene === "replying") { await shot(tag); }
+        if (scene === "media") {
+          await sleep(600);
+          // The picture decodes and the video's first frame loads inline; the missing file says so.
+          assert.equal(await evaluate("document.querySelector('.rem-media[data-kind=image] img')?.naturalWidth"), 640);
+          assert.ok(await evaluate("document.querySelector('.rem-media[data-kind=video] video')?.readyState") >= 1, "Video poster loads");
+          assert.match(await evaluate("document.querySelector('.rem-media-list').textContent"), /This picture is no longer on this computer/);
+          assert.match(await evaluate("document.querySelector('.rem-files').textContent"), /notes\.txt/);
+          await shot(tag);
+          await click("View chart.png larger");
+          assert.equal(await evaluate("document.querySelector('[data-media-viewer=image] img')?.naturalWidth"), 640);
+          await shot(`${tag}-viewer`);
+          await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))"); await sleep(200);
+          assert.equal(await evaluate("Boolean(document.querySelector('[data-media-viewer]'))"), false, "Escape closes the viewer");
+          await click("Play demo.mp4"); await sleep(1500);
+          assert.ok(await evaluate("document.querySelector('[data-media-viewer=video] video').currentTime") > 0.3, "The player starts playing");
+          await shot(`${tag}-player`);
+          await click("Close");
+        }
       }
     }
   }

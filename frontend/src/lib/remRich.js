@@ -1,0 +1,128 @@
+// Rich parts of Rem's chat: result cards, task progress, follow-ups and reply details.
+// The phone app has a Kotlin twin of these rules (RemRich.kt), so both say the same thing.
+
+import { plainMarkdown } from "./remHome.js";
+
+// Plan · Work · Check · Report, with the step a run is on.
+const STEP_KEYS = ["plan", "work", "check", "report"];
+const STEP_LABELS = { plan: "Plan", work: "Work", check: "Check", report: "Report" };
+const STEP_AT = { queued: 0, executing: 1, cancelling: 1, verifying: 2, repairing: 2 };
+const ENDED = new Set(["failed", "blocked", "cancelled", "outcome_unknown"]);
+
+export function runSteps(state, { reachedCheck = false } = {}) {
+  const at = state === "succeeded" ? 4 : STEP_AT[state] ?? (ENDED.has(state) ? (reachedCheck ? 2 : 1) : -1);
+  if (at < 0) return [];
+  const stopped = ENDED.has(state);
+  return STEP_KEYS.map((key, index) => ({
+    key,
+    label: STEP_LABELS[key],
+    state: index < at ? "done" : index === at ? (stopped ? "stopped" : "current") : "todo",
+  }));
+}
+
+// Words, not just color: "Plan done", "Work in progress", "Check not started".
+export function stepText(step) {
+  return `${step.label} ${{ done: "done", current: "in progress", stopped: "stopped", todo: "not started" }[step.state]}`;
+}
+
+export function elapsedLabel(fromIso, until = new Date()) {
+  const start = Date.parse(fromIso || "");
+  const end = until instanceof Date ? until.getTime() : Date.parse(until || "");
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "";
+  const seconds = Math.round((end - start) / 1000);
+  if (seconds < 60) return `${Math.max(seconds, 1)} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
+}
+
+// A check count with a symbol and words, so it reads the same without color.
+export function checksSummary(checks) {
+  const total = Number(checks?.total) || 0;
+  if (!total) return null;
+  const passed = Number(checks.passed) || 0;
+  const failed = Number(checks.failed) || 0;
+  if (failed) return { tone: "danger", symbol: "✕", text: `${failed} of ${total} checks failed` };
+  if (passed === total) return { tone: "success", symbol: "✓", text: `${passed} of ${total} checks passed` };
+  if (!passed) return { tone: "neutral", symbol: "○", text: total === 1 ? "Check not run yet" : `${total} checks not run yet` };
+  return { tone: "neutral", symbol: "◐", text: `${passed} of ${total} checks passed so far` };
+}
+
+// The text without the report links a result card already shows as buttons.
+// Only whole paragraphs that are exactly one of the card's links are dropped.
+export function bodyWithoutCardLinks(body, result) {
+  const links = new Set((result?.artifacts || []).map(artifact => String(artifact.link || "").trim()).filter(Boolean));
+  if (!links.size) return String(body ?? "");
+  const kept = String(body ?? "").split(/\n{2,}/).filter(paragraph => !links.has(paragraph.trim()));
+  return kept.join("\n\n").trim();
+}
+
+export function fileSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function artifactLine(artifact) {
+  return [String(artifact.kind || "file").toUpperCase(), fileSize(artifact.size)].join(" · ");
+}
+
+// "claude-sonnet-5-5 · 4.2 s" under a reply, when the desktop recorded it.
+export function replyMeta(meta) {
+  if (!meta) return "";
+  const seconds = typeof meta.seconds === "number" && Number.isFinite(meta.seconds) ? `${meta.seconds.toFixed(1)} s` : "";
+  const model = meta.model && meta.model !== "cli-default" ? meta.model : meta.provider || "";
+  return [model, seconds].filter(Boolean).join(" · ");
+}
+
+// "Ask about this" starts a reply that quotes the message.
+export function quoteForReply(text, limit = 280) {
+  const plain = plainMarkdown(String(text ?? "")).replace(/\s+/g, " ").trim();
+  if (!plain) return "";
+  const cut = plain.length > limit ? `${plain.slice(0, limit - 1).trimEnd()}…` : plain;
+  return `> ${cut}\n\n`;
+}
+
+// Copy puts the reply and its details on the clipboard as Markdown.
+export function messageCopyText(message) {
+  return [message?.body, message?.details].map(part => String(part ?? "").trim()).filter(Boolean).join("\n\n");
+}
+
+// Rem's presence in the header: what it is doing, as a state and a word.
+export function remPresence({ offline = false, replying = false, turnLabel = "", tasks = [], status = "" } = {}) {
+  if (offline) return { state: "offline", label: "Not connected" };
+  if (replying) return { state: "thinking", label: turnLabel ? `${turnLabel}…` : "Thinking…" };
+  if (/needs? you/.test(status)) return { state: "attention", label: status };
+  if (/^Working on/.test(status) || tasks.some(task => ["queued", "executing", "verifying", "repairing"].includes(task?.active_run?.state))) {
+    return { state: "working", label: status };
+  }
+  return { state: "idle", label: status };
+}
+
+// Follow-up prompts show only under the newest Rem message, and only until you answer.
+export function latestSuggestionMessageId(messages = []) {
+  const last = messages.at(-1);
+  return last && last.role !== "user" && last.suggestions?.length ? last.id : null;
+}
+
+const ACTIVE = new Set(["queued", "executing", "verifying", "repairing", "cancelling"]);
+
+// Action chips under the newest update about a finished task. They come only from the
+// task record, never from text Rem wrote, and appear only when the control would work:
+// Open report needs a saved report, Run again a task that isn't running, and Retry
+// review the run whose review was interrupted (the desktop marks it review_retryable).
+export function resultActions(message, tasks = [], { live = true, reviewRetry = true } = {}) {
+  if (!live || message?.role === "user" || message?.kind !== "task_update" || !message.work) return [];
+  const actions = [];
+  const report = message.result?.artifacts?.[0];
+  if (report) actions.push({ id: "open", label: "Open report", artifact: report });
+  const task = tasks.find(item => item.id === message.work.task_id);
+  if (!task || task.deleted_at) return actions;
+  if (task.active_run && ACTIVE.has(task.active_run.state)) return actions;
+  const run = task.last_run;
+  if (reviewRetry && run?.id === message.work.run_id && run.review_retryable === true) actions.push({ id: "retry", label: "Retry review", task, run });
+  actions.push({ id: "run", label: "Run again", task });
+  return actions;
+}

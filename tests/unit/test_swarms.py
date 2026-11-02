@@ -493,7 +493,6 @@ async def test_idle_board_dispatches_coordinator_recovery(manager, tmp_path):
     assert "No assignment is running" in calls[0]["messages"][0]["body"]
 
 
-
 def test_delivery_review_retries_only_selected_recipient_and_audits(manager, tmp_path):
     swarm = manager.create(tmp_path, config())
     sid = swarm["id"]
@@ -846,7 +845,9 @@ async def test_failed_lead_retries_existing_attempt_with_backoff_and_preserves_f
     assert run["usage"]["output_tokens"] == 5
 
 
-async def test_retry_backoff_caps_and_manual_stop_does_not_retry(manager, tmp_path):
+async def test_retry_backoff_pauses_after_repeated_failures_and_stop_does_not_retry(
+    manager, tmp_path
+):
     swarm = manager.create(tmp_path, config())
     sid = swarm["id"]
     manager.start(tmp_path, sid, "Build")
@@ -855,7 +856,7 @@ async def test_retry_backoff_caps_and_manual_stop_does_not_retry(manager, tmp_pa
         yield {"type": "error", "error": "Rate limited"}
 
     manager._stream = stream
-    for delay in (10, 20, 40, 80, 160, 300, 300):
+    for delay in (10, 20, 40, 80, 160):
         with manager._lock:
             state = manager._get(tmp_path, sid)
             state["run"]["agentStates"]["lead"]["retryAt"] = 0
@@ -863,10 +864,38 @@ async def test_retry_backoff_caps_and_manual_stop_does_not_retry(manager, tmp_pa
         await manager._turn(str(tmp_path), sid, "lead", threading.Event())
         run = manager.get(tmp_path, sid)["run"]
         assert delay - 2 <= run["agentStates"]["lead"]["retryAt"] - time.time() <= delay
+        assert run["state"] == "running"
+    with manager._lock:
+        state = manager._get(tmp_path, sid)
+        state["run"]["agentStates"]["lead"]["retryAt"] = 0
+        manager._save(state)
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    run = manager.get(tmp_path, sid)["run"]
+    # The sixth failure in a row stops relaunching the provider and asks the user.
+    assert run["state"] == "paused" and "failed 6 times" in run["pauseReason"]
+    assert run["agentStates"]["lead"]["retryPaused"] is True
+    resumed = manager.control(tmp_path, sid, "resume")["run"]
+    assert resumed["agentStates"]["lead"]["consecutiveFailures"] == 0
+    assert resumed["agentStates"]["lead"]["retryAt"] == 0
     manager.control(tmp_path, sid, "stop")
     await manager._turn(str(tmp_path), sid, "lead", threading.Event())
-    assert manager.get(tmp_path, sid)["run"]["turnCount"] == 7
+    assert manager.get(tmp_path, sid)["run"]["turnCount"] == 6
     assert manager.get(tmp_path, sid)["run"]["state"] == "stopped"
+
+
+async def test_sign_in_errors_pause_the_run_on_the_first_failure(manager, tmp_path):
+    swarm = manager.create(tmp_path, config())
+    sid = swarm["id"]
+    manager.start(tmp_path, sid, "Build")
+
+    async def stream(**kwargs):
+        yield {"type": "error", "error": "Not logged in. Run claude /login"}
+
+    manager._stream = stream
+    await manager._turn(str(tmp_path), sid, "lead", threading.Event())
+    run = manager.get(tmp_path, sid)["run"]
+    assert run["state"] == "paused" and "needs attention" in run["pauseReason"]
+    assert run["turnCount"] == 1
 
 
 async def test_retry_now_bypasses_backoff_and_runtime_continues(manager, tmp_path, monkeypatch):

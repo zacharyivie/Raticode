@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000162",
+  "id": "10000000-0000-4000-8000-000000000162",
+  "sequence": 162,
+  "type": "desktop.read",
+  "payload": {
+    "op": "rem.memories",
+    "params": {}
+  }
+}

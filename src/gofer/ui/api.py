@@ -118,10 +118,16 @@ from gofer.rattish.editor import (
 from gofer.rattish.parser import parse_rattish_recovering
 from gofer.rattish.preflight import run_preflight
 from gofer.rattish.run_service import (
+    RattishResumeRefused,
     RattishRunArtifactError,
     RattishRunResult,
-    is_rattish_run_active,
+    effective_run_status,
     new_run_id,
+    resume_rattish_run,
+    resume_refusal,
+    resume_rerun_nodes,
+    resumed_child,
+    resumed_run_id,
     run_rattish_file,
 )
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
@@ -167,6 +173,12 @@ class WorkflowUpdateError(ValueError):
 
 class WorkflowRunError(ValueError):
     pass
+
+
+RATTISH_RESUME_OPTIONS_UNSUPPORTED = (
+    "Rattish runs resume where they stopped. Rerunning from a chosen node, rerunning only "
+    "failed nodes or ignoring saved results isn't supported."
+)
 
 
 class WorkflowTriggerError(ValueError):
@@ -1608,6 +1620,10 @@ async def run_workflow_payload(
     base = _data_dir(data_dir)
     registered = _registered_rattish_workflow(workflow_id, base)
     if registered is not None:
+        if resume_options is not None:
+            # Rattish runs resume through resume_workflow_payload; a fresh run here
+            # would silently ignore the requested run and node.
+            raise WorkflowRunError(RATTISH_RESUME_OPTIONS_UNSUPPORTED)
         supplied_inputs = _merged_run_inputs(parameters, inputs, WorkflowRunError)
         if dry_run:
             return _rattish_plan_payload(
@@ -1781,16 +1797,65 @@ async def resume_workflow_payload(
     skip_cache: bool = False,
     force: bool = False,
     trigger_context: dict[str, Any] | None = None,
+    background: bool = False,
+    expected_revision: str | None = None,
 ) -> dict[str, Any]:
+    """Resume a run. A Rattish run resumes as a new run; see ``resume_rattish_run``.
+
+    ``background`` and ``expected_revision`` apply to Rattish runs, which accept
+    none of the legacy node options.
+    """
     if from_node and only_node:
         raise WorkflowRunError("fromNode and onlyNode cannot be used together")
     if not run_id:
         raise WorkflowRunError("runId is required")
-    if _registered_rattish_workflow(workflow_id, _data_dir(data_dir)) is not None:
-        # Running the workflow again here would ignore the requested run and node.
-        raise WorkflowRunError(
-            "Resuming Rattish workflow runs is not supported yet. Start a new run instead."
-        )
+    base = _data_dir(data_dir)
+    registered = _registered_rattish_workflow(workflow_id, base)
+    if registered is not None:
+        if from_node or only_node or skip_cache or force or trigger_context:
+            raise WorkflowRunError(RATTISH_RESUME_OPTIONS_UNSUPPORTED)
+        try:
+            document = _read_rattish_run_artifact(
+                _rattish_run_artifact_path(base, workflow_id, run_id)
+            )
+        except WorkflowLogError as exc:
+            raise WorkflowRunError(str(exc)) from exc
+        if background:
+            return await _start_rattish_background_run(
+                workflow_id,
+                registered.entrypoint,
+                base,
+                {},
+                None,
+                expected_revision,
+                resume_from=document,
+            )
+        cancel_event = threading.Event()
+        resumed_id = new_run_id()
+        active_key = (*_run_key(base, workflow_id), resumed_id)
+        with _active_run_lock:
+            _active_rattish_runs[active_key] = cancel_event
+        try:
+            result = await resume_rattish_run(
+                registered.entrypoint,
+                document,
+                data_dir=base,
+                run_id=resumed_id,
+                cancel_event=cancel_event,
+                expected_revision=expected_revision,
+            )
+        except (
+            RattishResumeRefused,
+            RattishArtifactError,
+            RattishError,
+            RattishRunArtifactError,
+            OSError,
+        ) as exc:
+            raise WorkflowRunError(str(exc)) from exc
+        finally:
+            with _active_run_lock:
+                _active_rattish_runs.pop(active_key, None)
+        return _rattish_run_payload(result, include_log_text=False)
     return await run_workflow_payload(
         workflow_id,
         data_dir,
@@ -2040,6 +2105,7 @@ async def _start_rattish_background_run(
     supplied_inputs: dict[str, Any],
     trigger_context: dict[str, Any] | None,
     expected_revision: str | None,
+    resume_from: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_id = new_run_id()
     cancel_event = threading.Event()
@@ -2057,16 +2123,27 @@ async def _start_rattish_background_run(
 
     async def execute() -> None:
         try:
-            run = await run_rattish_file(
-                source,
-                workflow_inputs=supplied_inputs,
-                trigger_events=([trigger_context] if trigger_context else None),
-                data_dir=base,
-                run_id=run_id,
-                cancel_event=cancel_event,
-                on_started=started,
-                expected_revision=expected_revision,
-            )
+            if resume_from is not None:
+                run = await resume_rattish_run(
+                    source,
+                    resume_from,
+                    data_dir=base,
+                    run_id=run_id,
+                    cancel_event=cancel_event,
+                    on_started=started,
+                    expected_revision=expected_revision,
+                )
+            else:
+                run = await run_rattish_file(
+                    source,
+                    workflow_inputs=supplied_inputs,
+                    trigger_events=([trigger_context] if trigger_context else None),
+                    data_dir=base,
+                    run_id=run_id,
+                    cancel_event=cancel_event,
+                    on_started=started,
+                    expected_revision=expected_revision,
+                )
             result["run"] = _rattish_run_payload(run)
         except Exception as exc:
             result["error"] = str(exc)
@@ -2988,7 +3065,7 @@ def _rattish_run_artifact_paths(base: Path, workflow_id: str) -> list[Path]:
     )
 
 
-def _read_rattish_run_artifact(path: Path) -> dict[str, Any]:
+def _read_rattish_run_artifact(path: Path, *, settled: bool = False) -> dict[str, Any]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -2996,22 +3073,51 @@ def _read_rattish_run_artifact(path: Path) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("run_artifact_version") != 1:
         raise WorkflowLogError(f"Invalid Rattish run artifact {path.name}.")
     if document.get("status") == "running":
-        pid = document.get("runner_pid")
-        try:
-            if not isinstance(pid, int) or pid <= 0:
-                raise ProcessLookupError
-            if pid == os.getpid():
-                if not is_rattish_run_active(str(document.get("run_id", ""))):
-                    document["status"] = "interrupted"
-            elif os.name == "nt":
-                # Windows os.kill(pid, 0) terminates a process. A foreign owner
-                # cannot be reconciled by this runner; report unknown instead.
-                document["status"] = "interrupted"
-            else:
-                os.kill(pid, 0)
-        except (OSError, ProcessLookupError):
-            document["status"] = "interrupted"
+        status = effective_run_status(document)
+        if status == "interrupted" and document.get("runner_pid") == os.getpid() and not settled:
+            # A run here saves its final record before it stops counting as active,
+            # so it may have finished after the read. Its record says so now.
+            return _read_rattish_run_artifact(path, settled=True)
+        document["status"] = status
     return document
+
+
+def _rattish_resume_states(
+    base: Path, workflow_id: str, documents: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Whether each run can be resumed now, and which nodes a resume runs again."""
+    registered = _registered_rattish_workflow(workflow_id, base)
+    ir = None
+    if registered is not None:
+        try:
+            ir = compile_rattish_file(
+                registered.entrypoint,
+                data_dir=base,
+                workflow_id=registered.workflow_id,
+                project_root=registered.project_root,
+            ).ir
+        except (RattishArtifactError, RattishError, OSError):
+            ir = None
+    # A newer run always resumes an older one, so its record is among these.
+    children = {
+        str(resumed_run_id(document)): str(document["run_id"])
+        for document in documents
+        if resumed_run_id(document)
+    }
+    states = {}
+    for document in documents:
+        run_id = str(document["run_id"])
+        reason = resume_refusal(document, ir)
+        if reason is None and run_id in children:
+            reason = (
+                f"This run was already resumed as run {children[run_id]}. Resume that run instead."
+            )
+        states[run_id] = {
+            "allowed": reason is None,
+            "reason": reason or "",
+            "rerunNodes": resume_rerun_nodes(document) if reason is None else [],
+        }
+    return states
 
 
 def _rattish_run_artifact_path(base: Path, workflow_id: str, run_id: str) -> Path:
@@ -3033,7 +3139,11 @@ def _rattish_ui_run_status(document: Mapping[str, Any]) -> str:
 
 
 def _rattish_run_summary(
-    document: Mapping[str, Any], path: Path, *, awaiting_approval: bool = False
+    document: Mapping[str, Any],
+    path: Path,
+    *,
+    awaiting_approval: bool = False,
+    resume: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": str(document["run_id"]),
@@ -3045,6 +3155,8 @@ def _rattish_run_summary(
         "durationSeconds": float(document.get("duration_ms", 0)) / 1000,
         "triggerType": "manual",
         "hasTriggerReplay": False,
+        "resumedFrom": (document.get("resumed_from") or {}).get("run_id"),
+        **({"resume": dict(resume)} if resume is not None else {}),
     }
 
 
@@ -3420,9 +3532,13 @@ def list_workflow_run_logs_payload(
             if any(document["status"] == "running" for document, _ in documents)
             else set()
         )
+        resume = _rattish_resume_states(base, workflow_id, [document for document, _ in documents])
         runs = [
             _rattish_run_summary(
-                document, path, awaiting_approval=str(document["run_id"]) in awaiting_ids
+                document,
+                path,
+                awaiting_approval=str(document["run_id"]) in awaiting_ids,
+                resume=resume[str(document["run_id"])],
             )
             for document, path in documents
         ]
@@ -3531,6 +3647,65 @@ def list_workflow_run_logs_payload(
         "runs": runs,
         "pagination": pagination,
     }
+
+
+def recent_rattish_runs_payload(
+    workflow_id: str, data_dir: Path | None = None, *, limit: int = 20, with_resume: bool = False
+) -> dict[str, Any]:
+    """The newest Rattish run summaries, reading only those runs' artifacts.
+
+    Also names the nodes each running run waits on for an approval. Unreadable
+    artifacts are skipped, as a phone poll should not fail on one bad run.
+    """
+    base = _data_dir(data_dir)
+    _validate_storage_workflow_id(workflow_id, WorkflowLogError)
+    paths = _rattish_run_artifact_paths(base, workflow_id)
+    documents = []
+    for path in paths[: max(0, limit)]:
+        try:
+            documents.append((_read_rattish_run_artifact(path), path))
+        except WorkflowLogError:
+            continue
+    waiting: dict[str, list[str]] = {}
+    if any(document["status"] == "running" for document, _ in documents):
+        for request in ApprovalStore(base).list_pending(workflow_id):
+            waiting.setdefault(request.run_id, []).append(request.node_id)
+    resume = (
+        _rattish_resume_states(base, workflow_id, [document for document, _ in documents])
+        if with_resume
+        else {}
+    )
+    return {
+        "workflowId": workflow_id,
+        "runs": [
+            _rattish_run_summary(
+                document,
+                path,
+                awaiting_approval=document["run_id"] in waiting,
+                resume=resume.get(str(document["run_id"])),
+            )
+            for document, path in documents
+        ],
+        "total": len(paths),
+        "awaitingNodes": waiting,
+    }
+
+
+def rattish_resume_state_payload(
+    workflow_id: str, run_id: str, data_dir: Path | None = None
+) -> dict[str, Any]:
+    """Whether one Rattish run can be resumed now, as run lists report it."""
+    base = _data_dir(data_dir)
+    path = _rattish_run_artifact_path(base, workflow_id, run_id)
+    state = _rattish_resume_states(base, workflow_id, [_read_rattish_run_artifact(path)])[run_id]
+    child = resumed_child(path.parent, run_id) if state["allowed"] else None
+    if child is not None:
+        state = {
+            "allowed": False,
+            "reason": f"This run was already resumed as run {child}. Resume that run instead.",
+            "rerunNodes": [],
+        }
+    return state
 
 
 def _run_started_at_in_range(
@@ -5450,6 +5625,7 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
         counts[record_status] += 1
         run_nodes[node_id] = {
             "nodeId": node_id,
+            "reused": bool(record.get("reused_from_run_id")),
             "status": record_status,
             "outcome": record["outcome"],
             "startedAt": record["started_at"],
@@ -5532,6 +5708,7 @@ def _rattish_artifact_ui_payload(document: Mapping[str, Any], path: Path) -> dic
         "error": document["error"],
         "rattishRun": document,
         "graphSnapshot": _rattish_run_graph_snapshot(document),
+        "resumedFrom": (document.get("resumed_from") or {}).get("run_id"),
     }
 
 

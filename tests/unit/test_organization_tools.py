@@ -273,8 +273,20 @@ def test_rem_mcp_roundtrips_settings_tasks_routines_and_recovery(manager, tmp_pa
             "maxConcurrency": 2,
             "monthlyBudgetUsd": 15,
         }
-        org = action(
+        # Granting an execution destination waits for the user's approval.
+        request = action(
             url, "configure", org["id"], config=config, expectedRevision=1, reason="Set up"
+        )
+        assert request["needsUserConsent"] is True
+        assert "execution destinations" in request["summary"]
+        org = manager.call(
+            "",
+            "user",
+            {
+                "action": "request_decide",
+                "organizationId": org["id"],
+                "params": {"requestId": request["requestId"], "decision": "approve"},
+            },
         )
         with pytest.raises(ValueError, match="changed"):
             action(url, "configure", org["id"], config=config, expectedRevision=1, reason="Stale")
@@ -314,7 +326,22 @@ def test_rem_mcp_roundtrips_settings_tasks_routines_and_recovery(manager, tmp_pa
             routine={**routine, "enabled": False},
             expectedRevision=routine["revision"],
         )
-        action(url, "resume_all", org["id"], expectedRevision=org["revision"])
+        request = action(url, "resume_all", org["id"], expectedRevision=org["revision"])
+        assert request["needsUserConsent"] is True
+        assert action(url, "read", org["id"])["config"]["employees"][1]["paused"]
+        with pytest.raises(ValueError, match="Only the user"):
+            action(
+                url, "request_decide", org["id"], requestId=request["requestId"], decision="approve"
+            )
+        manager.call(
+            "",
+            "user",
+            {
+                "action": "request_decide",
+                "organizationId": org["id"],
+                "params": {"requestId": request["requestId"], "decision": "approve"},
+            },
+        )
         current = action(url, "read", org["id"])
         assert not current["config"]["employees"][1]["paused"]
         assert not current["runtime"]["routines"][routine["id"]]["enabled"]

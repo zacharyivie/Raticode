@@ -27,7 +27,11 @@ Some models have no effort selector. A CLI-default model delegates selection to 
 
 ## Save defaults
 
-**Settings > Providers** manages enabled providers, executable paths, allowed or denied models, and provider-specific defaults. **Settings > Rem** chooses the default provider for new conversations. Existing explicit thread selections remain their own settings.
+**Settings > Providers** manages enabled providers, executable paths, allowed or denied models, and provider-specific defaults. **Settings > Rem** chooses the default provider, model and effort for new tasks and threads. Existing explicit thread selections remain their own settings.
+
+**Rem chat provider**, model and effort in **Settings > Rem** choose who writes the replies in Rem's home chat. Leave it on **Same as tasks and threads**, or pick a faster model or lower effort so chat answers quickly while tasks keep a stronger model.
+
+With Claude Code as the chat provider, Rem's reply in its home chat appears as it is written. Other providers show what Rem is doing, such as "Reading earlier messages", and then the finished reply. Hover a reply, or open its ⋯ menu on the phone, to see which model wrote it and how long it took.
 
 Refresh discovery after signing in, changing a binary, or receiving a new model entitlement. Repeated refreshes are not a substitute for authenticating the CLI itself.
 

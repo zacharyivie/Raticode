@@ -72,7 +72,10 @@ not match the tab it was created for.
   suggestions are available in text fields.
 - **Context menu**: open links in a new tab or your default browser, copy link
   addresses, save or copy images, search for selected text, and **Ask Rem about this**
-  (the page, or the selected text, as a new Rem thread).
+  (the page, or the selected text, as a new Rem thread). Ask Rem also works on local
+  HTML and PDF previews; as for a web page, Rem gets the open file's address and title,
+  plus the selection and page text where the page provides them, and no other access
+  to your files.
 
 ### Keyboard shortcuts
 

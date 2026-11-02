@@ -274,7 +274,9 @@ def test_uploaded_file_is_available_to_authorized_rem_only(application):
     app.handle(peer, request)
     claim = app.claim()
     assert claim is not None
-    assert claim["attachments"] == [{"name": "note.txt", "mime": "text/plain", "data": b"hello"}]
+    assert claim["attachments"] == [
+        {"id": file_id, "name": "note.txt", "mime": "text/plain", "data": b"hello"}
+    ]
 
 
 def test_acknowledged_chunks_pruned_without_reusing_sequence(application):

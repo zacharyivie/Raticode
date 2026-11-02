@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, ExternalLink, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, Copy, ExternalLink, LogIn, RefreshCw } from "lucide-react";
 import { apiUrl } from "../lib/api.js";
 import {
   allowanceLabel, formatUsageAmount, formatUsageNumber, formatUsageTime,
-  remainingPercent, usageDashboardUrl, usageProviderName, usageStatus,
+  remainingPercent, usageDashboardUrl, usageProviderName, usageSignIn, usageStatus,
 } from "../lib/usage.js";
+import { useProviderSignIn } from "./ProviderModelEffortFields.jsx";
 import "./UsageDashboard.css";
 import UsageCredentials from "./UsageCredentials.jsx";
 
@@ -73,6 +74,7 @@ export default function UsageDashboard() {
   }, [load, loading]);
 
   const accounts = (overview?.accounts || []).filter(account => group === "all" || (group === "api") === account.provider?.endsWith("_api"));
+  const signedOut = accounts.filter(account => usageSignIn(account)).length;
   function tabKey(event, index) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
@@ -103,8 +105,9 @@ export default function UsageDashboard() {
           <option value="all">All accounts</option><option value="cli">Coding apps</option><option value="api">API profiles</option>
         </select></label>
       </div>
+      {signedOut ? <p className="usage-attention">{signedOut === 1 ? "1 account needs" : `${signedOut} accounts need`} you to sign in before Raticode can read its allowance. Use the sign-in option below.</p> : null}
       <div className="usage-row-head" aria-hidden="true"><span>Provider / account</span><span>Remaining allowance</span></div>
-      {accounts.map(account => <AccountRow key={account.id} account={account} onCredentialsSaved={() => load(true)} />)}
+      {accounts.map(account => <AccountRow key={account.id} account={account} checking={loading} onCredentialsSaved={() => load(true)} />)}
       {!loading && overview && !accounts.length ? <p className="usage-empty">No {group === "api" ? "API profiles" : "accounts"} to show. Add a provider in Settings → Providers.</p> : null}
       <p className="usage-note">Allowances keep each provider&apos;s own units and reset windows. A plan percentage does not tell you how many tokens remain.</p>
     </div>
@@ -117,12 +120,13 @@ export default function UsageDashboard() {
   </div>;
 }
 
-function AccountRow({ account, onCredentialsSaved }) {
+function AccountRow({ account, checking, onCredentialsSaved }) {
   const windows = account.windows || [];
   const primary = windows[0];
   const url = usageDashboardUrl(account.dashboard_url);
   const name = usageProviderName(account.provider);
-  return <details className="usage-account" data-status={account.status}>
+  const signIn = usageSignIn(account);
+  return <div className="usage-account-row"><details className="usage-account" data-status={account.status}>
     <summary>
       <span className="usage-identity"><strong>{name}</strong><span>{account.profile || account.label || "Provider account"}</span></span>
       <span className="usage-allowance">
@@ -147,7 +151,41 @@ function AccountRow({ account, onCredentialsSaved }) {
         key={`${account.provider}:${account.profile || ""}`} provider={account.provider} profile={account.profile || null} onSaved={onCredentialsSaved}
       /> : null}
     </div>
-  </details>;
+  </details>
+  {/* Outside the disclosure so a signed-out account shows its way forward without expanding. */}
+  {signIn ? <UsageSignIn provider={account.provider} name={name} help={signIn} checking={checking} onCheck={onCredentialsSaved} /> : null}
+  </div>;
+}
+
+function UsageSignIn({ provider, name, help, checking, onCheck }) {
+  const { pending, starting, error, authenticate } = useProviderSignIn(provider);
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(help.command);
+      setCopied(true);
+    } catch { setCopied(false); }
+  }
+  const message = pending ? `Finish signing in to ${name} in your browser. Usage updates when you are done.`
+    : help.browser ? `Sign in to ${name} so Raticode can read your remaining allowance.`
+      : help.command ? <>Open a terminal and run <code>{help.command}</code> to sign in to {name}, then check again.</>
+        : `Sign in to ${name} using this profile's own settings, then check again.`;
+  return <div className="usage-sign-in">
+    <p role={pending ? "status" : undefined}>{message}</p>
+    <div className="usage-sign-in-actions">
+      {help.browser ? <button type="button" className="usage-sign-in-primary" disabled={starting} onClick={() => authenticate(pending ? "cancel" : "start")}>
+        {pending ? null : <LogIn size={13} aria-hidden="true" />}{starting ? "Opening sign-in…" : pending ? "Cancel sign-in" : `Sign in to ${name}`}
+      </button> : null}
+      {!help.browser && help.command ? <button type="button" className="usage-refresh" onClick={copy}>
+        {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}{copied ? "Copied" : "Copy command"}
+      </button> : null}
+      <button type="button" className="usage-refresh" disabled={checking} onClick={onCheck}>
+        <RefreshCw size={13} aria-hidden="true" />{checking ? "Checking…" : "Check again"}
+      </button>
+    </div>
+    {help.browser && help.command && !pending ? <p className="usage-sign-in-alt">If no browser opens, run <code>{help.command}</code> in a terminal.</p> : null}
+    {error ? <p role="alert" className="usage-error">{error}</p> : null}
+  </div>;
 }
 
 function AllowanceBar({ window }) {

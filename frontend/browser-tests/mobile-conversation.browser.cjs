@@ -1,5 +1,6 @@
 /* global __dirname, console, setTimeout, clearTimeout */
 // Disposable renderer fixture. No provider execution or real desktop state.
+require('../electron/tests/background-display.cjs').runInBackgroundDisplay();
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

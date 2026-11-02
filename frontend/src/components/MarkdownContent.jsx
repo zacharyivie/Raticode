@@ -1,9 +1,15 @@
 import { isLocalFileLink, resolveMarkdownLinkPath } from "../lib/fileLinks.js";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
+
+// Highlighting and ```rem-chart charts load on first use, outside the main bundle.
+const RichCodeBlock = lazy(() => import("./RichCodeBlock.jsx"));
+// Web images load through the backend; the loader is its own small chunk too.
+const WebImage = lazy(() => import("./WebImage.jsx"));
+const imagePlaceholder = <span aria-hidden="true" className="block h-40 w-full max-w-md rounded-lg bg-slate-100 dark:bg-[#26262a]" />;
 
 function MarkdownContent({
   className = "",
@@ -96,12 +102,19 @@ function MarkdownContent({
       return <hr className={inverse ? "border-white/25" : "border-line"} />;
     },
     img({ alt = "", src = "" }) {
+      // Web images load through the desktop backend, so the site never sees this
+      // window's request. They open full size in a browser tab.
+      if (isExternalUrl(src)) return <Suspense fallback={imagePlaceholder}><WebImage alt={alt} src={websiteLinkHref(src)} /></Suspense>;
+      // A broken local image hides.
       return (
         <img
           alt={alt}
           className="max-h-[32rem] max-w-full rounded-lg object-contain"
           loading="lazy"
+          referrerPolicy="no-referrer"
           src={src}
+          title={alt || undefined}
+          onError={(event) => { event.currentTarget.hidden = true; }}
         />
       );
     },
@@ -117,7 +130,14 @@ function MarkdownContent({
       return <p className="whitespace-pre-wrap leading-6">{children}</p>;
     },
     pre({ children }) {
-      return <CodeBlock inverse={inverse}>{children}</CodeBlock>;
+      const language = /language-([\w+-]+)/.exec(children?.props?.className || "")?.[1];
+      if (!language) return <CodeBlock inverse={inverse}>{children}</CodeBlock>;
+      const plain = <CodeBlock inverse={inverse}>{children}</CodeBlock>;
+      return (
+        <Suspense fallback={plain}>
+          <RichCodeBlock code={textFromReactNode(children).replace(/\n$/, "")} fallback={plain} Frame={CodeBlock} inverse={inverse} language={language} />
+        </Suspense>
+      );
     },
     table({ children }) {
       return (
@@ -154,7 +174,7 @@ function MarkdownContent({
   );
 }
 
-function CodeBlock({ children, inverse }) {
+function CodeBlock({ children, copyText, inverse }) {
   const [copyState, setCopyState] = useState("idle");
   const resetTimerRef = useRef(null);
 
@@ -162,7 +182,7 @@ function CodeBlock({ children, inverse }) {
 
   async function copyCode() {
     try {
-      await navigator.clipboard.writeText(textFromReactNode(children).replace(/\n$/, ""));
+      await navigator.clipboard.writeText((copyText ?? textFromReactNode(children)).replace(/\n$/, ""));
       setCopyState("copied");
       clearTimeout(resetTimerRef.current);
       resetTimerRef.current = setTimeout(() => setCopyState("idle"), 2000);

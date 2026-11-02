@@ -2,17 +2,19 @@ import { runFocusedEdit, rememberEditingTarget } from "../lib/focusedEditing.js"
 import { textEditorSessions, flushCodeDrafts } from "../lib/codeEditorSessions.js";
 import { startGenerationJob } from "../lib/generationJobs.js";
 import { generateReportTheme, reportThemeContext, normalizeReportThemes } from "../lib/reportThemes.js";
-import { applyPhoneSettings, orderDeviceMessages, startDeviceWorkspaceSync } from "../lib/deviceWorkspaceSync.js";
+import { applyPhoneSettings, orderDeviceMessages } from "../lib/deviceMessages.js";
 import { fetchChatTurn } from "../lib/chatTransport.js";
 import { previousRemModelSelection, remModelSelection, remModelSwitchBanner } from "../lib/remModelSelection.js";
 import { pathKey, samePath, pathWithin, uniquePaths, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
-import { archiveRetentionDays, expiredArchivedThreads, inspectThreadScopes, cachedThreadScopes, organizeThreads, READ_THREAD_LIMIT, threadIndexEntry, threadScopeKey } from "../lib/threadActivity.js";
+import { archiveRetentionDays, expiredArchivedThreads, cachedThreadScopes, organizeThreads, threadIndexEntry } from "../lib/threadActivity.js";
 import { loadEditorSession, saveEditorSession, loadWorkflowDraft, saveWorkflowDraft } from "../lib/editorSession.js";
 import brandCompat from "../lib/brandCompat.js";
 import { createConversationCache } from "../lib/conversationCache.js";
 import { loadConversationMessages } from "../lib/conversationStorage.js";
-import { CONVERSATION_PAGE_SIZE, conversationRepository } from "../lib/conversationRepository.js";
+import { conversationRepository, pageStart } from "../lib/conversationRepository.js";
 import ThreadSearch from "../components/ThreadSearch.jsx";
+import { ThreadList as ThreadListView, ThreadSections as ThreadSectionsView } from "../components/ThreadSections.jsx";
+import { threadActionPatch } from "../lib/threadSelection.js";
 import ThreadHistoryMatch from "../components/ThreadHistoryMatch.jsx";
 import { createConversationArchiveScheduler } from "../lib/conversationArchive.js";
 import { startPolling, shareCancellable } from "../lib/refresh.js";
@@ -25,10 +27,9 @@ import RemToolsMenu from "../components/RemToolsMenu.jsx";
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
 import { DEFAULT_REM_RESOURCES, remResourceError, snapshotRemResources } from "../lib/remResources.js";
 import { copyForkAttachments, forkThreadHistory, isForkableMessage } from "../lib/forkThread.js";
-import { lazy, Suspense, memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
-  Archive,
   ArrowLeft,
   Check,
   ChevronDown,
@@ -47,7 +48,6 @@ import {
   Moon,
   MoreVertical,
   Paperclip,
-  Pin,
   Plus,
   PencilLine,
   RefreshCw,
@@ -56,7 +56,6 @@ import {
   Settings as SettingsIcon,
   Sun,
   Smartphone,
-  Trash2,
   Undo2,
   Upload,
   Waypoints,
@@ -66,7 +65,10 @@ import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
 import { connectRemHome, remThreadWasCleared, setRemHomeContext, sendManagedRemInstruction } from "../lib/remHomeStore.js";
 const DagCanvas = lazy(() => import("../components/DagCanvas.jsx"));
 const RunPreviewDialog = lazy(() => import("../components/RunPreviewDialog.jsx"));
+const WorkflowHistoryDialog = lazy(() => import("../components/WorkflowDialogs.jsx").then(module => ({ default: module.WorkflowHistoryDialog })));
+const ExportWorkflowDialog = lazy(() => import("../components/WorkflowDialogs.jsx").then(module => ({ default: module.ExportWorkflowDialog })));
 const WorkflowListItem = lazy(() => import("../components/WorkflowListItem.jsx"));
+const ChatSources = lazy(() => import("../components/ChatSources.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
 const OrganizationWorkspace = lazy(() => import("../components/OrganizationWorkspace.jsx"));
 const SecondBrainWorkspace = lazy(() => import("../components/SecondBrainWorkspace.jsx"));
@@ -79,8 +81,8 @@ import { resolveMarkdownFileLinkTarget, markdownFileLinkTarget } from "../lib/fi
 import MarkdownContent from "../components/MarkdownContent.jsx";
 import ChatComposer, { MessageAttachments } from "../components/ChatComposer.jsx";
 const SettingsPopover = lazy(() => import("../components/SettingsPopover.jsx"));
-import { defaultSettingsSnapshot, normalizeAppSettings } from "../lib/settings.js";
-import { resolvePluginActivity } from "../lib/plugins.js";
+import { commandSlotSettings, defaultSettingsSnapshot, normalizeAppSettings } from "../lib/settings.js";
+import { pluginAvailable, pluginEnabled, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
 import RaticodeMark from "../components/RaticodeMark.jsx";
 import UnifiedBottomPanel from "../components/UnifiedBottomPanel.jsx";
 import { useWorkflowRunRegistry } from "../lib/useWorkflowRunRegistry.js";
@@ -318,7 +320,15 @@ export async function discoverProjectWorkflows(projectRoot, { signal, onResolved
 
 export default function App() {
   const deviceSyncContext = useRef({});
-  useEffect(() => startDeviceWorkspaceSync({ getContext: () => deviceSyncContext.current, deleteThread: deletePhoneThread }), []);
+  useEffect(() => {
+    // The sync engine loads after startup; it is not needed to render the app.
+    let stop = null;
+    let closed = false;
+    import("../lib/deviceWorkspaceSync.js").then(({ startDeviceWorkspaceSync }) => {
+      if (!closed) stop = startDeviceWorkspaceSync({ getContext: () => deviceSyncContext.current, deleteThread: deletePhoneThread });
+    });
+    return () => { closed = true; stop?.(); };
+  }, []);
   const [settings, setSettings] = useState(loadAppSettings);
   const [initialStudioSession] = useState(loadStudioSession);
   const [initialEditorSession] = useState(loadEditorSession);
@@ -430,8 +440,11 @@ export default function App() {
       const workspace = window.goferDesktop?.workspace;
       const projects = [];
       for (const root of mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots)) {
-        if (workspace?.getPathInfo && !(await workspace.getPathInfo(root))?.isDirectory) continue;
-        await workspace?.trustProjectRoot?.(root);
+        // One unreadable or untrusted project is left out instead of stopping Rem.
+        try {
+          if (workspace?.getPathInfo && !(await workspace.getPathInfo(root))?.isDirectory) continue;
+          await workspace?.trustProjectRoot?.(root);
+        } catch { continue; }
         projects.push({ root, name: projectNameFromPath(root), grantId: workspace?.pathGrantForApi?.(root) });
       }
       const memory = settings.memory;
@@ -448,10 +461,10 @@ export default function App() {
       const roots = new Set(projects.map(project => project.root));
       const threads = loadAllChatThreads().filter(thread => thread.scopeMode === "global" || roots.has(thread.projectRoot))
         .map(thread => ({ id: thread.id, title: thread.title, projectRoot: thread.projectRoot, updatedAt: thread.updatedAt, archived: thread.archived }));
-      return { provider: settings.assistant.provider || "codex", model: settings.assistant.model || "cli-default", effort: settings.assistant.effort || "", projects, resources: selection, brain, conversation_archive_root: memory.archiveFolder || "", report_theme: reportThemeContext(memory), workspace_snapshot: { threads } };
+      return { provider: settings.assistant.provider || "codex", model: settings.assistant.model || "cli-default", effort: settings.assistant.effort || "", chat_provider: settings.assistant.chatProvider || "", chat_model: settings.assistant.chatModel || "", chat_effort: settings.assistant.chatEffort || "", projects, resources: selection, brain, conversation_archive_root: memory.archiveFolder || "", report_theme: reportThemeContext(memory), workspace_snapshot: { threads }, browser_target: settings.browser.agentBrowser, swarm_access: settings.assistant.swarmAccessEnabled !== false, command_slots: commandSlotSettings(settings.assistant) };
     });
     return () => setRemHomeContext(null);
-  }, [settings.assistant, settings.memory, activeProjectRoot, recentProjectRoots]);
+  }, [settings.assistant, settings.memory, settings.browser.agentBrowser, activeProjectRoot, recentProjectRoots]);
 
   // Task supervision keeps updating threads even while another workspace is open.
   useEffect(() => connectRemHome(), []);
@@ -459,15 +472,37 @@ export default function App() {
   const [lifecyclePrompt, setLifecyclePrompt] = useState(null);
   const [workflowClosePrompt, setWorkflowClosePrompt] = useState(null);
   const [activeCodeDocumentState, setActiveCodeDocumentState] = useState(null);
-  const { projectPaneVisible, setProjectPaneVisible, assistantPaneVisible, setAssistantPaneVisible, closeCompactPane } = useResponsivePanes();
+  const { projectPaneVisible, setProjectPaneVisible, assistantPaneVisible, setAssistantPaneVisible, closeCompactPane } = useResponsivePanes(settings.layout);
   const [assistantFocusRequest, setAssistantFocusRequest] = useState(0);
   useEffect(() => {
     const openRem = () => { setAssistantPaneVisible(true); setAssistantFocusRequest(current => current + 1); };
     const showPane = () => setAssistantPaneVisible(true);
     window.addEventListener("gofer:rem-context", openRem);
     window.addEventListener("gofer:rem-open-thread", showPane);
-    return () => { window.removeEventListener("gofer:rem-context", openRem); window.removeEventListener("gofer:rem-open-thread", showPane); };
+    window.addEventListener("gofer:rem-show-task", showPane);
+    return () => { window.removeEventListener("gofer:rem-context", openRem); window.removeEventListener("gofer:rem-open-thread", showPane); window.removeEventListener("gofer:rem-show-task", showPane); };
   }, [setAssistantPaneVisible]);
+  // "Ask Rem about this" attaches files to Rem's chat when the Rem plugin is on,
+  // otherwise to the open thread in the Rem pane.
+  const remPluginOn = pluginEnabled(settings.plugins, "rem");
+  useEffect(() => {
+    const receive = event => {
+      const paths = event.detail?.paths || [];
+      if (!paths.length) return;
+      if (!remPluginOn) {
+        setAssistantPaneVisible(true);
+        setAssistantFocusRequest(current => current + 1);
+        window.dispatchEvent(new CustomEvent("gofer:rem-thread-attach-files", { detail: { paths } }));
+        return;
+      }
+      setSelectedSwarm(null);
+      setSelectedOrganization(null);
+      setSidebarActivity("rem");
+      void import("../lib/remComposer.js").then(({ attachPathsToRemComposer }) => attachPathsToRemComposer(paths));
+    };
+    window.addEventListener("gofer:rem-attach-files", receive);
+    return () => window.removeEventListener("gofer:rem-attach-files", receive);
+  }, [remPluginOn, setAssistantPaneVisible]);
   const [dataDir, setDataDir] = useState("");
   const [loadState, setLoadState] = useState({ loading: true, error: "" });
   const [doctorState, setDoctorState] = useState({
@@ -606,6 +641,19 @@ export default function App() {
   const changeSetting = useCallback((path, value) => {
     setSettings((current) => updateSetting(current, path, value));
   }, []);
+
+  // Organizations also has a backend switch. When the backend has it off, the
+  // plugin's preview turns off so the feature appears only in Feature Preview.
+  const organizationsShown = pluginAvailable(settings.plugins, "organizations");
+  useEffect(() => {
+    if (!organizationsShown) return undefined;
+    let cancelled = false;
+    fetch(apiUrl("/organizations?projectRoot=&action=availability")).then((response) => response.json()).then((payload) => {
+      if (cancelled || payload?.result?.enabled !== false) return;
+      setSettings((current) => updateSetting(current, "plugins.preview", withPluginPreview(current.plugins, "organizations", false)));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [organizationsShown]);
   changeStudioViewRef.current = changeStudioView;
   runWorkflowNowRef.current = runWorkflowNow;
 
@@ -1165,11 +1213,10 @@ export default function App() {
     void Promise.resolve(window.goferBrowser?.setPolicy?.(browserPolicyFromSettings(settings.browser))).catch(() => {});
   }, [settings.browser]);
 
-  function askRemAboutPage({ url, title, selection = "", text = "" }) {
+  // The browser sends the page text with the element and selection first.
+  function askRemAboutPage({ url, title, text = "" }) {
     window.dispatchEvent(new CustomEvent("gofer:rem-context", { detail: {
-      mode: "ask", autoSend: false, webPage: true, path: url, title,
-      text: selection ? `Selected text:\n${selection}\n\nPage text:\n${text}` : text,
-      draft: selection ? "Explain the selected text from this web page." : "Summarize this web page and point out what matters.",
+      mode: "ask", autoSend: false, webPage: true, path: url, title, text, draft: "",
     } }));
   }
 
@@ -2840,15 +2887,27 @@ export default function App() {
 
   async function resumeWorkflowRunLog(workflowId, runId, options = {}) {
     if (!workflowId || !runId) return;
+    // Rattish runs resume as a new background run; steps cut off mid-run start over.
+    const resume = logState.runs?.find((run) => run.id === runId)?.resume;
+    const rerun = resume?.rerunNodes ?? [];
+    if (resume && rerun.length && !window.confirm(`Resume this run? These steps run again: ${rerun.join(", ")}.`)) return;
 
     setRunState({ running: true, workflowId, error: "", result: null, resumingRunId: runId });
     setLogState((current) => ({ ...current, loading: true, error: "" }));
     try {
-      const request = workflowResumeRequest(workflowId, runId, options);
+      const request = workflowResumeRequest(workflowId, runId, resume ? { background: true } : options);
       const response = await fetch(request.url, request.options);
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload.error || `Workflow API returned ${response.status}`);
+      }
+      if (["running", "queued"].includes(payload.run?.status)) {
+        setRunState({ running: false, workflowId, error: "", result: payload.run });
+        recordWorkflowRun(workflows.find((workflow) => workflow.id === workflowId) ?? { id: workflowId }, payload.run);
+        void runRegistry.refresh();
+        setLogState((current) => ({ ...current, loading: false }));
+        void loadRunLogs(workflowId);
+        return;
       }
       setRunState({ running: false, workflowId, error: "", result: payload.run });
       setLogState({
@@ -3705,7 +3764,7 @@ export default function App() {
         onLoadLatestLog={() => loadLatestLog(target.id)}
         onSelectRunLog={(runId) => { setPinnedRun({ workflowId: target.id, runId }); void loadRunLog(target.id, runId); }}
         onStopRunLog={(runId) => stopWorkflowRunLog(target.id, runId)}
-        onResumeRunLog={target.sourceFormat === "rattish" ? undefined : (runId, options) => resumeWorkflowRunLog(target.id, runId, options)}
+        onResumeRunLog={(runId, options) => resumeWorkflowRunLog(target.id, runId, options)}
         onReplayRunLog={(runId, triggerId) => replayWorkflowTriggerLog(target.id, runId, triggerId)}
         onSettingChange={changeSetting} onImportWorkflow={importWorkflow}
         onExportWorkflow={() => exportWorkflow(target)} onRunWorkflow={() => runWorkflowNow(target)}
@@ -3868,7 +3927,7 @@ export default function App() {
         onToggleTheme={() => changeSetting("appearance.theme", theme === "dark" ? "light" : "dark")}
         onMenuAction={runGlobalMenuAction}
       />
-      <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="studio-panes flex h-full min-h-0 min-w-0 flex-1 overflow-hidden" data-project-side={settings.layout.projectPaneSide} data-assistant-side={settings.layout.assistantPaneSide}>
       {<WorkflowSidebar
         activity={sidebarActivity}
         paneVisible={projectPaneVisible}
@@ -3916,7 +3975,6 @@ export default function App() {
           startPaneResize(event, {
             max: 420,
             min: 240,
-            side: "right",
             width: workflowPaneWidth,
             onResize: (width) => changeSetting("layout.workflowPaneWidth", width),
           })
@@ -4018,6 +4076,7 @@ export default function App() {
               onRattishDiscard={reloadActiveRattishDocument}
               onRattishSaved={refreshRattishAfterFileSave}
               onSettingChange={changeSetting}
+              terminalProjectRoot={panelProjectRoot}
             />
             </Suspense>
         </div>
@@ -4090,6 +4149,7 @@ export default function App() {
           memorySettings={settings.memory}
           agentBrowser={settings.browser.agentBrowser}
           assistantDefaults={settings.assistant}
+          onNewThreadResourcesChange={resources => changeSetting("assistant.resources", resources)}
           archiveRetention={settings.general.archivedThreadRetention}
           audioInputDeviceId={settings.devices.audioInputId}
           recentProjectRoots={recentProjectRoots}
@@ -4114,7 +4174,6 @@ export default function App() {
             startPaneResize(event, {
               max: 520,
               min: 300,
-              side: "left",
               width: chatPaneWidth,
               onResize: (width) => changeSetting("layout.assistantPaneWidth", width),
             })
@@ -4160,10 +4219,11 @@ export default function App() {
         onImport={importWorkflowFromDialog}
       />
 
-      <ExportWorkflowDialog
+      {exportDialog.workflow ? <Suspense fallback={null}><ExportWorkflowDialog
         directory={exportDialog.directory}
         error={exportDialog.error}
-        open={Boolean(exportDialog.workflow)}
+        filename={workflowBundleFilename(exportDialog.workflow)}
+        open
         saving={exportDialog.saving}
         workflow={exportDialog.workflow}
         onClose={() => {
@@ -4173,9 +4233,9 @@ export default function App() {
         }}
         onChooseFolder={chooseExportDirectory}
         onExport={confirmExportWorkflow}
-      />
+      /></Suspense> : null}
 
-      {historyState.open && activeWorkflow ? (
+      {historyState.open && activeWorkflow ? <Suspense fallback={null}>
         <WorkflowHistoryDialog
           diff={historyState.diff}
           error={historyState.error}
@@ -4189,7 +4249,7 @@ export default function App() {
             restoreWorkflowRevision(activeWorkflow.id, revisionId, options)
           }
         />
-      ) : null}
+      </Suspense> : null}
       <TextZoomBar value={textZoom} />
     </main>
   );
@@ -4343,12 +4403,15 @@ function handlePaneResizeKeyDown(event, options) {
 
 // Resize the pane element directly while dragging and save the width once on
 // release. Saving on every move re-rendered the whole app each pointer event.
-function startPaneResize(event, { max, min, onResize, side, width }) {
+// Panes can dock to either edge, so the grabbed edge decides which way grows.
+function startPaneResize(event, { max, min, onResize, width }) {
   event.stopPropagation();
 
   const handle = event.currentTarget;
   const pane = handle.parentElement;
   const startX = event.clientX;
+  const bounds = pane.getBoundingClientRect();
+  const side = startX < bounds.left + bounds.width / 2 ? "left" : "right";
   let nextWidth = width;
 
   trackPointerDrag(event, {
@@ -4611,7 +4674,7 @@ export function workflowRunRequest(
 export function workflowResumeRequest(
   workflowId,
   runId,
-  { force = false, fromNode = null, onlyNode = null, skipCache = false, triggerContext = {} } = {},
+  { background, force = false, fromNode = null, onlyNode = null, skipCache = false, triggerContext = {} } = {},
 ) {
   return {
     url: apiUrl(
@@ -4622,7 +4685,7 @@ export function workflowResumeRequest(
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ force, fromNode, onlyNode, skipCache, triggerContext }),
+      body: JSON.stringify(background ? { background } : { force, fromNode, onlyNode, skipCache, triggerContext }),
     },
   };
 }
@@ -4661,12 +4724,16 @@ export function workflowLogUrls(workflowId, runId = null) {
   };
 }
 
-export function chatStreamRequestBody({ effort, provider, model, messages, workflow, permissionMode, conversationId, turnId, resetSession }) {
+export function chatStreamRequestBody({ effort, provider, model, messages, workflow, permissionMode, conversationId, turnId, resetSession, forkedFrom, machine }) {
   return {
+    // A paired desktop that runs this thread instead of this computer.
+    ...(machine ? { machine } : {}),
     provider,
     model,
     ...(conversationId && turnId ? { conversationId, turnId } : {}),
     ...(resetSession === true ? { resetSession: true } : {}),
+    // Lets the backend copy the parent's provider session instead of re-sending history.
+    ...(forkedFrom ? { forkedFrom } : {}),
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
     messages,
@@ -4715,15 +4782,18 @@ function resolveDisplayPath(pathValue = "", basePath = "") {
   return `${String(basePath).replace(/[\\/]+$/, "")}${separator}${value.replace(/^[\\/]+/, "")}`;
 }
 
-export function useResponsivePanes() {
-  const [compact, setCompact] = useState(() => (globalThis.window?.innerWidth ?? 1280) < 1000);
+// Startup visibility and the compact width come from Settings > Layout.
+export function useResponsivePanes(layout = {}) {
+  const [windowWidth, setWindowWidth] = useState(() => globalThis.window?.innerWidth ?? 1280);
+  const compactWidth = layout.compactWidth ?? 1000;
+  const compact = windowWidth < compactWidth;
   const compactRef = useRef(compact);
   compactRef.current = compact;
-  const [desktopProjectVisible, setDesktopProjectVisible] = useState(true);
-  const [desktopAssistantVisible, setDesktopAssistantVisible] = useState(true);
+  const [desktopProjectVisible, setDesktopProjectVisible] = useState(layout.projectPaneAtStartup !== false);
+  const [desktopAssistantVisible, setDesktopAssistantVisible] = useState(layout.assistantPaneAtStartup !== false);
   const [compactPane, setCompactPane] = useState("");
   useEffect(() => {
-    const resize = () => setCompact(window.innerWidth < 1000);
+    const resize = () => setWindowWidth(window.innerWidth);
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, []);
@@ -5305,7 +5375,7 @@ export function loadRecentCodePaths(storage = globalThis.window?.localStorage) {
 
 export function rememberRecentFile(current = [], path = "") {
   const nextPath = typeof path === "string" ? path.trim() : "";
-  if (!nextPath || /^(raticode-browser:|raticode-commit-diff:)/.test(nextPath)) return current;
+  if (!nextPath || /^(raticode-browser:|raticode-commit-diff:|raticode-terminal:)/.test(nextPath)) return current;
   return [nextPath, ...current.filter((candidate) => candidate !== nextPath)].slice(0, 8);
 }
 
@@ -5445,7 +5515,7 @@ export function scopeChatThreadToProject(
 
 export function editorFileReferences(paths = [], workflowTabs = {}) {
   return [...new Set(paths.map((path) => workflowTabs[path]?.sourcePath || path)
-    .filter((path) => path && !/^(workflow-graph:|raticode-browser:|browser:|raticode-commit-diff:)/.test(path)))];
+    .filter((path) => path && !/^(workflow-graph:|raticode-browser:|browser:|raticode-commit-diff:|raticode-terminal:)/.test(path)))];
 }
 
 export function chatWorkflowContextForThread(thread, workflows = [], openFiles = []) {
@@ -6091,138 +6161,6 @@ function updateButtonTitle(updateState) {
   return "Download, install, and restart Raticode";
 }
 
-export function WorkflowHistoryDialog({
-  diff,
-  error,
-  loading,
-  revisions,
-  workflow,
-  onClose,
-  onPreview,
-  onRefresh,
-  onRestore,
-}) {
-  return (
-    <Dialog
-      description={`${workflow.name} revision history`}
-      onClose={onClose}
-      panelClassName="flex max-h-[86vh] w-full max-w-[920px] flex-col rounded-lg border border-line bg-white shadow-panel"
-      panelProps={{ "aria-busy": loading || undefined }}
-      title="Workflow history"
-    >
-        <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold">Workflow history</h2>
-            <p className="truncate text-xs text-muted">
-              {workflow.name} · {workflow.id}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              className="grid h-8 w-8 place-items-center rounded-lg border border-line text-muted transition hover:bg-slate-50 hover:text-ink"
-              title="Refresh history"
-              type="button"
-              onClick={onRefresh}
-            >
-              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-            </button>
-            <button
-              className="grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-              title="Close"
-              type="button"
-              onClick={onClose}
-            >
-              <X size={17} />
-            </button>
-          </div>
-        </div>
-
-        <div className="grid min-h-0 flex-1 grid-cols-[340px_minmax(0,1fr)] overflow-hidden">
-          <div className="workflow-scrollbar min-h-0 overflow-y-auto border-r border-line">
-            {error ? (
-              <div className="border-b border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">
-                {error}
-              </div>
-            ) : null}
-            {loading && !revisions.length ? (
-              <div className="px-4 py-6 text-sm text-muted">Loading history...</div>
-            ) : null}
-            {!loading && !revisions.length ? (
-              <div className="px-4 py-6 text-sm text-muted">No revisions found.</div>
-            ) : null}
-            {revisions.map((revision) => (
-              <div key={revision.revisionId} className="border-b border-line px-4 py-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-ink">
-                      {formatRevisionDate(revision.createdAt)}
-                    </p>
-                    <p className="mt-0.5 text-xs text-muted">
-                      {revision.source} · {revision.author}
-                    </p>
-                  </div>
-                  <button
-                    className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] font-medium text-muted transition hover:bg-slate-50 hover:text-ink"
-                    type="button"
-                    onClick={() => onPreview(revision.revisionId)}
-                  >
-                    Diff
-                  </button>
-                </div>
-                <ul className="mt-2 space-y-1 text-xs text-slate-600">
-                  {(revision.summary ?? []).slice(0, 4).map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-                <div className="mt-3 flex gap-2">
-                  <button
-                    className="rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
-                    type="button"
-                    onClick={() => onRestore(revision.revisionId)}
-                  >
-                    Restore
-                  </button>
-                  <button
-                    className="rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
-                    type="button"
-                    onClick={() => onRestore(revision.revisionId, { asCopy: true })}
-                  >
-                    Restore as copy
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="min-h-0 overflow-hidden">
-            {diff ? (
-              <div className="flex h-full flex-col">
-                <div className="border-b border-line px-4 py-3">
-                  <p className="text-sm font-semibold">Revision diff</p>
-                  <p className="mt-1 text-xs text-muted">
-                    {(diff.summary ?? []).join("; ") || "No material changes"}
-                  </p>
-                </div>
-                <pre className="workflow-scrollbar min-h-0 flex-1 overflow-auto bg-[#0f172a] p-4 text-xs leading-5 text-slate-100">
-                  {diff.tomlDiff || "No TOML diff."}
-                </pre>
-              </div>
-            ) : (
-              <div className="grid h-full place-items-center px-8 text-center text-sm text-muted">
-                Select a revision diff to inspect TOML and graph-level changes.
-              </div>
-            )}
-          </div>
-        </div>
-    </Dialog>
-  );
-}
-
-function formatRevisionDate(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
-
 export function ChatPane({
   swarmProjectPaths = [],
   activeWorkflowId,
@@ -6233,6 +6171,7 @@ export function ChatPane({
   agentBrowser = DEFAULT_APP_SETTINGS.browser.agentBrowser,
   audioInputDeviceId = "default",
   composerFocusRequest = 0,
+  onNewThreadResourcesChange,
   onOpenMarkdownLink,
   onOpenFile,
   onResponseComplete,
@@ -6262,6 +6201,13 @@ export function ChatPane({
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [providerId, setProviderId] = useState(assistantDefaults.provider || "codex");
   const [permissionsByProvider, setPermissionsByProvider] = useState({});
+  const [machines, setMachines] = useState([]);
+  const [draftMachine, setDraftMachine] = useState("");
+  useEffect(() => {
+    const update = event => setMachines(Array.isArray(event.detail) ? event.detail : []);
+    window.addEventListener("gofer:device-machines", update);
+    return () => window.removeEventListener("gofer:device-machines", update);
+  }, []);
   const [model, setModel] = useState(assistantDefaults.model || "");
   const [effort, setEffort] = useState(assistantDefaults.effort || "");
   const {
@@ -6330,19 +6276,25 @@ export function ChatPane({
   useEffect(() => { persistChatThreads(threads); }, [threads]);
   useEffect(() => {
     const receive = ({ detail }) => {
-      const { messages, running, activeTurn } = detail;
+      const { messages, running, activeTurn, completed } = detail;
       let { metadata } = detail;
       if (remThreadWasCleared(metadata.id)) return;
       if (!chatAbortControllersRef.current[metadata.id] && typeof running === "boolean") {
-        // A turn started from another device ends unread unless it is open here.
-        if (!running && deviceRunningThreadsRef.current.has(metadata.id)) {
-          metadata = { ...metadata, ...threadReadPatch(activeThreadIdRef.current !== metadata.id) };
+        // A turn started elsewhere, or a Rem task that finished while this window
+        // wasn't watching, ends unread unless it is open here.
+        if (!running && (completed || deviceRunningThreadsRef.current.has(metadata.id))) {
+          metadata = { ...metadata, ...threadReadPatch(activeThreadIdRef.current !== metadata.id), archived: false };
         }
         if (running) deviceRunningThreadsRef.current.add(metadata.id);
         else deviceRunningThreadsRef.current.delete(metadata.id);
       }
       setThreads(current => current.some(t => t.id === metadata.id)
         ? current.map(t => t.id === metadata.id ? metadata : t) : [metadata, ...current]);
+      // Read on the phone: the finished-reply marker here goes too.
+      if (metadata.unread === false) {
+        setChatStateByThread(current => current[metadata.id]?.hasNewResponse
+          ? { ...current, [metadata.id]: { ...current[metadata.id], hasNewResponse: false } } : current);
+      }
       if (activeThreadIdRef.current === metadata.id) {
         setProviderId(metadata.provider || "codex");
         setModel(metadata.model || "");
@@ -6378,6 +6330,7 @@ export function ChatPane({
   const [backgroundChatAnnouncement, setBackgroundChatAnnouncement] = useState("");
   const [liveTurnByThread, setLiveTurnByThread] = useState({});
   const [expandedThoughtGroups, setExpandedThoughtGroups] = useState({});
+  const [lazyThoughts, setLazyThoughts] = useState({});
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [resourcesOpen, setResourcesOpen] = useState(false);
@@ -6514,13 +6467,21 @@ export function ChatPane({
     const start = historyState.threadId === activeThreadId && historyState.firstMessageId
       ? messages.findIndex(message => message.id === historyState.firstMessageId) : -1;
     const emptyThreadOpened = historyState.threadId === activeThreadId && !historyState.loading && !historyState.firstMessageId;
-    return repository.durable ? messages.slice(start >= 0 ? start : emptyThreadOpened ? 0 : -CONVERSATION_PAGE_SIZE) : messages;
+    return repository.durable ? messages.slice(start >= 0 ? start : emptyThreadOpened ? 0 : pageStart(messages)) : messages;
   }, [messages, historyState.threadId, historyState.firstMessageId, historyState.loading, activeThreadId, repository.durable]);
-  const chatItems = useMemo(() => buildChatItems(orderDeviceMessages(visibleMessages)), [visibleMessages]);
+  const thoughtStubs = historyState.threadId === activeThreadId ? historyState.thoughts : undefined;
+  const chatItems = useMemo(() => {
+    // Earlier thoughts stay in storage until someone expands their placeholder.
+    const ordered = orderDeviceMessages(visibleMessages);
+    const shown = new Set(ordered.map(message => message.id));
+    const stubs = new Map((thoughtStubs || []).filter(stub => !stub.ids.some(id => shown.has(id))).map(stub => [stub.anchorId, stub]));
+    return buildChatItems(stubs.size ? ordered.flatMap(message => stubs.has(message.id) ? [{ id: stubs.get(message.id).id, kind: "thought", lazy: stubs.get(message.id) }, message] : message) : ordered);
+  }, [visibleMessages, thoughtStubs]);
   const conversationItems = useMemo(() => {
-    if (!liveTurn || chatItems.some((item) => item.message?.id === liveTurn.id)) return chatItems;
-    return [...chatItems, { type: "message", message: liveTurn }];
-  }, [chatItems, liveTurn]);
+    const items = chatState.sending ? withLiveReply(chatItems) : chatItems;
+    if (!liveTurn || items.some((item) => item.message?.id === liveTurn.id)) return items;
+    return [...items, { type: "message", message: liveTurn }];
+  }, [chatItems, liveTurn, chatState.sending]);
   const latestUserMessageId = useMemo(
     () => messages.findLast((message) => message.role === "user")?.id ?? null,
     [messages],
@@ -6545,7 +6506,8 @@ export function ChatPane({
         chatPinnedToBottomRef.current = false;
       }
       conversationCacheRef.current.hydrate(threadId, page.messages, { recent: before === Infinity });
-      setHistoryState({ threadId, loading: false, hasMore: page.hasMore, before: page.before, firstMessageId: page.messages[0]?.id, error: "" });
+      setHistoryState(current => ({ threadId, loading: false, hasMore: page.hasMore, before: page.before, firstMessageId: page.messages[0]?.id, error: "",
+        thoughts: [...page.thoughts, ...(before === Infinity ? [] : current.thoughts || [])] }));
     } catch (error) {
       if (generation === historyRequestRef.current) setHistoryState(current => ({ ...current, loading: false, error: error.message || "History could not be loaded." }));
     } finally { if (generation === historyRequestRef.current) historyLoadingRef.current = false; }
@@ -6626,7 +6588,7 @@ export function ChatPane({
     prependScrollRef.current = null;
     setHistoryState({ threadId: activeThreadId, loading: repository.durable, hasMore: false, before: Infinity, error: "" });
     if (repository.durable) void loadHistoryPage(activeThreadId, Infinity);
-    if (repository.durable && !chatAbortControllersRef.current[activeThreadId]) conversationCacheRef.current.trim(activeThreadId, CONVERSATION_PAGE_SIZE);
+    if (repository.durable && !chatAbortControllersRef.current[activeThreadId]) conversationCacheRef.current.trim(activeThreadId);
     conversationCacheRef.current.get(activeThreadId);
     conversationCacheRef.current.activate([activeThreadId, ...Object.keys(chatAbortControllersRef.current)]);
     setDraft(draftsByThreadRef.current[activeThreadId || "new-thread"] || "");
@@ -6635,6 +6597,7 @@ export function ChatPane({
     dragDepthRef.current = 0;
     setDraggingFiles(false);
     setExpandedThoughtGroups({});
+    setLazyThoughts({});
     setConversationMenuOpen(false);
     setScopeMenuOpen(false);
   }, [activeThreadId, loadHistoryPage, repository.durable]);
@@ -6690,10 +6653,34 @@ export function ChatPane({
     addAttachments(event.dataTransfer.files);
   }
 
+  // Loaded on mount so a paste can check for copied files synchronously.
+  const fileAttachmentsRef = useRef(null);
+  useEffect(() => { void import("../lib/fileAttachments.js").then(module => { fileAttachmentsRef.current = module; }); }, []);
+  function attachFilePaths(paths) {
+    import("../lib/fileAttachments.js").then(({ readFileAttachments }) => readFileAttachments(paths))
+      .then(files => addAttachmentsRef.current(files), error => setAttachmentError(error.message || "Could not attach the file."));
+  }
+  const addAttachmentsRef = useRef(addAttachments);
+  addAttachmentsRef.current = addAttachments;
+  const attachFilePathsRef = useRef(attachFilePaths);
+  attachFilePathsRef.current = attachFilePaths;
+  useEffect(() => {
+    const receive = event => { if (event.detail?.paths?.length) attachFilePathsRef.current(event.detail.paths); };
+    window.addEventListener("gofer:rem-thread-attach-files", receive);
+    return () => window.removeEventListener("gofer:rem-thread-attach-files", receive);
+  }, []);
+
   function handleClipboardPaste(event) {
     const files = clipboardAttachmentFiles(event.clipboardData);
-    if (chatState.sending && !files.length) return;
     const pastedText = event.clipboardData?.getData?.("text/plain") || "";
+    // Files copied in Raticode paste as attachments instead of their paths.
+    const copiedPaths = files.length ? [] : fileAttachmentsRef.current?.copiedFilePaths(pastedText) || [];
+    if (copiedPaths.length) {
+      event.preventDefault();
+      attachFilePaths(copiedPaths);
+      return;
+    }
+    if (chatState.sending && !files.length) return;
     const textFile = largePasteFile(pastedText);
     if (!files.length && !textFile) return;
     event.preventDefault();
@@ -6711,9 +6698,15 @@ export function ChatPane({
   const openScopedFile = useCallback(path => {
     openFileRef.current?.(path, scopedProjectRoot);
   }, [scopedProjectRoot]);
-  const toggleThoughtGroup = useCallback((id, replyId, expanded) => {
+  const toggleThoughtGroup = useCallback(async (id, replyId, expanded, lazy) => {
     setExpandedThoughtGroups(current => ({ ...current, [id]: { replyId, expanded: !expanded } }));
-  }, []);
+    if (!lazy) return;
+    const threadId = activeThreadIdRef.current;
+    const loaded = value => activeThreadIdRef.current === threadId && setLazyThoughts(current => ({ ...current, [lazy.id]: value }));
+    loaded({});
+    try { loaded({ thoughts: buildChatItems(await repository.thoughts(threadId, lazy.ids))[0]?.thoughts || [] }); }
+    catch (error) { loaded({ error: error.message || "Thoughts could not be loaded." }); }
+  }, [repository]);
 
   useEffect(() => {
     if (!conversationMenuOpen || renamingThread) return undefined;
@@ -6863,6 +6856,15 @@ export function ChatPane({
     setChatAnnouncementByThread((current) => ({ ...current, [targetThreadId]: "" }));
     let contextBoundaryId = userMessage.id;
     const thoughtGroupId = uniqueClientId();
+    // Web pages Rem reads become source cards under its reply.
+    const sourceTools = import("../lib/chatSources.js").catch(() => null);
+    function attachTurnSources(body) {
+      void sourceTools.then(tools => tools && updateThreadMessages(targetThreadId, current => {
+        const index = current.findLastIndex(message => message.kind === "final" && message.body === body);
+        const sources = index < 0 ? [] : tools.collectTurnSources(current.filter(message => message.groupId === thoughtGroupId), body);
+        return sources.length ? current.with(index, { ...current[index], sources }) : current;
+      }));
+    }
     let turnSummaryReceived = false;
     let resumeAvailable = false;
     function appendAssistantMessage(body, kind = "final", extra = {}) {
@@ -6929,13 +6931,16 @@ export function ChatPane({
       const response = await fetchChatTurn(chatStreamRequestBody({
           conversationId: targetThreadId,
           resetSession: Boolean(originalMessage),
+          forkedFrom: targetThread.forkedFromThreadId,
           turnId: activeTurn.turnId,
           permissionMode: turnPermission,
+          machine: targetThread.machine,
           provider: turnProvider,
           model: turnModel,
           effort: turnEffort || undefined,
           messages: requestMessages
-            .filter((message) => !["turn-summary", "error"].includes(message.kind))
+            // Narration and tool steps stay visible but are not re-sent; final replies are.
+            .filter((message) => !["turn-summary", "error", "thought"].includes(message.kind))
             .map(chatMessageForRequest),
           workflow: {
             ...workflowContext,
@@ -6954,8 +6959,11 @@ export function ChatPane({
             remSecondBrain: selectedBrainConfig,
             remResources: turnResources,
             remBrowser: { target: agentBrowser },
+            remStreamText: true,
             id: `workflow-assistant:${targetThreadId}`,
             chatThreadId: targetThreadId,
+            // Names this thread when its tests wait behind another thread's.
+            chatThreadTitle: targetThreadTitle,
           },
         }), { signal: abortController.signal });
       if (!response.ok) {
@@ -7063,6 +7071,7 @@ export function ChatPane({
               const body = event.message?.body ?? "";
               if (body.trim()) {
                 appendAssistantMessage(body, "final");
+                attachTurnSources(body);
               }
               appendTurnSummary(event);
               setLiveTurnByThread((current) => ({ ...current, [targetThreadId]: null }));
@@ -7155,7 +7164,7 @@ export function ChatPane({
       if (chatAbortControllersRef.current[targetThreadId] === abortController) {
         if (!deletedChatThreadIdsRef.current.has(targetThreadId)) {
           setThreads(current => bumpChatThread(current, targetThreadId, undefined,
-            threadReadPatch(activeThreadIdRef.current !== targetThreadId)));
+            { ...threadReadPatch(activeThreadIdRef.current !== targetThreadId), archived: false }));
         }
         delete chatAbortControllersRef.current[targetThreadId];
         delete activeChatTurnsRef.current[targetThreadId];
@@ -7339,6 +7348,7 @@ export function ChatPane({
         provider: providerId, model, effort,
         resources: snapshotRemResources(homeResources),
         permissionsByProvider: { ...permissionsByProvider, [providerId]: permissionMode },
+        ...(draftMachine && !options.parent ? { machine: draftMachine } : {}),
         createdAt: now,
         updatedAt: now,
       },
@@ -7628,11 +7638,37 @@ export function ChatPane({
   }
 
   function archiveThread(threadId) {
-    updateThreadOrganization(threadId, { archived: true, pinned: false });
+    applyThreadsAction("archive", [threadId]);
   }
 
   function pinThread(threadId, pinned) {
-    updateThreadOrganization(threadId, { pinned, archived: false });
+    applyThreadsAction(pinned ? "pin" : "unpin", [threadId]);
+  }
+
+  // One change for every selected thread. Reading or archiving also clears the
+  // window's own finished-reply marker, which would otherwise keep it unread.
+  async function applyThreadsAction(action, ids) {
+    if (!ids.length) return;
+    if (action === "delete") {
+      if (!window.confirm(ids.length === 1
+        ? `Delete thread "${(threads.find(item => item.id === ids[0]) || loadChatThread(ids[0]))?.title || "Untitled"}"? This cannot be undone.`
+        : `Delete ${ids.length} threads? This cannot be undone.`)) return;
+      for (const id of ids) if (!await removeThread(id)) break;
+      return;
+    }
+    const patch = threadActionPatch(action);
+    if (!patch) return;
+    const chosen = new Set(ids);
+    setThreads(current => {
+      const known = new Set(current.map(item => item.id));
+      const stored = ids.filter(id => !known.has(id)).map(loadChatThread).filter(Boolean);
+      return [...current, ...stored].map(item => chosen.has(item.id) ? { ...item, ...patch } : item);
+    });
+    if (patch.unread === false) {
+      setChatStateByThread(current => ids.some(id => current[id]?.hasNewResponse)
+        ? Object.fromEntries(Object.entries(current).map(([id, state]) => [id, chosen.has(id) ? { ...state, hasNewResponse: false } : state]))
+        : current);
+    }
   }
 
   function renameThread(threadId, title) {
@@ -7890,6 +7926,7 @@ export function ChatPane({
                 onPin={pinThread}
                 onRename={setRenamingThread}
                 onDelete={deleteThread}
+                onThreadsAction={applyThreadsAction}
                 onClearArchive={clearArchivedThreads}
                 archiveRetention={archiveRetention}
                 onOpen={openThread}
@@ -7936,6 +7973,7 @@ export function ChatPane({
                 onPin={pinThread}
                 onRename={setRenamingThread}
                 onDelete={deleteThread}
+                onThreadsAction={applyThreadsAction}
                 onClearArchive={clearArchivedThreads}
                 archiveRetention={archiveRetention}
                 onOpen={openThread}
@@ -7968,6 +8006,8 @@ export function ChatPane({
                   sourcePath={assistantMarkdownSourcePath(scopedProjectRoot)}
                   onOpenFile={openScopedFile}
                   thoughts={item.thoughts}
+                  lazy={item.lazy}
+                  loaded={item.lazy && lazyThoughts[item.lazy.id]}
                   groupId={item.id}
                   onToggle={toggleThoughtGroup}
                 />
@@ -8006,7 +8046,12 @@ export function ChatPane({
             sending={chatState.sending}
             value={activeThread ? activeThread.resources ?? assistantDefaults.resources ?? DEFAULT_REM_RESOURCES : homeResources}
             memory={memorySettings}
-            onChange={(resources) => activeThread ? updateThreadConfig({ resources }) : setNewThreadResources(resources)}
+            onChange={(resources) => {
+              if (activeThread) updateThreadConfig({ resources });
+              // New-thread tools are the saved Rem defaults, so they survive restarts.
+              else if (onNewThreadResourcesChange) onNewThreadResourcesChange(resources);
+              else setNewThreadResources(resources);
+            }}
           />
           <ProviderModelEffortFields
             capabilities={providers}
@@ -8040,6 +8085,10 @@ export function ChatPane({
             permissionMode={permissionMode}
             permissionOptions={permissionOptions}
             onPermissionModeChange={selectPermission}
+            machines={machines}
+            machine={activeThread ? activeThread.machine || "" : draftMachine}
+            machineLocked={Boolean(activeThread && messages.length)}
+            onMachineChange={value => activeThread ? updateThreadConfig({ machine: value || undefined }) : setDraftMachine(value)}
             attachments={attachments}
             attachmentError={attachmentError}
             attachmentWarning={attachmentWarning?.text || ""}
@@ -8064,109 +8113,13 @@ export function ChatPane({
   );
 }
 
-export function ThreadSections({ threads, activityByThread = {}, launchedThreadId, onLaunchAnimationEnd, onClearArchive, archiveRetention = "never", ...props }) {
-  const [runningOpen, setRunningOpen] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
-  const [archiveCount, setArchiveCount] = useState(10);
-  const [scopeState, setScopeState] = useState(() => cachedThreadScopes(window.goferDesktop?.workspace));
-  const entries = useMemo(() => [...new Map([...chatThreadIndex(), ...threads.map(threadIndexEntry)].map(entry => [entry.id, entry])).values()].filter(entry => entry.managedRole !== "verify"), [threads]);
-  const scopeKey = threadScopeKey(entries);
-  useEffect(() => {
-    let cancelled = false;
-    let running = false;
-    const refresh = async (force = false) => {
-      if (running) return;
-      running = true;
-      const result = await inspectThreadScopes(JSON.parse(scopeKey), window.goferDesktop?.workspace, { force: Boolean(force) });
-      running = false;
-      if (!cancelled) setScopeState(result);
-    };
-    void refresh();
-    const timer = window.setInterval(() => refresh(true), 60000);
-    window.addEventListener("focus", refresh);
-    window.addEventListener("gofer:git-files-changed", refresh);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener("focus", refresh);
-      window.removeEventListener("gofer:git-files-changed", refresh);
-    };
-  }, [scopeKey]);
-  const activityIds = state => new Set(Object.keys(activityByThread).filter(id => state(activityByThread[id])));
-  const groups = organizeThreads(entries, {
-    running: activityIds(state => state?.sending || state?.deviceRunning),
-    unread: activityIds(state => state?.hasNewResponse),
-    ...scopeState,
-  });
-  const loaded = useMemo(() => new Map(threads.map(thread => [thread.id, thread])), [threads]);
-  const rowCache = useRef(new Map());
-  const loadThread = entry => {
-    if (loaded.has(entry.id)) return loaded.get(entry.id);
-    const cached = rowCache.current.get(entry.id);
-    if (cached?.entry === entry) return cached.thread;
-    const thread = loadChatThread(entry.id);
-    rowCache.current.set(entry.id, { entry, thread });
-    return thread;
-  };
-  const listProps = { ...props, activityByThread, launchedThreadId, onLaunchAnimationEnd, loadThread, sort: false };
-  const runningLaunch = !runningOpen && groups.running.some(entry => entry.id === launchedThreadId);
-  const clearable = groups.archived.filter(entry => !entry.managedRole);
-  const visibleCount = groups.pinned.length + groups.unread.length + groups.read.length;
-  return <div className="rem-thread-sections">
-    {groups.pinned.length ? <ThreadGroup label="Pinned" count={groups.pinned.length} icon={<Pin aria-hidden="true" size={12} />}>
-      <ThreadList {...listProps} threads={groups.pinned} />
-    </ThreadGroup> : null}
-    {groups.unread.length ? <ThreadGroup label="Unread" count={groups.unread.length}
-      icon={<span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-blue-500" />}>
-      <ThreadList {...listProps} threads={groups.unread} />
-    </ThreadGroup> : null}
-    {groups.read.length || !visibleCount ? <ThreadGroup label="Read" count={groups.read.length} icon={<Check aria-hidden="true" size={12} />}
-      description={`Your ${READ_THREAD_LIMIT} most recently read threads. Older ones move to the archive.`}>
-      <ThreadList {...listProps} threads={groups.read} pageSize={READ_THREAD_LIMIT}
-        emptyText={groups.running.length || groups.archived.length ? "No read threads." : "No thread history yet."} />
-    </ThreadGroup> : null}
-    {groups.running.length ? <ThreadGroup label="Running" count={groups.running.length} open={runningOpen}
-      launching={runningLaunch} onAnimationEnd={runningLaunch ? onLaunchAnimationEnd : undefined}
-      icon={<Loader2 aria-hidden="true" className="text-brand motion-safe:animate-spin" size={12} />}
-      onToggle={() => setRunningOpen(open => !open)}>
-      <ThreadList {...listProps} threads={groups.running} />
-    </ThreadGroup> : null}
-    <ThreadGroup label="Archived" count={groups.archived.length} open={archiveOpen}
-      icon={<Archive aria-hidden="true" size={12} />}
-      onToggle={() => { setArchiveOpen(open => !open); setArchiveCount(10); }}>
-      {groups.archived.length ? <div className="rem-archive-toolbar">
-        <span>{archiveRetentionDays(archiveRetention) ? `Deleted after ${archiveRetentionDays(archiveRetention)} days without activity` : "Kept until you clear them"}</span>
-        {clearable.length && onClearArchive ? <button type="button"
-          className="flex h-6 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-medium text-muted hover:bg-red-50 hover:text-red-600 focus-visible:outline-brand"
-          title="Delete every archived thread" aria-label={`Clear archive, ${clearable.length} ${clearable.length === 1 ? "thread" : "threads"}`}
-          onClick={() => onClearArchive(clearable)}>
-          <Trash2 aria-hidden="true" size={12} />Clear archive
-        </button> : null}
-      </div> : null}
-      <ThreadList {...listProps} archived key="archive" threads={groups.archived.slice(0, archiveCount)}
-        pageSize={10} totalCount={groups.archived.length} onLoadOlder={setArchiveCount} emptyText="The archive is empty." />
-    </ThreadGroup>
-  </div>;
+// The thread list lives in its own chunk; App supplies its history helpers.
+export function ThreadSections(props) {
+  return <ThreadSectionsView threadIndex={chatThreadIndex} loadStoredThread={loadChatThread} formatDate={formatThreadDate} {...props} />;
 }
 
-// Collapsible groups keep their header visible so their count and status stay readable.
-function ThreadGroup({ label, count, icon = null, description, open, onToggle, launching = false, onAnimationEnd, children }) {
-  const collapsible = Boolean(onToggle);
-  const bodyId = useId();
-  const heading = <>
-    <span className="grid h-3.5 w-3.5 shrink-0 place-items-center">{icon}</span>
-    <span>{label}</span>
-    <span className="rem-thread-count">{count}<span className="sr-only">{count === 1 ? " thread" : " threads"}</span></span>
-    {collapsible ? <ChevronRight aria-hidden="true" size={13} className={`ml-auto shrink-0 transition-transform ${open ? "rotate-90" : ""}`} /> : null}
-  </>;
-  return <section aria-label={`${label} threads`} className="rem-thread-group" data-thread-group={label.toLowerCase()}>
-    <div className={`rem-thread-group-header ${launching ? "rem-thread-launch" : ""}`} onAnimationEnd={onAnimationEnd}>
-      {collapsible
-        ? <button type="button" aria-expanded={Boolean(open)} aria-controls={bodyId} className="rem-thread-group-toggle" onClick={onToggle}>{heading}</button>
-        : <h3 className="rem-thread-group-title" title={description}>{heading}</h3>}
-    </div>
-    {!collapsible || open ? <div id={bodyId}>{children}</div> : null}
-  </section>;
+export function ThreadList(props) {
+  return <ThreadListView formatDate={formatThreadDate} {...props} />;
 }
 
 function ThreadRenameDialog({ thread, onClose, onRename }) {
@@ -8198,120 +8151,6 @@ function ThreadRenameDialog({ thread, onClose, onRename }) {
   </Dialog>;
 }
 
-function ThreadActions({ thread, onPin, onRename, onDelete }) {
-  const [open, setOpen] = useState(false);
-  const root = useRef(null);
-  const trigger = useRef(null);
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = event => { if (!root.current?.contains(event.target)) setOpen(false); };
-    const escape = event => { if (event.key === "Escape") { setOpen(false); trigger.current?.focus(); } };
-    window.addEventListener("pointerdown", dismiss);
-    window.addEventListener("keydown", escape);
-    return () => { window.removeEventListener("pointerdown", dismiss); window.removeEventListener("keydown", escape); };
-  }, [open]);
-  return <div ref={root} className="relative" onBlur={event => {
-    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
-  }}>
-    <button ref={trigger} title="Thread options" aria-label={`Thread options for ${thread.title}`} aria-expanded={open}
-      className="grid h-8 w-8 place-items-center rounded-md text-muted hover:bg-slate-100 hover:text-ink"
-      type="button" onClick={() => setOpen(value => !value)}><MoreVertical aria-hidden="true" size={15} /></button>
-    {open ? <div aria-label={`Actions for ${thread.title}`} className="absolute right-0 top-8 z-50 w-36 rounded-lg border border-line bg-white p-1 shadow-panel">
-      <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-ink hover:bg-slate-50"
-        onClick={() => { setOpen(false); trigger.current?.focus(); onRename?.(thread); }}>Rename Thread</button>
-      <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-ink hover:bg-slate-50"
-        onClick={() => { setOpen(false); trigger.current?.focus(); onPin?.(thread.id, !thread.pinned); }}>{thread.pinned ? "Unpin thread" : "Pin thread"}</button>
-      <button type="button" className="w-full rounded px-2 py-2 text-left text-xs text-red-600 hover:bg-red-50"
-        onClick={() => { setOpen(false); trigger.current?.focus(); onDelete(thread.id); }}>Delete thread</button>
-    </div> : null}
-  </div>;
-}
-
-export function ThreadList({ launchedThreadId, onLaunchAnimationEnd, activeThreadId, activityByThread = {}, onArchive, onPin, onRename, onDelete, onOpen, archived = false, threads, totalCount = threads.length, onLoadOlder, pageSize = 15, loadThread = entry => entry, sort = true, emptyText = "No thread history yet." }) {
-  const [visibleCount, setVisibleCount] = useState(pageSize);
-  const sortedThreads = sort ? [...threads].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))) : threads;
-  if (threads.length) {
-    return (
-      <div className="space-y-1">
-          {sortedThreads.slice(0, visibleCount).map(loadThread).filter(Boolean).map((thread) => (
-            <div
-              key={thread.id}
-              data-thread-id={thread.id}
-              data-thread-launching={thread.id === launchedThreadId || undefined}
-              onAnimationEnd={thread.id === launchedThreadId ? onLaunchAnimationEnd : undefined}
-              className={`group flex items-center gap-1 rounded-lg px-1 transition ${thread.id === launchedThreadId ? "rem-thread-launch" : ""} ${
-                thread.id === activeThreadId ? "bg-indigo-50" : "hover:bg-slate-50"
-              }`}
-            >
-              <button
-                className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
-                type="button"
-                onClick={() => onOpen(thread.id)}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate text-xs text-ink ${thread.unread || activityByThread[thread.id]?.hasNewResponse ? "font-semibold" : "font-medium"}`}>
-                    {thread.title}
-                  </div>
-                  <div className="mt-0.5 text-[10px] text-muted">{formatThreadDate(thread.updatedAt)}</div>
-                </div>
-                <ThreadActivityIndicator state={activityByThread[thread.id]} unread={thread.unread} />
-              </button>
-              {archived ? <button
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-red-50 hover:text-red-600"
-                title="Delete thread" aria-label={`Delete thread ${thread.title}`} type="button"
-                onClick={() => onDelete(thread.id)}>
-                <Trash2 aria-hidden="true" size={15} />
-              </button> : <button
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted hover:bg-slate-100 hover:text-ink"
-                title="Archive thread" aria-label={`Archive thread ${thread.title}`} type="button"
-                onClick={() => onArchive?.(thread.id)}>
-                <Archive aria-hidden="true" size={15} />
-              </button>}
-              <ThreadActions thread={thread} onPin={onPin} onRename={onRename} onDelete={onDelete} />
-            </div>
-          ))}
-          {totalCount > visibleCount ? (
-            <button className="w-full rounded-md px-2 py-2 text-left text-xs text-muted hover:bg-slate-50 focus-visible:outline" type="button" onClick={() => { const nextCount = visibleCount + pageSize; onLoadOlder?.(nextCount); setVisibleCount(nextCount); }}>
-              Show older threads ({totalCount - visibleCount})
-            </button>
-          ) : null}
-          {visibleCount > pageSize ? <button className="px-2 py-2 text-xs text-muted" type="button" onClick={() => setVisibleCount(pageSize)}>Collapse older threads</button> : null}
-      </div>
-    );
-  }
-
-  return (
-    <p className="px-2 py-4 text-center text-xs text-muted">{emptyText}</p>
-  );
-}
-
-function ThreadActivityIndicator({ state, unread = false }) {
-  if (state?.sending || state?.deviceRunning) {
-    return (
-      <span
-        className="grid h-4 w-4 shrink-0 place-items-center text-brand"
-        title="Rem response running"
-      >
-        <Loader2 aria-hidden="true" className="animate-spin" size={13} />
-        <span className="sr-only">Running</span>
-      </span>
-    );
-  }
-
-  if (state?.hasNewResponse || unread) {
-    return (
-      <span
-        className="grid h-4 w-4 shrink-0 place-items-center"
-        title="Rem response complete"
-      >
-        <span aria-hidden="true" className="h-2 w-2 rounded-full bg-blue-500" />
-        <span className="sr-only">Completed</span>
-      </span>
-    );
-  }
-
-  return null;
-}
 
 export function conversationIsAtBottom(element, tolerance = 4) {
   if (!element) return false;
@@ -8492,7 +8331,9 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
               <>
                 {message.kind === "search-source" ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
                   : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
-                {!isUser ? (
+                {!isUser && message.kind !== "streaming" && (message.sources?.length || /youtu\.?be/.test(message.body))
+                  ? <Suspense fallback={null}><ChatSources body={message.body} sources={message.sources} /></Suspense> : null}
+                {!isUser && message.kind !== "streaming" ? (
                   <div className="mt-1 flex justify-end border-t border-line/70 pt-1">
                     <button
                       aria-label={copied ? "Response copied" : "Copy response as Markdown"}
@@ -8709,26 +8550,29 @@ export function MarkdownMessage({ compact = false, inverse = false, onOpenLink, 
   );
 }
 
-const ThoughtGroup = memo(function ThoughtGroup({ groupId, replyId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts, searchMessageId }) {
+const NO_THOUGHTS = [];
+// A `lazy` group has only a placeholder until expanding it loads `loaded.thoughts`.
+const ThoughtGroup = memo(function ThoughtGroup({ groupId, replyId, expanded, onOpenFile, onOpenLink, onToggle, sourcePath, thoughts: groupThoughts, searchMessageId, lazy, loaded }) {
+  const thoughts = lazy ? loaded?.thoughts || NO_THOUGHTS : groupThoughts;
   const trace = useMemo(() => buildThoughtTrace(thoughts), [thoughts]);
   const count = trace.length;
   const match = thoughts.find(thought => String(thought.id) === String(searchMessageId));
   const matchKey = match?.trace?.id ? `trace-${match.groupId || ""}-${match.trace.id}` : match?.id;
 
-  if (!count) return null;
+  if (!count && (!lazy || loaded?.thoughts)) return null;
 
   return (
-    <div className="flex justify-start" data-message-id={thoughts[0]?.groupAnchorId}>
+    <div className="flex justify-start" data-message-id={groupId}>
       <div className="w-full min-w-0 text-sm text-slate-700 dark:text-[#d4d4d4]">
         <button
           className="flex w-full items-center justify-between gap-3 rounded-md px-1 py-1.5 text-left transition hover:text-ink"
           type="button"
           aria-expanded={expanded}
-          onClick={() => onToggle(groupId, replyId, expanded)}
+          onClick={() => onToggle(groupId, replyId, expanded, !expanded && lazy && !loaded?.thoughts ? lazy : null)}
         >
           <span className="min-w-0 text-xs font-semibold text-ink">
             {expanded ? "Hide thoughts" : "Show thoughts"}
-            <span className="ml-1.5 font-normal text-muted">{count}</span>
+            <span className="ml-1.5 font-normal text-muted">{count || null}</span>
           </span>
           <span className="grid h-6 w-6 place-items-center rounded-md text-muted transition">
             {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
@@ -8741,6 +8585,7 @@ const ThoughtGroup = memo(function ThoughtGroup({ groupId, replyId, expanded, on
         >
           <div className="overflow-hidden">
             <div className="px-1 pb-1 pt-2">
+              {expanded && !count ? <p className="text-xs text-muted" role={loaded?.error ? "alert" : "status"}>{loaded?.error || "Loading thoughts…"}</p> : null}
               {expanded && trace.map((entry, index) => (
                 <div
                   key={entry.key}
@@ -9163,10 +9008,7 @@ export function buildChatItems(messages) {
       index < messages.length &&
       messages[index].kind === "thought"
     ) {
-      thoughts.push({
-        ...messages[index],
-        groupAnchorId: segmentId,
-      });
+      thoughts.push(messages[index]);
       index += 1;
     }
     const nextMessage = messages[index];
@@ -9176,6 +9018,7 @@ export function buildChatItems(messages) {
         id: segmentId,
         type: "thought-group",
         thoughts,
+        lazy: thoughts[0].lazy,
       });
     }
   }
@@ -9193,7 +9036,19 @@ export function buildChatItems(messages) {
 export function isThoughtGroupExpanded(item, overrides, autoHide = true) {
   const override = overrides[item.id];
   if (override && override.replyId === item.replyId) return override.expanded;
-  return !autoHide || !item.replyId;
+  return !item.lazy && (!autoHide || !item.replyId);
+}
+
+// While Rem writes, its answer text shows as a reply instead of a thought.
+// Tool steps that follow fold it back into the thoughts above them.
+export function withLiveReply(items) {
+  const group = items.at(-1);
+  const thought = group?.type === "thought-group" ? group.thoughts.at(-1) : null;
+  const stream = String(thought?.deltaStreamId || "");
+  if (!stream || thought.trace || stream.startsWith("reasoning-") || !String(thought.body || "").trim()) return items;
+  const earlier = group.thoughts.slice(0, -1);
+  return [...items.slice(0, -1), ...(earlier.length ? [{ ...group, thoughts: earlier }] : []),
+    { type: "message", message: { ...thought, kind: "streaming" } }];
 }
 
 export function removeTrailingDuplicateOutputThought(messages, finalBody, groupId) {
@@ -9624,111 +9479,6 @@ export function CreateWorkflowDialog({
               <Upload aria-hidden="true" size={15} />
             )}
             {saving ? (mode === "create" ? "Creating..." : "Importing...") : mode === "create" ? "Create" : "Import"}
-          </button>
-        </div>
-      </form>
-    </Dialog>
-  );
-}
-
-export function ExportWorkflowDialog({
-  directory,
-  error,
-  open,
-  saving,
-  workflow,
-  onClose,
-  onChooseFolder,
-  onExport,
-}) {
-  const rattishBundle = workflow?.sourceFormat === "rattish";
-
-  if (!open) return null;
-
-  function handleSubmit(event) {
-    event.preventDefault();
-    onExport(directory);
-  }
-
-  return (
-    <Dialog
-      description={workflow?.name ? `Create a portable bundle for ${workflow.name}` : "Create a portable workflow bundle"}
-      onClose={onClose}
-      panelClassName="w-full max-w-[600px] rounded-lg border border-line bg-white shadow-panel"
-      panelProps={{ "aria-busy": saving || undefined }}
-      title="Export workflow bundle"
-    >
-      <form onSubmit={handleSubmit}>
-        <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div>
-            <h2 className="text-base font-semibold">Export workflow bundle</h2>
-            <p className="text-xs text-muted">
-              {rattishBundle
-                ? "Includes workflow files except those matched by .raticodeignore"
-                : workflow?.name
-                  ? `Create a portable bundle for ${workflow.name}`
-                  : "Create a portable workflow bundle"}
-            </p>
-          </div>
-          <button
-            className="grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
-            disabled={saving}
-            title="Close"
-            type="button"
-            onClick={onClose}
-          >
-            <X size={17} />
-          </button>
-        </div>
-
-        <div className="space-y-4 px-5 py-5">
-          <div>
-            <span className="text-xs font-medium text-muted">Export folder</span>
-            <button
-              autoFocus
-              className="mt-1 flex h-10 w-full min-w-0 items-center gap-2 rounded-lg border border-line bg-white px-3 text-left text-sm outline-none transition hover:border-slate-300 focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/15 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={saving}
-              title="Choose export folder"
-              type="button"
-              onClick={onChooseFolder}
-            >
-              <FolderOpen aria-hidden="true" className="shrink-0 text-muted" size={16} />
-              <span className={`min-w-0 flex-1 truncate ${directory ? "text-ink" : "text-muted"}`}>
-                {directory || "Choose a folder"}
-              </span>
-              <span className="shrink-0 text-xs font-medium text-brand">Choose</span>
-            </button>
-          </div>
-          <div className="rounded-lg bg-slate-50 px-3 py-2">
-            <div className="text-[11px] font-medium text-muted">Bundle filename</div>
-            <code className="mt-0.5 block truncate text-xs text-ink">
-              {workflowBundleFilename(workflow)}
-            </code>
-          </div>
-          {error ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm leading-5 text-red-700" role="alert">
-              {error}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-4">
-          <button
-            className="h-9 rounded-lg border border-line bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={saving}
-            type="button"
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          <button
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-brand px-3 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={saving || !directory.trim()}
-            title="Confirm workflow export"
-            type="submit"
-          >
-            {saving ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-            Export
           </button>
         </div>
       </form>

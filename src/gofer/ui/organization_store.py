@@ -66,6 +66,13 @@ def _project_identity(value: str, marker: tuple[Any, ...]) -> tuple[str, str]:
         return f"folder:{path}", str(path)
 
 
+DEFAULT_MONTHLY_TURN_LIMIT = 200
+DEFAULT_CHILD_TASKS_PER_TURN = 5
+DEFAULT_DELEGATION_DEPTH = 3
+# Modes that bypass the provider sandbox or its approvals. Rem needs the user's consent.
+DANGEROUS_PERMISSION_MODES = frozenset({"danger-full-access", "bypassPermissions"})
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -136,6 +143,7 @@ class Employee(BaseModel):
     memory: str = Field(default="", max_length=100_000)
     monthlyBudgetUsd: float = Field(default=0, ge=0, allow_inf_nan=False)
     monthlyTurnLimit: int = Field(default=0, ge=0, le=1000000)
+    monthlyTokenLimit: int = Field(default=0, ge=0, le=100_000_000_000)
     workspacePaths: list[str] | None = None
     secretRefs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -147,7 +155,7 @@ class Employee(BaseModel):
             value = {
                 **value,
                 "permissionMode": (
-                    "workspace-write" if value.get("provider", "codex") == "codex" else "default"
+                    "workspace-write" if value.get("provider", "codex") == "codex" else "dontAsk"
                 ),
             }
         return value
@@ -195,10 +203,18 @@ class OrganizationConfig(BaseModel):
     )
     teams: list[dict[str, Any]] = Field(default_factory=list)
     monthlyBudgetUsd: float = Field(default=0, ge=0, allow_inf_nan=False)
-    monthlyTurnLimit: int = Field(default=0, ge=0, le=1000000)
+    # New organizations get a bounded month; 0 remains an explicit "unlimited".
+    monthlyTurnLimit: int = Field(default=DEFAULT_MONTHLY_TURN_LIMIT, ge=0, le=1000000)
+    monthlyTokenLimit: int = Field(default=0, ge=0, le=100_000_000_000)
     maxConcurrency: int = Field(default=1, ge=1, le=16)
     maxTaskTurns: int = Field(default=20, ge=1, le=1000)
     turnTimeoutSeconds: int = Field(default=1800, ge=30, le=86400)
+    # Limits on work employees create for each other during one run.
+    maxChildTasksPerTurn: int = Field(default=DEFAULT_CHILD_TASKS_PER_TURN, ge=0, le=100)
+    maxDelegationDepth: int = Field(default=DEFAULT_DELEGATION_DEPTH, ge=0, le=20)
+    # "worktree" runs each task on its own branch; "checkout" edits the project folder.
+    workspaceIsolation: Literal["worktree", "checkout"] = "worktree"
+    blockGitPush: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     packageFiles: dict[str, str] = Field(default_factory=dict)
     remSecondBrain: dict[str, Any] = Field(default_factory=dict)
@@ -246,10 +262,13 @@ class OrganizationConfig(BaseModel):
         for initiative in self.projects:
             budget = initiative.get("monthlyBudgetUsd", 0)
             limit = initiative.get("monthlyTurnLimit", 0)
+            tokens = initiative.get("monthlyTokenLimit", 0)
             if type(budget) not in {int, float} or not math.isfinite(budget) or budget < 0:
                 raise ValueError("Initiative dollar budgets must be finite nonnegative numbers")
             if type(limit) is not int or not 0 <= limit <= 1000000:
-                raise ValueError("Initiative turn limits must be integers between 0 and 1000000")
+                raise ValueError("Initiative run limits must be integers between 0 and 1000000")
+            if type(tokens) is not int or not 0 <= tokens <= 100_000_000_000:
+                raise ValueError("Initiative token limits must be nonnegative integers")
         goals = {g.id: g for g in self.goalRecords}
         if len(goals) != len(self.goalRecords):
             raise ValueError("Goal IDs must be unique")
@@ -315,6 +334,8 @@ class Task(BaseModel):
     occurrenceId: str | None = None
     reviewRequestedAt: str | None = None
     acceptedAt: str | None = None
+    # The task's own git worktree and branch when the organization isolates work.
+    worktree: dict[str, str] | None = None
 
 
 class OrganizationStore:
@@ -502,12 +523,15 @@ class OrganizationStore:
         result = []
         for row in rows:
             config = json.loads(row["config"])
+            runtime = json.loads(row["runtime"])
             result.append(
                 {
                     "id": row["id"],
                     "name": config["name"],
                     "revision": row["revision"],
-                    "state": json.loads(row["runtime"])["state"],
+                    "state": runtime["state"],
+                    "pauseReason": runtime.get("pauseReason", ""),
+                    "archived": runtime.get("archived") is True,
                     "employees": len(config["employees"]),
                     "projectRoots": config.get("projectRoots", []),
                     "openTasks": row["open_tasks"],
@@ -663,6 +687,8 @@ class OrganizationStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = self._get(db, project, oid)
+            if current["runtime"].get("archived"):
+                raise ValueError("Restore this archived organization before changing it")
             if type(expected) is not int or current["revision"] != expected:
                 raise OrganizationConflict(
                     "Configuration changed. Reload before saving or restoring."
@@ -696,7 +722,16 @@ class OrganizationStore:
                 if p.get("workspacePath")
             }
             if disruptive:
-                runtime.update(state="paused", generation=runtime["generation"] + 1)
+                runtime.update(
+                    state="paused",
+                    generation=runtime["generation"] + 1,
+                    pauseReason=(
+                        "Paused because a configuration was restored"
+                        if restored_from is not None
+                        else "Paused because project folders, destinations or Second Brain "
+                        "settings changed. Review, then start again."
+                    ),
+                )
             for task in runtime["tasks"]:
                 orphaned = task["status"] not in {"done", "cancelled"} and (
                     (
@@ -729,19 +764,25 @@ class OrganizationStore:
             self._revision(db, oid, validated, actor, reason, restored_from)
         return self.get(project, oid)
 
-    def control(self, project: str, oid: str, actor: str, state: str) -> dict[str, Any]:
+    def control(
+        self, project: str, oid: str, actor: str, state: str, reason: str = ""
+    ) -> dict[str, Any]:
         if state not in {"running", "paused"}:
             raise ValueError("State must be running or paused")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = self._get(db, project, oid)
             config, runtime = current["config"], current["runtime"]
+            if state == "running" and runtime.get("archived"):
+                raise ValueError("Restore this archived organization before starting it")
             if state == "running" and not config.get("projectRoots"):
                 raise ValueError("Assign a Raticode project before starting employees")
             if state == "paused":
                 runtime["generation"] += 1
+                runtime["pauseReason"] = reason or "Paused"
+            else:
+                runtime.pop("pauseReason", None)
             runtime["state"] = state
-            runtime.pop("pauseReason", None)
             self._write_runtime(db, oid, runtime)
             self.event(
                 db,
@@ -751,6 +792,31 @@ class OrganizationStore:
                 {"state": state},
             )
             return self._get(db, project, oid)
+
+    def archive(self, oid: str, actor: str, archived: bool) -> dict[str, Any]:
+        """Hide a stopped organization and release its projects, keeping all history."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self._get(db, "", oid)
+            runtime = current["runtime"]
+            if bool(runtime.get("archived")) == archived:
+                return current
+            if archived:
+                if runtime["state"] != "paused" or any(t["claim"] for t in runtime["tasks"]):
+                    raise ValueError("Pause the organization and wait for running work first")
+                db.execute("DELETE FROM organization_projects WHERE organization=?", (oid,))
+                runtime.update(archived=True, generation=runtime["generation"] + 1)
+                runtime["pauseReason"] = "Archived"
+            else:
+                config = copy.deepcopy(current["config"])
+                self._set_project_ownership(db, oid, config)
+                runtime.pop("archived", None)
+                runtime["pauseReason"] = "Restored from the archive"
+            self._write_runtime(db, oid, runtime)
+            self.event(
+                db, oid, actor, "organization_archived" if archived else "organization_restored", {}
+            )
+            return self._get(db, "", oid)
 
     def _revision(
         self,
@@ -873,6 +939,20 @@ class OrganizationStore:
                 (oid, after),
             ).fetchall()
         return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
+
+    def turn_events(self, oid: str, turn: str, limit: int = 2000) -> list[dict[str, Any]]:
+        """Stored provider events of one employee run, oldest first."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT sequence, at, payload FROM organization_events WHERE organization=? "
+                "AND kind='turn_event' AND json_extract(payload, '$.turnId')=? "
+                "ORDER BY sequence LIMIT ?",
+                (oid, turn, limit),
+            ).fetchall()
+        return [
+            {"sequence": row["sequence"], "at": row["at"], **json.loads(row["payload"])["event"]}
+            for row in rows
+        ]
 
     @staticmethod
     def validate_task(

@@ -66,15 +66,19 @@ Actions and params:
   other providers default, with cli-managed also supported by antigravity/grok.
   resources follows help.resourcesSchema (shell, web, skills, mcpServers).
   Exactly one orchestrator and 1-16 agents. Optional wakeIntervalSeconds=60
-  (10-3600), maxConcurrency=3 (positive integer),
-  contextCharLimit=48000,
+  (10-3600), maxConcurrency=3 (1-16), contextCharLimit=48000.
+  Run limits, each with a default: maxTurns=200 (agent turns per run),
+  maxRunSeconds=28800 (running time, pauses excluded), maxTurnSeconds=3600 (one
+  turn), stallTurnLimit=6 (turns in a row without progress), maxRepairAttempts=3
+  (repairs per assignment), and optional maxTokens (reported input plus output
+  tokens). A run pauses when it reaches one. Charter up to 8000 characters, roles 4000.
   integrationChecks (command argument arrays), gitPermissions={local:true,remote:false}.
   Local Git allows managed staging/commits in assignment worktrees. Remote Git adds
   branch push and GitHub PR creation; it requires local Git. These settings govern
   managed tools and agent instructions, not arbitrary shell/network confinement.
-  Provider usage limits apply; no cumulative output, turn-count or elapsed-time cap.
-  Failed agents continue in their preserved workspace after non-blocking exponential
-  backoff, starting at 10 seconds and capped at 300 seconds. Stop cancels retries.
+  Failed agents continue in their preserved workspace after exponential backoff,
+  starting at 10 seconds and capped at 300 seconds. After 5 failures, or on sign-in,
+  quota or setup errors, the run pauses until the user fixes the provider and resumes.
   Non-Git projects serialize turns.
   Git projects snapshot local edits using a private index and isolate worktrees.
   Before agents start, each repository gets a named review worktree that accumulates
@@ -89,7 +93,10 @@ Actions and params:
   this conversation. Include the objective, constraints, findings, relevant file
   paths, and expected output. Share only relevant context; omit credentials.
   Long context is compacted before provider turns. Prefer relevant file paths
-  and a concise summary. Returns immediately; use read later.
+  and a concise summary. Returns immediately; use read later. If any agent uses
+  danger-full-access or bypassPermissions, start fails unless confirmFullAccess=true.
+  Set it only after the user explicitly agreed to run those agents without a sandbox
+  in this conversation; name the agents when you ask.
 - control: swarmId; action is pause, resume, or stop. Pause prevents new turns;
   stop requests cancellation and child workspace cleanup. Read state to confirm agents have stopped.
   action=cleanup retries a failed cleanup. Completed/stopped Git runs retain the review
@@ -107,8 +114,8 @@ Actions and params:
   status (planned, ready, working, in_review, accepted, blocked, cancelled), evidence,
   dependsOn (milestone IDs), checks (command argument arrays). Owned assignments
   dispatch automatically once dependencies are accepted. Git changes require verify
-  then integrate before acceptance. Research artifacts require verify. A user can
-  explicitly waive verification with waiverReason, recorded in history.
+  then integrate before acceptance. Research artifacts require verify. Only the user
+  can waive verification, from the desktop; waiverReason from Rem is rejected.
   Preserve existing IDs. Accepted work needs evidence. On revision conflict read
   progress again before applying changes. Only claim completion from recorded data.
 - verify: swarmId; milestoneId, attemptId, result with revision (Git commit SHA)
@@ -118,10 +125,13 @@ Actions and params:
   final combined verification; workspaceRoot selects a repository from projectWorkspaces.
   The user's checkout remains unchanged.
 - repair: swarmId; milestoneId, attemptId, reason describing the changed approach.
+  Repairs past the run's maxRepairAttempts need the user at the desktop.
 - replan: swarmId; reason with a changed plan. Use it to record a changed approach.
 - human_response: swarmId; notificationId, decision (proceed or redirect), instruction.
-  For recovery also resolution (review, retry or dismiss). Inspect the workspace and
-  confirm prior execution stopped before retrying. Act only on the user's authorization.
+  Rem can answer only recovery items (kind=recovery), with resolution (review, retry
+  or dismiss). Inspect the workspace and confirm prior execution stopped before
+  retrying. Approval requests are for the user: tell the user and let them answer
+  in the swarm's human inbox. Rem's answers are recorded as Rem's.
 - resolve_attempt: swarmId; attemptId, resolution (review, retry or dismiss), reason.
   Under the user's authorization, review uncertain effects and confirm prior execution stopped.
   Review preserves output for verification; dismiss allows an explicit new repair.
@@ -281,6 +291,7 @@ class RemSwarmAccess:
                 swarm_id,
                 _handoff(params, "task"),
                 workspace_grants=params.get("workspaceGrants"),
+                confirm_full_access=params.get("confirmFullAccess") is True,
             )
         elif action == "control":
             result = self.manager.control(
@@ -296,7 +307,7 @@ class RemSwarmAccess:
         elif action == "objectives":
             if "revision" not in params:
                 raise ValueError("Read progress and supply its revision before updating objectives")
-            result = self.manager.objectives(self.project, swarm_id, params)
+            result = self.manager.objectives(self.project, swarm_id, params, origin="rem")
         elif action in {
             "verify",
             "integrate",
@@ -306,7 +317,9 @@ class RemSwarmAccess:
             "human_response",
             "complete",
         }:
-            result = self.manager.execution(self.project, swarm_id, {**params, "action": action})
+            result = self.manager.execution(
+                self.project, swarm_id, {**params, "action": action}, origin="rem"
+            )
             return result if "result" in result else _summary(result)
         else:
             result = self.manager.resolve_delivery(self.project, swarm_id, params)
@@ -320,8 +333,14 @@ class RemSwarmAccess:
             swarm["run"] = self.manager.history_run(self.project, swarm_id, params["runId"])
         section = params.get("section", "overview")
         if section == "configuration":
+            # Show what the next run would use, so legacy zero limits read as their
+            # defaults instead of suggesting there is no limit.
+            try:
+                effective = {**swarm, **self.manager._configuration(swarm)}
+            except ValueError:
+                effective = swarm
             return {
-                key: swarm.get(key)
+                key: effective.get(key)
                 for key in (
                     "name",
                     "charter",
@@ -330,8 +349,10 @@ class RemSwarmAccess:
                     "maxTurns",
                     "maxConcurrency",
                     "maxRunSeconds",
+                    "maxTurnSeconds",
                     "maxRepairAttempts",
                     "stallTurnLimit",
+                    "maxTokens",
                     "contextCharLimit",
                     "integrationChecks",
                     "gitPermissions",

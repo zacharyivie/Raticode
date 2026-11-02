@@ -12,7 +12,7 @@ Rem helps you build workflows, edit code, debug, and understand a project. Each 
 
 Open Rem and send a message to create a thread, or use the new-thread control. Review the project scope and composer settings first. Enter sends; Shift+Enter inserts a line break. Threads are organized into pinned, active, and archived lists, ordered by message activity.
 
-Name a thread for its task, pin ongoing work, and archive finished work to keep the active list readable. Search threads to find a title or text anywhere in saved history, including older messages that are not currently loaded.
+Name a thread for its task, pin ongoing work, and archive finished work to keep the active list readable. Archiving marks a thread read, and new activity brings it back. **Mark as read** on an unread row, or **Mark all read** on the Unread header, clears the blue dot. Ctrl- or Cmd-click threads to select several, Shift-click to select a range, or click a section's name, such as Unread, to select every thread in it; the chevron still opens and closes Running and Archived. Right-click, press Shift+F10, or use the bar above the list to mark the selection read or unread, pin, archive, restore or delete it. Esc clears the selection. The phone app offers the same actions with a long press. Search threads to find a title or text anywhere in saved history, including older messages that are not currently loaded.
 
 ## Switch models when sending
 
@@ -27,6 +27,10 @@ Unsent picker changes add no history entries. Returning to the previously submit
 Each provider retains its own native session. Switching back restores that provider's session and supplies the turns it missed. Hidden provider tool state stays with that provider. Native continuation does not promise free historical tokens.
 
 ## Read thoughts and results
+
+Rem's answer appears word by word as the provider writes it. When Rem then runs a tool, the text it wrote so far moves into the thoughts above.
+
+When Rem used the web, cards under the reply list the pages it cited, read and found, with titles and thumbnails. YouTube links become video cards. Raticode's backend fetches these previews from public addresses only, never from this computer or your local network. Cards and images open in Raticode's browser. Rem can also show images from pages it read.
 
 Tool activity and intermediate thoughts appear in collapsible groups. **Settings > Rem > Auto-hide thoughts** collapses completed groups after the reply. Reopen them to inspect evidence. Turn summaries show timing and supported file-change information.
 

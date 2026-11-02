@@ -6,6 +6,31 @@
 > unresolvable `https://relay.invalid`. See the mobile repository's
 > `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
 
+> **October 31, 2026, optional Tailscale reach:** With the network opt-in on, a
+> user can also choose **Away from home with Tailscale** under Paired devices. The
+> desktop then listens on its own Tailscale node address (`100.64.0.0/10` or
+> `fd7a:115c:a1e0::/48`) on the same port as the LAN listener, and keeps the LAN
+> listener. The same TLS 1.3 pins, confirmation, generation checks and rate limits
+> apply, because both addresses share one `DeviceListener`. Raticode never signs
+> in to Tailscale, stores an auth key or calls the Tailscale API.
+> `gofer.devices.tailnet.detect` only runs `tailscale status --json --peers=false`.
+> Without the CLI, it reads the source address the OS picks for Tailscale's
+> `100.100.100.100` resolver, which sends no packet. That address is used only
+> when it differs from the default route's source, so a carrier-grade NAT LAN
+> address is not mistaken for a tailnet. `RATICODE_TAILSCALE_HOST` sets the
+> address by hand and must be inside those ranges. The opt-in is stored in the
+> registry `config` table. Detection runs off the request lock and is retried
+> every 20 seconds until the desktop is listening, then every 120 seconds, so
+> Tailscale may start after Raticode. Turning it off closes the extra socket and
+> ends the sessions that arrived through it. Phones learn the address only by
+> sending `sync.request.include_tailnet_endpoint: true`; see
+> [mobile-desktop-parity.md](../mobile-desktop-parity.md). Pairing still happens
+> over the LAN. The tailnet policy is the user's firewall for tailnet traffic.
+> In-app guidance tells the user to replace the default allow-all rule with a
+> single grant to the Raticode port, and to leave Funnel, Serve, subnet routes and
+> exit nodes off. Raticode does not check or change that policy, the host
+> firewall or the router.
+
 September 20 update. Production mobile navigation is live-only. Earlier milestone descriptions below are historical where they refer to missing application handlers or manual thread IDs.
 
 Device networking still requires the explicit environment opt-in. The default listener host is now the OS-selected outgoing private IPv4 address when available; a UDP route lookup obtains the address without transmitting a packet. Public, wildcard and multicast addresses are rejected. An explicit `RATICODE_DEVICE_HOST` remains authoritative. No opt-in means loopback-only and no public relay subscription.
@@ -18,7 +43,7 @@ New phone identity confirmation enables workspace sync by default in the same du
 
 ---
 
-The paired-phone list keeps thread sync and its grant count visible. **Project access** contains individual grants; **Device details** contains identity and revocation. **Connection and troubleshooting** shows the LAN IP and port, relay diagnostics and security-review status. Advanced setup is collapsed by default, and all sections use the existing light/dark settings styles. A paired label is saved trust, not evidence of a live connection.
+The section opens with local network and Rem status pills. **Pair a device** shows numbered steps: name this computer, scan the QR code, confirm the security code. The QR code always renders black on an opaque white field, including in dark mode, so phone cameras can read it. Each device under **Your devices** is a card with a status pill, its permission switches (thread sync with its grant count, approvals and swarm controls, and use Raticode from this phone), **Unpair**, **Revoke** and a collapsed **Security code**. Security codes appear in 8-character groups, matching the phone. **Connection and troubleshooting** shows the LAN IP and port and security-review status. Pairing another desktop stays collapsed inside the setup panel. A paired label is saved trust, not evidence of a live connection.
 
 Current implementation: [device messaging and fleet work](device-messaging.md).
 Current release scope and acceptance: [release guide](device-release.md).
@@ -79,7 +104,9 @@ fails closed. Headless Linux requires access to that user's unlocked session;
 there is no password-file fallback. OS-specific real credential-store behavior
 has not yet been validated across the host matrix.
 
-Opt in when launching the selected desktop build, or the backend without a window:
+In the desktop app, turn on **Phone and desktop pairing** in Settings >
+Developer > Feature Preview. The desktop stores the choice and restarts its
+backend with the opt-in below. To opt in for a backend without a window:
 
 ```bash
 export RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1
@@ -114,8 +141,9 @@ pairing frames after invitation creation. QR generation uses
 ### Development startup and phone authentication timeouts
 
 `electron:dev` uses the source backend and does not require an AppImage rebuild.
-It still needs the device-network opt-in. From `frontend`, after selecting the
-repository's Node version, stop the old development process and launch:
+It still needs the device-network opt-in: turn on the Feature Preview, or, from
+`frontend` after selecting the repository's Node version, stop the old
+development process and launch:
 
 ```sh
 RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1 npm run electron:dev

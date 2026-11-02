@@ -142,8 +142,10 @@ class DeviceSession:
         elif self.stage == "active" and self.peer is not None and self.application is not None:
             self.application.handle(self.peer, record)
             if record.get("type") == "sync.request":
-                cursor = record["payload"]["after_sequence"] or 0
-                self.sent_sequence = min(self.sent_sequence, cursor)
+                # The cursor is what the peer already holds. Resume there: rewind over
+                # events still in flight, and skip ahead of earlier sessions' events
+                # instead of replaying the whole retained outbox at one per tick.
+                self.sent_sequence = record["payload"]["after_sequence"] or 0
             self.deadline = time.monotonic() + 300
         else:
             raise PairingError("application_transport_not_enabled")
@@ -208,6 +210,8 @@ class DeviceListener:
         self.registry = registry
         self.invitations = invitations
         self.server: asyncio.Server | None = None
+        # Optional extra addresses on the same port, such as a Tailscale address.
+        self.extra: dict[str, asyncio.Server] = {}
         self.connections: dict[asyncio.StreamWriter, asyncio.Task[None]] = {}
         self.attempts: OrderedDict[str, tuple[float, float]] = OrderedDict()
         self.global_tokens = 32.0
@@ -219,6 +223,31 @@ class DeviceListener:
         self.server = await asyncio.start_server(self._connection, host, port, limit=MAX_FRAME + 4)
         assert self.server.sockets
         return int(self.server.sockets[0].getsockname()[1])
+
+    async def add_host(self, host: str, port: int) -> None:
+        """Also accept sessions on ``host``. Limits and authentication are shared."""
+        if self.server is None:
+            raise PairingError("listener_not_started")
+        if host not in self.extra:
+            self.extra[host] = await asyncio.start_server(
+                self._connection, host, port, limit=MAX_FRAME + 4
+            )
+
+    async def remove_host(self, host: str) -> None:
+        """Stop accepting on ``host`` and end the sessions that arrived through it."""
+        server = self.extra.pop(host, None)
+        if server is None:
+            return
+        server.close()
+        await server.wait_closed()
+        tasks = [
+            task
+            for writer, task in list(self.connections.items())
+            if (writer.get_extra_info("sockname") or ("",))[0] == host
+        ]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _allow(self, host: str) -> bool:
         now = time.monotonic()
@@ -292,6 +321,8 @@ class DeviceListener:
                 pass
 
     async def close(self) -> None:
+        for host in list(self.extra):
+            await self.remove_host(host)
         if self.server is not None:
             self.server.close()
             await self.server.wait_closed()

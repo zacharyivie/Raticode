@@ -242,6 +242,34 @@ def test_thread_groups_and_running_use_desktop_jobs(application, tmp_path):
         jobs.close()
 
 
+def test_unread_state_reaches_only_phones_that_ask(application, tmp_path):
+    app, peer = application
+    context, meta, shared, _ = parity(app, peer, tmp_path)
+    app.workspace.exchange(
+        peer,
+        {**meta, "mobileGroup": "active", "unread": True, "readAt": "2026-10-30T15:00:00Z"},
+        [],
+        context,
+        shared["revision"],
+    )
+
+    def sync(sequence: int, **extra: bool) -> dict[str, Any]:
+        payload = {"after_sequence": None, "limit": 100, "include_thread_details": True, **extra}
+        entry: dict[str, Any] = app.handle(
+            peer, event("sync.request", sequence=sequence, thread_id=None, payload=payload)
+        )[-1]["payload"]["threads"][0]
+        return entry
+
+    # Older phones reject unknown fields, so they never receive the activity fields.
+    legacy = sync(0)
+    assert "unread" not in legacy and "read_at" not in legacy
+    current = sync(1, include_activity=True)
+    assert current["unread"] is True and current["read_at"] == "2026-10-30T15:00:00Z"
+    assert current["group"] == "active"
+    app.workspace.exchange(peer, {**meta, "unread": False}, [], context, current["revision"])
+    assert sync(2, include_activity=True)["unread"] is False
+
+
 def test_phone_permissions_are_editable_and_reflect_back_on_desktop(application, tmp_path):
     app, peer = application
     context, _, shared, _ = parity(app, peer, tmp_path)

@@ -81,3 +81,88 @@
     padding-right: 10px;
   }
 }
+
+/* Layout arrangement picker. Thumbnails are diagrams of the workspace, so
+   each pane keeps its role color: muted files, plain editor, brand-tinted Rem. */
+.layout-presets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .layout-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.layout-preset {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 6px 8px;
+  border: 1px solid rgb(var(--color-line));
+  border-radius: 8px;
+  background: var(--settings-control-bg);
+  text-align: left;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.layout-preset:hover {
+  border-color: rgb(var(--color-muted));
+  background: var(--settings-control-hover);
+}
+
+.layout-preset:focus-visible {
+  outline: 2px solid rgb(var(--color-brand));
+  outline-offset: 2px;
+}
+
+.layout-preset[aria-checked="true"] {
+  border-color: rgb(var(--color-brand));
+  box-shadow: inset 0 0 0 1px rgb(var(--color-brand));
+}
+
+.layout-preset-thumbnail {
+  display: flex;
+  width: 100%;
+  height: 52px;
+  margin-bottom: 4px;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 5px;
+  background: rgb(var(--color-line) / .6);
+}
+
+.layout-preset-pane {
+  border-radius: 2px;
+  background: rgb(var(--color-surface));
+}
+
+/* The darker strip is the activity bar, drawn on the window edge. */
+.layout-preset-pane--project {
+  width: 24%;
+  background:
+    linear-gradient(to right, rgb(var(--color-muted) / .45) 0 5px, transparent 5px),
+    rgb(var(--color-surface-muted));
+}
+
+.layout-preset-pane--project[data-side="right"] {
+  background:
+    linear-gradient(to left, rgb(var(--color-muted) / .45) 0 5px, transparent 5px),
+    rgb(var(--color-surface-muted));
+}
+
+.layout-preset-pane--editor {
+  flex: 1;
+  background:
+    repeating-linear-gradient(to bottom, transparent 0 5px, rgb(var(--color-line)) 5px 6px) 5px 6px / calc(100% - 14px) 30px no-repeat,
+    rgb(var(--color-surface));
+}
+
+.layout-preset-pane--assistant {
+  width: 26%;
+  background:
+    linear-gradient(rgb(var(--color-brand) / .55), rgb(var(--color-brand) / .55)) 4px calc(100% - 5px) / calc(100% - 8px) 6px no-repeat,
+    rgb(var(--color-brand) / .16);
+}

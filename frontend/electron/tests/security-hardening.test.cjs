@@ -52,6 +52,36 @@ test("listing 100 worktrees never registers backend grants", async () => {
   }
 });
 
+test("Git watches require folder access and report only change categories to their window", async (t) => {
+  const { outside, security } = await fixture(t);
+  const sent = [];
+  let invalidated = 0;
+  let watched;
+  const sender = { id: 7, isDestroyed: () => false, send: (channel, payload) => sent.push({ channel, payload }) };
+  const context = {
+    resolveGitProjectDirectory: async options => security.resolveAllowedPath(options.projectRoot, { grantId: options.grantId, mustExist: true }),
+    invalidateGitReads: () => { invalidated += 1; },
+    gitWatcher: { watch: async (projectRoot, options) => { watched = { projectRoot, ...options }; return { watchId: "git-watch-1", mode: "watch" }; } },
+  };
+  const watch = mainFunction("gitWatch", context);
+  await assert.rejects(watch({ sender }, { projectRoot: outside }), /outside/);
+  assert.equal(watched, undefined);
+  const { grantId } = security.trustPath(outside);
+  const plain = async (value) => JSON.parse(JSON.stringify(await value));
+  assert.deepEqual(await plain(watch({ sender }, { projectRoot: outside, grantId })), { active: true, watchId: "git-watch-1", mode: "watch" });
+  assert.equal(watched.ownerId, 7);
+  watched.onChange(["index"], "git-watch-1");
+  assert.equal(invalidated, 0);
+  watched.onChange(["refs", "worktrees"], "git-watch-1");
+  assert.equal(invalidated, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [
+    { channel: "gofer:git-changed", payload: { watchId: "git-watch-1", kinds: ["index"] } },
+    { channel: "gofer:git-changed", payload: { watchId: "git-watch-1", kinds: ["refs", "worktrees"] } },
+  ]);
+  context.gitWatcher.watch = async () => { throw new Error("Not a Git repository"); };
+  assert.deepEqual(await plain(watch({ sender }, { projectRoot: outside, grantId })), { active: false });
+});
+
 for (const entry of corpus.cases) {
   test(`shared containment: ${entry.name}`, async (t) => {
     const { base, security } = await fixture(t);
@@ -204,6 +234,9 @@ test("remote capabilities are denied while studio audio and clipboard writes rem
   assert.equal(studio.check(contents, "media", "", { mediaType: "video" }), false);
   assert.equal(studio.check({}, "media", "", { mediaType: "audio" }), false);
   assert.equal(studio.check(contents, "clipboard-sanitized-write"), true);
+  assert.equal(studio.check(contents, "notifications"), true);
+  assert.equal(studio.check({}, "notifications"), false);
+  assert.equal(studio.check(contents, "notifications", "", { isMainFrame: false }), false);
   let microphone;
   studio.request(contents, "media", (value) => { microphone = value; }, { mediaTypes: ["audio"], requestingUrl: contents.getURL() });
   assert.equal(microphone, true);
@@ -523,14 +556,18 @@ test("a sibling worktree can be created, selected and checked out without prior 
   security.trustPath(outside);
   const sibling = path.join(base, "sibling-worktree");
   await fsp.mkdir(sibling);
+  const notified = [];
   const context = { fs, path, ...git, getIpcSecurity: () => security,
     registerBackendPathGrant: () => assert.fail("Creating a worktree must not need the backend"),
+    notifyGitChanged: (projectRoot, kinds) => notified.push({ projectRoot, kinds: [...kinds] }),
   };
   for (const name of ["resolveExactPath", "resolveGitProjectDirectory", "pathHandle"]) context[name] = mainFunction(name, context);
   const created = await mainFunction("gitWorktreeAdd", context)(null, {
     projectRoot: outside, targetPath: sibling, branch: "feature", createBranch: true, grantId: "expired",
   });
   assert.equal(created.createdPath, sibling);
+  // Other open views of this repository list the new worktree without a refresh.
+  assert.deepEqual(notified, [{ projectRoot: outside, kinds: ["refs", "worktrees"] }]);
   assert.equal(security.isUserGrant(created.grantId), true);
   const registered = [];
   context.registerBackendPathGrant = async handle => registered.push(handle);
@@ -542,7 +579,7 @@ test("a sibling worktree can be created, selected and checked out without prior 
   assert.equal(execFileSync("git", ["-C", sibling, "branch", "--show-current"], { encoding: "utf8" }).trim(), "other");
 });
 
-for (const name of ["readTextFile", "readBinaryPreview"]) {
+for (const name of ["readTextFile", "readBinaryPreview", "readAttachmentFile"]) {
   for (const swapParent of [false, true]) {
     test(`${name} rejects ${swapParent ? "parent" : "file"} links swapped after authorization`, async (t) => {
       const { inside, outside } = await fixture(t);
@@ -569,8 +606,8 @@ for (const name of ["readTextFile", "readBinaryPreview"]) {
         return target;
       };
       const read = mainFunction(name, {
-        fs, safeFiles, resolveWorkflowSource: resolve,
-        ...(name === "readBinaryPreview" ? { resolveExactPath: resolve } : {}),
+        fs, path, safeFiles, resolveWorkflowSource: resolve,
+        ...(name !== "readTextFile" ? { resolveExactPath: resolve } : {}),
         imageMimeType: () => "image/png", pathHandle: target => ({ path: target }),
       });
       await assert.rejects(read(null, { targetPath: target }));
@@ -599,6 +636,26 @@ test("bounded desktop reads preserve text, image bytes and size errors", async t
   await assert.rejects(image(null, { targetPath: target }), /too large to preview/);
 });
 
+test("attachment reads return any file's bytes with a type and enforce the chat limit", async t => {
+  const { inside } = await fixture(t);
+  const read = mainFunction("readAttachmentFile", {
+    path, safeFiles, resolveExactPath: target => target,
+    imageMimeType: target => target.endsWith(".png") ? "image/png" : "", pathHandle: target => ({ path: target }),
+  });
+  const image = path.join(inside, "shot.png");
+  const bytes = Buffer.from([137, 80, 78, 71, 0, 255]);
+  await fsp.writeFile(image, bytes);
+  assert.deepEqual({ ...await read(null, { targetPath: image }) }, { name: "shot.png", type: "image/png", data: bytes.toString("base64"), path: image });
+  const text = path.join(inside, "code.py");
+  await fsp.writeFile(text, "print('hi')");
+  assert.equal((await read(null, { targetPath: text })).type, "text/plain");
+  const binary = path.join(inside, "data.bin");
+  await fsp.writeFile(binary, Buffer.from([1, 0, 2]));
+  assert.equal((await read(null, { targetPath: binary })).type, "application/octet-stream");
+  await fsp.truncate(binary, 20 * 1024 * 1024 + 1);
+  await assert.rejects(read(null, { targetPath: binary }), /data\.bin is larger than 20 MB/);
+});
+
 
 test("text reads return a missing result when a file or its worktree disappears", async (t) => {
   const { outside, security } = await fixture(t);
@@ -624,4 +681,13 @@ test("text reads return a missing result when a file or its worktree disappears"
   await fsp.writeFile(directory, "Folder replaced by file");
   assert.equal((await read(null, options)).missing, true);
   await assert.rejects(read(null, { targetPath: path.join(outside, "unauthorized.txt") }), /outside/);
+});
+
+test("packaged builds encrypt the built-in browser's cookies with the OS key store", () => {
+  // Electron leaves cookie values in plaintext unless this fuse is flipped. Session
+  // cookies of sites the user signs into from Raticode's browser are credentials.
+  const build = require("../../package.json").build;
+  assert.equal(build.electronFuses?.enableCookieEncryption, true);
+  // The terminal editor launcher runs Electron as Node; keep that fuse untouched.
+  assert.equal(build.electronFuses?.runAsNode, undefined);
 });

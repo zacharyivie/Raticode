@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 0,
+  "type": "sync.snapshot",
+  "payload": {
+    "revision": 1,
+    "through_sequence": 0,
+    "threads": [],
+    "connection": {
+      "lan_endpoint": {
+        "host": "192.168.1.20",
+        "port": 44233
+      },
+      "rem_ready": true,
+      "remote_control": false,
+      "desktop_control": false,
+      "tailnet_endpoint": {
+        "host": "100.101.102.103",
+        "port": 44233
+      }
+    }
+  }
+}

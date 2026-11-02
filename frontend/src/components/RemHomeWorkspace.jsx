@@ -1,18 +1,27 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, ChevronRight, MessageSquare, MoreHorizontal, Plus, ShieldCheck, Settings, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, ChevronRight, MessageSquare, MoreHorizontal, Paperclip, Plus, ShieldCheck, Settings, Sparkles, Trash2, X } from "lucide-react";
+import ChatComposer, { MessageAttachments } from "./ChatComposer.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import RatFaceIcon from "./RatFaceIcon.jsx";
 import RemAvatar from "./RemAvatar.jsx";
+import RemMemoryPanel, { MemoryNote } from "./RemMemoryPanel.jsx";
+// Files on a reply; a paired phone that asked receives them too.
+import { ReplyFiles } from "./RemMedia.jsx";
 import { OutcomeGlyph, RemMenu, TaskGlyph, TaskTypeIcon, taskActions, typeLabel } from "./RemHomeParts.jsx";
+import { FollowUps, MessageActions, MessageDetails, NewMessagesPill, ProgressSteps, ResultActions, ResultCard } from "./RemRichParts.jsx";
+import { bodyWithoutCardLinks, latestSuggestionMessageId, remPresence } from "../lib/remRich.js";
 import {
   CREATABLE_TYPES, TASK_TYPES, WEEKDAYS, changesActiveWork, criteriaSummary, describeSchedule, draftTitle, draftToRequest,
-  conversationMessages, formatWhen, messageTime, messagesByDay, newTaskDraft, projectLabel, runState, scheduleIsEditable, statusLine, taskActivity, taskMessages, taskRecap,
+  conversationMessages, formatWhen, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, projectLabel, runState, scheduleIsEditable, statusLine, taskActivity, taskMessages, taskRecap,
   latestWorkMessageIds, taskToDraft, validateDraft, weekdayShort, workStatus,
 } from "../lib/remHome.js";
 import {
-  clearRemHistory, closeTaskSheet, connectRemHome, createRemTask, deleteRemTask, dismissNotice, loadRemHomeFixture, openRemThread,
+  clearRemHistory, closeTaskSheet, connectRemHome, createRemTask, deleteRemTask, dismissNotice, editRemMessage, loadRemHomeFixture, openRemThread,
   openTaskSheet, resetRemHomeStore, retryRemMessage, sendRemMessage, suggestMessage, updateRemTask, useRemHome,
 } from "../lib/remHomeStore.js";
+import { applyRemComposerRequest, attachToRemComposer, updateRemComposer, useRemComposerState } from "../lib/remComposer.js";
+import { clipboardAttachmentFiles, largePasteFile, transferContainsFiles } from "../lib/chatAttachments.js";
+import { copiedFilePaths, readFileAttachments } from "../lib/fileAttachments.js";
 import "./RemHome.css";
 
 const SUGGESTIONS = [
@@ -26,18 +35,21 @@ const devPreview = Boolean(import.meta.env?.DEV);
 export default function RemHomeWorkspace({ projectOptions = [], avatar = {}, onOpenLink, onOpenSettings }) {
   const store = useRemHome();
   const [confirmClear, setConfirmClear] = useState(false);
+  const [showMemories, setShowMemories] = useState(false);
   const [messageFocus, setMessageFocus] = useState(null);
   useEffect(() => connectRemHome(), []);
   const now = useNow();
   const replying = store.conversation?.turn_state === "replying";
-  const status = store.status === "offline" ? "Not connected" : replying ? "Thinking…" : statusLine(store.tasks, now);
+  const presence = remPresence({ offline: store.status === "offline", replying, turnLabel: store.conversation?.turn_label, tasks: store.tasks, status: statusLine(store.tasks, now) });
+  const status = presence.label;
   return <section className="rem-home" aria-label="Rem">
     <header className="rem-home-header">
-      <span className="rem-face" data-size="lg"><RatFaceIcon size={22} /></span>
+      <span className="rem-face" data-size="lg" data-presence={presence.state}><RatFaceIcon size={22} /></span>
       <div className="rem-home-title"><h2>Rem</h2><p role="status">{status}</p></div>
       {store.fixture ? <span className="rem-preview-pill">Preview<button type="button" onClick={() => { resetRemHomeStore(); connectRemHome(); }}>Exit</button></span> : null}
       <RemMenu label="Rem options" className="rem-home-options" trigger={<MoreHorizontal size={18} />} items={[
         { label: "Provider, model and effort…", icon: Settings, onSelect: onOpenSettings },
+        { label: "What Rem remembers…", icon: Brain, disabled: store.fixture || store.status !== "ready", onSelect: () => setShowMemories(true) },
         { label: "Clear history and tasks…", icon: Trash2, danger: true, disabled: store.resetting || store.status !== "ready", onSelect: () => setConfirmClear(true) },
       ]} />
     </header>
@@ -46,8 +58,10 @@ export default function RemHomeWorkspace({ projectOptions = [], avatar = {}, onO
       <p id="rem-clear-description">Stop Rem’s running work and permanently remove its conversation, tasks, memories, and task threads, including archived copies. Your own threads, project files, and saved reports stay.</p>
       <div><button type="button" disabled={store.resetting} onClick={() => setConfirmClear(false)}>Keep history</button><button type="button" data-danger="true" disabled={store.resetting} onClick={async () => { if (await clearRemHistory()) setConfirmClear(false); }}>{store.resetting ? "Clearing…" : "Clear history and tasks"}</button></div>
     </div> : null}
+    {showMemories ? <RemMemoryPanel now={now} onClose={() => setShowMemories(false)} /> : null}
     {store.notice ? <div role="status" className="rem-home-notice"><span>{store.notice}</span><button type="button" aria-label="Dismiss" title="Dismiss" onClick={dismissNotice}><X size={14} /></button></div> : null}
     {store.status === "error" && store.error ? <div role="alert" className="rem-home-notice" data-tone="danger"><span>{store.error}</span></div> : null}
+    {store.contextIssue ? <div role="status" className="rem-home-notice" data-tone="attention"><span>{store.contextIssue}</span></div> : null}
     <div className="rem-home-main" data-sheet={store.sheet ? "open" : undefined}>
       <Conversation key={store.conversation?.id || "loading"} store={store} now={now} replying={replying} avatar={avatar} onOpenLink={onOpenLink} messageFocus={messageFocus} />
       {store.sheet ? <>
@@ -69,13 +83,26 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus }
   const pinnedRef = useRef(true);
   const days = useMemo(() => messagesByDay(conversationMessages(store.messages), now), [store.messages, now]);
   const liveWork = useMemo(() => latestWorkMessageIds(store.messages), [store.messages]);
+  const followUpsFor = latestSuggestionMessageId(store.messages);
+  const [unseen, setUnseen] = useState(0);
+  const seenCount = useRef(store.messages.length);
   const offline = store.status === "offline";
   const last = store.messages.at(-1);
   // Follow new messages unless the person has scrolled up to read.
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (element && pinnedRef.current) element.scrollTop = element.scrollHeight;
+    // While you read further up, count what arrived instead of jumping to it.
+    if (pinnedRef.current) seenCount.current = store.messages.length;
+    setUnseen(pinnedRef.current ? 0 : Math.max(0, store.messages.length - seenCount.current));
   }, [store.messages.length, last?.id, replying]);
+  const jumpToLatest = () => {
+    const element = scrollRef.current;
+    pinnedRef.current = true;
+    seenCount.current = store.messages.length;
+    setUnseen(0);
+    element?.scrollTo({ top: element.scrollHeight, behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  };
   useLayoutEffect(() => {
     if (!messageFocus) return;
     const message = [...(scrollRef.current?.querySelectorAll("[data-message-id]") || [])]
@@ -85,17 +112,32 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus }
     message.focus({ preventScroll: true });
     message.scrollIntoView({ block: "center" });
   }, [messageFocus]);
-  return <div className="rem-convo">
-    <div ref={scrollRef} className="rem-stream" onScroll={event => { const element = event.currentTarget; pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80; }}>
+  const disabled = offline || store.status === "loading" || store.resetting;
+  const composer = useRemComposer(disabled);
+  return <div className="rem-convo" {...composer.handlers}>
+    {composer.dragging ? <div className="rem-drop" role="status" aria-live="polite"><Paperclip aria-hidden="true" size={20} /><span>Drop files to attach</span></div> : null}
+    <div ref={scrollRef} className="rem-stream" onScroll={event => {
+      const element = event.currentTarget;
+      pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+      if (pinnedRef.current && unseen) { seenCount.current = store.messages.length; setUnseen(0); }
+    }}>
       <div className="rem-stream-inner" role="log" aria-label="Conversation with Rem" aria-live="polite">
-        {store.messages.length ? days.map(day => <div key={day.label} className="rem-day">
+        {store.messages.length ? days.map(day => <div key={day.key} className="rem-day">
           <div className="rem-day-label" role="separator"><span>{day.label}</span></div>
-          {day.messages.map((message, index) => <Message key={message.id} message={message} first={day.messages[index - 1]?.role !== message.role} tasks={store.tasks} onOpenLink={onOpenLink} live={liveWork.has(message.id)} />)}
+          {day.messages.map((message, index) => <Message key={message.id} message={message} first={day.messages[index - 1]?.role !== message.role} now={now} tasks={store.tasks} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} />)}
         </div>) : <Welcome offline={offline} loading={store.status === "loading"} avatar={avatar} />}
-        {replying ? <div className="rem-msg" data-role="rem"><span className="rem-face"><RatFaceIcon size={18} /></span><div className="rem-typing" role="status" aria-label="Rem is replying"><i /><i /><i /></div></div> : null}
+        {replying ? <div className="rem-msg" data-role="rem"><span className="rem-face"><RatFaceIcon size={18} /></span><div className="rem-msg-body">
+          {/* The reply as it is written. Screen readers hear the finished message instead. */}
+          {store.conversation?.draft_reply ? <div className="rem-draft" aria-hidden="true"><MarkdownContent compact className="rem-markdown" value={store.conversation.draft_reply} /></div> : null}
+          <div className="rem-turn" role="status" aria-label={store.conversation?.turn_label ? `Rem is ${store.conversation.turn_label.toLowerCase()}` : "Rem is replying"}>
+            <span className="rem-typing" aria-hidden="true"><i /><i /><i /></span>
+            {store.conversation?.turn_label ? <span className="rem-turn-label" aria-hidden="true">{store.conversation.turn_label}…</span> : null}
+          </div>
+        </div></div> : null}
       </div>
     </div>
-    <Composer disabled={offline || store.status === "loading" || store.resetting} replying={replying} request={store.composerRequest} offline={offline} />
+    <NewMessagesPill count={unseen} onClick={jumpToLatest} />
+    <Composer composer={composer} disabled={disabled} replying={replying} request={store.composerRequest} offline={offline} />
   </div>;
 }
 
@@ -118,20 +160,43 @@ function Welcome({ offline, loading, avatar }) {
   </div>;
 }
 
-function Message({ message, first, tasks, onOpenLink, live = true }) {
+function Message({ message, first, now, tasks, onOpenLink, live = true, followUps = false }) {
+  const stamp = <MessageStamp iso={message.created_at} now={now} />;
   if (message.role === "user") {
     return <div className="rem-msg" data-message-id={message.id} tabIndex={-1} data-role="user" data-first={first || undefined} data-pending={message.pending || undefined}>
-      <div className="rem-bubble" title={messageTime(message.created_at)}>{message.body}</div>
-      {message.failed ? <p className="rem-msg-failed">Didn’t send. <button type="button" onClick={() => retryRemMessage(message.id)}>Try again</button></p> : null}
+      <div className="rem-bubble">
+        {message.attachments?.length ? <div className="rem-bubble-files"><MessageAttachments attachments={message.attachments} inverse /></div> : null}
+        {message.body}
+      </div>
+      {message.failed ? <p className="rem-msg-failed">Didn’t send. <button type="button" onClick={() => retryRemMessage(message.id)}>Try again</button> <button type="button" onClick={() => editRemMessage(message.id)}>Edit</button></p>
+        : message.pending && message.waiting ? <p className="rem-msg-waiting" role="status">Sends when Rem finishes replying</p> : stamp}
     </div>;
   }
-  return <div className="rem-msg" data-message-id={message.id} tabIndex={-1} data-role="rem" data-first={first || undefined}>
+  // A Rem message right after another Rem message gets a faint rule above it (data-follows).
+  return <div className="rem-msg" data-message-id={message.id} tabIndex={-1} data-role="rem" data-first={first || undefined} data-follows={first ? undefined : true}>
     {first ? <span className="rem-face"><RatFaceIcon size={18} /></span> : <span className="rem-face-space" aria-hidden="true" />}
-    <div className="rem-msg-body" title={messageTime(message.created_at)}>
-      <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" value={message.body} />
+    <div className="rem-msg-body">
+      <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" value={message.result ? bodyWithoutCardLinks(message.body, message.result) : message.body} />
+      <MessageDetails details={message.details} onOpenLink={onOpenLink} />
+      <ResultCard result={message.result} body={message.body} onOpenLink={onOpenLink} />
+      {message.files?.length ? <ReplyFiles files={message.files} onOpenLink={onOpenLink} /> : null}
       {message.work ? <WorkCard work={message.work} tasks={tasks} live={live} /> : null}
+      <ResultActions message={message} tasks={tasks} live={live} onOpenLink={onOpenLink} />
+      <MemoryNote messageId={message.id} memory={message.memory} />
+      {followUps ? <FollowUps suggestions={message.suggestions} /> : null}
+      {/* The time and the message's actions (Copy, Ask about this, model and time) share one line. */}
+      <div className="rem-msg-foot">{stamp}{message.body ? <MessageActions message={message} /> : null}</div>
     </div>
   </div>;
+}
+
+// Shows nothing when the message has no usable date.
+function MessageStamp({ iso, now }) {
+  const stamp = messageStamp(iso, now);
+  if (!stamp) return null;
+  return <time className="rem-msg-time" dateTime={stamp.iso} title={stamp.full}>
+    <span aria-hidden="true">{stamp.label}</span><span className="sr-only">{stamp.full}</span>
+  </time>;
 }
 
 // Live view of the thread Rem started for a request. The thread link is always shown.
@@ -146,6 +211,7 @@ function WorkCard({ work, tasks, live = true }) {
       <strong>{status.title}</strong>
       <small>{[status.type ? typeLabel(status.type) : "", status.label, checks].filter(Boolean).join(" · ")}</small>
     </button>
+    {live ? <ProgressSteps status={status} now={new Date()} /> : null}
     <div className="rem-work-links">
       {status.threadId ? <button type="button" onClick={() => openRemThread(status.threadId)}><MessageSquare size={13} aria-hidden="true" />Open thread</button> : <span className="rem-work-pending">Thread starting…</span>}
       {status.verificationThreadId && status.verificationThreadId !== status.threadId && status.state !== "succeeded" ? <button type="button" onClick={() => openRemThread(status.verificationThreadId)} aria-label="Open review thread" title="Open review thread"><ShieldCheck size={13} aria-hidden="true" /><span>Review</span></button> : null}
@@ -153,34 +219,88 @@ function WorkCard({ work, tasks, live = true }) {
   </div>;
 }
 
-function Composer({ disabled, replying, request, offline }) {
-  const [draft, setDraft] = useState("");
-  const textareaRef = useRef(null);
-  useEffect(() => {
-    if (!request) return;
-    setDraft(request.text);
-    textareaRef.current?.focus();
-  }, [request]);
-  useLayoutEffect(() => {
-    const element = textareaRef.current;
-    if (!element) return;
-    element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight, 200)}px`;
-  }, [draft]);
+// The same composer as threads: files can be attached, pasted or dropped, and long
+// pasted text becomes a text attachment. Files copied in Raticode paste as attachments.
+// The draft lives outside this view so it survives switching to another plugin.
+function useRemComposer(disabled) {
+  const { draft, attachments, error: attachmentError } = useRemComposerState();
+  const [dragging, setDragging] = useState(false);
+  const dragDepthRef = useRef(0);
+  const add = files => attachToRemComposer(files);
   const send = async () => {
     const text = draft.trim();
-    if (!text || disabled) return;
-    setDraft("");
-    if (!(await sendRemMessage(text))) setDraft(current => current || text);
+    if ((!text && !attachments.length) || disabled) return;
+    const files = attachments;
+    updateRemComposer({ draft: "", attachments: [], error: "" });
+    // A message that doesn't send stays in the conversation with Try again and Edit.
+    await sendRemMessage(text, files);
   };
-  return <form className="rem-composer" onSubmit={event => { event.preventDefault(); void send(); }}>
-    <div className="rem-composer-box" data-disabled={disabled || undefined}>
-      <textarea ref={textareaRef} rows={1} aria-label="Message Rem" placeholder={offline ? "Rem isn't connected yet" : replying ? "Rem is replying… you can keep typing" : "Message Rem"} value={draft}
-        onChange={event => setDraft(event.target.value)}
-        onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
-      <button type="submit" aria-label="Send" title="Send" disabled={disabled || !draft.trim()}><ArrowUp size={16} strokeWidth={2.25} /></button>
-    </div>
-  </form>;
+  const handlers = {
+    onPaste(event) {
+      const files = clipboardAttachmentFiles(event.clipboardData);
+      const pastedText = event.clipboardData?.getData?.("text/plain") || "";
+      const copiedPaths = files.length ? [] : copiedFilePaths(pastedText);
+      if (copiedPaths.length) {
+        event.preventDefault();
+        void readFileAttachments(copiedPaths).then(add, cause => updateRemComposer({ error: cause.message }));
+        return;
+      }
+      const textFile = largePasteFile(pastedText);
+      if (!files.length && !textFile) return;
+      event.preventDefault();
+      add(textFile ? [...files, textFile] : files);
+    },
+    onDragEnter(event) {
+      if (!transferContainsFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setDragging(true);
+    },
+    onDragOver(event) {
+      if (!transferContainsFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    },
+    onDragLeave(event) {
+      if (!transferContainsFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (!dragDepthRef.current) setDragging(false);
+    },
+    onDrop(event) {
+      if (!transferContainsFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setDragging(false);
+      add(event.dataTransfer.files);
+    },
+  };
+  return { draft, attachments, attachmentError, dragging, add, send, handlers };
+}
+
+function Composer({ composer, disabled, replying, request, offline }) {
+  const [focusRequest, setFocusRequest] = useState(0);
+  useEffect(() => {
+    if (applyRemComposerRequest(request)) setFocusRequest(current => current + 1);
+  }, [request]);
+  return <div className="rem-composer">
+    <ChatComposer
+      inputLabel="Message Rem"
+      placeholder={offline ? "Rem isn't connected yet" : replying ? "Rem is replying… you can keep typing" : composer.attachments.length ? "Add a note about the attached file" : "Message Rem"}
+      sendLabel="Send"
+      attachments={composer.attachments}
+      attachmentError={composer.attachmentError}
+      draft={composer.draft}
+      focusRequest={focusRequest}
+      permissionOptions={[]}
+      sendDisabled={disabled}
+      onAddAttachments={composer.add}
+      onAttachmentErrorChange={error => updateRemComposer({ error })}
+      onAttachmentsChange={attachments => updateRemComposer({ attachments })}
+      onDraftChange={draft => updateRemComposer({ draft })}
+      onSend={() => void composer.send()}
+    />
+  </div>;
 }
 
 // One task: live status above a small editor with the four task sections plus
@@ -380,7 +500,7 @@ function TaskStatus({ task, activity, now }) {
   const info = runState(last.state, last.needs_user);
   const tone = activity.kind === "attention" ? info.tone : activity.kind === "paused" ? "neutral" : info.tone === "attention" ? "neutral" : info.tone;
   return <section className="rem-status" aria-label="Last run" data-tone={tone}>
-    <div className="rem-status-line"><OutcomeGlyph status={{ ...info, tone, state: last.state, type: task.type }} /><strong>{last.state === "succeeded" ? taskRecap(last.summary_short || info.label) : last.summary_short || info.label}</strong>{last.finished_at ? <small>{formatWhen(last.finished_at, now, { past: true })}</small> : null}</div>
+    <div className="rem-status-line"><OutcomeGlyph status={{ ...info, tone, state: last.state, type: task.type }} /><strong>{last.state === "succeeded" ? taskRecap(last.summary_short || info.label) : plainMarkdown(last.summary_short) || info.label}</strong>{last.finished_at ? <small>{formatWhen(last.finished_at, now, { past: true })}</small> : null}</div>
     {criteriaSummary(last.criteria) ? <p className="rem-status-note">{criteriaSummary(last.criteria)}</p> : null}
     {task.state === "paused" ? <p className="rem-status-note">Schedule paused</p> : task.next_occurrence_at ? <p className="rem-status-note">Next run {formatWhen(task.next_occurrence_at, now)}</p> : null}
     <StatusActions run={last} controls={controls} />

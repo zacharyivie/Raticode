@@ -10,6 +10,7 @@ import { workflowRunSummary } from "../lib/workflowRuns.js";
 const TerminalWorkspace = lazy(() => import("./TerminalWorkspace.jsx"));
 import { bottomPanelTabForShortcut, clamp } from "../lib/terminalWorkspace.js";
 import { trackPointerDrag } from "../lib/paneResize.js";
+import { bottomPanelStartState, openTerminalTab, terminalInEditor } from "../lib/workspaceLayout.js";
 export * from "../lib/terminalWorkspace.js";
 
 const PANEL_MIN_HEIGHT = 140;
@@ -25,23 +26,36 @@ export default function UnifiedBottomPanel({
   timelineProps,
   runsProps = {},
 }) {
-  const hasExplicitPanelSelectionRef = useRef(false);
-  const [activeTab, setActiveTab] = useState("timeline");
-  const [collapsed, setCollapsed] = useState(true);
+  const [startState] = useState(() => bottomPanelStartState(settings.layout));
+  const hasExplicitPanelSelectionRef = useRef(startState.explicit);
+  const [activeTab, setActiveTab] = useState(startState.tab);
+  const [collapsed, setCollapsed] = useState(startState.collapsed);
   const [height, setHeight] = useState(settings.layout.bottomPanelHeight);
   const [newTerminalRequest, setNewTerminalRequest] = useState(0);
-  const [terminalMounted, setTerminalMounted] = useState(false);
-  const [runsMounted, setRunsMounted] = useState(false);
+  const [terminalMounted, setTerminalMounted] = useState(startState.tab === "terminal");
+  const [runsMounted, setRunsMounted] = useState(startState.tab === "runs");
+  // Settings > Layout can move terminals into an editor tab.
+  const editorTerminal = terminalInEditor(settings);
   const [timelineMounted, setTimelineMounted] = useState(false);
   useEffect(() => { if (activeTab === "timeline" && !collapsed) setTimelineMounted(true); }, [activeTab, collapsed]);
 
+  useEffect(() => {
+    if (!editorTerminal) return;
+    setTerminalMounted(false);
+    setActiveTab((current) => current === "terminal" ? "timeline" : current);
+  }, [editorTerminal]);
+
   const selectTab = useCallback((tab) => {
+    if (tab === "terminal" && editorTerminal) {
+      openTerminalTab();
+      return;
+    }
     hasExplicitPanelSelectionRef.current = true;
     setActiveTab(tab);
     setCollapsed(false);
     if (tab === "runs") setRunsMounted(true);
     if (tab === "terminal") setTerminalMounted(true);
-  }, []);
+  }, [editorTerminal]);
 
   const handleTabClick = useCallback((tab) => {
     if (tab === activeTab && !collapsed) {
@@ -54,10 +68,11 @@ export default function UnifiedBottomPanel({
   useEffect(() => {
     function togglePanel() {
       if (collapsed) {
-        const targetTab = bottomPanelTabForShortcut(
+        const shortcutTab = bottomPanelTabForShortcut(
           activeTab,
           hasExplicitPanelSelectionRef.current,
         );
+        const targetTab = editorTerminal && shortcutTab === "terminal" ? "timeline" : shortcutTab;
         setActiveTab(targetTab);
         if (targetTab === "terminal") setTerminalMounted(true);
       }
@@ -65,6 +80,10 @@ export default function UnifiedBottomPanel({
     }
 
     function newTerminal() {
+      if (editorTerminal) {
+        openTerminalTab({ newTerminal: true });
+        return;
+      }
       selectTab("terminal");
       setNewTerminalRequest((current) => current + 1);
     }
@@ -102,7 +121,7 @@ export default function UnifiedBottomPanel({
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("gofer:toggle-bottom-panel", handleExternalToggle);
     };
-  }, [activeTab, collapsed, selectTab, settings]);
+  }, [activeTab, collapsed, editorTerminal, selectTab, settings]);
 
   useEffect(() => {
     setHeight(settings.layout.bottomPanelHeight);
@@ -225,12 +244,12 @@ export default function UnifiedBottomPanel({
           {runSummary.unread.length ? <span className="text-brand">· {runSummary.unread.length} unread</span> : null}
           {runSummary.disconnected.length ? <span aria-label="Some run status is out of date" title="Some run status is out of date">!</span> : null}
         </PanelTab>
-        <PanelTab
+        {editorTerminal ? null : <PanelTab
           active={activeTab === "terminal"}
           icon={TerminalIcon}
           label="Terminal"
           onClick={() => handleTabClick("terminal")}
-        />
+        />}
         <div className="flex-1" />
         <button
           aria-label={collapsed ? "Expand bottom panel" : "Collapse bottom panel"}

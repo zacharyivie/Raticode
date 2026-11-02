@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -67,10 +68,9 @@ def test_whole_file_before_expose_and_encrypted_at_rest(files):
         result = files.receive("peer", "thread", chunk(value, b"content", offset=8))
     assert result["state"] == "available"
     assert files.content("peer", "thread", value["file_id"])[1] == b"private content"
-    for row in files.registry.db.execute(
-        "SELECT data FROM device_files UNION ALL SELECT data FROM device_file_chunks"
-    ):
-        assert b"private" not in row[0]
+    stored = list(files.directory.iterdir())
+    assert len(stored) == 1 and b"private" not in stored[0].read_bytes()
+    assert stored[0].stat().st_mode & 0o777 == 0o600
     with pytest.raises(PairingError, match="unavailable"):
         files.content("other", "thread", value["file_id"])
     with pytest.raises(PairingError, match="unavailable"):
@@ -91,29 +91,35 @@ def test_duplicate_chunk_and_conflict(files):
         files.receive("peer", "thread", chunk(value, b"def", offset=4))
 
 
-def test_small_chunks_have_a_shared_storage_quota(files, monkeypatch):
-    monkeypatch.setattr(files_module, "MAX_CHUNKS", 2)
-    first = offer(files, b"abc")
-    second = offer(files, b"def")
+def test_small_chunks_never_multiply_storage(files):
+    data = bytes(range(256)) * 80  # 20,480 bytes: one full record and one partial
+    value = offer(files, data)
     with files.registry.transaction():
-        files.offer("peer", "thread", first)
-        files.offer("other", "thread", second)
-        files.receive("peer", "thread", chunk(first, b"a", eof=False))
-        files.receive("other", "thread", chunk(second, b"d", eof=False))
-        # Retransmissions must still be acknowledged when the quota is full.
-        assert files.receive("peer", "thread", chunk(first, b"a", eof=False))["received_size"] == 1
+        files.offer("peer", "thread", value)
+        for offset in range(len(data)):
+            last = offset == len(data) - 1
+            files.receive("peer", "thread", chunk(value, data[offset : offset + 1], offset, last))
+        # Retransmissions are compared with what was committed.
+        assert files.receive("peer", "thread", chunk(value, data[:3], eof=False))["state"] == (
+            "available"
+        )
+    (stored,) = files.directory.iterdir()
+    assert stored.stat().st_size == files_module.stored_size(len(data))
+    assert files.content("peer", "thread", value["file_id"])[1] == data
+
+
+def test_byte_quota_and_full_disk_refuse_offers(files, monkeypatch):
+    monkeypatch.setattr(files_module, "MAX_TOTAL", 10)
+    with files.registry.transaction():
+        files.offer("peer", "thread", offer(files, b"123456"))
     with pytest.raises(PairingError, match="file_quota"), files.registry.transaction():
-        files.receive("peer", "thread", chunk(first, b"b", offset=1, eof=False))
-    assert files.registry.db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0] == 2
+        files.offer("peer", "thread", offer(files, b"12345"))
+    monkeypatch.setattr(files_module, "MAX_TOTAL", 10**12)
+    monkeypatch.setattr(files, "_free", lambda: files_module.FREE_SPACE_MARGIN + 100)
+    with pytest.raises(PairingError, match="file_disk_full"), files.registry.transaction():
+        files.offer("peer", "thread", offer(files, b"x" * 100))
     with files.registry.transaction():
-        status = files.receive("peer", "thread", chunk(first, b"bc", offset=1))
-    assert status["state"] == "available"
-    assert files.content("peer", "thread", first["file_id"])[1] == b"abc"
-    assert files.registry.db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0] == 1
-    with files.registry.transaction():
-        files.receive("other", "thread", chunk(second, b"e", offset=1, eof=False))
-        files.cancel("other", "thread", second["file_id"])
-    assert files.registry.db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0] == 0
+        files.offer("peer", "thread", offer(files, b"x" * 50))
 
 
 def test_truncation_and_bad_digest_never_expose(files):
@@ -184,3 +190,170 @@ def test_snapshot_rejects_fifo_without_waiting_for_writer(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def sized(files: DeviceFiles, size: int) -> dict[str, Any]:
+    return {**offer(files, b""), "size": size, "sha256": "0" * 64}
+
+
+@pytest.mark.parametrize(
+    ("limit", "size", "accepted"),
+    [
+        (files_module.MAX_FILE, files_module.MAX_FILE, True),
+        (files_module.MAX_FILE, files_module.MAX_FILE + 1, False),
+        (64 * 1024 * 1024, 64 * 1024 * 1024 - 1, True),
+        (64 * 1024 * 1024, 64 * 1024 * 1024 + 1, False),
+        (files_module.MAX_FILE_LARGE, files_module.MAX_FILE_LARGE - 1, True),
+        (files_module.MAX_FILE_LARGE, files_module.MAX_FILE_LARGE, True),
+        (files_module.MAX_FILE_LARGE, files_module.MAX_FILE_LARGE + 1, False),
+    ],
+)
+def test_offer_size_boundaries(files, monkeypatch, limit, size, accepted):
+    monkeypatch.setattr(files, "_free", lambda: 10**13)
+    value = sized(files, size)
+    if accepted:
+        with files.registry.transaction():
+            files.offer("peer", "thread", value, limit=limit)
+    else:
+        with pytest.raises(PairingError, match="bounds"), files.registry.transaction():
+            files.offer("peer", "thread", value, limit=limit)
+
+
+def test_legacy_limit_applies_without_an_explicit_one(files, monkeypatch):
+    monkeypatch.setattr(files, "_free", lambda: 10**13)
+    with pytest.raises(PairingError, match="bounds"), files.registry.transaction():
+        files.offer("peer", "thread", sized(files, files_module.MAX_FILE + 1))
+
+
+def test_snapshot_size_boundaries_use_sparse_files(files, tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "_free", lambda: 10**13)
+    root = tmp_path / "project"
+    root.mkdir()
+    for name, size in (
+        ("over-legacy", files_module.MAX_FILE + 1),
+        ("over-max", files_module.MAX_FILE_LARGE + 1),
+    ):
+        with open(root / name, "wb") as handle:
+            handle.truncate(size)
+    with pytest.raises(PairingError, match="scoped"), files.registry.transaction():
+        files.snapshot("peer", "thread", root, root / "over-legacy")
+    with pytest.raises(PairingError, match="scoped"), files.registry.transaction():
+        files.snapshot("peer", "thread", root, root / "over-max", limit=files_module.MAX_FILE_LARGE)
+    assert list(files.directory.iterdir()) == []
+    with files.registry.transaction():
+        value = files.snapshot(
+            "peer", "thread", root, root / "over-legacy", limit=files_module.MAX_FILE_LARGE
+        )
+    assert value["size"] == files_module.MAX_FILE + 1
+    assert value["sha256"] == hashlib.sha256(bytes(files_module.MAX_FILE + 1)).hexdigest()
+
+
+def test_large_snapshot_and_chunks_keep_memory_bounded(files, tmp_path, monkeypatch):
+    import tracemalloc
+
+    monkeypatch.setattr(files, "_free", lambda: 10**13)
+    root = tmp_path / "project"
+    root.mkdir()
+    size = 64 * 1024 * 1024 + 1
+    pattern = os.urandom(files_module.CHUNK)
+    digest = hashlib.sha256()
+    with open(root / "big.bin", "wb") as handle:
+        for _ in range(size // len(pattern)):
+            handle.write(pattern)
+            digest.update(pattern)
+        handle.write(b"!")
+        digest.update(b"!")
+    tracemalloc.start()
+    with files.registry.transaction():
+        value = files.snapshot(
+            "peer", "thread", root, root / "big.bin", limit=files_module.MAX_FILE_LARGE
+        )
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.reset_peak()
+    assert value["sha256"] == digest.hexdigest()
+    _, last = files.chunk("peer", "thread", value["file_id"], size - 1)
+    assert last == b"!"
+    _, middle = files.chunk("peer", "thread", value["file_id"], 1000 * files_module.CHUNK)
+    assert middle == pattern
+    _, chunk_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 2 * 1024 * 1024 and chunk_peak < 1024 * 1024
+    with pytest.raises(PairingError, match="too_large"):
+        files.content("peer", "thread", value["file_id"])
+
+
+def test_migrates_files_stored_as_blobs_or_chunk_rows(tmp_path):
+    registry = DeviceRegistry(tmp_path / "state", Secrets(), initialize=True)
+    try:
+        files = DeviceFiles(registry)
+        done, partial = offer(files, b"finished file"), offer(files, b"abcdefgh")
+        db = registry.db
+        with registry.transaction():
+            for value, state, received, blob in (
+                (done, "available", 13, files._seal("peer", done["file_id"], b"finished file")),
+                (partial, "receiving", 6, None),
+            ):
+                raw = json.dumps(value, sort_keys=True).encode()
+                db.execute(
+                    "INSERT INTO device_files VALUES (?,?,?,?,?,?,?,?,?,0)",
+                    (
+                        "peer",
+                        value["file_id"],
+                        "thread",
+                        files._seal("peer", value["file_id"], raw),
+                        value["size"],
+                        value["expires_at"],
+                        state,
+                        received,
+                        blob,
+                    ),
+                )
+            for offset, piece in ((0, b"abc"), (3, b"def")):
+                db.execute(
+                    "INSERT INTO device_file_chunks VALUES (?,?,?,?)",
+                    (
+                        "peer",
+                        partial["file_id"],
+                        offset,
+                        files._seal("peer", partial["file_id"], piece),
+                    ),
+                )
+        migrated = DeviceFiles(registry)
+        assert migrated.content("peer", "thread", done["file_id"])[1] == b"finished file"
+        assert db.execute("SELECT COUNT(*) FROM device_file_chunks").fetchone()[0] == 0
+        assert (
+            db.execute("SELECT COUNT(*) FROM device_files WHERE data IS NOT NULL").fetchone()[0]
+            == 0
+        )
+        with registry.transaction():
+            status = migrated.receive("peer", "thread", chunk(partial, b"gh", offset=6))
+        assert status["state"] == "available"
+        assert migrated.content("peer", "thread", partial["file_id"])[1] == b"abcdefgh"
+    finally:
+        registry.close()
+
+
+def test_removed_rows_lose_their_record_files(files):
+    value = offer(files, b"abc")
+    with files.registry.transaction():
+        files.offer("peer", "thread", value)
+        files.receive("peer", "thread", chunk(value, b"abc"))
+        files.registry.db.execute("DELETE FROM device_files")
+        files._expire()
+    assert list(files.directory.iterdir()) == []
+
+
+def test_rolled_back_chunk_does_not_break_the_retry(files):
+    value = offer(files, b"abcdef")
+    with files.registry.transaction():
+        files.offer("peer", "thread", value)
+        files.receive("peer", "thread", chunk(value, b"ab", eof=False))
+    with pytest.raises(RuntimeError), files.registry.transaction():
+        files.receive("peer", "thread", chunk(value, b"cd", offset=2, eof=False))
+        raise RuntimeError("a later step of the same event failed")
+    with files.registry.transaction():
+        assert files.receive("peer", "thread", chunk(value, b"ab", eof=False))["received_size"] == 2
+        files.receive("peer", "thread", chunk(value, b"cd", offset=2, eof=False))
+        status = files.receive("peer", "thread", chunk(value, b"ef", offset=4))
+    assert status["state"] == "available"
+    assert files.content("peer", "thread", value["file_id"])[1] == b"abcdef"

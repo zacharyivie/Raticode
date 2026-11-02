@@ -26,7 +26,7 @@ export default function ThreadHistoryMatch({ repository, target, scrollRef, rend
     setError("");
     try {
       const result = direction === "match" ? await repository.around(target.threadId, target.messageId)
-        : direction === "older" ? await repository.page(target.threadId, page.before)
+        : direction === "older" ? await repository.older(target.threadId, page.before)
         : await repository.newer(target.threadId, page.after);
       if (generation !== generationRef.current) return;
       if (direction === "older") {

@@ -12,6 +12,8 @@ from typing import Any, Literal, NotRequired, TypedDict
 import anyio
 import anyio.abc
 
+from gofer.core.command_slots import path_with_wrappers_first, scoped_command
+
 
 class ProcessStreamEvent(TypedDict):
     type: Literal["chunk", "exit"]
@@ -43,6 +45,28 @@ def build_subprocess_env(
     return env
 
 
+GIT_PUSH_BLOCKED_HELPER = "raticode-push-blocked-ask-the-user"
+
+
+def git_push_blocked_environment(parent: dict[str, str] | None = None) -> dict[str, str]:
+    """Env overrides that make every ``git push`` fail; fetch and commit still work.
+
+    Git rewrites each push URL to an unknown transport. This guards against
+    accidental pushes by agents. It is not a sandbox: a process that edits its
+    own environment or config can undo it.
+    """
+    count = (os.environ if parent is None else parent).get("GIT_CONFIG_COUNT", "0")
+    try:
+        index = max(0, int(count))
+    except ValueError:
+        index = 0
+    return {
+        "GIT_CONFIG_COUNT": str(index + 1),
+        f"GIT_CONFIG_KEY_{index}": f"url.{GIT_PUSH_BLOCKED_HELPER}://.pushInsteadOf",
+        f"GIT_CONFIG_VALUE_{index}": "",
+    }
+
+
 def env_with_executable_on_path(
     executable: str,
     overrides: dict[str, str] | None = None,
@@ -66,7 +90,9 @@ def env_with_executable_on_path(
     entries = [entry for entry in current_path.split(os.pathsep) if entry]
     if directory in entries:
         return env
-    env["PATH"] = os.pathsep.join([directory, *entries])
+    # Command slot wrappers stay first, or the provider's own folder (often
+    # holding npm and npx) would hide them.
+    env["PATH"] = path_with_wrappers_first(env, os.pathsep.join([directory, *entries]))
     return env
 
 
@@ -380,7 +406,7 @@ async def stream_subprocess(
         }
 
     process = await anyio.open_process(
-        cmd,
+        scoped_command(cmd, merged_env),
         cwd=cwd,
         env=merged_env,
         start_new_session=True,

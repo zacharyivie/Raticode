@@ -1,5 +1,6 @@
 // Drive Rem's browser tools through the actual desktop entry point and studio:
 // tabs join the tab strip in the background and the user's focus stays put.
+require("./background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");

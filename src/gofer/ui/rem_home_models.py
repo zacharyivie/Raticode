@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -108,6 +108,9 @@ class Recipe(BaseModel):
     conversation_turns: int = Field(default=1, ge=1, le=12, strict=True)
     schedule: Schedule = Field(default_factory=Schedule)
     acceptance_criteria: list[Criterion] = Field(default_factory=list, max_length=40)
+    # The user asked to be sent the file this task finds or makes. Only a run started
+    # by that user's chat message attaches it, so scheduled runs never send files.
+    send_files: bool = Field(default=False, strict=True)
 
     @field_validator("model", "effort")
     @classmethod
@@ -167,6 +170,11 @@ class Recipe(BaseModel):
         return self
 
 
+def read_only_recipe(recipe: dict[str, Any]) -> bool:
+    """Research and conversations run with read-only workers and never edit a project."""
+    return recipe.get("type") == "research" or recipe.get("execution_mode") == "conversation"
+
+
 def worker_config(config: dict[str, Any], recipe: dict[str, Any]) -> dict[str, Any]:
     """Apply task selections without changing Rem's settings or resource grants."""
     selected = dict(config)
@@ -180,6 +188,70 @@ def worker_config(config: dict[str, Any], recipe: dict[str, Any]) -> dict[str, A
     return selected
 
 
+def chat_config(config: dict[str, Any]) -> dict[str, Any]:
+    """The selection Rem uses for its own chat replies.
+
+    Settings > Rem can give the chat a faster provider, model or effort than
+    tasks and threads use. Without a chat provider, the chat follows them.
+    """
+    provider = config.get("chat_provider")
+    if not provider:
+        return config
+    return {
+        **config,
+        "provider": provider,
+        "model": config.get("chat_model") or "cli-default",
+        "effort": config.get("chat_effort") or "",
+    }
+
+
+def worker_resources(config: dict[str, Any], *, readonly: bool, review: bool) -> dict[str, Any]:
+    """The thread tools a Rem task receives: the user's thread defaults.
+
+    Desktop threads start from the same defaults (Settings > Thread tools), so
+    a writer task gets the identical selection. Read-only work keeps shell and
+    the enabled skills, which are instructions it only reads. MCP servers,
+    subagents and the browser can change things elsewhere, so they stay off.
+    Research may search the web when the user allows it; reviews never do.
+    """
+    selected = config.get("resources") or {}
+    resources = dict(selected)
+    resources["shell"] = bool(resources.get("shell", True))
+    resources["web"] = bool(resources.get("web", False))
+    if readonly:
+        resources = {
+            "shell": resources["shell"],
+            "web": resources["web"] and not review,
+            "agents": False,
+            "browser": False,
+            "skills": [
+                skill
+                for skill in selected.get("skills") or []
+                if isinstance(skill, dict) and skill.get("enabled") is not False
+            ],
+        }
+    return resources
+
+
+def worktree_skill(resources: dict[str, Any]) -> str | None:
+    """Name of an enabled skill that sets the project's own worktree process.
+
+    Such a skill decides where and on which branch changes go, so Rem must not
+    put the task in a worktree of its own.
+    """
+    from gofer.core.rem_library import skill_folder, skill_header
+
+    for skill in resources.get("skills") or []:
+        if not isinstance(skill, dict) or skill.get("enabled") is False or not skill.get("path"):
+            continue
+        folder = skill_folder(str(skill["path"]))
+        header = skill_header(folder)
+        name = header.get("name") or folder.name
+        if "worktree" in f"{name} {header.get('description', '')}".lower():
+            return name
+    return None
+
+
 def completion_recap(summary: str) -> str:
     """Keep the result's opening paragraph; details remain in the worker thread."""
     paragraph = summary.strip().split("\n\n", 1)[0]
@@ -190,6 +262,41 @@ def completion_recap(summary: str) -> str:
     if boundary > 40:
         return short[: boundary + 1]
     return short.rsplit(" ", 1)[0] + "…"
+
+
+def occurrence_context(run: dict[str, Any]) -> dict[str, Any] | None:
+    """Where this run sits in a repeated task: its moment and what was already accepted.
+
+    Repeated work, such as a weekly review of new comments, should cover only
+    what's new since the last accepted run and compare with it instead of
+    starting from nothing. One-off tasks that never succeeded need no context.
+    """
+    recipe = run["recipe"]
+    schedule = recipe.get("schedule") or {}
+    previous = run.get("previous_success")
+    recurring = schedule.get("kind", "once") != "once"
+    if not previous and not recurring:
+        return None
+    context: dict[str, Any] = {
+        "this_run_for": run.get("scheduled_for") or run["created_at"],
+        "started_by": "schedule" if run.get("scheduled_for") else "request",
+        "schedule_timezone": schedule.get("timezone", "UTC"),
+        "previous_accepted_run": previous,
+    }
+    if previous:
+        context["new_since"] = previous["for"]
+    return context
+
+
+OCCURRENCE_GUIDANCE = (
+    "\nThis task has run before or repeats on a schedule. Unless the task names its own "
+    "period, cover what is new from new_since up to this_run_for (UTC instants). If the "
+    "task names a period, use it. Read the previous accepted run's reports when comparing "
+    "helps, say what changed since then, and never present earlier findings as new. If "
+    "nothing new happened, say so plainly instead of repeating the old result. Without a "
+    "previous accepted run, use the task's period or state the default you chose.\n"
+    "Occurrence context:\n"
+)
 
 
 class TaskControl(BaseModel):
@@ -243,12 +350,38 @@ class ConversationDecision(WorkerReply):
         return value
 
 
+class MemoryChange(BaseModel):
+    """Correct or forget one saved memory by its exact ID."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=64)
+    action: Literal["update", "forget"]
+    text: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def corrected_text(self) -> MemoryChange:
+        if self.action == "update" and not self.text.strip():
+            raise ValueError("A memory update needs its corrected text")
+        return self
+
+
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reply: str = Field(min_length=1, max_length=4000)
     tasks: list[Recipe] = Field(default_factory=list, max_length=5)
     memories: list[str] = Field(default_factory=list, max_length=10)
+    memory_changes: list[MemoryChange] = Field(default_factory=list, max_length=10)
     controls: list[TaskControl] = Field(default_factory=list, max_length=5)
+    # Absolute paths of existing files the user asked Rem to send.
+    files: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(
+        default_factory=list, max_length=8
+    )
+    # Optional depth under the short reply, shown behind a "Details" disclosure.
+    details: str = Field(default="", max_length=6000)
+    # Up to three follow-up prompts. They only fill the message box when tapped.
+    suggestions: list[Annotated[str, Field(max_length=300)]] = Field(
+        default_factory=list, max_length=10
+    )
 
     @model_validator(mode="after")
     def suggested_criteria(self) -> Decision:
@@ -266,6 +399,15 @@ class TaskUpdate(BaseModel):
     summary: str = Field(min_length=1, max_length=700)
     needs_user: bool = Field(default=False, strict=True)
     user_question: str = Field(default="", max_length=500)
+    details: str = Field(default="", max_length=6000)
+    suggestions: list[Annotated[str, Field(max_length=300)]] = Field(
+        default_factory=list, max_length=10
+    )
+    # Absolute paths of files the user asked to be sent; used only for runs that
+    # answer the user's own chat request (``deliver_files_to``).
+    files: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(
+        default_factory=list, max_length=8
+    )
 
     @model_validator(mode="after")
     def require_question(self) -> TaskUpdate:

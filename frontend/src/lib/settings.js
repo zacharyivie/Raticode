@@ -163,10 +163,20 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     avatarEnabled: true,
     avatarAnimated: true,
     autoHideThoughts: true,
+    // 0 lets the backend size these to this computer's cores and memory.
+    maxWorkers: 0,
+    commandSlotsEnabled: true,
+    testSlots: 0,
+    buildSlots: 0,
+    browserSlots: 0,
     resources: { ...DEFAULT_REM_RESOURCES },
     effort: "",
     model: "",
     provider: "codex",
+    // Rem's own chat replies. An empty provider follows the settings above.
+    chatProvider: "",
+    chatModel: "",
+    chatEffort: "",
   },
   memory: { reportFormat: "md", reportThemes: DEFAULT_REPORT_THEMES, archiveFolder: "", secondBrainEnabled: false, secondBrainRoot: "", secondBrainFormat: "md", secondBrainTheme: "auto" },
   layout: {
@@ -174,6 +184,17 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     bottomPanelHeight: 300,
     graphInspectorWidth: 340,
     workflowPaneWidth: 272,
+    // Which window edge each side pane docks to. Panes on the same edge keep
+    // the project pane outermost, next to the window border.
+    projectPaneSide: "left",
+    assistantPaneSide: "right",
+    // "editor" opens terminals as a tab beside files instead of in the panel.
+    terminalLocation: "panel",
+    projectPaneAtStartup: true,
+    assistantPaneAtStartup: true,
+    bottomPanelAtStartup: "collapsed",
+    // Narrower windows show one side pane at a time. 0 never does.
+    compactWidth: 1000,
   },
   plugins: DEFAULT_PLUGIN_SETTINGS,
   keybindings: DEFAULT_KEYBINDINGS,
@@ -214,6 +235,11 @@ export function normalizeAppSettings(value = {}) {
   settings.assistant.avatarAnimated = settings.assistant.avatarAnimated !== false;
   settings.assistant.autoHideThoughts = settings.assistant.autoHideThoughts !== false;
   settings.assistant.resources = snapshotRemResources(settings.assistant.resources);
+  settings.assistant.maxWorkers = Math.round(boundedNumber(settings.assistant.maxWorkers, 0, 16, 0));
+  settings.assistant.commandSlotsEnabled = settings.assistant.commandSlotsEnabled !== false;
+  for (const key of ["testSlots", "buildSlots", "browserSlots"]) {
+    settings.assistant[key] = Math.round(boundedNumber(settings.assistant[key], 0, 16, 0));
+  }
   settings.general.autosave = settings.general.autosave !== false;
   settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["rem", "workflows", "files", "search", "source-control", "organizations", "second-brain"], value?.general?.defaultView === "code" ? "files" : "workflows");
   // Retain the old field for older installations reading these settings.
@@ -264,13 +290,31 @@ export function normalizeAppSettings(value = {}) {
   settings.assistant.provider = safeString(settings.assistant.provider, "codex", 80);
   settings.assistant.model = safeString(settings.assistant.model, "", 160);
   settings.assistant.effort = safeString(settings.assistant.effort, "", 80);
+  settings.assistant.chatProvider = safeString(settings.assistant.chatProvider, "", 80);
+  settings.assistant.chatModel = safeString(settings.assistant.chatModel, "", 160);
+  settings.assistant.chatEffort = safeString(settings.assistant.chatEffort, "", 80);
   settings.layout.workflowPaneWidth = boundedNumber(settings.layout.workflowPaneWidth, 240, 420, 272);
   settings.layout.assistantPaneWidth = boundedNumber(settings.layout.assistantPaneWidth, 300, 520, 380);
   settings.layout.bottomPanelHeight = boundedNumber(settings.layout.bottomPanelHeight, 140, 480, 300);
   settings.layout.graphInspectorWidth = boundedNumber(settings.layout.graphInspectorWidth, 280, 520, 340);
-  settings.plugins = normalizePluginSettings(settings.plugins);
+  settings.layout.projectPaneSide = enumValue(settings.layout.projectPaneSide, ["left", "right"], "left");
+  settings.layout.assistantPaneSide = enumValue(settings.layout.assistantPaneSide, ["left", "right"], "right");
+  settings.layout.terminalLocation = enumValue(settings.layout.terminalLocation, ["panel", "editor"], "panel");
+  settings.layout.projectPaneAtStartup = settings.layout.projectPaneAtStartup !== false;
+  settings.layout.assistantPaneAtStartup = settings.layout.assistantPaneAtStartup !== false;
+  settings.layout.bottomPanelAtStartup = enumValue(settings.layout.bottomPanelAtStartup, ["collapsed", "problems", "timeline", "runs", "terminal"], "collapsed");
+  settings.layout.compactWidth = Math.round(boundedNumber(settings.layout.compactWidth, 0, 2000, 1000));
+  // Read the stored value, not the merged defaults, so older plugin settings
+  // without Feature Preview choices are recognized and migrated.
+  settings.plugins = normalizePluginSettings(value?.plugins);
   settings.keybindings = normalizeKeybindings(settings.keybindings);
   return settings;
+}
+
+// Rem's worker and command slot limits, in the shape the backend validates.
+export function commandSlotSettings(assistant = {}) {
+  return { enabled: assistant.commandSlotsEnabled !== false, maxWorkers: assistant.maxWorkers || 0,
+    test: assistant.testSlots || 0, build: assistant.buildSlots || 0, browser: assistant.browserSlots || 0 };
 }
 
 export function updateSetting(settings, path, value) {

@@ -64,7 +64,7 @@ A staged candidate retains its recorded mode even if this variable changes later
 Review that mode in its manifest and release notes before tagging.
 
 Create the GitHub environment **release-signing** in
-[repository Settings > Environments](https://github.com/zacharyivie/gofer-flow/settings/environments).
+[repository Settings > Environments](https://github.com/zacharyivie/Raticode/settings/environments).
 Restrict its deployment branches to **Selected branches and tags**, then add a
 **branch** rule for `main` only. Both the credential check and native build jobs
 explicitly select this environment. Pull-request source validation does not.
@@ -93,7 +93,7 @@ For either exported certificate, encode the file locally without printing it:
 ```bash
 openssl base64 -A -in developer-id.p12 -out developer-id.base64
 # Feed the file into the environment secret. Do not commit either file.
-gh secret set MACOS_CERTIFICATE --repo zacharyivie/gofer-flow \
+gh secret set MACOS_CERTIFICATE --repo zacharyivie/Raticode \
   --env release-signing < developer-id.base64
 ```
 

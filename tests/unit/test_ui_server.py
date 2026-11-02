@@ -75,6 +75,7 @@ def _fake_server(
     server.chat_jobs = server_module.ChatJobs(tmp_path)
     server.generation_jobs = server_module.GenerationJobs(tmp_path)
     server.provider_auth = server_module.ProviderAuthSessions()
+    server.link_previews = server_module.LinkPreviews()
     server.resource_limits = resource_limits or DEFAULT_RESOURCE_LIMITS
     server.api_token = "test-ui-token"
     server.allowed_origins = {"http://127.0.0.1:5173"}
@@ -561,6 +562,33 @@ def test_ui_server_creates_missing_data_dir_before_scheduler_start(tmp_path) -> 
         if server.scheduler.is_running():
             server.scheduler.shutdown(wait=False)
         server.server_close()
+
+
+def test_link_previews_need_the_ui_token_and_refuse_local_pages(tmp_path: Path) -> None:
+    path = "/api/link-preview?url=http%3A%2F%2F127.0.0.1%2Fadmin"
+    assert _request(tmp_path, "GET", path, authenticated=False).status == 401
+
+    result = _request(tmp_path, "GET", path)
+
+    assert result.status == 422
+    assert "public web addresses" in cast(dict[str, Any], result.json())["error"]
+
+
+def test_chat_images_load_through_the_backend(tmp_path: Path, monkeypatch) -> None:
+    path = "/api/media-image?url=http%3A%2F%2F127.0.0.1%2Fcat.png"
+    assert _request(tmp_path, "GET", path, authenticated=False).status == 401
+    refused = _request(tmp_path, "GET", path)
+    assert refused.status == 422
+    assert "public web addresses" in cast(dict[str, Any], refused.json())["error"]
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 40
+    monkeypatch.setattr(
+        "gofer.ui.link_previews.fetch",
+        lambda url, accept, limit, **_: (url, "application/octet-stream", png, False),
+    )
+    loaded = _request(tmp_path, "GET", "/api/media-image?url=https%3A%2F%2Fexample.com%2Fcat")
+    assert loaded.status == 200
+    assert cast(dict[str, Any], loaded.json())["image"]["mime"] == "image/png"
 
 
 def test_ui_server_health_check_works_on_dynamic_port(tmp_path) -> None:
@@ -1723,6 +1751,7 @@ def test_ui_server_provider_profile_runner_prune_and_resume_routes(
             "skip_cache": True,
             "force": True,
             "trigger_context": {"reason": "test"},
+            "background": False,
         }
     }
 

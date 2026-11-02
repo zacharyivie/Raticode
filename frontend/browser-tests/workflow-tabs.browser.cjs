@@ -1,4 +1,5 @@
 /* global getComputedStyle, __dirname, clearTimeout, console, document, process, setTimeout, window */
+require('../electron/tests/background-display.cjs').runInBackgroundDisplay();
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');

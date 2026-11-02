@@ -80,8 +80,9 @@ jobs:
           npm audit --include=peer --audit-level=low --json > ../audit-evidence/npm-audit.json || audit_status=$?
           if [ "$audit_status" -ne 0 ]; then
             cat ../audit-evidence/npm-audit.json
+            # Allows only reviewed, expiring advisories in development-only build tools.
+            python ../scripts/check-npm-audit.py ../audit-evidence/npm-audit.json
           fi
-          exit "$audit_status"
 
       - name: Save dependency audit evidence
         # Earlier validation failures can skip both audits entirely.

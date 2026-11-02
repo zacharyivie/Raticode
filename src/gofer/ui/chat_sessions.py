@@ -25,6 +25,9 @@ from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links,
 from gofer.utils.paths import get_data_dir
 
 P = ParamSpec("P")
+# Providers whose CLI can copy a saved session into a new one. Cursor, Copilot,
+# Antigravity and Grok's ACP mode have no fork, so their forks re-send history.
+NATIVE_FORK_PROVIDERS = {"claude_code", "codex", "opencode"}
 RECOVERY_DELAYS = (1.0, 3.0)
 RECOVERY_PROMPT = (
     "Your previous response was interrupted by a provider error. Continue the original task "
@@ -58,6 +61,17 @@ def _digest(value: Any) -> str:
     return sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def _valid_native_id(native: Any) -> bool:
+    return (
+        isinstance(native, str)
+        and bool(native)
+        and not native.startswith("-")
+        and "\0" not in native
+        and len(native) <= 512
+        and not any(c.isspace() for c in native)
+    )
+
+
 @dataclass
 class ChatSession:
     root: Path
@@ -77,6 +91,11 @@ class ChatSession:
     def native_id(self) -> str | None:
         return self.state.get("nativeId")
 
+    @property
+    def fork_from(self) -> str | None:
+        """The parent thread's native session to copy on this thread's first turn."""
+        return None if self.native_id else self.state.get("forkFrom")
+
     def prompt(self, instructions: str, context: str, request: str) -> str:
         self.pending.update(instructions=_digest(instructions), context=_digest(context))
         if self.resumed:
@@ -90,22 +109,60 @@ class ChatSession:
         native = event.get("sessionId")
         if not isinstance(native, str) or not native:
             return
-        if (
-            native.startswith("-")
-            or "\0" in native
-            or len(native) > 512
-            or any(c.isspace() for c in native)
-        ):
+        if not _valid_native_id(native):
             raise ValueError("Provider returned an invalid native session identity")
         if self.native_id and native != self.native_id:
             raise ValueError("Provider changed native session identity while resuming Rem")
         updated = {**self.state, **self.pending, "nativeId": native, "users": self.users}
+        updated.pop("forkFrom", None)
         if updated == self.state and self.document.get("lastProvider") == self.state["provider"]:
             return
         self.state = updated
         self.state.pop("deliveryUncertain", None)
         self.document["lastProvider"] = self.state["provider"]
         self.save()
+
+
+def _fork_source(
+    root: Path, options: dict[str, Any], provider: str, project: str, users: list[str]
+) -> dict[str, Any] | None:
+    """Plan a native copy of the parent thread's session for a forked thread.
+
+    Only when the parent session saw exactly the fork's history and nothing
+    after it. A fork from an earlier message or another provider re-sends history.
+    """
+    parent = options.get("fork_from")
+    if provider not in NATIVE_FORK_PROVIDERS or not isinstance(parent, str) or not parent:
+        return None
+    try:
+        with open_binary_input(root.parent / _digest(parent) / "session.json") as source:
+            document = json.load(source)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or document.get("version") != 2:
+        return None
+    saved = (document.get("sessions") or {}).get(provider)
+    if document.get("lastProvider") != provider or not isinstance(saved, dict):
+        return None
+    previous = saved.get("users")
+    if (
+        saved.get("project") != project
+        or saved.get("deliveryUncertain")
+        or not _valid_native_id(saved.get("nativeId"))
+        or not isinstance(previous, list)
+        or not previous
+        or len(users) <= len(previous)
+        or users[: len(previous)] != previous
+    ):
+        return None
+    return {
+        "provider": provider,
+        "project": project,
+        "generation": uuid.uuid4().hex,
+        "forkFrom": saved["nativeId"],
+        "users": previous,
+        **{key: saved[key] for key in ("instructions", "context") if key in saved},
+    }
 
 
 def _plan(root: Path, options: dict[str, Any]) -> tuple[ChatSession, list[dict[str, Any]]]:
@@ -176,7 +233,14 @@ def _plan(root: Path, options: dict[str, Any]) -> tuple[ChatSession, list[dict[s
             "The previous turn ended without a native session ID. "
             "Edit and resend the message to start a new provider session safely."
         )
-    resumed = bool(
+    forked = (
+        None
+        if options.get("reset_session") or any(s.get("nativeId") for s in sessions.values())
+        else _fork_source(root, options, provider, project, users)
+    )
+    if forked is not None:
+        state, previous = forked, forked["users"]
+    resumed = forked is not None or bool(
         not options.get("reset_session")
         and state.get("provider") == provider
         and state.get("project") == project

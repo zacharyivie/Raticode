@@ -127,8 +127,9 @@ export function chatMessageForRequest(message) {
     role: message.role,
     body: String(message?.body ?? "").trim(),
     ...(attachments.length ? {
-      attachments: attachments.map(({ id, name, size, storageName, type }) => ({
-        id, name, size, storageName, type,
+      // Attachments sent from a phone name their media type "mime".
+      attachments: attachments.map(({ id, name, size, storageName, type, mime }) => ({
+        id, name, size, storageName, type: type || mime,
       })),
     } : {}),
   };

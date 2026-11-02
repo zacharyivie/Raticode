@@ -1,0 +1,40 @@
+/* Highlighted code and charts in chat. Colors keep at least 4.5:1 on the code block. */
+:root {
+  --rc-keyword: #7c3aed; --rc-string: #0f766e; --rc-number: #b45309; --rc-comment: #64748b; --rc-tag: #be185d;
+  --rc-series-1: #4f46e5; --rc-series-2: #0f766e; --rc-series-3: #c2410c; --rc-series-4: #be185d;
+  --rc-grid: rgba(100, 116, 139, .25); --rc-axis: #475569;
+}
+:root.dark, .dark {
+  --rc-keyword: #c4b5fd; --rc-string: #5eead4; --rc-number: #fcd34d; --rc-comment: #94a3b8; --rc-tag: #f9a8d4;
+  --rc-series-1: #a5b4fc; --rc-series-2: #5eead4; --rc-series-3: #fdba74; --rc-series-4: #f9a8d4;
+  --rc-grid: rgba(148, 163, 184, .22); --rc-axis: #cbd5e1;
+}
+.rc-keyword { color: var(--rc-keyword); font-weight: 600; }
+.rc-string { color: var(--rc-string); }
+.rc-number { color: var(--rc-number); }
+.rc-comment { color: var(--rc-comment); font-style: italic; }
+.rc-tag { color: var(--rc-tag); }
+
+.rc-chart { margin: 0; max-width: 600px; }
+.rc-chart-title { margin-bottom: 4px; font-size: 13px; font-weight: 600; }
+.rc-chart-scroll { overflow-x: auto; }
+.rc-chart svg { display: block; width: 100%; min-width: 360px; height: auto; }
+.rc-grid { stroke: var(--rc-grid); stroke-width: 1; }
+.rc-zero { stroke: var(--rc-axis); stroke-width: 1; }
+.rc-axis { fill: var(--rc-axis); font-size: 11px; font-variant-numeric: tabular-nums; }
+.rc-pattern-1 { opacity: .9; }
+.rc-pattern-2 { opacity: .8; }
+.rc-pattern-3 { opacity: .7; }
+.rc-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 0 0; padding: 0; list-style: none; font-size: 12px; }
+.rc-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.rc-swatch { width: 12px; height: 12px; border-radius: 2px; }
+.rc-data { margin-top: 6px; font-size: 12px; }
+.rc-data summary { cursor: pointer; width: fit-content; }
+.rc-table-scroll { overflow-x: auto; margin-top: 6px; }
+.rc-data table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.rc-data th, .rc-data td { padding: 3px 8px; border: 1px solid var(--rc-grid); text-align: right; }
+.rc-data th[scope=row], .rc-data thead th:first-child { text-align: left; }
+@media (forced-colors: active) {
+  .rc-keyword, .rc-string, .rc-number, .rc-comment, .rc-tag { color: CanvasText; }
+  .rc-chart svg * { stroke: CanvasText; fill: CanvasText; }
+}

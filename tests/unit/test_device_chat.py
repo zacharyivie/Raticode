@@ -14,8 +14,12 @@ from gofer.ui.device_chat import DeviceChatBridge
 class Work:
     def __init__(self) -> None:
         self.results: list[tuple[str, str, str, str | None]] = []
+        self.recorded: list[tuple[str, str, list[dict[str, Any]]]] = []
         self.done = threading.Event()
         self.granted = True
+
+    def record_attachments(self, peer, request_id, attachments):
+        self.recorded.append((peer, request_id, attachments))
 
     def claim(self):
         return None
@@ -151,14 +155,12 @@ async def test_dispatch_recovers_after_transient_claim_failure(tmp_path):
     steering.close()
 
 
-def test_authenticated_attachment_uses_existing_media_boundary_then_cleans_up(tmp_path):
+def test_phone_attachment_is_saved_with_the_desktop_thread(tmp_path):
     captured = []
+    desktop_thread = "desktop-thread"
 
     async def source(**kwargs):
         captured.append(kwargs)
-        files = list(tmp_path.glob("device-attachments-*/chat-attachments/*/*"))
-        assert len(files) == 1
-        assert files[0].read_bytes() == b"sample attachment"
         assert "raticode_attachment" in kwargs["messages"][-1]["body"]
         yield {"type": "final", "message": {"body": "File read"}}
 
@@ -166,15 +168,70 @@ def test_authenticated_attachment_uses_existing_media_boundary_then_cleans_up(tm
     jobs, steering = ChatJobs(tmp_path), ChatSteering(tmp_path)
     bridge = DeviceChatBridge(work, jobs, steering, tmp_path, source=source)
     task = request(tmp_path)
+    task["context"]["desktop_thread_id"] = desktop_thread
     task["attachments"] = [
-        {"name": "sample.txt", "mime": "text/plain", "data": b"sample attachment"}
+        {"id": "phone-file", "name": "sample.txt", "mime": "text/plain", "data": b"sample"}
     ]
     bridge.dispatch(task)
     assert work.done.wait(5)
-    list(jobs.events(task["event"]["thread_id"], task["turn_id"]))
+    list(jobs.events(desktop_thread, task["turn_id"]))
     assert captured
     assert work.results[0][2:] == ("File read", None)
-    assert list(tmp_path.glob("device-attachments-*")) == []
+    # The file outlives the turn, under the desktop thread, so later desktop
+    # turns that resend this message can still read it.
+    files = list((tmp_path / "chat-attachments" / desktop_thread).iterdir())
+    assert [path.read_bytes() for path in files] == [b"sample"]
+    ((peer, request_id, saved),) = work.recorded
+    assert (peer, request_id) == (task["peer"], task["event"]["request_id"])
+    assert saved == [
+        {
+            "id": "phone-file",
+            "name": "sample.txt",
+            "size": 6,
+            "type": "text/plain",
+            "mime": "text/plain",
+            "storageName": files[0].name,
+        }
+    ]
+    bridge.close()
+    jobs.close()
+    steering.close()
+
+
+def test_earlier_phone_attachments_reach_later_turns(tmp_path):
+    from gofer.ui.chat_media import store_chat_attachments
+
+    captured = []
+
+    async def source(**kwargs):
+        captured.append(kwargs)
+        yield {"type": "final", "message": {"body": "ok"}}
+
+    thread = "desktop-thread"
+    stored = store_chat_attachments(
+        {"threadId": thread, "files": [{"name": "photo.png", "type": "image/png", "data": ""}]},
+        tmp_path,
+    )["attachments"]
+    work = Work()
+    jobs, steering = ChatJobs(tmp_path), ChatSteering(tmp_path)
+    bridge = DeviceChatBridge(work, jobs, steering, tmp_path, source=source)
+    task = request(tmp_path)
+    task["context"]["desktop_thread_id"] = thread
+    task["messages"] = [
+        {"role": "user", "content": "look at this", "attachments": stored},
+        {"role": "user", "content": "lost", "attachments": [{"name": "gone.png"}]},
+        {"role": "assistant", "content": "seen"},
+        {"role": "user", "content": "what was in the photo?"},
+    ]
+    bridge.dispatch(task)
+    assert work.done.wait(5)
+    list(jobs.events(thread, task["turn_id"]))
+    first, lost = captured[0]["messages"][:2]
+    assert (
+        f'path="{tmp_path / "chat-attachments" / thread / stored[0]["storageName"]}"'
+        in (first["body"])
+    )
+    assert "[Attachment no longer available: gone.png]" in lost["body"]
     bridge.close()
     jobs.close()
     steering.close()

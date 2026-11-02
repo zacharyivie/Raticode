@@ -41,9 +41,12 @@ def swarm_status(swarm: dict[str, Any]) -> str:
     if state == "running":
         pending = any(i.get("state") == "pending" for i in run.get("humanInbox", []))
         return "awaiting_approval" if pending else "running"
+    # The phone protocol has no finishing or stopping status. Agents are still
+    # active in both, so report running rather than claiming the run is over.
     return {
         "paused": "paused",
-        "stopping": "cancelled",
+        "completing": "running",
+        "stopping": "running",
         "stopped": "cancelled",
         "failed": "failed",
         "completed": "completed",

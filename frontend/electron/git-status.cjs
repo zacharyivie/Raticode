@@ -23,7 +23,8 @@ function isGitRead(args) {
     || (command === "branch" && subcommand === "--show-current")
     || (command === "remote" && !subcommand)
     || (command === "stash" && ["list", "show"].includes(subcommand))
-    || (command === "worktree" && subcommand === "list");
+    || (command === "worktree" && subcommand === "list")
+    || (command === "config" && args.slice(offset).includes("--get-all"));
 }
 
 async function readSlowMetadata(projectRoot, branch, runner, options) {
@@ -282,6 +283,9 @@ async function gitRepositoryAction(projectRoot, action, value = "", options = {}
   if (/^(merge-|rebase-|stash-(list|preview|drop|clear|apply-selected)$)/.test(action)) {
     return require("./git-integration.cjs").integrationAction(projectRoot, action, value, options);
   }
+  if (["branch-cleanup-preview", "branch-cleanup", "branch-cleanup-keep"].includes(action)) {
+    return require("./git-cleanup.cjs").branchCleanupAction(projectRoot, action, value, options);
+  }
   const runner = options.runGit || runGit;
   const git = (...args) => runner(["-C", projectRoot, ...args]);
   if (action === "commit-diff") {
@@ -495,16 +499,30 @@ function parseGitWorktrees(output = "") {
   return worktrees;
 }
 
+async function commonGitDir(gitDir) {
+  let commonDir = "";
+  try { commonDir = (await fs.promises.readFile(path.join(gitDir, "commondir"), "utf8")).trim(); } catch { /* Main worktree. */ }
+  return commonDir ? path.resolve(gitDir, commonDir) : gitDir;
+}
+
+// Metadata folders for watching. Linked worktrees have their own HEAD and index.
+async function readGitLocation(projectRoot, options = {}) {
+  const runner = options.runGit || runGit;
+  const location = await repositoryLocation(projectRoot, runner);
+  const gitDir = location.gitDir || String(await runner(["-C", projectRoot, "rev-parse", "--absolute-git-dir"])).trim();
+  return { root: location.root, gitDir, commonDir: await commonGitDir(gitDir) };
+}
+
+// Another process changed repository metadata. Cached branch lists must be reread.
+function invalidateGitReads() {
+  gitReadGeneration += 1;
+}
+
 async function readGitWorktrees(projectRoot, options = {}) {
   const runner = options.runGit || runGit;
   try {
     const { root, gitDir } = await repositoryLocation(projectRoot, runner);
-    let repository = root;
-    if (gitDir) {
-      let commonDir = "";
-      try { commonDir = (await fs.promises.readFile(path.join(gitDir, "commondir"), "utf8")).trim(); } catch { /* Main worktree. */ }
-      repository = commonDir ? path.resolve(gitDir, commonDir) : gitDir;
-    }
+    const repository = gitDir ? await commonGitDir(gitDir) : root;
     // Share only pending reads. Every later listing sees externally changed worktrees.
     const reads = runnerMap(worktreeReads, runner);
     const key = `${gitReadGeneration}:${repository}`;
@@ -668,7 +686,9 @@ module.exports = {
   parseGitHistory,
   readGitFileBaseline,
   parseGitWorktrees,
+  invalidateGitReads,
   readGitHistory,
+  readGitLocation,
   readGitStatus,
   readGitBranches,
   readGitWorktrees,

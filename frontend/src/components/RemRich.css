@@ -1,0 +1,65 @@
+/* Rich parts of Rem's chat. Uses the Rem workspace palette from RemHome.css. */
+.rem-details { margin-top: 8px; max-width: 640px; border-left: 2px solid var(--rem-line); padding-left: 12px; }
+.rem-details > summary { width: fit-content; cursor: pointer; color: var(--rem-accent); font-size: 12.5px; font-weight: 500; }
+.rem-details[open] > summary { margin-bottom: 6px; }
+
+.rem-result { max-width: 560px; margin-top: 8px; }
+.rem-result-checks { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--rem-muted); }
+.rem-result-checks[data-tone=success] { color: var(--rem-success); }
+.rem-result-checks[data-tone=danger] { color: var(--rem-danger); }
+.rem-result-files { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.rem-result-files li { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--rem-soft-line); border-radius: 12px; background: var(--rem-raised); }
+.rem-result-thumb { display: grid; place-items: center; width: 44px; height: 44px; flex-shrink: 0; border-radius: 9px; background: var(--rem-accent-soft); color: var(--rem-accent); }
+.rem-result-file { flex: 1; min-width: 0; }
+.rem-result-file strong { display: block; overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.rem-result-file small { display: block; color: var(--rem-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.rem-result-open { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border: 1px solid var(--rem-line); border-radius: 8px; color: var(--rem-accent); font-size: 12px; font-weight: 500; }
+.rem-result-open:hover { background: var(--rem-accent-soft); }
+.rem-result-thread { margin-top: 8px; }
+
+.rem-followups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.rem-followups button { max-width: 100%; padding: 5px 12px; border: 1px solid var(--rem-line); border-radius: 999px; background: var(--rem-raised); color: var(--rem-ink); font-size: 12.5px; text-align: left; }
+.rem-followups button:hover { border-color: var(--rem-accent); color: var(--rem-accent); }
+
+.rem-msg-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-height: 26px; margin-top: 2px; opacity: 0; transition: opacity .12s; }
+.rem-msg:hover .rem-msg-actions, .rem-msg:focus-within .rem-msg-actions, .rem-msg:focus .rem-msg-actions { opacity: 1; }
+@media (hover: none) { .rem-msg-actions { opacity: 1; } }
+.rem-msg-actions button { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 7px; border-radius: 6px; color: var(--rem-muted); font-size: 11.5px; }
+.rem-msg-actions button:hover { background: var(--rem-accent-soft); color: var(--rem-ink); }
+.rem-msg-meta { margin-left: 6px; color: var(--rem-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.rem-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; }
+.rem-progress-steps { display: grid; flex: 1; min-width: 220px; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 0; padding: 0; list-style: none; }
+.rem-progress-steps li { position: relative; display: flex; gap: 4px; padding-top: 7px; color: var(--rem-muted); font-size: 11px; }
+.rem-progress-steps li::before { content: ""; position: absolute; inset: 0 0 auto; height: 3px; border-radius: 999px; background: var(--rem-soft-line); }
+.rem-progress-steps li[data-state=done]::before { background: var(--rem-accent); }
+.rem-progress-steps li[data-state=current] { color: var(--rem-ink); font-weight: 600; }
+.rem-progress-steps li[data-state=current]::before { background: linear-gradient(90deg, var(--rem-accent) 50%, var(--rem-soft-line) 50%); background-size: 200% 100%; animation: rem-progress 1.6s ease-in-out infinite alternate; }
+.rem-progress-steps li[data-state=stopped] { color: var(--rem-danger); }
+.rem-progress-steps li[data-state=stopped]::before { background: var(--rem-danger); }
+@media (prefers-reduced-motion: reduce) { .rem-progress-steps li[data-state=current]::before { animation: none; background: var(--rem-accent); opacity: .6; } }
+.rem-progress-time { color: var(--rem-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rem-work:has(.rem-progress) { flex-wrap: wrap; }
+.rem-work .rem-progress { flex-basis: 100%; order: 3; padding-left: 40px; }
+
+.rem-turn { display: flex; align-items: center; gap: 8px; }
+.rem-turn-label { color: var(--rem-muted); font-size: 12.5px; }
+
+.rem-new-pill { position: absolute; left: 50%; bottom: 86px; z-index: 2; display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; transform: translateX(-50%); border: 1px solid var(--rem-line); border-radius: 999px; background: var(--rem-raised); color: var(--rem-accent); font-size: 12px; font-weight: 600; box-shadow: 0 4px 14px rgb(0 0 0 / .12); }
+
+/* Presence: a soft ring while Rem thinks or works, a dot when something needs you. */
+.rem-home-header .rem-face { position: relative; }
+.rem-home-header .rem-face[data-presence=thinking]::after,
+.rem-home-header .rem-face[data-presence=working]::after { content: ""; position: absolute; inset: -3px; border: 2px solid var(--rem-accent); border-radius: 50%; opacity: .55; animation: rem-presence 1.8s ease-in-out infinite; }
+.rem-home-header .rem-face[data-presence=working]::after { border-color: var(--rem-success); animation-duration: 2.6s; }
+.rem-home-header .rem-face[data-presence=attention]::after { content: ""; position: absolute; top: -1px; right: -1px; width: 10px; height: 10px; border: 2px solid var(--rem-bg); border-radius: 50%; background: var(--rem-attention); }
+@keyframes rem-presence { 0%, 100% { transform: scale(1); opacity: .55; } 50% { transform: scale(1.08); opacity: .2; } }
+@media (prefers-reduced-motion: reduce) { .rem-home-header .rem-face::after { animation: none !important; } }
+.rem-draft { opacity: .92; }
+.rem-draft + .rem-turn .rem-typing { padding: 4px; }
+.rem-msg-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 0 10px; }
+.rem-msg-foot .rem-msg-actions { margin-top: 0; }
+.rem-result-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.rem-result-actions button { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border: 1px solid var(--rem-line); border-radius: 8px; background: var(--rem-raised); color: var(--rem-accent); font-size: 12.5px; font-weight: 500; }
+.rem-result-actions button:hover:not(:disabled) { background: var(--rem-accent-soft); }
+.rem-result-actions button:disabled { opacity: .6; }

@@ -59,6 +59,11 @@ def excerpt(message: dict[str, Any], query: str = "") -> dict[str, Any]:
     result["body"] = body[start : start + 6000]
     if start or len(body) > 6000:
         result["truncated"] = True
+    if message.get("attachments"):
+        result["attachments"] = [
+            {k: a[k] for k in ("name", "type", "size", "path") if k in a}
+            for a in message["attachments"]
+        ]
     return result
 
 
@@ -152,9 +157,14 @@ class RemRecall:
                 message = json.loads(row["body"])
                 linked = message.get("work") or {}
                 if linked.get("run_id"):
-                    run = self.store.get(db, "runs", linked["run_id"])
-                    task = self.store.get(db, "tasks", run["task_id"])
-                    if not self.permitted(run) or task.get("deleted_at"):
+                    try:
+                        run = self.store.get(db, "runs", linked["run_id"])
+                        task = self.store.get(db, "tasks", run["task_id"])
+                    except KeyError:
+                        # A finished one-time task removed after 30 days: the
+                        # message is still conversation history.
+                        run, task = None, {}
+                    if (run and not self.permitted(run)) or task.get("deleted_at"):
                         continue
                 item = excerpt(message, " ".join(request.queries) or query)
                 if len(item["body"]) > budget:

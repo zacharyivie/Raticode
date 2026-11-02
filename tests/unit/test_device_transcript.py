@@ -191,3 +191,31 @@ def test_renderer_exchange_keeps_presentation_and_bounds_large_wire_details(appl
     assert thought["groupId"] == "desktop-turn"
     assert thought["truncated"]
     assert rich["payload"]["messages"][-1]["presentation"]["durationMs"] == 2500
+
+
+def test_phone_history_leaves_out_hidden_context_but_keeps_it_stored(application, tmp_path):
+    app, peer = application
+    context, metadata, shared = share(app, peer, tmp_path)
+    thought = {"role": "assistant", "kind": "thought", "groupId": "turn"}
+    messages = [
+        {"id": "ask", "role": "user", "body": "Fix the build"},
+        {**thought, "id": "t1", "body": "Checking Gradle"},
+        {"id": "memory", "role": "assistant", "kind": "memory", "body": "Earlier: compacted notes"},
+        {"id": "context", "role": "system", "kind": "continuation-context", "body": "Prior turn"},
+        {**thought, "id": "t2", "body": "Found it"},
+        {"id": "reply", "role": "assistant", "kind": "final", "body": "Done"},
+    ]
+    app.workspace.exchange(peer, metadata, messages, context, shared["revision"])
+    page = app.handle(
+        peer,
+        event(
+            "thread.history.request",
+            thread_id=shared["thread_id"],
+            payload={"before": None, "include_presentation": True},
+        ),
+    )[0]["payload"]
+    shown = [m["source_id"] for m in page["messages"]]
+    assert shown == ["ask", "t1", "t2", "reply"]
+    assert page["total"] == 4 and page["before"] == 0
+    stored = {m["id"] for m in app.workspace.desktop_messages(peer, shared["thread_id"])}
+    assert {"memory", "context"} <= stored

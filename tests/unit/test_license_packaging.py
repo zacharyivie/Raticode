@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -214,3 +215,41 @@ def test_bundle_handles_platform_specific_locked_versions(license_build):
     policy_path.write_text(json.dumps(policy))
     collector.collect(output)
     assert (output / "python/example-2").is_dir()
+
+
+def test_every_shipped_python_package_has_a_review_for_its_locked_version():
+    """A dependency update must update its license review, or the release bundle fails."""
+    import tomllib
+
+    reviews = json.loads((ROOT / "packaging/licenses/reviewed.json").read_text())["python"]
+    packages: dict[str, list[dict[str, Any]]] = {}
+    for package in tomllib.loads((ROOT / "uv.lock").read_text())["package"]:
+        packages.setdefault(package["name"], []).append(package)
+    # The same closure collect-licenses.py bundles, read from the lock instead of an install.
+    pending = [("gofer-flow", ("xlsx",)), ("pyinstaller", ()), ("pyinstaller-hooks-contrib", ())]
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    while pending:
+        name, extras = pending.pop()
+        if (name, extras) in seen:
+            continue
+        seen.add((name, extras))
+        for package in packages.get(name, []):
+            dependencies = list(package.get("dependencies", []))
+            for extra in extras:
+                dependencies += package.get("optional-dependencies", {}).get(extra, [])
+            pending += [(item["name"], tuple(item.get("extra", []))) for item in dependencies]
+
+    unreviewed = []
+    for name in sorted({name for name, _ in seen} - {"gofer-flow"}):
+        versions = [package["version"] for package in packages[name]]
+        reviewed = [
+            version
+            for version in versions
+            if (reviews.get(f"{name}@{version}") or reviews.get(name) or {}).get("version")
+            == version
+        ]
+        # Packages locked at several versions differ by Python version or platform;
+        # only one of them ships with a given build.
+        if not reviewed or (len(versions) == 1 and reviewed != versions):
+            unreviewed.append(f"{name} {', '.join(versions)}")
+    assert unreviewed == []

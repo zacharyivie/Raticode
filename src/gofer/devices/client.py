@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -27,6 +27,7 @@ async def pair_desktop(registry: DeviceRegistry, uri: str) -> str:
     # User explicitly consented to this QR identity before calling.
     registry.propose(peer, pin, "desktop", invite["expires_at"], outbound=True)
     registry.save_endpoint(peer, endpoint)
+    registry.save_name(peer, invite["responder_name"])
     return await _connect(registry, peer, pin, endpoint, "pair", raw, invite)
 
 
@@ -48,7 +49,14 @@ async def _connect(
     invite: dict[str, Any] | None = None,
     request: dict[str, Any] | None = None,
     sink: Callable[[dict[str, Any]], None] | None = None,
+    preface: Sequence[dict[str, Any]] = (),
+    trailer: Sequence[dict[str, Any]] = (),
+    ticker: Callable[[], Sequence[dict[str, Any]]] | None = None,
+    done: Callable[[dict[str, Any]], bool] | None = None,
+    idle: float | None = None,
 ) -> str:
+    """One pinned session. ``ticker`` adds records while waiting, ``done`` replaces the
+    built-in answer check, and ``idle`` keeps a session open while the peer answers."""
     generation = registry.generation(peer)
     tls = DeviceTLS(
         certificate_pem=registry.identity.certificate,
@@ -63,6 +71,8 @@ async def _connect(
     bound = False
     verified_binding = False
     ready_received = False
+    # Once the request is answered, a trailer only gets a short courtesy wait.
+    answered = False
     binding: dict[str, Any] | None = None
     deadline = time.monotonic() + (
         min(300, invite["expires_at"] - registry.clock()) if invite else 30
@@ -87,18 +97,7 @@ async def _connect(
                 ).record()
                 tls.send(encode_record(binding))
                 bound = True
-            outgoing = tls.drain()
-            for offset in range(0, len(outgoing), MAX_CHUNK):
-                frame = Frame(
-                    session,
-                    mode,
-                    "initiator_to_responder",
-                    index,
-                    outgoing[offset : offset + MAX_CHUNK],
-                ).encode()
-                writer.write(packet(frame))
-                index += 1
-            await asyncio.wait_for(writer.drain(), 5)
+            index = await _flush(tls, writer, session, mode, index)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise PairingError("enrollment_expired")
@@ -110,6 +109,12 @@ async def _connect(
                 # Recheck revocation while waiting for human confirmation or a flight.
                 registry.check_generation(peer, generation)
                 registry.reconnect_pin(peer)
+                if ticker is not None and ready_received and not answered:
+                    extra_records = ticker()
+                    for extra in extra_records:
+                        tls.send(encode_record(extra))
+                    if extra_records:
+                        index = await _flush(tls, writer, session, mode, index)
                 await asyncio.wait({pending_read}, timeout=min(0.2, remaining))
             registry.check_generation(peer, generation)
             incoming = pending_read.result()
@@ -135,22 +140,24 @@ async def _connect(
                                 with registry.lock:
                                     registry.check_generation(peer, generation)
                                     sink(record)
-                            if record.get("request_id") == (request or {}).get("request_id") and (
-                                record.get("type") in ("error", "fleet.snapshot")
-                                or record.get("type") == "request.status"
-                                and record.get("payload", {}).get("status")
-                                in ("completed", "failed", "cancelled", "outcome_unknown")
-                                or record.get("type") == "job.status"
-                                and record.get("payload", {}).get("state")
-                                in (
-                                    "completed",
-                                    "failed",
-                                    "cancelled",
-                                    "outcome_unknown",
-                                    "rejected",
-                                )
-                            ):
-                                return peer
+                            if idle is not None and not answered:
+                                deadline = max(deadline, time.monotonic() + idle)
+                            matches = record.get("request_id") == (request or {}).get("request_id")
+                            if matches and done is not None and not answered:
+                                finished = done(record)
+                            else:
+                                finished = matches and _answered(record)
+                            if finished:
+                                if answered or not trailer:
+                                    return peer
+                                # Sent after the answer: an older peer that rejects
+                                # these records has already answered the request.
+                                # Waiting for the reply keeps an early close from
+                                # resetting the connection before the peer reads them.
+                                for extra in trailer:
+                                    tls.send(encode_record(extra))
+                                request, answered = trailer[-1], True
+                                deadline = time.monotonic() + 3
                             continue
                         with registry.lock:
                             registry.check_generation(peer, generation)
@@ -163,22 +170,16 @@ async def _connect(
                         tls.send(encode_record(ack))
                         ready_received = True
                         if request is not None:
-                            tls.send(encode_record(request))
+                            for outgoing_record in (*preface, request):
+                                tls.send(encode_record(outgoing_record))
                             deadline = time.monotonic() + 300
-                        outgoing = tls.drain()
-                        for offset in range(0, len(outgoing), MAX_CHUNK):
-                            frame = Frame(
-                                session,
-                                mode,
-                                "initiator_to_responder",
-                                index,
-                                outgoing[offset : offset + MAX_CHUNK],
-                            ).encode()
-                            writer.write(packet(frame))
-                            index += 1
-                        await asyncio.wait_for(writer.drain(), 5)
+                        index = await _flush(tls, writer, session, mode, index)
                         if request is None:
                             return peer
+    except Exception:
+        if answered:
+            return peer
+        raise
     finally:
         if pending_read is not None:
             pending_read.cancel()
@@ -190,14 +191,66 @@ async def _connect(
             pass
 
 
+def _answered(record: dict[str, Any]) -> bool:
+    """Whether a peer record ends the request it answers."""
+    kind, payload = record.get("type"), record.get("payload", {})
+    return bool(
+        kind in ("error", "fleet.snapshot")
+        or kind == "request.status"
+        and payload.get("status") in ("completed", "failed", "cancelled", "outcome_unknown")
+        or kind == "job.status"
+        and payload.get("state")
+        in ("completed", "failed", "cancelled", "outcome_unknown", "rejected")
+    )
+
+
+async def _flush(
+    tls: DeviceTLS, writer: asyncio.StreamWriter, session: str, mode: str, index: int
+) -> int:
+    outgoing = tls.drain()
+    for offset in range(0, len(outgoing), MAX_CHUNK):
+        frame = Frame(
+            session,
+            mode,
+            "initiator_to_responder",
+            index,
+            outgoing[offset : offset + MAX_CHUNK],
+        ).encode()
+        writer.write(packet(frame))
+        index += 1
+    await asyncio.wait_for(writer.drain(), 5)
+    return index
+
+
 async def exchange(
     registry: DeviceRegistry,
     peer: str,
     request: dict[str, Any],
     sink: Callable[[dict[str, Any]], None],
+    *,
+    preface: Sequence[dict[str, Any]] = (),
+    trailer: Sequence[dict[str, Any]] = (),
+    ticker: Callable[[], Sequence[dict[str, Any]]] | None = None,
+    done: Callable[[dict[str, Any]], bool] | None = None,
+    idle: float | None = None,
 ) -> str:
-    """A fresh pinned LAN session; durable retries reuse the exact request."""
+    """A fresh pinned LAN session; durable retries reuse the exact request.
+
+    ``preface`` records precede the request in the same session; ``trailer``
+    records follow its terminal answer.
+    """
     endpoint = registry.endpoint(peer)
     return await _connect(
-        registry, peer, registry.reconnect_pin(peer), endpoint, "resume", request=request, sink=sink
+        registry,
+        peer,
+        registry.reconnect_pin(peer),
+        endpoint,
+        "resume",
+        request=request,
+        sink=sink,
+        preface=preface,
+        trailer=trailer,
+        ticker=ticker,
+        done=done,
+        idle=idle,
     )

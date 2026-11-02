@@ -47,10 +47,13 @@ def company(manager, tmp_path) -> Any:
     )
 
 
-def call(manager, org, action, **params) -> Any:
+def call(manager, org, action, actor="Rem:test-thread", **params) -> Any:
+    # Starting a company is the user's decision; Rem only requests it.
+    if action == "control" and params.get("state") == "running":
+        actor = "user"
     return manager.call(
         org["projectRoot"],
-        "Rem:test-thread",
+        actor,
         {"organizationId": org["id"], "action": action, "params": params},
     )
 
@@ -115,6 +118,8 @@ def test_list_summarizes_staff_and_open_work(manager, tmp_path) -> Any:
             "name": "Studio",
             "revision": 1,
             "state": "paused",
+            "pauseReason": "",
+            "archived": False,
             "employees": 2,
             "openTasks": 1,
             "projectRoots": [str(tmp_path)],
@@ -232,7 +237,18 @@ def test_explicit_resume_all_lifts_roster_holds_and_dispatches_approved_work(
     assert all(employee["paused"] for employee in held["config"]["employees"])
     manager.dispatch()
     assert not manager._active
-    call(manager, org, "resume_all", expectedRevision=org["revision"])
+    # Rem can only ask; nothing changes until the user approves.
+    request = call(manager, org, "resume_all", expectedRevision=org["revision"])
+    assert request["needsUserConsent"] is True
+    assert all(e["paused"] for e in call(manager, org, "read")["config"]["employees"])
+    call(
+        manager,
+        org,
+        "request_decide",
+        actor="user",
+        requestId=request["requestId"],
+        decision="approve",
+    )
     started = call(manager, org, "control", state="running")
     assert started["runtime"]["state"] == "running"
     assert all(not employee["paused"] for employee in started["config"]["employees"])
@@ -249,7 +265,7 @@ def test_explicit_resume_all_lifts_roster_holds_and_dispatches_approved_work(
         "blocked",
     ]
     history = call(manager, org, "history")
-    assert history[0]["actor"] == "Rem:test-thread"
+    assert history[0]["actor"] == "user"
     assert {change["path"] for change in history[0]["changes"]} == {
         "/employees/lead/paused",
         "/employees/builder/paused",
@@ -455,8 +471,9 @@ def test_spec_package_roundtrip_preserves_identity_skills_and_attribution(manage
 def test_package_export_preserves_tasks_with_colliding_filename_slugs(identifiers) -> None:
     config = parse_package(fixture_files())["config"]
     tasks = [
-        Task(id=identifier, title=f"Task {index}", recurring=True, intervalSeconds=index * 60)
-        .model_dump()
+        Task(
+            id=identifier, title=f"Task {index}", recurring=True, intervalSeconds=index * 60
+        ).model_dump()
         for index, identifier in enumerate(identifiers, 1)
     ]
 
@@ -1413,7 +1430,7 @@ def test_secret_references_need_explicit_grants_and_never_store_values(manager, 
             return "test-credential-value"
 
     org = company(manager, tmp_path)
-    record = call(manager, org, "secret_reference", id="api", account="account")
+    record = call(manager, org, "secret_reference", actor="user", id="api", account="account")
     assert record["version"] == 1
     org = manager.store.get(org["projectRoot"], org["id"])
     employee = org["config"]["employees"][0]
@@ -1424,7 +1441,7 @@ def test_secret_references_need_explicit_grants_and_never_store_values(manager, 
     assert resolve_secrets(org, employee, resources, Secrets()) == ["test-credential-value"]
     assert resources["mcpServers"][0]["env"]["KEY"] == "test-credential-value"
     assert "test-credential-value" not in json.dumps(call(manager, org, "read"))
-    call(manager, org, "secret_reference", id="api", account="account", revoked=True)
+    call(manager, org, "secret_reference", actor="user", id="api", account="account", revoked=True)
     org = manager.store.get(org["projectRoot"], org["id"])
     with pytest.raises(ValueError, match="revoked"):
         resolve_secrets(

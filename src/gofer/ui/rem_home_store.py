@@ -6,8 +6,9 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Callable, Iterator
+from collections.abc import Set as AbstractSet
 from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -28,6 +29,89 @@ def encode(value: Any) -> str:
 
 
 RUN_STATES = ACTIVE | {"succeeded", "blocked", "cancelled", "failed", "outcome_unknown"}
+# Newest run first. Saving a run replaces its row, which gives it a new rowid,
+# so rowid order tracks the last update rather than when the run started.
+NEWEST_RUN = "json_extract(body, '$.created_at') DESC, rowid DESC"
+# A finished one-time task leaves task lists, then is removed this long after its run finished.
+RETENTION = timedelta(days=30)
+
+
+def _instant(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def retention(task: dict[str, Any]) -> dict[str, Any]:
+    """Whether a task view belongs in task lists, and when cleanup removes it.
+
+    Only a one-time task whose newest run is over, and that needs nothing from
+    the user, is finished. Recurring, scheduled and running tasks stay listed
+    and are never removed by cleanup.
+    """
+    run = task.get("last_run") or {}
+    finished_at = run.get("finished_at") or ""
+    finished = _instant(finished_at)
+    done = bool(
+        (task.get("schedule") or {}).get("kind", "once") == "once"
+        and not task.get("next_occurrence_at")
+        and not task.get("active_run")
+        and finished
+        and (
+            run.get("state") in {"succeeded", "cancelled"}
+            or (run.get("state") in NEEDS_ATTENTION and run.get("acknowledged") is True)
+        )
+    )
+    return {
+        "listed": not done,
+        "finished_at": finished_at,
+        "cleanup_at": (finished + RETENTION).isoformat() if done and finished else "",
+    }
+
+
+def duplicate_notices(messages: list[dict[str, Any]]) -> set[str]:
+    """Legacy "Started <task>." notices that repeat a reply written with them.
+
+    Earlier builds announced a follow-up's new run and then wrote Rem's reply with
+    the same task card in the same moment, so the task showed up twice. The stored
+    messages stay; only the redundant notice is left out of the conversation.
+    """
+    replies: dict[str, list[datetime]] = {}
+    for message in messages:
+        work = message.get("work") or {}
+        written = _instant(message.get("created_at"))
+        if work.get("run_id") and written and message.get("kind") != "task_update":
+            if message.get("id") != f"queued-{work['run_id']}":
+                replies.setdefault(str(work["run_id"]), []).append(written)
+    duplicates = set()
+    for message in messages:
+        work = message.get("work") or {}
+        run = str(work.get("run_id") or "")
+        written = _instant(message.get("created_at"))
+        if (
+            message.get("id") == f"queued-{run}"
+            and message.get("body") == f"Started {work.get('title')}."
+            and written
+            and any(abs(reply - written) < timedelta(seconds=5) for reply in replies.get(run, []))
+        ):
+            duplicates.add(str(message["id"]))
+    return duplicates
+
+
+def ran_at(task: dict[str, Any]) -> str:
+    """When a task last ran: its newest run's start or finish, or its creation time."""
+    times = [
+        moment
+        for run in (task.get("active_run"), task.get("last_run"))
+        for key in ("created_at", "finished_at")
+        if run and (moment := _instant(run.get(key)))
+    ]
+    created = _instant(task.get("created_at"))
+    if not times:
+        return created.astimezone(UTC).isoformat() if created else ""
+    return max(times).astimezone(UTC).isoformat()
 
 
 def begin_cycle(
@@ -60,13 +144,23 @@ def begin_cycle(
         unresolved_fingerprint=None,
         review_refresh_count=0,
         review_receipt_retry=False,
+        review_format_retry=False,
         transient_retries=0,
         not_before=None,
         waiting_reason=None,
+        waiting_for=None,
+        proof_waits=0,
     )
     run["criteria"] = [
         {"id": c["id"], "result": "unknown"} for c in run["recipe"]["acceptance_criteria"]
     ]
+    # Saved reports stay hash-bound evidence for the next attempt, so a
+    # follow-up, retried review or recovery doesn't demand the same report
+    # again. A missing or changed file still fails validation, and saves that
+    # landed after their grant was revoked stay superseded.
+    for artifact in run.get("artifacts", []):
+        if not artifact.get("superseded"):
+            artifact["epoch"] = run["epoch"]
     if kind == "work":
         run.update(
             repair_count=0,
@@ -124,9 +218,7 @@ class RemHomeStore:
             """)
             if not self.setting(db, "conversation"):
                 self.set_setting(db, "conversation", {"id": str(uuid4()), "turn_state": "idle"})
-            # Apply the completion policy to threads created before this version, too.
-            for row in db.execute("SELECT body FROM runs WHERE state='succeeded'").fetchall():
-                self.archive_run_threads(db, json.loads(row[0]))
+            self.restore_completed_threads(db)
 
     @contextmanager
     def connect(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:
@@ -270,7 +362,11 @@ class RemHomeStore:
         *,
         acknowledgement: str | None = None,
         thread_id: str | None = None,
+        scheduled_for: str | None = None,
+        announce: bool = True,
+        message_extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Queue a task's next run; ``announce=False`` when the caller writes its own card."""
         active = db.execute(
             "SELECT body FROM runs WHERE task=? AND state IN ('queued','executing',"
             "'verifying','repairing','cancelling')",
@@ -280,7 +376,7 @@ class RemHomeStore:
             return cast(dict[str, Any], json.loads(active[0]))
         uncertain = db.execute(
             "SELECT body FROM runs WHERE task=? AND state='outcome_unknown' "
-            "ORDER BY rowid DESC LIMIT 1",
+            "ORDER BY " + NEWEST_RUN + " LIMIT 1",
             (task["id"],),
         ).fetchone()
         if uncertain and not occurrence.startswith("manual:"):
@@ -290,7 +386,8 @@ class RemHomeStore:
             return cast(dict[str, Any], json.loads(known[0]))
         if not thread_id:
             previous = db.execute(
-                "SELECT body FROM runs WHERE task=? ORDER BY rowid DESC LIMIT 1", (task["id"],)
+                "SELECT body FROM runs WHERE task=? ORDER BY " + NEWEST_RUN + " LIMIT 1",
+                (task["id"],),
             ).fetchone()
             if previous:
                 saved = json.loads(previous[0])
@@ -308,17 +405,49 @@ class RemHomeStore:
             "thread_id": thread_id or str(uuid4()),
             "repair_count": 0,
             "criteria": [{"id": c["id"], "result": "unknown"} for c in task["acceptance_criteria"]],
+            "scheduled_for": scheduled_for,
+            "previous_success": self.previous_success(db, task["id"]),
         }
         self.put(db, "runs", run)
         self.provision_thread(db, run, "execute")
-        self.message(
-            db,
-            acknowledgement or f"Started {task['title']}.",
-            identity=f"queued-{run['id']}",
-            work=self.work(run),
-        )
+        if announce:
+            self.message(
+                db,
+                acknowledgement or f"Started {task['title']}.",
+                identity=f"queued-{run['id']}",
+                work=self.work(run),
+                **(message_extra or {}),
+            )
         self.event(db, "run.queued", {"run_id": run["id"]})
         return run
+
+    @staticmethod
+    def previous_success(db: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
+        """What the task's last accepted run covered, so the next one can pick up after it.
+
+        Failed or stopped runs don't count: the next run's window starts at the
+        last accepted occurrence, so nothing falls into a gap.
+        """
+        row = db.execute(
+            "SELECT body FROM runs WHERE task=? AND state='succeeded' ORDER BY "
+            + NEWEST_RUN
+            + " LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return None
+        run = json.loads(row[0])
+        return {
+            "run_id": run["id"],
+            "for": run.get("scheduled_for") or run["created_at"],
+            "finished_at": run.get("finished_at"),
+            "summary": run.get("summary_short") or "",
+            "reports": [
+                a["path"]
+                for a in run.get("artifacts", [])
+                if a.get("epoch") == run["epoch"] and not a.get("superseded") and a.get("path")
+            ],
+        }
 
     @staticmethod
     def work(run: dict[str, Any]) -> dict[str, Any]:
@@ -363,45 +492,70 @@ class RemHomeStore:
         self.put(db, "threads", thread)
         return str(identity)
 
-    def archive_run_threads(self, db: sqlite3.Connection, run: dict[str, Any]) -> None:
-        """Archive every worker/reviewer for a completed run without removing history."""
+    def restore_completed_threads(self, db: sqlite3.Connection) -> None:
+        """Undo the old policy that archived task threads when their run succeeded.
+
+        Finished task threads now stay in the thread list as unread until the user
+        opens them. Only that policy set ``archivedAt``, so threads the user archived
+        themselves on the desktop are not affected; the desktop owns those.
+        """
         rows = db.execute(
-            "SELECT body FROM threads WHERE json_extract(body, '$.managedRunId')=?",
-            (run["id"],),
+            "SELECT body FROM threads WHERE json_extract(body, '$.archivedAt') IS NOT NULL"
         ).fetchall()
         for row in rows:
             thread = json.loads(row[0])
-            if thread.get("archived"):
-                continue
-            thread.update(
-                archived=True, archivedAt=run.get("finished_at") or now(), updatedAt=now()
-            )
+            thread.pop("archivedAt", None)
+            thread["archived"] = False
             self.put(db, "threads", thread)
-            self.event(db, "thread.archived", {"thread_id": thread["id"], "run_id": run["id"]})
 
     def task_view(self, db: sqlite3.Connection, task: dict[str, Any]) -> dict[str, Any]:
         runs = [
             json.loads(row[0])
             for row in db.execute(
-                "SELECT body FROM runs WHERE task=? ORDER BY rowid DESC LIMIT 20", (task["id"],)
+                "SELECT body FROM runs WHERE task=? ORDER BY " + NEWEST_RUN + " LIMIT 20",
+                (task["id"],),
             )
         ]
+        active = next((r for r in runs if r["state"] in ACTIVE), None)
+        if runs and not active:
+            # Retry review is offered only where retry_review would accept it.
+            runs[0]["review_retryable"] = bool(
+                self.interrupted_review(runs[0])
+                and runs[0]["recipe"].get("revision") == task.get("revision")
+                and not task.get("deleted_at")
+            )
         return {
             **task,
-            "active_run": next((r for r in runs if r["state"] in ACTIVE), None),
+            "active_run": active,
             "last_run": runs[0] if runs else None,
             "recent_runs": runs,
         }
 
     def conversation(self) -> dict[str, Any]:
         with self.read() as db:
+            messages = [
+                json.loads(r["body"]) for r in db.execute("SELECT body FROM messages ORDER BY seq")
+            ]
+            hidden = duplicate_notices(messages)
             return {
                 "conversation": self.setting(db, "conversation"),
-                "messages": [
-                    json.loads(r["body"])
-                    for r in db.execute("SELECT body FROM messages ORDER BY seq")
-                ],
+                "messages": [m for m in messages if m["id"] not in hidden],
             }
+
+    def transcript(self, identity: str, limit: int = 600) -> list[dict[str, Any]]:
+        """A task thread's latest transcript entries, oldest first."""
+        if not identity:
+            return []
+        with self.read() as db:
+            rows = db.execute(
+                "SELECT body FROM thread_messages WHERE thread=? ORDER BY seq DESC LIMIT ?",
+                (identity, limit),
+            ).fetchall()
+        return [json.loads(row[0]) for row in reversed(rows)]
+
+    def thread_ids(self) -> list[str]:
+        with self.read() as db:
+            return [row[0] for row in db.execute("SELECT id FROM threads")]
 
     def tasks(self) -> list[dict[str, Any]]:
         with self.read() as db:
@@ -410,6 +564,74 @@ class RemHomeStore:
                 for row in db.execute("SELECT body FROM tasks")
                 if not (task := json.loads(row[0])).get("deleted_at")
             ]
+
+    def cleanup(
+        self,
+        clock: datetime,
+        *,
+        busy_runs: AbstractSet[str] = frozenset(),
+        busy_threads: AbstractSet[str] = frozenset(),
+    ) -> list[str]:
+        """Remove finished one-time tasks once their retention ends; return removed thread IDs.
+
+        The task, its revisions, runs, work threads, transcripts, receipts and
+        events go. Conversation messages keep their links to the task and thread.
+        Runs or threads a worker still holds, and results not yet delivered, wait.
+        """
+        removed: list[str] = []
+        with self.connect() as db:
+            for row in db.execute("SELECT body FROM tasks").fetchall():
+                task = json.loads(row[0])
+                kept = retention(self.task_view(db, task))
+                due = _instant(kept["cleanup_at"])
+                if kept["listed"] or due is None or due > clock:
+                    continue
+                runs = [
+                    json.loads(r[0])
+                    for r in db.execute("SELECT body FROM runs WHERE task=?", (task["id"],))
+                ]
+                run_ids = [r["id"] for r in runs]
+                marks = ",".join("?" * len(run_ids))
+                threads = sorted(
+                    {r["thread_id"] for r in runs}
+                    | {
+                        t[0]
+                        for t in db.execute(
+                            "SELECT id FROM threads WHERE json_extract(body, '$.managedRunId') "
+                            f"IN ({marks})",
+                            run_ids,
+                        )
+                    }
+                )
+                if (
+                    any(r["state"] in ACTIVE for r in runs)
+                    or not busy_runs.isdisjoint(run_ids)
+                    or not busy_threads.isdisjoint(threads)
+                    or db.execute(
+                        f"SELECT 1 FROM outbox WHERE run IN ({marks})", run_ids
+                    ).fetchone()
+                ):
+                    continue
+                shared = ",".join("?" * len(threads))
+                # Another task's run never reuses a thread, but never delete one that does.
+                if db.execute(
+                    f"SELECT 1 FROM runs WHERE task!=? AND json_extract(body, '$.thread_id') "
+                    f"IN ({shared})",
+                    (task["id"], *threads),
+                ).fetchone():
+                    continue
+                db.execute(f"DELETE FROM thread_messages WHERE thread IN ({shared})", threads)
+                db.execute(f"DELETE FROM threads WHERE id IN ({shared})", threads)
+                db.execute(f"DELETE FROM runs WHERE id IN ({marks})", run_ids)
+                db.execute("DELETE FROM revisions WHERE task=?", (task["id"],))
+                db.execute("DELETE FROM tasks WHERE id=?", (task["id"],))
+                # Saved command results and activity entries copy the task's recipe and runs.
+                for identity in [task["id"], *run_ids, *threads]:
+                    db.execute("DELETE FROM receipts WHERE instr(body, ?) > 0", (identity,))
+                    db.execute("DELETE FROM events WHERE instr(body, ?) > 0", (identity,))
+                self.event(db, "task.cleaned", {"task_id": task["id"]})
+                removed.extend(threads)
+        return removed
 
     def mutate_task(
         self,
@@ -427,7 +649,8 @@ class RemHomeStore:
             config = self.setting(db, "config")
             if action == "run":
                 previous = db.execute(
-                    "SELECT body FROM runs WHERE task=? ORDER BY rowid DESC LIMIT 1", (identity,)
+                    "SELECT body FROM runs WHERE task=? ORDER BY " + NEWEST_RUN + " LIMIT 1",
+                    (identity,),
                 ).fetchone()
                 old_run = json.loads(previous[0]) if previous else {}
                 run = (
@@ -579,7 +802,18 @@ class RemHomeStore:
                 if not task["enabled"] or not at or datetime.fromisoformat(at) > clock:
                     continue
                 occurrence = f"{task['id']}:{task['schedule_revision']}:{at}"
-                self.add_run(db, task, occurrence, config)
+                run = self.add_run(db, task, occurrence, config, scheduled_for=at)
+                # A one-time request for a file at a later time still answers that
+                # request; repeating schedules never send files on their own.
+                source = (task.get("delegation_context") or {}).get("source_message_id")
+                if (
+                    task.get("send_files")
+                    and task["schedule"].get("kind") == "once"
+                    and source
+                    and run["occurrence"] == occurrence
+                ):
+                    run["deliver_files_to"] = source
+                    self.put(db, "runs", run)
                 task["next_occurrence_at"] = Schedule.model_validate(task["schedule"]).next(clock)
                 self.put(db, "tasks", task)
 
@@ -608,12 +842,17 @@ class RemHomeStore:
         self.append_threads(identity, [message])
 
     def append_threads(self, identity: str, messages: list[dict[str, Any]]) -> None:
-        """Write a batch of transcript entries in one transaction."""
+        """Write a batch of transcript entries in one transaction.
+
+        Rewriting an entry keeps its place. REPLACE would delete and reinsert it
+        with a new seq, moving it to the end of what the UI and models read.
+        """
         if not messages:
             return
         with self.connect() as db:
             db.executemany(
-                "INSERT OR REPLACE INTO thread_messages(thread,id,body) VALUES(?,?,?)",
+                "INSERT INTO thread_messages(thread,id,body) VALUES(?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET body=excluded.body",
                 [(identity, message["id"], encode(message)) for message in messages],
             )
 

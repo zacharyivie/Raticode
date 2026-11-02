@@ -148,6 +148,7 @@ from gofer.ui.chat_media import (
 )
 from gofer.ui.chat_steering import ChatSteering, ChatSteeringConflict, ChatTurn
 from gofer.ui.generation_jobs import GenerationJobs
+from gofer.ui.link_previews import LinkPreviews, PreviewError, chat_image
 from gofer.ui.organization_operations import READ_OPERATIONS
 from gofer.ui.organization_packages import read_directory
 from gofer.ui.organization_store import OrganizationConflict
@@ -156,7 +157,7 @@ from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.swarms import SwarmManager
 from gofer.utils.logging import get_logger
-from gofer.utils.paths import get_data_dir
+from gofer.utils.paths import get_data_dir, restrict_to_owner
 
 log = get_logger(__name__)
 CONTINUOUS_RUN_POLL_SECONDS = 1.0
@@ -326,6 +327,22 @@ class DesktopPathGrantStore:
 
 
 class GoferUiServer(ThreadingHTTPServer):
+    async def _rem_task_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
+        """Run a Rem task with the fleet status tools desktop threads have.
+
+        Sending work to another desktop would delegate the task again, so Rem
+        tasks only read fleet status, like a read-only desktop thread.
+        """
+        from gofer.ui.device_tools import stream_with_fleet_tools
+
+        async with aclosing(
+            stream_with_fleet_tools(
+                self._device_chat_source, self.devices, read_only_override=True, **options
+            )
+        ) as stream:
+            async for event in stream:
+                yield event
+
     async def _device_chat_source(self, **options: Any) -> AsyncGenerator[dict[str, Any], None]:
         """Use the desktop's provider, resource and swarm services for shared turns."""
         workflow = dict(options.get("workflow") or {})
@@ -377,6 +394,9 @@ class GoferUiServer(ThreadingHTTPServer):
         allowed_origins: set[str] | None = None,
     ) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
+        # Transcripts and databases below it may quote credentials; other accounts on
+        # this computer must not read them.
+        restrict_to_owner(data_dir)
         super().__init__(server_address, GoferUiRequestHandler)
         self.data_dir = data_dir
         from gofer.ui.brain_library import BrainLibrary
@@ -395,6 +415,7 @@ class GoferUiServer(ThreadingHTTPServer):
             self.devices = DeviceControl(data_dir)
         except ImportError:
             pass
+        self.link_previews = LinkPreviews()
         self.api_token = api_token or os.environ.get("GOFER_UI_API_TOKEN") or _new_ui_api_token()
         self.emit_ready_token = os.environ.get("GOFER_UI_EMIT_READY_TOKEN") == "1"
         self.allowed_origins = (
@@ -459,7 +480,7 @@ class GoferUiServer(ThreadingHTTPServer):
 
         self.rem_home = RemHome(
             data_dir,
-            source=self._device_chat_source,
+            source=self._rem_task_source,
             jobs=self.chat_jobs,
             steering=self.chat_steering,
             authorize=self._authorize_rem_home,
@@ -967,7 +988,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         parts = parsed.path.removeprefix("/api/rem/").split("/")
         try:
             if method == "GET" and parts == ["conversation"]:
-                result = service.store.conversation()
+                # A restarted backend has no desktop context until the renderer
+                # sends it again; queued tasks wait for it.
+                result = {**service.store.conversation(), "context_ready": service.has_context}
             elif method == "GET" and parts == ["tasks"]:
                 result = {"tasks": service.store.tasks()}
             elif method == "GET" and len(parts) == 2 and parts[0] == "threads":
@@ -975,6 +998,23 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             elif method == "GET" and len(parts) == 2 and parts[0] == "runs":
                 with service.store.connect() as db:
                     result = {"run": service.store.get(db, "runs", parts[1])}
+            elif method == "GET" and parts == ["memories"]:
+                result = service.memories()
+            elif method == "POST" and parts == ["memories"]:
+                result = service.add_memory(self._read_json())
+            elif method == "PUT" and parts == ["memory-mode"]:
+                result = service.memory_mode(self._read_json())
+            elif (
+                method == "POST"
+                and len(parts) == 3
+                and parts[0] == "messages"
+                and parts[2] == "undo-memory"
+            ):
+                result = service.undo_memory(parts[1])
+            elif method == "PATCH" and len(parts) == 2 and parts[0] == "memories":
+                result = service.edit_memory(parts[1], self._read_json())
+            elif method == "DELETE" and len(parts) == 2 and parts[0] == "memories":
+                result = service.forget_memory(parts[1])
             elif method == "GET" and parts == ["events"]:
                 after = int(parse_qs(parsed.query).get("after", ["0"])[0])
                 if after < 0:
@@ -982,14 +1022,8 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 result = {"events": service.store.events(after)}
             elif method == "POST" and parts == ["context"]:
                 body = self._read_json()
-                self._validate_rem_thread_projects(
-                    {"workflow": {"remThreads": {"projects": body.get("projects", [])}}}
-                )
-                if not isinstance(body.get("brain", {}), dict):
-                    raise ValueError("Invalid Second Brain configuration")
-                if body.get("brain", {}).get("enabled"):
-                    self._validate_second_brain({"workflow": {"remSecondBrain": body["brain"]}})
-                result = service.configure(body)
+                warnings = self._prune_rem_context(body)
+                result = {**service.configure(body), "warnings": warnings}
             elif method == "POST" and parts == ["messages"]:
                 result = service.submit_message(self._read_json())
             elif method == "POST" and parts == ["reset"]:
@@ -1019,6 +1053,13 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 and parts[2] in {"cancel", "acknowledge"}
             ):
                 result = service.store.mutate_run(parts[1], self._read_json(), parts[2])
+            elif (
+                method == "POST"
+                and len(parts) == 3
+                and parts[0] == "runs"
+                and parts[2] == "retry_review"
+            ):
+                result = service.retry_review(parts[1], self._read_json())
             elif method == "DELETE" and len(parts) == 2 and parts[0] == "tasks":
                 request_id = parse_qs(parsed.query).get("request_id", [""])[0]
                 result = service.edit_task(parts[1], {"request_id": request_id}, "delete")
@@ -1295,12 +1336,18 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             result = manager.create(project_root, body)
         elif method == "PUT" and swarm_id and not action:
             result = manager.update(project_root, swarm_id, body)
+        elif method == "DELETE" and swarm_id and not action:
+            self._send_json(manager.delete(project_root, swarm_id))
+            return
         elif method == "POST" and action == "start":
+            expected = body.get("expectedConfigurationHash")
             result = manager.start(
                 project_root,
                 swarm_id,
                 body.get("task", ""),
                 workspace_grants=body.get("workspaceGrants"),
+                expected_configuration_hash=expected if isinstance(expected, str) else None,
+                confirm_full_access=body.get("confirmFullAccess") is True,
             )
         elif method == "POST" and action == "control":
             result = manager.control(
@@ -1339,6 +1386,22 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
+            return
+        if parsed.path == "/api/media-image":
+            # Inline images in chat load through here, so sites never see the
+            # renderer's own request (its address, cookies or referrer).
+            url = parse_qs(parsed.query).get("url", [""])[0]
+            try:
+                self._send_json({"image": chat_image(url)})
+            except PreviewError as exc:
+                self._send_json({"error": str(exc)}, status=422)
+            return
+        if parsed.path == "/api/link-preview":
+            url = parse_qs(parsed.query).get("url", [""])[0]
+            try:
+                self._send_json({"preview": self.server.link_previews.get(url)})
+            except PreviewError as exc:
+                self._send_json({"error": str(exc)}, status=422)
             return
 
         if parsed.path == "/api/generation-jobs":
@@ -1805,8 +1868,21 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     body["context"] = shared_context(
                         metadata, workflow, provider_capabilities_payload()["providers"], canonical
                     )
+                if body.get("action") == "host_template":
+                    from gofer.ui.device_context import shared_context
+
+                    workflow = body.get("workflow") or {}
+                    self._validate_rem_thread_projects({"workflow": workflow})
+                    self._validate_second_brain({"workflow": workflow})
+                    template = body.get("metadata")
+                    body["context"] = shared_context(
+                        template if isinstance(template, dict) else {},
+                        workflow,
+                        provider_capabilities_payload()["providers"],
+                        None,
+                    )
                 if (
-                    body.get("action") in {"workspace_poll", "workspace_exchange"}
+                    body.get("action") in {"workspace_poll", "workspace_exchange", "host_template"}
                     and self.server.devices.application is not None
                 ):
                     self.server.devices.application.workspace.providers = _device_provider_catalog()
@@ -2589,6 +2665,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                         skip_cache=bool(body.get("skipCache", False)),
                         force=bool(body.get("force", False)),
                         trigger_context=trigger_context,
+                        background=body.get("background") is True,
                     )
                 )
             except (WorkflowRunError, json.JSONDecodeError) as exc:
@@ -3192,9 +3269,31 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     async for event in fleet_stream:
                         yield event
 
-            async with aclosing(stream_with_thread_tools(fleet_source, **options)) as stream:
+            # Desktop threads may switch to a worktree the agent creates mid-turn.
+            async with aclosing(
+                stream_with_thread_tools(fleet_source, worktrees=True, **options)
+            ) as stream:
                 async for event in stream:
                     yield event
+
+        machine = body.get("machine")
+        if machine:
+            from gofer.devices.remote_threads import RemoteThreads
+
+            devices = getattr(self.server, "devices", None)
+
+            async def remote_stream(**options: Any) -> AsyncGenerator[dict[str, Any], None]:
+                # The chosen paired desktop runs the turn with its own projects and tools.
+                if devices is None:
+                    yield {"type": "error", "error": "Device pairing is off on this computer."}
+                    return
+                async with aclosing(
+                    RemoteThreads(devices).stream(machine=str(machine), **options)
+                ) as stream:
+                    async for event in stream:
+                        yield event
+
+            thread_stream = remote_stream
 
         write_event = emit or self._write_stream_event
         cancel_event = threading.Event()
@@ -3209,6 +3308,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 messages=body.get("messages") or [],
                 conversation_id=body.get("conversationId"),
                 reset_session=body.get("resetSession") is True,
+                fork_from=_optional_body_str(body, "forkedFrom"),
                 workflow=body.get("workflow"),
                 trusted_swarm_url=trusted_swarm_url,
                 data_dir=data_dir,
@@ -3319,6 +3419,42 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Rem projects must be existing absolute directories")
             self._assert_bundle_path_allowed(root, project.get("grantId"), must_exist=True)
             project["name"] = str(project.get("name") or root.name)
+
+    def _prune_rem_context(self, body: dict[str, Any]) -> list[str]:
+        """Drop the projects or Second Brain that Rem can't use, and say why.
+
+        One moved project or a revoked Second Brain used to reject the whole
+        context, which stopped Rem from replying or starting any task.
+        """
+        projects = body.get("projects", [])
+        if not isinstance(projects, list) or len(projects) > 100:
+            raise ValueError("Expected at most 100 open projects")
+        brain = body.get("brain", {})
+        if not isinstance(brain, dict):
+            raise ValueError("Invalid Second Brain configuration")
+        authorize = self.server._authorize_rem_home
+        warnings: list[str] = []
+        kept = []
+        for project in projects:
+            name = (project.get("name") or project.get("root")) if isinstance(project, dict) else ""
+            try:
+                self._validate_rem_thread_projects(
+                    {"workflow": {"remThreads": {"projects": [project]}}}
+                )
+                authorize({"projects": [project]}, {})
+            except ValueError as exc:
+                warnings.append(f"Rem can't use {name or 'a project'}: {exc}")
+                continue
+            kept.append(project)
+        body["projects"] = kept
+        if brain.get("enabled"):
+            try:
+                self._validate_second_brain({"workflow": {"remSecondBrain": brain}})
+                authorize({"projects": [], "brain": brain}, {})
+            except ValueError as exc:
+                body["brain"] = {**brain, "enabled": False}
+                warnings.append(f"Rem can't use Second Brain: {exc}")
+        return warnings
 
     def _validate_second_brain(self, body: dict[str, Any]) -> None:
         config = (body.get("workflow") or {}).get("remSecondBrain") or {}

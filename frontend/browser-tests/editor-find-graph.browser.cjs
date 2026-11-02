@@ -1,4 +1,5 @@
 /* global __dirname, process, console, clearTimeout, setTimeout, document, window, navigator, KeyboardEvent, Event */
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const { app, BrowserWindow } = require("electron");
 const assert = require("node:assert/strict");
 const path = require("node:path");

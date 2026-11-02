@@ -30,6 +30,7 @@ let rattishEditorModule;
 let rattishRangesModule;
 let settingsModule;
 let settingsPopoverModule;
+let workflowDialogsModule;
 let chatAttachmentsModule;
 let chatComposerModule;
 
@@ -63,6 +64,7 @@ before(async () => {
   rattishRangesModule = await viteServer.ssrLoadModule("/src/lib/rattishRanges.js");
   settingsModule = await viteServer.ssrLoadModule("/src/lib/settings.js");
   settingsPopoverModule = await viteServer.ssrLoadModule("/src/components/SettingsPopover.jsx");
+  workflowDialogsModule = await viteServer.ssrLoadModule("/src/components/WorkflowDialogs.jsx");
   chatAttachmentsModule = await viteServer.ssrLoadModule("/src/lib/chatAttachments.js");
   chatComposerModule = await viteServer.ssrLoadModule("/src/components/ChatComposer.jsx");
 });
@@ -400,7 +402,9 @@ test("device settings select and test a microphone with a live input meter", asy
     });
   }
 
-  const dom = await mountReact(React.createElement(SettingsHarness), createFetchMock([]));
+  const dom = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: true, enabled: false, peers: [] }),
+  ]));
   navigator.mediaDevices = {
     async enumerateDevices() {
       return [{ deviceId: "studio-mic", kind: "audioinput", label: "Studio microphone" }];
@@ -429,6 +433,17 @@ test("device settings select and test a microphone with a live input meter", asy
 
   delete window.AudioContext;
   await dom.unmount();
+
+  // With pairing off in Feature Preview, Devices shows no pairing controls.
+  const offDom = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+  ]));
+  try {
+    await offDom.click(offDom.byText("Devices"));
+    await offDom.flush();
+    assert.equal(allElements(offDom.container).some(node => node.getAttribute?.("aria-label") === "Paired devices"), false);
+    assert.doesNotMatch(offDom.text(), /Phone connections|device pairing|RATICODE_DEVICE/);
+  } finally { await offDom.unmount(); }
 });
 
 test("settings search only takes focus on open and compact switches keep their control focused", async () => {
@@ -864,7 +879,7 @@ test("app crash fallback exposes recovery actions and complete diagnostics", () 
   assert.ok(report.includes(`Raticode v${frontendPackage.version}`));
 
   const issueUrl = new URL(crashBoundaryModule.issueUrlForCrash(crash));
-  assert.equal(issueUrl.origin + issueUrl.pathname, "https://github.com/zacharyivie/gofer-flow/issues/new");
+  assert.equal(issueUrl.origin + issueUrl.pathname, "https://github.com/zacharyivie/Raticode/issues/new");
   assert.match(issueUrl.searchParams.get("title"), /^Crash: ReferenceError:/);
   assert.ok(issueUrl.searchParams.get("body").includes(`Raticode v${frontendPackage.version}`));
 });
@@ -971,7 +986,7 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
   const cases = [
     {
       name: "workflow history",
-      render: (onClose) => React.createElement(appModule.WorkflowHistoryDialog, {
+      render: (onClose) => React.createElement(workflowDialogsModule.WorkflowHistoryDialog, {
         diff: null,
         error: "",
         loading: false,
@@ -1005,9 +1020,10 @@ test("every migrated dialog family uses the shared keyboard and focus contract",
     },
     {
       name: "export workflow",
-      render: (onClose) => React.createElement(appModule.ExportWorkflowDialog, {
+      render: (onClose) => React.createElement(workflowDialogsModule.ExportWorkflowDialog, {
         directory: "/tmp",
         error: "",
+        filename: "demo.gof.zip",
         open: true,
         saving: false,
         workflow: workflowFixture(),
@@ -1958,8 +1974,22 @@ test("Code file explorer creates, copies, pastes, reveals, renames, and trashes 
   assert.deepEqual(calls[0], ["create", "/workspace/gofer-flow", "notes.md"]);
   assert.deepEqual(openedFiles.at(-1), ["/workspace/gofer-flow/notes.md", undefined]);
 
+  const remRequests = [];
+  const receiveRem = event => remRequests.push(event.detail);
+  window.addEventListener("gofer:rem-attach-files", receiveRem);
   await contextMenu(dom.byText("README.md"));
+  await dom.click(menuAction("Ask Rem about this"));
+  window.removeEventListener("gofer:rem-attach-files", receiveRem);
+  assert.deepEqual(remRequests, [{ paths: ["/workspace/gofer-flow/README.md"] }]);
+  await contextMenu(dom.byText("docs"));
+  assert.ok(!allElements(dom.byLabel("File actions")).some(element => directText(element) === "Ask Rem about this"), "folders can't be attached");
+  await contextMenu(dom.byText("README.md"));
+
+  const clipboardWrites = [];
+  navigator.clipboard.writeText = async value => clipboardWrites.push(value);
   await dom.click(menuAction("Copy"));
+  await dom.flush();
+  assert.deepEqual(clipboardWrites, ["/workspace/gofer-flow/README.md"], "copied files paste into chats as attachments");
   await contextMenu(dom.byText("docs"));
   await dom.click(menuAction("Paste"));
   await dom.flush();
@@ -5674,6 +5704,46 @@ test("ACP text deltas update one thought, preserve whitespace, and remove duplic
   } finally { await dom.unmount(); }
 });
 
+test("Rem streams its answer as a live reply and lists the pages it read", async () => {
+  const fetchTrace = { id: "fetch-1", kind: "tool", title: "WebFetch", input: '{"url":"https://docs.example.com/guide","prompt":"summary"}', status: "complete" };
+  const controlled = controlledStreamResponse([
+    JSON.stringify({ type: "thought", text: "WebFetch", trace: fetchTrace }) + "\n",
+    JSON.stringify({ type: "thought", text: "The guide ", deltaStreamId: "claude-text-m-0" }) + "\n",
+    JSON.stringify({ type: "final", message: { body: "The guide says yes." } }) + "\n",
+  ]);
+  let request;
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+    jsonResponse("/api/provider/capabilities", { providers: [{ id: "claude_code", displayName: "Claude", available: true, models: [] }] }),
+    (url, options) => {
+      if (url !== "/api/chat/stream") return null;
+      request = JSON.parse(options.body);
+      return controlled.response(url);
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  const saved = () => JSON.parse(window.localStorage.getItem(appModule.chatStorageKeyFor(request.conversationId)));
+  try {
+    await dom.flush();
+    await dom.change(dom.first("textarea"), "What does the guide say?");
+    await dom.click(dom.byTitle("Send message"));
+    await dom.flush();
+    assert.equal(request.workflow.remStreamText, true);
+    controlled.releaseNext();
+    controlled.releaseNext();
+    await dom.flush();
+    const live = saved().find(message => message.deltaStreamId === "claude-text-m-0");
+    assert.ok(allElements(dom.container).some(node => node.getAttribute?.("data-message-id") === live.id));
+    controlled.releaseNext();
+    for (let attempt = 0; attempt < 40 && !saved().find(message => message.kind === "final")?.sources; attempt++) {
+      await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 25)); });
+    }
+    assert.deepEqual(saved().find(message => message.kind === "final").sources, [
+      { url: "https://docs.example.com/guide", title: "", kind: "read" },
+    ]);
+  } finally { await dom.unmount(); }
+});
+
 test("Rem recovery keeps partial output once, shows status, and keeps Stop available", async () => {
   const controlled = controlledStreamResponse([
     JSON.stringify({ type: "thought", text: "Completed part", deltaStreamId: "attempt-1" }) + "\n",
@@ -5963,7 +6033,6 @@ test("editing and resending the latest user message replaces the rest of the con
     JSON.parse(chatRequests.at(-1).options.body).messages.map(({ role, body }) => ({ role, body })),
     [
       { role: "user", body: "First prompt" },
-      { role: "assistant", body: "Checking the prompt" },
       { role: "assistant", body: "Done" },
       { role: "user", body: "Corrected prompt" },
     ],
@@ -7762,6 +7831,48 @@ test("DagCanvas run history exposes resume and rerun controls", async () => {
   await dom.unmount();
 });
 
+test("DagCanvas offers Rattish resume only for runs the desktop can resume", async () => {
+  const resumeCalls = [];
+  const workflow = workflowFixture({ id: "rattish-resume", name: "Rattish resume" });
+  const harness = (runs) => React.createElement(DagCanvasHarness, {
+    dataDir: "/workspace",
+    workflow,
+    logState: { loading: false, error: "", text: "", path: null, runs, selectedRunId: runs[0].id },
+    onResumeRunLog(runId, options) {
+      resumeCalls.push({ runId, options });
+    },
+    onWorkflowChange() {},
+  });
+  const reason = "This run finished successfully, so there is nothing to resume.";
+  let dom = await mountReact(
+    harness([{ id: "run-2", status: "success", resume: { allowed: false, reason, rerunNodes: [] } }]),
+    createFetchMock([]),
+  );
+  await dom.flush();
+  await dom.click(dom.byTitle("More graph actions"));
+  await dom.click(dom.byTitle("Select workflow run"));
+  const refused = dom.ancestor(dom.byText("Resume"), "BUTTON");
+  assert.equal(reactProps(refused).disabled, true);
+  assert.equal(reactProps(refused).title, reason);
+  // Rattish runs resume where they stopped; the legacy node options are not offered.
+  assert.doesNotMatch(dom.text(), /Rerun failed nodes|Rerun from selected node/);
+  await dom.unmount();
+
+  dom = await mountReact(
+    harness([{ id: "run-1", status: "error", resume: { allowed: true, reason: "", rerunNodes: ["step"] } }]),
+    createFetchMock([]),
+  );
+  await dom.flush();
+  await dom.click(dom.byTitle("More graph actions"));
+  await dom.click(dom.byTitle("Select workflow run"));
+  await dom.click(dom.ancestor(dom.byText("Resume"), "BUTTON"));
+  assert.deepEqual(resumeCalls, [{ runId: "run-1", options: {} }]);
+  await dom.unmount();
+
+  const request = appModule.workflowResumeRequest("rattish-resume", "run-1", { background: true });
+  assert.deepEqual(JSON.parse(request.options.body), { background: true });
+});
+
 test("DagCanvas shows Rattish run outcomes, start nodes, needs, and project paths", async () => {
   const rattishNode = (id, type, operation, needs) => ({
     id,
@@ -8338,6 +8449,59 @@ test("worktree removal deletes the folder and registration while preserving the 
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
+});
+
+test("source control branch cleanup lists outdated branches and deletes them only after confirmation", async () => {
+  let items = [{ path: "/workspace/project", branch: "main" }, { path: "/workspace/old", branch: "old" }, { path: "/workspace/busy", branch: "busy" }];
+  const remove = [{ branch: "old", hash: "a".repeat(40), newer: "main", worktree: "/workspace/old" }, { branch: "stale", hash: "b".repeat(40), newer: "main", worktree: "" }];
+  const calls = [];
+  const removedProjects = [];
+  const dom = await mountReact(
+    React.createElement(codeFileExplorerModule.default, {
+      workflow: { projectRoot: items[0].path },
+      onRemoveRecentProject: (root) => removedProjects.push(root),
+    }),
+    createFetchMock([]),
+    { desktop: { workspace: {
+      async trustProjectRoot() {},
+      async listDirectory() { return { entries: [] }; },
+      async gitStatus() { return { active: true, entries: [], branch: "main", branches: ["main", "old", "busy", "stale"] }; },
+      async gitHistory() { return { active: true, commits: [] }; },
+      async gitWorktrees() { return { active: true, worktrees: items }; },
+      async gitRepoAction(root, action, value) {
+        if (action === "stash-list") return { stashes: [] };
+        calls.push([action, value]);
+        if (action === "branch-cleanup-preview") return { remove, kept: [{ branch: "busy", reason: "Uncommitted changes" }], keepPatterns: { project: ["dev"], user: [] } };
+        if (action === "branch-cleanup-keep") return { remove: remove.slice(0, 1), kept: [{ branch: "stale", reason: "Always kept in this project" }], keepPatterns: { project: value.patterns, user: [] } };
+        items = items.filter(item => item.branch !== "old");
+        return { active: true, entries: [], branch: "main", branches: ["main", "busy"], cleanup: { removed: remove, failed: [] }, notice: "Deleted 2 branches and 1 worktree." };
+      },
+    } } },
+  );
+  await dom.click(dom.byLabel("Source control"));
+  await dom.click(dom.byText("Branches"));
+  await dom.click(dom.byLabel("Clean up branches"));
+  assert.match(dom.byLabel("Branches to delete").textContent, /old.*Behind main · \/workspace\/old.*stale.*Behind main/);
+  assert.match(dom.byLabel("Outdated branches kept").textContent, /busy · Uncommitted changes/);
+  await dom.click(dom.byText("Cancel"));
+  assert.deepEqual(calls.map(([action]) => action), ["branch-cleanup-preview"]);
+  await dom.click(dom.byLabel("Clean up branches"));
+  assert.equal(dom.byLabel("Always keep in this project").value, "dev");
+  assert.equal(reactProps(dom.byLabel("Save branches always kept in this project")).disabled, true);
+  await dom.change(dom.byLabel("Always keep in this project"), "dev,  stale ");
+  assert.equal(dom.byLabel("Always keep in this project").value, "dev,  stale ");
+  await dom.click(dom.byLabel("Save branches always kept in this project"));
+  await dom.flush();
+  assert.deepEqual(calls.at(-1), ["branch-cleanup-keep", { scope: "project", patterns: ["dev", "stale"] }]);
+  assert.equal(dom.byLabel("Always keep in this project").value, "dev, stale");
+  assert.match(dom.byLabel("Outdated branches kept").textContent, /stale · Always kept in this project/);
+  await dom.click(dom.byText("Delete 1 branch"));
+  await dom.flush();
+  assert.deepEqual(calls.at(-1), ["branch-cleanup", { items: remove.slice(0, 1) }]);
+  assert.deepEqual(removedProjects, ["/workspace/old"]);
+  assert.doesNotMatch(dom.text(), /Clean up branches\?/);
+  assert.match(dom.text(), /Deleted 2 branches and 1 worktree\./);
+  await dom.unmount();
 });
 
 test("source control requires explicit confirmation to discard worktree changes and supports cancel", async () => {
@@ -8917,7 +9081,7 @@ test("Electron IPC security validates sender origins and external URL schemes", 
     false,
   );
 
-  assert.equal(isSafeExternalUrl("https://github.com/zacharyivie/gofer-flow"), true);
+  assert.equal(isSafeExternalUrl("https://github.com/zacharyivie/Raticode"), true);
   assert.equal(isSafeExternalUrl("http://127.0.0.1:8765/docs"), true);
   assert.equal(isSafeExternalUrl("mailto:help@example.com"), true);
   assert.equal(isSafeExternalUrl("file:///etc/passwd"), false);
@@ -9756,6 +9920,7 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "dataDirectory",
     "developer",
     "editFocused",
+    "features",
     "getDataDir",
     "getDroppedFilePath",
     "grantDroppedPath",
@@ -9796,8 +9961,9 @@ test("Electron preload exposes stable desktop and update bridge contracts", asyn
     "searchProject",
     "selectPath",
     "trustProjectRoot",
+    "watchGit",
   ]);
-  assert.deepEqual(Object.keys(exposed.goferDesktop.textFiles).sort(), ["closePreview", "openPreview", "read", "readPreview", "write"]);
+  assert.deepEqual(Object.keys(exposed.goferDesktop.textFiles).sort(), ["closePreview", "openPreview", "read", "readAttachment", "readPreview", "write"]);
   assert.deepEqual(Object.keys(exposed.goferDesktop.dataDirectory).sort(), ["choose", "get"]);
   assert.deepEqual(Object.keys(exposed.goferBrowser).sort(), [
     "adopt",
@@ -9972,6 +10138,41 @@ test("Electron worktree removal bridge forwards force only when explicitly true"
     assert.equal(result.channel, "gofer:git-worktree-remove");
     assert.equal(result.payload.force, force === true);
   }
+});
+
+test("Electron Git watch bridge delivers only its own changes and stops its watch", async () => {
+  const calls = [];
+  let nextWatch = 0;
+  const exposed = runPreload({
+    argv: ["electron", "preload"],
+    invoke(channel, payload) {
+      calls.push({ channel, payload });
+      return channel === "gofer:git-watch" ? { active: true, watchId: `watch-${++nextWatch}`, mode: "watch" } : { ok: true };
+    },
+  });
+  const changes = [];
+  const modes = [];
+  const stop = exposed.goferDesktop.workspace.watchGit("/workspace/main", { onChange: change => changes.push(change), onReady: mode => modes.push(mode) });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(modes, ["watch"]);
+  assert.equal(calls[0].channel, "gofer:git-watch");
+  assert.equal(calls[0].payload.projectRoot, "/workspace/main");
+  const listener = exposed.ipcListeners.get("gofer:git-changed");
+  listener({}, { watchId: "watch-other", kinds: ["worktrees"] });
+  listener({}, { watchId: "watch-1", kinds: ["worktrees", 7, "refs"] });
+  assert.deepEqual(toPlainObject(changes), [{ kinds: ["worktrees", "refs"] }]);
+  stop();
+  stop();
+  assert.equal(exposed.ipcListeners.has("gofer:git-changed"), false);
+  assert.deepEqual(toPlainObject(calls.filter(call => call.channel === "gofer:git-unwatch")), [{ channel: "gofer:git-unwatch", payload: { watchId: "watch-1" } }]);
+
+  // A view that closes before the watch starts still releases it.
+  const early = exposed.goferDesktop.workspace.watchGit("/workspace/main", { onReady: mode => modes.push(mode) });
+  early();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(modes, ["watch"]);
+  assert.equal(calls.at(-1).channel, "gofer:git-unwatch");
+  assert.equal(calls.at(-1).payload.watchId, "watch-2");
 });
 
 test("Electron preload keeps file grants private while attaching them to later calls", async () => {
@@ -10212,6 +10413,7 @@ function runPreload({ argv, invoke }) {
 
   vm.runInNewContext(source, sandbox, { filename: "preload.cjs" });
   exposed.zoomFactors = zoomFactors;
+  exposed.ipcListeners = listeners;
   return exposed;
 }
 
@@ -11054,8 +11256,13 @@ function textOf(node) {
   return node.textContent ?? "";
 }
 
+function threadGroupSection(dom, label) {
+  return allElements(dom.container).find(node => node.tagName === "SECTION" && node.getAttribute?.("aria-label") === `${label} threads`);
+}
+
+// The chevron opens and closes a group; activating the group's name selects its threads.
 function threadGroupToggle(dom, label) {
-  return dom.ancestor(dom.byExactText(label), "BUTTON");
+  return allElements(threadGroupSection(dom, label)).find(node => node.tagName === "BUTTON" && /^(Show|Hide) /.test(node.getAttribute?.("aria-label") || ""));
 }
 
 async function openThreadGroup(dom, label) {
@@ -11075,6 +11282,22 @@ test("Rem pages older threads and bumps active history without loading messages"
   await dom.click(dom.byText("Collapse older threads"));
   assert.equal(dom.allByTitle("Archive thread").length, 15);
   await dom.unmount();
+});
+
+test("thread rows show each thread's scope beside its date", async () => {
+  const threads = [
+    { id: "project", title: "Project thread", updatedAt: "2026-10-28T10:00:00Z", projectRoot: "/work/Raticode", projectBranch: "main", scopeMode: "project" },
+    { id: "global", title: "Global thread", updatedAt: "2026-10-28T09:00:00Z", projectRoot: "", scopeMode: "global" },
+    { id: "none", title: "Unscoped thread", updatedAt: "2026-10-28T08:00:00Z", projectRoot: "" },
+  ];
+  const dom = await mountReact(React.createElement(appModule.ThreadList, { threads, onOpen() {}, onDelete() {} }), createFetchMock([]));
+  try {
+    const badges = allElements(dom.container).filter(node => node.getAttribute?.("data-thread-scope"));
+    assert.deepEqual(badges.map(node => [node.getAttribute("data-thread-scope"), node.textContent, node.getAttribute("title")]), [
+      ["project", "Scope: Raticode", "/work/Raticode (main)"],
+      ["global", "Scope: Global", "Global scope"],
+    ]);
+  } finally { await dom.unmount(); }
 });
 
 test("Rem large pastes become text attachments without entering the draft", async () => {
@@ -12297,10 +12520,15 @@ test("editor Rem context actions capture the exact selection and its location", 
   globalThis.window.dispatchEvent = event => events.push(event);
   const editor = { addAction(action) { actions.push(action); return { dispose() {} }; }, getSelection: () => ({ startLineNumber: 4, endLineNumber: 7 }), getModel: () => ({ getValueInRange: () => "selected text" }) };
   const installed = installRemActions(editor, () => ({ path: "/repo/file.py" }));
-  assert.deepEqual(actions.map(a => a.label), ["Ask Rem", "Explain with Rem"]);
-  actions[0].run(editor); actions[1].run(editor);
+  assert.deepEqual(actions.map(a => a.label), ["Ask Rem", "Explain with Rem", "Ask Rem about this file"]);
+  actions[0].run(editor); actions[1].run(editor); actions[2].run(editor);
   assert.equal(events[0].detail.text, "selected text"); assert.equal(events[0].detail.path, "/repo/file.py");
   assert.equal(events[0].detail.startLine, 4); assert.equal(events[1].detail.mode, "explain"); installed.dispose();
+  assert.equal(events[2].type, "gofer:rem-attach-files"); assert.deepEqual(events[2].detail, { paths: ["/repo/file.py"] });
+  // An older Git version in a diff isn't a file on disk to attach.
+  actions.length = 0;
+  installRemActions(editor, () => ({ path: "/repo/file.py", version: "Original Git version" }));
+  assert.deepEqual(actions.map(a => a.label), ["Ask Rem", "Explain with Rem"]);
 });
 
 test("Ask Rem keeps the selected text attached in a new thread scoped to its own project", async () => {
@@ -12318,6 +12546,35 @@ test("Ask Rem keeps the selected text attached in a new thread scoped to its own
   assert.equal(dom.first("textarea").value, "Why does this work?");
   assert.match(dom.text(), /editor-selection.txt/);
   await dom.unmount();
+});
+
+test("thread composer attaches files asked about or copied in Raticode", async () => {
+  const transfers = await viteServer.ssrLoadModule("/src/lib/fileTransfers.js");
+  const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]);
+  const reads = [];
+  const desktop = { textFiles: { readAttachment: async path => { reads.push(path); return { name: path.split("/").at(-1), type: "text/plain", data: Buffer.from("x").toString("base64") }; } } };
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), fetchMock, { desktop });
+  try {
+    await dom.change(dom.first("textarea"), "Look at these");
+    await dom.dispatchWindow("gofer:rem-thread-attach-files", { detail: { paths: ["/p/code.py"] } });
+    for (let attempt = 0; attempt < 20 && !/code\.py/.test(dom.text()); attempt++) await dom.flush();
+    assert.ok(dom.byLabel("Remove code.py"));
+
+    transfers.setFileClipboard({ path: "/p/notes.md", name: "notes.md", entries: [{ path: "/p/notes.md", name: "notes.md", isFile: true }], operation: "copy", clipboardText: "/p/notes.md" });
+    const pane = allElements(dom.container).find(node => node.tagName === "ASIDE" && node.getAttribute?.("data-chat-pane") === "true");
+    let prevented = false;
+    await dom.pointer(pane, "onPaste", { preventDefault: () => { prevented = true; }, clipboardData: { items: [], getData: () => "/p/notes.md" } });
+    for (let attempt = 0; attempt < 20 && !/notes\.md/.test(dom.text()); attempt++) await dom.flush();
+    assert.ok(prevented);
+    assert.ok(dom.byLabel("Remove notes.md"));
+    assert.ok(dom.byLabel("Remove code.py"));
+    assert.equal(dom.first("textarea").value, "Look at these");
+    // Other text pastes normally.
+    prevented = false;
+    await dom.pointer(pane, "onPaste", { preventDefault: () => { prevented = true; }, clipboardData: { items: [], getData: () => "plain words" } });
+    assert.equal(prevented, false);
+    assert.deepEqual(reads, ["/p/code.py", "/p/notes.md"]);
+  } finally { transfers.setFileClipboard(null); await dom.unmount(); }
 });
 
 test("Workflow repair sends once in a fresh thread in the workflow project", async () => {
@@ -12833,6 +13090,32 @@ test("Rem accepts staged diffs larger than 200000 characters", async () => {
 });
 
 
+test("Run on lists paired computers, sends the choice, and locks once a thread starts", async () => {
+  const machines = [{ id: "11111111-1111-4111-8111-111111111111", name: "Studio desktop" }];
+  function Harness({ locked = false }) {
+    const [machine, setMachine] = React.useState("");
+    return React.createElement(chatComposerModule.default, {
+      draft: "hello", provider: "codex", machines, machine, machineLocked: locked,
+      onMachineChange: setMachine, onDraftChange() {}, onSend() {},
+    });
+  }
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]));
+  const select = dom.byLabel("Run on");
+  assert.equal(reactProps(select).value, "");
+  await dom.change(select, machines[0].id);
+  assert.equal(reactProps(dom.byLabel("Run on")).value, machines[0].id);
+  assert.equal(appModule.chatStreamRequestBody({ provider: "codex", machine: reactProps(select).value }).machine, machines[0].id);
+  assert.equal("machine" in appModule.chatStreamRequestBody({ provider: "codex" }), false);
+  await dom.unmount();
+  const locked = await mountReact(React.createElement(Harness, { locked: true }), createFetchMock([]));
+  assert.equal(reactProps(locked.byLabel("Run on")).disabled, true);
+  await locked.unmount();
+  // Without paired computers the composer shows no machine menu.
+  const alone = await mountReact(React.createElement(chatComposerModule.default, { draft: "", provider: "codex", onDraftChange() {}, onSend() {} }), createFetchMock([]));
+  assert.equal(allElements(alone.container).some(node => node.getAttribute?.("aria-label") === "Run on"), false);
+  await alone.unmount();
+});
+
 test("Rem permissions show provider-specific choices and update the request", async () => {
   function Harness() {
     const [provider, setProvider] = React.useState("codex");
@@ -13125,6 +13408,79 @@ test("worktree list removes externally deleted entries on focus", async () => {
     await dom.flush();
     assert.throws(() => dom.byLabel("Remove feature worktree"));
   } finally { await dom.unmount(); }
+});
+
+test("source control updates on its own when worktrees are created or deleted outside the panel", async () => {
+  let items = [{ path: "/main", branch: "main", main: true }];
+  let commits = [{ hash: "a".repeat(40), shortHash: "aaaaaaa", subject: "Initial", parents: [] }];
+  let entries = [];
+  const watches = [];
+  const calls = { status: 0, worktrees: 0, history: 0 };
+  let selectRoot;
+  function Harness() {
+    const [projectRoot, setProjectRoot] = React.useState("/main");
+    selectRoot = setProjectRoot;
+    return React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot }, onOpenFile() {} });
+  }
+  const workspace = {
+    trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => { calls.status += 1; return { active: true, entries, branch: "main", branches: ["main", ...items.slice(1).map(item => item.branch)] }; },
+    gitHistory: async () => { calls.history += 1; return { active: true, commits }; },
+    gitWorktrees: async () => { calls.worktrees += 1; return { active: true, worktrees: items }; },
+    watchGit: (projectRoot, handlers) => {
+      const watch = { projectRoot, handlers, stopped: false };
+      watches.push(watch);
+      queueMicrotask(() => handlers.onReady?.("watch"));
+      return () => { watch.stopped = true; };
+    },
+  };
+  const live = () => watches.filter(watch => !watch.stopped);
+  const changed = async (...kinds) => {
+    await React.act(async () => { for (const watch of live()) watch.handlers.onChange({ kinds }); });
+    await dom.flush();
+  };
+  const dom = await mountReact(React.createElement(Harness), createFetchMock([]), { desktop: { workspace } });
+  try {
+    assert.deepEqual(live().map(watch => watch.projectRoot), ["/main"]);
+    await dom.click(dom.byLabel("Source control"));
+    await dom.click(dom.byText("Branches"));
+    assert.throws(() => dom.byLabel("Remove feature worktree"));
+
+    // An agent, swarm or terminal runs `git worktree add`; no refresh click or focus.
+    items = [...items, { path: "/feature", branch: "feature" }];
+    await changed("refs", "worktrees");
+    assert.ok(dom.byLabel("Remove feature worktree"));
+    assert.match(dom.text(), /\/feature/);
+
+    // Then `git worktree remove` or `prune` deletes it.
+    items = items.slice(0, 1);
+    await changed("worktrees");
+    assert.throws(() => dom.byLabel("Remove feature worktree"));
+
+    // Staged or committed changes refresh Changes, and History only while it is open.
+    entries = [{ path: "agent.txt", status: "A", staged: true, unstaged: false }];
+    await dom.click(dom.byText("Changes"));
+    const historyCalls = calls.history;
+    await changed("index");
+    assert.match(dom.text(), /agent\.txt/);
+    await changed("refs");
+    assert.equal(calls.history, historyCalls);
+    await dom.click(dom.byText("History"));
+    commits = [{ hash: "b".repeat(40), shortHash: "bbbbbbb", subject: "Agent commit", parents: ["a".repeat(40)] }, ...commits];
+    await changed("refs");
+    assert.match(dom.text(), /Agent commit/);
+
+    // The manual refresh button still reads everything again.
+    const before = { ...calls };
+    await dom.click(dom.byLabel("Refresh source control"));
+    assert.ok(calls.status > before.status && calls.worktrees > before.worktrees && calls.history > before.history);
+
+    // Switching projects moves the watch; leaving stops it.
+    await React.act(async () => selectRoot("/feature"));
+    await dom.flush();
+    assert.deepEqual(live().map(watch => watch.projectRoot), ["/feature"]);
+  } finally { await dom.unmount(); }
+  assert.equal(live().length, 0);
 });
 
 
@@ -14108,6 +14464,93 @@ test("Rem clears the archive after confirmation and keeps Rem task threads", asy
   } finally { window.confirm = previousConfirm; await dom.unmount(); }
 });
 
+test("thread rows can be selected in bulk, read, archived and deleted from the header, toolbar and right-click menu", async () => {
+  const stamp = minutes => new Date(Date.now() - minutes * 60000).toISOString();
+  const threads = [
+    { id: "u1", title: "Unread one", unread: true, updatedAt: stamp(1) },
+    { id: "u2", title: "Unread two", unread: true, updatedAt: stamp(2) },
+    { id: "r1", title: "Read one", updatedAt: stamp(3), readAt: stamp(3) },
+    { id: "r2", title: "Read two", updatedAt: stamp(4), readAt: stamp(4) },
+    { id: "old", title: "Old archived", archived: true, unread: true, updatedAt: stamp(90) },
+  ];
+  const storage = Object.fromEntries(threads.map(thread => [`gofer-flow-chat-thread-meta:${thread.id}`, JSON.stringify(thread)]));
+  storage["gofer-flow-chat-threads"] = JSON.stringify(threads.map(thread => ({ ...thread, scopeIndexed: true })));
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "/repo", width: 380 }), fetchMock, { storage });
+  const saved = id => appModule.loadChatThread(id);
+  const row = title => dom.ancestor(dom.byExactText(title), "BUTTON");
+  const inSection = (label, title) => textOf(threadGroupSection(dom, label) || { textContent: "" }).includes(title);
+  const fire = async (node, handler, patch) => { await React.act(async () => { reactProps(node)[handler](testEvent(node, patch)); }); await dom.flush(); };
+  const button = (root, text) => allElements(root).find(node => node.tagName === "BUTTON" && textOf(node) === text);
+  const previousConfirm = window.confirm;
+  try {
+    await dom.flush();
+    // Activating the Unread header selects both unread threads.
+    await dom.click(dom.byLabel("Unread, 2 threads. Select all unread threads"));
+    const toolbar = dom.byLabel("Selected threads");
+    assert.match(textOf(toolbar), /2 selected/);
+    assert.equal(dom.byLabel("Unread, 2 threads. Clear selection").getAttribute("aria-pressed"), "true");
+    await dom.click(button(toolbar, "Mark as read"));
+    await dom.flush();
+    assert.deepEqual([saved("u1").unread, saved("u2").unread], [false, false]);
+    assert.ok(saved("u1").readAt);
+    assert.equal(threadGroupSection(dom, "Unread"), undefined, "Nothing is left unread");
+    assert.ok(inSection("Read", "Unread one"));
+    // Ctrl-click two read threads, then right-click one of them for the menu.
+    await fire(row("Read one"), "onClick", { ctrlKey: true });
+    await fire(row("Read two"), "onClick", { ctrlKey: true });
+    assert.match(textOf(dom.byLabel("Selected threads")), /2 selected/);
+    await fire(dom.ancestor(row("Read two"), "DIV"), "onContextMenu", { clientX: 40, clientY: 60 });
+    const menu = dom.byLabel("Actions for 2 selected threads");
+    assert.deepEqual(allElements(menu).filter(node => node.getAttribute?.("role") === "menuitem").map(textOf),
+      ["Mark as unread", "Pin", "Archive", "Delete"]);
+    await dom.click(button(menu, "Mark as unread"));
+    await dom.flush();
+    assert.deepEqual([saved("r1").unread, saved("r2").unread], [true, true]);
+    assert.ok(inSection("Unread", "Read two"));
+    // Mark all read clears the section in one step.
+    await dom.click(dom.byLabel("Mark all 2 unread threads as read"));
+    await dom.flush();
+    assert.deepEqual([saved("r1").unread, saved("r2").unread], [false, false]);
+    // A row's own button marks it read; archiving an unread thread marks it read too.
+    await fire(dom.ancestor(row("Unread one"), "DIV"), "onContextMenu", {});
+    await dom.click(button(dom.byLabel("Actions for 1 selected thread"), "Mark as unread"));
+    await dom.flush();
+    await dom.click(dom.byLabel("Mark Unread one as read"));
+    await dom.flush();
+    assert.equal(saved("u1").unread, false);
+    await fire(dom.ancestor(row("Unread one"), "DIV"), "onContextMenu", {});
+    await dom.click(button(dom.byLabel("Actions for 1 selected thread"), "Mark as unread"));
+    await dom.flush();
+    await dom.click(dom.byLabel("Archive thread Unread one"));
+    await dom.flush();
+    assert.deepEqual([saved("u1").archived, saved("u1").unread], [true, false], "Archiving marks the thread read");
+    // Selecting the collapsed Archived section opens it, and the selection can be restored or deleted together.
+    assert.equal(threadGroupToggle(dom, "Archived").getAttribute("aria-expanded"), "false");
+    await dom.click(dom.byLabel("Archived, 2 threads. Select all archived threads"));
+    assert.equal(threadGroupToggle(dom, "Archived").getAttribute("aria-expanded"), "true");
+    await dom.click(button(dom.byLabel("Selected threads"), "More actions"));
+    const archivedMenu = dom.byLabel("Actions for 2 selected threads");
+    assert.ok(button(archivedMenu, "Restore"));
+    const prompts = [];
+    window.confirm = message => { prompts.push(message); return true; };
+    await dom.click(button(archivedMenu, "Delete"));
+    await dom.flush();
+    assert.deepEqual(prompts, ["Delete 2 threads? This cannot be undone."]);
+    assert.equal(saved("old"), null);
+    assert.equal(saved("u1"), null);
+    assert.ok(saved("r1"));
+    // A plain click still opens a thread and clears any selection.
+    await fire(row("Read one"), "onClick", { ctrlKey: true });
+    await dom.click(row("Read one"));
+    await dom.flush();
+    assert.equal(allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Selected threads"), false);
+  } finally { window.confirm = previousConfirm; await dom.unmount(); }
+});
+
 test("Rem deletes archived threads after the configured time without activity", async () => {
   const old = new Date(Date.now() - 40 * 86400000).toISOString();
   const threads = [
@@ -14531,7 +14974,7 @@ for (const status of [400, 409, 500]) {
 }
 
 
-test("swarm digest shows coordinator summaries, current states, and idle diagnosis", async () => {
+test("swarm digest shows orchestrator summaries, current states, and idle diagnosis", async () => {
   const { SwarmDigest } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
   const agents = [{ id: "lead", name: "Development lead" }, { id: "worker", name: "Backend" }];
   const run = { state: "failed", agentStates: { lead: { state: "idle" }, worker: { state: "retry_wait" } },
@@ -14544,7 +14987,7 @@ test("swarm digest shows coordinator summaries, current states, and idle diagnos
   assert.match(html, /Fixing route validation/);
   assert.match(html, /retry wait/);
   assert.match(html, /The next assignment was never queued/);
-  assert.match(html, /Coordinator update/);
+  assert.match(html, /Orchestrator update/);
 });
 
 test("swarm digest falls back to assignments and escapes provider text", async () => {
@@ -15797,6 +16240,37 @@ test("background first turn captures tools, skills, MCP and permissions before a
   } finally { grant.resolve(); await dom.flush(); await dom.unmount(); }
 });
 
+test("new thread tools are saved as Rem defaults so they survive a restart", async () => {
+  const skill = { path: "/skills/worktree-dev-flow", enabled: true };
+  const changes = [];
+  function Harness() {
+    const [settings, setSettings] = React.useState(settingsModule.DEFAULT_APP_SETTINGS);
+    return React.createElement(appModule.ChatPane, {
+      width: 380,
+      assistantDefaults: settings.assistant,
+      onNewThreadResourcesChange: resources => {
+        changes.push(resources);
+        setSettings(current => settingsModule.updateSetting(current, "assistant.resources", resources));
+      },
+    });
+  }
+  const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] })]);
+  const dom = await mountReact(React.createElement(Harness), fetchMock);
+  try {
+    await dom.flush();
+    await dom.click(dom.byLabel("New thread tools, skills & MCP"));
+    const enabled = !reactProps(dom.byLabel("Search the web")).checked;
+    await dom.change(dom.byLabel("Search the web"), enabled);
+    assert.equal(changes.at(-1).web, enabled);
+    assert.equal(reactProps(dom.byLabel("Search the web")).checked, enabled, "the menu shows the saved default");
+  } finally { await dom.unmount(); }
+  const storage = createStorage();
+  settingsModule.saveAppSettings(settingsModule.updateSetting(settingsModule.DEFAULT_APP_SETTINGS, "assistant.resources", { ...changes.at(-1), skills: [skill] }), storage);
+  const reloaded = settingsModule.loadAppSettings(storage).assistant.resources;
+  assert.deepEqual(reloaded.skills, [skill]);
+  assert.equal(reloaded.web, changes.at(-1).web);
+});
+
 test("invalid new thread resources block background dispatch until corrected", async () => {
   const fetchMock = createFetchMock([
     jsonResponse("/api/provider/capabilities", { providers: [{ id: "codex", available: true, models: [] }] }),
@@ -16277,7 +16751,9 @@ test("forking an earlier message preserves the original and sends only the copie
     await dom.keyDown(dom.first("textarea"), "Enter"); await dom.flush();
     const request = JSON.parse(fetchMock.calls.find(call => call.url === "/api/chat/stream").options.body);
     assert.equal(request.conversationId, child.id);
-    assert.deepEqual(request.messages.map(message => message.body), ["First question", "Checking the files", "Read file", "Context compacted", "First answer", "Explore another approach"]);
+    assert.equal(request.forkedFrom, parent.id);
+    // Narration and tool steps are not re-sent to the new session.
+    assert.deepEqual(request.messages.map(message => message.body), ["First question", "Context compacted", "First answer", "Explore another approach"]);
     assert.deepEqual(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread:fork-parent")), history);
   } finally { await dom.unmount(); }
 });
@@ -16750,6 +17226,20 @@ test("Rem merges consecutive thought groups and keeps tool identities scoped to 
   assert.equal(appModule.isThoughtGroupExpanded(items[0], {}, false), true);
 });
 
+test("earlier thought placeholders stay collapsed until the user expands them", () => {
+  const stub = { id: "t-1", anchorId: "next", ids: ["t-1", "t-2"] };
+  const items = appModule.buildChatItems([
+    { id: "question", role: "user", body: "Question" },
+    { id: stub.id, kind: "thought", lazy: stub },
+    { id: "next", role: "user", body: "Interrupted, ask again" },
+  ]);
+  assert.equal(items[1].lazy, stub);
+  assert.equal(items[1].replyId, null);
+  // Thought groups without a reply normally open; placeholders do not, even with auto-hide off.
+  assert.equal(appModule.isThoughtGroupExpanded(items[1], {}, false), false);
+  assert.equal(appModule.isThoughtGroupExpanded(items[1], { [items[1].id]: { replyId: null, expanded: true } }), true);
+});
+
 for (const provider of ["codex", "claude_code", "cursor", "copilot", "opencode", "grok"]) {
   test(`Rem accepts pasted images for ${provider}`, async () => {
     const dom = await mountReact(React.createElement(appModule.ChatPane, { width: 380, assistantDefaults: { provider } }), createFetchMock([
@@ -16875,6 +17365,64 @@ test("Rem settings expose the auto-hide thoughts switch and save its value", asy
     await dom.click(control);
     assert.deepEqual(changes, [["assistant.autoHideThoughts", false]]);
   } finally { await dom.unmount(); }
+});
+
+test("Rem settings set the worker limit and command slots", async () => {
+  const changes = [];
+  const props = {
+    open: true, initialCategory: "assistant", settings: settingsModule.normalizeAppSettings({}),
+    onChange: (key, value) => changes.push([key, value]), onClose() {}, onResetAll() {},
+  };
+  const dom = await mountReact(React.createElement(settingsPopoverModule.default, props), createFetchMock([]));
+  const rowFor = (text) => dom.ancestor(dom.byText(text), el => allElements(el).some(node => node.tagName === "INPUT" || node.getAttribute?.("role") === "switch"));
+  try {
+    const workers = allElements(rowFor("Rem task workers")).find(el => el.tagName === "INPUT");
+    assert.equal(workers.value, "0");
+    // Clearing the field while focused keeps the draft instead of snapping back.
+    await dom.focus(workers);
+    await dom.change(workers, "");
+    assert.equal(workers.value, "");
+    await dom.change(workers, "12");
+    await dom.blur(workers);
+    const tests = allElements(rowFor("Test runs at once")).find(el => el.tagName === "INPUT");
+    await dom.focus(tests);
+    await dom.change(tests, "40");
+    await dom.blur(tests);
+    assert.ok(dom.byText("Builds at once"));
+    assert.ok(dom.byText("Browser test runs at once"));
+    const queue = allElements(rowFor("Queue tests and builds")).find(el => el.getAttribute?.("role") === "switch");
+    assert.equal(queue.getAttribute("aria-checked"), "true");
+    await dom.click(queue);
+    assert.deepEqual(changes, [
+      ["assistant.maxWorkers", 12],
+      ["assistant.testSlots", 16],
+      ["assistant.commandSlotsEnabled", false],
+    ]);
+  } finally { await dom.unmount(); }
+  const off = renderToStaticMarkup(React.createElement(settingsPopoverModule.default, {
+    ...props, settings: settingsModule.normalizeAppSettings({ assistant: { commandSlotsEnabled: false } }),
+  }));
+  assert.match(off, /Queue tests and builds/);
+  assert.doesNotMatch(off, /Test runs at once/);
+});
+
+test("Rem worker and command slot settings are bounded and sent in Rem's shape", () => {
+  const normalized = settingsModule.normalizeAppSettings({ assistant: { maxWorkers: 99, testSlots: -3, buildSlots: 2.6, commandSlotsEnabled: "yes" } });
+  assert.equal(normalized.assistant.maxWorkers, 16);
+  assert.equal(normalized.assistant.testSlots, 0);
+  assert.equal(normalized.assistant.buildSlots, 3);
+  assert.equal(normalized.assistant.commandSlotsEnabled, true);
+  assert.deepEqual(settingsModule.commandSlotSettings(normalized.assistant), { enabled: true, maxWorkers: 16, test: 0, build: 3, browser: 0 });
+  assert.deepEqual(settingsModule.commandSlotSettings(settingsModule.normalizeAppSettings({ assistant: { commandSlotsEnabled: false } }).assistant).enabled, false);
+});
+
+test("phone attachments keep their media type in desktop requests", async () => {
+  const message = chatAttachmentsModule.chatMessageForRequest({
+    role: "user",
+    body: "From my phone",
+    attachments: [{ id: "phone-file", name: "photo.png", size: 9, mime: "image/png", storageName: `${"a".repeat(32)}-photo.png` }],
+  });
+  assert.deepEqual(message.attachments, [{ id: "phone-file", name: "photo.png", size: 9, storageName: `${"a".repeat(32)}-photo.png`, type: "image/png" }]);
 });
 
 test("Rem starts a fresh provider session only for an explicit edit and resend", () => {
@@ -17024,6 +17572,24 @@ test("final answers remove duplicate stream fragments across tools and retain re
     { id: "other-turn", kind: "thought", groupId: "other", body: "Hello world", deltaStreamId: "answer" },
   ];
   assert.deepEqual(appModule.removeTrailingDuplicateOutputThought(thoughts, "Hello world", "g").map(item => item.id), ["reason", "tool", "other-turn"]);
+});
+
+test("Rem's answer text shows as a live reply while it streams", () => {
+  const thoughts = [
+    { id: "reason", kind: "thought", groupId: "g", body: "Weighing it", deltaStreamId: "reasoning-a" },
+    { id: "tool", kind: "thought", groupId: "g", body: "Read", trace: { kind: "tool", id: "r", title: "Read" } },
+    { id: "text", role: "assistant", kind: "thought", groupId: "g", body: "Here is", deltaStreamId: "claude-text-m-1" },
+  ];
+  const items = appModule.withLiveReply(appModule.buildChatItems([{ id: "u", role: "user", body: "Hi" }, ...thoughts]));
+  assert.deepEqual(items.map(item => item.type), ["message", "thought-group", "message"]);
+  assert.deepEqual(items[1].thoughts.map(thought => thought.id), ["reason", "tool"]);
+  assert.equal(items[2].message.kind, "streaming");
+  assert.equal(items[2].message.body, "Here is");
+  // Reasoning streams and tool steps stay in the thoughts.
+  for (const last of [thoughts[0], thoughts[1]]) {
+    const unchanged = appModule.buildChatItems([last]);
+    assert.equal(appModule.withLiveReply(unchanged), unchanged);
+  }
 });
 
 test("editing paste preserves saved attachments and the separate composer draft", async () => {
@@ -17693,41 +18259,111 @@ test("plugin settings hide, order, and lock the activity rail", async () => {
 
 test("the Plugins settings section toggles, reorders, and restores sidebar plugins", async () => {
   const changes = [];
-  let settings = settingsModule.normalizeAppSettings({});
-  const render = () => React.createElement(settingsPopoverModule.default, {
-    open: true,
-    initialCategory: "plugins",
-    settings,
-    onChange: (path, value) => { changes.push([path, value]); settings = settingsModule.updateSetting(settings, path, value); },
-    onClose: () => {},
-  });
+  let settings = settingsModule.normalizeAppSettings({ plugins: { enabled: {}, preview: { rem: true } } });
+  // Holds settings in state so every click sees the previous change.
+  function Harness() {
+    const [current, setCurrent] = React.useState(settings);
+    return React.createElement(settingsPopoverModule.default, {
+      open: true,
+      initialCategory: "plugins",
+      settings: current,
+      onChange: (path, value) => { changes.push([path, value]); settings = settingsModule.updateSetting(settings, path, value); setCurrent(settings); },
+      onClose: () => {},
+    });
+  }
+  const render = () => React.createElement(Harness);
+  const hasLabel = (dom, label) => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
   const dom = await mountReact(render(), createFetchMock([]));
   try {
-    assert.ok(dom.byText("Experimental"));
     assert.ok(dom.byText("Always shown"));
-    assert.equal(allElements(dom.container).filter(node => textOf(node) === "Experimental").length, 4);
-    for (const label of ["Rem", "Swarms", "Organizations", "Second Brain"]) {
-      assert.equal(dom.byLabel(`Show ${label}`).getAttribute("aria-checked"), "false", `${label} is experimental and off by default`);
-    }
+    assert.doesNotMatch(dom.text(), /Experimental/);
+    // Experimental plugins that are off appear only in Feature Preview.
+    for (const label of ["Swarms", "Organizations", "Second Brain"]) assert.equal(hasLabel(dom, `Show ${label}`), false, `${label} is hidden while off`);
+    assert.equal(dom.byLabel("Show Rem").getAttribute("aria-checked"), "true");
     assert.equal(dom.byLabel("Show Search").getAttribute("aria-checked"), "true");
-    await dom.click(dom.byLabel("Show Rem"));
-    assert.deepEqual(changes.at(-1), ["plugins.enabled", { rem: true }]);
     await dom.click(dom.byLabel("Show Search"));
     assert.deepEqual(changes.at(-1), ["plugins.enabled", { search: false }]);
+    // Hiding a Feature Preview plugin removes it from the sidebar only.
+    await dom.click(dom.byLabel("Show Rem"));
+    assert.deepEqual(changes.at(-1), ["plugins.enabled", { search: false, rem: false }]);
+    assert.deepEqual(settings.plugins.preview, { rem: true });
+    assert.equal(dom.byLabel("Show Rem").getAttribute("aria-checked"), "false", "the row and its switch stay");
     await dom.keyDown(dom.byLabel("Move Rem"), "ArrowDown");
     assert.deepEqual(changes.at(-1), ["plugins.order", ["workflows", "rem", "files", "search", "source-control", "swarms", "organizations", "second-brain"]]);
   } finally { await dom.unmount(); }
 
   changes.length = 0;
-  settings = settingsModule.normalizeAppSettings({ plugins: { locked: true, order: ["files", "rem"], enabled: { rem: false } } });
+  settings = settingsModule.normalizeAppSettings({ plugins: { locked: true, order: ["files", "rem"], enabled: { rem: false, search: false }, preview: { rem: true } } });
   const lockedDom = await mountReact(render(), createFetchMock([]));
   try {
     assert.equal(reactProps(lockedDom.byLabel("Move Rem")).disabled, true);
     await lockedDom.click(lockedDom.byText("Restore defaults"));
+    // Restoring sidebar defaults shows every plugin and leaves Feature Preview alone.
     assert.deepEqual(changes, [["plugins.order", settingsModule.DEFAULT_APP_SETTINGS.plugins.order], ["plugins.enabled", {}]]);
+    assert.deepEqual(settings.plugins.preview, { rem: true });
   } finally { await lockedDom.unmount(); }
-  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("experimental"), ["plugins"]);
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("experimental"), ["developer"]);
+  assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("feature preview"), ["developer"]);
   assert.ok(settingsPopoverModule.settingsCategoriesForQuery("plugins").includes("plugins"));
+});
+
+test("Feature Preview turns on every experimental feature, restarting the backend only when needed", async () => {
+  const changes = [];
+  const calls = [];
+  let settings = settingsModule.normalizeAppSettings({});
+  let backend = { organizations: false, "device-network": false };
+  const features = {
+    get: async () => backend,
+    set: async (id, enabled) => { calls.push([id, enabled]); backend = { ...backend, [id]: enabled }; return { features: backend }; },
+  };
+  // Holds settings in state so every click sees the previous change.
+  function Harness() {
+    const [current, setCurrent] = React.useState(settings);
+    return React.createElement(settingsPopoverModule.default, {
+      open: true,
+      initialCategory: "developer",
+      settings: current,
+      onChange: (path, value) => { changes.push([path, value]); settings = settingsModule.updateSetting(settings, path, value); setCurrent(settings); },
+      onClose: () => {},
+    });
+  }
+  const render = () => React.createElement(Harness);
+  const dom = await mountReact(render(), createFetchMock([]), { desktop: { features } });
+  try {
+    await dom.flush();
+    assert.ok(dom.byLabel("Feature Preview"));
+    for (const label of ["Rem home", "Swarms", "Organizations", "Second Brain", "Phone and desktop pairing"]) {
+      assert.equal(dom.byLabel(`Preview ${label}`).getAttribute("aria-checked"), "false", `${label} is off by default`);
+    }
+    await dom.click(dom.byLabel("Preview Swarms"));
+    assert.deepEqual(changes.at(-1), ["plugins.preview", { swarms: true }]);
+    assert.deepEqual(calls, [], "sidebar-only previews do not restart the backend");
+
+    await dom.click(dom.byLabel("Preview Organizations"));
+    await dom.flush();
+    assert.deepEqual(calls, [["organizations", true]]);
+    assert.deepEqual(changes.at(-1), ["plugins.preview", { swarms: true, organizations: true }]);
+    // The choice is stored before the restart reloads the window.
+    assert.equal(JSON.parse(window.localStorage.getItem(settingsModule.SETTINGS_STORAGE_KEY)).plugins.preview.organizations, true);
+
+    await dom.click(dom.byLabel("Preview Phone and desktop pairing"));
+    await dom.flush();
+    assert.deepEqual(calls.at(-1), ["device-network", true]);
+  } finally { await dom.unmount(); }
+
+  // Without the desktop app, backend-only previews cannot apply, so they are not listed.
+  const browserDom = await mountReact(render(), createFetchMock([]));
+  try {
+    assert.ok(browserDom.byLabel("Preview Organizations"));
+    assert.equal(allElements(browserDom.container).some(node => node.getAttribute?.("aria-label") === "Preview Phone and desktop pairing"), false);
+  } finally { await browserDom.unmount(); }
+
+  // Hiding a plugin from the sidebar does not turn its feature off.
+  settings = settingsModule.normalizeAppSettings({ plugins: { enabled: { "second-brain": false }, preview: { "second-brain": true } } });
+  const hiddenDom = await mountReact(render(), createFetchMock([]));
+  try {
+    assert.equal(hiddenDom.byLabel("Preview Second Brain").getAttribute("aria-checked"), "true");
+  } finally { await hiddenDom.unmount(); }
 });
 
 test("Rem opens its conversation from the rail and sends thread links to the Rem pane", async () => {
@@ -17757,7 +18393,14 @@ test("Rem opens its conversation from the rail and sends thread links to the Rem
     }
     assert.match(textOf(dom.byLabel("Conversation with Rem")), /Started a research thread\.[\s\S]*Sync research[\s\S]*Working/);
     assert.ok(fetchMock.calls.some(call => call.url === "/api/rem/tasks"));
-    assert.ok(fetchMock.calls.some(call => call.url === "/api/rem/context" && call.options.method === "POST"));
+    const context = fetchMock.calls.find(call => call.url === "/api/rem/context" && call.options.method === "POST");
+    // Task threads get the same browser and swarm settings as desktop threads.
+    assert.deepEqual(
+      [JSON.parse(context.options.body).browser_target, JSON.parse(context.options.body).swarm_access],
+      ["raticode", true],
+    );
+    // So do the worker and command slot limits from Settings > Rem.
+    assert.deepEqual(JSON.parse(context.options.body).command_slots, { enabled: true, maxWorkers: 0, test: 0, build: 0, browser: 0 });
     await dom.click(dom.ancestor(dom.byText("Open thread"), "BUTTON"));
     assert.deepEqual(opened, ["thread-worker"]);
     assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:thread-worker")).managedRunId, "r1");
@@ -17765,6 +18408,27 @@ test("Rem opens its conversation from the rail and sends thread links to the Rem
     window.removeEventListener("gofer:rem-open-thread", listener);
     await dom.unmount();
     remStore.resetRemHomeStore();
+  }
+});
+
+test("Organizations leaves the sidebar when its backend switch is off", async () => {
+  const storage = { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ plugins: { enabled: { organizations: true } } }) };
+  for (const enabled of [true, false]) {
+    const fetchMock = createFetchMock([
+      jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+      jsonResponse("/api/organizations?projectRoot=&action=availability", { result: { enabled, experimental: true } }),
+    ]);
+    const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage });
+    const hasLabel = label => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
+    try {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        await dom.flush();
+      }
+      assert.ok(fetchMock.calls.some(call => call.url === "/api/organizations?projectRoot=&action=availability"));
+      // Off in the backend means the feature appears only in Feature Preview.
+      assert.equal(hasLabel("Organizations"), enabled);
+    } finally { await dom.unmount(); }
   }
 });
 
@@ -17895,7 +18559,174 @@ test("Rem displays proactive task results and problems without sending a user me
   }
 });
 
-test("Rem mirrors completion and archives linked worker and review threads between polls", async () => {
+test("Rem messages show their date and time, and back-to-back Rem replies are divided", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const today = new Date(); today.setHours(9, 5, 0, 0);
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1); yesterday.setHours(16, 30);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [
+      { id: "old-ask", role: "user", body: "Old question", created_at: yesterday.toISOString() },
+      { id: "old-reply", role: "rem", body: "Old answer", created_at: yesterday.toISOString() },
+      { id: "ask", role: "user", body: "New question", created_at: today.toISOString() },
+      { id: "reply", role: "rem", body: "First reply", created_at: today.toISOString() },
+      { id: "update", role: "rem", kind: "task_update", body: "Second reply", created_at: today.toISOString() },
+      { id: "undated", role: "rem", body: "Third reply", created_at: "not a date" },
+    ] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 20 && !textOf(dom.container).includes("Third reply"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    const log = dom.byLabel("Conversation with Rem");
+    const message = id => allElements(log).find(node => node.getAttribute?.("data-message-id") === id);
+    const stamp = id => allElements(message(id)).find(node => node.tagName === "TIME");
+    assert.equal(stamp("ask").getAttribute("dateTime"), today.toISOString());
+    assert.equal(textOf(stamp("reply")).startsWith("9:05 AM"), true);
+    assert.equal(textOf(stamp("old-reply")).startsWith("Yesterday, 4:30 PM"), true);
+    assert.match(stamp("reply").getAttribute("title"), /, 9:05 AM$/);
+    // The undated reply keeps its place under Today without a stamp or a stray label.
+    assert.equal(stamp("undated"), undefined);
+    assert.doesNotMatch(textOf(log), /Invalid Date|Earlier/);
+    assert.deepEqual(allElements(log).filter(node => node.getAttribute?.("role") === "separator").map(textOf), ["Yesterday", "Today"]);
+    // Only a Rem message directly after another Rem message gets the divider.
+    assert.deepEqual(["old-reply", "reply", "update", "undated"].map(id => message(id).getAttribute("data-follows")), [null, null, "true", "true"]);
+    assert.equal(message("ask").getAttribute("data-follows"), null);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("pictures and videos on Rem's replies show inline, open large, and say when they can't be shown", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const opened = [], released = [], links = [];
+  const files = [
+    { name: "cat.png", size: 2048, path: "/home/me/Pictures/cat.png" },
+    { name: "demo.mp4", size: 4096, path: "/home/me/Videos/demo.mp4" },
+    { name: "gone.jpg", size: 10, path: "/home/me/Pictures/gone.jpg" },
+    { name: "notes.txt", size: 12, path: "/home/me/notes.txt" },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [
+      { id: "reply", role: "rem", body: "Here they are.", created_at: new Date().toISOString(), files },
+    ] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const desktop = { textFiles: {
+    openPreview: async target => {
+      opened.push(target);
+      if (target.endsWith("gone.jpg")) throw new Error("ENOENT");
+      return { id: `id-${target}`, url: `raticode-media://preview/${target.split("/").at(-1)}` };
+    },
+    closePreview: async id => released.push(id),
+  } };
+  const dom = await mountReact(React.createElement(workspace.default, { onOpenLink: path => links.push(path) }), fetchMock, { desktop });
+  try {
+    for (let attempt = 0; attempt < 20 && !textOf(dom.container).includes("no longer on this computer"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    await dom.flush();
+    // Only pictures and videos ask for a preview; other files keep their plain button.
+    assert.deepEqual(opened.sort(), files.slice(0, 3).map(file => file.path).sort());
+    const media = dom.byLabel("Pictures and videos");
+    assert.equal(allElements(media).filter(node => node.tagName === "FIGURE").length, 3);
+    assert.match(textOf(dom.byLabel("Attached files")), /notes\.txt/);
+    assert.equal(reactProps(allElements(dom.byLabel("View cat.png larger")).find(node => node.tagName === "IMG")).src, "raticode-media://preview/cat.png");
+    const poster = allElements(dom.byLabel("Play demo.mp4")).find(node => node.tagName === "VIDEO");
+    assert.equal(reactProps(poster).src, "raticode-media://preview/demo.mp4#t=0.1");
+    assert.equal(reactProps(poster).controls, undefined);
+    // A file that has gone away says so instead of showing a broken image.
+    assert.match(textOf(media), /This picture is no longer on this computer\./);
+
+    // Clicking the picture opens it large; Close returns to the chat.
+    await dom.click(dom.byLabel("View cat.png larger"));
+    const viewer = allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "image");
+    assert.ok(viewer);
+    assert.equal(reactProps(allElements(viewer).find(node => node.tagName === "IMG")).src, "raticode-media://preview/cat.png");
+    await dom.click(allElements(viewer).find(node => node.getAttribute?.("aria-label") === "Close"));
+    assert.equal(allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer")), undefined);
+
+    // Clicking the video opens a player with controls that starts on its own.
+    await dom.click(dom.byLabel("Play demo.mp4"));
+    const player = allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "video");
+    const video = allElements(player).find(node => node.tagName === "VIDEO");
+    assert.equal(reactProps(video).src, "raticode-media://preview/demo.mp4");
+    assert.equal(reactProps(video).controls, true);
+    assert.equal(reactProps(video).autoPlay, true);
+    await dom.pointer(video, "onError");
+    assert.match(textOf(player), /can't be played here/);
+    await dom.click(allElements(player).find(node => node.tagName === "BUTTON" && textOf(node).includes("Open in editor")));
+    assert.deepEqual(links, ["/home/me/Videos/demo.mp4"]);
+
+    // A picture the window can't decode falls back to a note; its name still opens it.
+    await dom.pointer(allElements(dom.byLabel("View cat.png larger")).find(node => node.tagName === "IMG"), "onError");
+    assert.match(textOf(media), /This picture can't be previewed here/);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+  assert.deepEqual(released.sort(), ["id-/home/me/Pictures/cat.png", "id-/home/me/Videos/demo.mp4"]);
+});
+
+test("a web image in chat opens large with a button for the browser tab", async () => {
+  const image = await viteServer.ssrLoadModule("/src/components/WebImage.jsx");
+  const tabs = [];
+  const fetchMock = createFetchMock([
+    (url) => String(url).includes("/api/media-image?url=") ? { ok: true, status: 200, json: async () => ({ image: { mime: "image/png", data: "iVBORw0KGgo=" } }) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(image.default, { alt: "A cat", src: "https://example.org/cat.png" }), fetchMock);
+  globalThis.window.open = (...args) => tabs.push(args);
+  try {
+    for (let attempt = 0; attempt < 20 && !textOf(dom.container) && !allElements(dom.container).some(node => node.tagName === "IMG"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    await dom.click(dom.byLabel("View A cat larger"));
+    assert.deepEqual(tabs, []);
+    const viewer = allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "image");
+    assert.equal(reactProps(allElements(viewer).find(node => node.tagName === "IMG")).src, "data:image/png;base64,iVBORw0KGgo=");
+    await dom.click(allElements(viewer).find(node => node.tagName === "BUTTON" && textOf(node).includes("Open in browser")));
+    assert.deepEqual(tabs, [["https://example.org/cat.png", "_blank", "noopener,noreferrer"]]);
+  } finally { await dom.unmount(); }
+});
+
+test("Rem mirrors a task thread in the server's order when an early message was missing here", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const transcript = [
+    { id: "prompt", role: "user", sender: "rem", body: "Investigate Rem" },
+    { id: "prompt-final", role: "assistant", kind: "final", body: "Report" },
+    { id: "repair", role: "user", sender: "rem", body: "Please address these findings" },
+    { id: "repair-final", role: "assistant", kind: "final", body: "Saved" },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/threads/worker", { metadata: { id: "worker", title: "Worker", managedRunId: "run" }, messages: transcript, running: false }),
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  try {
+    const repository = (await viteServer.ssrLoadModule("/src/lib/conversationRepository.js")).conversationRepository();
+    // This window only saw the repair turn live, so its copy starts mid-thread.
+    await repository.save("worker", transcript.slice(1, 3));
+    await store.syncRemThread("worker");
+    assert.deepEqual((await repository.all("worker")).map(message => message.id), ["prompt", "prompt-final", "repair", "repair-final"]);
+  } finally {
+    store.resetRemHomeStore();
+    await dom.unmount();
+  }
+});
+
+test("Rem mirrors completion of linked worker and review threads between polls as unread", async () => {
   const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
   store.resetRemHomeStore();
   store.setRemHomeContext(null);
@@ -17912,7 +18743,7 @@ test("Rem mirrors completion and archives linked worker and review threads betwe
       if (!url.startsWith("/api/rem/threads/")) return null;
       const id = url.split("/").at(-1);
       requests.push(id);
-      return { ok: true, json: async () => ({ metadata: { id, title: id, managedRunId: "run", archived: completed, updatedAt: created }, messages: [{ id: `${id}-reply`, role: "assistant", kind: "final", body: completed ? "Finished." : "Working." }], running: !completed }) };
+      return { ok: true, json: async () => ({ metadata: { id, title: id, managedRunId: "run", archived: false, updatedAt: created }, messages: [{ id: `${id}-reply`, role: "assistant", kind: "final", body: completed ? "Finished." : "Working." }], running: !completed }) };
     },
   ]);
   const dom = await mountReact(React.createElement("div"), fetchMock);
@@ -17928,7 +18759,9 @@ test("Rem mirrors completion and archives linked worker and review threads betwe
     await store.refreshRemHome();
     assert.deepEqual(requests, ["worker", "review", "worker", "review"]);
     for (const id of ["worker", "review"]) {
-      assert.equal(JSON.parse(window.localStorage.getItem(`gofer-flow-chat-thread-meta:${id}`)).archived, true);
+      const metadata = JSON.parse(window.localStorage.getItem(`gofer-flow-chat-thread-meta:${id}`));
+      assert.equal(metadata.archived, false, "Finished task threads stay in the thread list");
+      assert.equal(metadata.unread, true, "A finish nobody has seen is unread");
     }
     const repository = (await viteServer.ssrLoadModule("/src/lib/conversationRepository.js")).conversationRepository();
     assert.equal((await repository.all("worker")).at(-1).body, "Finished.");
@@ -17945,12 +18778,120 @@ test("Rem mirrors completion and archives linked worker and review threads betwe
       assert.equal(snapshots[0].messages.at(-1).body, "Finished.");
     } finally { window.removeEventListener("gofer:device-thread-sync", receive); }
     assert.deepEqual(opened, ["worker"]);
-    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:worker")).archived, true);
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:worker")).archived, false);
   } finally {
     window.removeEventListener("gofer:rem-open-thread", listener);
     store.resetRemHomeStore();
     await dom.unmount();
   }
+});
+
+test("Rem keeps syncing a task thread that a new run reuses after an earlier run finished there", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const first = { id: "run-1", thread_id: "worker", state: "succeeded", epoch: 0, finished_at: "2026-11-01T20:50:09Z" };
+  let second = null;
+  const requests = [];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    (url) => {
+      if (url === "/api/rem/tasks") {
+        // Runs come newest first; the earlier finished run shares the thread.
+        const runs = second ? [second, first] : [first];
+        return { ok: true, json: async () => ({ tasks: [{ id: "task", active_run: second, last_run: runs[0], recent_runs: runs }] }) };
+      }
+      if (url !== "/api/rem/threads/worker") return null;
+      requests.push(second?.id || first.id);
+      const run = second || first;
+      return { ok: true, json: async () => ({ metadata: { id: "worker", title: "Voice assistant", managedRunId: run.id, managedRole: "execute", updatedAt: second ? "2026-11-02T01:21:00Z" : "2026-11-01T20:50:10Z" },
+        messages: [{ id: `${run.id}-ask`, role: "user", sender: "rem", body: "Work" }], running: Boolean(second) }) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  const synced = [];
+  const receive = event => synced.push(event.detail);
+  window.addEventListener("gofer:device-thread-sync", receive);
+  try {
+    await store.refreshRemHome();
+    await store.refreshRemHome();
+    assert.deepEqual(requests, ["run-1"], "A finished run's thread syncs once");
+    second = { id: "run-2", thread_id: "worker", state: "executing", epoch: 0 };
+    await store.refreshRemHome();
+    await store.refreshRemHome();
+    assert.deepEqual(requests, ["run-1", "run-2", "run-2"], "The running thread syncs on every poll");
+    const metadata = JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:worker"));
+    assert.equal(metadata.managedRunId, "run-2");
+    assert.notEqual(metadata.updatedAt, "2026-11-01T20:50:10Z", "The new run's activity moves the thread up");
+    assert.equal(synced.at(-1).running, true, "The thread list and phone sync learn it is running");
+  } finally {
+    window.removeEventListener("gofer:device-thread-sync", receive);
+    store.resetRemHomeStore();
+    await dom.unmount();
+  }
+});
+
+test("Rem task threads leave the archive on new activity and land in Unread or Read by whether the finish was seen", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const old = new Date(Date.now() - 3600000).toISOString();
+  // The user archived this task thread after reading an earlier run.
+  const worker = { id: "worker", title: "Nightly digest", managedRunId: "run", managedRole: "execute", scopeMode: "global", projectRoot: "", archived: true, readAt: old, updatedAt: old };
+  const storage = { "gofer-flow-chat-thread-meta:worker": JSON.stringify(worker), "gofer-flow-chat-threads": JSON.stringify([{ ...worker, scopeIndexed: true }]) };
+  let snapshot = null;
+  const turn = (id, done) => [{ id: `${id}-ask`, role: "user", sender: "rem", body: `Run ${id}` }, ...(done ? [{ id: `${id}-final`, role: "assistant", kind: "final", body: `Finished ${id}.` }] : [])];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/provider/capabilities", { providers: [] }),
+    (url) => url === "/api/rem/threads/worker" ? { ok: true, json: async () => snapshot } : null,
+    (url) => url.startsWith("/api/chat/threads/") ? { ok: true, json: async () => ({}) } : null,
+  ]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { activeProjectRoot: "", width: 380 }), fetchMock, { storage });
+  const section = name => allElements(dom.container).find(node => node.tagName === "SECTION" && node.getAttribute("aria-label") === `${name} threads`);
+  const placed = async () => {
+    await dom.flush();
+    for (const name of ["Unread", "Read", "Archived"]) { const group = section(name); if (group && /Nightly digest/.test(textOf(group))) return name; }
+    return null;
+  };
+  const sync = async (messages, running) => {
+    snapshot = { metadata: { id: "worker", title: "Nightly digest", managedRunId: "run", managedRole: "execute", scopeMode: "global", projectRoot: "", archived: false, updatedAt: old }, messages, running };
+    const detail = await store.syncRemThread("worker");
+    await dom.flush();
+    return detail;
+  };
+  const saved = () => JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:worker"));
+  // While the thread is open its list is hidden; group the saved index the same way
+  // the list and the phone sync do.
+  const { organizeThreads } = await viteServer.ssrLoadModule("/src/lib/threadActivity.js");
+  const indexed = async () => {
+    await dom.flush();
+    const groups = organizeThreads(JSON.parse(window.localStorage.getItem("gofer-flow-chat-threads")));
+    return ["pinned", "unread", "read", "running", "archived"].find(name => groups[name].some(entry => entry.id === "worker"));
+  };
+  try {
+    await openThreadGroup(dom, "Archived");
+    assert.equal(await placed(), "Archived");
+    // Rem starts another run in the archived thread: it leaves the archive while it runs.
+    await sync(turn("a", false), true);
+    assert.equal(saved().archived, false);
+    assert.equal(await placed(), null, "A running thread waits in Running, not Archived");
+    // The run finishes while the user is elsewhere: Unread.
+    const finished = await sync(turn("a", true), false);
+    assert.equal(finished.completed, true);
+    assert.equal(await placed(), "Unread");
+    assert.equal(saved().unread, true);
+    // An unchanged poll keeps it unread rather than resetting it from the server copy.
+    await sync(turn("a", true), false);
+    assert.equal(await placed(), "Unread");
+    // Opening it marks the completion seen: Read.
+    await dom.click(dom.ancestor(allElements(section("Unread")).find(node => textOf(node) === "Nightly digest"), "BUTTON"));
+    assert.equal(await indexed(), "read");
+    // A later run that finishes while the thread is open was seen, so it stays in Read.
+    await sync([...turn("a", true), ...turn("b", false)], true);
+    await sync([...turn("a", true), ...turn("b", true)], false);
+    assert.equal(await indexed(), "read");
+    assert.equal(saved().unread, false);
+    assert.equal(saved().archived, false);
+  } finally { await dom.unmount(); store.resetRemHomeStore(); }
 });
 
 test("Rem retries a message with its original request ID after a lost response", async () => {
@@ -17979,6 +18920,148 @@ test("Rem retries a message with its original request ID after a lost response",
     assert.equal(requests.length, 2);
     assert.deepEqual(requests[1], requests[0]);
   } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
+});
+
+test("Rem delivers a message sent while it is replying once the reply finishes", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  let replying = true;
+  const requests = [];
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (url !== "/api/rem/messages" || options.method !== "POST") return null;
+      requests.push(JSON.parse(options.body));
+      if (replying) { setTimeout(() => { replying = false; }, 10); return { ok: false, status: 409, json: async () => ({ error: "Rem is still replying; try again shortly" }) }; }
+      return { ok: true, status: 200, json: async () => ({ accepted: true }) };
+    },
+    (url) => url === "/api/rem/conversation" ? { ok: true, status: 200, json: async () => ({ conversation: { id: "rem", turn_state: replying ? "replying" : "idle" }, messages: [] }) } : null,
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  try {
+    await store.refreshRemHome();
+    const sent = store.sendRemMessage("And check the docs too");
+    for (let attempt = 0; attempt < 40 && !store.getState().messages[0]?.waiting; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(store.getState().messages[0].waiting, true, "The message should say it waits for Rem's reply");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await dom.flush(1500);
+    assert.equal(await sent, true);
+    assert.equal(store.getState().notice, "");
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1], requests[0], "The queued message keeps its request ID");
+  } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
+});
+
+test("Rem keeps working when its context is rejected and keeps unsent messages after polling", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/context", { error: "Invalid Rem configuration" }, { method: "POST", ok: false, status: 400 }),
+    jsonResponse("/api/rem/messages", { error: "Provider unavailable" }, { method: "POST", ok: false, status: 500 }),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "hello", role: "rem", body: "Hi" }], context_ready: true }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  try {
+    store.setRemHomeContext(async () => ({ provider: "codex", projects: [] }));
+    await store.refreshRemHome();
+    assert.equal(store.getState().status, "ready");
+    assert.deepEqual(store.getState().messages.map(message => message.id), ["hello"]);
+    assert.match(store.getState().contextIssue, /Invalid Rem configuration/);
+    assert.equal(await store.sendRemMessage("Still there?"), false);
+    await store.refreshRemHome();
+    const unsent = store.getState().messages.at(-1);
+    assert.equal(unsent.failed, true, "Try again must survive the next poll");
+    store.editRemMessage(unsent.id);
+    assert.equal(store.getState().composerRequest.text, "Still there?");
+    assert.equal(store.getState().messages.length, 1);
+  } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
+});
+
+test("Rem's composer turns pasted files and long text into attachments like threads", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const uploads = [];
+  const messages = [];
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (url !== "/api/chat/attachments" || options.method !== "POST") return null;
+      const body = JSON.parse(options.body);
+      uploads.push(body);
+      return { ok: true, status: 201, json: async () => ({ attachments: body.files.map((file, index) => ({ id: `a${index}`, name: file.name, size: 1, type: file.type, storageName: `${"0".repeat(32)}-${file.name}` })) }) };
+    },
+    (url, options = {}) => {
+      if (url !== "/api/rem/messages" || options.method !== "POST") return null;
+      messages.push(JSON.parse(options.body));
+      return { ok: true, status: 200, json: async () => ({ accepted: true }) };
+    },
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default), fetchMock);
+  try {
+    await store.refreshRemHome();
+    await dom.flush();
+    const convo = allElements(dom.container).find(node => node.getAttribute?.("class") === "rem-convo");
+    const text = "Large reference data\n".repeat(2000);
+    await dom.pointer(convo, "onPaste", { clipboardData: { items: [], getData: () => text } });
+    await dom.pointer(convo, "onPaste", { clipboardData: { items: [{ kind: "file", getAsFile: () => new File(["png"], "shot.png", { type: "image/png" }) }], getData: () => "" } });
+    assert.equal(dom.byLabel("Message Rem").value, "");
+    assert.match(dom.text(), /pasted-text-.*\.txt/);
+    assert.ok(dom.byLabel("Remove shot.png"));
+    await dom.click(dom.byLabel("Send"));
+    for (let attempt = 0; attempt < 20 && !messages.length; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(uploads[0].threadId, "rem-home");
+    assert.deepEqual(uploads[0].files.map(file => file.name).sort().at(-1), "shot.png");
+    assert.equal(messages[0].body, "");
+    assert.equal(messages[0].attachments.length, 2);
+    assert.ok(messages[0].attachments.every(item => item.storageName));
+    await dom.flush();
+    assert.ok(!allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Remove shot.png"));
+    assert.match(textOf(dom.byLabel("Conversation with Rem")), /shot\.png/);
+  } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
+});
+
+test("Rem keeps an unsent message across plugin switches and attaches copied or asked-about files", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  const composer = await viteServer.ssrLoadModule("/src/lib/remComposer.js");
+  const transfers = await viteServer.ssrLoadModule("/src/lib/fileTransfers.js");
+  store.resetRemHomeStore();
+  composer.resetRemComposer();
+  store.setRemHomeContext(null);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const desktop = { textFiles: { readAttachment: async path => ({ name: path.split("/").at(-1), type: "text/plain", data: Buffer.from("print('hi')").toString("base64") }) } };
+  let dom = await mountReact(React.createElement(workspace.default), fetchMock, { desktop });
+  try {
+    await store.refreshRemHome();
+    await dom.flush();
+    await dom.change(dom.byLabel("Message Rem"), "Half typed");
+    await dom.unmount();
+    // Another plugin is open: "Ask Rem about this" still reaches Rem's chat.
+    globalThis.window.goferDesktop = desktop;
+    await composer.attachPathsToRemComposer(["/p/code.py"]);
+    dom = await mountReact(React.createElement(workspace.default), fetchMock, { desktop });
+    await dom.flush();
+    assert.equal(dom.byLabel("Message Rem").value, "Half typed");
+    assert.ok(dom.byLabel("Remove code.py"));
+
+    transfers.setFileClipboard({ path: "/p/notes.md", name: "notes.md", entries: [{ path: "/p/notes.md", name: "notes.md", isFile: true }], operation: "copy", clipboardText: "/p/notes.md" });
+    const convo = allElements(dom.container).find(node => node.getAttribute?.("class") === "rem-convo");
+    let prevented = false;
+    await dom.pointer(convo, "onPaste", { preventDefault: () => { prevented = true; }, clipboardData: { items: [], getData: () => "/p/notes.md" } });
+    for (let attempt = 0; attempt < 20 && composer.getRemComposer().attachments.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+    await dom.flush();
+    assert.ok(prevented);
+    assert.ok(dom.byLabel("Remove notes.md"));
+    assert.equal(dom.byLabel("Message Rem").value, "Half typed");
+  } finally { transfers.setFileClipboard(null); store.resetRemHomeStore(); composer.resetRemComposer(); await dom.unmount(); }
 });
 
 test("Rem configuration changes do not wait on a discarded workspace lookup", async () => {
@@ -18123,6 +19206,145 @@ test("Rem clear history erases its conversation and task threads but keeps the u
   }
 });
 
+test("Rem's memory panel lists, corrects and forgets remembered facts", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const created = new Date().toISOString();
+  let memories = [
+    { id: "a", text: "Uses Google OAuth.", created_at: created },
+    { id: "b", text: "Digest at 06:00.", created_at: created },
+  ];
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "c", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options) => {
+      if (url === "/api/rem/memories" && (options.method || "GET") === "GET") return { ok: true, json: async () => ({ memories }) };
+      if (url === "/api/rem/memories/a" && options.method === "PATCH") {
+        memories = memories.map(item => item.id === "a" ? { ...item, text: JSON.parse(options.body).text, edited_at: created } : item);
+        return { ok: true, json: async () => ({ memories }) };
+      }
+      if (url === "/api/rem/memories/b" && options.method === "DELETE") {
+        memories = memories.filter(item => item.id !== "b");
+        return { ok: true, json: async () => ({ memories }) };
+      }
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const settle = async (done) => {
+    for (let attempt = 0; attempt < 30 && !done(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  try {
+    await dom.click(dom.byLabel("Rem"));
+    await settle(() => store.getState().status === "ready" && dom.container.querySelector('[aria-label="Rem options"]'));
+    await dom.click(dom.byLabel("Rem options"));
+    await settle(() => textOf(dom.container).includes("What Rem remembers…"));
+    await dom.click(dom.ancestor(dom.byText("What Rem remembers…"), "BUTTON"));
+    await settle(() => textOf(dom.container).includes("Uses Google OAuth."));
+    const panel = () => dom.ancestor(dom.byExactText("What Rem remembers"), node => node.getAttribute?.("role") === "dialog");
+    const button = (scope, label) => allElements(scope).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+    const item = text => dom.ancestor(dom.byText(text), "LI");
+    assert.match(textOf(panel()), /Uses Google OAuth\..*Digest at 06:00\./s);
+    await dom.click(button(item("Uses Google OAuth."), "Edit"));
+    const field = dom.byLabel("Memory text");
+    await dom.change(field, "");
+    assert.equal(dom.byLabel("Memory text").value, "");
+    await dom.change(field, "Never use Google OAuth.");
+    await dom.click(button(panel(), "Save"));
+    await settle(() => textOf(dom.container).includes("Never use Google OAuth."));
+    assert.match(textOf(item("Never use Google OAuth.")), /edited/);
+    await dom.click(button(item("Digest at 06:00."), "Forget"));
+    await settle(() => !textOf(dom.container).includes("Digest at 06:00."));
+    assert.doesNotMatch(textOf(panel()), /Digest at 06:00/);
+    const patch = fetchMock.calls.find(call => call.url === "/api/rem/memories/a");
+    assert.deepEqual(JSON.parse(patch.options.body), { text: "Never use Google OAuth." });
+    await dom.click(button(panel(), "Done"));
+    assert.doesNotMatch(dom.text(), /Correct anything that’s wrong/);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("Rem's memory controls pause saving, add a memory and undo what a reply saved", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  const created = new Date().toISOString();
+  let mode = "on";
+  let memories = [{ id: "tea", text: "Prefers tea", created_at: created }];
+  let note = { saved: [{ id: "tea", text: "Prefers tea" }], refused: 1 };
+  const conversation = () => ({
+    conversation: { id: "c", turn_state: "idle" },
+    messages: [
+      { id: "m1", role: "user", body: "I like tea", created_at: created },
+      { id: "reply-m1", role: "rem", body: "Noted.", created_at: created, memory: note },
+    ],
+  });
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([])),
+    (url) => url === "/api/rem/conversation" ? { ok: true, json: async () => conversation() } : null,
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+    (url, options) => {
+      const method = options.method || "GET";
+      if (url === "/api/rem/memories" && method === "GET") return { ok: true, json: async () => ({ memories, mode }) };
+      if (url === "/api/rem/memories" && method === "POST") {
+        memories = [{ id: "east", text: JSON.parse(options.body).text, created_at: created, added_by: "user" }, ...memories];
+        return { ok: true, json: async () => ({ memories, mode }) };
+      }
+      if (url === "/api/rem/memory-mode" && method === "PUT") {
+        mode = JSON.parse(options.body).mode;
+        return { ok: true, json: async () => ({ memories, mode }) };
+      }
+      if (url === "/api/rem/messages/reply-m1/undo-memory" && method === "POST") {
+        memories = memories.filter(item => item.id !== "tea");
+        note = { ...note, undone_at: created };
+        return { ok: true, json: async () => ({ memories, mode }) };
+      }
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const settle = async (done) => {
+    for (let attempt = 0; attempt < 30 && !done(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const button = (scope, label) => allElements(scope).find(node => node.tagName === "BUTTON" && textOf(node) === label);
+  try {
+    await dom.click(dom.byLabel("Rem"));
+    await settle(() => textOf(dom.container).includes("Saved to memory"));
+    const reply = () => dom.ancestor(dom.byText("Saved to memory: “Prefers tea”"), node => String(node.getAttribute?.("class") || node.className || "").includes("rem-memory-note"));
+    assert.match(textOf(reply()), /Didn’t save 1 item that looked like a password, key or token/);
+    await dom.click(button(reply(), "Undo"));
+    await settle(() => textOf(reply()).includes("Undone"));
+    assert.ok(fetchMock.calls.some(call => call.url === "/api/rem/messages/reply-m1/undo-memory" && call.options.method === "POST"));
+    assert.equal(button(reply(), "Undo"), undefined);
+
+    await dom.click(dom.byLabel("Rem options"));
+    await settle(() => textOf(dom.container).includes("What Rem remembers…"));
+    await dom.click(dom.ancestor(dom.byText("What Rem remembers…"), "BUTTON"));
+    await settle(() => textOf(dom.container).includes("Rem hasn’t saved anything yet."));
+    const panel = () => dom.ancestor(dom.byExactText("What Rem remembers"), node => node.getAttribute?.("role") === "dialog");
+    const paused = allElements(panel()).find(node => node.tagName === "INPUT" && node.value === "paused");
+    await dom.change(paused, "paused");
+    await settle(() => textOf(panel()).includes("saves nothing new"));
+    assert.deepEqual(JSON.parse(fetchMock.calls.find(call => call.url === "/api/rem/memory-mode").options.body), { mode: "paused" });
+    await dom.change(dom.byLabel("Something for Rem to remember"), "Works in Eastern time");
+    await dom.click(button(panel(), "Add"));
+    await settle(() => textOf(panel()).includes("added by you"));
+    assert.match(textOf(panel()), /Works in Eastern time/);
+    assert.equal(dom.byLabel("Something for Rem to remember").value, "");
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
 test("Rem folder links open projects, and its menu opens provider settings", async () => {
   const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
   store.resetRemHomeStore();
@@ -18217,7 +19439,7 @@ test("Rem syncs completed worker transcripts while its home is closed", async ()
     jsonResponse("/api/workflows", workflowsPayload([])),
     jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
     jsonResponse("/api/rem/tasks", { tasks: [{ id: "task", last_run: { id: "run", thread_id: "managed-worker", state: "succeeded", finished_at: stamp } }] }),
-    jsonResponse("/api/rem/threads/managed-worker", { metadata: { id: "managed-worker", title: "Digest worker", scopeMode: "global", managedRunId: "run", archived: true, updatedAt: stamp }, messages: [{ id: "worker-final", role: "assistant", kind: "final", body: "The digest finished." }], running: false }),
+    jsonResponse("/api/rem/threads/managed-worker", { metadata: { id: "managed-worker", title: "Digest worker", scopeMode: "global", managedRunId: "run", archived: false, updatedAt: stamp }, messages: [{ id: "worker-final", role: "assistant", kind: "final", body: "The digest finished." }], running: false }),
   ]);
   const dom = await mountReact(React.createElement(appModule.default), fetchMock);
   try {
@@ -18227,7 +19449,8 @@ test("Rem syncs completed worker transcripts while its home is closed", async ()
     assert.ok(!allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Conversation with Rem"));
     const repository = (await viteServer.ssrLoadModule("/src/lib/conversationRepository.js")).conversationRepository();
     assert.equal((await repository.all("managed-worker")).at(-1)?.body, "The digest finished.");
-    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:managed-worker")).archived, true);
+    const metadata = JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:managed-worker"));
+    assert.deepEqual([metadata.archived, metadata.unread], [false, true], "A finish that happened while Raticode was elsewhere is unread");
   } finally { await dom.unmount(); store.resetRemHomeStore(); }
 });
 
@@ -18237,7 +19460,7 @@ test("Rem serializes overlapping active and completed thread snapshots", async (
   store.resetRemHomeStore();
   const old = createDeferred();
   let calls = 0;
-  const snapshot = finished => ({ metadata: { id: "race-worker", managedRunId: "run", archived: finished }, messages: [{ id: "reply", role: "assistant", kind: "final", body: finished ? "Finished." : "Working." }], running: !finished });
+  const snapshot = finished => ({ metadata: { id: "race-worker", managedRunId: "run", archived: false }, messages: [{ id: "reply", role: "assistant", kind: "final", body: finished ? "Finished." : "Working." }], running: !finished });
   const dom = await mountReact(React.createElement("div"), createFetchMock([(url) => {
     if (url !== "/api/rem/threads/race-worker") return null;
     calls += 1;
@@ -18252,7 +19475,8 @@ test("Rem serializes overlapping active and completed thread snapshots", async (
     await first; await second;
     const repository = (await viteServer.ssrLoadModule("/src/lib/conversationRepository.js")).conversationRepository();
     assert.equal((await repository.all("race-worker")).at(-1).body, "Finished.");
-    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:race-worker")).archived, true);
+    // Same message ID, so only the running-to-finished change marks the completion.
+    assert.equal(JSON.parse(window.localStorage.getItem("gofer-flow-chat-thread-meta:race-worker")).unread, true);
   } finally { await dom.unmount(); store.resetRemHomeStore(); }
 });
 
@@ -18284,6 +19508,107 @@ async function mountBrowser(fake, props = {}) {
   await dom.flush();
   return dom;
 }
+
+test("downloads offer Open with Raticode first, then the system's apps for that file", async () => {
+  const { DownloadsView } = await viteServer.ssrLoadModule("/src/components/BrowserPanels.jsx");
+  const calls = [];
+  const download = { id: "d1", filename: "guide.html", path: "/home/me/Downloads/guide.html", state: "completed", url: "https://example.com/guide.html", receivedBytes: 10, totalBytes: 10 };
+  const bridge = {
+    onDownloads: () => () => {},
+    library: async (action, options = {}) => {
+      calls.push([action, options]);
+      if (action === "download-apps") return { apps: [{ id: "firefox.desktop", name: "Firefox", isDefault: true }, { id: "kate.desktop", name: "Kate", isDefault: false }] };
+      return { downloads: [download] };
+    },
+  };
+  const opened = [];
+  const dom = await mountReact(React.createElement(DownloadsView, { bridge, onOpenFile: (path) => opened.push(path) }), createFetchMock([]));
+  await dom.flush();
+  const button = () => dom.ancestor(dom.byExactText("Open with"), "BUTTON");
+  await dom.click(button());
+  await dom.flush();
+  const menu = dom.byLabel("Open guide.html with");
+  const items = allElements(menu).filter((node) => node.getAttribute?.("role") === "menuitem").map(textOf);
+  assert.deepEqual(items, ["Raticode", "FirefoxDefault", "Kate"]);
+  assert.deepEqual(toPlainObject(calls.at(-1)), ["download-apps", { id: "d1" }]);
+  await dom.click(dom.ancestor(dom.byExactText("Kate"), "BUTTON"));
+  await dom.flush();
+  assert.deepEqual(toPlainObject(calls.at(-1)), ["download", { command: "open-with", id: "d1", appId: "kate.desktop" }]);
+  assert.equal(button().getAttribute("aria-expanded"), "false");
+  await dom.click(button());
+  await dom.flush();
+  await dom.click(dom.ancestor(dom.byExactText("Raticode"), "BUTTON"));
+  assert.deepEqual(opened, ["/home/me/Downloads/guide.html"]);
+  // Open uses Raticode by default, like links.
+  const before = calls.length;
+  await dom.click(dom.byExactText("Open"));
+  assert.deepEqual(opened, ["/home/me/Downloads/guide.html", "/home/me/Downloads/guide.html"]);
+  assert.equal(calls.length, before);
+  await dom.unmount();
+});
+
+test("Ask Rem about this passes the right-clicked element with the page", async () => {
+  let command = null;
+  const asked = [];
+  const fake = fakeBrowserBridge({
+    onCommand: (callback) => { command = callback; return () => {}; },
+    pageContext: async () => ({ url: "https://example.com/", title: "Shop", selection: "", text: "Shop page" }),
+  });
+  const dom = await mountBrowser(fake, { onAskRem: (context) => asked.push(context) });
+  const element = { tag: "button", text: "Buy now" };
+  await React.act(async () => command({ action: "ask-rem", clientId: "tab", id: "s1", selection: "", element }));
+  await dom.flush();
+  assert.deepEqual(toPlainObject(asked), [{ url: "https://example.com/", title: "Shop", text: "The user right-clicked this element and is asking about it:\nElement: <button>\nText:\nBuy now\n\nPage text:\nShop page" }]);
+  await dom.unmount();
+});
+
+test("Ask Rem about this page works on local files as on web pages", async () => {
+  const fileUrl = "file:///repo/report.html";
+  for (const [props, created] of [
+    [{ localPath: "/repo/report.html", initialUrl: "" }, { url: fileUrl, profile: "preview", security: { level: "local", label: "Local file" } }],
+    [{}, {}],
+  ]) {
+    const asked = [];
+    const contextCalls = [];
+    let command = null;
+    const url = created.url || "https://example.com/";
+    const fake = fakeBrowserBridge({
+      ...(created.url ? { create: async () => ({ id: "s1", clientId: "tab", ready: true, loading: false, ...created }) } : {}),
+      onCommand: (callback) => { command = callback; return () => {}; },
+      pageContext: async (id, selection) => { contextCalls.push([id, selection]); return { url, title: "Report", selection, text: "Total 42" }; },
+    });
+    const dom = await mountBrowser(fake, { onAskRem: (context) => asked.push(context), ...props });
+    await dom.click(allElements(dom.container).find((element) => element.getAttribute?.("aria-label") === "Browser menu" && element.tagName === "BUTTON"));
+    await dom.click(dom.ancestor(dom.byExactText("Ask Rem about this page"), "BUTTON"));
+    await dom.flush();
+    // Right-clicking sends the selection and element through the same path.
+    await React.act(async () => command({ action: "ask-rem", clientId: "tab", id: "s1", selection: "Total", element: { tag: "td", text: "42" } }));
+    await dom.flush();
+    assert.deepEqual(contextCalls, [["s1", ""], ["s1", "Total"]]);
+    assert.deepEqual(toPlainObject(asked), [
+      { url, title: "Report", text: "Total 42" },
+      { url, title: "Report", text: "The user right-clicked this element and is asking about it:\nElement: <td>\nText:\n42\n\nSelected text:\nTotal\n\nPage text:\nTotal 42" },
+    ]);
+    await dom.unmount();
+  }
+});
+
+test("the Downloads button animates when a download finishes", async () => {
+  let push = null;
+  const fake = fakeBrowserBridge({
+    library: async () => ({ downloads: [{ id: "old", state: "completed" }] }),
+    onDownloads: (callback) => { push = callback; return () => {}; },
+  });
+  const dom = await mountBrowser(fake);
+  const button = () => allElements(dom.container).find((node) => node.tagName === "BUTTON" && node.getAttribute("aria-label")?.startsWith("Downloads"));
+  const icon = () => ({ className: allElements(button()).find((node) => node.tagName === "SPAN")?.getAttribute("class") || "" });
+  assert.doesNotMatch(icon().className, /browser-download-arrived/);
+  await React.act(async () => push({ downloads: [{ id: "new", state: "progressing" }, { id: "old", state: "completed" }] }));
+  assert.doesNotMatch(icon().className, /browser-download-arrived/);
+  await React.act(async () => push({ downloads: [{ id: "new", state: "completed" }, { id: "old", state: "completed" }] }));
+  assert.match(icon().className, /browser-download-arrived/);
+  await dom.unmount();
+});
 
 test("browser prompts ask inside the tab and send only the user's answer", async () => {
   const fake = fakeBrowserBridge();
@@ -18419,4 +19744,256 @@ test("Ctrl+Shift+T reopens closed browser tabs from anywhere in the studio", () 
   assert.equal(command?.scope, "global");
   const appSource = fs.readFileSync(path.join(repoRoot, "frontend/src/pages/App.jsx"), "utf8");
   assert.match(appSource, /if \(action === "browser\.reopenClosedTab"\) reopenClosedBrowserTabRef\.current\?\.\(\);/);
+});
+
+test("Layout settings apply arrangements, terminal location and reset", async () => {
+  let latest = settingsModule.DEFAULT_APP_SETTINGS;
+  function SettingsHarness() {
+    const [settings, setSettings] = React.useState(settingsModule.DEFAULT_APP_SETTINGS);
+    latest = settings;
+    return React.createElement(settingsPopoverModule.default, {
+      initialCategory: "layout",
+      onChange: (path, value) => setSettings((current) => settingsModule.updateSetting(current, path, value)),
+      onClose() {},
+      onResetAll() {},
+      open: true,
+      settings,
+    });
+  }
+  const dom = await mountReact(React.createElement(SettingsHarness), createFetchMock([]));
+  try {
+    const arrangement = dom.byLabel("Arrangement");
+    assert.equal(arrangement.getAttribute("role"), "radiogroup");
+    assert.equal(dom.ancestor(dom.byExactText("Classic"), "BUTTON").getAttribute("aria-checked"), "true");
+
+    await dom.click(dom.ancestor(dom.byExactText("Rem first"), "BUTTON"));
+    assert.equal(latest.layout.projectPaneSide, "right");
+    assert.equal(latest.layout.assistantPaneSide, "left");
+    assert.equal(dom.ancestor(dom.byExactText("Rem first"), "BUTTON").getAttribute("aria-checked"), "true");
+    assert.equal(dom.ancestor(dom.byExactText("Classic"), "BUTTON").getAttribute("aria-checked"), "false");
+    assert.equal(reactProps(dom.byLabel("Rem pane side")).value, "left");
+
+    // A side chosen by hand that matches no preset leaves every preset unchecked.
+    await dom.change(dom.byLabel("Rem pane side"), "right");
+    assert.equal(latest.layout.assistantPaneSide, "right");
+    assert.equal(dom.ancestor(dom.byExactText("Panes right"), "BUTTON").getAttribute("aria-checked"), "true");
+
+    await dom.change(dom.byLabel("Terminal location"), "editor");
+    await dom.change(dom.byLabel("Open at startup"), "runs");
+    await dom.click(dom.byLabel("Show Rem at startup"));
+    assert.equal(latest.layout.terminalLocation, "editor");
+    assert.equal(latest.layout.bottomPanelAtStartup, "runs");
+    assert.equal(latest.layout.assistantPaneAtStartup, false);
+
+    const reset = allElements(dom.container).find((node) => node.tagName === "BUTTON" && textOf(node) === "Reset layout");
+    await dom.click(reset);
+    assert.deepEqual(latest.layout, settingsModule.DEFAULT_APP_SETTINGS.layout);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("bottom panel opens its startup view and hands terminals to the editor", async () => {
+  const settings = settingsModule.normalizeAppSettings({ layout: { terminalLocation: "editor", bottomPanelAtStartup: "problems" } });
+  const dom = await mountReact(React.createElement(bottomPanelModule.default, { settings }), createFetchMock([]));
+  const opened = [];
+  const listener = (event) => opened.push(event.detail);
+  window.addEventListener("gofer:open-terminal-tab", listener);
+  try {
+    assert.ok(dom.byLabel("Collapse bottom panel"));
+    assert.equal(dom.byText("Problems").getAttribute("aria-selected"), "true");
+    assert.equal(allElements(dom.byLabel("Bottom panel views")).some((node) => textOf(node) === "Terminal"), false);
+
+    await dom.dispatchWindow("keydown", { code: "KeyT", ctrlKey: true, key: "t" });
+    await dom.dispatchWindow("gofer:toggle-bottom-panel", { detail: { tab: "terminal" } });
+    assert.deepEqual(opened, [{ newTerminal: true }, {}]);
+    // The panel itself keeps showing Problems.
+    assert.equal(dom.byText("Problems").getAttribute("aria-selected"), "true");
+  } finally {
+    window.removeEventListener("gofer:open-terminal-tab", listener);
+    await dom.unmount();
+  }
+
+  const panelDom = await mountReact(React.createElement(bottomPanelModule.default, {
+    settings: settingsModule.normalizeAppSettings({ layout: { bottomPanelAtStartup: "terminal" } }),
+  }), createFetchMock([]));
+  try {
+    assert.ok(panelDom.byLabel("Collapse bottom panel"));
+    assert.equal(panelDom.byText("Terminal").getAttribute("aria-selected"), "true");
+  } finally {
+    await panelDom.unmount();
+  }
+});
+
+test("terminal editor tab opens on request and closes when terminals move back to the panel", async () => {
+  const terminalPath = "raticode-terminal:workspace";
+  const activated = [];
+  const closed = [];
+  let setLayoutSettings;
+  function TerminalTabHarness() {
+    const [settings, setSettings] = React.useState(() => settingsModule.normalizeAppSettings({ layout: { terminalLocation: "editor" } }));
+    const [openPaths, setOpenPaths] = React.useState([]);
+    setLayoutSettings = setSettings;
+    return React.createElement(codeWorkspaceModule.default, {
+      // Inactive, so the terminal workspace renders without starting a shell.
+      active: false,
+      activePath: "",
+      onActivePathChange: (path) => activated.push(path),
+      onClosePaths: (paths) => {
+        closed.push(...paths);
+        setOpenPaths((current) => current.filter((path) => !paths.includes(path)));
+      },
+      onOpenPathsChange: setOpenPaths,
+      openPaths,
+      settings,
+      terminalProjectRoot: "/repo",
+      workflow: { projectRoot: "/repo" },
+    });
+  }
+  const dom = await mountReact(React.createElement(TerminalTabHarness), createFetchMock([]));
+  try {
+    await dom.dispatchWindow("gofer:open-terminal-tab", { detail: { background: true } });
+    await dom.flush();
+    assert.deepEqual(activated, []);
+    assert.ok(dom.byLabel("Close Terminal"));
+    assert.equal(dom.byLabel("Editor tabs").getAttribute("role"), "tablist");
+
+    await dom.dispatchWindow("gofer:open-terminal-tab", { detail: { newTerminal: true } });
+    await dom.flush();
+    assert.deepEqual(activated, [terminalPath]);
+    assert.equal(allElements(dom.byLabel("Editor tabs")).filter((node) => node.getAttribute?.("aria-label") === "Close Terminal").length, 1);
+
+    await React.act(async () => setLayoutSettings((current) => settingsModule.updateSetting(current, "layout.terminalLocation", "panel")));
+    await dom.flush();
+    assert.deepEqual(closed, [terminalPath]);
+    assert.equal(allElements(dom.container).some((node) => node.getAttribute?.("aria-label") === "Close Terminal"), false);
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("startup layout settings dock and hide side panes", async () => {
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture()])),
+  ]), {
+    storage: {
+      [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ layout: { projectPaneSide: "right", assistantPaneSide: "left", assistantPaneAtStartup: false } }),
+    },
+  });
+  try {
+    await dom.flush();
+    const panes = allElements(dom.container).find((node) => node.getAttribute?.("data-project-side"));
+    assert.equal(panes.getAttribute("data-project-side"), "right");
+    assert.equal(panes.getAttribute("data-assistant-side"), "left");
+    const chat = allElements(dom.container).find((node) => node.getAttribute?.("data-chat-pane") === "true");
+    assert.equal(chat.parentNode.getAttribute("aria-hidden"), "true");
+  } finally {
+    await dom.unmount();
+  }
+});
+
+test("terminal tabs are not files for Rem, recents or file checks", () => {
+  const terminalPath = "raticode-terminal:workspace";
+  assert.deepEqual(appModule.editorFileReferences(["/repo/a.js", terminalPath]), ["/repo/a.js"]);
+  assert.deepEqual(appModule.rememberRecentFile(["/repo/a.js"], terminalPath), ["/repo/a.js"]);
+  assert.equal(codeWorkspaceModule.codeTabLabel(terminalPath), "Terminal");
+});
+
+test("swarm launch review requires confirming agents without a sandbox", async () => {
+  const { LaunchReview } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const starts = [];
+  const swarm = { name: "Apps", projectRoot: "/desktop", maxConcurrency: 2, integrationChecks: [], gitPermissions: { local: true, remote: false }, agents: [
+    { id: "lead", name: "Lead", role: "Plan", provider: "codex", isOrchestrator: true, permissionMode: "danger-full-access" },
+    { id: "review", name: "Reviewer", role: "Review", provider: "codex", permissionMode: "read-only" },
+  ] };
+  const dom = await mountReact(React.createElement(LaunchReview, { swarm, busy: false, onStart: value => starts.push(value), onCancel() {} }), createFetchMock([]));
+  const start = () => allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node).includes("Start run"));
+  try {
+    assert.match(dom.text(), /Lead runs without a sandbox/);
+    assert.match(dom.text(), /No integration checks are set/);
+    assert.match(dom.text(), /200 agent turns, 8 h running time, 60 min per turn/);
+    assert.equal(reactProps(start()).disabled, true);
+    await dom.change(dom.byLabel("Confirm full access"), true);
+    assert.equal(reactProps(start()).disabled, false);
+    await dom.click(start());
+    assert.deepEqual(starts, [true]);
+  } finally { await dom.unmount(); }
+});
+
+test("swarm limits keep a draft while editing and save checks and legacy limits", async () => {
+  const { SwarmSettings } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const calls = [];
+  const swarm = { name: "Apps", maxTurns: 0, maxRunSeconds: 0, integrationChecks: [["npm", "test"]], agents: [
+    { id: "lead", name: "Lead", role: "Plan", provider: "codex", isOrchestrator: true },
+  ] };
+  const dom = await mountReact(React.createElement(SwarmSettings, { swarm, rootPath: "/desktop", onSave: payload => calls.push(payload) }), createFetchMock([]));
+  try {
+    const turns = dom.controlAfterLabel("Agent turns per run");
+    assert.equal(turns.value, "200");
+    await dom.focus(turns);
+    await dom.change(turns, "");
+    assert.equal(turns.value, "");
+    await dom.change(turns, "50");
+    await dom.blur(turns);
+    const tokens = dom.controlAfterLabel("Token limit");
+    await dom.focus(tokens);
+    await dom.change(tokens, "250000");
+    await dom.blur(tokens);
+    const checks = dom.controlAfterLabel("Integration checks");
+    assert.equal(checks.value, "npm test");
+    await dom.change(checks, 'npm test\nruff check "src dir"');
+    await dom.pointer(dom.first("form"), "onSubmit");
+    assert.equal(calls[0].maxTurns, 50);
+    assert.equal(calls[0].maxRunSeconds, 8 * 3600);
+    assert.equal(calls[0].maxTokens, 250000);
+    assert.deepEqual(calls[0].integrationChecks, [["npm", "test"], ["ruff", "check", "src dir"]]);
+  } finally { await dom.unmount(); }
+});
+
+test("swarm stop asks for confirmation before cleaning up the run", async () => {
+  const { default: SwarmWorkspace } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const swarm = { id: "team", name: "Apps", updatedAt: "1", projectRoot: "/workspace", agents: [{ id: "lead", name: "Lead", role: "Plan", provider: "codex", isOrchestrator: true }], run: {
+    id: "run", state: "running", task: "Build", messages: [], events: [], objectives: [], attempts: [], agentStates: { lead: { state: "working" } },
+    configuration: { agents: [{ id: "lead", name: "Lead", role: "Plan", provider: "codex", isOrchestrator: true }], maxTurns: 200 },
+  } };
+  const controls = [];
+  const fetchMock = createFetchMock([
+    (url, options = {}) => {
+      if (!url.startsWith("/api/swarms/team")) return null;
+      if (options.method === "POST") controls.push(JSON.parse(options.body).action);
+      return { ok: true, status: 200, json: async () => ({ swarm }) };
+    },
+  ]);
+  const dom = await mountReact(React.createElement(SwarmWorkspace, { rootPath: "/workspace", swarmId: "team", onSelect() {}, onClose() {} }), fetchMock);
+  try {
+    await dom.flush();
+    await dom.click(allElements(dom.container).find(node => node.tagName === "BUTTON" && textOf(node) === "Stop…"));
+    assert.deepEqual(controls, []);
+    assert.match(dom.text(), /A stopped run can’t be resumed/);
+    await dom.click(dom.byExactText("Stop and clean up"));
+    await dom.flush();
+    assert.deepEqual(controls, ["stop"]);
+  } finally { await dom.unmount(); }
+});
+
+test("swarm execution shows limits, usage by agent and where results are", async () => {
+  const { SwarmExecution } = await viteServer.ssrLoadModule("/src/components/SwarmWorkspace.jsx");
+  const agents = [{ id: "lead", name: "Lead" }, { id: "one", name: "Builder" }];
+  const html = renderToStaticMarkup(React.createElement(SwarmExecution, { agents, readOnly: true, busy: false, onAction() {}, run: {
+    state: "paused", turnCount: 12, elapsedSeconds: 1800, stalledTurns: 1,
+    configuration: { maxTurns: 200, maxRunSeconds: 28800, maxTurnSeconds: 3600, stallTurnLimit: 6, maxRepairAttempts: 3 },
+    usage: { reported_input_tokens: 900, reported_output_tokens: 100 },
+    objectives: [{ milestones: [{ id: "m1", title: "Parser fix" }] }],
+    workspace: { mode: "git", path: "/data/workspaces/r/apps-review", branch: "raticode/swarm/r/apps-review", excludedFiles: [".env"] },
+    cleanup: { archives: ["/data/workspaces/r/retained/a1"] },
+    attempts: [{ id: "a1", ownerId: "one", milestoneId: "m1", state: "succeeded", startedAt: "x", usage: { input_tokens: 900, output_tokens: 100 } }],
+  } }));
+  assert.match(html, /12 of 200/);
+  assert.match(html, /30 min of 8 h/);
+  assert.match(html, /900 in · 100 out/);
+  assert.match(html, /Usage by agent/);
+  assert.match(html, /Builder/);
+  assert.match(html, /raticode\/swarm\/r\/apps-review/);
+  assert.match(html, /look like secrets: \.env/);
+  assert.match(html, /Archived unfinished work \(1\)/);
 });

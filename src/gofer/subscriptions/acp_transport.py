@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
+from gofer.core.command_slots import scoped_command
 from gofer.utils.process import (
     _terminate_process_tree,
     build_subprocess_env,
@@ -329,11 +330,12 @@ async def open_acp_transport(
         raise ValueError("ACP needs a command and positive output/time limits")
     if cancel_event is not None and cancel_event.is_set():
         raise AcpTransportError("ACP turn cancelled before launch")
+    child_env = build_subprocess_env(env_with_executable_on_path(command[0], env))
     spawn = asyncio.create_task(
         asyncio.create_subprocess_exec(
-            *command,
+            *scoped_command(command, child_env),
             cwd=cwd,
-            env=build_subprocess_env(env_with_executable_on_path(command[0], env)),
+            env=child_env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

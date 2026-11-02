@@ -470,14 +470,19 @@ Steering does not cancel an already-running command or undo its effects. Other p
 use the same queue without claiming active-turn steering support.
 
 Runs default to three concurrent agents and a 60-second orchestrator check interval.
-There is no cumulative turn or elapsed-time limit. Each agent can choose a workspace
+Run limits default to 200 agent turns, 8 hours of running time, 60 minutes per turn,
+6 turns in a row without progress and 3 repairs per assignment, with an optional
+reported-token limit; the run pauses at each. Each agent can choose a workspace
 project. Git repositories get a named review worktree before agents start, with isolated
 assignment worktrees feeding their changes into it. Cleanup retains each repository's
 review worktree. Non-Git projects serialize writers within each project.
 The timer reconciles new board activity; it does not start repeated empty provider turns.
-Pause prevents new turns while current turns finish. Stop requests cancellation. Reopening
-the application leaves interrupted runs paused, with uncertain deliveries visible for
-review. Provider failures retry with bounded backoff in their preserved workspace.
+An idle run is prompted once to unblock itself; if nothing changes, it pauses as stalled.
+Pause prevents new turns while current turns finish. Stop requests cancellation and cleans
+up, so a stopped run can't be resumed. Reopening the application leaves interrupted runs
+paused, with uncertain deliveries visible for review. Provider failures retry with bounded
+backoff in their preserved workspace and pause the run after five in a row or on a sign-in,
+quota or setup error. Swarm agents don't get write access to the app data folder.
 No run starts merely by opening a project or selecting a swarm.
 
 ### Rem access
@@ -489,8 +494,12 @@ even when Rem's shell access is off. Read-only and plan modes allow inspection o
 
 Ask Rem to create or edit a team, start a requested run, pause/resume/stop work,
 message members, update objectives, or inspect progress, agent activity, and previous
-runs. Rem can also verify and integrate attempts, resolve the human inbox, repair or
-replan work, retry cleanup, and request completion through the runtime's normal checks.
+runs. Rem can also verify and integrate attempts, answer recovery items in the human
+inbox, repair or replan work, retry cleanup, and request completion through the
+runtime's normal checks. Approval requests, verification waivers and repairs past the
+repair limit are left to the user, and Rem's actions are recorded as Rem's. Starting a
+team with full-access agents needs `confirmFullAccess`, which Rem sets only after the
+user agrees in the conversation.
 Creating a team does not start it. Members still use their own configured
 providers and resources.
 

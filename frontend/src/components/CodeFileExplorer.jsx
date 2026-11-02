@@ -7,6 +7,7 @@ import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { commitDiffPath } from "../lib/commitDiff.js";
 import RemActionIcon from "./RemActionIcon.jsx";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { askRemAboutFiles, copyFilesForPaste } from "../lib/fileAttachments.js";
 import { beginFileDrag, containsFileTransfer, droppedFileEntries, getFileClipboard, setFileClipboard, subscribeFileClipboard, transferName, clipboardEntries, topLevelTransferEntries } from "../lib/fileTransfers.js";
 import {
   ArrowDown,
@@ -14,6 +15,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Eraser,
   Scissors,
   ClipboardPaste,
   FileCode2,
@@ -252,7 +254,8 @@ export default function CodeFileExplorer({
   const [worktreeMenu, setWorktreeMenu] = useState(null);
   const [worktreeRemoval, setWorktreeRemoval] = useState(null);
   const [worktreeRemovalError, setWorktreeRemovalError] = useState("");
-  useEffect(() => { setWorktreeRemoval(null); setWorktreeRemovalError(""); }, [rootPath]);
+  const [branchCleanup, setBranchCleanup] = useState(null);
+  useEffect(() => { setWorktreeRemoval(null); setWorktreeRemovalError(""); setBranchCleanup(null); }, [rootPath]);
   const [worktreeFormOpen, setWorktreeFormOpen] = useState(false);
   const [worktreeBranch, setWorktreeBranch] = useState("");
   const [worktreeFolder, setWorktreeFolder] = useState("");
@@ -520,11 +523,38 @@ export default function CodeFileExplorer({
     }
   }, [rootPath, historyRefs, historyLimit]);
 
+  // Git metadata events cover worktrees and commits from agents, swarms and
+  // terminals. Polling stays as a slower safety net while the watch is live.
+  const [gitWatchMode, setGitWatchMode] = useState("");
+  const gitEventRef = useRef(null);
+  gitEventRef.current = (kinds, retry = true) => {
+    // A read that started before the change may return the old state. Read once more after it.
+    if (retry && (gitStatusLoadingRef.current || gitPanelsLoadingRef.current)) {
+      window.setTimeout(() => { if (currentRootRef.current === rootPath) gitEventRef.current?.(kinds, false); }, 500);
+    }
+    void loadSourceControlStatus();
+    if (sidebarView === "source-control" && (kinds.includes("worktrees") || kinds.includes("refs"))) {
+      void loadGitPanels({ includeHistory: sourceTab === "history" && kinds.includes("refs") });
+    }
+  };
+  useEffect(() => {
+    const watchGit = window.goferDesktop?.workspace?.watchGit;
+    setGitWatchMode("");
+    if (!rootPath || !watchGit) return undefined;
+    const stop = watchGit(rootPath, {
+      onReady: (mode) => { if (currentRootRef.current === rootPath) setGitWatchMode(mode); },
+      onChange: ({ kinds }) => { if (currentRootRef.current === rootPath) gitEventRef.current?.(kinds); },
+    });
+    return () => stop?.();
+  }, [rootPath]);
+
+  useEffect(() => {
+    if (sidebarView === "source-control") void loadGitPanels({ includeHistory: sourceTab === "history" });
+  }, [sidebarView, sourceTab, loadGitPanels]);
   useEffect(() => {
     if (sidebarView !== "source-control") return undefined;
-    void loadGitPanels({ includeHistory: sourceTab === "history" });
-    return startPolling(() => loadGitPanels({ includeHistory: false }));
-  }, [sidebarView, sourceTab, loadGitPanels]);
+    return startPolling(() => loadGitPanels({ includeHistory: false }), { interval: ["watch", "poll"].includes(gitWatchMode) ? 15000 : 2000 });
+  }, [sidebarView, loadGitPanels, gitWatchMode]);
 
   useEffect(() => {
     setHistoryRefs(null);
@@ -755,7 +785,14 @@ export default function CodeFileExplorer({
     const entries = selectedTransferEntries(entry);
     if (!entries.length) return;
     setFileClipboard({ ...entries[0], entries, operation });
+    // Copied files also paste into Rem's chats as attachments.
+    if (operation === "copy") void copyFilesForPaste(entries).catch(() => {});
     treeRef.current?.focus();
+  }
+
+  function askRemAboutEntry(entry) {
+    setContextMenu(null);
+    askRemAboutFiles(selectedTransferEntries(entry).filter(item => !item.isDirectory).map(item => item.path));
   }
 
   async function transferEntries(entries, directory, operation, onTransferred) {
@@ -1061,6 +1098,65 @@ export default function CodeFileExplorer({
     }
   }
 
+  async function previewBranchCleanup() {
+    if (gitBusy) return;
+    setBranchCleanup({ loading: true, plan: null, error: "" });
+    try {
+      const result = await window.goferDesktop?.workspace?.gitRepoAction?.(rootPath, "branch-cleanup-preview", {});
+      if (!result) throw new Error("Restart the desktop app to enable Git actions.");
+      if (result.error) throw new Error(result.error);
+      if (currentRootRef.current === rootPath) setBranchCleanup({ loading: false, plan: result, error: "" });
+    } catch (cause) {
+      if (currentRootRef.current === rootPath) setBranchCleanup({ loading: false, plan: null, error: cause instanceof Error ? cause.message : String(cause) });
+    }
+  }
+
+  async function saveCleanupKeep(scope, patterns) {
+    if (gitBusy || branchCleanup?.saving) return;
+    setBranchCleanup(current => ({ ...current, saving: true, error: "" }));
+    try {
+      const result = await window.goferDesktop?.workspace?.gitRepoAction?.(rootPath, "branch-cleanup-keep", { scope, patterns });
+      if (!result) throw new Error("Restart the desktop app to enable Git actions.");
+      if (result.error) throw new Error(result.error);
+      if (currentRootRef.current === rootPath) setBranchCleanup({ loading: false, plan: result, error: "" });
+    } catch (cause) {
+      if (currentRootRef.current === rootPath) setBranchCleanup(current => ({ ...current, saving: false, error: cause instanceof Error ? cause.message : String(cause) }));
+    }
+  }
+
+  async function runBranchCleanup() {
+    const plan = branchCleanup?.plan;
+    if (gitBusy || gitOperationRef.current || !plan?.remove.length) return;
+    if (plan.remove.some(item => item.worktree && hasUnsavedCodeChanges(item.worktree))) {
+      setBranchCleanup(current => ({ ...current, error: "Save your editor changes in these worktrees first." }));
+      return;
+    }
+    gitOperationRef.current = true;
+    setGitBusy(true);
+    setBranchCleanup(current => ({ ...current, error: "" }));
+    try {
+      const result = await window.goferDesktop?.workspace?.gitRepoAction?.(rootPath, "branch-cleanup", { items: plan.remove });
+      if (!result) throw new Error("Restart the desktop app to enable Git actions.");
+      if (currentRootRef.current !== rootPath) return;
+      if (result.active) setSourceControl(result);
+      if (result.error) throw new Error(result.error);
+      for (const item of result.cleanup.removed) {
+        if (!item.worktree) continue;
+        window.dispatchEvent(new CustomEvent("gofer:git-files-changed", { detail: { rootPath: item.worktree } }));
+        onRemoveRecentProject?.(item.worktree);
+      }
+      setGitNotice(result.notice);
+      setBranchCleanup(result.cleanup.failed.length ? { loading: false, plan: null, error: result.cleanup.failed.map(item => `${item.branch}: ${item.error}`).join("\n") } : null);
+      await loadGitPanels();
+      onFilesystemChange?.({ type: "git", rootPath });
+    } catch (cause) {
+      if (currentRootRef.current === rootPath) setBranchCleanup(current => ({ ...current, error: cause instanceof Error ? cause.message : String(cause) }));
+    } finally {
+      gitOperationRef.current = false;
+      setGitBusy(false);
+    }
+  }
+
   function handleTreeKeyDown(event) {
     if (event.target?.matches?.("input, textarea") || event.target?.closest?.('[role="menu"]')) return;
     if (["ArrowUp", "ArrowDown", "Home", "End", "ArrowLeft", "ArrowRight"].includes(event.key)) {
@@ -1131,13 +1227,15 @@ export default function CodeFileExplorer({
   }
 
   const rootLoading = loadingPaths.has(rootPath);
+  // A pane docked to the right keeps its activity bar on the window edge.
+  const railOnRight = settings.layout?.projectPaneSide === "right";
   return (
     <div
-      className={`flex h-full min-h-0 min-w-0 ${paneVisible ? "" : "[&>[role=tabpanel]]:hidden [&>section]:hidden"}`}
+      className={`flex h-full min-h-0 min-w-0 ${railOnRight ? "flex-row-reverse" : ""} ${paneVisible ? "" : "[&>[role=tabpanel]]:hidden [&>section]:hidden"}`}
       aria-label="Project sidebar"
       onKeyDownCapture={handleExplorerKeyDown}
     >
-      <div className="flex w-10 shrink-0 flex-col border-r border-line">
+      <div className={`flex w-10 shrink-0 flex-col border-line ${railOnRight ? "border-l" : "border-r"}`}>
         <div ref={railRef} role="tablist" aria-label="Project sidebar views" aria-orientation="vertical" className="flex flex-col">
           {railPlugins.map(({ id, label }) => {
             const Icon = PLUGIN_ICONS[id];
@@ -1154,7 +1252,7 @@ export default function CodeFileExplorer({
                 aria-controls={`sidebar-panel-${id}`}
                 tabIndex={sidebarView === id ? 0 : -1}
                 draggable={!pluginsLocked}
-                className={`relative grid h-10 w-full shrink-0 place-items-center border-l-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${sidebarView === id ? "border-brand text-ink" : "border-transparent text-muted hover:bg-slate-100 hover:text-ink"} ${pluginDrag?.id === id ? "opacity-40" : ""}`}
+                className={`relative grid h-10 w-full shrink-0 place-items-center ${railOnRight ? "border-r-2" : "border-l-2"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${sidebarView === id ? "border-brand text-ink" : "border-transparent text-muted hover:bg-slate-100 hover:text-ink"} ${pluginDrag?.id === id ? "opacity-40" : ""}`}
                 onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); setContextMenu(null); setRecentMenuOpen(false); }}
                 onDragStart={(event) => {
                   if (pluginsLocked) { event.preventDefault(); return; }
@@ -1518,7 +1616,10 @@ export default function CodeFileExplorer({
               {sourceTab === "branches" ? <>
             <div className="flex h-7 items-center justify-between">
               <span className="text-[10px] font-semibold text-ink">Worktrees</span>
-              <button aria-label="Add worktree" className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink" type="button" onClick={() => { setWorktreeStartPoint(""); setWorktreeFormOpen((current) => !current); }}><FolderPlus size={12} /></button>
+              <span className="flex items-center">
+                <button aria-label="Clean up branches" title="Delete outdated branches and their worktrees" className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink disabled:opacity-40" type="button" disabled={gitBusy} onClick={() => void previewBranchCleanup()}><Eraser size={12} /></button>
+                <button aria-label="Add worktree" className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink" type="button" onClick={() => { setWorktreeStartPoint(""); setWorktreeFormOpen((current) => !current); }}><FolderPlus size={12} /></button>
+              </span>
             </div>
             {worktreeFormOpen ? (
               <form className="mb-2 space-y-1.5 rounded-md bg-slate-50 p-2" onSubmit={createWorktree}>
@@ -1738,6 +1839,7 @@ export default function CodeFileExplorer({
           pathCopied={copiedPath === (contextMenu.entry?.path ?? rootPath)}
           x={contextMenu.x}
           y={contextMenu.y}
+          onAskRem={() => askRemAboutEntry(contextMenu.entry)}
           onCopy={() => copyEntry(contextMenu.entry)}
           onCut={() => copyEntry(contextMenu.entry, "move")}
           onCopyPath={() => copyPath(contextMenu.entry)}
@@ -1780,6 +1882,43 @@ export default function CodeFileExplorer({
           <div className="mt-5 flex justify-end gap-2">
             <button type="button" className="rounded border border-line px-3 py-2 text-xs" disabled={gitOperationBusy} onClick={() => setWorktreeRemoval(null)}>Cancel</button>
             <button aria-label={worktreeRemoval.requiresForce ? "Discard changes and remove" : "Confirm worktree removal"} type="button" className="rounded bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-50" disabled={gitBusy} onClick={() => removeWorktree(worktreeRemoval)}>{gitOperationBusy ? "Removing…" : worktreeRemoval.requiresForce ? "Discard changes and remove" : "Remove worktree"}</button>
+          </div>
+        </Dialog>
+      ) : null}
+
+      {branchCleanup ? (
+        <Dialog
+          title="Clean up branches?"
+          onClose={() => { if (!gitOperationRef.current) setBranchCleanup(null); }}
+          panelClassName="w-full max-w-lg rounded-xl border border-line bg-white p-5 text-ink"
+        >
+          <h2 className="text-sm font-semibold">Clean up branches?</h2>
+          {branchCleanup.loading ? <p role="status" className="mt-3 text-xs text-muted">Checking branches…</p> : null}
+          {branchCleanup.plan ? <>
+            <p className="mt-3 text-xs">{branchCleanup.plan.remove.length ? "These branches have no commits of their own. A newer local branch already contains everything on them. Their worktree folders will be deleted too." : "There are no outdated branches to clean up."}</p>
+            {branchCleanup.plan.remove.length ? <ul aria-label="Branches to delete" className="mt-3 max-h-60 space-y-1.5 overflow-y-auto text-xs">
+              {branchCleanup.plan.remove.map(item => <li key={item.branch} className="rounded bg-slate-50 px-2 py-1.5">
+                <span className="block break-all font-medium">{item.branch}</span>
+                <span className="block break-all text-[11px] text-muted">Behind {item.newer}{item.worktree ? ` · ${item.worktree}` : ""}</span>
+              </li>)}
+            </ul> : null}
+            {branchCleanup.plan.kept.length ? <>
+              <h3 className="mt-4 text-xs font-semibold">Kept</h3>
+              <ul aria-label="Outdated branches kept" className="mt-1 space-y-1 text-[11px] text-muted">
+                {branchCleanup.plan.kept.map(item => <li key={item.branch} className="break-all">{item.branch} · {item.reason}</li>)}
+              </ul>
+            </> : null}
+          </> : null}
+          {branchCleanup.plan ? <section aria-label="Always keep" className="mt-4 space-y-2 border-t border-line pt-3">
+            <h3 className="text-xs font-semibold">Always keep</h3>
+            <p className="text-[11px] text-muted">Branch names or patterns such as release/*, separated by commas. Stored in Git config, not committed.</p>
+            <CleanupKeepField label="This project" patterns={branchCleanup.plan.keepPatterns?.project || []} disabled={gitBusy || branchCleanup.saving} onSave={patterns => saveCleanupKeep("project", patterns)} />
+            <CleanupKeepField label="All projects" patterns={branchCleanup.plan.keepPatterns?.user || []} disabled={gitBusy || branchCleanup.saving} onSave={patterns => saveCleanupKeep("user", patterns)} />
+          </section> : null}
+          {branchCleanup.error ? <p role="alert" className="mt-3 whitespace-pre-wrap break-words text-xs text-red-600">{branchCleanup.error}</p> : null}
+          <div className="mt-5 flex justify-end gap-2">
+            <button type="button" className="rounded border border-line px-3 py-2 text-xs" disabled={gitOperationBusy} onClick={() => setBranchCleanup(null)}>{branchCleanup.plan?.remove.length ? "Cancel" : "Close"}</button>
+            {branchCleanup.plan?.remove.length ? <button type="button" className="rounded bg-red-600 px-3 py-2 text-xs text-white disabled:opacity-50" disabled={gitBusy || branchCleanup.saving} onClick={() => void runBranchCleanup()}>{gitOperationBusy ? "Deleting…" : `Delete ${branchCleanup.plan.remove.length} branch${branchCleanup.plan.remove.length === 1 ? "" : "es"}`}</button> : null}
           </div>
         </Dialog>
       ) : null}
@@ -1874,6 +2013,7 @@ function SourceControlDecoration({ directory = false, path, projectRoot, statuse
 function ExplorerContextMenu({
   canPaste,
   entry,
+  onAskRem,
   onCopy,
   onCut,
   onCopyPath,
@@ -1901,6 +2041,7 @@ function ExplorerContextMenu({
       <MenuButton icon={pathCopied ? Check : Copy} label={pathCopied ? "Path copied" : "Copy path"} onClick={onCopyPath} />
       {entry ? (
         <>
+          {!entry.isDirectory ? <MenuButton icon={RemActionIcon} label="Ask Rem about this" onClick={onAskRem} /> : null}
           <div className="my-1 border-t border-line" />
           <MenuButton icon={PencilLine} label="Rename" shortcut="F2" onClick={onRename} />
           <MenuButton icon={Copy} label="Copy" shortcut={formatKeybinding("Mod+KeyC")} onClick={onCopy} />
@@ -1932,6 +2073,21 @@ function MenuButton({ danger = false, disabled = false, icon: Icon, label, onCli
       {shortcut ? <span className="text-[10px] text-muted">{shortcut}</span> : null}
     </button>
   );
+}
+
+// Keep the typed text until it is saved so commas and spaces are not rewritten while typing.
+function CleanupKeepField({ label, patterns, disabled, onSave }) {
+  const saved = patterns.join(", ");
+  const [draft, setDraft] = useState(saved);
+  useEffect(() => { setDraft(saved); }, [saved]);
+  const parsed = draft.split(/[\s,]+/).filter(Boolean);
+  const changed = parsed.join(", ") !== saved;
+  const save = () => { if (changed && !disabled) onSave(parsed); };
+  return <div className="flex items-center gap-2 text-[11px]">
+    <span className="w-20 shrink-0 text-muted">{label}</span>
+    <input aria-label={`Always keep in ${label.toLowerCase()}`} className="h-7 min-w-0 flex-1 rounded border border-line bg-white px-2 text-[11px] outline-none focus:border-indigo-500" placeholder="dev, main" value={draft} disabled={disabled} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); save(); } }} />
+    <button type="button" aria-label={`Save branches always kept in ${label.toLowerCase()}`} className="h-7 shrink-0 rounded border border-line px-2 text-[11px] disabled:opacity-40" disabled={disabled || !changed} onClick={save}>Save</button>
+  </div>;
 }
 
 export function visibleTreeRows(rootPath, directories, expanded, query = "", statuses = []) {

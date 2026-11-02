@@ -832,7 +832,7 @@
     },
     "pypdf": {
       "license": "BSD-3-Clause",
-      "version": "6.21.3"
+      "version": "6.21.4"
     },
     "pytest": {
       "license": "MIT",

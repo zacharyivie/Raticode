@@ -478,6 +478,48 @@ async def test_claude_named_profile_never_reads_default_credentials(monkeypatch,
     assert not row["windows"]
 
 
+def fake_keychain(monkeypatch, secrets: dict[str, str]) -> list[list[str]]:
+    import subprocess
+
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        secret = secrets.get(command[command.index("-s") + 1])
+        return subprocess.CompletedProcess(
+            command, 0 if secret else 44, (secret or "").encode() + b"\n", b""
+        )
+
+    monkeypatch.setattr(usage.sys, "platform", "darwin")
+    monkeypatch.setattr(usage.subprocess, "run", run)
+    return calls
+
+
+def test_claude_macos_reads_default_sign_in_from_keychain(monkeypatch):
+    oauth = {"accessToken": "keychain-secret", "scopes": ["user:profile"]}
+    calls = fake_keychain(
+        monkeypatch, {"Claude Code-credentials": json.dumps({"claudeAiOauth": oauth})}
+    )
+    assert usage._claude_native_token({}, None) == "keychain-secret"
+    assert calls[0][:2] == ["/usr/bin/security", "find-generic-password"]
+
+
+def test_claude_macos_profiles_never_read_default_keychain(monkeypatch, tmp_path):
+    oauth = {"accessToken": "default-secret", "scopes": ["user:profile"]}
+    calls = fake_keychain(
+        monkeypatch, {"Claude Code-credentials": json.dumps({"claudeAiOauth": oauth})}
+    )
+    assert usage._claude_native_token({"CLAUDE_CONFIG_DIR": str(tmp_path / "w")}, "work") is None
+    assert not calls
+
+
+def test_keychain_is_only_read_on_macos(monkeypatch):
+    calls = fake_keychain(monkeypatch, {"cursor-access-token": "x"})
+    monkeypatch.setattr(usage.sys, "platform", "linux")
+    assert usage._macos_keychain_secret("cursor-access-token") is None
+    assert not calls
+
+
 def test_claude_named_profile_reads_its_own_config_dir(tmp_path):
     write_claude_credentials(tmp_path / "work", accessToken="work-secret")
     assert (
@@ -771,6 +813,46 @@ def test_cursor_profiles_only_read_their_own_sign_in(tmp_path):
     write_cursor_login(tmp_path / "work", token)
     assert usage._cursor_native_token({}, "work") is None
     assert usage._cursor_native_token({"XDG_CONFIG_HOME": str(tmp_path / "work")}, "work") == token
+
+
+def test_cursor_macos_reads_cli_sign_in_from_keychain(monkeypatch):
+    token = jwt(sub="auth0|mac", exp=4_000_000_000)
+    calls = fake_keychain(monkeypatch, {"cursor-access-token": token})
+    assert usage._cursor_native_token({}, None) == token
+    assert calls[0][2:4] == ["-a", "cursor-user"]
+    assert usage._cursor_native_token({}, "work") is None
+    assert len(calls) == 1
+
+
+def test_cursor_macos_reads_file_store_sign_in(monkeypatch, tmp_path):
+    # AGENT_CLI_CREDENTIAL_STORE=file keeps the macOS sign-in in ~/.cursor/auth.json.
+    token = jwt(sub="auth0|mac-file", exp=4_000_000_000)
+    (tmp_path / "home" / ".cursor").mkdir(parents=True)
+    (tmp_path / "home" / ".cursor" / "auth.json").write_text(json.dumps({"accessToken": token}))
+    calls = fake_keychain(monkeypatch, {})
+    monkeypatch.setattr(usage.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert usage._cursor_native_token({}, None) == token
+    assert len(calls) == 1
+    # A named profile reads only the home directory its environment selects.
+    assert usage._cursor_native_token({"XDG_CONFIG_HOME": str(tmp_path / "w")}, "work") is None
+    work = tmp_path / "work-home"
+    write_cursor_login(work / ".config", jwt(sub="auth0|other", exp=1))
+    (work / ".cursor").mkdir()
+    (work / ".cursor" / "auth.json").write_text(json.dumps({"accessToken": token}))
+    assert usage._cursor_native_token({"HOME": str(work)}, "work") == token
+    assert len(calls) == 1
+
+
+def test_cursor_windows_reads_cli_sign_in_from_appdata(monkeypatch, tmp_path):
+    token = jwt(sub="auth0|windows", exp=4_000_000_000)
+    (tmp_path / "Roaming" / "Cursor").mkdir(parents=True)
+    (tmp_path / "Roaming" / "Cursor" / "auth.json").write_text(json.dumps({"accessToken": token}))
+    monkeypatch.setattr(usage.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    assert usage._cursor_native_token({}, None) == token
+    # A named profile must not report the default Windows account.
+    assert usage._cursor_native_token({"XDG_CONFIG_HOME": str(tmp_path / "work")}, "work") is None
 
 
 def test_cursor_app_database_is_a_read_only_fallback(tmp_path):

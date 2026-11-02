@@ -1373,12 +1373,17 @@ def resume(
     """Resume a failed or stopped workflow run."""
     if from_node and only_node:
         raise typer.BadParameter("--from-node and --only-node cannot be used together")
-    if _resolve_rattish_source(workflow, data_dir) is not None:
-        console.print(
-            "[red]Resuming Rattish workflow runs is not supported yet. "
-            f"Start a new run with: gof workflow run {workflow}[/red]"
-        )
-        raise typer.Exit(1)
+    rattish_source = _resolve_rattish_source(workflow, data_dir)
+    if rattish_source is not None:
+        if from_node or only_node or skip_cache or force:
+            console.print(
+                "[red]Rattish runs resume where they stopped. --from-node, --only-node, "
+                f"--skip-cache and --force aren't supported; run gof workflow run {workflow} "
+                "to start over.[/red]"
+            )
+            raise typer.Exit(1)
+        rattish_commands.execute_rattish_resume(rattish_source, run_id, data_dir=data_dir)
+        return
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:

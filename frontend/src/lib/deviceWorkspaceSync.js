@@ -1,3 +1,4 @@
+import { mergeDeviceMessages, phoneSettings } from "./deviceMessages.js";
 import { reportThemeContext } from "./reportThemes.js";
 import { apiUrl } from "./api.js";
 import { inspectThreadScopes, organizeThreads, threadIndexEntry } from "./threadActivity.js";
@@ -17,72 +18,19 @@ export function reconcileDesktopThread(local, remote) {
   let result = remote.context_modified && unchanged
     ? { ...local, ...Object.fromEntries(fields.filter(key => key in remote.metadata).map(key => [key, remote.metadata[key]])) }
     : local;
-  const organization = ["pinned", "archived", "updatedAt"];
-  if (remote.organization_modified && organization.every(key => JSON.stringify(local[key]) === JSON.stringify(base[key]))) {
-    result = { ...result, ...Object.fromEntries(organization.filter(key => key in remote.metadata).map(key => [key, remote.metadata[key]])) };
+  // Placement and read state reconcile separately: reading on the phone must not
+  // undo a desktop pin, and a desktop read must not be undone by the phone.
+  for (const organization of [["pinned", "archived", "updatedAt"], ["unread", "readAt"]]) {
+    if (remote.organization_modified && organization.every(key => JSON.stringify(local[key]) === JSON.stringify(base[key]))) {
+      result = { ...result, ...Object.fromEntries(organization.filter(key => key in remote.metadata).map(key => [key, remote.metadata[key]])) };
+    }
   }
   if (remote.title_modified && local.title === base.title) result = { ...result, title: remote.metadata.title };
   return result;
 }
 
-// Keep replayed diagnostics next to their originating user message, including
-// turns completed before the renderer was opened. Native messages keep their order.
-export function orderDeviceMessages(messages) {
-  const groups = new Map();
-  for (const message of messages) if (message.deviceRequestId) {
-    const group = groups.get(message.deviceRequestId) || [];
-    group.push(message); groups.set(message.deviceRequestId, group);
-  }
-  for (const group of groups.values()) group.sort((a, b) => a.deviceSequence - b.deviceSequence);
-  const result = [];
-  const emitted = new Set();
-  const present = new Set(messages.map(message => message.id));
-  for (const message of messages) {
-    if (message.deviceRequestId) {
-      if (present.has(message.deviceRequestId) || emitted.has(message.deviceRequestId)) continue;
-      result.push(...groups.get(message.deviceRequestId));
-      emitted.add(message.deviceRequestId);
-      continue;
-    }
-    result.push(message);
-    if (groups.has(message.id)) result.push(...groups.get(message.id));
-  }
-  return result;
-}
-
-export function mergeDeviceMessages(current, incoming) {
-  const byId = new Map(current.map(message => [String(message.id), message]));
-  for (const message of incoming) {
-    const old = byId.get(String(message.id));
-    if (!old || message.deviceRequestId) byId.set(String(message.id), { ...old, ...message });
-    else if (message.origin === "phone") byId.set(String(message.id), { ...old, origin: "phone", ...(message.attachments?.length ? { attachments: message.attachments } : {}) });
-  }
-  return orderDeviceMessages([...byId.values()]);
-}
-
-// Phones allowed to use Raticode see these settings. The backend keeps only its
-// allowlisted display and default choices; agent tool defaults stay here.
-const PHONE_SETTING_SECTIONS = ["appearance", "general", "assistant", "editor", "terminal", "memory"];
-
-export function phoneSettings(settings = {}) {
-  const assistant = { ...settings.assistant };
-  delete assistant.resources;
-  return { appearance: settings.appearance, general: settings.general, assistant, editor: settings.editor,
-    terminal: settings.terminal, memory: { reportFormat: settings.memory?.reportFormat } };
-}
-
-export function applyPhoneSettings(settings, changes = []) {
-  const next = structuredClone(settings);
-  for (const change of changes) {
-    for (const [key, value] of Object.entries(change.values || {})) {
-      const [section, field, ...rest] = key.split(".");
-      if (rest.length || !field || !PHONE_SETTING_SECTIONS.includes(section)) continue;
-      next[section] = { ...(next[section] || {}), [field]: value };
-    }
-  }
-  return next;
-}
-
+// Re-exported for existing callers; App loads only deviceMessages.js eagerly.
+export { applyPhoneSettings, mergeDeviceMessages, orderDeviceMessages, phoneSettings } from "./deviceMessages.js";
 export function startDeviceWorkspaceSync({ storage = window.localStorage, repository = conversationRepository(), interval = 5000, getContext = () => ({}), deleteThread = null } = {}) {
   const host = window;
   if (!host.goferDesktop?.workspace?.pathGrantForApi) return () => {};
@@ -93,6 +41,15 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
   const sent = new Map();
   const peers = new Map();
   const runningByThread = new Map();
+  // Rem home reports when its task threads run. Without this, a running task
+  // thread past the Read limit would reach the phone as archived.
+  const runningTaskThreads = new Set();
+  const taskThreadSync = ({ detail }) => {
+    if (!detail?.metadata?.managedRunId || typeof detail.running !== "boolean") return;
+    if (detail.running) runningTaskThreads.add(detail.metadata.id);
+    else runningTaskThreads.delete(detail.metadata.id);
+  };
+  host.addEventListener?.("gofer:device-thread-sync", taskThreadSync);
   let appliedSettings = [];
   async function action(body) {
     const response = await fetch(apiUrl("/devices"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
@@ -100,11 +57,32 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
     if (!response.ok) throw new Error(result.error || "Desktop thread sync failed.");
     return result;
   }
+  async function openProjects() {
+    const index = read(storage, indexKey, []);
+    const desktop = getContext();
+    const settings = desktop.settings || {};
+    const memory = settings.memory || {};
+    const assistant = settings.assistant || {};
+    const workspace = host.goferDesktop.workspace;
+    const roots = [...new Set([...(desktop.roots || []), ...index.map(entry => read(storage, metaKey(entry.id), entry)?.projectRoot)].filter(Boolean))];
+    const labels = read(storage, "gofer.projectLabels", {});
+    const projects = [];
+    for (const root of roots.slice(0, 100)) {
+      if (workspace.getPathInfo && !(await workspace.getPathInfo(root))?.isDirectory) continue;
+      await workspace.trustProjectRoot?.(root);
+      projects.push({ root, name: labels[root] || root.split(/[\\/]/).pop(), grantId: workspace.pathGrantForApi(root) });
+    }
+    if (memory.secondBrainEnabled) await workspace.trustProjectRoot?.(memory.secondBrainRoot);
+    return { index, desktop, settings, memory, assistant, workspace, projects };
+  }
   async function importThread(remote) {
     if (!remote.metadata || remote.revoked) return;
     const id = remote.metadata.id;
     const local = read(storage, metaKey(id), null);
     let metadata = reconcileDesktopThread(local, remote);
+    // Rem home runs task threads and reports their state. The phone mirror
+    // never runs them, so its "not running" would flip them to unread.
+    const running = metadata.managedRunId ? undefined : remote.running;
     const current = await repository.all(id);
     const byId = new Map(current.map(m => [String(m.id), m]));
     const merged = mergeDeviceMessages(current, remote.messages);
@@ -113,19 +91,21 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
       await repository.save(id, merged, current, current);
     }
     const submitted = additions.some(m => m.role === "user" && !byId.has(String(m.id)));
-    const completed = remote.running === false && (runningByThread.get(id) === true
+    const completed = running === false && (runningByThread.get(id) === true
       || additions.some(m => m.kind === "final" || m.kind === "error" || (m.kind === "turn-summary" && m.completedAt)));
-    if (typeof remote.running === "boolean") runningByThread.set(id, remote.running);
+    if (typeof running === "boolean") runningByThread.set(id, running);
+    // A turn sent or finished from another device is new activity, which brings
+    // an archived thread back. The window marks a finished turn unread.
     if (submitted || completed) {
-      metadata = { ...metadata, updatedAt: new Date().toISOString() };
+      metadata = { ...metadata, archived: false, updatedAt: new Date().toISOString() };
     }
-    if (JSON.stringify(metadata) !== JSON.stringify(local) || additions.length || typeof remote.running === "boolean") {
+    if (JSON.stringify(metadata) !== JSON.stringify(local) || additions.length || typeof running === "boolean") {
       storage.setItem(metaKey(id), JSON.stringify(metadata));
       const index = read(storage, indexKey, []);
       const entry = threadIndexEntry(metadata);
       const nextIndex = index.some(t => t.id === id) ? index.map(t => t.id === id ? entry : t) : [entry, ...index];
       storage.setItem(indexKey, JSON.stringify(nextIndex.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))));
-      emit("gofer:device-thread-sync", { metadata, messages: additions, running: remote.running, activeTurn: remote.active_turn });
+      emit("gofer:device-thread-sync", { metadata, messages: additions, running, activeTurn: remote.active_turn, completed });
     }
   }
   async function tick() {
@@ -163,24 +143,11 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
             threads.delete(native);
           }
         }
-        const index = read(storage, indexKey, []);
-        const desktop = getContext();
-        const settings = desktop.settings || {};
-        const memory = settings.memory || {};
-        const assistant = settings.assistant || {};
-        const workspace = host.goferDesktop.workspace;
-        const roots = [...new Set([...(desktop.roots || []), ...index.map(entry => read(storage, metaKey(entry.id), entry)?.projectRoot)].filter(Boolean))];
-        const labels = read(storage, "gofer.projectLabels", {});
-        const projects = [];
-        for (const root of roots.slice(0, 100)) {
-          if (workspace.getPathInfo && !(await workspace.getPathInfo(root))?.isDirectory) continue;
-          await workspace.trustProjectRoot?.(root);
-          projects.push({ root, name: labels[root] || root.split(/[\\/]/).pop(), grantId: workspace.pathGrantForApi(root) });
-        }
-        if (memory.secondBrainEnabled) await workspace.trustProjectRoot?.(memory.secondBrainRoot);
+        const { index, settings, memory, assistant, workspace, projects } = await openProjects();
         const stored = index.map(entry => read(storage, metaKey(entry.id), entry));
         const scopes = await inspectThreadScopes(stored, workspace);
-        const groups = organizeThreads(stored, { running: new Set([...runningByThread].filter(([, running]) => running).map(([id]) => id)), ...scopes });
+        const running = new Set([...runningTaskThreads, ...[...runningByThread].filter(([, active]) => active).map(([id]) => id)]);
+        const groups = organizeThreads(stored, { running, ...scopes });
         const pinnedIds = new Set(groups.pinned.map(entry => entry.id));
         const archivedIds = new Set(groups.archived.map(entry => entry.id));
         for (const entry of index) {
@@ -211,6 +178,15 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
           sent.set(key, JSON.stringify({ metadata: read(storage, metaKey(entry.id), metadata), workflow, mobileGroup, revision: result.revision }));
         }
       }
+      // Paired desktops this one can run threads on, for the composer's Run on menu.
+      emit("gofer:device-machines", (status.peers || [])
+        .filter(peer => peer.role === "desktop" && peer.state === "active")
+        .map(peer => ({ id: peer.device_id, name: peer.name || "Paired desktop" })));
+      // Desktops allowed to run threads here see this computer's open projects.
+      if ((status.thread_host_peers || []).length) {
+        const { syncThreadHosting } = await import("./deviceThreadHosting.js");
+        await syncThreadHosting(status.thread_host_peers, await openProjects(), action, sent);
+      }
       if ((status.desktop_control_peers || []).length) {
         const desktop = getContext();
         if (desktop.settings) {
@@ -229,5 +205,5 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
     } finally { if (!stopped) timer = setTimeout(tick, interval); }
   }
   tick();
-  return () => { stopped = true; clearTimeout(timer); controller.abort(); };
+  return () => { stopped = true; clearTimeout(timer); controller.abort(); host.removeEventListener?.("gofer:device-thread-sync", taskThreadSync); };
 }

@@ -50,6 +50,7 @@ const {
 
 const PROMPT_TIMEOUT_MS = 2 * 60 * 1000;
 const PDF_TIMEOUT_MS = 60 * 1000;
+const SAVE_AS_TIMEOUT_MS = 30 * 1000;
 const PAGE_CONTEXT_WORLD_ID = 1918;
 const UA_SAMPLE_WORLD_ID = 1919;
 const HIGH_ENTROPY_FIELDS = ["architecture", "bitness", "formFactors", "fullVersionList", "model", "platformVersion", "uaFullVersion", "wow64"];
@@ -58,6 +59,14 @@ const CLIENT_HINT_URLS = ["https://*/*", "wss://*/*", "http://localhost/*", "htt
 const MAX_RESTORED_ENTRIES = 25;
 const MAX_PAGE_STATE_CHARS = 16 * 1024;
 const USER_INPUT_TYPES = new Set(["mouseDown", "keyDown", "rawKeyDown", "touchStart", "gestureTap", "char"]);
+
+// The page reports the element it was right-clicked on; keep a bounded copy.
+function contextElement(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const limits = { tag: 40, path: 500, role: 100, label: 500, alt: 500, title: 500, href: 2000, src: 2000, text: 8000, html: 8000 };
+  const element = Object.fromEntries(Object.entries(limits).map(([key, limit]) => [key, typeof payload[key] === "string" ? payload[key].slice(0, limit) : ""]));
+  return element.tag ? element : null;
+}
 
 // Matches browser_owner() in src/gofer/ui/browser_tools.py.
 function remOwnerForThread(threadId) {
@@ -76,6 +85,7 @@ function createBrowserSessions({
   resolvePath,
   store,
   log = () => {},
+  openWith = null,
   quarantineDir,
   platform = process.platform,
   chromeVersion = process.versions.chrome,
@@ -578,6 +588,7 @@ function createBrowserSessions({
       if (channel === "gofer:browser-zoom" && (payload?.direction === 1 || payload?.direction === -1)) {
         changePageZoom(session, payload.direction);
       }
+      if (channel === "gofer:browser-context-element") session.contextElement = contextElement(payload);
       if (channel === "gofer:browser-navigation" && payload?.action === "back" && contents.navigationHistory.canGoBack()) {
         contents.navigationHistory.goBack();
       }
@@ -1069,12 +1080,14 @@ function createBrowserSessions({
     const id = crypto.randomUUID();
     const dangerous = isDangerousDownload(filename);
     const directory = app.getPath("downloads");
+    const saveAs = takePendingSaveAs(session, item);
+    const askWhere = !dangerous && !byRem && (policy.askWhereToSave || saveAs);
     let finalPath = "";
     if (dangerous) {
       fs.mkdirSync(quarantineDir, { recursive: true, mode: 0o700 });
       item.setSavePath(path.join(quarantineDir, `${id}.download`));
-    } else if (policy.askWhereToSave && !byRem) {
-      item.setSaveDialogOptions({ defaultPath: path.join(directory, filename), title: "Save download" });
+    } else if (askWhere) {
+      item.setSaveDialogOptions({ defaultPath: path.join(directory, filename), title: saveAs ? "Save image" : "Save download" });
     } else {
       finalPath = uniqueDownloadPath(directory, filename, (candidate) => fs.existsSync(candidate) || [...downloads.values()].some((value) => value.entry.path === candidate));
       item.setSavePath(finalPath);
@@ -1111,6 +1124,13 @@ function createBrowserSessions({
       }
     });
     item.once("done", (_event, state) => {
+      // Cancelling the save dialog is not a download worth listing.
+      if (askWhere && state === "cancelled" && !item.getSavePath()) {
+        downloads.delete(id);
+        store.removeDownload(id);
+        emitDownloads();
+        return;
+      }
       entry.receivedBytes = item.getReceivedBytes();
       entry.paused = false;
       if (!entry.path && !dangerous) entry.path = item.getSavePath();
@@ -1122,7 +1142,32 @@ function createBrowserSessions({
     });
   }
 
-  function downloadAction(action, id) {
+  function finishedDownloadPath(entry) {
+    if (entry?.state !== "completed" || !entry.path) throw new Error("Only finished downloads can be opened.");
+    if (!fs.existsSync(entry.path)) throw new Error("The file was moved or deleted.");
+    return entry.path;
+  }
+
+  async function downloadApps(id) {
+    const entry = store.listDownloads().find((item) => item.id === id);
+    if (!entry) throw new Error("That download is no longer listed.");
+    const filePath = finishedDownloadPath(entry);
+    try {
+      return { apps: openWith ? await openWith.listApps(filePath) : [] };
+    } catch (error) {
+      log("warn", `Listing apps for a download failed: ${error.message}`);
+      return { apps: [] };
+    }
+  }
+
+  async function openDownloadWith(entry, appId) {
+    const filePath = finishedDownloadPath(entry);
+    if (!openWith) throw new Error("Open with is not supported on this system.");
+    await openWith.openWith(filePath, appId);
+    return { downloads: store.listDownloads() };
+  }
+
+  function downloadAction(action, id, options = {}) {
     const live = downloads.get(id);
     const entry = live?.entry || store.listDownloads().find((item) => item.id === id);
     if (!entry && action !== "clear") throw new Error("That download is no longer listed.");
@@ -1134,6 +1179,8 @@ function createBrowserSessions({
         if (entry.state !== "completed" || !entry.path) throw new Error("Only finished downloads can be opened.");
         void shell.openPath(entry.path);
         break;
+      case "open-with":
+        return openDownloadWith(entry, String(options.appId || ""));
       case "show":
         if (entry.path && fs.existsSync(entry.path)) shell.showItemInFolder(entry.path);
         else throw new Error("The file was moved or deleted.");
@@ -1191,6 +1238,9 @@ function createBrowserSessions({
   function showContextMenu(session, params) {
     const contents = liveContents(session);
     if (!contents) return;
+    // Frames other than the main one do not report the element they show.
+    if (params.frame && params.frame !== contents.mainFrame) session.contextElement = null;
+    const element = session.contextElement || null;
     const template = [];
     const separator = () => { if (template.length && template.at(-1).type !== "separator") template.push({ type: "separator" }); };
     if (params.misspelledWord) {
@@ -1211,7 +1261,7 @@ function createBrowserSessions({
     }
     if (params.mediaType === "image" && params.srcURL) {
       template.push(
-        { label: "Save image as…", click: () => contents.downloadURL(params.srcURL) },
+        { label: "Save image as…", click: () => saveImageAs(session, params.srcURL) },
         { label: "Copy image", click: () => contents.copyImageAt(params.x, params.y) },
         { label: "Copy image address", click: () => copyText(params.srcURL) },
       );
@@ -1228,8 +1278,9 @@ function createBrowserSessions({
       );
       separator();
     }
-    if (session.kind !== "preview") {
-      template.push({ label: "Ask Rem about this", click: () => emitCommand(session, "ask-rem", { selection: String(params.selectionText || "").slice(0, 20000) }) });
+    // Local files ask about the open page only; Rem gets no further file access.
+    if (session.kind !== "preview" || /^file:/i.test(contents.getURL())) {
+      template.push({ label: "Ask Rem about this", click: () => emitCommand(session, "ask-rem", { selection: String(params.selectionText || "").slice(0, 20000), element }) });
       separator();
     }
     template.push(
@@ -1246,6 +1297,22 @@ function createBrowserSessions({
     );
     const owner = getMainWindow();
     Menu.buildFromTemplate(template).popup(owner && !owner.isDestroyed() ? { window: owner } : {});
+  }
+
+  // The download that follows asks where to save, like Save page as….
+  function saveImageAs(session, url) {
+    const contents = liveContents(session);
+    if (!contents) return;
+    session.pendingSaveAs = { url, at: Date.now() };
+    contents.downloadURL(url);
+  }
+
+  function takePendingSaveAs(session, item) {
+    const pending = session?.pendingSaveAs;
+    if (!pending) return false;
+    session.pendingSaveAs = null;
+    const original = item.getURLChain?.()[0] || item.getURL();
+    return pending.url === original && Date.now() - pending.at < SAVE_AS_TIMEOUT_MS;
   }
 
   async function savePage(session) {
@@ -1793,7 +1860,9 @@ function createBrowserSessions({
       case "downloads":
         return { downloads: store.listDownloads() };
       case "download":
-        return downloadAction(String(options.command || ""), String(options.id || ""));
+        return downloadAction(String(options.command || ""), String(options.id || ""), options);
+      case "download-apps":
+        return downloadApps(String(options.id || ""));
       case "sites":
         return { sites: await sitesWithData(options.profile) };
       case "site-clear": {

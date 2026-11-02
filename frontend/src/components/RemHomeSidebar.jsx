@@ -18,7 +18,7 @@ function TaskRow({ task, activity, selected, onOpen }) {
   const open = () => { openTaskSheet(task.id); onOpen?.(); };
   if (confirming) {
     return <li className="rem-task-row" data-confirming="true">
-      <p>Delete <strong>{task.title}</strong>?{activity.kind === "running" ? " Its current run stops." : ""}</p>
+      <p>Delete <strong>{task.title}</strong>?{activity.kind === "running" || activity.kind === "queued" ? " Its current run stops." : ""}</p>
       <div className="rem-task-confirm">
         <button type="button" data-danger="true" autoFocus onClick={() => { setConfirming(false); void deleteRemTask(task); }}>Delete</button>
         <button type="button" onClick={() => setConfirming(false)}>Keep</button>

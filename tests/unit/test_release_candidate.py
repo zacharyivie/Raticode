@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-REPO = "zacharyivie/gofer-flow"
+REPO = "zacharyivie/Raticode"
 SHA = "a" * 40
 ROOT = Path(__file__).resolve().parents[2]
 

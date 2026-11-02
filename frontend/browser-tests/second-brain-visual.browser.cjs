@@ -1,6 +1,7 @@
 /* global __dirname, console, setTimeout, clearTimeout, process */
 // Visual audit of the Second Brain sidebar and workspace with the seeded library.
 // Run through run-second-brain-visual.cjs. No backend, providers or user folders are used.
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");

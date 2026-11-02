@@ -361,3 +361,27 @@ async def test_orphaned_live_artifact_is_disconnected_never_succeeded(
         api.stop_workflow_run_payload(workflow.workflow_id, base, run.document["run_id"])["stopped"]
         is False
     )
+
+
+@pytest.mark.anyio
+async def test_rattish_runs_refuse_resume_options_instead_of_rerunning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gofer.core.executor import ResumeOptions
+
+    base, workflow = setup_workflow(tmp_path)
+    started: list[object] = []
+
+    async def fake_run(*args, **kwargs):
+        started.append(args)
+        raise AssertionError("Resume must not start a fresh Rattish run")
+
+    monkeypatch.setattr(api, "run_rattish_file", fake_run)
+    with pytest.raises(api.WorkflowRunError, match="Rattish runs resume where they stopped"):
+        await api.run_workflow_payload(
+            workflow.workflow_id,
+            base,
+            resume_options=ResumeOptions(run_id="earlier", from_node="step"),
+        )
+    assert not started

@@ -36,4 +36,6 @@ Reverting unstaged changes restores the index version. Reverting staged changes 
 
 A worktree gives another branch a separate working folder. Use worktree controls to create isolated review or implementation directories. Git prevents removal of a dirty worktree. Inspect and preserve its changes before cleanup.
 
+The Worktrees list, branches, Changes and an open History view update on their own when worktrees are added, removed or pruned, including by agents, swarms and `git worktree` in a terminal, and when commits or staged changes land. Raticode watches only the repository's Git metadata, not your files. Edits to working files show up within a few seconds. **Refresh source control** reads everything again on demand.
+
 [Swarms](../advanced/swarms.md) use review and assignment worktrees to keep concurrent agent work separate. A worktree is still part of the same repository and shares its Git metadata.

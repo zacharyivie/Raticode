@@ -184,9 +184,14 @@ def test_rem_task_selection_survives_prompt_edits_and_later_runs(api):
 def test_rem_project_writes_require_current_desktop_grants(api, tmp_path: Path):
     request, service = api
     context = {"provider": "codex", "projects": [{"root": str(tmp_path)}]}
-    denied = request("POST", "/api/rem/context", body=context)
-    assert denied.status == 400
-    assert "approved" in denied.json()["error"]
+    # An unapproved project is left out without stopping the rest of Rem.
+    pruned = request("POST", "/api/rem/context", body=context)
+    assert pruned.status == 200, pruned.json()
+    assert "approved" in pruned.json()["warnings"][0]
+    with service.store.read() as db:
+        assert service.store.setting(db, "config")["projects"] == []
+    assert service.has_context
+    assert request("GET", "/api/rem/conversation").json()["context_ready"] is True
     with pytest.raises(ValueError):
         service.authorize(context, {"type": "develop", "project_dir": str(tmp_path)})
     assert (
@@ -288,3 +293,107 @@ def test_rem_standalone_development_uses_managed_workspace_without_project_grant
         },
     )
     assert denied.status == 400
+
+
+def test_rem_memories_can_be_listed_corrected_and_forgotten(api):
+    request, service = api
+    with service.store.connect() as db:
+        service.store.set_setting(
+            db,
+            "memories",
+            {
+                "old": {"text": "Uses Google OAuth.", "created_at": "2026-10-01T00:00:00+00:00"},
+                "new": {"text": "Digest at 06:00.", "created_at": "2026-10-08T00:00:00+00:00"},
+            },
+        )
+    assert request("GET", "/api/rem/memories", authenticated=False).status == 401
+    listed = request("GET", "/api/rem/memories").json()["memories"]
+    assert [m["id"] for m in listed] == ["new", "old"]
+
+    edited = request("PATCH", "/api/rem/memories/old", body={"text": "  Never use Google OAuth.  "})
+    assert edited.status == 200, edited.json()
+    old = next(m for m in edited.json()["memories"] if m["id"] == "old")
+    assert old["text"] == "Never use Google OAuth." and old["edited_at"]
+    assert request("PATCH", "/api/rem/memories/old", body={"text": " "}).status == 400
+    assert request("PATCH", "/api/rem/memories/old", body={"text": "x" * 2001}).status == 400
+    assert request("PATCH", "/api/rem/memories/missing", body={"text": "x"}).status == 404
+
+    forgotten = request("DELETE", "/api/rem/memories/new")
+    assert [m["id"] for m in forgotten.json()["memories"]] == ["old"]
+    assert request("DELETE", "/api/rem/memories/new").status == 404
+    with service.store.read() as db:
+        assert set(service.store.setting(db, "memories")) == {"old"}
+
+
+def test_rem_api_retries_only_an_interrupted_review(api):
+    request, service = api
+    task = request(
+        "POST",
+        "/api/rem/tasks",
+        body={
+            "request_id": "create-retry",
+            "title": "Check notes",
+            "type": "errand",
+            "prompt": "Check notes",
+            "schedule": {"kind": "daily", "local_time": "09:00"},
+        },
+    ).json()["task"]
+    run = request(
+        "POST", f"/api/rem/tasks/{task['id']}/run", body={"request_id": "run-retry"}
+    ).json()["run"]
+    service._update(run["id"], state="succeeded")
+    last = request("GET", "/api/rem/tasks").json()["tasks"][0]["last_run"]
+    assert last["review_retryable"] is False
+    refused = request(
+        "POST", f"/api/rem/runs/{run['id']}/retry_review", body={"request_id": "early"}
+    )
+    assert refused.status == 409
+    # The implementation finished but its review stopped: Retry review is offered and works once.
+    service._update(
+        run["id"],
+        state="blocked",
+        blocked_phase="verifying",
+        worker_result="Implemented.",
+        verification_thread_id="review-thread",
+    )
+    last = request("GET", "/api/rem/tasks").json()["tasks"][0]["last_run"]
+    assert last["review_retryable"] is True
+    retried = request(
+        "POST", f"/api/rem/runs/{run['id']}/retry_review", body={"request_id": "retry"}
+    )
+    assert retried.status == 200
+    tasks = request("GET", "/api/rem/tasks").json()["tasks"]
+    assert tasks[0]["active_run"]["id"] == run["id"]
+    assert tasks[0]["last_run"].get("review_retryable") is not True
+
+
+def test_rem_memory_api_adds_switches_modes_and_undoes_a_reply(api):
+    request, service = api
+    assert (
+        request("POST", "/api/rem/memories", body={"text": "x"}, authenticated=False).status == 401
+    )
+    added = request("POST", "/api/rem/memories", body={"text": "Works in Eastern time"})
+    assert added.status == 200, added.json()
+    assert [m["text"] for m in added.json()["memories"]] == ["Works in Eastern time"]
+    assert request("POST", "/api/rem/memories", body={"text": "api key: abcd1234"}).status == 400
+
+    assert (
+        request("PUT", "/api/rem/memory-mode", body={"mode": "paused"}).json()["mode"] == "paused"
+    )
+    assert request("PUT", "/api/rem/memory-mode", body={"mode": "maybe"}).status == 400
+    assert request("GET", "/api/rem/memories").json()["mode"] == "paused"
+
+    with service.store.connect() as db:
+        service.store.message(
+            db,
+            "Saved.",
+            identity="reply-1",
+            memory={"saved": [{"id": "new", "text": "Likes tea"}]},
+        )
+        saved = service.store.setting(db, "memories")
+        saved["new"] = {"text": "Likes tea", "created_at": "2026-11-01T00:00:00+00:00"}
+        service.store.set_setting(db, "memories", saved)
+    undone = request("POST", "/api/rem/messages/reply-1/undo-memory")
+    assert undone.status == 200, undone.json()
+    assert [m["text"] for m in undone.json()["memories"]] == ["Works in Eastern time"]
+    assert request("POST", "/api/rem/messages/missing/undo-memory").status == 404

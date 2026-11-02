@@ -1,3 +1,4 @@
+require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 let themeJob = null;
 let jobNumber = 0;
 let holdTheme = false;

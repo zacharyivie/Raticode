@@ -1,7 +1,8 @@
 // Plugins are the views in the left activity rail. Each entry's position here
-// is its default order. `required` plugins cannot be turned off, and
-// `experimental` plugins stay listed in Settings but are off until a user
-// turns them on. Mark a plugin experimental by setting the flag here.
+// is its default order. `required` plugins are always shown. `experimental`
+// plugins exist only once turned on in Settings > Developer > Feature Preview;
+// while off they appear nowhere else in the app. Showing or hiding a plugin in
+// the sidebar is a separate choice. Mark a plugin experimental here.
 export const SIDEBAR_PLUGINS = Object.freeze([
   { id: "rem", label: "Rem", description: "Rem's home with threads, tasks, and reviews.", experimental: true },
   { id: "workflows", label: "Workflows", description: "Workflows in the current project." },
@@ -18,11 +19,14 @@ export const FALLBACK_PLUGIN_ID = "files";
 const PLUGIN_IDS = SIDEBAR_PLUGINS.map((plugin) => plugin.id);
 
 export const DEFAULT_PLUGIN_SETTINGS = Object.freeze({
-  // Only choices the user made are stored, so a plugin that graduates from
-  // experimental turns on for everyone who never turned it off.
+  // Only choices the user made are stored. `enabled` holds sidebar
+  // visibility, which defaults to shown; `preview` holds the Feature Preview
+  // choices, which default to off. A plugin that graduates from experimental
+  // turns on for everyone.
   enabled: {},
   locked: false,
   order: PLUGIN_IDS,
+  preview: {},
 });
 
 export function sidebarPlugin(id) {
@@ -31,14 +35,26 @@ export function sidebarPlugin(id) {
 
 export function normalizePluginSettings(value = {}) {
   const enabled = {};
+  const preview = {};
   const storedEnabled = value?.enabled && typeof value.enabled === "object" ? value.enabled : {};
+  const storedPreview = value?.preview && typeof value.preview === "object" ? value.preview : null;
   for (const plugin of SIDEBAR_PLUGINS) {
-    if (!plugin.required && typeof storedEnabled[plugin.id] === "boolean") enabled[plugin.id] = storedEnabled[plugin.id];
+    if (plugin.required) continue;
+    const shown = storedEnabled[plugin.id];
+    if (plugin.experimental && !storedPreview) {
+      // Older settings used one switch for both choices: on meant the
+      // feature was turned on and shown.
+      if (shown === true) preview[plugin.id] = true;
+      continue;
+    }
+    if (shown === false) enabled[plugin.id] = false;
+    if (plugin.experimental && storedPreview[plugin.id] === true) preview[plugin.id] = true;
   }
   return {
     enabled,
     locked: value?.locked === true,
     order: normalizePluginOrder(value?.order),
+    preview,
   };
 }
 
@@ -55,21 +71,43 @@ export function normalizePluginOrder(order) {
   return next;
 }
 
-export function pluginEnabled(pluginSettings, id) {
+// Whether a plugin exists in the app at all. Experimental plugins need their
+// Feature Preview switch.
+export function pluginAvailable(pluginSettings, id) {
   const plugin = sidebarPlugin(id);
   if (!plugin) return false;
+  return !plugin.experimental || pluginSettings?.preview?.[id] === true;
+}
+
+// Whether a plugin appears in the sidebar.
+export function pluginEnabled(pluginSettings, id) {
+  const plugin = sidebarPlugin(id);
+  if (!pluginAvailable(pluginSettings, id)) return false;
   if (plugin.required) return true;
-  const choice = pluginSettings?.enabled?.[id];
-  return typeof choice === "boolean" ? choice : !plugin.experimental;
+  return pluginSettings?.enabled?.[id] !== false;
 }
 
 export function withPluginEnabled(pluginSettings, id, enabled) {
   const plugin = sidebarPlugin(id);
   const next = { ...pluginSettings?.enabled };
   if (!plugin || plugin.required) return next;
-  if (enabled === !plugin.experimental) delete next[id];
-  else next[id] = enabled;
+  if (enabled) delete next[id];
+  else next[id] = false;
   return next;
+}
+
+export function withPluginPreview(pluginSettings, id, enabled) {
+  const next = { ...pluginSettings?.preview };
+  if (!sidebarPlugin(id)?.experimental) return next;
+  if (enabled) next[id] = true;
+  else delete next[id];
+  return next;
+}
+
+// Plugins listed in sidebar settings: everything except experimental plugins
+// whose Feature Preview is off.
+export function listedPlugins(pluginSettings) {
+  return orderedPlugins(pluginSettings).filter((plugin) => pluginAvailable(pluginSettings, plugin.id));
 }
 
 export function orderedPlugins(pluginSettings) {

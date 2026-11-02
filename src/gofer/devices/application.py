@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import secrets
+import socket
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,12 +20,53 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
-from gofer.devices.files import CHUNK, DeviceFiles
+from gofer.devices.files import DeviceFiles
 from gofer.devices.organization_jobs import event_schema
-from gofer.devices.registry import DeviceRegistry, PairingError, device_id
+from gofer.devices.registry import (
+    DEFAULT_DESKTOP_NAME,
+    DeviceRegistry,
+    PairingError,
+    device_id,
+    display_name,
+)
 
 _SCHEMA = json.loads((Path(__file__).parent / "protocol/v2/event.schema.json").read_text())
-_VALIDATOR = Draft202012Validator(event_schema(_SCHEMA))
+
+
+def _desktop_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Desktop-only fleet extension: a paired desktop announces its own listener.
+
+    It is sent last in a session, after the answer arrives, so an older desktop
+    that rejects the field still answers the request first.
+    """
+    for rule in schema["allOf"]:
+        if rule.get("if", {}).get("properties", {}).get("type", {}).get("const") == "fleet.request":
+            rule["then"]["properties"]["payload"]["properties"]["advertise"] = {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "lan_endpoint": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "host": {"type": "string", "minLength": 1, "maxLength": 253},
+                                    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                                },
+                                "required": ["host", "port"],
+                                "additionalProperties": False,
+                            },
+                            {"type": "null"},
+                        ]
+                    },
+                },
+                "required": ["name", "lan_endpoint"],
+                "additionalProperties": False,
+            }
+    return schema
+
+
+_VALIDATOR = Draft202012Validator(_desktop_schema(event_schema(_SCHEMA)))
 OUTBOX_EVENTS = 10000
 OUTBOX_BYTES = 64 * 1024 * 1024
 RETAIN_ACKNOWLEDGED = 400
@@ -45,11 +88,21 @@ READ_ONLY_KINDS = frozenset(
 RECENT_READS = 2048
 
 
+def host_template(peer: str) -> str:
+    """The grant a paired desktop's remote threads are created from."""
+    return str(uuid5(NAMESPACE_URL, "raticode-thread-host:" + peer))
+
+
 class DeviceApplication:
     lan_endpoint: dict[str, Any] | None = None
+    # Set only while the user's Tailscale opt-in is listening.
+    tailnet_endpoint: dict[str, Any] | None = None
+    # Includes loopback, which only another desktop on this machine can use.
+    listener_endpoint: dict[str, Any] | None = None
 
     def __init__(self, registry: DeviceRegistry) -> None:
         self.registry = registry
+        self.name = display_name(socket.gethostname()) or DEFAULT_DESKTOP_NAME
         self.rem_ready: Callable[[], bool] = lambda: False
         with registry.lock:
             registry.db.execute(
@@ -104,6 +157,15 @@ class DeviceApplication:
               CREATE TABLE IF NOT EXISTS device_outbox (
                 sequence INTEGER NOT NULL,peer TEXT NOT NULL,event BLOB NOT NULL,
                 PRIMARY KEY(peer,sequence));
+              CREATE TABLE IF NOT EXISTS device_thread_hosts (peer TEXT PRIMARY KEY);
+              CREATE TABLE IF NOT EXISTS device_remote_threads (
+                peer TEXT NOT NULL, local TEXT NOT NULL, remote TEXT NOT NULL,
+                PRIMARY KEY(peer,local));
+              CREATE TABLE IF NOT EXISTS device_remote_cursors (
+                peer TEXT PRIMARY KEY, value INTEGER NOT NULL);
+              CREATE TABLE IF NOT EXISTS device_peer_snapshots (
+                peer TEXT NOT NULL, kind TEXT NOT NULL, sequence INTEGER NOT NULL,
+                event BLOB NOT NULL, PRIMARY KEY(peer,kind));
             """)
         self.files = DeviceFiles(registry)
         with registry.transaction():
@@ -189,6 +251,10 @@ class DeviceApplication:
                 "device_remote_requests",
                 "device_remote_cancels",
                 "device_remote_results",
+                "device_remote_cursors",
+                "device_thread_hosts",
+                "device_remote_threads",
+                "device_peer_snapshots",
                 "device_outbox",
                 "device_files",
                 "device_file_chunks",
@@ -198,10 +264,15 @@ class DeviceApplication:
                 "device_workspace_denied",
                 "device_remote_control",
                 "device_desktop_control",
+                "device_rem_requests",
+                "device_rem_files",
+                "device_link_files",
+                "device_workflow_requests",
                 "relay_origins",
             ):
                 db.execute(f"DELETE FROM {table} WHERE peer=?", (peer,))
             db.execute("DELETE FROM endpoints WHERE device_id=?", (peer,))
+            db.execute("DELETE FROM peer_names WHERE device_id=?", (peer,))
             db.execute("DELETE FROM peers WHERE device_id=?", (peer,))
 
     def revoke_grant(self, peer: str, thread: str) -> None:
@@ -277,12 +348,36 @@ class DeviceApplication:
                 )
             ]
 
+    def _prepare_desktop_read(self, peer: str, event: dict[str, Any]) -> dict[str, Any] | None:
+        """Read Rem, organization and usage data for a phone view outside the device lock.
+
+        Only new reads from a trusted phone that may use the desktop get here.
+        handle() checks trust and permission again under the lock before answering;
+        actions stay entirely inside one transaction.
+        """
+        if event["type"] != "desktop.read":
+            return None
+        with self.registry.lock:
+            try:
+                self._trusted(peer)
+            except PairingError:
+                return None
+            for table in ("device_inbox", "device_inbox_reads"):
+                if self.registry.db.execute(
+                    f"SELECT 1 FROM {table} WHERE peer=? AND id=?", (peer, event["id"])
+                ).fetchone():
+                    return None
+            if not self.desktop.allowed(peer):
+                return None
+        return self.desktop.gather(event)
+
     def handle(self, peer: str, event: dict[str, Any]) -> list[dict[str, Any]]:
         if not _VALIDATOR.is_valid(event):
             raise PairingError("invalid_application_event")
         digest = hashlib.sha256(
             json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+        prepared = self._prepare_desktop_read(peer, event)
         with self.registry.transaction():
             self._trusted(peer)
             db = self.registry.db
@@ -328,7 +423,7 @@ class DeviceApplication:
             remote_result = self.remote.handle(peer, event)
             if remote_result is not None:
                 return remote_result
-            desktop_result = self.desktop.handle(peer, event)
+            desktop_result = self.desktop.handle(peer, event, prepared)
             if desktop_result is not None:
                 return desktop_result
             if kind == "thread.create":
@@ -456,6 +551,18 @@ class DeviceApplication:
                         )
                     else:
                         thread = native_thread
+                    if parent == host_template(peer):
+                        # The turn journal is keyed by this thread, so history can show
+                        # the paired desktop each thought and tool step as it happens.
+                        self.workspace.put(
+                            peer,
+                            thread,
+                            {
+                                "metadata": {"id": thread, "title": payload["title"]},
+                                "messages": [],
+                                "revision": 1,
+                            },
+                        )
                     db.execute(
                         "INSERT INTO device_grants VALUES (?,?,?)",
                         (peer, thread, self._encode(peer, context)),
@@ -500,7 +607,12 @@ class DeviceApplication:
                             "provider": context["provider"],
                             "model": context["model"],
                             **(
-                                self.workspace.details(peer, grant["thread"], context)
+                                self.workspace.details(
+                                    peer,
+                                    grant["thread"],
+                                    context,
+                                    activity=payload.get("include_activity") is True,
+                                )
                                 if payload.get("include_thread_details")
                                 else {}
                             ),
@@ -547,6 +659,13 @@ class DeviceApplication:
                                         "rem_ready": self.rem_ready(),
                                         "remote_control": self.remote.allowed(peer),
                                         "desktop_control": self.desktop.allowed(peer),
+                                        # Older phones reject unknown fields, so only a
+                                        # phone that asks learns the Tailscale address.
+                                        **(
+                                            {"tailnet_endpoint": self.tailnet_endpoint}
+                                            if payload.get("include_tailnet_endpoint") is True
+                                            else {}
+                                        ),
                                     }
                                 }
                                 if payload.get("include_connection")
@@ -557,11 +676,15 @@ class DeviceApplication:
                 )
                 return events
             if kind == "fleet.request":
+                if "advertise" in payload:
+                    # A paired desktop names its own listener inside its pinned session,
+                    # so the reverse direction works without typing an address.
+                    self._advertised(peer, payload["advertise"])
                 now = int(self.registry.clock())
                 devices = [
                     {
                         "device_id": row["device_id"],
-                        "name": "Paired desktop" if row["role"] == "desktop" else "Paired mobile",
+                        "name": self._label(row),
                         "role": row["role"],
                         "status": row["reachability"],
                         "last_seen": int(row["last_seen"]) if row["last_seen"] else None,
@@ -570,8 +693,8 @@ class DeviceApplication:
                         "running_jobs": row["running_jobs"] or [],
                     }
                     for row in self.fleet()
-                    if row["state"] == "active"
-                ][:100]
+                    if row["state"] in ("active", "indirect") and row["device_id"] != peer
+                ][:99]
                 jobs = [
                     row[0]
                     for row in db.execute("SELECT request FROM device_work WHERE state='running'")
@@ -594,7 +717,7 @@ class DeviceApplication:
                     0,
                     {
                         "device_id": self.registry.identity.device_id,
-                        "name": "Raticode Desktop",
+                        "name": self.name,
                         "role": "desktop",
                         "status": "reachable",
                         "last_seen": now,
@@ -616,7 +739,12 @@ class DeviceApplication:
                     "SELECT 1 FROM device_grants WHERE peer=? AND thread=?",
                     (peer, event["thread_id"]),
                 ).fetchone()
-                if grant is None:
+                # Rem's chat has one private file channel per phone, open only
+                # while the user lets that phone use Raticode.
+                rem_files = event["thread_id"] == self.desktop.files_thread(
+                    peer
+                ) and self.desktop.allowed(peer)
+                if grant is None and not rem_files:
                     raise PairingError("file_thread_grant_required")
                 if kind == "file.offer":
                     self.files.offer(peer, event["thread_id"], payload)
@@ -828,13 +956,14 @@ class DeviceApplication:
                     return self.pending(peer)
                 attachment_metadata = []
                 for attachment in payload.get("attachment_ids", []):
-                    offer, _ = self.files.content(peer, event["thread_id"], attachment)
+                    offer = self.files.metadata(peer, event["thread_id"], attachment)
                     attachment_metadata.append(
                         {
                             "id": attachment,
                             "name": offer["name"],
                             "size": offer["size"],
                             "mime": offer["mime"],
+                            "type": offer["mime"],
                         }
                     )
                 if (
@@ -962,12 +1091,23 @@ class DeviceApplication:
     ) -> list[dict[str, str]]:
         with self.registry.lock:
             if self.workspace.value(peer, thread) is not None:
-                return [
-                    {"role": m["role"], "content": m["body"]}
-                    for m in self.workspace.messages(
-                        peer, thread, for_dispatch=True, through_request=through_request
-                    )[-200:]
-                ]
+                history = []
+                for m in self.workspace.messages(
+                    peer, thread, for_dispatch=True, through_request=through_request
+                )[-200:]:
+                    saved = [
+                        item
+                        for item in m.get("attachments", [])
+                        if isinstance(item, dict) and item.get("storageName")
+                    ]
+                    history.append(
+                        {
+                            "role": m["role"],
+                            "content": m["body"],
+                            **({"attachments": saved} if saved else {}),
+                        }
+                    )
+                return history
             messages = []
             for row in self.registry.db.execute(
                 "SELECT event,state,request FROM device_work WHERE peer=? AND thread=? AND "
@@ -1229,6 +1369,35 @@ class DeviceApplication:
             raise PairingError("invalid_remote_response")
         with self.registry.transaction():
             self._trusted(peer)
+            # The peer delivers its outbox in sequence order, so the highest number
+            # received is this desktop's acknowledgment cursor for the next session.
+            self.registry.db.execute(
+                "INSERT INTO device_remote_cursors VALUES (?,?) ON CONFLICT(peer) DO UPDATE "
+                "SET value=MAX(value,excluded.value)",
+                (peer, event["sequence"]),
+            )
+            self.registry.db.execute(
+                "UPDATE peers SET last_seen=? WHERE device_id=?", (self.registry.clock(), peer)
+            )
+            if event["type"] in ("catalog.snapshot", "thread.snapshot", "thread.history.snapshot"):
+                # Answers to a live remote thread are consumed by that turn's stream.
+                return
+            if event["type"] in ("fleet.snapshot", "sync.snapshot"):
+                # Periodic status snapshots replace each other instead of filling the
+                # result journal that holds delegated work answers.
+                self.registry.db.execute(
+                    "INSERT INTO device_peer_snapshots VALUES (?,?,?,?) "
+                    "ON CONFLICT(peer,kind) DO UPDATE SET sequence=excluded.sequence,"
+                    "event=excluded.event WHERE excluded.sequence>=sequence",
+                    (peer, event["type"], event["sequence"], self._encode(peer, event)),
+                )
+                if event["type"] == "fleet.snapshot":
+                    self.registry.db.execute(
+                        "UPDATE device_remote_requests SET state='completed' WHERE peer=? "
+                        "AND request=?",
+                        (peer, event["request_id"]),
+                    )
+                return
             count = self.registry.db.execute(
                 "SELECT COUNT(*) FROM device_remote_results WHERE peer=?", (peer,)
             ).fetchone()[0]
@@ -1265,16 +1434,11 @@ class DeviceApplication:
                 terminal = event["payload"]["state"]
             elif event["type"] == "error":
                 terminal = "failed"
-            elif event["type"] == "fleet.snapshot":
-                terminal = "completed"
             if terminal in ("completed", "failed", "cancelled", "outcome_unknown", "rejected"):
                 self.registry.db.execute(
                     "UPDATE device_remote_requests SET state=? WHERE peer=? AND request=?",
                     (terminal, peer, event["request_id"]),
                 )
-            self.registry.db.execute(
-                "UPDATE peers SET last_seen=? WHERE device_id=?", (self.registry.clock(), peer)
-            )
 
     def _next_outbound_sequence(self, peer: str) -> int:
         db = self.registry.db
@@ -1357,10 +1521,7 @@ class DeviceApplication:
     def _file_chunk(
         self, peer: str, event: dict[str, Any], identifier: str, offset: int
     ) -> dict[str, Any]:
-        offer, data = self.files.content(peer, event["thread_id"], identifier)
-        if not 0 <= offset <= len(data):
-            raise PairingError("file_chunk_offset")
-        chunk = data[offset : offset + CHUNK]
+        offer, chunk = self.files.chunk(peer, event["thread_id"], identifier, offset)
         result = self._emit(
             peer,
             event,
@@ -1369,7 +1530,7 @@ class DeviceApplication:
                 "file_id": identifier,
                 "offset": offset,
                 "data": base64.urlsafe_b64encode(chunk).rstrip(b"=").decode(),
-                "eof": offset + len(chunk) == len(data),
+                "eof": offset + len(chunk) == offer["size"],
             },
         )
         self.registry.db.execute(
@@ -1398,28 +1559,31 @@ class DeviceApplication:
             from gofer.ui.device_chat import validate_context
 
             context = validate_context(self._decode(peer, row[0]))
-            root = Path(context["project_path"])
-            identity = context["project_identity"]
-            if context.get("desktop_parity"):
-                candidates = [
-                    {"root": str(root), "identity": identity},
-                    *context.get("projects", []),
-                ]
-                selected = next(
-                    (
-                        p
-                        for p in candidates
-                        if Path(path).absolute().is_relative_to(Path(p["root"]))
-                    ),
-                    None,
-                )
-                if selected is None:
-                    raise PairingError("file_not_in_open_desktop_project")
-                root, identity = Path(selected["root"]), selected["identity"]
-            offer = self.files.snapshot(peer, thread, root, Path(path), identity)
+            offer = self._thread_snapshot(peer, thread, context, Path(path))
             return self._emit(
                 peer, {"thread_id": thread, "request_id": str(uuid4())}, "file.offer", offer
             )
+
+    def _thread_snapshot(
+        self, peer: str, thread: str, context: dict[str, Any], path: Path
+    ) -> dict[str, Any]:
+        """Snapshot a file from a shared thread's project folders for that thread."""
+        root = Path(context["project_path"])
+        identity = context["project_identity"]
+        if context.get("desktop_parity"):
+            candidates = [
+                {"root": str(root), "identity": identity},
+                *context.get("projects", []),
+            ]
+            selected = next(
+                (p for p in candidates if path.absolute().is_relative_to(Path(p["root"]))),
+                None,
+            )
+            if selected is None:
+                raise PairingError("file_not_in_open_desktop_project")
+            root, identity = Path(selected["root"]), selected["identity"]
+        offer: dict[str, Any] = self.files.snapshot(peer, thread, root, path, identity)
+        return offer
 
     def spawn_thread(self, peer: str, origin_request: str, action: dict[str, Any]) -> None:
         """Apply the same explicit Rem child-thread action as the desktop renderer."""
@@ -1435,7 +1599,7 @@ class DeviceApplication:
                 "SELECT context FROM device_grants WHERE peer=? AND thread=?", (peer, origin[0])
             ).fetchone()
             context = self._decode(peer, row[0])
-            if not context.get("desktop_parity"):
+            if not context.get("desktop_parity") or not context.get("desktop_thread_id"):
                 raise PairingError("workspace_sharing_required")
             request = str(uuid5(NAMESPACE_URL, "raticode-child:" + origin_request))
             if db.execute(
@@ -1556,46 +1720,237 @@ class DeviceApplication:
                 )
             ]
 
+    def _snapshot(self, peer: str, kind: str) -> dict[str, Any] | None:
+        row = self.registry.db.execute(
+            "SELECT event FROM device_peer_snapshots WHERE peer=? AND kind=?", (peer, kind)
+        ).fetchone()
+        return self._decode(peer, row[0]) if row else None
+
     def fleet(self) -> list[dict[str, Any]]:
+        """Direct peers, then devices a paired desktop reports from its own pairings."""
         with self.registry.lock:
             now = self.registry.clock()
             result = []
+            reports: list[tuple[dict[str, Any], dict[str, Any]]] = []
             for peer in self.registry.list():
-                observed = None
-                for row in self.registry.db.execute(
-                    "SELECT event FROM device_remote_results WHERE peer=? ORDER BY rowid DESC",
-                    (peer["device_id"],),
-                ):
-                    event = self._decode(peer["device_id"], row[0])
-                    if event["type"] == "fleet.snapshot":
-                        observed = next(
-                            (
-                                d
-                                for d in event["payload"]["devices"]
-                                if d["device_id"] == peer["device_id"]
-                            ),
-                            None,
-                        )
-                        break
-                fresh = (
-                    observed is not None
-                    and observed["observed_at"] <= now < observed["fresh_until"]
-                    and now - observed["observed_at"] <= 60
-                )
-                result.append(
-                    {
-                        **peer,
-                        "reachability": "reachable" if fresh else "unknown",
-                        "running_jobs": observed["running_jobs"]
-                        if fresh and observed is not None
-                        else None,
-                    }
-                )
+                snapshot = self._snapshot(peer["device_id"], "fleet.snapshot")
+                devices = snapshot["payload"]["devices"] if snapshot else []
+                observed = next((d for d in devices if d["device_id"] == peer["device_id"]), None)
+                fresh = observed is not None and self._fresh(observed, now)
+                entry = {
+                    **peer,
+                    "name": peer["name"] or (observed or {}).get("name"),
+                    "reachability": "reachable" if fresh else "unknown",
+                    "running_jobs": observed["running_jobs"]
+                    if fresh and observed is not None
+                    else None,
+                }
+                if peer["role"] == "desktop":
+                    entry["endpoint_known"] = (
+                        self.registry.db.execute(
+                            "SELECT 1 FROM endpoints WHERE device_id=?", (peer["device_id"],)
+                        ).fetchone()
+                        is not None
+                    )
+                    shared = self._snapshot(peer["device_id"], "sync.snapshot")
+                    # Threads that desktop granted to this one; fleet work needs these IDs.
+                    entry["shared_threads"] = [
+                        {
+                            key: thread[key]
+                            for key in ("thread_id", "title", "project_id", "provider", "model")
+                        }
+                        for thread in (shared["payload"]["threads"] if shared else [])
+                    ]
+                    if peer["state"] == "active" and fresh:
+                        reports.append((entry, snapshot or {}))
+                result.append(entry)
+            known = {self.registry.identity.device_id, *(p["device_id"] for p in result)}
+            for via, snapshot in reports:
+                for device in snapshot["payload"]["devices"]:
+                    if device["device_id"] in known:
+                        continue
+                    known.add(device["device_id"])
+                    fresh = device["status"] == "reachable" and self._fresh(device, now)
+                    result.append(
+                        {
+                            "device_id": device["device_id"],
+                            "name": display_name(device["name"]),
+                            "role": device["role"],
+                            "state": "indirect",
+                            "via": via["device_id"],
+                            "via_name": via["name"],
+                            "last_seen": device["last_seen"],
+                            "reachability": "reachable" if fresh else "unknown",
+                            "running_jobs": device["running_jobs"] if fresh else None,
+                        }
+                    )
             return result
+
+    @staticmethod
+    def _fresh(observed: dict[str, Any], now: float) -> bool:
+        return bool(
+            observed["observed_at"] <= now < observed["fresh_until"]
+            and now - observed["observed_at"] <= 60
+        )
+
+    def _label(self, row: dict[str, Any]) -> str:
+        default = "Desktop" if row["role"] == "desktop" else "Phone"
+        name = row.get("name") or default
+        if row.get("via"):
+            name = f"{name} (via {row.get('via_name') or 'paired desktop'})"
+        return name[:80]
+
+    def _advertised(self, peer: str, advert: dict[str, Any]) -> None:
+        if self.registry._row(peer)["role"] != "desktop":
+            raise PairingError("desktop_advertisement_required")
+        self.registry.save_name(peer, advert["name"], chosen=False)
+        endpoint = advert["lan_endpoint"]
+        if endpoint is None:
+            return
+        from gofer.devices.pairing import lan_endpoint
+
+        checked = lan_endpoint(endpoint)
+        assert checked is not None
+        # A loopback address names this machine; only trust it between local test peers.
+        if ipaddress.ip_address(checked["host"]).is_loopback and self.lan_endpoint is not None:
+            return
+        self.registry.save_endpoint(peer, checked)
+
+    def _session_event(
+        self,
+        peer: str,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        thread_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self.registry.transaction():
+            self._trusted(peer)
+            event = {
+                "version": 2,
+                "id": str(uuid4()),
+                "thread_id": thread_id,
+                "request_id": request_id or str(uuid4()),
+                "sequence": self._next_outbound_sequence(peer),
+                "type": kind,
+                "payload": payload,
+            }
+        _VALIDATOR.validate(event)
+        return event
+
+    def hosting(self) -> list[str]:
+        with self.registry.lock:
+            return [
+                row[0]
+                for row in self.registry.db.execute(
+                    "SELECT h.peer FROM device_thread_hosts h JOIN peers p ON p.device_id=h.peer "
+                    "WHERE p.state='active'"
+                )
+            ]
+
+    def enable_hosting(self, peer: str, enabled: bool) -> None:
+        """Local choice: let a paired desktop start Rem threads that run on this one."""
+        with self.registry.transaction():
+            self._trusted(peer)
+            if self.registry._row(peer)["role"] != "desktop":
+                raise PairingError("desktop_required")
+            db = self.registry.db
+            if enabled:
+                db.execute("INSERT OR IGNORE INTO device_thread_hosts VALUES (?)", (peer,))
+                return
+            db.execute("DELETE FROM device_thread_hosts WHERE peer=?", (peer,))
+            # Turning it off revokes every thread that desktop started here.
+            self._revoke_thread_tree(peer, host_template(peer))
+
+    def host_template(self, peer: str, context: dict[str, Any]) -> None:
+        """Local API only: this desktop's open projects and provider policies.
+
+        Threads the paired desktop creates copy this context, then choose a project,
+        provider, model and permission mode within it, exactly like a phone thread.
+        """
+        with self.registry.transaction():
+            self._trusted(peer)
+            if peer not in self.hosting():
+                raise PairingError("thread_hosting_disabled")
+            context = {
+                **context,
+                "title": "Threads from a paired desktop",
+                "allow_thread_create": True,
+                "revision": 1,
+            }
+            context.pop("desktop_thread_id", None)
+            self.registry.db.execute(
+                "INSERT OR REPLACE INTO device_grants VALUES (?,?,?)",
+                (peer, host_template(peer), self._encode(peer, context)),
+            )
+
+    def remote_thread(self, peer: str, local: str) -> str | None:
+        with self.registry.lock:
+            row = self.registry.db.execute(
+                "SELECT remote FROM device_remote_threads WHERE peer=? AND local=?", (peer, local)
+            ).fetchone()
+            return str(row[0]) if row else None
+
+    def save_remote_thread(self, peer: str, local: str, remote: str | None) -> None:
+        with self.registry.transaction():
+            self._trusted(peer)
+            if remote is None:
+                self.registry.db.execute(
+                    "DELETE FROM device_remote_threads WHERE peer=? AND local=?", (peer, local)
+                )
+            else:
+                self.registry.db.execute(
+                    "INSERT OR REPLACE INTO device_remote_threads VALUES (?,?,?)",
+                    (peer, local, device_id(remote)),
+                )
+
+    def acknowledgment(self, peer: str) -> dict[str, Any]:
+        """Leads every desktop session: acknowledges what arrived, asks for shared threads.
+
+        Without it the peer replays its entire outbox on each new session and the
+        outbox eventually reaches its quota.
+        """
+        with self.registry.lock:
+            row = self.registry.db.execute(
+                "SELECT value FROM device_remote_cursors WHERE peer=?", (peer,)
+            ).fetchone()
+        return self._session_event(
+            peer, "sync.request", {"after_sequence": row[0] if row else None, "limit": 100}
+        )
+
+    def advertisement(self, peer: str) -> dict[str, Any]:
+        return self._session_event(
+            peer,
+            "fleet.request",
+            {"advertise": {"name": self.name, "lan_endpoint": self.listener_endpoint}},
+        )
+
+    def fleet_probe(self, peer: str) -> dict[str, Any]:
+        """A read-only status request that is never journaled as delegated work."""
+        if self.registry._row(peer)["role"] != "desktop":
+            raise PairingError("mobile_is_not_worker")
+        return self._session_event(peer, "fleet.request", {})
 
     def attachment(self, peer: str, thread: str, identifier: str) -> dict[str, Any]:
         offer, data = self.files.content(peer, thread, identifier)
-        return {"name": offer["name"], "mime": offer["mime"], "data": data}
+        return {"id": identifier, "name": offer["name"], "mime": offer["mime"], "data": data}
+
+    def record_attachments(
+        self, peer: str, request_id: str, attachments: list[dict[str, Any]]
+    ) -> None:
+        """Point a phone message's attachments at their saved copies in the desktop thread.
+
+        Phone uploads expire, so desktop turns that resend this message need the
+        file name the desktop saved it under.
+        """
+        with self.registry.transaction():
+            self._trusted(peer)
+            self.registry.db.execute(
+                "INSERT INTO device_message_attachments VALUES (?,?,?) "
+                "ON CONFLICT(peer,request) DO UPDATE SET value=excluded.value",
+                (peer, request_id, self._encode(peer, {"attachments": attachments})),
+            )
 
     def _prune_acknowledged(self, peer: str, cursor: int) -> None:
         # A peer's cursor is its application receipt, not an HTTP publication result.

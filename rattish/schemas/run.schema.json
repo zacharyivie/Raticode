@@ -87,6 +87,7 @@
           "activation_group_id": {"type": "string", "minLength": 1},
           "message": {"type": "string"},
           "outcome": {"enum": ["success", "allowed_failure", "failure"]},
+          "reused": {"const": true},
           "status": {
             "enum": ["passed", "failed", "preflight_failed", "invalid_inputs", "running", "stopped", "interrupted"]
           }
@@ -109,7 +110,8 @@
           "duration_ms": {"type": "integer", "minimum": 0},
           "outcome": {"enum": ["success", "allowed_failure", "failure"]},
           "output": true,
-          "error": {"$ref": "#/$defs/error"}
+          "error": {"$ref": "#/$defs/error"},
+          "reused_from_run_id": {"type": "string", "minLength": 1}
         },
         "required": [
           "node_id",
@@ -128,7 +130,23 @@
     },
     "outputs": {"type": "object"},
     "latest_node_outputs": {"type": "object"},
-    "error": {"$ref": "#/$defs/error"}
+    "error": {"$ref": "#/$defs/error"},
+    "trigger_event_count": {"type": "integer", "minimum": 0},
+    "resumed_from": {
+      "type": "object",
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "rerun_nodes": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "reused_runs": {"type": "integer", "minimum": 0},
+        "not_reused_runs": {"type": "integer", "minimum": 0}
+      },
+      "required": ["run_id", "rerun_nodes"],
+      "additionalProperties": false
+    }
   },
   "required": [
     "run_artifact_version",

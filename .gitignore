@@ -37,7 +37,8 @@ math problems/
 !.raticode/registry/radish/workspace-registry.json
 
 # Virtual environments
-.venv/
+# No trailing slash: worktrees often symlink .venv to the main checkout.
+.venv
 .uv-cache/
 venv/
 env/
@@ -46,7 +47,7 @@ env/
 .hatch/
 
 # local dev reporting
-reports*
+/reports*
 
 # Testing
 .pytest_cache/

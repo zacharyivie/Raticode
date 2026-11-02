@@ -82,6 +82,43 @@ records input names, not supplied values. Exit status `0` means the workflow pas
 preflight or workflow failure returns `1`. Invalid CLI input or invalid declared workflow
 input returns `2`.
 
+### Resuming a run
+
+`gof workflow resume ID --run-id RUN`, the desktop's **Resume** and a paired phone's
+**Resume** resume a `failed`, `stopped` or `interrupted` run as a new run. The earlier run's
+artifact is never changed. The new artifact names it in `resumed_from.run_id`.
+
+The new run replays the earlier run's saved node records in their saved order. The k-th start
+of a node in one activation group and lineage takes that key's k-th record, so routes, joins,
+loops and cycles rebuild the scheduler state the earlier run had. Records with outcome
+`success` or `allowed_failure` are reused without calling the node again; they keep their
+original times and carry `reused_from_run_id`, and their `node_completed` event has
+`reused: true`. Everything else runs for real: the failed activation, activations a stop or
+crash cut off (`resumed_from.rerun_nodes`, which may have partly run), and the work they lead
+to. Live work is held until nothing more can be replayed. After that a record is still reused
+for a matching start, but never in a lineage where live work has completed, since that work's
+results may differ. `resumed_from.reused_runs` and `not_reused_runs` count the outcome. Budgets
+count reused records like any other run; the workflow timeout starts again.
+
+A run is refused, with a sentence that says why, when:
+
+- it passed, is still running, or never started its nodes (`preflight_failed`,
+  `invalid_inputs`);
+- its error comes from the workflow itself (`workflow_control`, `budget` or
+  `output_validation` errors, or `RATTISH_RUN_RECORD_INVALID`), so a replay would end the same
+  way;
+- it had inputs or trigger events, whose values aren't saved (`trigger_event_count`);
+- it has no `compiled_snapshot`, the source or compilation fingerprint changed since, or the
+  source no longer compiles;
+- an agent with `memory: run` has a reused record, because that memory isn't saved;
+- another run already resumed it (resume that run instead), or a resume of it is in progress.
+  A resume whose steps never started (`preflight_failed` or `invalid_inputs`) redid nothing and
+  doesn't count; it keeps `resumed_from` as history.
+
+Resume runs preflight and honours the active-run limit, approvals and `expected_revision` like
+a new run. The legacy `--from-node`, `--only-node`, `--skip-cache` and `--force` options are
+refused for Rattish runs.
+
 JSON output is one object with these required fields:
 
 | Field | Value |

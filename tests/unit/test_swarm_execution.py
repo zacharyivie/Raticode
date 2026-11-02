@@ -589,7 +589,7 @@ async def test_worktrees_keep_both_conflicting_edits_and_dirty_user_index(manage
         manager.tool("lead", {"action": "complete"})
 
 
-async def test_repair_has_no_count_limit_and_old_results_are_stale(manager, tmp_path):
+async def test_repair_limit_applies_to_agents_and_rem_but_not_the_user(manager, tmp_path):
     root = tmp_path / "project"
     sid = team(manager, root, maxRepairAttempts=1)
     plan(manager, root, sid, [milestone()])
@@ -619,10 +619,13 @@ async def test_repair_has_no_count_limit_and_old_results_are_stale(manager, tmp_
             },
         )
     await manager._turn(str(root), sid, "one", threading.Event())
-    manager.tool(
-        "lead",
-        {"action": "repair", "milestoneId": "a", "attemptId": new["id"], "reason": "Try again"},
-    )
+    again = {"action": "repair", "milestoneId": "a", "attemptId": new["id"], "reason": "Try again"}
+    # maxRepairAttempts=1 was used by the first repair.
+    with pytest.raises(SwarmError, match="request_approval"):
+        manager.tool("lead", again)
+    with pytest.raises(SwarmError, match="repair attempts"):
+        manager.execution(root, sid, again, origin="rem")
+    manager.execution(root, sid, again)
     assert assignment(manager, root, sid)[1]["repairCount"] == 2
 
 
@@ -641,15 +644,18 @@ async def test_context_cursors_usage_and_stall_replanning(manager, tmp_path):
         }
 
     manager._stream = stream
-    for i in range(3):
+    for i in range(2):
         manager.message(root, sid, {"body": f"Review {i}", "recipientId": "lead"})
         await manager._turn(str(root), sid, "lead", threading.Event())
     run = manager.get(root, sid)["run"]
-    assert run["state"] == "running" and not run.get("replanRequired")
-    assert run["usage"]["input_tokens"] == 30
+    # stallTurnLimit=2: two turns without progress pause the run for a new plan.
+    assert run["state"] == "paused" and run["replanRequired"] is True
+    assert "No progress in 2 turns" in run["pauseReason"]
+    assert run["usage"]["input_tokens"] == 20
+    with pytest.raises(SwarmError, match="changed plan"):
+        manager.control(root, sid, "resume")
     assert all(len(p) == 1 and len(p[0]["body"]) <= 8000 for p in prompts)
     assert "Review 0" not in prompts[1][0]["body"]
-    manager.control(root, sid, "pause")
     manager.execution(
         root,
         sid,
@@ -660,7 +666,7 @@ async def test_context_cursors_usage_and_stall_replanning(manager, tmp_path):
     manager.message(root, sid, {"body": "Review"})
     await manager._turn(str(root), sid, "lead", threading.Event())
     usage = manager.get(root, sid)["run"]["usage"]
-    assert usage["input_tokens"] is None and usage["reported_input_tokens"] == 30
+    assert usage["input_tokens"] is None and usage["reported_input_tokens"] == 20
 
 
 def test_activity_updates_do_not_load_or_rewrite_history(manager, tmp_path):
@@ -713,9 +719,9 @@ async def test_completion_blocks_queued_requests(manager, tmp_path):
     assert manager.get(root, sid)["run"]["state"] == "completed"
 
 
-async def test_non_git_writers_are_serial_without_legacy_elapsed_limit(manager, tmp_path):
+async def test_non_git_writers_are_serial(manager, tmp_path):
     root = tmp_path / "project"
-    sid = team(manager, root, maxRunSeconds=1)
+    sid = team(manager, root)
     manager.message(root, sid, {"body": "Write", "recipientId": "one"})
     entered = []
 

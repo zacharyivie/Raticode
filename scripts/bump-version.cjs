@@ -135,8 +135,8 @@ updateTextFile("packaging/arch/.SRCINFO", (text) => {
 
   next = replaceOnce(
     next,
-    /source_x86_64 = Raticode-.+-x86_64\.AppImage::https:\/\/github\.com\/zacharyivie\/gofer-flow\/releases\/download\/v[^/]+\/Raticode-.+-x86_64\.AppImage/,
-    `source_x86_64 = Raticode-${version}-x86_64.AppImage::https://github.com/zacharyivie/gofer-flow/releases/download/v${version}/Raticode-${version}-x86_64.AppImage`,
+    /source_x86_64 = Raticode-.+-x86_64\.AppImage::https:\/\/github\.com\/zacharyivie\/(?:Raticode|gofer-flow)\/releases\/download\/v[^/]+\/Raticode-.+-x86_64\.AppImage/,
+    `source_x86_64 = Raticode-${version}-x86_64.AppImage::https://github.com/zacharyivie/Raticode/releases/download/v${version}/Raticode-${version}-x86_64.AppImage`,
     ".SRCINFO AppImage source URL",
   );
 
@@ -182,8 +182,8 @@ updateTextFile("packaging/arch-cli/.SRCINFO", (text) => {
 
   next = replaceOnce(
     next,
-    /source_x86_64 = gof-linux-x64-[^:]+::https:\/\/github\.com\/zacharyivie\/gofer-flow\/releases\/download\/v[^/]+\/gof-linux-x64/,
-    `source_x86_64 = gof-linux-x64-${version}::https://github.com/zacharyivie/gofer-flow/releases/download/v${version}/gof-linux-x64`,
+    /source_x86_64 = gof-linux-x64-[^:]+::https:\/\/github\.com\/zacharyivie\/(?:Raticode|gofer-flow)\/releases\/download\/v[^/]+\/gof-linux-x64/,
+    `source_x86_64 = gof-linux-x64-${version}::https://github.com/zacharyivie/Raticode/releases/download/v${version}/gof-linux-x64`,
     "CLI .SRCINFO source URL",
   );
 
