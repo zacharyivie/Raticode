@@ -38,7 +38,11 @@ The queue explains why a task is waiting, including employee holds, unmet depend
 
 **Pause** stops running tasks and returns them to To do; they run again on the next Start, and the interrupted run doesn't count against the task's run limit. Delegated work (swarms, paired desktops, HTTPS gateways) stays blocked for review instead.
 
-Open a run under **Runs and artifacts** on a task to read what the employee did.
+Open a run under **Runs and artifacts** on a task to read what the employee did, or choose **Show input** to see exactly what it was given: its instructions, the task and conversation, its tools and working folder. Inputs are stored compressed and readable only by you, and Raticode checks each against the run's fingerprint. Each run records the provider, model, effort and permission mode it used, whether it ran in its own worktree, a fingerprint of everything the employee was given, and, for worktree runs, the commit it ended at and whether it left uncommitted changes.
+
+## Audit trail
+
+Activity is append-only: entries and task conversations can't be edited or deleted, and each entry is linked to the one before it by a hash. Every 30 seconds, and after each successful check, Raticode also appends the latest link to `organization-audit-anchors.jsonl` in its data folder, outside the database. **Configuration history > Verify audit trail** checks the configuration history, the activity chain and those anchors, and reports the first entry that doesn't match. The anchors catch entries removed from the end of the log or a rebuilt database, unless the anchor file was changed too. Entries written before an upgrade added linking are counted but can't be checked. Every change to work is recorded, including changes the scheduler makes on its own, such as blocking a task that reached its run limit. Retry keys for repeated requests are kept for 30 days.
 
 ## Routines and evidence
 
@@ -70,6 +74,20 @@ Configuration history supports revision-aware restore previews. Restoring config
 
 When enabled, organization management tools are available in both global and project threads. Ask Rem to inspect an organization before changing it, and state which configuration or task you want changed. Read-only and plan sessions cannot mutate organizations, and workflow execution still requires authorization.
 
-Rem can't start an organization by itself. When Rem asks to start one, resume all employees, archive it, or change settings that widen what employees may do (full-access or bypass-permission modes, credential grants, execution destinations, allowing push, editing the project folder directly), the Organizations tab shows the request and nothing changes until you approve it. Rem can't store credential values; enter them under **Operations > Protected credentials**. A paired phone can't start an organization whose active employees run without a sandbox.
+Rem can't start an organization by itself. The Organizations tab shows a request, and nothing changes until you approve it, when Rem asks to:
+
+- start the organization, resume all employees, or archive it;
+- approve a task's plan, remove a task's approval or review step, accept a result that needs independent review, authorize a workflow, or confirm that interrupted outside work has stopped;
+- turn on a routine or webhook, or make an enabled routine run more often;
+- re-enable or repoint a revoked credential;
+- add or resume employees, change a permission mode to anything that can write, give employees more tools, skills, folders or credentials, or add project folders or execution destinations;
+- raise or remove a run, token or dollar limit, raise an operating limit, or make heartbeats more frequent;
+- allow `git push` or let employees edit the project folder directly.
+
+New or changed heartbeats must be at least 15 minutes apart. A shorter heartbeat saved before this rule keeps working until it is edited.
+
+Employees can lift only blocks that an employee set. Work that Raticode, you or Rem blocked for review, and work you cancelled, stays stopped until you or Rem reopen it. Only your reopen gives a task that hit its run limit a fresh allowance.
+
+Requests expire after a day, asking twice returns the same request, and a request is applied at most once. A change that would fail anyway, such as claiming a folder another organization owns, is refused right away instead of waiting. Rem can't store credential values; enter them under **Operations > Protected credentials**. A paired phone can't start an organization whose active employees run without a sandbox.
 
 See [Swarms](./swarms.md), [Desktop fleet](./fleet.md), and [Permissions and local data](./security.md).

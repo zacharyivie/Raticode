@@ -7,7 +7,7 @@ import { SIDEBAR_PLUGINS } from "./plugins.js";
 export const FEATURE_PREVIEWS = Object.freeze([
   ...SIDEBAR_PLUGINS.filter((plugin) => plugin.experimental).map((plugin) => ({
     id: plugin.id,
-    label: plugin.id === "rem" ? "Rem home" : plugin.label,
+    label: plugin.label,
     description: plugin.description,
     plugin: plugin.id,
     backend: plugin.id === "organizations",

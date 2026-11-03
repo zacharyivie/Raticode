@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gofer.ui.rem_home import RemHome
+from gofer.ui.rem_home_store import RUN_INTERNALS
 from tests.unit import test_ui_server as harness
 
 
@@ -397,3 +399,61 @@ def test_rem_memory_api_adds_switches_modes_and_undoes_a_reply(api):
     assert undone.status == 200, undone.json()
     assert [m["text"] for m in undone.json()["memories"]] == ["Works in Eastern time"]
     assert request("POST", "/api/rem/messages/missing/undo-memory").status == 404
+
+
+def test_rem_polls_get_run_summaries_and_unchanged_answers(api):
+    request, service = api
+    task = request(
+        "POST",
+        "/api/rem/tasks",
+        body={
+            "request_id": "create-poll",
+            "title": "Check notes",
+            "type": "errand",
+            "prompt": "Check notes",
+            "schedule": {"kind": "daily", "local_time": "09:00"},
+        },
+    ).json()["task"]
+    run = request(
+        "POST", f"/api/rem/tasks/{task['id']}/run", body={"request_id": "run-poll"}
+    ).json()["run"]
+    traces = [{"type": "tool", "output": "x" * 50_000}]
+    service._update(run["id"], worker_traces=traces, review_traces=traces, worker_result="Done.")
+
+    # The list the desktop polls leaves out traces and worker internals.
+    listed = request("GET", "/api/rem/tasks").json()
+    view = listed["tasks"][0]
+    for shown in (view["active_run"], view["last_run"], *view["recent_runs"]):
+        assert shown["id"] == run["id"] and shown["thread_id"] == run["thread_id"]
+        assert not set(RUN_INTERNALS) & set(shown)
+    assert len(json.dumps(listed)) < 20_000
+    # Rem's own turns still read the whole run.
+    assert service.store.tasks()[0]["active_run"]["worker_traces"] == traces
+
+    # A client that has the current version gets a short answer instead.
+    version = listed["version"]
+    assert request("GET", f"/api/rem/tasks?known={version}").json() == {
+        "unchanged": True,
+        "version": version,
+    }
+    service._update(run["id"], phase_label="Second pass after review")
+    changed = request("GET", f"/api/rem/tasks?known={version}").json()
+    assert changed["version"] != version
+    assert changed["tasks"][0]["active_run"]["phase_label"] == "Second pass after review"
+
+    conversation = request("GET", "/api/rem/conversation").json()
+    assert request("GET", f"/api/rem/conversation?known={conversation['version']}").json() == {
+        "unchanged": True,
+        "version": conversation["version"],
+        "context_ready": conversation["context_ready"],
+    }
+
+    thread_path = f"/api/rem/threads/{run['thread_id']}"
+    thread = request("GET", thread_path).json()
+    assert request("GET", f"{thread_path}?known={thread['version']}").json()["unchanged"] is True
+    service.store.append_thread(
+        run["thread_id"], {"id": "progress", "role": "assistant", "body": "Halfway"}
+    )
+    grown = request("GET", f"{thread_path}?known={thread['version']}").json()
+    assert grown["messages"][-1]["body"] == "Halfway"
+    assert grown["version"] != thread["version"]

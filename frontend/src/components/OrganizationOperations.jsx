@@ -1,6 +1,6 @@
 import { useState } from "react";
 import OrganizationExecutionSettings from "./OrganizationExecutionSettings.jsx";
-import { formatUsd, organizationRequest, transcriptEntries } from "../lib/organizations.js";
+import { formatUsd, organizationRequest, transcriptEntries, runProvenance } from "../lib/organizations.js";
 import ConfirmButton from "./OrganizationConfirm.jsx";
 
 const Field = ({ label, children }) => <label className="org-field"><span>{label}</span>{children}</label>;
@@ -54,6 +54,25 @@ export default function OrganizationOperations({ organization, busy, onAction, o
   </section>;
 }
 
+function RunInput({ organization, task, attempt }) {
+  const [record, setRecord] = useState(null);
+  const [error, setError] = useState("");
+  async function load() {
+    setError("");
+    try { setRecord(await organizationRequest("", "run_input", organization.id, { taskId: task.id, turnId: attempt.id })); }
+    catch (failure) { setError(failure.message); }
+  }
+  if (!record) return <><button className="org-button" type="button" onClick={load}>Show input</button>{error && <span role="alert"> {error}</span>}</>;
+  const { input } = record;
+  return <div className="org-transcript" role="region" aria-label="Run input" tabIndex={0}>
+    <p className={record.matchesRecord ? "org-notice-text" : "org-warning-text"}>{record.matchesRecord ? "Matches this run's fingerprint." : "Doesn't match this run's fingerprint; the stored input may have changed."}</p>
+    <p className="org-note">{input.provider} · {input.model} · {input.permissionMode} · {input.workingDirectory}</p>
+    <details><summary>Instructions</summary><pre className="org-prose">{input.instructions}</pre></details>
+    <details><summary>Task and conversation</summary><pre className="org-prose">{input.messages.map(m => m.body).join("\n\n")}</pre></details>
+    <button className="org-button" type="button" onClick={() => setRecord(null)}>Close input</button>
+  </div>;
+}
+
 function RunTranscript({ organization, task, attempt }) {
   const [events, setEvents] = useState(null);
   const [error, setError] = useState("");
@@ -79,7 +98,7 @@ export function TaskRunControls({ organization, task, busy, onAction }) {
     {task.approvalRequired && task.approvedRevision == null && !["done", "cancelled"].includes(task.status) && <button className="org-button" disabled={busy} onClick={() => onAction("approve", { taskId: task.id, expectedRevision: task.revision })}>Approve plan</button>}
   </div>
     {task.status === "in_review" && !task.claim && <form onSubmit={e => e.preventDefault()} className="org-form"><Text label="Review reason" value={reason} onChange={setReason} required /><div className="org-actions">{[["accept", "Accept result"], ["revise", "Request revision"], ["reject", "Reject result"]].map(([decision, label]) => <button key={decision} className="org-button" disabled={busy || !reason.trim()} onClick={() => onAction("review", { taskId: task.id, expectedRevision: task.revision, decision, body: reason })}>{label}</button>)}</div></form>}
-    {!!attempts.length && <details open><summary>Runs and artifacts</summary>{attempts.map(a => <div key={a.id} className="org-attempt"><p><strong>{a.status}</strong> · {new Date(a.startedAt).toLocaleString()} · {a.elapsedSeconds?.toFixed(1) || "…"}s · {a.usage?.total_tokens != null ? `${a.usage.total_tokens.toLocaleString()} tokens` : "tokens unknown"} · {a.costUsd == null ? "cost not reported" : formatUsd(a.costUsd)}<br /><small>{a.workspacePath}{a.error && ` · ${a.error}`}</small></p><RunTranscript organization={organization} task={task} attempt={a} /></div>)}{task.artifacts?.map(a => <p key={a.id}>{a.kind}: {a.path}<br /><small>SHA-256 {a.sha256}</small></p>)}<form className="org-form" onSubmit={e => { e.preventDefault(); onAction("artifact_add", { taskId: task.id, ...artifact }); }}><Text label="Artifact file, absolute path" value={artifact.path} onChange={path => setArtifact(a => ({ ...a, path }))} required /><Field label="Result belongs to run"><select required value={artifact.attemptId} onChange={e => setArtifact(a => ({ ...a, attemptId: e.target.value }))}><option value="">Choose run</option>{attempts.map(a => <option key={a.id} value={a.id}>{new Date(a.startedAt).toLocaleString()} · {a.status}</option>)}</select></Field><Field label="Artifact kind"><select value={artifact.kind} onChange={e => setArtifact(a => ({ ...a, kind: e.target.value }))}>{["file", "diff", "test", "document"].map(kind => <option key={kind}>{kind}</option>)}</select></Field><button className="org-button" disabled={busy}>Attach evidence</button></form></details>}
+    {!!attempts.length && <details open><summary>Runs and artifacts</summary>{attempts.map(a => <div key={a.id} className="org-attempt"><p><strong>{a.status}</strong> · {new Date(a.startedAt).toLocaleString()} · {a.elapsedSeconds?.toFixed(1) || "…"}s · {a.usage?.total_tokens != null ? `${a.usage.total_tokens.toLocaleString()} tokens` : "tokens unknown"} · {a.costUsd == null ? "cost not reported" : formatUsd(a.costUsd)}<br /><small>{[...runProvenance(a), a.workspacePath].join(" · ")}{a.error && ` · ${a.error}`}</small></p><RunTranscript organization={organization} task={task} attempt={a} />{a.inputSha256 && <RunInput organization={organization} task={task} attempt={a} />}</div>)}{task.artifacts?.map(a => <p key={a.id}>{a.kind}: {a.path}<br /><small>SHA-256 {a.sha256}</small></p>)}<form className="org-form" onSubmit={e => { e.preventDefault(); onAction("artifact_add", { taskId: task.id, ...artifact }); }}><Text label="Artifact file, absolute path" value={artifact.path} onChange={path => setArtifact(a => ({ ...a, path }))} required /><Field label="Result belongs to run"><select required value={artifact.attemptId} onChange={e => setArtifact(a => ({ ...a, attemptId: e.target.value }))}><option value="">Choose run</option>{attempts.map(a => <option key={a.id} value={a.id}>{new Date(a.startedAt).toLocaleString()} · {a.status}</option>)}</select></Field><Field label="Artifact kind"><select value={artifact.kind} onChange={e => setArtifact(a => ({ ...a, kind: e.target.value }))}>{["file", "diff", "test", "document"].map(kind => <option key={kind}>{kind}</option>)}</select></Field><button className="org-button" disabled={busy}>Attach evidence</button></form></details>}
     {task.workflowContract && <><button className="org-button" onClick={async () => { try { setPreview(await organizationRequest("", "workflow_preview", organization.id, { taskId: task.id })); setError(""); } catch (failure) { setError(failure.message); } }}>Validate workflow contract</button>{preview && <p role="status">Workflow compiled. {preview.preflightReady ? "Preflight passed." : "Preflight found missing resources."}<br /><small>IR SHA-256 {preview.irSha256}</small>{preview.preflightDiagnostics?.map((message, i) => <span key={i}>{message}</span>)}</p>}{preview && <><p className="org-note">Required grants: {preview.requiredResources?.join(", ")}</p><button className="org-button org-primary" disabled={busy || !!task.claim || !preview.preflightReady} onClick={() => onAction("workflow_launch", { taskId: task.id, expectedRevision: task.revision, irSha256: preview.irSha256 })}>Authorize workflow execution</button><p className="org-note">Queues this compiled workflow for execution when the organization is running. Changes to its source or contract require new authorization.</p></>}{error && <p role="alert">{error}</p>}</>}
   </section>;
 }

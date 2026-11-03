@@ -9,6 +9,11 @@ Changes since the `v0.4.0` tag.
 
 ### Added
 
+- Raticode Mobile can let Rem read the screen you're looking at for one voice
+  request, when you turn that on. The text is used for that reply only and isn't
+  saved; Rem's answer is kept like any reply. Whatever the AI returns, a reply
+  that saw a screen only answers: it never starts or changes tasks, saves
+  memories, sends files or makes phone cards.
 - Pictures and videos Rem sends show right in its chat, on the desktop and the
   phone. Click or tap a picture to see it large, or a video to play it. Web
   images in chat open large too, with a button for the browser.
@@ -28,6 +33,10 @@ Changes since the `v0.4.0` tag.
   keys, and Raticode's own data are sent only when your message names the
   exact path.
   Paired phones receive these files too.
+- Rem can send files a task listed by folder and name, such as "Screenshots are
+  in `/dir/`:" followed by the file names, instead of saying their paths aren't in
+  your conversation. When none of the files can be sent, Rem no longer says
+  "Here they are" above the reasons.
 - When you ask Rem to send something it first has to find or make, such as "Send
   me a video", the file now arrives with the task's update when it finishes,
   instead of waiting for you to ask again. A phone that asked gets it too. It
@@ -50,10 +59,13 @@ Changes since the `v0.4.0` tag.
   permissions menu, when you start a thread. The other computer opts in under
   Paired devices, uses its own projects and sign-ins, and streams its progress
   back. Turns sent from your phone in that thread run there too.
+- Rem is no longer experimental. Its home is in the activity rail for
+  everyone, with no Feature Preview switch. If you hid Rem from the sidebar,
+  it stays hidden until you show it again in Settings > Plugins.
 - Feature Preview in Developer settings has a switch for every experimental
-  feature: Rem home, Swarms, Organizations, Second Brain, and phone and desktop
-  pairing. Features that are off are hidden everywhere else. Organizations and
-  pairing no longer need an environment variable at launch.
+  feature: Swarms, Organizations, Second Brain, and phone and desktop pairing.
+  Features that are off are hidden everywhere else. Organizations and pairing
+  no longer need an environment variable at launch.
 - Rem's chat can use its own provider, model and effort in Settings > Rem, so
   a fast model answers in chat while tasks and threads keep a stronger one.
 - Claude Code replies appear word by word in Rem threads instead of all at once.
@@ -61,8 +73,26 @@ Changes since the `v0.4.0` tag.
   found, with titles and thumbnails, plus video cards for YouTube links. Rem is
   told to show real images from pages it read when they help.
 
+### Changed
+
+- Release checks and candidate builds now run on pushes to `stage` instead of
+  `main`. When a candidate is ready, squash merge `stage` into `main` and tag the
+  squash commit; publishing checks that it has exactly the candidate's files.
+  A signing environment set up for `main` needs its branch rule changed to `stage`.
+
 ### Fixed
 
+- Tapping a file link in a Rem reply's Details on the phone fetches the file,
+  instead of saying the link isn't in the message. A file link in Rem's chat
+  also opens files outside open projects, the same files Rem can attach; credential
+  stores, secret-looking files and Raticode's own data still stay on the desktop.
+- A paired phone no longer gets stuck unable to reconnect until Raticode Mobile
+  is reinstalled. When the desktop turned down something the phone had queued,
+  such as a download whose file expired while the phone slept, it hung up
+  instead of answering, and the phone sent the same request again on every
+  reconnect. The desktop now answers, and the phone drops that request and says
+  why. A phone that is stuck this way recovers once the desktop is updated, with
+  no reinstall or new pairing.
 - A workflow run can't be resumed twice at once. The desktop, a paired phone
   and `gof` used to be able to start the same resume together and redo finished
   work. A crash never leaves a run unable to resume.
@@ -82,6 +112,9 @@ Changes since the `v0.4.0` tag.
   Raticode, agents, swarms or `git worktree` in a terminal, and when commits or
   staged changes land. History refreshes while it is open, and the refresh
   button still works.
+- Source control History keeps commit text on the left and the branch graph on
+  the right, so a wide graph no longer cuts the text off. The text gets about
+  two thirds of the panel, and a scrollbar under the graph shows the rest.
 - Pairing another computer has its own choice in Pair a device, with clear steps
   to create an invitation link on one computer and paste it on the other.
 - Paired desktops work in both directions without typing an address, keep each

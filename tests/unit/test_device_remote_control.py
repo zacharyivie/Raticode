@@ -2,8 +2,6 @@
 
 from typing import Any
 
-import pytest
-
 from gofer.core.approvals import ApprovalRequest, ApprovalStore
 from gofer.devices.remote_control import swarm_wire_id
 from gofer.devices.workspace import resource_options
@@ -38,8 +36,10 @@ def test_polling_requests_never_exhaust_the_lifetime_inbox(application, monkeypa
     before = db.execute(replies, (peer,)).fetchone()[0]
     app.handle(peer, duplicate)
     assert db.execute(replies, (peer,)).fetchone()[0] == before
-    with pytest.raises(ValueError, match="sequence_conflict"):
-        app.handle(peer, request("catalog.request", 20))
+    reused = request("catalog.request", 20)
+    [refusal] = app.handle(peer, reused)
+    assert refusal["type"] == "error" and refusal["request_id"] == reused["request_id"]
+    assert refusal["payload"]["code"] == "conflict"
 
 
 def test_resources_change_only_on_explicit_phone_choice(application, tmp_path):

@@ -48,14 +48,32 @@ def company(manager, tmp_path) -> Any:
 
 
 def call(manager, org, action, actor="Rem:test-thread", **params) -> Any:
-    # Starting a company is the user's decision; Rem only requests it.
-    if action == "control" and params.get("state") == "running":
+    # Starting, approving plans and scheduling are the user's decisions; Rem only requests them.
+    if (action == "control" and params.get("state") == "running") or action in {
+        "approve",
+        "review",
+        "routine_save",
+        "workflow_launch",
+        "webhook_save",
+    }:
         actor = "user"
-    return manager.call(
+    result = manager.call(
         org["projectRoot"],
         actor,
         {"organizationId": org["id"], "action": action, "params": params},
     )
+    if action in {"configure", "restore"} and result.get("needsUserConsent"):
+        # These tests cover configuration behavior; consent has its own tests.
+        result = manager.call(
+            org["projectRoot"],
+            "user",
+            {
+                "organizationId": org["id"],
+                "action": "request_decide",
+                "params": {"requestId": result["requestId"], "decision": "approve"},
+            },
+        )
+    return result
 
 
 def employee_call(manager, org, action, eid="builder", **params) -> Any:
@@ -561,7 +579,7 @@ def test_portable_runtime_settings_roundtrip_without_local_resources(manager, tm
     org = company(manager, tmp_path)
     config = org["config"]
     config["employees"][0].update(
-        provider="claude_code", permissionMode="default", monthlyTurnLimit=9, heartbeatSeconds=90
+        provider="claude_code", permissionMode="default", monthlyTurnLimit=9, heartbeatSeconds=900
     )
     exported = export_package(config, [])
     assert ".raticode.yaml" in exported
@@ -569,7 +587,7 @@ def test_portable_runtime_settings_roundtrip_without_local_resources(manager, tm
     employee = imported["config"]["employees"][0]
     assert employee["provider"] == "claude_code"
     assert employee["monthlyTurnLimit"] == 9
-    assert employee["heartbeatSeconds"] == 90
+    assert employee["heartbeatSeconds"] == 900
     assert imported["config"]["remSecondBrain"] == {}
 
 

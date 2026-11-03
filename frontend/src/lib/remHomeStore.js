@@ -31,6 +31,12 @@ let contextPending = Promise.resolve();
 const mirroredThreads = new Map();
 const threadSyncPending = new Map();
 const finishedThreadVersions = new Map();
+// Content versions of what this window last applied. The backend answers
+// "unchanged" for a matching version, so a poll while nothing happens downloads,
+// parses and re-renders nothing. Older backends send no version.
+let versions = { conversation: "", tasks: "" };
+const threadVersions = new Map();
+const withVersion = (path, version) => version ? `${path}?known=${encodeURIComponent(version)}` : path;
 // Task threads last seen running, so a finish between polls still counts as completion.
 const runningThreads = new Set();
 const clearedThreads = new Set();
@@ -96,10 +102,12 @@ async function syncContext() {
 }
 function setContextIssue(contextIssue) { if (state.contextIssue !== contextIssue) set({ contextIssue }); }
 
-export function syncRemThread(threadId) {
+// `poll` marks the routine refresh: an unchanged thread then costs nothing and
+// isn't announced again. Opening a thread always delivers its snapshot.
+export function syncRemThread(threadId, { poll = false } = {}) {
   // Serialize reads and writes so a slow active snapshot cannot overwrite completion.
   const previous = threadSyncPending.get(threadId) || Promise.resolve();
-  const result = previous.catch(() => {}).then(() => syncThreadSnapshot(threadId));
+  const result = previous.catch(() => {}).then(() => syncThreadSnapshot(threadId, poll));
   threadSyncPending.set(threadId, result);
   void result.finally(() => {
     if (threadSyncPending.get(threadId) === result) threadSyncPending.delete(threadId);
@@ -107,17 +115,21 @@ export function syncRemThread(threadId) {
   return result;
 }
 
-async function syncThreadSnapshot(threadId) {
+async function syncThreadSnapshot(threadId, poll) {
   const generation = historyGeneration;
   if (state.resetting || clearedThreads.has(threadId)) return null;
-  const remote = await request(`/threads/${encodeURIComponent(threadId)}`);
+  const { version = "", ...remote } = await request(withVersion(`/threads/${encodeURIComponent(threadId)}`, poll ? threadVersions.get(threadId) : ""));
   if (generation !== historyGeneration || state.resetting) return null;
+  if (remote.unchanged) return null;
   if (!remote.metadata) return null;
   const fingerprint = JSON.stringify(remote);
   const storage = window.localStorage;
   const metaKey = `gofer-flow-chat-thread-meta:${threadId}`;
   const saved = () => { try { return JSON.parse(storage.getItem(metaKey) || "null"); } catch { return null; } };
   if (mirroredThreads.get(threadId) === fingerprint) {
+    if (version) threadVersions.set(threadId, version);
+    // Everything here already has this snapshot; only a newly opened pane needs it.
+    if (poll) return null;
     // A newly mounted thread pane still needs the transcript and terminal state.
     const detail = { ...remote, metadata: mergeTaskThreadMetadata(saved(), remote.metadata) };
     window.dispatchEvent(new CustomEvent("gofer:device-thread-sync", { detail }));
@@ -151,6 +163,8 @@ async function syncThreadSnapshot(threadId) {
   const entry = threadIndexEntry(metadata);
   storage.setItem("gofer-flow-chat-threads", JSON.stringify([entry, ...index.filter(item => item.id !== threadId)]));
   mirroredThreads.set(threadId, fingerprint);
+  if (version) threadVersions.set(threadId, version);
+  else threadVersions.delete(threadId);
   if (remote.running) runningThreads.add(threadId);
   else runningThreads.delete(threadId);
   const detail = { ...remote, metadata, completed };
@@ -165,27 +179,38 @@ export async function refreshRemHome() {
     // Context is sent when it changes, once a minute, and before each command,
     // not on every poll.
     if (!configuredContext) await syncContext();
-    const [conversation, tasks] = await Promise.all([request("/conversation"), request("/tasks")]);
+    const [conversation, tasks] = await Promise.all([
+      request(withVersion("/conversation", versions.conversation)),
+      request(withVersion("/tasks", versions.tasks)),
+    ]);
     if (state.fixture || state.resetting || generation !== historyGeneration) return;
+    versions = { conversation: conversation.version || "", tasks: tasks.version || "" };
     // A restarted backend lost the context; queued tasks wait until it's sent again.
     if (conversation.context_ready === false && configuredContext) { configuredContext = ""; void syncContext(); }
     const previousTasks = state.status === "ready" ? state.tasks : null;
-    set(current => ({
-      ...current,
-      status: "ready",
-      error: "",
-      conversation: conversation.conversation ?? current.conversation,
-      // Keep optimistic messages until the server reports their request.
-      messages: mergeMessages(conversation.messages ?? [], current.messages),
-      tasks: tasks.tasks ?? [],
-    }));
-    notifyFinishedRuns(previousTasks, tasks.tasks ?? []);
+    if (conversation.unchanged && tasks.unchanged) {
+      // Nothing re-renders unless an earlier failed poll needs clearing.
+      if (state.status !== "ready" || state.error) set({ status: "ready", error: "" });
+    } else {
+      set(current => ({
+        ...current,
+        status: "ready",
+        error: "",
+        ...(conversation.unchanged ? {} : {
+          conversation: conversation.conversation ?? current.conversation,
+          // Keep optimistic messages until the server reports their request.
+          messages: mergeMessages(conversation.messages ?? [], current.messages),
+        }),
+        ...(tasks.unchanged ? {} : { tasks: tasks.tasks ?? [] }),
+      }));
+      if (!tasks.unchanged) notifyFinishedRuns(previousTasks, tasks.tasks ?? []);
+    }
     // Include finished runs so the final reply and unread state reach the
     // thread list even when a run completes between polls. Runs come newest
     // first, and a thread reused by a later run keeps that run's version, so an
     // older finished run can't mark a running thread as already synced.
     const threads = new Map();
-    for (const task of tasks.tasks || []) {
+    for (const task of state.tasks) {
       for (const run of [task.active_run, task.last_run, ...(task.recent_runs || [])].filter(Boolean)) {
         const version = run.finished_at ? JSON.stringify([run.state, run.epoch, run.finished_at]) : null;
         for (const id of [run.thread_id, run.verification_thread_id].filter(Boolean)) if (!threads.has(id)) threads.set(id, version);
@@ -193,7 +218,7 @@ export async function refreshRemHome() {
     }
     await Promise.allSettled([...threads].map(async ([id, version]) => {
       if (version && finishedThreadVersions.get(id) === version) return;
-      await syncRemThread(id);
+      await syncRemThread(id, { poll: true });
       if (version) finishedThreadVersions.set(id, version);
       else finishedThreadVersions.delete(id);
     }));
@@ -225,8 +250,14 @@ function notifyFinishedRuns(previous, tasks) {
 }
 function mergeMessages(server, current) {
   const known = new Set(server.map(message => message.request_id).filter(Boolean));
+  // Messages the server didn't change keep their objects, so their rows stay cached.
+  const previous = new Map(current.filter(message => !message.pending && !message.failed).map(message => [message.id, message]));
+  const merged = server.map(message => {
+    const old = previous.get(message.id);
+    return old && JSON.stringify(old) === JSON.stringify(message) ? old : message;
+  });
   // Unsent messages stay, so "Try again" is still there after the next poll.
-  return [...server, ...current.filter(message => (message.pending || message.failed) && !known.has(message.request_id))];
+  return [...merged, ...current.filter(message => (message.pending || message.failed) && !known.has(message.request_id))];
 }
 
 // Starts polling while a Rem surface is mounted. Event replay can replace this
@@ -433,12 +464,14 @@ export async function clearRemHistory() {
       await repository.remove(id);
       storage.removeItem(`gofer-flow-chat-thread-meta:${id}`);
       mirroredThreads.delete(id);
+      threadVersions.delete(id);
       finishedThreadVersions.delete(id);
       runningThreads.delete(id);
       window.dispatchEvent(new CustomEvent("gofer:device-thread-deleted", { detail: { id } }));
     }
     storage.setItem("gofer-flow-chat-threads", JSON.stringify(index.filter(entry => !removed.has(entry.id))));
     configuredContext = "";
+    versions = { conversation: "", tasks: "" };
     contextPending = Promise.resolve();
     pendingClear = null;
     storage.removeItem("gofer-flow-rem-reset-pending");
@@ -468,12 +501,13 @@ export async function openRemThread(threadId) {
   window.dispatchEvent(new CustomEvent("gofer:rem-open-thread", { detail: { threadId } }));
 }
 
-export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; emit(); }
+export function resetRemHomeStore() { ++historyGeneration; stopPolling?.(); stopPolling = null; state = initialState(); configuredContext = ""; versions = { conversation: "", tasks: "" }; threadVersions.clear(); mirroredThreads.clear(); finishedThreadVersions.clear(); runningThreads.clear(); clearedThreads.clear(); pendingClear = null; emit(); }
 // Explicit fixtures for tests, the visual harness and development previews.
 // Production never seeds sample tasks or messages.
 export async function loadRemHomeFixture(scene = "busy") {
   stopPolling?.();
   stopPolling = null;
+  versions = { conversation: "", tasks: "" };
   const sample = await import("./remHomeSample.js");
   set({ ...initialState(), status: "ready", fixture: true, ...sample.remHomeScene(scene) });
 }

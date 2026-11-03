@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { historyByDate, teamMembers, teamGroups, projectPeople, employeeTree, reportingHierarchy, eligibleManagers, configurationChanges, newEmployee, taskGroups, changeLabel, activityEntries, actorLabel, formatUsd, usageCost, plural, initials, relativeDay, employeeStatus, attentionSummary, monthUsage, transcriptEntries, reportsCost, dangerousPermission } from "./organizations.js";
+import { historyByDate, teamMembers, teamGroups, projectPeople, employeeTree, reportingHierarchy, eligibleManagers, configurationChanges, newEmployee, taskGroups, changeLabel, activityEntries, actorLabel, formatUsd, usageCost, plural, initials, relativeDay, employeeStatus, attentionSummary, monthUsage, transcriptEntries, reportsCost, dangerousPermission, pendingRequests, runProvenance } from "./organizations.js";
 
 test("configuration revisions group by local calendar date, retaining revision order", () => {
   const history = [
@@ -143,7 +143,7 @@ test("employees with blocked or reviewable work show that they need the user", (
 });
 test("the attention summary counts what waits for the user, including Rem's requests", () => {
   const tasks = [{ status: "blocked" }, { status: "in_review" }, { status: "todo", approvalRequired: true, approvedRevision: null }, { status: "done", approvalRequired: true, approvedRevision: null }];
-  const runtime = { consentRequests: { a: { status: "pending" }, b: { status: "declined" } } };
+  const runtime = { consentRequests: { a: { status: "pending", at: new Date().toISOString() }, b: { status: "declined" } } };
   assert.deepEqual(attentionSummary(tasks, runtime), { blocked: 1, review: 1, approval: 1, requests: 1, running: 0 });
 });
 test("monthly usage reports runs and tokens, and unknown cost when no run reported it", () => {
@@ -171,4 +171,23 @@ test("consent and worktree events read as plain activity", () => {
     { sequence: 2, kind: "worktree_created", actor: "system", at: "2026-10-31T00:00:01Z", payload: { taskId: "t", branch: "org/build-1234" } },
   ], [{ id: "t", title: "Build" }]);
   assert.deepEqual(entries.map(e => [e.text, e.detail]), [["Created a worktree for “Build”", "Branch org/build-1234"], ["Asked for your approval", "Start the organization"]]);
+});
+
+test("requests older than a day no longer show as waiting", () => {
+  const now = Date.parse("2026-11-02T12:00:00Z");
+  const runtime = { consentRequests: {
+    fresh: { id: "fresh", status: "pending", at: "2026-11-02T08:00:00Z" },
+    stale: { id: "stale", status: "pending", at: "2026-10-31T08:00:00Z" },
+    done: { id: "done", status: "approved", at: "2026-11-02T09:00:00Z" },
+  } };
+  assert.deepEqual(pendingRequests(runtime, now).map(r => r.id), ["fresh"]);
+});
+test("run records show what ran and where the work ended", () => {
+  assert.deepEqual(runProvenance({ provider: "codex", model: "cli-default", permissionMode: "workspace-write", isolation: "worktree", headCommit: "0123456789abcdef", uncommittedChanges: true, inputSha256: "f".repeat(64) }), ["codex · provider default", "workspace-write", "own worktree", "ended at 0123456789 + uncommitted changes", "input ffffffffffff"]);
+  assert.deepEqual(runProvenance({}), []);
+});
+test("automatic updates name the tasks that changed", () => {
+  const [entry] = activityEntries([{ sequence: 1, kind: "state_updated", actor: "system", at: "2026-11-02T00:00:00Z", payload: { source: "dispatch", taskChanges: [{ taskId: "t", title: "Build", from: "todo", to: "blocked" }] } }]);
+  assert.equal(entry.text, "Updated work automatically");
+  assert.equal(entry.detail, "“Build”: To do → Blocked");
 });

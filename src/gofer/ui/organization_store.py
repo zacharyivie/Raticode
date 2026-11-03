@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import subprocess
@@ -71,6 +72,26 @@ DEFAULT_CHILD_TASKS_PER_TURN = 5
 DEFAULT_DELEGATION_DEPTH = 3
 # Modes that bypass the provider sandbox or its approvals. Rem needs the user's consent.
 DANGEROUS_PERMISSION_MODES = frozenset({"danger-full-access", "bypassPermissions"})
+
+
+# New or changed heartbeats can't wake an employee more often than this. Saved shorter
+# values keep working until they are edited, so existing configurations still load.
+MIN_HEARTBEAT_SECONDS = 900
+
+
+def check_heartbeats(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> None:
+    previous = {e.get("id"): e.get("heartbeatSeconds") or 0 for e in before}
+    for employee in after:
+        beat = employee.get("heartbeatSeconds") or 0
+        if 0 < beat < MIN_HEARTBEAT_SECONDS and previous.get(employee.get("id")) != beat:
+            raise ValueError(
+                f"{employee.get('name') or employee.get('id')}'s heartbeat must be at least "
+                "15 minutes (900 seconds) apart"
+            )
+
+
+def event_digest(previous: str, oid: str, at: str, actor: str, kind: str, body: str) -> str:
+    return hashlib.sha256(json.dumps([previous, oid, at, actor, kind, body]).encode()).hexdigest()
 
 
 def now() -> str:
@@ -341,6 +362,7 @@ class Task(BaseModel):
 class OrganizationStore:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "organizations.sqlite3"
+        self._anchor_heads: dict[str, int] = {}
         data_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript("""
@@ -379,7 +401,24 @@ class OrganizationStore:
                     kind TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS org_events_index
                     ON organization_events(organization, sequence);
+                CREATE TRIGGER IF NOT EXISTS events_no_update
+                    BEFORE UPDATE ON organization_events BEGIN
+                    SELECT RAISE(ABORT, 'Organization activity is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS events_no_delete
+                    BEFORE DELETE ON organization_events BEGIN
+                    SELECT RAISE(ABORT, 'Organization activity is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS comments_no_update
+                    BEFORE UPDATE ON organization_comments BEGIN
+                    SELECT RAISE(ABORT, 'Task conversations are append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS comments_no_delete
+                    BEFORE DELETE ON organization_comments BEGIN
+                    SELECT RAISE(ABORT, 'Task conversations are append-only'); END;
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(organization_events)")}
+            # Events written before the chain existed keep NULL digests and are reported as such.
+            for column in ("digest", "previous_digest"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE organization_events ADD COLUMN {column} TEXT")
 
         self._migrate_project_ownership()
         with self.connect() as db:
@@ -640,6 +679,14 @@ class OrganizationStore:
                     "WHERE body != excluded.body",
                     (oid, kind, key, json.dumps(value, sort_keys=True)),
                 )
+        # Idempotency records are the only kind that expires; other records are permanent.
+        if "requests" in runtime:
+            kept = list(runtime["requests"])
+            db.execute(
+                "DELETE FROM organization_records WHERE organization=? AND kind='requests' "
+                f"AND id NOT IN ({','.join('?' * len(kept))})",
+                (oid, *kept),
+            )
         body = json.dumps({k: v for k, v in runtime.items() if k not in collections})
         db.execute(
             "UPDATE organizations SET runtime=? WHERE id=? AND runtime != ?", (body, oid, body)
@@ -655,6 +702,7 @@ class OrganizationStore:
     ) -> dict[str, Any]:
         config = {"projectRoots": [project] if project else [], **config}
         validated = OrganizationConfig.model_validate(config).model_dump()
+        check_heartbeats([], validated["employees"])
         self._warm_project_ownership(validated)
         oid = str(uuid4())
         work = [Task.model_validate(t).model_dump() for t in tasks or []]
@@ -681,6 +729,7 @@ class OrganizationStore:
         actor: str,
         reason: str,
         restored_from: int | None = None,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
         validated = OrganizationConfig.model_validate(config).model_dump()
         self._warm_project_ownership(validated)
@@ -689,6 +738,8 @@ class OrganizationStore:
             current = self._get(db, project, oid)
             if current["runtime"].get("archived"):
                 raise ValueError("Restore this archived organization before changing it")
+            if restored_from is None:
+                check_heartbeats(current["config"]["employees"], validated["employees"])
             if type(expected) is not int or current["revision"] != expected:
                 raise OrganizationConflict(
                     "Configuration changed. Reload before saving or restoring."
@@ -696,6 +747,10 @@ class OrganizationStore:
             if "projectRoots" not in config:
                 validated["projectRoots"] = current["config"].get("projectRoots", [])
             self._set_project_ownership(db, oid, validated)
+            if dry_run:
+                # Validation only, so a request that would fail is refused before it waits.
+                db.rollback()
+                return current
             if "packageFiles" not in config:
                 validated["packageFiles"] = current["config"].get("packageFiles", {})
             runtime = current["runtime"]
@@ -912,23 +967,182 @@ class OrganizationStore:
             db.execute("BEGIN IMMEDIATE")
             organization = self._get(db, project, oid)
             before = json.dumps(organization["runtime"])
+            statuses = {t["id"]: t["status"] for t in organization["runtime"]["tasks"]}
             payload = callback(organization)
             if before == json.dumps(organization["runtime"]) and not payload:
                 return organization
             self._write_runtime(db, oid, organization["runtime"])
-            if payload:
-                self.event(db, oid, actor, kind, payload)
+            # Every state change leaves an event, including scheduler-only updates.
+            changes = [
+                {
+                    "taskId": t["id"],
+                    "title": t["title"][:200],
+                    "from": statuses.get(t["id"]),
+                    "to": t["status"],
+                }
+                for t in organization["runtime"]["tasks"]
+                if statuses.get(t["id"]) != t["status"]
+            ]
+            if not payload:
+                kind, payload = "state_updated", {"source": kind}
+            if changes and "taskChanges" not in payload:
+                payload = {**payload, "taskChanges": changes}
+            self.event(db, oid, actor, kind, payload)
         return organization
 
     @staticmethod
     def event(
         db: sqlite3.Connection, oid: str, actor: str, kind: str, payload: dict[str, Any]
     ) -> None:
+        """Append an event linked to the organization's previous event by hash."""
+        if not db.in_transaction:
+            db.execute("BEGIN IMMEDIATE")
+        previous = db.execute(
+            "SELECT digest FROM organization_events WHERE organization=? AND digest IS NOT NULL "
+            "ORDER BY sequence DESC LIMIT 1",
+            (oid,),
+        ).fetchone()
+        previous_digest = previous[0] if previous else ""
+        at, body = now(), json.dumps(payload)
         db.execute(
-            "INSERT INTO organization_events(organization, at, actor, kind, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (oid, now(), actor, kind, json.dumps(payload)),
+            "INSERT INTO organization_events"
+            "(organization, at, actor, kind, payload, digest, previous_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                oid,
+                at,
+                actor,
+                kind,
+                body,
+                event_digest(previous_digest, oid, at, actor, kind, body),
+                previous_digest,
+            ),
         )
+
+    @property
+    def anchor_path(self) -> Path:
+        # Outside the database, so rebuilding or truncating the database can be noticed.
+        return self.path.parent / "organization-audit-anchors.jsonl"
+
+    def _anchors(self, oid: str) -> list[dict[str, Any]]:
+        try:
+            lines = self.anchor_path.read_text().splitlines()
+        except OSError:
+            return []
+        anchors = []
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict) and item.get("organization") == oid:
+                anchors.append(item)
+        return anchors
+
+    def anchor(self, oid: str) -> dict[str, Any] | None:
+        """Append the organization's latest event hash to the anchor file if it moved."""
+        with self.connect() as db:
+            head = db.execute(
+                "SELECT sequence, digest FROM organization_events WHERE organization=? "
+                "AND digest IS NOT NULL ORDER BY sequence DESC LIMIT 1",
+                (oid,),
+            ).fetchone()
+        if head is None:
+            return None
+        cached = self._anchor_heads.get(oid)
+        if cached is None:
+            known = self._anchors(oid)
+            cached = known[-1]["sequence"] if known else 0
+        if cached == head["sequence"]:
+            self._anchor_heads[oid] = cached
+            return None
+        item = {
+            "organization": oid,
+            "sequence": head["sequence"],
+            "digest": head["digest"],
+            "at": now(),
+        }
+        descriptor = os.open(self.anchor_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(descriptor, "a") as handle:
+            handle.write(json.dumps(item) + "\n")
+        self._anchor_heads[oid] = head["sequence"]
+        return item
+
+    def verify_audit(self, oid: str) -> dict[str, Any]:
+        """Check the configuration history chain and the activity chain end to end."""
+        try:
+            revisions = len(self.history("", oid))
+            history: dict[str, Any] = {"ok": True, "revisions": revisions}
+        except ValueError as exc:
+            history = {"ok": False, "error": str(exc)}
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT sequence, at, actor, kind, payload, digest, previous_digest "
+                "FROM organization_events WHERE organization=? ORDER BY sequence",
+                (oid,),
+            ).fetchall()
+        legacy, chained, expected, broken = 0, 0, "", None
+        for row in rows:
+            if row["digest"] is None:
+                if chained:
+                    broken = {
+                        "sequence": row["sequence"],
+                        "reason": "Unlinked event after the chain began",
+                    }
+                    break
+                legacy += 1
+                continue
+            digest = event_digest(
+                row["previous_digest"] or "",
+                oid,
+                row["at"],
+                row["actor"],
+                row["kind"],
+                row["payload"],
+            )
+            if (row["previous_digest"] or "") != expected or digest != row["digest"]:
+                broken = {"sequence": row["sequence"], "reason": "Event content or order changed"}
+                break
+            expected, chained = row["digest"], chained + 1
+        digests = {row["sequence"]: row["digest"] for row in rows}
+        newest = max(digests, default=0)
+        anchors = self._anchors(oid)
+        mismatch = next(
+            (
+                a
+                for a in anchors
+                if a.get("sequence", 0) > newest
+                or digests.get(a.get("sequence")) != a.get("digest")
+            ),
+            None,
+        )
+        anchored = {
+            "ok": mismatch is None,
+            "anchors": len(anchors),
+            **(
+                {
+                    "brokenAt": {
+                        "sequence": mismatch["sequence"],
+                        "reason": "Entries recorded by the anchor file are missing or changed",
+                    }
+                }
+                if mismatch
+                else {}
+            ),
+        }
+        return {
+            "history": history,
+            "anchors": anchored,
+            "activity": {
+                "ok": broken is None,
+                "events": len(rows),
+                "linked": chained,
+                "beforeLinking": legacy,
+                **({"brokenAt": broken} if broken else {}),
+            },
+            "ok": history["ok"] and broken is None and mismatch is None,
+            "checkedAt": now(),
+        }
 
     def events(self, project: str, oid: str, after: int = 0) -> list[dict[str, Any]]:
         self.get(project, oid)

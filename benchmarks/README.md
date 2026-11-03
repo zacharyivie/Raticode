@@ -32,7 +32,7 @@ The fixture mounts ten persistent text tabs. One holds 2,000,000 characters. It 
 
 For a before/after comparison, use the same benchmark files and dependencies in a separate checkout of the baseline commit. Alternate before and after process launches. The recorded results contain three runs per variant. Dynamic module URLs are incidental ephemeral loopback URLs. The split check opens a second pane and requires exactly two idle Git refreshes, keeping keyboard focus separate from visibility. Avatar checks capture all four poses at the requested device scale and at 100% and 150% zoom.
 
-`frontend/benchmarks/bundle-budget.js` enforces a 1,000,000-byte entry budget, 400,000-byte optional chunk budget, and 3,050,000-byte Monaco budget during the normal production build. All limits use uncompressed JavaScript bytes. The ordinary Vite warning is advisory; this plugin fails builds that exceed their budgets.
+`frontend/benchmarks/bundle-budget.js` enforces a 1,000,000-byte entry budget and a 3,050,000-byte Monaco budget during the normal production build. Other lazy chunks, including `App`, have no size limit. All limits use uncompressed JavaScript bytes. The ordinary Vite warning is advisory; this plugin fails builds that exceed their budgets.
 
 `bash scripts/build-avatar-assets.sh` regenerates aligned 224 and 336 pixel delivery images using ImageMagick, preserving the original artwork and background filter.
 

@@ -58,6 +58,18 @@ IDs remain unchanged across a fresh TLS session. Repeated events with changed
 content and reused sequence numbers fail closed. Repeated operation IDs cannot
 start a second provider job. Dispatch claims serialize by thread.
 
+A request the desktop refuses is answered with an `error` event carrying its
+request ID, instead of only closing the session. This covers a conflict, an expired
+or unknown file, missing thread access, a full quota and a request this desktop
+version doesn't support. The phone keeps a request queued until an answer with its
+ID arrives and resends the queue on every connection, so a refusal that only ended
+the session blocked that phone on every reconnect. Where it can, the desktop records
+the refused event's ID first, so a resend gets the same answer and never runs.
+Conflicts can't be recorded and are answered again on each resend. Lost trust and a
+full outbox still end the session; the phone's next acknowledging sync frees the
+outbox. The backend logs only the fixed refusal code, at most every ten minutes per
+code for a session that ends.
+
 The dispatch boundary is persisted before entering ChatJobs. Restart marks an
 uncertain running request `outcome_unknown` instead of launching it again.
 Outbound desktop requests retain exact event bytes and retry on a fresh pinned

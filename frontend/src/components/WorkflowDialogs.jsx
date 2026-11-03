@@ -2,8 +2,8 @@ import { Download, FolderOpen, Loader2, RefreshCw, X } from "lucide-react";
 
 import { Dialog } from "./Dialog.jsx";
 
-// Workflow dialogs that open on demand. App.jsx loads them lazily to keep its
-// startup chunk within budget.
+// Workflow dialogs that open on demand. App.jsx loads them lazily so they
+// aren't part of the code that loads at startup.
 
 export function WorkflowHistoryDialog({
   diff,

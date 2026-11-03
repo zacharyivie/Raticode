@@ -309,6 +309,29 @@ def test_a_chat_follow_up_asking_for_the_file_attaches_it(home: RemHome, video: 
     assert update["files"][0]["name"] == "rem-sample.mp4" and update["reply_to"] == "send"
 
 
+def test_an_update_whose_files_were_all_refused_does_not_claim_them(
+    home: RemHome, video: Path, outside: Path
+):
+    ask(
+        home,
+        "cat",
+        "Send me a picture of a cat",
+        {"reply": "Looking.", "tasks": [recipe(None, type="errand", send_files=True)]},
+    )
+    missing = outside / "cat.jpg"
+    update, _ = finish(
+        home,
+        latest_run(home, "Check the feature"),
+        f"I downloaded a cat photo and checked that it opens.\n\n**File:** `{missing}`",
+        {"summary": "A picture of a cat is attached.", "files": [str(missing)]},
+    )
+    assert update["body"] == (
+        "I downloaded a cat photo and checked that it opens.\n\n"
+        "I couldn’t attach cat.jpg: that file doesn’t exist."
+    )
+    assert "files" not in update
+
+
 def test_update_failure_is_logged_and_still_reports(
     home: RemHome, video: Path, caplog: pytest.LogCaptureFixture
 ):

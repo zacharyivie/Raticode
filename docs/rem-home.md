@@ -14,7 +14,7 @@ Edits stay local until you save. Escape closes an unchanged sheet but never disc
 
 ## Data the UI renders
 
-The store (`frontend/src/lib/remHomeStore.js`) polls every 2.5s while a Rem surface is mounted. An event stream can replace polling without changing the components. Every mutation sends a `request_id`. Edits also send `expected_revision`, and a 409 response keeps the draft and explains the conflict.
+The store (`frontend/src/lib/remHomeStore.js`) polls every 2.5s while a Rem surface is mounted. An event stream can replace polling without changing the components. `GET /api/rem/conversation`, `/tasks` and `/threads/{id}` include a content `version`. A poll that sends it back as `?known=<version>` gets `{ unchanged: true, version }` while nothing changed (the conversation also keeps `context_ready`), so an idle poll downloads, parses and re-renders nothing. Task lists carry run summaries: `worker_traces`, `review_traces`, `config`, `recipe`, `worker_result`, `review_verdict` and `previous_success` stay on the server (`RUN_INTERNALS` in `rem_home_store.py`). The draft is read only by the composer, and message rows are memoized, so typing doesn't re-render the conversation. Every mutation sends a `request_id`. Edits also send `expected_revision`, and a 409 response keeps the draft and explains the conflict.
 
 | Request | Body / response used by the UI |
 | --- | --- |

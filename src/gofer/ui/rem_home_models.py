@@ -382,6 +382,8 @@ class Decision(BaseModel):
     suggestions: list[Annotated[str, Field(max_length=300)]] = Field(
         default_factory=list, max_length=10
     )
+    # Cards for the phone that asked (rem_phone_actions); invalid ones are dropped, not fatal.
+    phone_actions: list[Any] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def suggested_criteria(self) -> Decision:

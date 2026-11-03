@@ -70,6 +70,14 @@ from gofer.ui.rem_home_worktree import (
     plan_worktree,
     release_worktree,
 )
+from gofer.ui.rem_phone_actions import PHONE_ACTIONS, clean_phone_actions
+from gofer.ui.rem_screen import (
+    MAX_WAITING,
+    SCREEN_GONE,
+    SCREEN_HELD,
+    SCREEN_RULES,
+    clean_screen,
+)
 from gofer.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -373,6 +381,28 @@ def names_path(request: str, *paths: str) -> bool:
     return False
 
 
+def listed_in_folder(records: str, path: Path) -> bool:
+    """Whether the records name this file's folder and, separately, its bare file name.
+
+    Workers often report "Screenshots are in `/dir/`:" followed by a list of names, so
+    the joined path never appears. A name that is only part of another path, such as
+    ``/elsewhere/a.png``, doesn't count, so Rem still can't pair a folder with a name
+    taken from somewhere else.
+    """
+    folder = str(path.parent)
+    if not names_path(records, folder, folder.rstrip(os.sep) + os.sep):
+        return False
+    start = records.find(path.name)
+    while path.name and start >= 0:
+        before = records[start - 1] if start else ""
+        if not (before.isalnum() or before in "._-~" + os.sep) and _PATH_END.match(
+            records, start + len(path.name)
+        ):
+            return True
+        start = records.find(path.name, start + 1)
+    return False
+
+
 def reply_files(
     paths: list[str],
     config: dict[str, Any],
@@ -385,7 +415,8 @@ def reply_files(
 
     Files in an open project or the Second Brain are sent as before. Any other file the
     account running Raticode can read is sent too, provided its exact path appears in
-    what Rem was given (``records``), so Rem never sends a path it guessed. Credential
+    what Rem was given (``records``), or its folder and its bare name both do
+    (``listed_in_folder``), so Rem never sends a path it guessed. Credential
     stores, secret-looking files, Raticode's own data and system folders also need the
     user's current message (``request``) to name the exact path, inside open folders too.
     Without ``records`` only the open folders are used. Paired phones read each file
@@ -422,7 +453,11 @@ def reply_files(
                     f"I couldn’t attach {name}: it isn’t in an open project or the Second Brain."
                 )
                 continue
-            if raw not in records and str(resolved) not in records:
+            if (
+                raw not in records
+                and str(resolved) not in records
+                and not listed_in_folder(records, path)
+            ):
                 refused.append(
                     f"I couldn’t attach {name}: its path isn’t in our conversation, so I won’t "
                     "guess at it. Send me the full path and I’ll attach it."
@@ -622,6 +657,8 @@ class RemHome:
         self.worker_backgrounds: dict[tuple[str, int], dict[str, Any]] = {}
         self.conversation_worker: threading.Thread | None = None
         self.conversation_cancel = threading.Event()
+        # Phone screen text waiting for its reply, by request ID. Memory only, used once.
+        self.screens: dict[str, dict[str, str]] = {}
         self.owned = False
         self.has_context = False
         self.resetting = False
@@ -969,9 +1006,19 @@ class RemHome:
         self.has_context = True
         return {"configured": True}
 
-    def submit_message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if set(payload) - {"request_id", "body", "attachments"}:
+    def submit_message(
+        self, payload: dict[str, Any], *, source: Literal["phone"] | None = None
+    ) -> dict[str, Any]:
+        """Queue a user message. ``source`` marks a paired phone's request, never set by the API.
+
+        A phone request may carry ``screen`` text for its reply only; it is kept in memory and the
+        stored message records just the app's name.
+        """
+        if set(payload) - {"request_id", "body", "attachments", "screen"}:
             raise ValueError("Unknown message fields")
+        if "screen" in payload and source != "phone":
+            raise ValueError("Only a paired phone can share its screen")
+        screen = clean_screen(payload["screen"]) if "screen" in payload else None
         text = payload.get("body", "")
         attachments = message_attachments(payload.get("attachments"), self.data_dir)
         if not isinstance(text, str) or not (text.strip() or attachments) or len(text) > 100000:
@@ -988,6 +1035,8 @@ class RemHome:
                 role="user",
                 request_id=payload["request_id"],
                 **({"attachments": attachments} if attachments else {}),
+                **({"source": source} if source else {}),
+                **({"screen_app": screen["app"]} if screen else {}),
             )
             conversation.update(
                 turn_state="replying",
@@ -998,7 +1047,23 @@ class RemHome:
             self.store.set_setting(db, "conversation", conversation)
             return {"accepted": True, "request_id": payload["request_id"]}
 
-        return self.store.command("message", payload, operation)
+        # The screen text is left out of the command record, which is stored.
+        stored = {k: v for k, v in payload.items() if k != "screen"}
+        if screen:
+            stored["screen_app"] = screen["app"]
+        if not screen:
+            return self.store.command("message", stored, operation)
+        # Ready before the message is queued, so the reply that picks it up finds it.
+        with self.lock:
+            self.screens[payload["request_id"]] = screen
+            while len(self.screens) > MAX_WAITING:
+                self.screens.pop(next(iter(self.screens)))
+        try:
+            return self.store.command("message", stored, operation)
+        except Exception:
+            with self.lock:
+                self.screens.pop(payload["request_id"], None)
+            raise
 
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         recipe = Recipe.model_validate({k: v for k, v in payload.items() if k != "request_id"})
@@ -1066,6 +1131,17 @@ class RemHome:
             current_request: dict[str, Any] = {"id": pending, "body": query}
             if incoming.get("attachments"):
                 current_request["attachments"] = attachment_context(incoming["attachments"])
+            # Only a paired phone's own request may get phone action cards back.
+            from_phone = incoming.get("source") == "phone"
+            if from_phone:
+                current_request["from_phone"] = True
+            # Shared screen text is used for this reply only, then forgotten.
+            with self.lock:
+                screen = self.screens.pop(pending, None)
+            if from_phone and screen:
+                current_request["screen"] = screen
+            elif incoming.get("screen_app"):
+                current_request["screen_unavailable"] = True
             recall_reader = RemRecall(self.store, config)
             recalled = recall_reader.gather(Recall(), query)
             recall_requests: list[dict[str, Any]] = [
@@ -1079,6 +1155,9 @@ class RemHome:
                 "You are Rem, Raticode's conversational companion. Reply naturally in one or two "
                 "short sentences. "
                 + REPLY_EXTRAS
+                + (" " + PHONE_ACTIONS if from_phone else "")
+                + (" " + SCREEN_RULES if "screen" in current_request else "")
+                + (" " + SCREEN_GONE if "screen_unavailable" in current_request else "")
                 + " You have no tools. Answer basic conversation and QA using only "
                 "the supplied context. Every requested action or substantive investigation must "
                 "be delegated as a task. Never claim an action happened. Never expand the user's "
@@ -1172,7 +1251,9 @@ class RemHome:
                 "Raticode attaches each file under your reply, so don't paste the paths into "
                 "the reply as well. "
                 "Return ONLY JSON {reply,details,suggestions:[],tasks:[],memories:[],"
-                "memory_changes:[],controls:[],files:[]} and no other fields. "
+                "memory_changes:[],controls:[],files:[]"
+                + (",phone_actions:[]" if from_phone else "")
+                + "} and no other fields. "
                 "Existing tasks can be discussed; do not create duplicates. "
                 "If more context is needed, instead return ONLY "
                 "{recall:{queries:[short search terms],threads:[{thread_id,before_message_id?}],"
@@ -1299,6 +1380,18 @@ class RemHome:
                 decision = Decision.model_validate(
                     self._generate(prompt, chat_config(config), self.conversation_cancel)
                 )
+            if "screen" in current_request:
+                # Screen text can carry instructions and private words. Whatever the model returned,
+                # a reply that saw it only answers: no new or changed work, memories, files, phone
+                # cards, details or suggestions, so nothing acts on the screen or keeps its text.
+                acted = bool(
+                    decision.tasks or decision.controls or decision.files or decision.phone_actions
+                )
+                decision.tasks, decision.controls, decision.files = [], [], []
+                decision.memories, decision.memory_changes, decision.phone_actions = [], [], []
+                decision.details, decision.suggestions = "", []
+                if acted:
+                    decision.reply = SCREEN_HELD
             delegation_context = {"source_message_id": pending, "recall_requests": recall_requests}
             self._turn_label(
                 "Starting a task"
@@ -1407,9 +1500,20 @@ class RemHome:
                 decision.files, config, records=prompt, request=query, data_dir=self.data_dir
             )
             if refused:
-                decision.reply = "\n\n".join([decision.reply, *refused])
+                # The reply was written expecting its files to arrive ("Here they are").
+                # When none did and it does nothing else, the refusals are the reply.
+                lead = (
+                    []
+                    if not files and not decision.tasks and not decision.controls
+                    else [decision.reply]
+                )
+                decision.reply = "\n\n".join([*lead, *refused])
             # reply_to lets a paired phone deliver files only for its own requests.
             file_extra: dict[str, Any] = {"files": files, "reply_to": pending} if files else {}
+            # The same tag limits phone action cards to the phone that asked.
+            actions = clean_phone_actions(decision.phone_actions) if from_phone else []
+            if actions:
+                file_extra.update(phone_actions=actions, reply_to=pending)
             # Every effect of one decision commits together. If any control or
             # task fails, nothing is applied and the user sees a single error.
             with self.store.connect() as db:
@@ -1520,18 +1624,23 @@ class RemHome:
                     )
                     message_extra.update(reply_extras(decision, chat_config(config), started))
                     message_extra.update(note)
+                    message_extra.update(file_extra)
                     self.store.message(
                         db,
                         decision.reply,
                         identity=f"reply-{pending}",
                         **message_extra,
-                        **file_extra,
                     )
                 elif file_extra:
-                    # Task replies are written with their runs; files get their own message.
+                    # Task replies are written with their runs; files and phone
+                    # actions get their own message.
                     self.store.message(
                         db,
-                        "Here’s what you asked for." if len(files) == 1 else "Here are the files.",
+                        "Ready on your phone."
+                        if not files
+                        else "Here’s what you asked for."
+                        if len(files) == 1
+                        else "Here are the files.",
                         identity=f"files-{pending}",
                         **file_extra,
                     )
@@ -1855,7 +1964,10 @@ class RemHome:
                         data_dir=self.data_dir,
                     )
                     if refused:
-                        body = "\n\n".join([body, *refused])
+                        # The summary was told its files are attached; when none were,
+                        # lead with the worker's own words instead.
+                        lead = body if files else completion_recap(result)
+                        body = "\n\n".join([lead, *refused])
                     if files:
                         # reply_to lets the paired phone that asked receive them.
                         extras.update(files=files, reply_to=deliver)

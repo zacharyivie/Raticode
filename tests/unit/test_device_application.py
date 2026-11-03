@@ -97,10 +97,16 @@ def test_conflicting_retry_and_sequence_fail_closed(application):
     request = event()
     grant(app, peer, request)
     app.handle(peer, request)
-    with pytest.raises(PairingError, match="event_id_conflict"):
-        app.handle(peer, request | {"payload": {"text": "changed", "attachment_ids": []}})
-    with pytest.raises(PairingError, match="sequence_conflict"):
-        app.handle(peer, event())
+    # Conflicts never run. They are answered so the phone drops them instead of
+    # resending them on every connection (test_device_refused_requests).
+    changed = request | {"payload": {"text": "changed", "attachment_ids": []}}
+    reused = event()
+    for conflicting in (changed, reused):
+        [refusal] = app.handle(peer, conflicting)
+        assert refusal["type"] == "error" and refusal["payload"]["code"] == "conflict"
+    work = app.claim()
+    assert work is not None and work["event"]["payload"]["text"] == "private message"
+    assert app.claim() is None
 
 
 def test_new_event_id_same_operation_does_not_execute_twice(application):

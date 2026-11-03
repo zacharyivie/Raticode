@@ -1,15 +1,22 @@
 # Preparing and publishing a release
 
-Push the final version to `main`, wait for **Prepare release candidate** to succeed,
-review its draft downloads, then push the version tag at that exact commit.
+Push the final version to `stage`, wait for **Prepare release candidate** to succeed,
+and review its draft downloads. When you're ready, squash merge `stage` into `main`
+and push the version tag at the squash commit (or at the staged commit itself).
 Tagging publishes the already staged files. It never starts a build.
 
 | Phase | Trigger | Result |
 | --- | --- | --- |
-| Validate source | Pull request, and the first job of main preparation | Locked dependency audits, Python lint/types/full tests, frontend lint/unit/browser tests, package-version agreement |
-| Prepare candidate | Push to `main`, or manual **Prepare release candidate** on `main` | Windows x64, macOS arm64 and Linux x64 packages; unsigned by default, with optional Windows/macOS signing and Apple notarization; native tests and distribution backend tests |
+| Validate source | Pull request, and the first job of stage preparation | Locked dependency audits, Python lint/types/full tests, frontend lint/unit/browser tests, package-version agreement |
+| Prepare candidate | Push to `stage`, or manual **Prepare release candidate** on `stage` | Windows x64, macOS arm64 and Linux x64 packages; unsigned by default, with optional Windows/macOS signing and Apple notarization; native tests and distribution backend tests |
 | Stage exact files | Successful preparation in the same run | Attested manifest, complete draft release, release notes and verified remote hashes |
+| Squash merge | You merge `stage` into `main` | No workflow; `main` gets one new commit with the staged files |
 | Publish | Push of `vX.Y.Z` | Verify the matching successful candidate and make its existing draft public |
+
+Pushes to `main` no longer build or stage anything. A pull request from `stage` into
+`main`, such as the one GitHub's **Squash and merge** button uses, still runs
+**Validate source** on the pull request. Release notes are generated when the draft is
+staged, from the staged commit.
 
 The old unsigned dry-run and duplicate frontend-check workflows are replaced by
 `validate-source.yml` and `release-candidate.yml`. Update any required status checks
@@ -28,7 +35,7 @@ are not passed to unsigned packaging.
 
 All source validation, dependency audits, native runtime and distribution tests,
 updater hash checks, checksums, provenance attestations and remote-file verification
-still run. Main stages the tested candidate; tags publish those exact files.
+still run. Stage prepares the tested candidate; tags publish those exact files.
 The build's policy output supplies the manifest's boolean `signed` field. Signed
 candidates require signature and notarization receipts. Unsigned candidates omit
 those receipts and the signing check; they cannot claim a signed verification pass.
@@ -57,7 +64,7 @@ the local speech model and needs an internet connection.
 
 Complete the provider setup below, then set the **repository** Actions variable
 `RELEASE_SIGNING` to the exact value `true`. It must be a repository variable because
-the caller reads it before entering an environment. Every subsequent main candidate
+the caller reads it before entering an environment. Every subsequent stage candidate
 will require Windows signing and macOS signing/notarization. Missing credentials
 or failed signatures stop preparation; the signed path never falls back to unsigned.
 A staged candidate retains its recorded mode even if this variable changes later.
@@ -66,14 +73,16 @@ Review that mode in its manifest and release notes before tagging.
 Create the GitHub environment **release-signing** in
 [repository Settings > Environments](https://github.com/zacharyivie/Raticode/settings/environments).
 Restrict its deployment branches to **Selected branches and tags**, then add a
-**branch** rule for `main` only. Both the credential check and native build jobs
+**branch** rule for `stage` only. Both the credential check and native build jobs
 explicitly select this environment. Pull-request source validation does not.
-Required reviewers are optional; adding them means each main preparation waits
-for approval before signing. Without reviewers, trusted main pushes run automatically.
+Required reviewers are optional; adding them means each stage preparation waits
+for approval before signing. Without reviewers, trusted stage pushes run automatically.
+An environment that was set up earlier with a `main` rule must be changed to `stage`,
+or signed preparation will wait for a deployment that can never be approved.
 
 Add these five **environment secrets** and three **environment variables** in that
 environment's settings. Repository-level values with the same names can also be
-resolved by Actions, but environment scope keeps signing access tied to trusted main.
+resolved by Actions, but environment scope keeps signing access tied to trusted stage.
 No personal access token is needed for uploading, attestation or publication;
 the workflows use the automatically issued `GITHUB_TOKEN` and GitHub OIDC.
 
@@ -147,7 +156,7 @@ are not prerequisites for the unsigned release pipeline.
 ## Candidate review and tagging
 
 1. Bump versions before preparation and commit the release notes and code. Push to
-   `origin/main`. Every main push prepares the current package version, even if you
+   `origin/stage`. Every stage push prepares the current package version, even if you
    are not ready to publish it. This costs native build time and, when enabled, signing service use.
 2. Wait for the whole **Prepare release candidate** run to finish successfully. Open
    the draft linked in **Stage exact files**' job summary. It is identified by the
@@ -159,16 +168,29 @@ are not prerequisites for the unsigned release pipeline.
    Linux DEB/RPM checks cover extraction and startup, not package-manager dependency
    resolution or maintainer scripts. Full desktop launch, clean-machine installation
    and an update from 0.2.5 remain manual review tasks. No user workflow runs in these tests.
-4. Create `vX.Y.Z` at the **reviewed SHA**, then push that tag. For example, replace
-   both placeholders before running:
+4. Squash merge `stage` into `main`. The squash commit is new, so it has a different
+   SHA from the reviewed one, but it must contain exactly the same files. Check before
+   tagging; these two lines must print the same tree:
 
    ```bash
-   git tag -a vX.Y.Z REVIEWED_FULL_COMMIT_SHA -m 'Release vX.Y.Z'
+   git rev-parse 'REVIEWED_FULL_COMMIT_SHA^{tree}'
+   git rev-parse 'origin/main^{tree}'
+   ```
+
+   They differ if `main` had commits that `stage` didn't, or if the merge resolved a
+   conflict. Then bring `stage` up to date with `main`, push it, and review the new
+   candidate instead.
+5. Create `vX.Y.Z` at the squash commit on `main`, or at the reviewed stage SHA, then
+   push that tag. For example, replace the placeholder before running:
+
+   ```bash
+   git tag -a vX.Y.Z SQUASH_FULL_COMMIT_SHA -m 'Release vX.Y.Z'
    git push origin refs/tags/vX.Y.Z
    ```
 
-5. The publish job verifies package/tag versions, the remote tag's commit, the
-   manifest's GitHub attestation, the successful main preparation run and attempt,
+6. The publish job verifies package/tag versions, the remote tag's commit, that the
+   tagged commit has the candidate's exact file tree, the manifest's GitHub
+   attestation for the staged commit, the successful stage preparation run and attempt,
    the complete asset inventory and every remote SHA-256. It changes the existing
    draft's candidate name to the version tag and publishes it. It verifies the
    public asset bytes afterward. It never replaces release assets.
@@ -190,8 +212,10 @@ protect workflow changes and `v*` tag creation with repository rules.
   preparation attempt succeeds. Failed/in-progress runs cannot authorize publication.
 - Upload retries accept identical existing files and refuse mismatches. There is no
   `--clobber`. A rerun uses a distinct attempt identifier; an incomplete older draft
-  remains unpublished. A new main commit gets its own draft.
+  remains unpublished. A new stage commit gets its own draft.
 - If two successful candidates exist for the same SHA, publication refuses to choose.
+  A candidate built from the tagged commit itself wins over others with the same
+  files. A squash-commit tag that matches two stage candidates' files refuses too.
   Review them and delete the superseded draft through GitHub before tagging or
   rerunning publication. Never delete a published release as a retry mechanism.
 - A candidate must be at most seven days old at its first publication. Re-prepare
@@ -203,15 +227,15 @@ protect workflow changes and `v*` tag creation with repository rules.
   durable candidate store; Actions artifact expiration does not erase them. Deleting
   the source run or provenance evidence prevents the publish gate from verifying it.
 - Delete abandoned drafts through normal repository maintenance. They are not
-  automatically deleted by a later main push.
+  automatically deleted by a later stage push.
 
-A normal candidate can coexist with later commits on main; tag the reviewed SHA.
+A normal candidate can coexist with later commits on stage; tag the reviewed SHA or its squash commit.
 For the already pushed `v0.2.6` at the old commit, rerunning that historical workflow
 will still use its historical definition. Prefer preparing the next unused version
 with this flow. Reusing 0.2.6 would require an explicit decision to move/delete the
 existing tag and prepare the new commit. This change does neither.
 
-Main preparation exposes build failures and, when enabled, signing/account/service
+Stage preparation exposes build failures and, when enabled, signing/account/service
 failures before you tag.
 Publication still depends on GitHub reads, provenance verification and the final
 visibility API call. Service outages can fail an attempt; safe retries and refusing

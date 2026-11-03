@@ -23,9 +23,9 @@ const ids = (plugins) => plugins.map((plugin) => plugin.id);
 test("default plugins show everything except experimental ones", () => {
   const settings = normalizePluginSettings();
   assert.deepEqual(settings, { enabled: {}, locked: false, order: DEFAULT_PLUGIN_SETTINGS.order, preview: {} });
-  assert.deepEqual(ids(enabledPlugins(settings)), ["workflows", "files", "search", "source-control"]);
-  assert.deepEqual(ids(SIDEBAR_PLUGINS.filter((plugin) => plugin.experimental)), ["rem", "swarms", "organizations", "second-brain"]);
-  for (const id of ["rem", "swarms", "organizations", "second-brain"]) assert.equal(pluginEnabled(settings, id), false);
+  assert.deepEqual(ids(enabledPlugins(settings)), ["rem", "workflows", "files", "search", "source-control"]);
+  assert.deepEqual(ids(SIDEBAR_PLUGINS.filter((plugin) => plugin.experimental)), ["swarms", "organizations", "second-brain"]);
+  for (const id of ["swarms", "organizations", "second-brain"]) assert.equal(pluginEnabled(settings, id), false);
   assert.equal(pluginEnabled(settings, "unknown"), false);
 });
 
@@ -35,8 +35,10 @@ test("the file explorer cannot be turned off", () => {
   assert.equal(pluginEnabled(settings, "files"), true);
   assert.deepEqual(withPluginEnabled(settings, "files", false), { search: false });
   assert.equal(resolvePluginActivity(settings, "search"), "files");
-  assert.equal(resolvePluginActivity(settings, "rem"), "files");
-  assert.equal(resolvePluginActivity({ enabled: {}, preview: { rem: true } }, "rem"), "rem");
+  assert.equal(resolvePluginActivity(settings, "swarms"), "files");
+  assert.equal(resolvePluginActivity({ enabled: {}, preview: { swarms: true } }, "swarms"), "swarms");
+  assert.equal(resolvePluginActivity(settings, "rem"), "rem");
+  assert.equal(resolvePluginActivity({ enabled: { rem: false } }, "rem"), "files");
 });
 
 test("only choices that differ from the default are stored", () => {
@@ -49,7 +51,7 @@ test("only choices that differ from the default are stored", () => {
   assert.deepEqual(withPluginPreview(settings, "search", true), {}, "only experimental plugins have a preview");
   assert.deepEqual(withPluginEnabled(settings, "search", false), { search: false });
   assert.deepEqual(withPluginEnabled({ enabled: { search: false } }, "search", true), {});
-  assert.deepEqual(normalizePluginSettings({ enabled: { search: "no", stale: true }, preview: { search: true, rem: "yes" } }), normalizePluginSettings({ preview: {} }));
+  assert.deepEqual(normalizePluginSettings({ enabled: { search: "no", stale: true }, preview: { search: true, rem: true, swarms: "yes" } }), normalizePluginSettings({ preview: {} }));
 });
 
 test("stored orders drop unknown plugins and restore missing ones near their defaults", () => {
@@ -89,25 +91,49 @@ test("app settings keep plugin choices through updates", () => {
 });
 
 test("Feature Preview lists every experimental feature and hides the ones that are off", () => {
-  assert.deepEqual(FEATURE_PREVIEWS.map((feature) => feature.id), ["rem", "swarms", "organizations", "second-brain", "device-network"]);
+  assert.deepEqual(FEATURE_PREVIEWS.map((feature) => feature.id), ["swarms", "organizations", "second-brain", "device-network"]);
   assert.deepEqual(FEATURE_PREVIEWS.filter((feature) => feature.backend).map((feature) => feature.id), ["organizations", "device-network"]);
   const settings = normalizePluginSettings({ enabled: { swarms: false, search: false }, preview: { swarms: true } });
   // Plugins that are off in Feature Preview are not listed in sidebar settings.
-  assert.deepEqual(ids(listedPlugins(settings)), ["workflows", "files", "search", "source-control", "swarms"]);
+  assert.deepEqual(ids(listedPlugins(settings)), ["rem", "workflows", "files", "search", "source-control", "swarms"]);
   // Hiding a plugin from the sidebar keeps its feature on and its settings row.
   assert.equal(pluginAvailable(settings, "swarms"), true);
   assert.equal(pluginEnabled(settings, "swarms"), false);
-  assert.equal(pluginAvailable(settings, "rem"), false);
+  assert.equal(pluginAvailable(settings, "organizations"), false);
 });
 
 test("older settings, which used one switch for both, become a Feature Preview choice", () => {
-  const settings = normalizePluginSettings({ enabled: { rem: true, swarms: false, search: false } });
-  assert.deepEqual(settings.preview, { rem: true });
+  const settings = normalizePluginSettings({ enabled: { swarms: true, organizations: false, search: false } });
+  assert.deepEqual(settings.preview, { swarms: true });
   assert.deepEqual(settings.enabled, { search: false });
-  assert.equal(pluginEnabled(settings, "rem"), true);
-  assert.equal(pluginAvailable(settings, "swarms"), false);
+  assert.equal(pluginEnabled(settings, "swarms"), true);
+  assert.equal(pluginAvailable(settings, "organizations"), false);
   // Once saved in the new shape, a hidden experimental plugin stays hidden but on.
-  const saved = normalizePluginSettings({ enabled: { rem: false }, preview: { rem: true } });
-  assert.equal(pluginAvailable(saved, "rem"), true);
-  assert.equal(pluginEnabled(saved, "rem"), false);
+  const saved = normalizePluginSettings({ enabled: { swarms: false }, preview: { swarms: true } });
+  assert.equal(pluginAvailable(saved, "swarms"), true);
+  assert.equal(pluginEnabled(saved, "swarms"), false);
+});
+
+test("Rem is a standard plugin and keeps the sidebar choice saved while it was a preview", () => {
+  assert.equal(pluginAvailable(normalizePluginSettings(), "rem"), true);
+  assert.deepEqual(withPluginPreview({ preview: {} }, "rem", true), {}, "Rem has no Feature Preview switch");
+  // Rem turned on and shown, in the current and the older settings shape.
+  for (const stored of [{ enabled: {}, preview: { rem: true } }, { enabled: { rem: true } }]) {
+    const settings = normalizePluginSettings(stored);
+    assert.deepEqual(settings.preview, {});
+    assert.deepEqual(settings.enabled, {});
+    assert.equal(pluginEnabled(settings, "rem"), true);
+  }
+  // Rem turned on but hidden from the sidebar stays hidden.
+  const hidden = normalizePluginSettings({ enabled: { rem: false }, preview: { rem: true, swarms: true } });
+  assert.deepEqual(hidden, { ...hidden, enabled: { rem: false }, preview: { swarms: true } });
+  assert.equal(pluginAvailable(hidden, "rem"), true);
+  assert.equal(pluginEnabled(hidden, "rem"), false);
+  // Rem's preview was off: it now appears, and the other choices are kept.
+  const off = normalizePluginSettings({ locked: true, order: ["files", "rem"], enabled: { search: false }, preview: { "second-brain": true } });
+  assert.deepEqual(off.enabled, { search: false });
+  assert.deepEqual(off.preview, { "second-brain": true });
+  assert.equal(off.locked, true);
+  assert.deepEqual(off.order, normalizePluginOrder(["files", "rem"]));
+  assert.equal(pluginEnabled(off, "rem"), true);
 });

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -86,12 +87,19 @@ class GitHub:
         self.fail_upload_at = 0
         self.fail_after_publish = False
         self.attestation_valid = True
+        # Commits with build provenance, and which ones publication checked.
+        self.attested = {SHA}
+        self.verified: list[str] = []
+        self.runs: dict[int, dict[str, Any]] = {}
         self.sha = SHA
+        # The checked-out tag commit, and each commit's file tree.
+        self.head = SHA
+        self.trees: dict[str, str] = {}
         self.run: dict[str, Any] = {
             "conclusion": "success",
             "status": "completed",
             "head_sha": SHA,
-            "head_branch": "main",
+            "head_branch": "stage",
             "event": "push",
             "path": candidate.WORKFLOW,
             "repository": {"full_name": REPO},
@@ -105,15 +113,19 @@ class GitHub:
         monkeypatch.setattr(
             candidate.subprocess,
             "run",
-            lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout=SHA + "\n"),
+            lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout=self.head + "\n"),
         )
 
     def api(self, endpoint: str, payload: Any = None, method: str = "GET") -> Any:
         route = endpoint.split(f"repos/{REPO}/", 1)[1].split("?", 1)[0]
         if route.startswith("commits/"):
             return {"sha": self.sha}
+        if route.startswith("git/commits/"):
+            commit = route.rsplit("/", 1)[1]
+            return {"sha": commit, "tree": {"sha": self.trees.get(commit, f"tree-{commit}")}}
         if route.startswith("actions/runs/"):
-            return copy.deepcopy(self.run)
+            run_id = int(route.split("/")[2])
+            return copy.deepcopy(self.runs.get(run_id, self.run))
         if route == "releases/generate-notes":
             return {"body": "Release notes"}
         if route == "releases":
@@ -142,9 +154,11 @@ class GitHub:
 
     def gh(self, *args: str, output: Path | None = None) -> str:
         if args[:2] == ("attestation", "verify"):
-            assert "--source-digest" in args and SHA in args
+            source = args[args.index("--source-digest") + 1]
             assert f"{REPO}/{self.candidate.WORKFLOW}" in args
-            if not self.attestation_valid:
+            assert args[args.index("--source-ref") + 1] == "refs/heads/stage"
+            self.verified.append(source)
+            if not self.attestation_valid or source not in self.attested:
                 raise subprocess.CalledProcessError(1, "gh attestation verify")
             return "verified"
         assert args[:2] == ("release", "upload")
@@ -280,6 +294,7 @@ def test_retry_after_publication_response_loss_verifies_existing_release(
         "pending-run",
         "wrong-run-sha",
         "untrusted-branch",
+        "main-branch-run",
         "untrusted-workflow",
         "fork",
         "bad-attestation",
@@ -320,6 +335,9 @@ def test_publication_fails_closed(
         github.run["head_sha"] = "b" * 40
     elif change == "untrusted-branch":
         github.run["head_branch"] = "feature"
+    elif change == "main-branch-run":
+        # Candidates now come only from stage; a main run no longer qualifies.
+        github.run["head_branch"] = "main"
     elif change == "untrusted-workflow":
         github.run["path"] = ".github/workflows/release-dry-run.yml"
     elif change == "fork":
@@ -438,3 +456,102 @@ def test_signed_candidate_still_rejects_failed_platform_verification(
     )
     with pytest.raises(ValueError, match="Invalid Windows signature|notarization not accepted"):
         candidate.verify_group(folder, group, candidate.versions(), signed=True)
+
+
+SQUASH = "c" * 40
+
+
+def test_tag_on_the_squash_merge_into_main_publishes_the_staged_candidate(
+    candidate: Any, prepared: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, _ = prepared
+    github = GitHub(candidate, monkeypatch)
+    candidate.stage(REPO, output)
+    github.verified.clear()
+    # Squash merging stage into main makes a new commit with the same files.
+    github.sha = github.head = SQUASH
+    github.trees = {SHA: "same-files", SQUASH: "same-files"}
+
+    candidate.publish(REPO)
+
+    release = github.releases[0]
+    assert github.publish_calls == 1
+    assert not release["draft"] and release["tag_name"] == f"v{candidate.versions()}"
+    assert release["target_commitish"] == SQUASH
+    # Provenance is still checked against the staged commit the files were built from.
+    assert set(github.verified) == {SHA}
+
+
+def test_tag_on_a_main_commit_with_different_files_is_refused(
+    candidate: Any, prepared: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, _ = prepared
+    github = GitHub(candidate, monkeypatch)
+    candidate.stage(REPO, output)
+    github.verified.clear()
+    github.sha = github.head = SQUASH
+
+    with pytest.raises(ValueError, match="Expected exactly one verified"):
+        candidate.publish(REPO)
+    assert github.publish_calls == 0
+    assert github.verified == []
+
+
+def _second_candidate(
+    candidate: Any, github: Any, output: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """Stage another push of the same files from a different stage commit."""
+    other = "d" * 40
+    copy_dir = tmp_path / "other-release"
+    shutil.copytree(output, copy_dir)
+    manifest = json.loads((copy_dir / candidate.MANIFEST).read_text())
+    manifest.update(commit=other, run_id=43)
+    (copy_dir / candidate.MANIFEST).write_text(json.dumps(manifest))
+    github.attested.add(other)
+    github.runs[43] = {**github.run, "head_sha": other}
+    monkeypatch.setenv("GITHUB_SHA", other)
+    candidate.stage(REPO, copy_dir)
+    monkeypatch.setenv("GITHUB_SHA", SHA)
+    return other
+
+
+def test_a_candidate_from_the_tagged_commit_wins_over_one_with_the_same_files(
+    candidate: Any, prepared: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, _ = prepared
+    github = GitHub(candidate, monkeypatch)
+    candidate.stage(REPO, output)
+    other = _second_candidate(candidate, github, output, tmp_path, monkeypatch)
+    github.trees = {SHA: "same-files", other: "same-files"}
+
+    candidate.publish(REPO)
+
+    published = [r for r in github.releases if not r["draft"]]
+    assert [r["id"] for r in published] == [1]
+
+
+def test_two_stage_candidates_with_the_squashed_files_are_ambiguous(
+    candidate: Any, prepared: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, _ = prepared
+    github = GitHub(candidate, monkeypatch)
+    candidate.stage(REPO, output)
+    other = _second_candidate(candidate, github, output, tmp_path, monkeypatch)
+    github.sha = github.head = SQUASH
+    github.trees = {SHA: "same-files", other: "same-files", SQUASH: "same-files"}
+
+    with pytest.raises(ValueError, match="Expected exactly one verified"):
+        candidate.publish(REPO)
+    assert github.publish_calls == 0
+
+
+@pytest.mark.parametrize("command", ["manifest", "stage"])
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/heads/dev", "refs/tags/v1.0.0"])
+def test_candidates_are_only_prepared_on_stage(
+    candidate: Any, monkeypatch: pytest.MonkeyPatch, command: str, ref: str
+) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_REF", ref)
+    monkeypatch.setattr("sys.argv", ["release-candidate.py", command])
+    with pytest.raises(ValueError, match="trusted stage branch"):
+        candidate.main()

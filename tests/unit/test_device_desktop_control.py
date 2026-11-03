@@ -12,7 +12,6 @@ from uuid import uuid4
 import pytest
 
 from gofer.devices import desktop_control as module
-from gofer.devices.registry import PairingError
 from gofer.devices.remote_control import swarm_wire_id
 from gofer.ui.organizations import OrganizationManager
 from tests.unit.test_device_application import application as application
@@ -76,7 +75,9 @@ class RemStore:
             "messages": self.messages,
         }
 
-    def tasks(self) -> list[dict[str, Any]]:
+    def tasks(self, *, summary: bool = False) -> list[dict[str, Any]]:
+        # The phone never needs run traces or worker config.
+        assert summary
         return [self.task]
 
     def thread_ids(self) -> list[str]:
@@ -106,7 +107,10 @@ class Rem:
         self.store = RemStore(root)
         self.calls: list[tuple[str, Any]] = []
 
-    def submit_message(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def submit_message(
+        self, payload: dict[str, Any], *, source: str | None = None
+    ) -> dict[str, Any]:
+        assert source == "phone"
         self.calls.append(("message", payload))
         return {"accepted": True}
 
@@ -562,10 +566,10 @@ def _block_rem_tasks(app: Any) -> tuple[threading.Event, threading.Event]:
     store = app.desktop.rem.store
     tasks = store.tasks
 
-    def slow_tasks() -> list[dict[str, Any]]:
+    def slow_tasks(*, summary: bool = False) -> list[dict[str, Any]]:
         started.set()
         assert release.wait(5)
-        result: list[dict[str, Any]] = tasks()
+        result: list[dict[str, Any]] = tasks(summary=summary)
         return result
 
     store.tasks = slow_tasks
@@ -617,7 +621,9 @@ def _upload(app: Any, peer: str, thread: str, data: bytes, sequence: int) -> str
         "sha256": hashlib.sha256(data).hexdigest(),
         "expires_at": int(app.registry.clock()) + 600,
     }
-    app.handle(peer, event("file.offer", sequence, thread_id=thread, payload=offer))
+    answer = app.handle(peer, event("file.offer", sequence, thread_id=thread, payload=offer))
+    if answer[-1]["type"] == "error":
+        raise PermissionError(answer[-1]["payload"]["code"])
     chunk = {
         "file_id": identifier,
         "offset": 0,
@@ -634,15 +640,16 @@ def test_rem_chat_attachments_use_the_phone_file_channel(phone, tmp_path):
     rem = app.desktop.rem
     rem.data_dir = tmp_path / "rem-data"
     channel = app.desktop.files_thread(peer)
-    # The channel is closed until the user lets this phone use Raticode.
-    with pytest.raises(PairingError, match="file_thread_grant_required"):
+    # The channel is closed until the user lets this phone use Raticode. The refusal
+    # is answered, so the phone drops the upload instead of resending it forever.
+    with pytest.raises(PermissionError, match="unauthorized"):
         _upload(app, peer, channel, b"x", 600)
     app.desktop.enable(peer, True)
     home = send("desktop.read", "rem.home")["value"]
     assert home["files_thread"] == channel and home["media"] is True
     assert send("desktop.read", "overview")["value"]["media"] is True
     # Another phone's channel, or any other unshared thread, stays closed.
-    with pytest.raises(PairingError):
+    with pytest.raises(PermissionError, match="unauthorized"):
         _upload(app, peer, str(uuid4()), b"x", 610)
 
     first = _upload(app, peer, channel, b"\x89PNG first", 620)
@@ -757,7 +764,7 @@ def test_files_on_rem_replies_go_only_to_the_phone_that_asked(phone, tmp_path):
     )[-1]["payload"]
     assert base64.urlsafe_b64decode(outside_chunk["data"] + "==") == b"private"
 
-    # A tapped link is not a file Rem attached: outside the open folders it stays refused.
+    # A link Rem wrote in its chat reaches the same files as its attachments, path unseen.
     rem.store.messages.append(
         {"id": "linked", "role": "rem", "body": f"See [it](<{outside}>)", "created_at": "t6"}
     )
@@ -766,7 +773,8 @@ def test_files_on_rem_replies_go_only_to_the_phone_that_asked(phone, tmp_path):
         "files.link",
         {"source": "rem", "message_id": "linked", "href": str(outside)},
     )
-    assert tapped["ok"] is False
+    assert tapped["ok"], tapped
+    assert str(tmp_path) not in json.dumps(tapped["value"])
 
     identifier = reply["files"][0]["file_id"]
     chunk = app.handle(
@@ -776,6 +784,49 @@ def test_files_on_rem_replies_go_only_to_the_phone_that_asked(phone, tmp_path):
     assert base64.urlsafe_b64decode(chunk["data"] + "==") == report.read_bytes()[:16384]
     app.remove_peer(peer)
     assert app.registry.db.execute("SELECT COUNT(*) FROM device_rem_files").fetchone()[0] == 0
+
+
+def test_phone_actions_go_only_to_the_phone_that_asked(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    assert send("desktop.action", "rem.message", {"body": "20 minute timer"})["ok"]
+    request = rem.calls[-1][1]["request_id"]
+    actions = [
+        {"type": "timer", "seconds": 1200},
+        # Stored before a rule changed, or written by hand: checked again on the way out.
+        {"type": "dial", "number": "*#06#"},
+    ]
+    rem.store.messages += [
+        {
+            "id": "mine",
+            "role": "rem",
+            "body": "Ready.",
+            "created_at": "t4",
+            "phone_actions": actions,
+            "reply_to": request,
+        },
+        {
+            "id": "desk",
+            "role": "rem",
+            "body": "Ready.",
+            "created_at": "t5",
+            "phone_actions": actions,
+            "reply_to": "desk-request",
+        },
+        {
+            "id": "untagged",
+            "role": "rem",
+            "body": "Ready.",
+            "created_at": "t6",
+            "phone_actions": actions,
+        },
+    ]
+    home = send("desktop.read", "rem.home")["value"]
+    assert home["phone_actions"] is True
+    shown = {m["id"]: m.get("phone_actions") for m in home["messages"]}
+    assert shown["mine"] == [{"type": "timer", "seconds": 1200}]
+    assert shown["desk"] is None and shown["untagged"] is None
 
 
 def test_files_on_finished_task_updates_go_to_the_phone_that_asked(phone, tmp_path):
@@ -913,7 +964,7 @@ def test_finished_one_time_tasks_leave_the_list_but_their_links_still_open(phone
         "last_run": {**done_run, "id": "run3", "finished_at": "2026-10-31T09:00:00+00:00"},
     }
     rem.store.task["active_run"]["created_at"] = "2026-10-29T08:00:00+00:00"
-    rem.store.tasks = lambda: [rem.store.task, done, recent]
+    rem.store.tasks = lambda summary=False: [rem.store.task, done, recent]
     rem.store.thread_ids = lambda: ["thread1", "thread2"]
     rem.store.messages.append(
         {
@@ -1139,3 +1190,85 @@ def test_phone_reads_and_changes_rem_memories_like_the_desktop_panel(phone, home
         m for m in send("desktop.read", "rem.home")["value"]["messages"] if m["id"] == "reply-m1"
     )
     assert shown["memory"]["undone"] is True
+
+
+def test_phone_alerts_cover_only_its_own_requests_and_their_tasks(phone, home):
+    app, peer, _, send = phone
+    assert send("desktop.read", "rem.notices")["code"] == "unauthorized"
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    store = home.store
+    assert send("desktop.read", "overview")["value"]["rem_notices"] is True
+
+    def asked_here() -> str:
+        request = str(uuid4())
+        app.desktop.db.execute("INSERT INTO device_rem_requests VALUES (?,?)", (peer, request))
+        return request
+
+    def task(identity: str, source: str) -> None:
+        body = {"id": identity, "delegation_context": {"source_message_id": source}}
+        with store.connect() as db:
+            db.execute("INSERT INTO tasks VALUES (?,?)", (identity, json.dumps(body)))
+
+    with store.connect() as db:
+        store.message(db, "Typed on the desktop", identity="desk-1", role="user")
+        store.message(db, "Desktop answer", identity="reply-desk-1")
+    # With no position the phone only learns where the conversation is now.
+    start = send("desktop.read", "rem.notices")["value"]
+    assert start["notices"] == [] and start["cursor"] == 2 and start["more"] is False
+
+    mine = asked_here()
+    task("task-phone", mine)
+    task("task-desk", "desk-1")
+    update = {"task_id": "task-phone", "title": "Build check", "needs_user": True}
+    with store.connect() as db:
+        store.message(db, "What failed?", identity=mine, role="user")
+        store.message(db, "Here is what failed.", identity=f"reply-{mine}")
+        store.message(db, "Needs you", identity="finished-p", kind="task_update", work=update)
+        desk = {"task_id": "task-desk"}
+        store.message(db, "Desk task done", identity="finished-d", kind="task_update", work=desk)
+        store.message(db, "Another desktop question", identity="desk-2", role="user")
+        store.message(db, "Desktop answer two", identity="reply-desk-2")
+    read = send("desktop.read", "rem.notices", {"after": start["cursor"]})["value"]
+    assert [(n["id"], n["kind"]) for n in read["notices"]] == [
+        (f"reply-{mine}", "reply"),
+        ("finished-p", "task_update"),
+    ]
+    assert read["notices"][1]["title"] == "Build check" and read["notices"][1]["needs_user"] is True
+    assert read["notices"][0]["body"] == "Here is what failed." and read["cursor"] == 8
+    assert send("desktop.read", "rem.notices", {"after": 8})["value"]["notices"] == []
+
+    # A reply that lands after the phone already read its own question still counts.
+    later = asked_here()
+    with store.connect() as db:
+        store.message(db, "And now?", identity=later, role="user")
+    assert send("desktop.read", "rem.notices", {"after": 8})["value"]["cursor"] == 9
+    with store.connect() as db:
+        for index in range(10):
+            store.message(db, f"Part {index}", identity=f"reply-{later}-{index}")
+    burst = send("desktop.read", "rem.notices", {"after": 9})["value"]
+    assert [n["body"] for n in burst["notices"]] == [f"Part {i}" for i in range(2, 10)]
+    assert burst["skipped"] == 2 and burst["cursor"] == 19
+
+    # A reset conversation, or a bad position, never replays old messages.
+    assert send("desktop.read", "rem.notices", {"after": 500})["value"] == {
+        "cursor": 19,
+        "notices": [],
+        "skipped": 0,
+        "more": False,
+        "digest": send("desktop.read", "rem.notices", {"after": 500})["value"]["digest"],
+    }
+    for bad in ("9", True, -1, 2**53, 1.5):
+        assert send("desktop.read", "rem.notices", {"after": bad})["code"] == "invalid"
+    # A legacy "Started" notice repeating a reply written with it alerts once, as the chat shows it.
+    started = {"task_id": "task-phone", "run_id": "run-9", "title": "Build check"}
+    with store.connect() as db:
+        store.message(db, "Build check", identity=asked_here(), role="user")
+        store.message(db, "Started Build check.", identity="queued-run-9", work=started)
+        store.message(db, "On it.", identity="reply-run-9", work=started)
+    legacy = send("desktop.read", "rem.notices", {"after": 19})["value"]
+    assert [n["id"] for n in legacy["notices"]] == ["reply-run-9"] and legacy["cursor"] == 22
+
+    # Another phone's requests are not this phone's alerts.
+    app.desktop.db.execute("DELETE FROM device_rem_requests WHERE peer=?", (peer,))
+    assert send("desktop.read", "rem.notices", {"after": 2})["value"]["notices"] == []

@@ -309,7 +309,8 @@ def test_rem_mcp_roundtrips_settings_tasks_routines_and_recovery(manager, tmp_pa
             changes={"status": "cancelled"},
         )
         action(url, "reopen", org["id"], taskId=task["id"], expectedRevision=task["revision"])
-        routine = action(
+        # Recurring work is scheduled only after the user approves Rem's request.
+        request = action(
             url,
             "routine_save",
             org["id"],
@@ -319,6 +320,18 @@ def test_rem_mcp_roundtrips_settings_tasks_routines_and_recovery(manager, tmp_pa
                 "intervalSeconds": 3600,
             },
         )
+        assert request["needsUserConsent"] and "Daily" in request["summary"]
+        assert not action(url, "read", org["id"])["runtime"].get("routines")
+        manager.call(
+            "",
+            "user",
+            {
+                "action": "request_decide",
+                "organizationId": org["id"],
+                "params": {"requestId": request["requestId"], "decision": "approve"},
+            },
+        )
+        routine = next(iter(action(url, "read", org["id"])["runtime"]["routines"].values()))
         action(
             url,
             "routine_save",
@@ -348,13 +361,24 @@ def test_rem_mcp_roundtrips_settings_tasks_routines_and_recovery(manager, tmp_pa
         assert current["config"]["executionTargets"][0]["id"] == "team"
         # No running organization and no provider calls are needed for management.
         assert current["runtime"]["state"] == "paused"
-        restored = action(
+        # Revision 1 has no dollar budget, so restoring it removes a limit and needs consent.
+        request = action(
             url,
             "restore",
             org["id"],
             revision=1,
             expectedRevision=current["revision"],
             reason="Restore original",
+        )
+        assert "monthly limits" in request["summary"]
+        restored = manager.call(
+            "",
+            "user",
+            {
+                "action": "request_decide",
+                "organizationId": org["id"],
+                "params": {"requestId": request["requestId"], "decision": "approve"},
+            },
         )
         assert restored["config"]["employees"] == []
         assert len(restored["runtime"]["tasks"]) == 1

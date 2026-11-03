@@ -109,9 +109,6 @@ def test_links_outside_rems_folders_or_messages_are_refused(linked, tmp_path):
         return send("desktop.action", "files.link", {"source": "rem", **params})
 
     before = _outbox(app)
-    # The link is in Rem's message but the file is outside its folders.
-    refused = fetch(message_id="reply-1", href=str(outside))
-    assert (refused["code"], "Second Brain" in refused["detail"]) == ("unauthorized", True)
     # A path the user typed into their own message gives the phone nothing.
     assert fetch(message_id="typed", href=str(report))["code"] == "not_found"
     # A path that isn't in the named message is refused even inside the brain.
@@ -213,6 +210,22 @@ def test_rem_task_thread_links_resolve_against_the_task_project(linked, monkeypa
         "desktop.action", "files.link", {"source": "rem_thread", "message_id": "a1", "href": "x"}
     )
     assert missing["code"] == "invalid"
+    # A task thread's link stays inside the open folders, unlike Rem's own chat.
+    outside = linked[5]
+    store_thread = thread
+
+    def thread_with_outside(identifier: str) -> dict[str, Any]:
+        data = store_thread(identifier)
+        data["messages"].append(
+            {"id": "a2", "role": "assistant", "body": f"See [notes]({outside})"}
+        )
+        return data
+
+    monkeypatch.setattr(store, "thread", thread_with_outside)
+    refused = send(
+        "desktop.action", "files.link", {**base, "message_id": "a2", "href": str(outside)}
+    )
+    assert (refused["code"], "Second Brain" in refused["detail"]) == ("unauthorized", True)
     # Rem's chat has no folder to resolve a relative link against.
     store.messages.append({"id": "rel", "role": "rem", "body": "[app](src/app.py)"})
     relative = send(
@@ -384,3 +397,92 @@ def test_shared_thread_links_to_secret_files_are_refused(phone, tmp_path):
     )
     assert refused["code"] == "unauthorized"
     assert "passwords, keys or sign-ins" in refused["detail"]
+
+
+def test_links_in_a_replys_details_open_like_links_in_its_text(linked, tmp_path):
+    app, peer, _, send, report, _ = linked
+    rem = app.desktop.rem
+    shot = tmp_path / "screenshots" / "voice synth" / "small-320dp-paused.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"\x89PNG fixture")
+    rem.store.messages += [
+        {
+            "id": "reply-details",
+            "role": "rem",
+            "body": "Here are the screenshots.",
+            "details": f"- [Paused](<{shot}>)\n- [Plan](<{report}>)",
+            "created_at": "t7",
+        },
+        # Details on the user's own message never count.
+        {"id": "typed-details", "role": "user", "body": "x", "details": f"[p](<{report}>)"},
+    ]
+    for href, name in ((str(shot), "small-320dp-paused.png"), (str(report), "launch plan.html")):
+        result = send(
+            "desktop.action",
+            "files.link",
+            {"source": "rem", "message_id": "reply-details", "href": href},
+        )
+        assert result["ok"], (href, result)
+        assert result["value"]["name"] == name
+        assert result["value"]["thread_id"] == app.desktop.files_thread(peer)
+        assert str(shot.parent) not in json.dumps(result["value"])
+    typed = send(
+        "desktop.action",
+        "files.link",
+        {"source": "rem", "message_id": "typed-details", "href": str(report)},
+    )
+    assert typed["code"] == "not_found"
+
+
+def test_rem_chat_links_reach_files_outside_open_folders_like_its_reply_files(linked, tmp_path):
+    app, peer, _, send, _, outside = linked
+    rem = app.desktop.rem
+    before = _outbox(app)
+    # The file is outside the open folders, in a reply Rem wrote: it is read from its own folder.
+    result = send(
+        "desktop.action",
+        "files.link",
+        {"source": "rem", "message_id": "reply-1", "href": str(outside)},
+    )
+    assert result["ok"], result
+    channel = app.desktop.files_thread(peer)
+    chunk = app.handle(
+        peer,
+        event(
+            "file.request", 701, thread_id=channel, payload={"file_id": result["value"]["file_id"]}
+        ),
+    )[-1]["payload"]
+    assert base64.urlsafe_b64decode(chunk["data"] + "==") == b"private"
+    # Secret-looking files and Raticode's own data stay on the desktop wherever they are.
+    secret = tmp_path / "auth.json"
+    secret.write_text("{}")
+    rem.data_dir = tmp_path / "rem-data"
+    own = rem.data_dir / "rem-home.sqlite3"
+    own.parent.mkdir()
+    own.write_bytes(b"synthetic")
+    link = tmp_path / "linked.txt"
+    link.symlink_to(outside)
+    rem.store.messages.append(
+        {
+            "id": "reply-outside",
+            "role": "rem",
+            "body": f"[a]({secret}) [b]({own}) [c]({link})",
+            "created_at": "t8",
+        }
+    )
+    offered = len(_offers(app, peer, before))
+    for path in (secret, own):
+        refused = send(
+            "desktop.action",
+            "files.link",
+            {"source": "rem", "message_id": "reply-outside", "href": str(path)},
+        )
+        assert refused["code"] == "unauthorized"
+        assert "passwords, keys or sign-ins" in refused["detail"]
+    symlinked = send(
+        "desktop.action",
+        "files.link",
+        {"source": "rem", "message_id": "reply-outside", "href": str(link)},
+    )
+    assert symlinked["code"] == "unauthorized"
+    assert len(_offers(app, peer, before)) == offered

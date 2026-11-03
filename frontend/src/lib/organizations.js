@@ -1,7 +1,7 @@
 import { providerPermissionDefault } from "./providerPermissions.js";
 import { apiUrl } from "./api.js";
 
-const READS = new Set(["availability", "list", "read", "history", "events", "export", "help", "tasks", "attempts", "routines", "outcomes", "rehearse", "diagnostics", "workflow_preview"]);
+const READS = new Set(["availability", "list", "read", "history", "events", "export", "help", "tasks", "attempts", "routines", "outcomes", "rehearse", "diagnostics", "workflow_preview", "run_events", "audit_verify", "run_input"]);
 export async function organizationRequest(projectRoot = "", action = "list", organizationId, params = {}) {
   projectRoot = projectRoot || "";
   const read = READS.has(action);
@@ -176,13 +176,30 @@ const DANGEROUS_MODES = new Set(["danger-full-access", "bypassPermissions"]);
 export const dangerousPermission = mode => DANGEROUS_MODES.has(mode);
 
 // What needs the user right now, for the overview strip.
+// Rem's requests expire after a day; older ones can no longer be approved.
+export const CONSENT_TTL_MS = 24 * 60 * 60 * 1000;
+export function pendingRequests(runtime = {}, now = Date.now()) {
+  return Object.values(runtime.consentRequests || {}).filter(request => request.status === "pending" && now - Date.parse(request.at) < CONSENT_TTL_MS);
+}
+
+// What a run used and produced, as short labels for its record.
+export function runProvenance(attempt = {}) {
+  return [
+    attempt.provider && `${attempt.provider} · ${attempt.model === "cli-default" ? "provider default" : attempt.model}${attempt.effort ? ` · ${attempt.effort}` : ""}`,
+    attempt.permissionMode,
+    attempt.isolation === "worktree" ? "own worktree" : attempt.isolation === "folder" ? "project folder" : null,
+    attempt.headCommit && `ended at ${attempt.headCommit.slice(0, 10)}${attempt.uncommittedChanges ? " + uncommitted changes" : ""}`,
+    attempt.inputSha256 && `input ${attempt.inputSha256.slice(0, 12)}`,
+  ].filter(Boolean);
+}
+
 export function attentionSummary(tasks = [], runtime = {}) {
   const open = tasks.filter(isOpenTask);
   return {
     blocked: open.filter(task => task.status === "blocked").length,
     review: open.filter(task => task.status === "in_review").length,
     approval: open.filter(needsApproval).length,
-    requests: Object.values(runtime.consentRequests || {}).filter(request => request.status === "pending").length,
+    requests: pendingRequests(runtime).length,
     running: open.filter(task => task.claim).length,
   };
 }
@@ -267,6 +284,8 @@ export function activityEntries(events, tasks = []) {
     if (event.kind === "runtime_recovered") Object.assign(entry, { text: "Paused after Raticode restarted", detail: payload.reason || "" });
     if (event.kind === "consent_requested") Object.assign(entry, { text: "Asked for your approval", detail: payload.summary || "" });
     if (event.kind === "consent_decided") Object.assign(entry, { text: payload.decision === "approve" ? "Approved Rem's request" : "Declined Rem's request", detail: payload.error || "" });
+    if (event.kind === "state_updated") Object.assign(entry, { text: "Updated work automatically", detail: (payload.taskChanges || []).map(change => `“${change.title}”: ${STATUS_LABELS[change.from] || "new"} → ${STATUS_LABELS[change.to] || change.to}`).join("; ") });
+    if (event.kind === "consent_checked") Object.assign(entry, { text: "Closed expired requests from Rem", detail: plural(payload.expired?.length || 0, "request") });
     if (event.kind === "organization_archived") entry.text = "Archived the organization";
     if (event.kind === "organization_restored") entry.text = "Restored the organization from the archive";
     if (event.kind === "worktree_created") Object.assign(entry, { text: `Created a worktree for ${taskTitle(payload, tasks)}`, detail: payload.branch ? `Branch ${payload.branch}` : "" });

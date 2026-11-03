@@ -32,6 +32,19 @@ RUN_STATES = ACTIVE | {"succeeded", "blocked", "cancelled", "failed", "outcome_u
 # Newest run first. Saving a run replaces its row, which gives it a new rowid,
 # so rowid order tracks the last update rather than when the run started.
 NEWEST_RUN = "json_extract(body, '$.created_at') DESC, rowid DESC"
+# Run fields only workers, reviewers and Rem's own turns read. Task lists that the
+# desktop and phone poll leave them out: traces alone run to hundreds of kilobytes
+# per run. SQLite drops them before Python has to parse them.
+RUN_INTERNALS = (
+    "worker_traces",
+    "review_traces",
+    "config",
+    "recipe",
+    "worker_result",
+    "review_verdict",
+    "previous_success",
+)
+SUMMARY_RUN = "json_remove(body, " + ", ".join(f"'$.{key}'" for key in RUN_INTERNALS) + ")"
 # A finished one-time task leaves task lists, then is removed this long after its run finished.
 RETENTION = timedelta(days=30)
 
@@ -508,20 +521,27 @@ class RemHomeStore:
             thread["archived"] = False
             self.put(db, "threads", thread)
 
-    def task_view(self, db: sqlite3.Connection, task: dict[str, Any]) -> dict[str, Any]:
+    def task_view(
+        self, db: sqlite3.Connection, task: dict[str, Any], *, summary: bool = False
+    ) -> dict[str, Any]:
         runs = [
             json.loads(row[0])
             for row in db.execute(
-                "SELECT body FROM runs WHERE task=? ORDER BY " + NEWEST_RUN + " LIMIT 20",
+                f"SELECT {SUMMARY_RUN if summary else 'body'} FROM runs WHERE task=? "
+                "ORDER BY " + NEWEST_RUN + " LIMIT 20",
                 (task["id"],),
             )
         ]
         active = next((r for r in runs if r["state"] in ACTIVE), None)
         if runs and not active:
             # Retry review is offered only where retry_review would accept it.
+            latest = runs[0]
+            if summary and latest["state"] in {"blocked", "cancelled"}:
+                # The check reads the worker result and recipe, which summaries leave out.
+                latest = self.get(db, "runs", latest["id"])
             runs[0]["review_retryable"] = bool(
-                self.interrupted_review(runs[0])
-                and runs[0]["recipe"].get("revision") == task.get("revision")
+                self.interrupted_review(latest)
+                and latest["recipe"].get("revision") == task.get("revision")
                 and not task.get("deleted_at")
             )
         return {
@@ -542,6 +562,45 @@ class RemHomeStore:
                 "messages": [m for m in messages if m["id"] not in hidden],
             }
 
+    def messages_after(self, after: int, limit: int = 300) -> dict[str, Any]:
+        """Conversation messages stored after sequence ``after``, oldest first, for phone alerts.
+
+        ``seq`` never changes once a message is stored, so it is the phone's cursor; ``last``
+        is the last position read. Legacy duplicate notices are left out, as in
+        ``conversation()``. Also returns the latest question asked at or before ``after`` and,
+        for task updates, the message that started each task, so the caller can tell which
+        requests were its own.
+        """
+        with self.read() as db:
+            latest = int(db.execute("SELECT COALESCE(MAX(seq), 0) FROM messages").fetchone()[0])
+            rows = db.execute(
+                "SELECT seq, body FROM messages WHERE seq > ? ORDER BY seq LIMIT ?", (after, limit)
+            ).fetchall()
+            asked = db.execute(
+                "SELECT id FROM messages WHERE seq <= ? AND json_extract(body, '$.role') = 'user' "
+                "ORDER BY seq DESC LIMIT 1",
+                (after,),
+            ).fetchone()
+            messages = [{**json.loads(body), "seq": int(seq)} for seq, body in rows]
+            last = messages[-1]["seq"] if messages else after
+            hidden = duplicate_notices(messages)
+            messages = [m for m in messages if m["id"] not in hidden]
+            sources: dict[str, str | None] = {}
+            for message in messages:
+                task = (message.get("work") or {}).get("task_id")
+                if message.get("kind") != "task_update" or not task or task in sources:
+                    continue
+                row = db.execute("SELECT body FROM tasks WHERE id=?", (task,)).fetchone()
+                context = (json.loads(row[0]).get("delegation_context") or {}) if row else {}
+                sources[task] = context.get("source_message_id")
+        return {
+            "latest": latest,
+            "last": last,
+            "messages": messages,
+            "asked": asked[0] if asked else None,
+            "sources": sources,
+        }
+
     def transcript(self, identity: str, limit: int = 600) -> list[dict[str, Any]]:
         """A task thread's latest transcript entries, oldest first."""
         if not identity:
@@ -557,10 +616,11 @@ class RemHomeStore:
         with self.read() as db:
             return [row[0] for row in db.execute("SELECT id FROM threads")]
 
-    def tasks(self) -> list[dict[str, Any]]:
+    def tasks(self, *, summary: bool = False) -> list[dict[str, Any]]:
+        """Tasks with their recent runs; ``summary`` leaves out ``RUN_INTERNALS``."""
         with self.read() as db:
             return [
-                self.task_view(db, task)
+                self.task_view(db, task, summary=summary)
                 for row in db.execute("SELECT body FROM tasks")
                 if not (task := json.loads(row[0])).get("deleted_at")
             ]

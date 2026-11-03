@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Brain, ChevronRight, MessageSquare, MoreHorizontal, Paperclip, Plus, ShieldCheck, Settings, Sparkles, Trash2, X } from "lucide-react";
 import ChatComposer, { MessageAttachments } from "./ChatComposer.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
@@ -32,8 +32,16 @@ const SUGGESTIONS = [
 ];
 const devPreview = Boolean(import.meta.env?.DEV);
 
+// Rows of messages without a task card get this instead of the task list, so a
+// task update doesn't re-render them.
+const NO_TASKS = [];
+
 export default function RemHomeWorkspace({ projectOptions = [], avatar = {}, onOpenLink, onOpenSettings }) {
   const store = useRemHome();
+  // The app passes a new function on every render; a stable one keeps message rows cached.
+  const openLinkRef = useRef(onOpenLink);
+  useLayoutEffect(() => { openLinkRef.current = onOpenLink; });
+  const openLink = useCallback(href => openLinkRef.current?.(href), []);
   const [confirmClear, setConfirmClear] = useState(false);
   const [showMemories, setShowMemories] = useState(false);
   const [messageFocus, setMessageFocus] = useState(null);
@@ -63,7 +71,7 @@ export default function RemHomeWorkspace({ projectOptions = [], avatar = {}, onO
     {store.status === "error" && store.error ? <div role="alert" className="rem-home-notice" data-tone="danger"><span>{store.error}</span></div> : null}
     {store.contextIssue ? <div role="status" className="rem-home-notice" data-tone="attention"><span>{store.contextIssue}</span></div> : null}
     <div className="rem-home-main" data-sheet={store.sheet ? "open" : undefined}>
-      <Conversation key={store.conversation?.id || "loading"} store={store} now={now} replying={replying} avatar={avatar} onOpenLink={onOpenLink} messageFocus={messageFocus} />
+      <Conversation key={store.conversation?.id || "loading"} store={store} now={now} replying={replying} avatar={avatar} onOpenLink={openLink} messageFocus={messageFocus} />
       {store.sheet ? <>
         <button type="button" className="rem-sheet-scrim" aria-label="Close task" tabIndex={-1} onClick={closeTaskSheet} />
         <TaskSheet key={store.sheet.mode === "task" ? store.sheet.taskId : "new"} sheet={store.sheet} tasks={store.tasks} projectOptions={projectOptions} now={now} messages={store.messages} onShowMessage={id => { setMessageFocus({ id }); closeTaskSheet(); }} />
@@ -113,9 +121,9 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus }
     message.scrollIntoView({ block: "center" });
   }, [messageFocus]);
   const disabled = offline || store.status === "loading" || store.resetting;
-  const composer = useRemComposer(disabled);
-  return <div className="rem-convo" {...composer.handlers}>
-    {composer.dragging ? <div className="rem-drop" role="status" aria-live="polite"><Paperclip aria-hidden="true" size={20} /><span>Drop files to attach</span></div> : null}
+  const drop = useRemDropZone();
+  return <div className="rem-convo" {...drop.handlers}>
+    {drop.dragging ? <div className="rem-drop" role="status" aria-live="polite"><Paperclip aria-hidden="true" size={20} /><span>Drop files to attach</span></div> : null}
     <div ref={scrollRef} className="rem-stream" onScroll={event => {
       const element = event.currentTarget;
       pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
@@ -124,7 +132,7 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus }
       <div className="rem-stream-inner" role="log" aria-label="Conversation with Rem" aria-live="polite">
         {store.messages.length ? days.map(day => <div key={day.key} className="rem-day">
           <div className="rem-day-label" role="separator"><span>{day.label}</span></div>
-          {day.messages.map((message, index) => <Message key={message.id} message={message} first={day.messages[index - 1]?.role !== message.role} now={now} tasks={store.tasks} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} />)}
+          {day.messages.map((message, index) => <Message key={message.id} message={message} first={day.messages[index - 1]?.role !== message.role} now={now} tasks={message.work ? store.tasks : NO_TASKS} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} />)}
         </div>) : <Welcome offline={offline} loading={store.status === "loading"} avatar={avatar} />}
         {replying ? <div className="rem-msg" data-role="rem"><span className="rem-face"><RatFaceIcon size={18} /></span><div className="rem-msg-body">
           {/* The reply as it is written. Screen readers hear the finished message instead. */}
@@ -137,7 +145,7 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus }
       </div>
     </div>
     <NewMessagesPill count={unseen} onClick={jumpToLatest} />
-    <Composer composer={composer} disabled={disabled} replying={replying} request={store.composerRequest} offline={offline} />
+    <Composer disabled={disabled} replying={replying} request={store.composerRequest} offline={offline} />
   </div>;
 }
 
@@ -160,7 +168,8 @@ function Welcome({ offline, loading, avatar }) {
   </div>;
 }
 
-function Message({ message, first, now, tasks, onOpenLink, live = true, followUps = false }) {
+// Rows re-render only when their own props change, not on every keystroke or poll.
+const Message = memo(function Message({ message, first, now, tasks, onOpenLink, live = true, followUps = false }) {
   const stamp = <MessageStamp iso={message.created_at} now={now} />;
   if (message.role === "user") {
     return <div className="rem-msg" data-message-id={message.id} tabIndex={-1} data-role="user" data-first={first || undefined} data-pending={message.pending || undefined}>
@@ -188,7 +197,7 @@ function Message({ message, first, now, tasks, onOpenLink, live = true, followUp
       <div className="rem-msg-foot">{stamp}{message.body ? <MessageActions message={message} /> : null}</div>
     </div>
   </div>;
-}
+});
 
 // Shows nothing when the message has no usable date.
 function MessageStamp({ iso, now }) {
@@ -222,19 +231,11 @@ function WorkCard({ work, tasks, live = true }) {
 // The same composer as threads: files can be attached, pasted or dropped, and long
 // pasted text becomes a text attachment. Files copied in Raticode paste as attachments.
 // The draft lives outside this view so it survives switching to another plugin.
-function useRemComposer(disabled) {
-  const { draft, attachments, error: attachmentError } = useRemComposerState();
+// Only the composer reads it, so typing doesn't re-render the conversation.
+function useRemDropZone() {
   const [dragging, setDragging] = useState(false);
   const dragDepthRef = useRef(0);
   const add = files => attachToRemComposer(files);
-  const send = async () => {
-    const text = draft.trim();
-    if ((!text && !attachments.length) || disabled) return;
-    const files = attachments;
-    updateRemComposer({ draft: "", attachments: [], error: "" });
-    // A message that doesn't send stays in the conversation with Try again and Edit.
-    await sendRemMessage(text, files);
-  };
   const handlers = {
     onPaste(event) {
       const files = clipboardAttachmentFiles(event.clipboardData);
@@ -275,30 +276,38 @@ function useRemComposer(disabled) {
       add(event.dataTransfer.files);
     },
   };
-  return { draft, attachments, attachmentError, dragging, add, send, handlers };
+  return { dragging, handlers };
 }
 
-function Composer({ composer, disabled, replying, request, offline }) {
+function Composer({ disabled, replying, request, offline }) {
+  const { draft, attachments, error: attachmentError } = useRemComposerState();
   const [focusRequest, setFocusRequest] = useState(0);
+  const send = async () => {
+    const text = draft.trim();
+    if ((!text && !attachments.length) || disabled) return;
+    updateRemComposer({ draft: "", attachments: [], error: "" });
+    // A message that doesn't send stays in the conversation with Try again and Edit.
+    await sendRemMessage(text, attachments);
+  };
   useEffect(() => {
     if (applyRemComposerRequest(request)) setFocusRequest(current => current + 1);
   }, [request]);
   return <div className="rem-composer">
     <ChatComposer
       inputLabel="Message Rem"
-      placeholder={offline ? "Rem isn't connected yet" : replying ? "Rem is replying… you can keep typing" : composer.attachments.length ? "Add a note about the attached file" : "Message Rem"}
+      placeholder={offline ? "Rem isn't connected yet" : replying ? "Rem is replying… you can keep typing" : attachments.length ? "Add a note about the attached file" : "Message Rem"}
       sendLabel="Send"
-      attachments={composer.attachments}
-      attachmentError={composer.attachmentError}
-      draft={composer.draft}
+      attachments={attachments}
+      attachmentError={attachmentError}
+      draft={draft}
       focusRequest={focusRequest}
       permissionOptions={[]}
       sendDisabled={disabled}
-      onAddAttachments={composer.add}
+      onAddAttachments={files => attachToRemComposer(files)}
       onAttachmentErrorChange={error => updateRemComposer({ error })}
       onAttachmentsChange={attachments => updateRemComposer({ attachments })}
       onDraftChange={draft => updateRemComposer({ draft })}
-      onSend={() => void composer.send()}
+      onSend={() => void send()}
     />
   </div>;
 }

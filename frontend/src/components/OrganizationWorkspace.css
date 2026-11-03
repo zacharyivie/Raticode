@@ -371,3 +371,6 @@ button.org-chart-person:hover { background: var(--org-soft); border-radius: 6px;
 .org-transcript ol { display: grid; gap: 8px; margin: 0 0 10px; padding: 0; list-style: none; }
 .org-transcript strong { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: rgb(var(--color-muted)); }
 .org-field select[multiple] { min-height: 64px; }
+.org-audit-check { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 0 0 22px; font-size: 12px; }
+.org-audit-check p { margin: 0; }
+.org-notice-text { color: var(--org-success); }

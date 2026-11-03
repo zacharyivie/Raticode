@@ -347,10 +347,10 @@ def test_triggers_separate_validation_preparation_and_publication() -> None:
     candidate = _entry_workflow("release-candidate.yml")
     publish = _entry_workflow("release.yml")
     assert set(validation["on"]) == {"pull_request", "workflow_call"}
-    assert candidate["on"]["push"]["branches"] == ["main"]
+    assert candidate["on"]["push"]["branches"] == ["stage"]
     assert set(candidate["on"]) == {"push", "workflow_dispatch"}
     assert publish["on"] == {"push": {"tags": ["v*"]}}
-    assert _job(candidate, "prepare")["if"] == "github.ref == 'refs/heads/main'"
+    assert _job(candidate, "prepare")["if"] == "github.ref == 'refs/heads/stage'"
     assert _job(candidate, "prepare")["secrets"] == "inherit"
     assert _job(candidate, "stage")["needs"] == "prepare"
     assert set(publish["jobs"]) == {"publish"}

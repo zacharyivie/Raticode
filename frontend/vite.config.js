@@ -17,8 +17,6 @@ export default defineConfig({
         manualChunks(id) {
           if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(id)) return "react";
           if (id.includes("node_modules") && /(?:react-markdown|remark-|rehype-|micromark|mdast-|hast-|unist-|unified)/.test(id)) return "markdown";
-          // The thread list loads beside App so App stays under its size budget.
-          if (/\/src\/(?:components\/ThreadSections\.jsx|lib\/threadSelection\.js)$/.test(id)) return "threads";
         },
       },
     },

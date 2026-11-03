@@ -7,6 +7,7 @@ reach the durable handler only after local trust confirmation and ready acknowle
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import time
 from collections import OrderedDict
@@ -28,6 +29,10 @@ from gofer.devices.pairing import Invitations
 from gofer.devices.registry import DeviceRegistry, PairingError, device_id
 from gofer.devices.storage import StorageError
 from gofer.devices.tls import DeviceTLS, DeviceTLSError
+
+logger = logging.getLogger(__name__)
+# A phone stuck on one refusal reconnects every few seconds; name each reason rarely.
+REFUSAL_LOG_INTERVAL = 600.0
 
 
 class DeviceSession:
@@ -216,6 +221,7 @@ class DeviceListener:
         self.attempts: OrderedDict[str, tuple[float, float]] = OrderedDict()
         self.global_tokens = 32.0
         self.global_updated = time.monotonic()
+        self.refusals_logged: dict[str, float] = {}
 
     async def start(self, host: str = "127.0.0.1", port: int = 0) -> int:
         if self.server is not None:
@@ -304,9 +310,12 @@ class DeviceListener:
             TimeoutError,
             ValueError,
             TypeError,
-        ):
-            # Never log peer input, invitation material, TLS exceptions or pins.
-            pass
+        ) as exc:
+            # Never log peer input, invitation material, TLS exceptions or pins. Only a
+            # fixed refusal code that ended a signed-in session is named, so a phone that
+            # keeps reconnecting leaves a reason behind.
+            if isinstance(exc, PairingError) and session is not None and session.stage == "active":
+                self._note_refusal(str(exc))
         finally:
             if session is not None:
                 session.closed = True
@@ -319,6 +328,15 @@ class DeviceListener:
                 await writer.wait_closed()
             except OSError:
                 pass
+
+    def _note_refusal(self, reason: str) -> None:
+        if reason in ("session_timeout", "session_closed"):
+            return  # A phone that slept or closed the app; nothing to explain.
+        now = time.monotonic()
+        if now - self.refusals_logged.get(reason, -REFUSAL_LOG_INTERVAL) < REFUSAL_LOG_INTERVAL:
+            return
+        self.refusals_logged[reason] = now
+        logger.warning("Paired device session ended: %s", reason)
 
     async def close(self) -> None:
         for host in list(self.extra):

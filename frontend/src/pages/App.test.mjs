@@ -10758,9 +10758,9 @@ async function exerciseDialogFamily(renderDialog, desktop = {}) {
   await dom.unmount();
 }
 
-// Rem, Swarms, and Second Brain are experimental plugins, so tests that open
-// them from the activity rail turn them on first.
-const EXPERIMENTAL_PLUGINS_ON = { rem: true, swarms: true, "second-brain": true };
+// Swarms and Second Brain are experimental plugins, so tests that open them
+// from the activity rail turn them on first. Rem is always available.
+const EXPERIMENTAL_PLUGINS_ON = { swarms: true, "second-brain": true };
 
 function experimentalPluginStorage() {
   return { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ plugins: { enabled: EXPERIMENTAL_PLUGINS_ON } }) };
@@ -18259,7 +18259,7 @@ test("plugin settings hide, order, and lock the activity rail", async () => {
 
 test("the Plugins settings section toggles, reorders, and restores sidebar plugins", async () => {
   const changes = [];
-  let settings = settingsModule.normalizeAppSettings({ plugins: { enabled: {}, preview: { rem: true } } });
+  let settings = settingsModule.normalizeAppSettings({ plugins: { enabled: {}, preview: { swarms: true } } });
   // Holds settings in state so every click sees the previous change.
   function Harness() {
     const [current, setCurrent] = React.useState(settings);
@@ -18278,29 +18278,34 @@ test("the Plugins settings section toggles, reorders, and restores sidebar plugi
     assert.ok(dom.byText("Always shown"));
     assert.doesNotMatch(dom.text(), /Experimental/);
     // Experimental plugins that are off appear only in Feature Preview.
-    for (const label of ["Swarms", "Organizations", "Second Brain"]) assert.equal(hasLabel(dom, `Show ${label}`), false, `${label} is hidden while off`);
+    for (const label of ["Organizations", "Second Brain"]) assert.equal(hasLabel(dom, `Show ${label}`), false, `${label} is hidden while off`);
+    assert.equal(dom.byLabel("Show Swarms").getAttribute("aria-checked"), "true");
+    // Rem is a standard plugin, listed and shown without a Feature Preview choice.
     assert.equal(dom.byLabel("Show Rem").getAttribute("aria-checked"), "true");
     assert.equal(dom.byLabel("Show Search").getAttribute("aria-checked"), "true");
     await dom.click(dom.byLabel("Show Search"));
     assert.deepEqual(changes.at(-1), ["plugins.enabled", { search: false }]);
-    // Hiding a Feature Preview plugin removes it from the sidebar only.
     await dom.click(dom.byLabel("Show Rem"));
     assert.deepEqual(changes.at(-1), ["plugins.enabled", { search: false, rem: false }]);
-    assert.deepEqual(settings.plugins.preview, { rem: true });
     assert.equal(dom.byLabel("Show Rem").getAttribute("aria-checked"), "false", "the row and its switch stay");
+    // Hiding a Feature Preview plugin removes it from the sidebar only.
+    await dom.click(dom.byLabel("Show Swarms"));
+    assert.deepEqual(changes.at(-1), ["plugins.enabled", { search: false, rem: false, swarms: false }]);
+    assert.deepEqual(settings.plugins.preview, { swarms: true });
+    assert.equal(dom.byLabel("Show Swarms").getAttribute("aria-checked"), "false", "the row and its switch stay");
     await dom.keyDown(dom.byLabel("Move Rem"), "ArrowDown");
     assert.deepEqual(changes.at(-1), ["plugins.order", ["workflows", "rem", "files", "search", "source-control", "swarms", "organizations", "second-brain"]]);
   } finally { await dom.unmount(); }
 
   changes.length = 0;
-  settings = settingsModule.normalizeAppSettings({ plugins: { locked: true, order: ["files", "rem"], enabled: { rem: false, search: false }, preview: { rem: true } } });
+  settings = settingsModule.normalizeAppSettings({ plugins: { locked: true, order: ["files", "rem"], enabled: { rem: false, search: false }, preview: { swarms: true } } });
   const lockedDom = await mountReact(render(), createFetchMock([]));
   try {
     assert.equal(reactProps(lockedDom.byLabel("Move Rem")).disabled, true);
     await lockedDom.click(lockedDom.byText("Restore defaults"));
     // Restoring sidebar defaults shows every plugin and leaves Feature Preview alone.
     assert.deepEqual(changes, [["plugins.order", settingsModule.DEFAULT_APP_SETTINGS.plugins.order], ["plugins.enabled", {}]]);
-    assert.deepEqual(settings.plugins.preview, { rem: true });
+    assert.deepEqual(settings.plugins.preview, { swarms: true });
   } finally { await lockedDom.unmount(); }
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("experimental"), ["developer"]);
   assert.deepEqual(settingsPopoverModule.settingsCategoriesForQuery("feature preview"), ["developer"]);
@@ -18332,9 +18337,12 @@ test("Feature Preview turns on every experimental feature, restarting the backen
   try {
     await dom.flush();
     assert.ok(dom.byLabel("Feature Preview"));
-    for (const label of ["Rem home", "Swarms", "Organizations", "Second Brain", "Phone and desktop pairing"]) {
+    for (const label of ["Swarms", "Organizations", "Second Brain", "Phone and desktop pairing"]) {
       assert.equal(dom.byLabel(`Preview ${label}`).getAttribute("aria-checked"), "false", `${label} is off by default`);
     }
+    // Rem is a standard feature, so it has no Feature Preview switch.
+    assert.doesNotMatch(dom.text(), /Rem home/);
+    assert.equal(allElements(dom.container).some(node => /^Preview Rem/.test(node.getAttribute?.("aria-label") ?? "")), false);
     await dom.click(dom.byLabel("Preview Swarms"));
     assert.deepEqual(changes.at(-1), ["plugins.preview", { swarms: true }]);
     assert.deepEqual(calls, [], "sidebar-only previews do not restart the backend");
@@ -19062,6 +19070,97 @@ test("Rem keeps an unsent message across plugin switches and attaches copied or 
     assert.ok(dom.byLabel("Remove notes.md"));
     assert.equal(dom.byLabel("Message Rem").value, "Half typed");
   } finally { transfers.setFileClipboard(null); store.resetRemHomeStore(); composer.resetRemComposer(); await dom.unmount(); }
+});
+
+test("Rem polls that find nothing new download, store and re-render nothing", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  let messages = [{ id: "hi", role: "rem", body: "Hello" }];
+  let transcript = [{ id: "ask", role: "user", sender: "rem", body: "Work" }];
+  let phase = "Working";
+  const urls = [];
+  // Versions stand in for the backend's content hashes.
+  const fetchMock = createFetchMock([(url) => {
+    if (!url.startsWith("/api/rem/")) return null;
+    urls.push(url);
+    const [path, query = ""] = url.split("?");
+    const known = new URLSearchParams(query).get("known");
+    const answer = (version, payload, keep = {}) => ({ ok: true, json: async () => known === version ? { unchanged: true, version, ...keep } : { ...payload, version } });
+    if (path === "/api/rem/conversation") return answer(`c${messages.length}`, { conversation: { id: "rem", turn_state: "idle" }, messages: structuredClone(messages), context_ready: true }, { context_ready: true });
+    if (path === "/api/rem/tasks") return answer(`t-${phase}`, { tasks: [{ id: "task", active_run: { id: "run", thread_id: "worker", state: "executing", phase_label: phase } }] });
+    if (path === "/api/rem/threads/worker") return answer(`w${transcript.length}`, { metadata: { id: "worker", title: "Worker", managedRunId: "run" }, messages: transcript, running: true });
+    return null;
+  }]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  const synced = [];
+  const receive = event => synced.push(event.detail);
+  window.addEventListener("gofer:device-thread-sync", receive);
+  let emitted = 0;
+  const unsubscribe = store.subscribe(() => { emitted += 1; });
+  try {
+    await store.refreshRemHome();
+    const first = store.getState();
+    assert.equal(first.messages[0].body, "Hello");
+    assert.equal(synced.length, 1);
+    emitted = 0;
+    urls.length = 0;
+    await store.refreshRemHome();
+    assert.deepEqual(urls.sort(), ["/api/rem/conversation?known=c1", "/api/rem/tasks?known=t-Working", "/api/rem/threads/worker?known=w1"]);
+    assert.equal(emitted, 0, "An unchanged poll doesn't re-render Rem");
+    assert.equal(store.getState(), first);
+    assert.equal(synced.length, 1, "An unchanged thread isn't announced again");
+
+    // Progress, new transcript entries and new messages still arrive.
+    transcript = [...transcript, { id: "step", role: "assistant", body: "Halfway" }];
+    phase = "Checking";
+    await store.refreshRemHome();
+    assert.equal(store.getState().tasks[0].active_run.phase_label, "Checking");
+    assert.equal(store.getState().messages, first.messages, "The unchanged conversation keeps its messages");
+    assert.equal(synced.length, 2);
+    assert.equal(synced.at(-1).messages.at(-1).body, "Halfway");
+    messages = [...messages, { id: "more", role: "rem", body: "More" }];
+    await store.refreshRemHome();
+    assert.deepEqual(store.getState().messages.map(message => message.body), ["Hello", "More"]);
+    assert.equal(store.getState().messages[0], first.messages[0], "Unchanged messages keep their objects, so their rows stay cached");
+  } finally {
+    unsubscribe();
+    window.removeEventListener("gofer:device-thread-sync", receive);
+    store.resetRemHomeStore();
+    await dom.unmount();
+  }
+});
+
+test("typing to Rem re-renders the composer, not the messages", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  const composer = await viteServer.ssrLoadModule("/src/lib/remComposer.js");
+  store.resetRemHomeStore();
+  composer.resetRemComposer();
+  store.setRemHomeContext(null);
+  // Every render of a message row reads its date.
+  let reads = 0;
+  const message = (id, role, body) => Object.defineProperty({ id, role, body }, "created_at", { enumerable: true, get() { reads += 1; return "2026-11-02T09:05:00Z"; } });
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [message("ask", "user", "Question"), message("reply", "rem", "**Answer**")] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default, { onOpenLink: () => {} }), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 20 && !textOf(dom.container).includes("Answer"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    assert.ok(reads > 0);
+    reads = 0;
+    for (const draft of ["H", "He", "Hel", "Hell", "Hello"]) await dom.change(dom.byLabel("Message Rem"), draft);
+    assert.equal(dom.byLabel("Message Rem").value, "Hello");
+    assert.equal(reads, 0, "Keystrokes must not re-render message rows");
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+    composer.resetRemComposer();
+  }
 });
 
 test("Rem configuration changes do not wait on a discarded workspace lookup", async () => {

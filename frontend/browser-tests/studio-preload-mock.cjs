@@ -8,12 +8,12 @@ if (process.env.GOFER_TERMINAL_ONLY === "1") {
   }));
 }
 
-// The studio regressions exercise Rem, Swarms, and Second Brain from the
-// activity rail, so turn on those experimental plugins unless a test has
-// already stored its own settings.
+// The studio regressions exercise Swarms and Second Brain from the activity
+// rail, so turn on those experimental plugins unless a test has already stored
+// its own settings. Rem is always available.
 if (!window.localStorage.getItem("raticode.settings.v1")) {
   window.localStorage.setItem("raticode.settings.v1", JSON.stringify({
-    version: 2, plugins: { enabled: { rem: true, swarms: true, "second-brain": true } },
+    version: 2, plugins: { enabled: { swarms: true, "second-brain": true } },
   }));
 }
 

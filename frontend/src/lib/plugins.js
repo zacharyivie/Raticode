@@ -4,7 +4,7 @@
 // while off they appear nowhere else in the app. Showing or hiding a plugin in
 // the sidebar is a separate choice. Mark a plugin experimental here.
 export const SIDEBAR_PLUGINS = Object.freeze([
-  { id: "rem", label: "Rem", description: "Rem's home with threads, tasks, and reviews.", experimental: true },
+  { id: "rem", label: "Rem", description: "Rem's home with threads, tasks, and reviews." },
   { id: "workflows", label: "Workflows", description: "Workflows in the current project." },
   { id: "files", label: "File explorer", description: "Browse, create, and organize project files.", required: true },
   { id: "search", label: "Search", description: "Find and replace text across the project." },

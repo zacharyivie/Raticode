@@ -1,7 +1,9 @@
 """Stage verified release files, then publish their verified draft without rebuilding.
 
-Only the candidate workflow writes drafts. The tag workflow verifies the attested
-manifest, the exact successful source run and every remote byte before publishing.
+Only the candidate workflow writes drafts, from pushes to the stage branch. The tag
+workflow verifies the attested manifest, the exact successful source run and every
+remote byte before publishing. A version tag may point at the staged commit itself or
+at a commit with an identical file tree, such as its squash merge into main.
 All subprocess arguments and API payloads are passed without shell interpolation.
 """
 
@@ -26,6 +28,8 @@ WORKFLOW = ".github/workflows/release-candidate.yml"
 GROUPS = ("linux", "windows", "macos", "audit-evidence")
 MAX_AGE = timedelta(days=7)
 READY = "<!-- raticode-candidate-ready:"
+# Pushes to this branch prepare candidates. Main receives them by squash merge.
+CANDIDATE_BRANCH = "stage"
 
 
 def require(condition: Any, message: str) -> None:
@@ -285,11 +289,11 @@ def validate_run(run: dict[str, Any], sha: str, repo: str) -> None:
     )
     require(
         run.get("head_sha") == sha
-        and run.get("head_branch") == "main"
+        and run.get("head_branch") == CANDIDATE_BRANCH
         and run.get("event") in {"push", "workflow_dispatch"}
         and run.get("path") == WORKFLOW
         and run.get("repository", {}).get("full_name", "").lower() == repo.lower(),
-        "Candidate must come from this repository's trusted main preparation workflow",
+        "Candidate must come from this repository's trusted stage preparation workflow",
     )
 
 
@@ -327,6 +331,18 @@ def verify_remote(
         require(digest(target) == info["sha256"], f"Remote hash mismatch: {entry['name']}")
         if "size" in info:
             require(target.stat().st_size == info["size"], f"Remote size mismatch: {entry['name']}")
+
+
+def same_source(repo: str, candidate: str, released: str) -> bool:
+    """Whether the released commit has exactly the candidate's files.
+
+    A squash merge of stage into main makes a new commit; its tree is identical to
+    the staged commit's when main held nothing stage didn't already contain.
+    """
+    if candidate == released:
+        return True
+    trees = [api(f"repos/{repo}/git/commits/{sha}")["tree"]["sha"] for sha in (candidate, released)]
+    return trees[0] == trees[1]
 
 
 def candidate_tag(manifest: dict[str, Any]) -> str:
@@ -399,8 +415,9 @@ def stage(repo: str, directory: Path) -> None:
     api(f"repos/{repo}/releases/{release['id']}", {"body": body}, "PATCH")
     summary = (
         f"Candidate staged: {release['html_url']}\n\n"
-        "After this run succeeds, review the draft files and push the version tag at the "
-        "exact source commit shown below. Do not use the web Publish button.\n\n" + body + "\n"
+        "After this run succeeds, review the draft files. Then push the version tag at the "
+        "source commit shown below, or at its squash merge into main if that commit has "
+        "exactly the same files. Do not use the web Publish button.\n\n" + body + "\n"
     )
     print(summary)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -420,7 +437,7 @@ def verify_provenance(repo: str, path: Path, sha: str) -> None:
         "--source-digest",
         sha,
         "--source-ref",
-        "refs/heads/main",
+        f"refs/heads/{CANDIDATE_BRANCH}",
     )
 
 
@@ -435,11 +452,18 @@ def read_candidate(
         f"{READY}{digest(path)} -->" in (release.get("body") or ""),
         "Candidate remote verification has not completed",
     )
-    verify_provenance(repo, path, sha)
     manifest: dict[str, Any] = json.loads(path.read_text())
-    validate_manifest(manifest, repo, sha, version)
+    source = manifest.get("commit")
+    require(isinstance(source, str) and re.fullmatch(r"[0-9a-f]{40}", source), "Bad source SHA")
+    require(
+        same_source(repo, source, sha),
+        "The tagged commit's files differ from the candidate's staged commit",
+    )
+    # The attestation binds the manifest to the staged commit it was built from.
+    verify_provenance(repo, path, source)
+    validate_manifest(manifest, repo, source, version)
     run = api(f"repos/{repo}/actions/runs/{manifest['run_id']}/attempts/{manifest['run_attempt']}")
-    validate_run(run, sha, repo)
+    validate_run(run, source, repo)
     return manifest
 
 
@@ -466,7 +490,7 @@ def publish(repo: str) -> None:
     ]
     require(
         candidates,
-        "No verified draft for this commit. Finish Prepare release candidate on main, "
+        "No verified draft for this commit. Finish Prepare release candidate on stage, "
         "then rerun this publish job. The tag job never builds missing candidates.",
     )
     with tempfile.TemporaryDirectory() as temporary:
@@ -481,6 +505,9 @@ def publish(repo: str) -> None:
                 print(f"Skipping unusable draft {release['id']}: {error}")
                 continue
             ready.append((release, manifest))
+        # A candidate built from the tagged commit itself wins over ones that only
+        # share its files, such as an earlier stage push of the same content.
+        ready = [item for item in ready if item[1]["commit"] == sha] or ready
         require(
             len(ready) == 1,
             "Expected exactly one verified, successful candidate for this commit. "
@@ -535,7 +562,10 @@ def main() -> None:
     repo = os.environ["GITHUB_REPOSITORY"]
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "Invalid repository")
     if command in {"manifest", "stage"}:
-        require(os.environ["GITHUB_REF"] == "refs/heads/main", "Candidates require trusted main")
+        require(
+            os.environ["GITHUB_REF"] == f"refs/heads/{CANDIDATE_BRANCH}",
+            "Candidates require the trusted stage branch",
+        )
     if command == "manifest":
         run_id = int(os.environ["GITHUB_RUN_ID"])
         create_manifest(

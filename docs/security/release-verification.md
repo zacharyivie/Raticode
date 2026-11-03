@@ -24,9 +24,11 @@ exception must name one advisory and its affected package/version, explain the
 unreachable code path, identify an owner, and expire on a date. Do not add a
 blanket severity downgrade or `continue-on-error` to the audit steps.
 
-Validation and every platform build check out the main event's immutable
-`github.sha`. Publication checks the tag against the attested candidate commit
-and rechecks the remote tag before making the draft public. Desktop packages exclude the
+Validation and every platform build check out the stage event's immutable
+`github.sha`. Publication accepts a tag at the attested candidate commit or at a
+commit with the identical file tree, such as its squash merge into `main`. It
+verifies provenance against the candidate commit and rechecks the remote tag
+before making the draft public. Desktop packages exclude the
 Electron test directory and test modules.
 
 Actions use commit hashes. Dependabot proposes weekly action and dependency
@@ -161,15 +163,15 @@ under the test host. Windows/macOS verification remains separate.
 
 ## Release signing setup
 
-Main preparation defaults to unsigned releases and needs no signing credentials.
+Stage preparation defaults to unsigned releases and needs no signing credentials.
 Set the repository variable `RELEASE_SIGNING=true` to opt into signed candidates,
 which require five secrets and three variables in the `release-signing` environment. See [the release guide](../releasing.md) for every setting, its purpose,
 how to obtain it, and the Windows hardware/cloud signing limitation. Both the early
 credential check and native build jobs select that environment only for signed
 preparation. Unsigned jobs use `release-unsigned` with no secrets required. Restrict
-the signing environment to main.
+the signing environment to the `stage` branch.
 
-Main builds the candidate and verifies it before uploading a draft. Its manifest
+Stage builds the candidate and verifies it before uploading a draft. Its manifest
 records `signed: true` or `signed: false`, and release notes disclose the mode. Tag pushes
 only publish a matching successful candidate. Signing values are passed to scoped
 signing/packaging steps, after dependency installation. Source validation on pull
@@ -196,7 +198,7 @@ checksums and provenance remain mandatory in either mode.
 The staging job attests every candidate artifact, including Linux and standalone
 CLI binaries, checksum files and dependency evidence, using GitHub's OIDC build
 provenance, plus a manifest binding the source SHA, run/attempt, artifact IDs and
-file hashes. Publication verifies that manifest, the successful main run and every
+file hashes. Publication verifies that manifest, the successful stage run and every
 remote asset before changing draft visibility. Verification of a downloaded artifact is:
 
 ```sh

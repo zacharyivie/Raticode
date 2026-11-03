@@ -21,9 +21,9 @@ REM_MANAGED = {"rem_artifacts"}
 
 
 @pytest.fixture
-def rem(tmp_path: Path):
+def rem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """test_rem_home's RemHome with a fake provider."""
-    yield from test_rem_home.home.__wrapped__(tmp_path)  # type: ignore[attr-defined]
+    yield from test_rem_home.home.__wrapped__(tmp_path, monkeypatch)  # type: ignore[attr-defined]
 
 
 def skill(root: Path, name: str, description: str) -> dict[str, Any]:

@@ -172,10 +172,12 @@ yay -S gofer-flow-cli
 
 ## Release Builds
 
-Pushes to `main` validate source and build unsigned Linux, Windows and macOS
+Pushes to `stage` validate source and build unsigned Linux, Windows and macOS
 packages, and stage a verified draft through `.github/workflows/release-candidate.yml`.
-Review that candidate before pushing a `v*` tag at its exact commit. The tag workflow
-publishes the staged files without rebuilding. Pull requests run source validation.
+Review that candidate, squash merge `stage` into `main`, then push a `v*` tag at the
+squash commit, which must have exactly the candidate's files, or at the staged commit.
+The tag workflow publishes the staged files without rebuilding. Pull requests run
+source validation.
 
 See [the release guide](docs/releasing.md) for signing setup, candidate review,
 tagging and retry behavior. Signing is optional. Leave `RELEASE_SIGNING` unset for

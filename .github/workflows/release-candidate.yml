@@ -1,9 +1,11 @@
 name: Prepare release candidate
 
+# Release checks and candidates run on stage. Main receives a reviewed candidate by
+# squash merge, then a v* tag publishes it (see docs/releasing.md).
 on:
   push:
     branches:
-      - main
+      - stage
   workflow_dispatch:
 
 permissions:
@@ -16,7 +18,7 @@ concurrency:
 jobs:
   prepare:
     name: Validate source and prepare candidate
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/stage'
     uses: ./.github/workflows/release-build.yml
     with:
       signed_release: ${{ vars.RELEASE_SIGNING == 'true' }}

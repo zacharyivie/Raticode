@@ -93,6 +93,15 @@ app.whenReady().then(async () => {
       && Math.abs(icon.y + icon.height / 2 - message.y - message.height / 2) < 1
       && Math.abs(header.right - copy.right) < 1 && hash.left > time.right && Math.abs(hash.y - time.y) < 1;
   })), "History must use compact lanes, put the ID after the time and keep only the copy button at the top right");
+  assert.ok(await evaluate(() => {
+    const list = document.querySelector(".scm-history-graph");
+    const bounds = list.getBoundingClientRect();
+    return list.scrollWidth === list.clientWidth && [...document.querySelectorAll(".scm-history-row")].every(row => {
+      const text = row.querySelector(".scm-history-text").getBoundingClientRect();
+      const lane = row.querySelector(".scm-history-lane").getBoundingClientRect();
+      return Math.abs(text.left - bounds.left) < 1 && Math.abs(text.right - lane.left) < 1 && Math.abs(lane.right - bounds.right) < 1;
+    });
+  }), "A narrow graph must sit at the right of left-aligned text without any horizontal scrolling");
   assert.ok(await evaluate(() => [...document.querySelectorAll(".scm-history-lane path")].some(edge => edge.getAttribute("d").includes("C"))));
   await evaluate(() => [...document.querySelectorAll(".scm-history-row button")].find(button => button.textContent.includes("Add configurable Find")).click());
   assert.ok(await evaluate(() => document.body.textContent.includes("Keep search within the active editor.")));
@@ -154,6 +163,51 @@ app.whenReady().then(async () => {
   assert.equal(await evaluate(() => window.historyCalls.at(-1).refs), null);
   await evaluate(() => document.querySelector('[aria-label="Filter commit history"]').dispatchEvent(new Event("pointerdown", { bubbles: true })));
   assert.equal(await evaluate(() => document.querySelector('[aria-label="History branches"]').getAttribute("aria-expanded")), "false");
+  await evaluate(() => { window.showWideHistory(); document.querySelector('[aria-label="Refresh commit history"]').click(); });
+  for (let i = 0; i < 40; i++) {
+    if (await evaluate(() => document.querySelectorAll(".scm-history-row").length === 14)) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const wideLayout = () => evaluate(() => {
+    const list = document.querySelector(".scm-history-graph");
+    const bounds = list.getBoundingClientRect();
+    const scrollbar = document.querySelector(".scm-history-scrollbar");
+    const rows = [...document.querySelectorAll(".scm-history-row")].map(row => {
+      const text = row.querySelector(".scm-history-text").getBoundingClientRect();
+      const lane = row.querySelector(".scm-history-lane").getBoundingClientRect();
+      const copy = row.querySelector('button[aria-label^="Copy commit ID"]').getBoundingClientRect();
+      const subject = row.querySelector(".font-medium").getBoundingClientRect();
+      const hit = document.elementFromPoint(subject.left + 4, subject.top + subject.height / 2);
+      return { text: [text.left, text.right], lane: [lane.left, lane.right, lane.width], copyRight: copy.right, subjectRight: subject.right, textOnTop: Boolean(hit?.closest(".scm-history-text")) };
+    });
+    return { left: bounds.left, right: bounds.right, width: list.clientWidth, scrollWidth: list.scrollWidth, scrollLeft: list.scrollLeft, bar: scrollbar.getBoundingClientRect().toJSON(), barRange: scrollbar.scrollWidth - scrollbar.clientWidth, rows };
+  });
+  const wide = await wideLayout();
+  assert.equal(wide.rows.length, 14);
+  assert.ok(wide.scrollWidth > wide.width, "A wide graph must overflow into a horizontal scroll");
+  assert.equal(wide.barRange, wide.scrollWidth - wide.width, "The pinned scrollbar must cover exactly the hidden graph");
+  assert.ok(Math.abs(wide.bar.left - (wide.left + wide.width * 2 / 3)) < 1 && Math.abs(wide.bar.width - wide.width / 3) < 1, "The pinned scrollbar must sit under the graph third");
+  for (const row of wide.rows) {
+    assert.ok(Math.abs(row.text[0] - wide.left) < 1 && Math.abs(row.text[1] - row.text[0] - wide.width * 2 / 3) < 1, "Commit text must keep the left two thirds");
+    assert.ok(Math.abs(row.lane[0] - row.text[1]) < 1 && row.lane[2] > wide.width / 3, "The graph must start right of the text and continue past the visible third");
+    assert.ok(row.copyRight <= row.text[1] + 0.5 && row.subjectRight <= row.text[1] + 0.5 && row.textOnTop, "A wide graph must not cover or push out the commit text");
+  }
+  await evaluate(() => { const bar = document.querySelector(".scm-history-scrollbar"); bar.scrollLeft = bar.scrollWidth; bar.dispatchEvent(new Event("scroll")); });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const scrolled = await wideLayout();
+  assert.equal(scrolled.scrollLeft, wide.scrollWidth - wide.width, "Dragging the pinned scrollbar must scroll the graph");
+  for (const row of scrolled.rows) {
+    assert.ok(Math.abs(row.text[0] - wide.left) < 1 && row.textOnTop, "Commit text must stay in place while the graph scrolls");
+    assert.ok(Math.abs(row.lane[1] - scrolled.right) < 1, "Scrolling to the end must reveal the rest of the graph");
+  }
+  require("node:fs").writeFileSync("/tmp/rem-history-wide-scrolled.png", (await win.webContents.capturePage()).toPNG());
+  await evaluate(() => { const list = document.querySelector(".scm-history-graph"); list.scrollLeft = 0; list.dispatchEvent(new Event("scroll")); });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(await evaluate(() => document.querySelector(".scm-history-scrollbar").scrollLeft), 0, "Scrolling the graph directly must move the pinned scrollbar too");
+  await evaluate(() => [...document.querySelectorAll(".scm-history-row button")].find(button => button.textContent.includes("Parallel branch 3")).click());
+  assert.equal(await evaluate(() => [...document.querySelectorAll(".scm-history-row button[aria-expanded]")].find(button => button.textContent.includes("Parallel branch 3")).getAttribute("aria-expanded")), "true", "Commits must still expand beside a wide graph");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  require("node:fs").writeFileSync("/tmp/rem-history-wide.png", (await win.webContents.capturePage()).toPNG());
   await verifyContrast();
   const screenshot = await win.webContents.capturePage();
   require("node:fs").writeFileSync("/tmp/rem-find-graph.png", screenshot.toPNG());

@@ -18,6 +18,8 @@ READ_ACTIONS = {
     "import_github_preview",
     "providers",
     "run_events",
+    "audit_verify",
+    "run_input",
 } | READ_OPERATIONS
 
 TASK_EDIT_FIELDS = {
@@ -85,7 +87,10 @@ ACTION_HELP = {
     "control": (
         "state=running/paused. Running authorizes eligible work; individual holds remain. "
         "From Rem, starting returns needsUserConsent: the user approves it in the "
-        "Organizations tab. Tell the user that nothing has started yet."
+        "Organizations tab within 24 hours. Tell the user that nothing has started yet. "
+        "The same applies to approve, workflow_launch, enabling routines or webhooks, and "
+        "configure/restore changes that add or resume employees, widen permissions, tools, "
+        "folders or credentials, or raise or remove limits."
     ),
     "resume_all": (
         "expectedRevision. Explicitly clear all employee holds. From Rem, needs user consent."
@@ -96,6 +101,11 @@ ACTION_HELP = {
     ),
     "request_decide": "User-only requestId, decision=approve/decline for Rem's consent requests.",
     "run_events": "taskId, turnId (an attempt ID). Stored transcript events of one employee run.",
+    "run_input": "taskId, turnId. The stored input of one employee run and whether it matches.",
+    "audit_verify": (
+        "No parameters. Verifies the configuration history hash chain and the append-only, "
+        "hash-linked activity log; reports events written before linking began."
+    ),
     "task_create": (
         "Task fields from taskSchema, required title, optional idempotencyKey. "
         "execution={targetId: destination ID} requests managed delegation. "

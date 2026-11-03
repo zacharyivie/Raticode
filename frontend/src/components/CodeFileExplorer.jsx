@@ -246,6 +246,12 @@ export default function CodeFileExplorer({
   const historySelectionRef = useRef({ refs: historyRefs, limit: historyLimit });
   historySelectionRef.current = { refs: historyRefs, limit: historyLimit };
   const historyGraph = useMemo(() => layoutHistoryGraph(filterHistory(gitHistory.commits, historyQuery)), [gitHistory.commits, historyQuery]);
+  // The pinned scrollbar under the graph column mirrors the list's horizontal scroll.
+  const historyListRef = useRef(null);
+  const historyScrollbarRef = useRef(null);
+  const mirrorHistoryScroll = (from, to) => {
+    if (from.current && to.current && Math.abs(to.current.scrollLeft - from.current.scrollLeft) >= 1) to.current.scrollLeft = from.current.scrollLeft;
+  };
   const [expandedCommits, setExpandedCommits] = useState(() => new Set());
   const [copiedCommitHash, setCopiedCommitHash] = useState("");
   const [worktrees, setWorktrees] = useState({ active: false, items: [], loading: false });
@@ -1732,15 +1738,16 @@ export default function CodeFileExplorer({
             {!gitHistory.loading && gitHistory.active && !gitHistory.commits.length ? <p className="py-6 text-center text-xs text-muted">{historyRefs?.length === 0 ? "Select branches to show their history." : historyRefs ? "No commits in this selection." : "No commits yet."}</p> : null}
             {!gitHistory.loading && gitHistory.commits.length > 0 && !historyGraph.rows.length ? <p className="py-4 text-xs text-muted">No loaded commits match. Clear the filter or load more history.</p> : null}
             <p className="mb-2 text-[10px] leading-4 text-muted">Newer commits are above their ancestors. Lines meet at shared commits.</p>
-            <div role="list" aria-label="Branch history graph" className="scm-history-graph">
+            <div className="scm-history-scroll" style={{ "--scm-graph-width": `${historyGraph.width}px` }}>
+            <div ref={historyListRef} role="list" aria-label="Branch history graph" className="scm-history-graph" onScroll={() => mirrorHistoryScroll(historyListRef, historyScrollbarRef)}>
             {historyGraph.rows.map((row) => {
               const { commit } = row;
               const isExpanded = expandedCommits.has(commit.hash);
               const isCopied = copiedCommitHash === commit.hash;
               return (
                 <div key={commit.hash} role="listitem" className="scm-history-row">
-                  <GitHistoryLane row={row} width={historyGraph.width} />
-                <div onContextMenu={event => openHistoryMenu(event, commit)} onKeyDown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openHistoryMenu(event, commit); }} className={`min-w-0 flex-1 rounded-md transition-colors ${isExpanded ? "bg-slate-50" : "hover:bg-slate-50"}`}>
+                <div className="scm-history-text">
+                <div onContextMenu={event => openHistoryMenu(event, commit)} onKeyDown={event => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) openHistoryMenu(event, commit); }} className={`min-w-0 rounded-md transition-colors ${isExpanded ? "bg-slate-50" : "hover:bg-slate-50"}`}>
                   <div className="flex items-center rounded-md">
                     <button
                       aria-expanded={isExpanded}
@@ -1781,8 +1788,12 @@ export default function CodeFileExplorer({
                   ) : null}
                 </div>
                 </div>
+                  <GitHistoryLane row={row} width={historyGraph.width} />
+                </div>
               );
             })}
+            </div>
+            <div ref={historyScrollbarRef} aria-hidden="true" tabIndex={-1} className="scm-history-scrollbar" onScroll={() => mirrorHistoryScroll(historyScrollbarRef, historyListRef)}><div /></div>
             </div>
             {gitHistory.hasMore && historyLimit < 5000 ? <button type="button" className="my-2 w-full rounded border border-line py-1 text-[11px] text-muted hover:text-ink disabled:opacity-50" disabled={gitHistory.loading} onClick={() => setHistoryLimit(limit => limit + 100)}>Load more history</button> : null}
             {gitHistory.hasMore && historyLimit >= 5000 ? <p className="py-2 text-[11px] text-muted">Showing 5,000 commits. Select a branch to narrow history.</p> : null}

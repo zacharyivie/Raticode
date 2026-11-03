@@ -20,6 +20,14 @@ const commits = [
   { hash: "local", shortHash: "fab3203", subject: "Add configurable Find", message: "Add configurable Find\n\nKeep search within the active editor.", parents: ["base"], labels: [] },
   { hash: "base", shortHash: "dab4204", subject: "Release Raticode", parents: [], labels: [refs[2]] },
 ].map(commit => ({ author: "Ada", authoredAt: "2026-09-30T12:00:00Z", ...commit }));
+// A twelve-way merge keeps twelve lanes open, far wider than a third of the sidebar.
+const wideCommits = [
+  { hash: "octopus", shortHash: "e999999", subject: "Merge twelve parallel branches", parents: Array.from({ length: 12 }, (_, index) => `wide-${index}`), labels: [] },
+  ...Array.from({ length: 12 }, (_, index) => ({ hash: `wide-${index}`, shortHash: `e${String(index).padStart(6, "0")}`, subject: `Parallel branch ${index + 1} with a commit subject long enough to need truncating`, parents: ["base"], labels: [] })),
+  commits.at(-1),
+].map(commit => ({ author: "Ada", authoredAt: "2026-09-30T12:00:00Z", ...commit }));
+let wideHistory = false;
+window.showWideHistory = () => { wideHistory = true; };
 let fileExists = true;
 let projectExists = true;
 let projectGrant = "";
@@ -62,6 +70,7 @@ window.goferDesktop = {
         reachable.add(hash);
         commits.find(commit => commit.hash === hash)?.parents.forEach(visit);
       }
+      if (wideHistory) return { active: true, refs, commits: wideCommits };
       if (options.refs == null) commits.forEach(commit => visit(commit.hash));
       else options.refs.forEach(ref => visit(tips.get(ref)));
       return { active: true, refs, commits: commits.filter(commit => reachable.has(commit.hash)) };

@@ -920,21 +920,26 @@ def heartbeat(path: str | None) -> Iterator[None]:
         return
     stop = threading.Event()
 
-    def beat() -> None:
-        while True:
-            with contextlib.suppress(OSError):
-                with open(path, "a", encoding="utf-8"):
-                    pass
-                os.utime(path)
-            if stop.wait(HEARTBEAT_SECONDS):
-                return
+    def touch() -> None:
+        with contextlib.suppress(OSError):
+            with open(path, "a", encoding="utf-8"):
+                pass
+            os.utime(path)
 
+    def beat() -> None:
+        while not stop.wait(HEARTBEAT_SECONDS):
+            touch()
+
+    # Report activity before the command starts, so even a command that ends
+    # before the background thread first runs is seen as recent activity.
+    touch()
     thread = threading.Thread(target=beat, daemon=True)
     thread.start()
     try:
         yield
     finally:
         stop.set()
+        thread.join(timeout=5)
 
 
 def _short_command(argv: list[str]) -> str:

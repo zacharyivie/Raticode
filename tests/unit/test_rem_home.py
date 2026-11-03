@@ -41,7 +41,14 @@ def recipe(project: Path | None = None, **patch: Any) -> dict[str, Any]:
 
 
 @pytest.fixture
-def home(tmp_path: Path):
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import gofer.ui.rem_home as rem_home_module
+
+    # The automatic worker limit follows this computer's cores and memory (2 on a
+    # 4-core CI runner), and new workers wait when memory runs low. Pin both so
+    # tests behave the same on every host; admission tests set their own values.
+    monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: 8 * 1024**3)
+
     async def source(**kwargs: Any):
         instructions = kwargs["agent_instructions"]
         if "independent read-only reviewer" in instructions:
@@ -100,7 +107,9 @@ def home(tmp_path: Path):
         generate=lambda p, c, e: {"reply": "Hello.", "tasks": [], "memories": []},
         start=False,
     )
-    instance.configure({"provider": "codex", "model": "cli-default"})
+    instance.configure(
+        {"provider": "codex", "model": "cli-default", "command_slots": {"maxWorkers": 8}}
+    )
     yield instance
     instance.close()
     for worker, _ in instance.workers.values():
@@ -3822,6 +3831,23 @@ def test_new_workers_wait_for_free_memory(
     assert wait_run(home, second["id"], {"succeeded", "blocked"})["state"] == "succeeded"
 
 
+def test_rem_tests_admit_the_same_workers_on_a_small_computer(
+    home: RemHome, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.core.command_slots as command_slots
+    import gofer.ui.rem_home as rem_home_module
+
+    # A one-core, 2 GB computer would allow one worker automatically.
+    monkeypatch.setattr(command_slots, "cpu_count", lambda: 1)
+    monkeypatch.setattr(command_slots, "memory_total_bytes", lambda: 2 * 1024**3)
+    assert command_slots.default_limits()["maxWorkers"] == 1
+
+    # The fixture's saved limit and free memory keep concurrency tests host-independent.
+    assert home._admission() == (8, None)
+    available = rem_home_module.memory_available_bytes()
+    assert available is not None and available >= command_slots.WORKER_MEMORY_FLOOR
+
+
 def test_waiting_or_running_tests_keep_a_quiet_turn_alive(
     home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -4082,6 +4108,84 @@ def test_reply_files_rules_for_files_outside_open_folders(
     assert sensitive_path(tmp_path / ".aws" / "credentials")
     assert sensitive_path(tmp_path / "project" / ".env.local")
     assert not sensitive_path(shot)
+
+
+def test_files_listed_by_folder_and_name_can_be_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+    from gofer.ui.rem_home import reply_files
+
+    monkeypatch.setattr(rem_home_module.Path, "home", classmethod(lambda cls: tmp_path))
+    folder = tmp_path / "Raticode Mobile" / "screenshots" / "voice-synth"
+    folder.mkdir(parents=True)
+    for name in ("small-320dp-paused.png", "small-320dp-review.png", "other.png"):
+        (folder / name).write_bytes(b"png")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "plan.png").write_bytes(b"png")
+    (folder / "plan.png").write_bytes(b"png")
+    (folder / ".env").write_text("API_KEY=synthetic-not-a-real-key")
+    # How the voice-mode worker reported its screenshots: the folder once, then names.
+    records = (
+        f"Screenshots are in `{folder}/`:\n- `small-320dp-paused.png`\n"
+        "- `small-320dp-review.png`\n- `.env`\n"
+        f"Plan: `{elsewhere / 'plan.png'}`\n"
+    )
+    asked = [str(folder / n) for n in ("small-320dp-paused.png", "small-320dp-review.png")]
+    files, refused = reply_files(asked, {}, records=records)
+    assert [f["name"] for f in files] == ["small-320dp-paused.png", "small-320dp-review.png"]
+    assert not refused
+    # The ~/ form of the folder counts too.
+    home_form = records.replace(str(tmp_path), "~")
+    files, _ = reply_files(asked[:1], {}, records=home_form)
+    assert [f["name"] for f in files] == ["small-320dp-paused.png"]
+
+    def refusal(path: Path, text: str) -> str:
+        files, refused = reply_files([str(path)], {}, records=text)
+        assert not files
+        return refused[0]
+
+    # A name the records never list in that folder is still a guess.
+    assert "isn’t in our conversation" in refusal(folder / "other.png", records)
+    # A name that appears only inside another folder's path doesn't pair with this one.
+    assert "isn’t in our conversation" in refusal(folder / "plan.png", records)
+    # Part of a longer name doesn't count, and neither does a folder that only prefixes one.
+    assert "isn’t in our conversation" in refusal(
+        folder / "small-320dp-paused.png", f"In `{folder}/`: `big-small-320dp-paused.png`"
+    )
+    assert "isn’t in our conversation" in refusal(
+        folder / "small-320dp-paused.png", f"In `{folder}-old/`: `small-320dp-paused.png`"
+    )
+    # Secret-looking names still need the request to name the exact path.
+    assert "may hold passwords" in refusal(folder / ".env", records)
+
+
+def test_reply_whose_files_were_all_refused_says_so_instead(home: RemHome, tmp_path: Path):
+    missing = tmp_path / "gone.png"
+    home.generate = lambda p, c, e: {"reply": "Here are the screenshots.", "files": [str(missing)]}
+    home.submit_message({"request_id": "shots", "body": "Send me the screenshots"})
+    home._reply()
+    reply = home.store.conversation()["messages"][-1]
+    assert reply["body"] == "I couldn’t attach gone.png: that file doesn’t exist."
+    assert "files" not in reply
+
+    # When some files arrive, Rem's own words stay above the refusals.
+    shot = tmp_path / "project" / "shot.png"
+    shot.parent.mkdir()
+    shot.write_bytes(b"png")
+    home.configure(
+        {"provider": "codex", "model": "cli-default", "projects": [{"root": str(shot.parent)}]}
+    )
+    home.generate = lambda p, c, e: {
+        "reply": "Here are the screenshots.",
+        "files": [str(shot), str(missing)],
+    }
+    home.submit_message({"request_id": "some", "body": "Send me the screenshots"})
+    home._reply()
+    reply = home.store.conversation()["messages"][-1]
+    assert reply["body"].startswith("Here are the screenshots.\n\nI couldn’t attach gone.png")
+    assert [f["name"] for f in reply["files"]] == ["shot.png"]
 
 
 def test_agent_sign_ins_and_secret_files_need_the_request_to_name_them(

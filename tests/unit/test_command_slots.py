@@ -555,3 +555,26 @@ def test_last_activity_reads_the_heartbeat(tmp_path: Path) -> None:
     with command_slots.heartbeat(str(path)):
         pass
     assert abs((command_slots.last_activity(tmp_path, "thread") or 0) - time.time()) < 5
+
+
+def test_a_quick_command_reports_activity_before_the_heartbeat_thread_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = command_slots.activity_path(tmp_path, "thread")
+    path.parent.mkdir(parents=True)
+    release = threading.Event()
+
+    class SlowThread(threading.Thread):
+        # A busy computer can schedule the heartbeat thread after the command ends.
+        def run(self) -> None:
+            release.wait(5)
+            super().run()
+
+    monkeypatch.setattr(command_slots.threading, "Thread", SlowThread)
+    try:
+        with command_slots.heartbeat(str(path)):
+            assert command_slots.last_activity(tmp_path, "thread") is not None
+            release.set()
+    finally:
+        release.set()
+    assert abs((command_slots.last_activity(tmp_path, "thread") or 0) - time.time()) < 5

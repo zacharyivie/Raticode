@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Building2, History, Plus, Download, Pause, Play, Users, ListTodo, Activity, Settings, Folder, GitBranch, Check, X, ChevronRight, Upload, Clock, ShieldCheck, AlertTriangle, Archive } from "lucide-react";
-import { organizationRequest, teamMembers, projectPeople, employeeTree, eligibleManagers, historyByDate, configurationChanges, newEmployee, initials, plural, employeeStatus, STATUS_LABELS, TASK_STATUSES, needsApproval, isOpenTask, taskGroups, actorLabel, changeLabel, activityEntries, usageCost, relativeDay, filterWork, appendActivity, attentionSummary, monthUsage, reportsCost, dangerousPermission } from "../lib/organizations.js";
+import { organizationRequest, teamMembers, projectPeople, employeeTree, eligibleManagers, historyByDate, configurationChanges, newEmployee, initials, plural, employeeStatus, STATUS_LABELS, TASK_STATUSES, needsApproval, isOpenTask, taskGroups, actorLabel, changeLabel, activityEntries, usageCost, relativeDay, filterWork, appendActivity, attentionSummary, monthUsage, reportsCost, dangerousPermission, pendingRequests as waitingRequests } from "../lib/organizations.js";
 import ConfirmButton from "./OrganizationConfirm.jsx";
 import { startPolling } from "../lib/refresh.js";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
@@ -96,7 +96,7 @@ export default function OrganizationWorkspace({ rootPath, organizationId, projec
   const running = organization?.runtime.state === "running";
   const archived = organization?.runtime.archived === true;
   const attention = attentionSummary(tasks, organization?.runtime);
-  const pendingRequests = Object.values(organization?.runtime.consentRequests || {}).filter(request => request.status === "pending");
+  const pendingRequests = organization ? waitingRequests(organization.runtime) : [];
   const openCount = tasks.filter(isOpenTask).length;
   const approvals = tasks.filter(t => isOpenTask(t) && needsApproval(t)).length;
   function navigate(id) { setCollectionId(null); setSection(id); setEditor(null); setRestore(null); scroll.current?.scrollTo(0, 0); }
@@ -128,7 +128,7 @@ export default function OrganizationWorkspace({ rootPath, organizationId, projec
     {organization && <nav className="org-tabs" aria-label="Organization sections">{SECTIONS.map(([id, label, Icon]) => <button type="button" key={id} aria-label={label} aria-current={!editor && (section === id || id === "chart" && ["teams", "projects"].includes(section)) ? "page" : undefined} onClick={() => navigate(id)}><Icon size={15} aria-hidden="true" />{label}{id === "work" && approvals > 0 && <span className="org-count" aria-label={`${approvals} awaiting approval`}>{approvals}</span>}</button>)}</nav>}
     {error && <div className="org-banner org-error" role="alert"><span>{error}</span><button className="org-button org-icon-button" type="button" aria-label="Dismiss error" onClick={() => setError("")}><X size={15} /></button></div>}
     {notice && <div className="org-banner org-notice" role="status"><Check size={16} aria-hidden="true" /><span>{notice}</span><button className="org-button org-icon-button" type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
-    {pendingRequests.map(request => <div key={request.id} className="org-banner org-pause org-request" role="alert"><ShieldCheck size={15} aria-hidden="true" /><span><strong>Rem asks to: {request.summary}.</strong> Nothing has changed yet. Requested {new Date(request.at).toLocaleString()}.</span><button className="org-button org-primary" type="button" disabled={busy} onClick={() => act("request_decide", { requestId: request.id, decision: "approve" })}>Approve</button><button className="org-button" type="button" disabled={busy} onClick={() => act("request_decide", { requestId: request.id, decision: "decline" })}>Decline</button></div>)}
+    {pendingRequests.map(request => <div key={request.id} className="org-banner org-pause org-request" role="alert"><ShieldCheck size={15} aria-hidden="true" /><span><strong>Rem asks to: {request.summary}.</strong> Nothing has changed yet. Requested {new Date(request.at).toLocaleString()}; the request expires after a day.</span><button className="org-button org-primary" type="button" disabled={busy} onClick={() => act("request_decide", { requestId: request.id, decision: "approve" })}>Approve</button><button className="org-button" type="button" disabled={busy} onClick={() => act("request_decide", { requestId: request.id, decision: "decline" })}>Decline</button></div>)}
     {archived ? <div className="org-banner org-pause" role="status"><Archive size={14} aria-hidden="true" /><span>This organization is archived. Its history is kept and its projects are released.</span><button className="org-button" type="button" disabled={busy} onClick={() => act("archive", { archived: false })}>Restore organization</button></div>
       : !running && organization?.runtime.pauseReason && <div className="org-banner org-pause" role="status"><Pause size={14} aria-hidden="true" /><span>{organization.runtime.pauseReason}</span></div>}
     <div ref={scroll} className="org-scroll"><div className="org-content">
@@ -174,6 +174,7 @@ export default function OrganizationWorkspace({ rootPath, organizationId, projec
         </>)}
         {section === "history" && <>
           <div className="org-section-heading"><div><h3>Configuration history</h3><p className="org-note">Every change records who made it and why. Restore a healthy state without losing task history.</p></div><History size={24} className="org-muted" aria-hidden="true" /></div>
+          <AuditCheck organizationId={organizationId} />
           {restore && <RestorePreview restore={restore} config={config} busy={busy} reason={restoreReason} onReason={setRestoreReason} onCancel={() => setRestore(null)} onRestore={async () => { if (await act("restore", { revision: restore.revision, expectedRevision: restore.expectedRevision, reason: restoreReason })) { setRestore(null); setRestoreReason(""); } }} />}
           <div className="org-history">{historyByDate(history).map(bucket => <section className="org-date" key={bucket.date}><h4>{relativeDay(bucket.revisions[0].at) && <strong>{relativeDay(bucket.revisions[0].at)}</strong>}<span>{bucket.date}</span><small>{plural(bucket.revisions.length, "revision")}</small></h4><div>{bucket.revisions.map(item => <article className="org-revision" key={item.revision} data-current={item.revision === revision}>
             <div className="org-section-heading"><strong>Revision {item.revision}{item.revision === revision && <span className="org-current">Current</span>}</strong><time dateTime={item.at}>{new Date(item.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div>
@@ -188,6 +189,22 @@ export default function OrganizationWorkspace({ rootPath, organizationId, projec
       </>}
     </div></div>
   </section>;
+}
+
+function AuditCheck({ organizationId }) {
+  const [report, setReport] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
+  async function check() {
+    setChecking(true); setError("");
+    try { setReport(await organizationRequest("", "audit_verify", organizationId)); }
+    catch (failure) { setError(failure.message); }
+    finally { setChecking(false); }
+  }
+  const activity = report?.activity;
+  return <div className="org-audit-check"><button className="org-button" type="button" disabled={checking} onClick={check}><ShieldCheck size={14} />{checking ? "Checking…" : "Verify audit trail"}</button>
+    {report && <p role="status" className={report.ok ? "org-notice-text" : "org-warning-text"}>{report.ok ? `Intact: ${plural(report.history.revisions, "configuration revision")} and ${plural(activity.linked, "linked activity entry", "linked activity entries")}` : `Problem found: ${report.history.error || `activity entry ${activity.brokenAt.sequence}: ${activity.brokenAt.reason}`}`}{activity?.beforeLinking ? `. ${plural(activity.beforeLinking, "older entry", "older entries")} predate linking and can't be checked.` : "."}</p>}
+    {error && <p role="alert" className="org-warning-text">{error}</p>}</div>;
 }
 
 function AttentionStrip({ attention, usage, onWork, onActivity }) {
@@ -294,7 +311,7 @@ function EmployeeEditor({ employee, config, tasks, revision, defaults, busy, onS
     {dangerousPermission(draft.permissionMode) && <p className="org-banner org-pause" role="alert"><AlertTriangle size={14} aria-hidden="true" />This mode turns off the provider&apos;s sandbox or approvals. The employee can run any command on this computer, including outside its project.</p>}
     <h4 className="org-form-divider">Workspace grants</h4><label className="org-check"><input type="checkbox" checked={draft.workspacePaths == null} onChange={e => patch({ workspacePaths: e.target.checked ? null : [] })} />All organization projects</label>{draft.workspacePaths != null && config.projectRoots.map(root => <label key={root} className="org-check"><input type="checkbox" checked={draft.workspacePaths.includes(root)} onChange={e => patch({ workspacePaths: e.target.checked ? [...draft.workspacePaths, root] : draft.workspacePaths.filter(r => r !== root) })} />{root}</label>)}
     <TextField label="Secret reference IDs, comma separated" value={draft.secretRefsDraft ?? (draft.secretRefs || []).join(", ")} onChange={value => patch({ secretRefsDraft: value })} />
-    <h4 className="org-form-divider">Schedule and limits</h4><NumberField label="Heartbeat interval in seconds, 0 disables" value={draft.heartbeatSeconds} onChange={heartbeatSeconds => patch({ heartbeatSeconds })} required /><label className="org-check"><input type="checkbox" checked={draft.paused} onChange={e => patch({ paused: e.target.checked })} />Pause this employee</label>
+    <h4 className="org-form-divider">Schedule and limits</h4><NumberField label="Heartbeat interval in seconds, 0 disables" value={draft.heartbeatSeconds} onChange={heartbeatSeconds => patch({ heartbeatSeconds })} required />{Number(draft.heartbeatSeconds) > 0 && Number(draft.heartbeatSeconds) < 900 && <p className="org-banner org-pause" role="note"><AlertTriangle size={14} aria-hidden="true" />{Number(draft.heartbeatSeconds) === Number(employee?.heartbeatSeconds) ? `This saved heartbeat can use up to ${Math.floor(86400 / Number(draft.heartbeatSeconds)).toLocaleString()} runs a day while idle. New values must be at least 900 seconds.` : "Heartbeats must be at least 900 seconds (15 minutes) apart."}</p>}<label className="org-check"><input type="checkbox" checked={draft.paused} onChange={e => patch({ paused: e.target.checked })} />Pause this employee</label>
     <div className="org-form-grid org-form-thirds"><NumberField label="Employee monthly run limit, 0 is unlimited" value={draft.monthlyTurnLimit ?? "0"} onChange={monthlyTurnLimit => patch({ monthlyTurnLimit })} /><NumberField label="Employee monthly token limit, 0 is unlimited" value={draft.monthlyTokenLimit ?? "0"} onChange={monthlyTokenLimit => patch({ monthlyTokenLimit })} /><NumberField label="Employee monthly dollar budget, 0 disables" value={draft.monthlyBudgetUsd ?? "0"} onChange={monthlyBudgetUsd => patch({ monthlyBudgetUsd })} /></div>
     {Number(draft.monthlyBudgetUsd) > 0 && !reportsCost(draft.provider) && <p className="org-banner org-pause" role="note"><AlertTriangle size={14} aria-hidden="true" />{draft.provider} doesn&apos;t report dollar cost, so this budget pauses the employee after one run. Use a run or token limit instead.</p>}
     <details className="org-form-disclosure"><summary>Tools, skills and MCP servers</summary><RemResources value={draft.resources} onChange={resources => patch({ resources })} /></details>

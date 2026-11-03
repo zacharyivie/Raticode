@@ -16,6 +16,8 @@ uploads attachments on it, and the desktop offers it files Rem's replies name,
 read from an open project or the Second Brain folder. It is not a shared thread.
 Tapping a file link in a reply asks for that file directly (``files.link``);
 no model is involved, and the link must be in a message Rem or an agent wrote.
+Phones that opted in to Rem chat alerts poll ``rem.notices`` for Rem's replies and
+task updates to their own requests; the phone decides what an alert shows.
 
 Excluded on purpose: browsing files and the code editor, terminals, the browser,
 pairing, provider credentials, skill and MCP server definitions, organization
@@ -36,6 +38,7 @@ import stat
 import time
 import unicodedata
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -52,6 +55,7 @@ READ_OPS = frozenset(
         "rem.draft",
         "rem.home",
         "rem.memories",
+        "rem.notices",
         "rem.task",
         "rem.thread",
         "organizations.list",
@@ -109,6 +113,13 @@ def _comment_author(actor: Any, employees: dict[Any, Any]) -> str:
     return str((employees.get(eid) or {}).get("name") or eid or "Unknown")
 
 
+def _timestamp(value: Any) -> float:
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def _organization_usage(runtime: dict[str, Any]) -> dict[str, Any]:
     """This month's company totals: runs and reported tokens and dollars."""
     month = time.strftime("%Y-%m", time.gmtime())
@@ -131,6 +142,8 @@ SENSITIVE = (
 _CANONICAL_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Files on one Rem chat message, in either direction.
 REM_FILES = 8
+# Phone alerts per read; older ones are counted, not sent.
+REM_NOTICES = 8
 # Where a tapped file link came from: Rem's chat, a Rem task thread, a shared thread.
 LINK_SOURCES = frozenset({"rem", "rem_thread", "thread"})
 LINK_LIMIT = 2048
@@ -596,10 +609,16 @@ def link_paths(href: str) -> list[str]:
 
 
 def _authored(messages: list[Any], identity: str, roles: set[str]) -> str | None:
-    """The body of a message Rem or an agent wrote; the user's own text doesn't count."""
+    """The text of a message Rem or an agent wrote, with its Details section; the
+    user's own text doesn't count. Phones show Details as Markdown with links too."""
     for message in messages:
         if isinstance(message, dict) and message.get("id") == identity:
-            return str(message.get("body") or "") if message.get("role") in roles else None
+            if message.get("role") not in roles:
+                return None
+            details = message.get("details")
+            return "\n".join(
+                [str(message.get("body") or "")] + ([details] if isinstance(details, str) else [])
+            )
     return None
 
 
@@ -794,12 +813,21 @@ class DesktopControl:
                 roots.append(config["brain"]["root"])
             return {
                 "conversation": store.conversation(),
-                "tasks": store.tasks(),
+                # The phone reads run summaries only, never traces or worker config.
+                "tasks": store.tasks(summary=True),
                 "threads": store.thread_ids(),
                 "roots": roots,
             }
+        if op == "rem.notices":
+            store = self._need(self.rem, "Rem").store
+            after = params.get("after")
+            if after is None:
+                return {"after": None, "stored": store.messages_after(0, 0)}
+            if type(after) is not int or not 0 <= after < 2**53:
+                raise Refused("invalid", "Unknown message position.")
+            return {"after": after, "stored": store.messages_after(after)}
         if op == "rem.task":
-            return {"tasks": self._need(self.rem, "Rem").store.tasks()}
+            return {"tasks": self._need(self.rem, "Rem").store.tasks(summary=True)}
         if op == "rem.memories":
             return {"memories": self._need(self.rem, "Rem").memories()}
         if op == "rem.thread":
@@ -934,6 +962,8 @@ class DesktopControl:
                 "memories": True,
                 # Phones send thread.manage read/unread only to desktops that say so here.
                 "thread_read": True,
+                # Phones read rem.notices for Rem chat alerts only from desktops that say so.
+                "rem_notices": self.rem is not None,
                 "workflows": self.workflows.available(),
             }
         if op == "media.image":
@@ -944,6 +974,8 @@ class DesktopControl:
             return _draft_delta(data["conversation"], params.get("since"))
         if op == "rem.home":
             return self._rem_home(peer, data)
+        if op == "rem.notices":
+            return self._rem_notices(peer, data["after"], data["stored"])
         if op == "rem.task":
             return self._rem_task(peer, _text(params.get("task_id"), 128), data)
         if op == "rem.memories":
@@ -997,6 +1029,9 @@ class DesktopControl:
             files = self._reply_files(peer, message, roots)
             if files:
                 item["files"] = files
+            actions = self._phone_actions(peer, message)
+            if actions:
+                item["phone_actions"] = actions
             items.append(item)
         shown = _newest(items)
         return {
@@ -1030,22 +1065,99 @@ class DesktopControl:
             "draft_deltas": True,
             "review_retry": True,
             "memories": True,
+            "phone_actions": True,
+            "screen_context": True,
         }
+
+    def _asked_by(self, peer: str, message: dict[str, Any]) -> bool:
+        """Whether this Rem message answers a request this phone sent."""
+        request = message.get("reply_to")
+        return isinstance(request, str) and (
+            self.db.execute(
+                "SELECT 1 FROM device_rem_requests WHERE peer=? AND request=?", (peer, request)
+            ).fetchone()
+            is not None
+        )
+
+    def _phone_actions(self, peer: str, message: dict[str, Any]) -> list[dict[str, Any]]:
+        """Rem's suggested phone actions, only for the phone that asked, checked again."""
+        from gofer.ui.rem_phone_actions import clean_phone_actions
+
+        raw = message.get("phone_actions")
+        if message.get("role") == "user" or not raw or not self._asked_by(peer, message):
+            return []
+        return clean_phone_actions(raw)
+
+    def _rem_notices(self, peer: str, after: int | None, stored: dict[str, Any]) -> dict[str, Any]:
+        """Rem's new messages for this phone's alerts: replies and updates for its own requests.
+
+        Answers to questions typed on the desktop, and updates for tasks started there, stay
+        on the desktop. ``cursor`` is the last message position read; with no ``after``, or one
+        past the end of a reset conversation, it only returns the current position.
+        """
+        latest = int(stored["latest"])
+        if after is None or after > latest:
+            return {"cursor": latest, "notices": [], "skipped": 0, "more": False}
+        messages = stored["messages"]
+        candidates = {str(m.get("id")) for m in messages if m.get("role") == "user"}
+        candidates.update(str(v) for v in stored["sources"].values() if v)
+        if stored["asked"]:
+            candidates.add(str(stored["asked"]))
+        mine = self._phone_requests(peer, candidates)
+        asked = str(stored["asked"]) in mine if stored["asked"] else False
+        found = []
+        for message in messages:
+            if message.get("role") == "user":
+                asked = str(message.get("id")) in mine
+                continue
+            if message.get("role") != "rem":
+                continue
+            work = message.get("work") if isinstance(message.get("work"), dict) else {}
+            update = message.get("kind") == "task_update"
+            if not (stored["sources"].get(work.get("task_id")) in mine if update else asked):
+                continue
+            found.append(
+                {
+                    "id": _text(message.get("id"), 128),
+                    "kind": "task_update" if update else "reply",
+                    "body": _text(message.get("body"), 1500),
+                    "created_at": _text(message.get("created_at"), 80),
+                    "title": _text(work.get("title"), 160),
+                    "needs_user": work.get("needs_user") is True,
+                }
+            )
+        cursor = int(stored["last"])
+        return {
+            "cursor": cursor,
+            "notices": found[-REM_NOTICES:],
+            "skipped": max(0, len(found) - REM_NOTICES),
+            # More messages are stored after cursor; the phone reads again at once.
+            "more": cursor < latest,
+        }
+
+    def _phone_requests(self, peer: str, candidates: set[str]) -> set[str]:
+        """The Rem chat messages among ``candidates`` that this phone sent."""
+        found: set[str] = set()
+        listed = sorted(candidates)
+        for start in range(0, len(listed), 400):
+            chunk = listed[start : start + 400]
+            marks = ",".join("?" * len(chunk))
+            found.update(
+                row[0]
+                for row in self.db.execute(
+                    "SELECT request FROM device_rem_requests WHERE peer=? "
+                    f"AND request IN ({marks})",
+                    (peer, *chunk),
+                )
+            )
+        return found
 
     def _reply_files(
         self, peer: str, message: dict[str, Any], roots: list[str]
     ) -> list[dict[str, Any]]:
         """Offer the files on Rem's reply to the phone that asked for them, once each."""
         files = message.get("files")
-        request = message.get("reply_to")
-        if not isinstance(files, list) or not files or not isinstance(request, str):
-            return []
-        if (
-            self.db.execute(
-                "SELECT 1 FROM device_rem_requests WHERE peer=? AND request=?", (peer, request)
-            ).fetchone()
-            is None
-        ):
+        if not isinstance(files, list) or not files or not self._asked_by(peer, message):
             return []
         identity = _text(message.get("id"), 128)
         result = []
@@ -1085,9 +1197,10 @@ class DesktopControl:
     ) -> dict[str, Any]:
         """Offer one file from Rem's folders on the phone's Rem chat channel.
 
-        ``own_folder`` is for files already on one of Rem's replies, which Rem checked
-        when it wrote the reply: one outside the open folders is read from its own
-        folder. Tapped links never use it, so a link can't reach outside those folders.
+        ``own_folder`` is for files Rem chose for its chat: files already on one of its
+        replies, and links in its chat replies that the user taps. One outside the open
+        folders is read from its own folder, after the sensitive-file check. Links in
+        task threads and shared threads never use it, so they stay inside the folders.
         """
         if not path.is_absolute() or not _phone_name(path.name[:160]):
             raise Refused("unauthorized", OUTSIDE)
@@ -1201,7 +1314,9 @@ class DesktopControl:
                 peer, {"thread_id": thread, "request_id": str(uuid4())}, "file.offer", offer
             )
         else:
-            offer = self._offer_path(peer, path, self._rem_roots(peer))
+            # Rem's chat may send any file the desktop account can read, as its reply
+            # files do; a link in a task thread stays within the open folders.
+            offer = self._offer_path(peer, path, self._rem_roots(peer), own_folder=source == "rem")
         # A repeated tap replaces the earlier copy unless the phone is downloading it.
         if (
             previous is not None
@@ -1448,7 +1563,7 @@ class DesktopControl:
             "pause_reason": _text(runtime.get("pauseReason"), 300),
             "usage": _organization_usage(runtime),
             "pending_requests": sum(
-                r.get("status") == "pending"
+                r.get("status") == "pending" and time.time() - _timestamp(r.get("at")) < 24 * 3600
                 for r in (runtime.get("consentRequests") or {}).values()
             ),
             "projects": [
@@ -1589,6 +1704,14 @@ class DesktopControl:
                 "request_id": request,
                 "body": _text(params.get("body"), 20000),
             }
+            if params.get("screen") is not None:
+                # Text from the phone's screen for this reply only (rem_screen); never stored.
+                from gofer.ui.rem_screen import clean_screen
+
+                try:
+                    message["screen"] = clean_screen(params["screen"])
+                except ValueError as exc:
+                    raise Refused("invalid", str(exc)) from None
             identifiers = params.get("attachment_ids") or []
             if (
                 not isinstance(identifiers, list)
@@ -1601,7 +1724,7 @@ class DesktopControl:
                 message["attachments"] = self._rem_attachments(peer, rem, identifiers)
             try:
                 if not sent:
-                    rem.submit_message(message)
+                    rem.submit_message(message, source="phone")
             except Exception:
                 self._discard(rem, message.get("attachments") or [])
                 raise

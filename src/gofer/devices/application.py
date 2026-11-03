@@ -10,6 +10,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import logging
 import secrets
 import socket
 from collections.abc import Callable
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+from jsonschema import Draft202012Validator, ValidationError  # type: ignore[import-untyped]
 
 from gofer.devices.files import DeviceFiles
 from gofer.devices.organization_jobs import event_schema
@@ -30,6 +31,7 @@ from gofer.devices.registry import (
     display_name,
 )
 
+logger = logging.getLogger(__name__)
 _SCHEMA = json.loads((Path(__file__).parent / "protocol/v2/event.schema.json").read_text())
 
 
@@ -67,6 +69,68 @@ def _desktop_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 _VALIDATOR = Draft202012Validator(_desktop_schema(event_schema(_SCHEMA)))
+_EVENT_TYPES = frozenset(_SCHEMA["properties"]["type"]["enum"])
+# Refusals that still end the session: the phone is no longer trusted, or there is no
+# room to answer. A full outbox recovers when the phone's next sync acknowledges events.
+_SESSION_ENDING = frozenset({"peer_unavailable", "outbox_quota", "outbox_byte_quota"})
+# Refusals that cannot be stored under the request's event ID, so each resend is
+# answered again until the phone drops the request.
+_UNRECORDED = frozenset(
+    {"event_id_conflict", "sequence_conflict", "inbox_quota", "invalid_application_event"}
+)
+_NOT_ALLOWED = frozenset(
+    {
+        "mobile_is_not_worker",
+        "originating_request_not_authorized",
+        "project_not_open",
+        "file_not_in_open_desktop_project",
+        "thread_hosting_disabled",
+        "workspace_sharing_disabled",
+    }
+)
+_MALFORMED = frozenset(
+    {"file_chunk_encoding", "file_chunk_offset", "file_offer_bounds", "file_integrity"}
+)
+
+
+def _refusal(reason: str) -> tuple[str, str]:
+    """The protocol error code and the sentence a phone shows for a refused request."""
+    if reason == "invalid_application_event":
+        return "unsupported", (
+            "This desktop can't handle that request. Update Raticode on your computer, "
+            "then try again."
+        )
+    if reason in ("event_id_conflict", "sequence_conflict"):
+        return "conflict", (
+            "The desktop already has a different request with this number. Send it again."
+        )
+    if reason == "file_unavailable":
+        return "not_found", (
+            "This file is no longer available on the desktop. Ask Rem to send it again."
+        )
+    if reason.endswith("_conflict"):
+        return "conflict", (
+            "This request conflicts with one the desktop already has. Refresh, then try again."
+        )
+    if reason.endswith("_unavailable") or reason == "work_not_running":
+        return "not_found", (
+            "The desktop no longer has what this request refers to. Refresh, then try again."
+        )
+    if reason.endswith("_quota") or reason in ("file_too_large", "file_disk_full"):
+        return "too_large", (
+            "The desktop has no room for this request. Free some space or let other work "
+            "finish, then try again."
+        )
+    if reason.endswith("_required") or reason in _NOT_ALLOWED:
+        return "unauthorized", (
+            "This phone isn't allowed to do that. Check its access in Paired devices on "
+            "your computer."
+        )
+    if reason.startswith("invalid_") or reason in _MALFORMED:
+        return "invalid_request", "The desktop couldn't use this request. Try again."
+    return "internal", "The desktop couldn't complete this request. Try again."
+
+
 OUTBOX_EVENTS = 10000
 OUTBOX_BYTES = 64 * 1024 * 1024
 RETAIN_ACKNOWLEDGED = 400
@@ -373,11 +437,76 @@ class DeviceApplication:
 
     def handle(self, peer: str, event: dict[str, Any]) -> list[dict[str, Any]]:
         if not _VALIDATOR.is_valid(event):
-            raise PairingError("invalid_application_event")
+            return self._refuse(peer, event, None, "invalid_application_event")
         digest = hashlib.sha256(
             json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         prepared = self._prepare_desktop_read(peer, event)
+        try:
+            return self._handle(peer, event, digest, prepared)
+        except PairingError as exc:
+            if str(exc) in _SESSION_ENDING:
+                raise
+            return self._refuse(peer, event, digest, str(exc))
+        except (KeyError, TypeError) as exc:
+            return self._refuse(peer, event, digest, type(exc).__name__)
+
+    def _refuse(
+        self, peer: str, event: dict[str, Any], digest: str | None, reason: str
+    ) -> list[dict[str, Any]]:
+        """Answer a request the desktop will not carry out, instead of ending the session.
+
+        The phone keeps a request queued until an event with its request ID arrives and
+        resends its whole queue on every connection, so a refusal that only closed the
+        session would block that phone until it was reinstalled. The answer is recorded
+        under the request's event ID where possible, so a resend gets the same answer.
+        """
+        kind = event.get("type") if event.get("type") in _EVENT_TYPES else "invalid"
+        logger.warning("Phone request %s refused: %s", kind, reason)
+        code, detail = _refusal(reason)
+        with self.registry.transaction():
+            self._trusted(peer)
+            if digest is not None and reason not in _UNRECORDED:
+                for table in ("device_inbox", "device_inbox_reads"):
+                    prior = self.registry.db.execute(
+                        f"SELECT digest FROM {table} WHERE peer=? AND id=?", (peer, event["id"])
+                    ).fetchone()
+                    if prior is not None:
+                        return self.pending(peer)
+                self._record_inbound(peer, event, digest)
+            try:
+                return [
+                    self._emit(
+                        peer, event, "error", {"code": code, "retryable": False, "detail": detail}
+                    )
+                ]
+            except ValidationError:
+                # Too malformed to address an answer to; nothing was recorded.
+                raise PairingError(reason) from None
+
+    def _record_inbound(self, peer: str, event: dict[str, Any], digest: str) -> None:
+        db = self.registry.db
+        read_only = event["type"] in READ_ONLY_KINDS
+        db.execute(
+            f"INSERT INTO {'device_inbox_reads' if read_only else 'device_inbox'} VALUES (?,?,?,?)",
+            (peer, event["id"], digest, event["sequence"]),
+        )
+        if read_only:
+            db.execute(
+                "DELETE FROM device_inbox_reads WHERE peer=? AND sequence NOT IN (SELECT "
+                "sequence FROM device_inbox_reads WHERE peer=? ORDER BY sequence DESC "
+                "LIMIT ?)",
+                (peer, peer, RECENT_READS),
+            )
+        db.execute("UPDATE peers SET last_seen=? WHERE device_id=?", (self.registry.clock(), peer))
+
+    def _handle(
+        self,
+        peer: str,
+        event: dict[str, Any],
+        digest: str,
+        prepared: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
         with self.registry.transaction():
             self._trusted(peer)
             db = self.registry.db
@@ -401,21 +530,7 @@ class DeviceApplication:
                     (peer, event["sequence"]),
                 ).fetchone():
                     raise PairingError("sequence_conflict")
-            db.execute(
-                f"INSERT INTO {'device_inbox_reads' if read_only else 'device_inbox'} "
-                "VALUES (?,?,?,?)",
-                (peer, event["id"], digest, event["sequence"]),
-            )
-            if read_only:
-                db.execute(
-                    "DELETE FROM device_inbox_reads WHERE peer=? AND sequence NOT IN (SELECT "
-                    "sequence FROM device_inbox_reads WHERE peer=? ORDER BY sequence DESC "
-                    "LIMIT ?)",
-                    (peer, peer, RECENT_READS),
-                )
-            db.execute(
-                "UPDATE peers SET last_seen=? WHERE device_id=?", (self.registry.clock(), peer)
-            )
+            self._record_inbound(peer, event, digest)
             kind, payload = event["type"], event["payload"]
             workspace_result = self.workspace.handle(peer, event)
             if workspace_result is not None:

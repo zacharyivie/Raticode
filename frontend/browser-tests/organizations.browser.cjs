@@ -72,6 +72,12 @@ async function main() {
   await click("Start organization"); await wait("document.querySelector('.org-start') === null");
   await click("Work"); await wait("document.querySelector('.org-work-group')?.textContent.includes('In review')");
   await evaluate("document.querySelector('.org-task-open').click()"); await wait("document.querySelector('.org-conversation')?.textContent.includes('test provider')");
+  // Each run can be opened, and its record names what ran.
+  await wait("document.querySelector('.org-attempt')?.textContent.includes('workspace-write')");
+  await click("Open run"); await wait("document.querySelector('.org-transcript')?.textContent.includes('Final answer')");
+  await click("Close run");
+  await click("Show input"); await wait("[...document.querySelectorAll('.org-transcript')].some(e=>e.textContent.includes(\"Matches this run's fingerprint\"))");
+  await click("Close input");
   // Saved comments appear in the retained task conversation.
   await field("Comment", "Release evidence reviewed");
   await click("Save comment");
@@ -111,6 +117,7 @@ async function main() {
   await click("Activity"); await wait("document.querySelectorAll('.org-event').length > 0");
   assert.ok(await evaluate("document.querySelector('.org-activity').textContent.includes('Approved the plan')"));
   await click("Configuration history"); await wait("document.querySelectorAll('.org-revision').length === 3");
+  await click("Verify audit trail"); await wait("document.querySelector('.org-audit-check p')?.textContent.startsWith('Intact: 3 configuration revisions')");
   await evaluate("[...document.querySelectorAll('.org-revision button')].at(-1).click()"); await wait("document.querySelector('.org-restore') !== null");
   assert.equal(await evaluate("document.activeElement.classList.contains('org-restore')"), true);
   await evaluate("document.querySelector('.org-restore .org-changes details').open = true");

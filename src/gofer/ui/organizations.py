@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import gzip
 import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -49,7 +51,6 @@ from gofer.ui.organization_packages import (
     zip_package,
 )
 from gofer.ui.organization_store import (
-    DANGEROUS_PERMISSION_MODES,
     OrganizationConfig,
     OrganizationConflict,
     OrganizationStore,
@@ -103,6 +104,10 @@ Actions:
   projects; restoring reclaims them. History and work records are kept.
 - request_decide: user-only requestId and decision=approve/decline for a consent request.
 - run_events: taskId and turnId. The stored transcript events of one employee run.
+- audit_verify: checks the configuration history chain, the hash-linked activity log and the
+  anchor file that records the log's head outside the database.
+- run_input: taskId and turnId. Exactly what one employee run was given, checked against
+  the run's inputSha256.
 Staged work: create planned tasks with status=backlog. Start never runs backlog; move a task
 to todo to activate it. Express ordering with dependsOn task IDs, not prose, and do not write
 "not authorized" into descriptions of work you expect to run.
@@ -174,7 +179,25 @@ CONFIG_ACTIONS = {
     "request_decide",
 }
 # Rem may ask for these; the user approves them in the Organizations tab.
-CONSENT_ACTIONS = {"control", "configure", "restore", "resume_all", "archive"}
+CONSENT_ACTIONS = {
+    "control",
+    "configure",
+    "restore",
+    "resume_all",
+    "archive",
+    "approve",
+    "workflow_launch",
+    "webhook_save",
+    "routine_save",
+    "task_update",
+    "review",
+    "execution_resolve",
+    "secret_reference",
+}
+# A request Rem made more than this long ago can no longer be approved.
+CONSENT_TTL = timedelta(hours=24)
+# How long a retry can reuse an idempotency key.
+REQUEST_RETENTION = timedelta(days=30)
 # Turn events stored per run. Final, error and usage events are always kept.
 MAX_TURN_EVENTS = 1000
 # Reasons that let the scheduler claim, block or pause; anything else leaves the company idle.
@@ -206,22 +229,157 @@ def _dirty(root: str) -> bool:
     return result.returncode != 0 or bool(result.stdout.strip())
 
 
+def _worktree_state(root: str) -> dict[str, Any]:
+    """The worktree's commit after a run and whether it left uncommitted changes."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", root, "rev-parse", "HEAD"],
+            env=build_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return {"headCommit": head, "uncommittedChanges": _dirty(root)}
+
+
 def actor_name(org: dict[str, Any], actor: str) -> str:
     eid = actor.removeprefix("employee:")
     return next((e["name"] for e in org["config"]["employees"] if e["id"] == eid), eid)
 
 
+# Permission modes that only read. Any other change of mode can widen what an employee does.
+READ_ONLY_MODES = frozenset({"read-only", "plan"})
+# Limits where 0 means "no limit" and a larger number allows more.
+OPEN_ENDED_LIMITS = ("monthlyTurnLimit", "monthlyTokenLimit", "monthlyBudgetUsd")
+COMPANY_CAPS = (
+    "maxTaskTurns",
+    "maxConcurrency",
+    "turnTimeoutSeconds",
+    "maxChildTasksPerTurn",
+    "maxDelegationDepth",
+)
+
+
+MAX_RUN_INPUT_BYTES = 16 * 1024 * 1024
+
+
+def write_run_input(path: Path, content: bytes) -> None:
+    """Store a run's input compressed and private to this user."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb") as handle:
+        handle.write(content)
+
+
+def more_often(previous: dict[str, Any], routine: dict[str, Any]) -> bool:
+    """Whether a routine edit schedules work sooner or keeps more of it."""
+    old, new = previous.get("intervalSeconds") or 0, routine.get("intervalSeconds") or 0
+    return bool(
+        (new and (not old or new < old))
+        or (routine.get("cron") and routine.get("cron") != previous.get("cron"))
+        or (routine.get("overlap") == "queue" and previous.get("overlap") != "queue")
+        or (routine.get("missed") == "coalesce" and previous.get("missed") == "skip")
+    )
+
+
+# Blocks set by Raticode, the user or Rem; employees may lift only their own kind.
+def employee_may_unblock(task: dict[str, Any]) -> bool:
+    reason = task.get("blockReason") or ""
+    return reason in {"", "dependencies"} or (
+        reason.startswith("Blocked by ")
+        and not reason.startswith(("Blocked by you", "Blocked by Rem"))
+    )
+
+
+def expire_requests(requests: dict[str, Any]) -> list[str]:
+    """Mark pending consent requests older than CONSENT_TTL as expired."""
+    cutoff = datetime.now(UTC) - CONSENT_TTL
+    expired = [
+        r["id"]
+        for r in requests.values()
+        if r["status"] == "pending" and datetime.fromisoformat(r["at"]) < cutoff
+    ]
+    for rid in expired:
+        requests[rid].update(status="expired", decidedAt=now())
+    return expired
+
+
+def _loosened(before: dict[str, Any], after: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    """Open-ended limits that were removed (set to 0) or raised."""
+    changed = []
+    for key in keys:
+        old, new = before.get(key) or 0, after.get(key) or 0
+        if old and (not new or new > old):
+            changed.append(key)
+    return changed
+
+
+def _tool_names(resources: dict[str, Any]) -> set[str]:
+    resources = resources or {}
+    names = {
+        flag
+        for flag in ("shell", "web", "agents", "browser")
+        if resources.get(flag, flag != "browser")
+    }
+    names |= {f"mcp:{server.get('name')}" for server in resources.get("mcpServers", [])}
+    names |= {f"skill:{skill.get('path')}" for skill in resources.get("skills", [])}
+    return names
+
+
 def escalation(before: dict[str, Any], after: dict[str, Any]) -> str:
-    """Describe configuration changes that widen what employees may do, or return ""."""
+    """Describe configuration changes that widen what employees may do, or return "".
+
+    Rem may make any other change directly. These need the user's approval because they
+    let employees run more, run sooner, reach more tools or folders, or spend more.
+    """
     reasons = []
     old = {e.get("id"): e for e in before.get("employees", [])}
     for employee in after.get("employees", []):
-        previous = old.get(employee.get("id"), {})
+        name = employee.get("name") or employee.get("id")
+        previous = old.get(employee.get("id"))
+        if previous is None:
+            if not employee.get("paused"):
+                reasons.append(f"add {name} as an active employee")
+            previous = {"paused": True, "permissionMode": "read-only", "resources": {}}
+        elif previous.get("paused") and not employee.get("paused"):
+            reasons.append(f"resume {name}")
         mode = employee.get("permissionMode")
-        if mode in DANGEROUS_PERMISSION_MODES and previous.get("permissionMode") != mode:
-            reasons.append(f"give {employee.get('name') or employee.get('id')} {mode}")
+        if mode != previous.get("permissionMode") and mode not in READ_ONLY_MODES:
+            reasons.append(f"change {name}'s permissions to {mode}")
+        if _tool_names(employee.get("resources", {})) - _tool_names(previous.get("resources", {})):
+            reasons.append(f"give {name} more tools")
+        if set(employee.get("skills") or []) - set(previous.get("skills") or []):
+            reasons.append(f"give {name} more skills")
+        grants, old_grants = employee.get("workspacePaths"), previous.get("workspacePaths", [])
+        if previous.get("id") and (
+            (grants is None and old_grants is not None) or set(grants or []) - set(old_grants or [])
+        ):
+            reasons.append(f"let {name} work in more folders")
         if set(employee.get("secretRefs") or []) - set(previous.get("secretRefs") or []):
-            reasons.append(f"grant credentials to {employee.get('name') or employee.get('id')}")
+            reasons.append(f"grant credentials to {name}")
+        if _loosened(previous, employee, OPEN_ENDED_LIMITS):
+            reasons.append(f"raise or remove {name}'s monthly limits")
+        beat, old_beat = (
+            employee.get("heartbeatSeconds") or 0,
+            previous.get("heartbeatSeconds") or 0,
+        )
+        if beat and (not old_beat or beat < old_beat):
+            reasons.append(f"wake {name} more often")
+    if _loosened(before, after, OPEN_ENDED_LIMITS):
+        reasons.append("raise or remove the organization's monthly limits")
+    if any((after.get(key) or 0) > (before.get(key) or 0) for key in COMPANY_CAPS if key in before):
+        reasons.append("raise operating limits")
+    initiatives = {p.get("id"): p for p in before.get("projects", [])}
+    if any(
+        _loosened(initiatives.get(p.get("id"), {}), p, OPEN_ENDED_LIMITS)
+        for p in after.get("projects", [])
+    ):
+        reasons.append("raise or remove initiative limits")
+    if set(after.get("projectRoots", [])) - set(before.get("projectRoots", [])):
+        reasons.append("add project folders")
     targets = {t.get("id"): t for t in before.get("executionTargets", [])}
     if any(targets.get(t.get("id")) != t for t in after.get("executionTargets", [])):
         reasons.append("add or change execution destinations")
@@ -232,7 +390,7 @@ def escalation(before: dict[str, Any], after: dict[str, Any]) -> str:
         and after.get("workspaceIsolation", "worktree") == "checkout"
     ):
         reasons.append("let employees edit the project folder directly")
-    return ("Change settings to " + ", ".join(reasons)) if reasons else ""
+    return ("Change settings to " + ", ".join(dict.fromkeys(reasons))) if reasons else ""
 
 
 class OrganizationManager:
@@ -276,6 +434,13 @@ class OrganizationManager:
 
     @staticmethod
     def _recover(org: dict[str, Any]) -> dict[str, Any]:
+        # A request that was being applied when Raticode stopped may be half done.
+        for request in (org["runtime"].get("consentRequests") or {}).values():
+            if request["status"] == "applying":
+                request.update(
+                    status="failed",
+                    error="Raticode restarted while applying this request; check the result",
+                )
         # A company that was already paused with nothing running has nothing to recover.
         if org["runtime"]["state"] == "paused" and not any(
             task["claim"] for task in org["runtime"]["tasks"]
@@ -334,6 +499,48 @@ class OrganizationManager:
             return "Lift every employee hold"
         if action == "archive":
             return "Archive the organization" if params.get("archived", True) else ""
+        if action == "approve":
+            # Plan approval is the human gate on approval-required work.
+            task = next(
+                (t for t in org["runtime"]["tasks"] if t["id"] == params.get("taskId")), None
+            )
+            return f"Approve the plan for \u201c{task['title']}\u201d" if task else ""
+        if action == "workflow_launch":
+            return "Authorize a workflow to run"
+        if action == "webhook_save":
+            return "Let an outside service trigger a routine" if params.get("enabled") else ""
+        if action == "routine_save":
+            routine = params.get("routine") or {}
+            previous = org["runtime"].get("routines", {}).get(routine.get("id"), {})
+            name = routine.get("name", "routine")
+            if not routine.get("enabled", True):
+                return ""
+            if not previous.get("enabled", False):
+                return f"Schedule recurring work: {name}"
+            return f"Run the routine {name} more often" if more_often(previous, routine) else ""
+        task = next((t for t in org["runtime"]["tasks"] if t["id"] == params.get("taskId")), None)
+        title = f"\u201c{task['title']}\u201d" if task else "a task"
+        if action == "task_update" and task:
+            changes = params.get("changes") or {}
+            if task["approvalRequired"] and changes.get("approvalRequired") is False:
+                return f"Remove the approval step from {title}"
+            if task.get("reviewRequired") and changes.get("reviewRequired") is False:
+                return f"Remove independent review from {title}"
+            return ""
+        if action == "review":
+            accepting = params.get("decision") == "accept" and task and task.get("reviewRequired")
+            return f"Accept the result of {title}" if accepting else ""
+        if action == "execution_resolve":
+            return "Confirm that interrupted outside work has stopped"
+        if action == "secret_reference":
+            previous = org["runtime"].get("secrets", {}).get(params.get("id"), {})
+            if (
+                previous
+                and not params.get("revoked")
+                and (previous.get("revoked") or previous.get("account") != params.get("account"))
+            ):
+                return f"Re-enable or repoint the credential {params.get('id')}"
+            return ""
         after = params.get("config")
         if action == "restore":
             after = next(
@@ -351,7 +558,13 @@ class OrganizationManager:
             after = OrganizationConfig.model_validate(after).model_dump()
         except ValueError:
             return ""
-        return escalation(org["config"], after)
+        reason = escalation(org["config"], after)
+        if reason:
+            # Refuse now what would fail on approval, such as a folder another company owns.
+            self.store.configure(
+                project, org["id"], after, org["revision"], "Rem", "Consent check", dry_run=True
+            )
+        return reason
 
     def _request_consent(
         self,
@@ -373,6 +586,14 @@ class OrganizationManager:
 
         def record(current: dict[str, Any]) -> dict[str, Any]:
             requests = current["runtime"].setdefault("consentRequests", {})
+            expire_requests(requests)
+            fingerprint = json.dumps([action, params], sort_keys=True, default=str)
+            for existing in requests.values():
+                # Asking again for the same thing returns the request already waiting.
+                if existing["status"] == "pending" and existing.get("fingerprint") == fingerprint:
+                    request.update(existing)
+                    return {}
+            request["fingerprint"] = fingerprint
             pending = [r for r in requests.values() if r["status"] == "pending"]
             if len(pending) >= 20:
                 raise ValueError("Twenty requests already wait for the user's decision")
@@ -397,12 +618,38 @@ class OrganizationManager:
         }
 
     def _decide(self, project: str, org: dict[str, Any], params: dict[str, Any]) -> Any:
-        request = (org["runtime"].get("consentRequests") or {}).get(params.get("requestId"))
         decision = params.get("decision")
-        if not request or request["status"] != "pending":
-            raise ValueError("Choose a pending request")
         if decision not in {"approve", "decline"}:
             raise ValueError("Choose approve or decline")
+        claimed: dict[str, Any] = {}
+
+        def claim(current: dict[str, Any]) -> dict[str, Any]:
+            # Claim the request in one transaction so a double click can't apply it twice.
+            requests = current["runtime"].get("consentRequests") or {}
+            expired = expire_requests(requests)
+            item = requests.get(params.get("requestId"))
+            if item and item["status"] == "pending":
+                item["status"] = "applying" if decision == "approve" else "declined"
+                item["decidedAt"] = now()
+                claimed.update(copy.deepcopy(item))
+            return {"expired": expired} if expired else {}
+
+        self.store.mutate(project, org["id"], "user", "consent_checked", claim)
+        if not claimed:
+            raise ValueError(
+                "This request is no longer waiting. It was decided already or is more than a "
+                "day old; ask Rem again if you still want it."
+            )
+        request = claimed
+        if decision == "decline":
+            self.store.mutate(
+                project,
+                org["id"],
+                "user",
+                "consent_decided",
+                lambda _: {"requestId": request["id"], "decision": decision, "error": ""},
+            )
+            return self.public(self.store.get(project, org["id"]))
         error = ""
         if decision == "approve":
             try:
@@ -421,15 +668,7 @@ class OrganizationManager:
         def settle(current: dict[str, Any]) -> dict[str, Any]:
             item = current["runtime"].get("consentRequests", {}).get(request["id"])
             if item:
-                item.update(
-                    status="failed"
-                    if error
-                    else "approved"
-                    if decision == "approve"
-                    else "declined",
-                    decidedAt=now(),
-                    error=error,
-                )
+                item.update(status="failed" if error else "approved", decidedAt=now(), error=error)
             return {"requestId": request["id"], "decision": decision, "error": error}
 
         self.store.mutate(project, org["id"], "user", "consent_decided", settle)
@@ -678,6 +917,32 @@ class OrganizationManager:
             with self._lock:
                 result = self.store.archive(oid, actor, archived)
             return self.public(result)
+        if action == "audit_verify":
+            report = self.store.verify_audit(oid)
+            if report["ok"]:
+                # A verified head is worth remembering outside the database.
+                self.store.anchor(oid)
+            return report
+        if action == "run_input":
+            turn = params.get("turnId")
+            attempt = org["runtime"].get("attempts", {}).get(turn)
+            if (
+                not isinstance(turn, str)
+                or not attempt
+                or attempt["taskId"] != params.get("taskId")
+            ):
+                raise ValueError("Choose a run of this task")
+            try:
+                with gzip.open(self.run_input_path(oid, turn), "rb") as handle:
+                    stored = handle.read(MAX_RUN_INPUT_BYTES + 1)
+            except OSError as exc:
+                raise ValueError("This run's input wasn't kept; it predates input records") from exc
+            return {
+                "turnId": turn,
+                "input": json.loads(stored),
+                "sha256": hashlib.sha256(stored).hexdigest(),
+                "matchesRecord": hashlib.sha256(stored).hexdigest() == attempt.get("inputSha256"),
+            }
         if action == "run_events":
             turn = params.get("turnId")
             attempt = org["runtime"].get("attempts", {}).get(turn)
@@ -991,6 +1256,11 @@ class OrganizationManager:
                     if params.get("unblock"):
                         if employee_id and not self._owns(current, employee_id, task):
                             raise ValueError("Only an owner or manager may unblock work")
+                        if employee_id and not employee_may_unblock(task):
+                            raise ValueError(
+                                "Raticode, the user or Rem blocked this task for review; "
+                                "ask them to reopen it"
+                            )
                         if task["status"] != "blocked" or task["claim"]:
                             raise ValueError("Only stopped blocked work can be unblocked")
                         task.update(status="todo", blockReason="")
@@ -1036,11 +1306,19 @@ class OrganizationManager:
                     elif action == "reopen":
                         if task["claim"] or task["status"] not in {"done", "cancelled", "blocked"}:
                             raise ValueError("Only stopped work can be reopened")
+                        if employee_id and (
+                            task["status"] == "cancelled"
+                            or (task["status"] == "blocked" and not employee_may_unblock(task))
+                        ):
+                            raise ValueError(
+                                "Only the user or Rem can reopen work that was cancelled or "
+                                "blocked for review"
+                            )
                         task.update(
                             status="todo", cancellation=None, blockReason="", acceptedRevision=None
                         )
-                        # The user's reopen grants a fresh run allowance; a manager can't.
-                        if not employee_id and task["turns"] >= current["config"]["maxTaskTurns"]:
+                        # Only the user's reopen grants a fresh run allowance.
+                        if actor == "user" and task["turns"] >= current["config"]["maxTaskTurns"]:
                             task["turns"] = 0
                     else:
                         changes = params.get("changes", {})
@@ -1049,6 +1327,16 @@ class OrganizationManager:
                         changes = {
                             key: value for key, value in changes.items() if task.get(key) != value
                         }
+                        if (
+                            employee_id
+                            and task["status"] == "blocked"
+                            and changes.get("status") not in {None, "blocked", "cancelled"}
+                            and not employee_may_unblock(task)
+                        ):
+                            raise ValueError(
+                                "Raticode, the user or Rem blocked this task for review; "
+                                "ask them to reopen it"
+                            )
                         if task["claim"] and set(changes) - {"status", "evidence"}:
                             raise OrganizationConflict(
                                 "Pause and wait for the turn before editing its plan"
@@ -1150,7 +1438,15 @@ class OrganizationManager:
                 result_task.clear()
                 result_task.update(id=task["id"], revision=task["revision"], status=task["status"])
             if request_key:
-                requests[scoped_key] = {"hash": request_hash, "result": copy.deepcopy(result_task)}
+                # Retries arrive within minutes; a month is ample and keeps the table bounded.
+                cutoff = (datetime.now(UTC) - REQUEST_RETENTION).isoformat()
+                for stale in [k for k, v in requests.items() if v.get("at", "") < cutoff]:
+                    requests.pop(stale)
+                requests[scoped_key] = {
+                    "hash": request_hash,
+                    "result": copy.deepcopy(result_task),
+                    "at": now(),
+                }
             return {
                 "taskId": task["id"],
                 "revision": task["revision"],
@@ -1322,9 +1618,13 @@ class OrganizationManager:
                     for row in rows:
                         if self._closed.is_set():
                             break
-                        current = self.store.get(row["project"], row["id"])
-                        self.executions.reconcile(current)
-                        self.release_worktrees(current)
+                        try:
+                            current = self.store.get(row["project"], row["id"])
+                            self.executions.reconcile(current)
+                            self.release_worktrees(current)
+                            self.store.anchor(row["id"])
+                        except Exception:
+                            log.exception("Organization upkeep failed for %s", row["id"])
                     next_reconcile = time.monotonic() + 30
             except Exception:
                 log.exception("Organization dispatch failed")
@@ -1343,11 +1643,8 @@ class OrganizationManager:
         )
         if worktree is None:
             raise ValueError("This project is not a Git repository, so it can't be isolated")
-        try:
-            ensure_worktree(worktree)
-        except WorktreeError as exc:
-            raise ValueError(f"Raticode couldn't create the task's worktree: {exc}") from exc
 
+        # Record the worktree before creating it, so a revoked run can't leave one untracked.
         def record(current: dict[str, Any]) -> dict[str, Any]:
             existing = next(t for t in current["runtime"]["tasks"] if t["id"] == task["id"])
             if existing["claim"] != turn_id:
@@ -1358,14 +1655,24 @@ class OrganizationManager:
             return {"taskId": task["id"], "branch": worktree["branch"]}
 
         self.store.mutate(project, oid, "system", "worktree_created", record)
+        try:
+            ensure_worktree(worktree)
+        except WorktreeError as exc:
+            raise ValueError(f"Raticode couldn't create the task's worktree: {exc}") from exc
         return worktree
 
     def release_worktrees(self, org: dict[str, Any]) -> None:
         """Commit leftovers and remove worktrees of finished tasks; branches stay for review."""
+        with self._lock:
+            # A cancelled run clears its claim at once but may still be writing for a moment.
+            in_use = set(self._active_roots.values())
         finished = [
             t
             for t in org["runtime"]["tasks"]
-            if t.get("worktree") and not t["claim"] and t["status"] in {"done", "cancelled"}
+            if t.get("worktree")
+            and not t["claim"]
+            and t["status"] in {"done", "cancelled"}
+            and f"task:{t['id']}" not in in_use
         ]
         for task in finished:
             worktree = task["worktree"]
@@ -1396,6 +1703,11 @@ class OrganizationManager:
                 return {"taskId": task["id"], "branch": task["worktree"]["branch"]}
 
             self.store.mutate(org["projectRoot"], org["id"], "system", "worktree_released", clear)
+
+    def run_input_path(self, oid: str, turn: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f-]{1,64}", turn) or not re.fullmatch(r"[0-9a-f-]{1,64}", oid):
+            raise ValueError("Invalid run identifier")
+        return self.data_dir / "organization-runs" / oid / f"{turn}.json.gz"
 
     @staticmethod
     def _block(task: dict[str, Any], reason: str) -> None:
@@ -1444,303 +1756,307 @@ class OrganizationManager:
             rows = rows[offset:] + rows[:offset]
             self._dispatch_cursor += 1
         for row in rows:
-            project, oid = row["project"], row["id"]
-            # Read and resolve Git identities before taking the lock that UI saves wait on.
-            org = self.store.get(project, oid)
-            if org["runtime"]["state"] != "running" or org["runtime"].get("archived"):
-                continue
-            for root in {
-                *(org["config"].get("projectRoots", [])),
-                *(
-                    t.get("workspacePath")
-                    for t in org["runtime"]["tasks"]
-                    if t.get("workspacePath")
-                ),
-                *(p["workspacePath"] for p in org["config"]["projects"] if p.get("workspacePath")),
-            }:
-                project_identity(root)
-            with self._lock:
-                # Shared project writes are serialized unless each task has its own worktree.
-                if self._closed.is_set() or len(self._active) >= 8:
-                    continue
-                chosen: dict[str, Any] = {}
+            # One organization's failure must not stall the others.
+            try:
+                self._dispatch_org(row["project"], row["id"])
+            except Exception:
+                log.exception("Organization dispatch failed for %s", row["id"])
 
-                def claim(org: dict[str, Any]) -> dict[str, Any]:
-                    runtime, config = org["runtime"], org["config"]
-                    self._unblock(org)
-                    for task in runtime["tasks"]:
-                        claim_id = task["claim"]
-                        if claim_id and (
-                            claim_id not in self._active or not self._active[claim_id][2].is_alive()
-                        ):
-                            task.update(claim=None)
-                            self._block(task, "Worker stopped unexpectedly; review before retrying")
-                            attempt = runtime.get("attempts", {}).get(claim_id)
-                            if attempt:
-                                attempt.update(status="interrupted", finishedAt=now())
-                            self._active.pop(claim_id, None)
-                            self._active_roots.pop(claim_id, None)
-                    if (
-                        runtime["state"] != "running"
-                        or sum(active_oid == oid for active_oid, _, _ in self._active.values())
-                        >= config["maxConcurrency"]
-                    ):
-                        return {}
-                    schedule_routines(org, datetime.now(UTC))
-                    self._unblock(org)
-                    month = datetime.now(UTC).strftime("%Y-%m")
-                    usage = runtime.setdefault("usage", {}).setdefault(month, {})
-                    exhausted = self._exhausted
+    def _dispatch_org(self, project: str, oid: str) -> None:
+        # Read and resolve Git identities before taking the lock that UI saves wait on.
+        org = self.store.get(project, oid)
+        if org["runtime"]["state"] != "running" or org["runtime"].get("archived"):
+            return
+        for root in {
+            *(org["config"].get("projectRoots", [])),
+            *(t.get("workspacePath") for t in org["runtime"]["tasks"] if t.get("workspacePath")),
+            *(p["workspacePath"] for p in org["config"]["projects"] if p.get("workspacePath")),
+        }:
+            project_identity(root)
+        with self._lock:
+            # Shared project writes are serialized unless each task has its own worktree.
+            if self._closed.is_set() or len(self._active) >= 8:
+                return
+            chosen: dict[str, Any] = {}
 
-                    if exhausted(config, usage.get("company", {})):
-                        runtime["state"] = "paused"
-                        runtime["pauseReason"] = (
-                            "Monthly limit reached, or the provider doesn't report the cost or "
-                            "tokens a limit needs. Raise the limit or use a run limit instead."
-                        )
-                        return {"reason": runtime["pauseReason"]}
-                    employees = {e["id"]: e for e in config["employees"] if not e["paused"]}
-                    employees = {
-                        eid: e
-                        for eid, e in employees.items()
-                        if not exhausted(e, usage.get(f"employee:{eid}", {}))
-                    }
-                    for eid, employee in employees.items():
-                        interval = employee["heartbeatSeconds"]
-                        last = runtime["heartbeats"].get(eid)
-                        if interval and (
-                            not last or datetime.fromisoformat(last) <= datetime.now(UTC)
-                        ):
-                            if not any(
-                                t["assignee"] == eid
-                                and (
-                                    t["claim"]
-                                    or task_reason(org, t) == "Ready"
-                                    or (
-                                        t["title"] == "Heartbeat: review assignments"
-                                        and t["status"] not in {"done", "cancelled"}
-                                    )
-                                )
-                                for t in runtime["tasks"]
-                            ):
-                                runtime["tasks"].append(
-                                    Task(
-                                        title="Heartbeat: review assignments",
-                                        assignee=eid,
-                                        description="Review organization goals and blocked work. "
-                                        "Delegate or record the next useful action.",
-                                    ).model_dump()
-                                )
-                            runtime["heartbeats"][eid] = (
-                                datetime.now(UTC) + timedelta(seconds=interval)
-                            ).isoformat()
-                    for task in sorted(
-                        runtime["tasks"],
-                        key=lambda t: (
-                            {"critical": 0, "high": 1, "medium": 2, "low": 3}[t["priority"]]
-                            - (
-                                datetime.now(UTC) - datetime.fromisoformat(t["createdAt"])
-                            ).total_seconds()
-                            / 86400
-                        ),
+            def claim(org: dict[str, Any]) -> dict[str, Any]:
+                runtime, config = org["runtime"], org["config"]
+                self._unblock(org)
+                for task in runtime["tasks"]:
+                    claim_id = task["claim"]
+                    if claim_id and (
+                        claim_id not in self._active or not self._active[claim_id][2].is_alive()
                     ):
-                        if (
-                            task["status"] != "todo"
-                            or task["claim"]
-                            or task["assignee"] not in employees
-                        ):
-                            continue
-                        if task["approvalRequired"] and task["approvedRevision"] is None:
-                            continue
-                        if task["dueAt"] and datetime.fromisoformat(task["dueAt"]) > datetime.now(
-                            UTC
-                        ):
-                            continue
-                        if task["turns"] >= config["maxTaskTurns"]:
-                            self._block(
-                                task,
-                                "Run limit for this task reached. Reopen it to allow more runs.",
+                        task.update(claim=None)
+                        self._block(task, "Worker stopped unexpectedly; review before retrying")
+                        attempt = runtime.get("attempts", {}).get(claim_id)
+                        if attempt:
+                            attempt.update(status="interrupted", finishedAt=now())
+                        self._active.pop(claim_id, None)
+                        self._active_roots.pop(claim_id, None)
+                if (
+                    runtime["state"] != "running"
+                    or sum(active_oid == oid for active_oid, _, _ in self._active.values())
+                    >= config["maxConcurrency"]
+                ):
+                    return {}
+                schedule_routines(org, datetime.now(UTC))
+                self._unblock(org)
+                month = datetime.now(UTC).strftime("%Y-%m")
+                usage = runtime.setdefault("usage", {}).setdefault(month, {})
+                exhausted = self._exhausted
+
+                if exhausted(config, usage.get("company", {})):
+                    runtime["state"] = "paused"
+                    runtime["pauseReason"] = (
+                        "Monthly limit reached, or the provider doesn't report the cost or "
+                        "tokens a limit needs. Raise the limit or use a run limit instead."
+                    )
+                    return {"reason": runtime["pauseReason"]}
+                employees = {e["id"]: e for e in config["employees"] if not e["paused"]}
+                employees = {
+                    eid: e
+                    for eid, e in employees.items()
+                    if not exhausted(e, usage.get(f"employee:{eid}", {}))
+                }
+                for eid, employee in employees.items():
+                    interval = employee["heartbeatSeconds"]
+                    last = runtime["heartbeats"].get(eid)
+                    if interval and (not last or datetime.fromisoformat(last) <= datetime.now(UTC)):
+                        if not any(
+                            t["assignee"] == eid
+                            and (
+                                t["claim"]
+                                or task_reason(org, t) == "Ready"
+                                or (
+                                    t["title"] == "Heartbeat: review assignments"
+                                    and t["status"] not in {"done", "cancelled"}
+                                )
                             )
-                            continue
-                        task_project: dict[str, Any] = next(
-                            (p for p in config["projects"] if p["id"] == task["project"]), {}
-                        )
-                        if exhausted(task_project, usage.get(f"initiative:{task['project']}", {})):
-                            continue
-                        roots = config.get("projectRoots", [])
-                        working_root = (
-                            task.get("workspacePath")
-                            or task_project.get("workspacePath")
-                            or (roots[0] if roots else "")
-                        )
-                        if not working_root or not self.store.owns_project(oid, working_root):
-                            self._block(task, "Assign an owned Raticode project before retrying")
-                            continue
-                        grants = employees[task["assignee"]].get("workspacePaths")
-                        if grants is not None and working_root not in grants:
-                            self._block(task, "Workspace is outside this employee's grants")
-                            continue
-                        isolated = self._isolated(config, working_root)
-                        root_key = f"task:{task['id']}" if isolated else working_root
-                        if root_key in self._active_roots.values() or any(
-                            t["claim"] and t["assignee"] == task["assignee"]
                             for t in runtime["tasks"]
                         ):
-                            continue
-                        try:
-                            reserved = reservation(org, task)
-                            validate_execution(org, task)
-                        except ValueError as exc:
-                            self._block(task, str(exc))
-                            continue
-                        if (
-                            task.get("execution", {})
-                            and task["execution"].get("kind") == "workflow"
-                            and not task.get("workflowAuthorization")
-                        ):
-                            self._block(task, "Authorize the workflow preview before launch")
-                            continue
-                        if task["turns"] + reserved > config["maxTaskTurns"]:
-                            self._block(
-                                task,
-                                "This task's run limit is too small for the runs it reserves",
+                            runtime["tasks"].append(
+                                Task(
+                                    title="Heartbeat: review assignments",
+                                    assignee=eid,
+                                    description="Review organization goals and blocked work. "
+                                    "Delegate or record the next useful action.",
+                                ).model_dump()
                             )
-                            continue
-                        # A monthly limit is temporary: wait for capacity instead of blocking.
-                        if any(
-                            policy.get("monthlyTurnLimit")
-                            and account.get("turns", 0) + reserved > policy["monthlyTurnLimit"]
-                            for policy, account in (
-                                (config, usage.get("company", {})),
-                                (
-                                    employees[task["assignee"]],
-                                    usage.get(f"employee:{task['assignee']}", {}),
-                                ),
-                                (task_project, usage.get(f"initiative:{task['project']}", {})),
-                            )
-                        ):
-                            continue
-                        task.update(
-                            claim=str(uuid4()),
-                            status="in_progress",
-                            turns=task["turns"] + reserved,
-                            revision=task["revision"] + 1,
+                        runtime["heartbeats"][eid] = (
+                            datetime.now(UTC) + timedelta(seconds=interval)
+                        ).isoformat()
+                for task in sorted(
+                    runtime["tasks"],
+                    key=lambda t: (
+                        {"critical": 0, "high": 1, "medium": 2, "low": 3}[t["priority"]]
+                        - (
+                            datetime.now(UTC) - datetime.fromisoformat(t["createdAt"])
+                        ).total_seconds()
+                        / 86400
+                    ),
+                ):
+                    if (
+                        task["status"] != "todo"
+                        or task["claim"]
+                        or task["assignee"] not in employees
+                    ):
+                        continue
+                    if task["approvalRequired"] and task["approvedRevision"] is None:
+                        continue
+                    if task["dueAt"] and datetime.fromisoformat(task["dueAt"]) > datetime.now(UTC):
+                        continue
+                    if task["turns"] >= config["maxTaskTurns"]:
+                        self._block(
+                            task,
+                            "Run limit for this task reached. Reopen it to allow more runs.",
                         )
-                        for account_id in (
-                            "company",
-                            f"employee:{task['assignee']}",
-                            f"initiative:{task['project']}",
-                        ):
-                            account = usage.setdefault(account_id, {})
-                            account["turns"] = account.get("turns", 0) + reserved
-                        runtime.setdefault("attempts", {})[task["claim"]] = {
-                            "id": task["claim"],
-                            "organizationId": oid,
-                            "taskId": task["id"],
-                            "employeeId": task["assignee"],
-                            "parentRunId": task.get("parentRunId"),
-                            "workspacePath": working_root,
-                            "startedAt": now(),
-                            "status": "running",
-                            "configRevision": org["revision"],
-                            "planRevision": task.get("planRevision", 1),
-                            "costUsd": None,
-                            "reservedTurns": reserved,
-                            "reservationMonth": month,
-                            "initiativeId": task["project"],
-                        }
-                        chosen.update(
-                            budget=min(
-                                (
-                                    policy["monthlyBudgetUsd"]
-                                    - usage.get(account_id, {}).get("costUsd", 0)
-                                    for policy, account_id in (
-                                        (config, "company"),
-                                        (
-                                            employees[task["assignee"]],
-                                            f"employee:{task['assignee']}",
-                                        ),
-                                        (task_project, f"initiative:{task['project']}"),
-                                    )
-                                    if policy.get("monthlyBudgetUsd")
-                                ),
-                                default=None,
+                        continue
+                    task_project: dict[str, Any] = next(
+                        (p for p in config["projects"] if p["id"] == task["project"]), {}
+                    )
+                    if exhausted(task_project, usage.get(f"initiative:{task['project']}", {})):
+                        continue
+                    roots = config.get("projectRoots", [])
+                    working_root = (
+                        task.get("workspacePath")
+                        or task_project.get("workspacePath")
+                        or (roots[0] if roots else "")
+                    )
+                    if not working_root or not self.store.owns_project(oid, working_root):
+                        self._block(task, "Assign an owned Raticode project before retrying")
+                        continue
+                    grants = employees[task["assignee"]].get("workspacePaths")
+                    if grants is not None and working_root not in grants:
+                        self._block(task, "Workspace is outside this employee's grants")
+                        continue
+                    isolated = self._isolated(config, working_root)
+                    root_key = f"task:{task['id']}" if isolated else working_root
+                    if root_key in self._active_roots.values() or any(
+                        t["claim"] and t["assignee"] == task["assignee"] for t in runtime["tasks"]
+                    ):
+                        continue
+                    try:
+                        reserved = reservation(org, task)
+                        validate_execution(org, task)
+                    except ValueError as exc:
+                        self._block(task, str(exc))
+                        continue
+                    if (
+                        task.get("execution", {})
+                        and task["execution"].get("kind") == "workflow"
+                        and not task.get("workflowAuthorization")
+                    ):
+                        self._block(task, "Authorize the workflow preview before launch")
+                        continue
+                    if task["turns"] + reserved > config["maxTaskTurns"]:
+                        self._block(
+                            task,
+                            "This task's run limit is too small for the runs it reserves",
+                        )
+                        continue
+                    # A monthly limit is temporary: wait for capacity instead of blocking.
+                    if any(
+                        policy.get("monthlyTurnLimit")
+                        and account.get("turns", 0) + reserved > policy["monthlyTurnLimit"]
+                        for policy, account in (
+                            (config, usage.get("company", {})),
+                            (
+                                employees[task["assignee"]],
+                                usage.get(f"employee:{task['assignee']}", {}),
                             ),
-                            month=month,
-                            working_root=working_root,
-                            root_key=root_key,
-                            isolated=isolated,
-                            org=copy.deepcopy(org),
-                            task=copy.deepcopy(task),
-                            employee=copy.deepcopy(employees[task["assignee"]]),
-                            reserved=reserved,
+                            (task_project, usage.get(f"initiative:{task['project']}", {})),
                         )
-                        return {
-                            "taskId": task["id"],
-                            "turnId": task["claim"],
-                            "employeeId": task["assignee"],
-                            "configRevision": org["revision"],
-                        }
-                    return {}
+                    ):
+                        continue
+                    task.update(
+                        claim=str(uuid4()),
+                        status="in_progress",
+                        turns=task["turns"] + reserved,
+                        revision=task["revision"] + 1,
+                    )
+                    for account_id in (
+                        "company",
+                        f"employee:{task['assignee']}",
+                        f"initiative:{task['project']}",
+                    ):
+                        account = usage.setdefault(account_id, {})
+                        account["turns"] = account.get("turns", 0) + reserved
+                    runtime.setdefault("attempts", {})[task["claim"]] = {
+                        "id": task["claim"],
+                        "organizationId": oid,
+                        "taskId": task["id"],
+                        "employeeId": task["assignee"],
+                        "parentRunId": task.get("parentRunId"),
+                        "workspacePath": working_root,
+                        "startedAt": now(),
+                        "status": "running",
+                        "configRevision": org["revision"],
+                        "planRevision": task.get("planRevision", 1),
+                        "costUsd": None,
+                        "reservedTurns": reserved,
+                        "reservationMonth": month,
+                        "initiativeId": task["project"],
+                        # What ran, so a run can be explained and repeated later.
+                        "provider": employees[task["assignee"]]["provider"],
+                        "model": employees[task["assignee"]]["model"],
+                        "effort": employees[task["assignee"]].get("effort"),
+                        "permissionMode": employees[task["assignee"]]["permissionMode"],
+                        "isolation": "worktree" if isolated else "folder",
+                        "blockGitPush": config.get("blockGitPush", True),
+                    }
+                    chosen.update(
+                        budget=min(
+                            (
+                                policy["monthlyBudgetUsd"]
+                                - usage.get(account_id, {}).get("costUsd", 0)
+                                for policy, account_id in (
+                                    (config, "company"),
+                                    (
+                                        employees[task["assignee"]],
+                                        f"employee:{task['assignee']}",
+                                    ),
+                                    (task_project, f"initiative:{task['project']}"),
+                                )
+                                if policy.get("monthlyBudgetUsd")
+                            ),
+                            default=None,
+                        ),
+                        month=month,
+                        working_root=working_root,
+                        root_key=root_key,
+                        isolated=isolated,
+                        org=copy.deepcopy(org),
+                        task=copy.deepcopy(task),
+                        employee=copy.deepcopy(employees[task["assignee"]]),
+                        reserved=reserved,
+                    )
+                    return {
+                        "taskId": task["id"],
+                        "turnId": task["claim"],
+                        "employeeId": task["assignee"],
+                        "configRevision": org["revision"],
+                    }
+                return {}
 
-                if any(
-                    a.get("executionHandle")
-                    and not a["executionHandle"].get("settled")
-                    and a["id"] not in self._active
-                    for a in org["runtime"].get("attempts", {}).values()
-                ):
-                    continue
-                instant = datetime.now(UTC)
-                runtime = org["runtime"]
-                # Avoid activity noise on every scheduler tick: only claim when something can move.
-                if not (
-                    any(
-                        task_reason(org, t, instant) in DISPATCH_REASONS
-                        or (
-                            t["claim"]
-                            and (
-                                t["claim"] not in self._active
-                                or not self._active[t["claim"]][2].is_alive()
-                            )
-                        )
-                        for t in runtime["tasks"]
-                    )
-                    or any(
-                        e["heartbeatSeconds"]
-                        and not e["paused"]
+            if any(
+                a.get("executionHandle")
+                and not a["executionHandle"].get("settled")
+                and a["id"] not in self._active
+                for a in org["runtime"].get("attempts", {}).values()
+            ):
+                return
+            instant = datetime.now(UTC)
+            runtime = org["runtime"]
+            # Avoid activity noise on every scheduler tick: only claim when something can move.
+            if not (
+                any(
+                    task_reason(org, t, instant) in DISPATCH_REASONS
+                    or (
+                        t["claim"]
                         and (
-                            not runtime["heartbeats"].get(e["id"])
-                            or datetime.fromisoformat(runtime["heartbeats"][e["id"]]) <= instant
+                            t["claim"] not in self._active
+                            or not self._active[t["claim"]][2].is_alive()
                         )
-                        for e in org["config"]["employees"]
                     )
-                    or any(
-                        r["enabled"]
-                        and r.get("nextAt")
-                        and datetime.fromisoformat(r["nextAt"]) <= instant
-                        for r in runtime.get("routines", {}).values()
-                    )
-                ):
-                    continue
-                self.store.mutate(project, oid, "system", "dispatch", claim)
-                if not chosen:
-                    continue
-                cancel = threading.Event()
-                turn_id = chosen["task"]["claim"]
-                thread = threading.Thread(
-                    target=self._run,
-                    args=(chosen, cancel),
-                    daemon=True,
-                    name=f"employee-{turn_id[:8]}",
+                    for t in runtime["tasks"]
                 )
-                self._active[turn_id] = (oid, cancel, thread)
-                self._active_roots[turn_id] = chosen["root_key"]
-                try:
-                    thread.start()
-                    self._wake.set()
-                except Exception as exc:
-                    chosen["setup_error"] = str(exc)
-                    self._run(chosen, cancel)
+                or any(
+                    e["heartbeatSeconds"]
+                    and not e["paused"]
+                    and (
+                        not runtime["heartbeats"].get(e["id"])
+                        or datetime.fromisoformat(runtime["heartbeats"][e["id"]]) <= instant
+                    )
+                    for e in org["config"]["employees"]
+                )
+                or any(
+                    r["enabled"]
+                    and r.get("nextAt")
+                    and datetime.fromisoformat(r["nextAt"]) <= instant
+                    for r in runtime.get("routines", {}).values()
+                )
+            ):
+                return
+            self.store.mutate(project, oid, "system", "dispatch", claim)
+            if not chosen:
+                return
+            cancel = threading.Event()
+            turn_id = chosen["task"]["claim"]
+            thread = threading.Thread(
+                target=self._run,
+                args=(chosen, cancel),
+                daemon=True,
+                name=f"employee-{turn_id[:8]}",
+            )
+            self._active[turn_id] = (oid, cancel, thread)
+            self._active_roots[turn_id] = chosen["root_key"]
+            try:
+                thread.start()
+                self._wake.set()
+            except Exception as exc:
+                chosen["setup_error"] = str(exc)
+                self._run(chosen, cancel)
 
     def _run(self, chosen: dict[str, Any], cancel: threading.Event) -> None:
         org, task, employee = chosen["org"], chosen["task"], chosen["employee"]
@@ -1750,6 +2066,8 @@ class OrganizationManager:
         working_root = chosen["working_root"]
         usage: dict[str, Any] = {}
         managed_turns: int | None = None
+        # Fingerprint of exactly what the employee was given, and where its work ended up.
+        provenance: dict[str, Any] = {}
         try:
             if chosen.get("setup_error"):
                 raise RuntimeError(chosen["setup_error"])
@@ -1803,6 +2121,7 @@ class OrganizationManager:
 
             async def execute() -> None:
                 nonlocal final, usage, managed_turns
+                provenance["runRoot"] = run_root
                 with self.session(
                     project,
                     f"employee:{employee['id']}",
@@ -1915,6 +2234,36 @@ class OrganizationManager:
                             ),
                         }
                     ]
+
+                    granted = copy.deepcopy(resources)
+                    granted["mcpServers"] = [
+                        server
+                        for server in granted.get("mcpServers", [])
+                        if server.get("name") != "organizations"
+                    ]
+                    for server in granted["mcpServers"]:
+                        server.pop("env", None)
+                    # Keep exactly what the employee was given, so the run can be inspected,
+                    # compared or repeated. The fingerprint covers the stored bytes.
+                    run_input = self._redact(
+                        json.dumps(
+                            {
+                                "provider": employee["provider"],
+                                "model": employee["model"],
+                                "effort": employee["effort"],
+                                "permissionMode": employee["permissionMode"],
+                                "instructions": identity,
+                                "messages": messages,
+                                "resources": granted,
+                                "workingDirectory": run_root,
+                            },
+                            sort_keys=True,
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                    ).encode()
+                    provenance["inputSha256"] = hashlib.sha256(run_input).hexdigest()
+                    write_run_input(self.run_input_path(oid, turn_id), run_input)
 
                     async def source() -> AsyncGenerator[dict[str, Any], None]:
                         if task.get("execution"):
@@ -2035,6 +2384,8 @@ class OrganizationManager:
             error = self._redact(str(exc)) or type(exc).__name__
         finally:
             final = self._redact(final)
+            if chosen.get("isolated") and provenance.get("runRoot"):
+                provenance.update(_worktree_state(provenance["runRoot"]))
             with self._lock:
                 cancel_reason = self._cancel_reasons.pop(turn_id, "cancelled")
             # Delegated executions may have external effects, so they stay blocked for review.
@@ -2099,6 +2450,7 @@ class OrganizationManager:
                         else "completed",
                         error=error,
                         costUsd=cost if known_cost else None,
+                        **{k: v for k, v in provenance.items() if k != "runRoot"},
                         usage=usage,
                         usedTurns=used,
                     )

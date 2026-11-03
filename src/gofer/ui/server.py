@@ -236,6 +236,23 @@ def _finite_json_number(value: str) -> float:
     return number
 
 
+def rem_poll_result(
+    result: dict[str, Any], known: str, keep: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Tag a view Rem's clients poll with a content version.
+
+    A client that sends the version it already has gets ``unchanged`` back, plus
+    the ``keep`` fields, instead of the whole view. Polls while nothing happens
+    then cost no download, no parsing and no re-render.
+    """
+    version = hashlib.sha256(
+        json.dumps(result, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()[:32]
+    if known == version:
+        return {"unchanged": True, "version": version} | {k: result[k] for k in keep if k in result}
+    return {**result, "version": version}
+
+
 def sync_workflow_schedules(data_dir: Path, scheduler: WorkflowScheduler) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     active_schedule_ids: set[str] = set()
@@ -986,15 +1003,20 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         service = self.server.rem_home
         parsed = urlparse(self.path)
         parts = parsed.path.removeprefix("/api/rem/").split("/")
+        known = parse_qs(parsed.query).get("known", [""])[0]
         try:
             if method == "GET" and parts == ["conversation"]:
                 # A restarted backend has no desktop context until the renderer
                 # sends it again; queued tasks wait for it.
-                result = {**service.store.conversation(), "context_ready": service.has_context}
+                result = rem_poll_result(
+                    {**service.store.conversation(), "context_ready": service.has_context},
+                    known,
+                    keep=("context_ready",),
+                )
             elif method == "GET" and parts == ["tasks"]:
-                result = {"tasks": service.store.tasks()}
+                result = rem_poll_result({"tasks": service.store.tasks(summary=True)}, known)
             elif method == "GET" and len(parts) == 2 and parts[0] == "threads":
-                result = service.store.thread(parts[1])
+                result = rem_poll_result(service.store.thread(parts[1]), known)
             elif method == "GET" and len(parts) == 2 and parts[0] == "runs":
                 with service.store.connect() as db:
                     result = {"run": service.store.get(db, "runs", parts[1])}
@@ -1190,6 +1212,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             "export",
             "help",
             "providers",
+            "run_events",
+            "audit_verify",
+            "run_input",
         } | READ_OPERATIONS
         if method == "GET" and action not in read_actions:
             raise ValueError("Mutations require POST")
