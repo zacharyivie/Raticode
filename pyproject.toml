@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gofer-flow"
-version = "0.5.0"
+version = "0.5.1"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-    "typer[all]>=0.12",
+    "typer[all]>=0.27.3",
     "PyYAML>=6.0.2",
-    "apscheduler>=3.10",
+    "apscheduler>=3.11.3",
     "networkx>=3.3",
     "pydantic>=2.13.5",
-    "pydantic-settings>=2.14.2",
+    "pydantic-settings>=2.16.1",
     "rich>=13.7",
     "anyio>=4.15.1",
     "python-dotenv>=1.2.3",
@@ -27,14 +27,14 @@ dependencies = [
     "watchdog>=6.0.0",
     "pypdf>=6.21.4",
     "fastembed>=0.7",
-    "bibtexparser>=1.4,<2",
+    "bibtexparser>=2.1.0,<3",
     "vosk>=0.3.45; sys_platform != 'darwin'",
     "vosk==0.3.44; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
 devices = [
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
     "pyOpenSSL==26.4.0",
     "tink==1.16.1",
     "keyring==25.7.0",
@@ -44,7 +44,7 @@ xlsx = [
     "openpyxl>=3.1",
 ]
 dev = [
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
     "pyOpenSSL==26.4.0",
     "tink==1.16.1",
     "keyring==25.7.0",

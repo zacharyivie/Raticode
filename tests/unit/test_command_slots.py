@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -222,6 +223,7 @@ def test_default_limits_follow_cores_and_memory(
 def _no_memory_pressure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(command_slots, "memory_pressure", lambda: 0.0)
     monkeypatch.setattr(command_slots, "memory_available_bytes", lambda: 8 * 1024**3)
+    monkeypatch.setattr(command_slots, "swap_used_share", lambda: 0.1)
 
 
 def test_slots_are_exclusive_and_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -308,6 +310,7 @@ def test_memory_pressure_holds_new_slots_while_others_run(
 ) -> None:
     write_settings(tmp_path, SlotSettings(test=2, build=2))
     monkeypatch.setattr(command_slots, "memory_available_bytes", lambda: None)
+    monkeypatch.setattr(command_slots, "swap_used_share", lambda: None)
     pressure = [50.0]
     monkeypatch.setattr(command_slots, "memory_pressure", lambda: pressure[0])
     # Nothing else is running, so the first command starts despite the pressure.
@@ -578,3 +581,231 @@ def test_a_quick_command_reports_activity_before_the_heartbeat_thread_runs(
     finally:
         release.set()
     assert abs((command_slots.last_activity(tmp_path, "thread") or 0) - time.time()) < 5
+
+
+# Memory safeguards -------------------------------------------------------------
+
+
+def test_nearly_full_swap_holds_new_slots_while_others_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_settings(tmp_path, SlotSettings(test=2, build=2))
+    monkeypatch.setattr(command_slots, "memory_pressure", lambda: 0.0)
+    monkeypatch.setattr(command_slots, "memory_available_bytes", lambda: 8 * 1024**3)
+    swap = [0.86]
+    monkeypatch.setattr(command_slots, "swap_used_share", lambda: swap[0])
+    # Free memory looks fine, but swap (often compressed RAM) is nearly full.
+    build = acquire(tmp_path, "build", command="tsc", label="", notify=print)
+    assert build is not None
+    messages: list[str] = []
+
+    def sleep(_seconds: float) -> None:
+        swap[0] = 0.5
+
+    test = acquire(
+        tmp_path, "test", command="pytest", label="", notify=messages.append, sleep=sleep
+    )
+    assert test is not None
+    assert "swap is 86% full" in messages[0]
+    build.release()
+    test.release()
+
+
+def test_swap_share_reads_meminfo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 100 kB\nSwapTotal: 1000 kB\nSwapFree: 250 kB\n")
+    real_open = open
+    monkeypatch.setattr(
+        "builtins.open",
+        lambda path, *a, **k: real_open(meminfo if path == "/proc/meminfo" else path, *a, **k),
+    )
+    assert command_slots.swap_used_share() == pytest.approx(0.75)
+    meminfo.write_text("MemTotal: 100 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n")
+    assert command_slots.swap_used_share() is None
+
+
+def test_each_queued_command_gets_its_own_scope_with_a_backstop() -> None:
+    limit = command_slots.command_memory_limit(total=32 * 1024**3)
+    assert limit == int(32 * 1024**3 * command_slots.COMMAND_MEMORY_SHARE)
+    argv = command_slots.command_scope(["npm", "test"], "raticode-cmd-1-2", limit)
+    assert argv[:5] == ["systemd-run", "--user", "--scope", "--quiet", "--collect"]
+    assert "--unit=raticode-cmd-1-2" in argv and f"--slice={command_slots.SLICE}" in argv
+    backstop = int(argv[argv.index("-p") + 1].removeprefix("MemoryMax="))
+    # The kernel's limit sits above Raticode's own, so Raticode normally stops it first.
+    assert limit < backstop <= int(32 * 1024**3 * command_slots.COMMAND_BACKSTOP_SHARE) + 1
+    assert argv[-3:] == ["--", "npm", "test"]
+
+
+def test_run_caps_commands_only_inside_raticodes_slice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_memory_pressure(monkeypatch)
+    calls: list[int | None] = []
+
+    def run_child(argv, env, *, limit=None, notify=None):
+        calls.append(limit)
+        return 0
+
+    monkeypatch.setattr(command_slots, "_run_child", run_child)
+    monkeypatch.setattr(command_slots, "memory_total_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setenv(command_slots.ROOT_ENV, str(tmp_path))
+    monkeypatch.delenv(command_slots.HELD_ENV, raising=False)
+    monkeypatch.delenv(command_slots.SLICE_ENV, raising=False)
+    monkeypatch.setattr(os, "nice", lambda _n: 0)
+    assert command_slots.run("test", ["pytest"]) == 0
+    monkeypatch.setenv(command_slots.SLICE_ENV, command_slots.SLICE)
+    assert command_slots.run("test", ["pytest"]) == 0
+    assert calls == [None, int(16 * 1024**3 * command_slots.COMMAND_MEMORY_SHARE)]
+
+
+def test_command_watch_stops_a_runaway_command_itself_and_says_why() -> None:
+    used = [100]
+    sent: list[int] = []
+
+    def stop(signum: int) -> int:
+        sent.append(signum)
+        return 1
+
+    messages: list[str] = []
+    now = [0.0]
+    watch = command_slots.CommandWatch(
+        lambda: used[0],
+        stop,
+        2 * 1024**3,
+        notify=messages.append,
+        command="node --test src/pages/App.test.mjs",
+        grace_seconds=5,
+        clock=lambda: now[0],
+    )
+    assert watch.check() is False and not sent
+    used[0] = 3 * 1024**3
+    assert watch.check() is True
+    assert sent == [signal.SIGTERM]
+    assert messages == [
+        "Raticode stopped node --test src/pages/App.test.mjs: it used 3.0 GB of memory and "
+        "swap, over the 2.0 GB one test, build or browser run may use. Other work on this "
+        "computer was not affected. Look for a leak or an endless loop in what it runs, or "
+        "run fewer tests at once."
+    ]
+    now[0] = 4.0
+    watch.check()
+    assert sent == [signal.SIGTERM]
+    now[0] = 5.0
+    watch.check()
+    watch.check()
+    # One SIGKILL after the grace period, and the message only once.
+    assert sent == [signal.SIGTERM, signal.SIGKILL]
+    assert len(messages) == 1
+
+
+def test_command_watch_ignores_unknown_usage() -> None:
+    sent: list[int] = []
+
+    def stop(signum: int) -> int:
+        sent.append(signum)
+        return 0
+
+    watch = command_slots.CommandWatch(lambda: None, stop, 1, notify=print, command="x")
+    assert watch.check() is False and not sent
+
+
+def test_cgroup_usage_counts_memory_and_swap(tmp_path: Path) -> None:
+    (tmp_path / "memory.current").write_text("300\n")
+    (tmp_path / "memory.swap.current").write_text("200\n")
+    assert command_slots.cgroup_usage(tmp_path) == 500
+    (tmp_path / "memory.swap.current").unlink()
+    assert command_slots.cgroup_usage(tmp_path) == 300
+
+
+def test_scope_cgroup_waits_for_the_named_unit(tmp_path: Path) -> None:
+    (tmp_path / "42").mkdir()
+    cgroup = tmp_path / "42" / "cgroup"
+    cgroup.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope\n")
+    assert command_slots._scope_cgroup(42, "raticode-cmd-1.scope", tmp_path) is None
+    cgroup.write_text(
+        "0::/user.slice/user-1000.slice/user@1000.service/raticode.slice/raticode-cmd-1.scope\n"
+    )
+    assert command_slots._scope_cgroup(42, "raticode-cmd-1.scope", tmp_path) == Path(
+        "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/raticode.slice/"
+        "raticode-cmd-1.scope"
+    )
+
+
+def test_slice_cgroup_is_found_under_the_user_manager(tmp_path: Path) -> None:
+    own = tmp_path / "cgroup"
+    own.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-k.scope\n")
+    assert command_slots.slice_cgroup(own) == Path(
+        "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/raticode.slice"
+    )
+    own.write_text("0::/system.slice/gofer.service\n")
+    assert command_slots.slice_cgroup(own) is None
+
+
+def _scope(root: Path, name: str, pids: list[int], used: int) -> None:
+    scope = root / name
+    scope.mkdir()
+    (scope / "cgroup.procs").write_text("".join(f"{pid}\n" for pid in pids))
+    (scope / "memory.current").write_text(f"{used}\n")
+    (scope / "memory.swap.current").write_text("0\n")
+
+
+def _process(proc: Path, pid: int, parent: int, comm: str) -> None:
+    (proc / str(pid)).mkdir()
+    (proc / str(pid) / "stat").write_text(f"{pid} ({comm}) S {parent} 1 1 0 -1\n")
+    (proc / str(pid) / "comm").write_text(f"{comm}\n")
+
+
+def test_leftovers_of_finished_turns_are_reclaimed_only_when_memory_is_short(
+    tmp_path: Path,
+) -> None:
+    cgroup, proc = tmp_path / "slice", tmp_path / "proc"
+    cgroup.mkdir()
+    proc.mkdir()
+    _process(proc, 876, 1, "systemd")
+    _process(proc, 500, 1, "python3")  # Raticode's backend
+    # A running turn: its provider's parent is the backend. It is the biggest.
+    _process(proc, 10, 500, "claude")
+    _process(proc, 11, 10, "node")
+    _scope(cgroup, "run-p10-i1.scope", [10, 11], 9 * 1024**3)
+    # Gradle and Kotlin daemons whose turn ended: only the service manager is left.
+    _process(proc, 20, 876, "java")
+    _process(proc, 21, 876, "java")
+    _scope(cgroup, "run-p19-i2.scope", [20, 21], 6 * 1024**3)
+    # A smaller leftover browser.
+    _process(proc, 30, 876, "chrome")
+    _scope(cgroup, "run-p29-i3.scope", [30], 100 * 1024**2)
+    scopes = {scope.name: scope.leftover for scope in command_slots.slice_scopes(cgroup, proc)}
+    assert scopes == {"run-p10-i1.scope": False, "run-p19-i2.scope": True, "run-p29-i3.scope": True}
+
+    stopped: list[str] = []
+    logged: list[str] = []
+
+    def stop(name: str) -> bool:
+        stopped.append(name)
+        return True
+
+    assert command_slots.reclaim_leftovers(cgroup, reason=None, proc_root=proc, stop=stop) is None
+    assert stopped == []
+    name = command_slots.reclaim_leftovers(
+        cgroup, reason="swap is 92% full", proc_root=proc, stop=stop, log=logged.append
+    )
+    # One at a time, biggest leftover first; the running turn is never touched.
+    assert name == stopped[0] == "run-p19-i2.scope"
+    assert stopped == ["run-p19-i2.scope"]
+    record = json.loads(logged[0].removeprefix("RATICODE_RECLAIMED "))
+    assert record == {
+        "unit": "run-p19-i2.scope",
+        "bytes": 6 * 1024**3,
+        "reason": "swap is 92% full",
+    }
+
+
+def test_memory_is_critical_on_low_free_memory_or_nearly_full_swap() -> None:
+    total = 32 * 1024**3
+    assert command_slots.memory_critical(available=16 * 1024**3, total=total, swap=0.3) is None
+    assert command_slots.memory_critical(available=2 * 1024**3, total=total, swap=0.3) == (
+        "only 2.0 GB of memory is free"
+    )
+    assert command_slots.memory_critical(available=16 * 1024**3, total=total, swap=0.95) == (
+        "swap is 95% full"
+    )

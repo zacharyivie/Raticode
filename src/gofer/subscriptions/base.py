@@ -18,6 +18,9 @@ from gofer.subscriptions.usage import track_invocation
 from gofer.utils.process import env_with_executable_on_path, stream_subprocess
 from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
 
+# Records that end a provider's turn: Claude Code's result and Codex's turn events.
+TERMINAL_RECORDS = frozenset({"result", "turn.completed", "turn.failed"})
+
 
 class Subscription(ABC):
     # Tool-free calls must receive the evidence directly, without reading a prompt file.
@@ -62,9 +65,18 @@ class Subscription(ABC):
                     error = payload.get("error")
                     if isinstance(error, dict):
                         error = error.get("message")
+                    # Codex error records carry their text in message.
+                    message = payload.get("message")
                     provider_error = str(
-                        error or payload.get("result") or "Provider reported a failed response"
+                        error
+                        or (message if isinstance(message, str) else None)
+                        or payload.get("result")
+                        or "Provider reported a failed response"
                     )
+                elif payload.get("type") in TERMINAL_RECORDS:
+                    # A turn's own outcome replaces an earlier error, such as Codex's
+                    # "Reconnecting... 1/5" before a call it retried and completed.
+                    provider_error = None
             candidate, metadata = self._parse_provider_output(line, "")
             protocol_usage.update(metadata)
             if candidate != line:

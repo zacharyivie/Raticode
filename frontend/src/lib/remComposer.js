@@ -6,7 +6,8 @@ import { focusRemComposer } from "./remHomeStore.js";
 // Rem's unsent message lives here, not in its view, so it survives switching
 // to another plugin. It stays out of the Rem store so typing doesn't re-render
 // the sidebar, and out of App's chunk because only Rem's view needs it.
-const emptyComposer = () => ({ draft: "", attachments: [], error: "" });
+// replyTo is the preview of the message being replied to, sent as refers_to.
+const emptyComposer = () => ({ draft: "", attachments: [], error: "", replyTo: null });
 let composer = emptyComposer();
 let appliedRequest = 0;
 const listeners = new Set();
@@ -41,5 +42,12 @@ export function applyRemComposerRequest(request) {
   appliedRequest = request.id;
   if (typeof request.text === "string") updateRemComposer({ draft: request.text });
   if (request.attachments?.length) updateRemComposer({ attachments: request.attachments });
+  if ("replyTo" in request) updateRemComposer({ replyTo: request.replyTo || null });
   return true;
+}
+
+// Reply links the next message to this one and puts the cursor in the message box.
+export function replyToRemMessage(reference) {
+  updateRemComposer({ replyTo: reference });
+  focusRemComposer();
 }

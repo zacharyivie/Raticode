@@ -568,7 +568,7 @@
     },
     "apscheduler": {
       "license": "MIT",
-      "version": "3.11.2"
+      "version": "3.11.3"
     },
     "ast-serialize": {
       "license": "MIT",
@@ -579,8 +579,8 @@
       "version": "26.1.0"
     },
     "bibtexparser": {
-      "license": "LGPLv3 or BSD",
-      "version": "1.4.4"
+      "license": "MIT",
+      "version": "2.1.0"
     },
     "boolean-py": {
       "license": "BSD-2-Clause",
@@ -812,7 +812,7 @@
     },
     "pydantic-settings": {
       "license": "MIT",
-      "version": "2.15.0"
+      "version": "2.16.1"
     },
     "pygments": {
       "license": "BSD-2-Clause",
@@ -825,6 +825,10 @@
     "pyinstaller-hooks-contrib": {
       "license": "License :: OSI Approved :: Apache Software License; License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
       "version": "2026.6"
+    },
+    "pylatexenc": {
+      "license": "MIT",
+      "version": "2.11"
     },
     "pyparsing": {
       "license": "MIT",
@@ -924,7 +928,7 @@
     },
     "typer": {
       "license": "MIT",
-      "version": "0.26.7"
+      "version": "0.27.3"
     },
     "typing-extensions": {
       "license": "PSF-2.0",

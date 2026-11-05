@@ -161,6 +161,9 @@ class DeviceApplication:
     lan_endpoint: dict[str, Any] | None = None
     # Set only while the user's Tailscale opt-in is listening.
     tailnet_endpoint: dict[str, Any] | None = None
+    # False while the opt-in is on but not listening yet. The field is then left out,
+    # because a null tells phones to forget the address.
+    tailnet_known: bool = True
     # Includes loopback, which only another desktop on this machine can use.
     listener_endpoint: dict[str, Any] | None = None
 
@@ -433,7 +436,10 @@ class DeviceApplication:
                     return None
             if not self.desktop.allowed(peer):
                 return None
-        return self.desktop.gather(event)
+            # Git reads are scoped to the projects this phone may see, read under the lock.
+            scoped = str(event["payload"].get("op", "")).startswith("source_control.")
+            projects = self.desktop.projects(peer) if scoped else None
+        return self.desktop.gather(event, projects)
 
     def handle(self, peer: str, event: dict[str, Any]) -> list[dict[str, Any]]:
         if not _VALIDATOR.is_valid(event):
@@ -779,6 +785,7 @@ class DeviceApplication:
                                         **(
                                             {"tailnet_endpoint": self.tailnet_endpoint}
                                             if payload.get("include_tailnet_endpoint") is True
+                                            and (self.tailnet_endpoint or self.tailnet_known)
                                             else {}
                                         ),
                                     }

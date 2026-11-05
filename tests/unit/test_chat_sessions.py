@@ -1055,3 +1055,33 @@ async def test_claude_mcp_capability_urls_stay_off_the_command_line(
     assert (seen["mode"], seen["folder_mode"]) == (0o600, 0o700)
     # The file is gone once the provider exits.
     assert not seen["path"].exists() and not seen["path"].parent.exists()
+
+
+async def test_a_provider_killed_by_the_system_reports_why_not_raw_protocol(
+    native_cli, monkeypatch, tmp_path
+):
+    # The last stdout piece before the kill was cut off in the middle of a record.
+    fragment = 'reason\\":null,\\"stop_sequence\\":null,\\"usage\\":{\\"input_tokens\\":2'
+
+    async def killed(command, **kwargs):
+        yield {"type": "chunk", "stream": "stdout", "text": fragment, "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": -9}
+
+    monkeypatch.setattr(chat, "stream_subprocess", killed)
+    events = await turn(tmp_path, "claude_code", [{"role": "user", "body": "Run the tests"}])
+    error = events[-1]
+    assert error["type"] == "error"
+    assert error["processExitCode"] == -9
+    assert error["error"].startswith("The provider was stopped by the system (SIGKILL).")
+    assert "stop_sequence" not in error["error"]
+
+
+def test_provider_exit_messages_and_plain_output():
+    assert chat.provider_exit_message(0) is None
+    assert chat.provider_exit_message(1) is None
+    assert chat.provider_exit_message(None) is None
+    assert "ran out of memory" in (chat.provider_exit_message(137) or "")
+    assert chat.provider_exit_message(-15) == "The provider was stopped by SIGTERM."
+    assert chat.plain_output("Error: please sign in") == "Error: please sign in"
+    assert chat.plain_output('{"type": "result"}') == ""
+    assert chat.plain_output('nput_json_delta","partial_json":"ls') == ""

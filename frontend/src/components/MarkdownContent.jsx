@@ -1,4 +1,5 @@
 import { isLocalFileLink, resolveMarkdownLinkPath } from "../lib/fileLinks.js";
+import { remarkFileMentions } from "../lib/fileMentions.js";
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -9,11 +10,13 @@ import remarkGfm from "remark-gfm";
 const RichCodeBlock = lazy(() => import("./RichCodeBlock.jsx"));
 // Web images load through the backend; the loader is its own small chunk too.
 const WebImage = lazy(() => import("./WebImage.jsx"));
+const DEFAULT_REMARK_PLUGINS = [remarkGfm];
 const imagePlaceholder = <span aria-hidden="true" className="block h-40 w-full max-w-md rounded-lg bg-slate-100 dark:bg-[#26262a]" />;
 
 function MarkdownContent({
   className = "",
   compact = false,
+  fileMentions = null,
   inverse = false,
   onOpenRelativeLink,
   sourcePath = "",
@@ -23,6 +26,12 @@ function MarkdownContent({
   const onOpenRelativeLinkRef = useRef(onOpenRelativeLink);
   onOpenRelativeLinkRef.current = onOpenRelativeLink;
   const spacing = compact ? "space-y-2" : "space-y-4";
+  // Full file paths the backend found in the text open like links.
+  const mentionsKey = fileMentions?.length ? JSON.stringify(fileMentions) : "";
+  const remarkPlugins = useMemo(
+    () => (mentionsKey ? [remarkGfm, remarkFileMentions(JSON.parse(mentionsKey))] : DEFAULT_REMARK_PLUGINS),
+    [mentionsKey],
+  );
 
   const handleLinkClick = useCallback((event, href) => {
     if (!href) return;
@@ -165,7 +174,7 @@ function MarkdownContent({
       <ReactMarkdown
         components={components}
         rehypePlugins={[rehypeSlug]}
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={remarkPlugins}
         urlTransform={markdownUrlTransform}
       >
         {String(value ?? "")}

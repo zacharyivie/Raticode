@@ -1,10 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "./api.js";
 import { startPolling } from "./refresh.js";
-import { disconnectWorkflowRunRecords, exactWorkflowRunStopPath, markWorkflowRunReviewed, mergeWorkflowRunRecords, pruneUnlistedWorkflowRuns, readWorkflowRunRecords, writeWorkflowRunRecords } from "./workflowRuns.js";
+import { disconnectWorkflowRunRecords, exactWorkflowRunStopPath, markWorkflowRunReviewed, mergeWorkflowRunRecords, pruneUnlistedWorkflowRuns, readWorkflowRunRecords, watchesWorkflowRun, writeWorkflowRunRecords } from "./workflowRuns.js";
 
 export function workflowRunContext(workflow) {
   return { workflowId: workflow.id, workflowName: workflow.name, projectPath: workflow.projectRoot || "", worktreePath: workflow.projectRoot || "", sourcePath: workflow.sourcePath || "" };
+}
+
+// Reading one workflow's run history takes two requests, and each makes the
+// backend look the workflow up and read every run it saved. Doing that for every
+// workflow on every poll kept the backend above a full CPU core with dozens of
+// workflows. Between full scans, only workflows that can have changed are read.
+export const FULL_SCAN_MS = 30_000;
+
+const latestRunOf = workflow => JSON.stringify(workflow.latestRun ?? null);
+
+// Which workflows a poll reads: all of them on a full scan; otherwise ones with
+// an active or lost run, ones with a queued run, and ones whose latest run in the
+// workflow list changed since the last poll (including workflows new to it).
+export function workflowsToScan(workflows, { full, records = [], queueRuns = [], latest = new Map(), previousLatest = new Map() }) {
+  if (full) return workflows;
+  const watched = new Set([
+    ...records.filter(watchesWorkflowRun).map(record => record.workflowId),
+    ...queueRuns.map(run => run.workflowId),
+  ]);
+  for (const [id, value] of latest) if (previousLatest.get(id) !== value) watched.add(id);
+  return workflows.filter(workflow => watched.has(workflow.id));
 }
 
 async function read(path) {
@@ -28,6 +49,8 @@ export function useWorkflowRunRegistry(workflows) {
   const pendingRef = useRef(null);
   const mounted = useRef(false);
   const stopping = useRef(new Set());
+  const lastFullScan = useRef(0);
+  const latestRuns = useRef(new Map());
   const record = useCallback((workflow, run) => setRecords(current => mergeWorkflowRunRecords(current, [{ ...run, workflowId: workflow.id }], workflowRunContext(workflow))), []);
   const review = useCallback(key => setRecords(current => markWorkflowRunReviewed(current, key)), []);
   const refresh = useCallback(() => {
@@ -42,7 +65,18 @@ export function useWorkflowRunRegistry(workflows) {
       for (const run of recordsRef.current) {
         if (!known.has(run.workflowId)) known.set(run.workflowId, { id: run.workflowId, name: run.workflowName, projectRoot: run.projectPath, sourcePath: run.sourcePath });
       }
-      const remaining = [...known.values()];
+      const latest = discovered.status === "fulfilled"
+        ? new Map((discovered.value.workflows || []).map(workflow => [workflow.id, latestRunOf(workflow)]))
+        : null;
+      const startedAt = Date.now();
+      const full = !latest || startedAt - lastFullScan.current >= FULL_SCAN_MS;
+      const remaining = workflowsToScan([...known.values()], {
+        full,
+        records: recordsRef.current,
+        queueRuns: queue.status === "fulfilled" ? queue.value.runs || [] : [],
+        latest: latest || undefined,
+        previousLatest: latestRuns.current,
+      });
       const updates = [];
       const failedIds = [];
       await Promise.all(Array.from({ length: Math.min(4, remaining.length) }, async () => {
@@ -63,6 +97,12 @@ export function useWorkflowRunRegistry(workflows) {
           } catch (error) { failedIds.push(workflow.id); failures.push(error.message); }
         }
       }));
+      if (full) lastFullScan.current = startedAt;
+      if (latest) {
+        // A workflow that couldn't be read is read again on the next poll.
+        for (const id of failedIds) latest.delete(id);
+        latestRuns.current = latest;
+      }
       if (queue.status === "fulfilled") {
         for (const run of queue.value.runs || []) {
           updates.push({ workflow: known.get(run.workflowId) || { id: run.workflowId }, runs: [{ ...run, logPath: run.runLogPath, queueRun: true }] });

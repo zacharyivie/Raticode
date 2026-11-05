@@ -77,12 +77,29 @@ export function replyMeta(meta) {
   return [model, seconds].filter(Boolean).join(" · ");
 }
 
-// "Ask about this" starts a reply that quotes the message.
-export function quoteForReply(text, limit = 280) {
-  const plain = plainMarkdown(String(text ?? "")).replace(/\s+/g, " ").trim();
-  if (!plain) return "";
-  const cut = plain.length > limit ? `${plain.slice(0, limit - 1).trimEnd()}…` : plain;
-  return `> ${cut}\n\n`;
+// "Reply" links a new message to this one. The desktop stores only the ID and builds
+// the same preview when the chat is read (reference_preview in rem_home_store.py).
+export function replyTarget(message, limit = 280) {
+  const plain = plainMarkdown(String(message?.body ?? "")).replace(/\s+/g, " ").trim();
+  const files = (message?.attachments?.length || 0) + (message?.files?.length || 0);
+  return {
+    id: message.id,
+    role: message.role || "rem",
+    body: plain.length > limit ? `${plain.slice(0, limit - 1).trimEnd()}…` : plain,
+    created_at: message.created_at || "",
+    ...(message.kind === "task_update" ? { kind: "task_update" } : {}),
+    ...(message.work?.title ? { title: message.work.title } : {}),
+    ...(files ? { files } : {}),
+  };
+}
+
+// Who wrote the message a reply refers to, and the line shown from it.
+export function referenceLines(reference) {
+  if (!reference?.id) return null;
+  if (reference.unavailable) return { author: "an earlier message", text: "No longer in this chat" };
+  const author = reference.role === "user" ? "You" : reference.kind === "task_update" ? "Rem · Task update" : "Rem";
+  const files = reference.files ? (reference.files === 1 ? "1 file" : `${reference.files} files`) : "";
+  return { author, text: reference.body || (reference.title ? `Task: ${reference.title}` : "") || files || "Message" };
 }
 
 // Copy puts the reply and its details on the clipboard as Markdown.
@@ -105,6 +122,28 @@ export function remPresence({ offline = false, replying = false, turnLabel = "",
 export function latestSuggestionMessageId(messages = []) {
   const last = messages.at(-1);
   return last && last.role !== "user" && last.suggestions?.length ? last.id : null;
+}
+
+// Long messages fold to a preview of about a third of the screen. Only a message at
+// least half again as tall folds, so folding always hides a useful amount. The phone
+// uses the same numbers in dp (RemRich.collapseLimits).
+export function collapseLimits(screenHeight) {
+  const height = Number(screenHeight) > 0 ? Number(screenHeight) : 800;
+  const preview = Math.round(Math.min(360, Math.max(168, height * 0.3)));
+  return { preview, threshold: Math.round(preview * 1.5) };
+}
+
+export function shouldCollapse(contentHeight, screenHeight) {
+  return contentHeight > collapseLimits(screenHeight).threshold;
+}
+
+// Rem's newest message opens in full, since it is the one being read; older long
+// messages and long messages you sent start folded.
+export function latestRemMessageId(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role !== "user") return messages[index]?.id ?? null;
+  }
+  return null;
 }
 
 const ACTIVE = new Set(["queued", "executing", "verifying", "repairing", "cancelling"]);

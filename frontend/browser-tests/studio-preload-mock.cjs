@@ -29,6 +29,10 @@ const apiBaseArgument = process.argv.find((value) => value.startsWith("--gofer-a
 if (apiBaseArgument) {
   window.goferApiBaseUrl = apiBaseArgument.slice("--gofer-api-base-url=".length);
 }
+const apiTokenArgument = process.argv.find((value) => value.startsWith("--gofer-api-token="));
+if (apiTokenArgument) {
+  window.__goferSessionToken = apiTokenArgument.slice("--gofer-api-token=".length);
+}
 
 window.__goferBridgeCalls = bridgeCalls;
 

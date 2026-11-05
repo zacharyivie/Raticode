@@ -364,6 +364,8 @@ function startBackend(port = 0) {
         ...reportPdfService?.env,
         GOFER_DESKTOP_GRANT_SECRET: desktopGrantSecret,
         GOFER_UI_EMIT_READY_TOKEN: "1",
+        // Dictation on macOS uses Apple's on-device recognizer through this helper.
+        ...(process.platform === "darwin" ? { GOFER_SPEECH_HELPER: macosSpeechHelperPath() } : {}),
         // Lets the backend grant and revoke Rem's per-turn browser access.
         ...(agentBrowserService ? {
           GOFER_BROWSER_SERVICE_URL: agentBrowserService.url,
@@ -474,6 +476,12 @@ function defaultPackagedBackendPath() {
   }
 
   return path.join(repoRoot, "dist", BACKEND_EXECUTABLE_NAME);
+}
+
+function macosSpeechHelperPath() {
+  if (app.isPackaged) return path.join(process.resourcesPath, "speech", "raticode-speech");
+  // Development builds: `node scripts/build-macos-speech-helper.cjs` puts it here.
+  return path.join(repoRoot, "dist", "macos-speech", "raticode-speech");
 }
 
 function getGoferDataDir() {
@@ -853,7 +861,7 @@ function setupIpcHandlers() {
     missingThreadRoots: (_event, options = {}) => missingThreadRoots(options.paths),
     readBinaryPreview,
     readAttachmentFile,
-    openMediaPreview: (event, options = {}) => mediaPreviews.open(resolveExactPath(options.targetPath, { grantId: options.grantId, mustExist: true }), event.sender.id),
+    openMediaPreview,
     closeMediaPreview: (event, options = {}) => mediaPreviews.close(options.id, event.sender.id),
     readTextFile,
     resizeTerminal,
@@ -1845,6 +1853,18 @@ async function readBinaryPreview(_event, options = {}) {
   };
 }
 
+// Chats keep showing pictures and videos attached long ago, so a file that has since
+// been moved or deleted is an answer, not a failed IPC call that logs a stack trace.
+function openMediaPreview(event, options = {}) {
+  try {
+    const targetPath = resolveExactPath(options.targetPath, { grantId: options.grantId, mustExist: true });
+    return mediaPreviews.open(targetPath, event.sender.id);
+  } catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes(error.code || error.cause?.code)) return { missing: true };
+    throw error;
+  }
+}
+
 // Reads any file for a chat attachment. The limit matches the chat's per-file limit.
 async function readAttachmentFile(_event, options = {}) {
   if (!options.targetPath || typeof options.targetPath !== "string") {
@@ -2037,10 +2057,10 @@ async function forgetRem(_event, { threadIds } = {}) {
 
 async function gitRepoAction(_event, options = {}) {
   const projectRoot = await resolveGitProjectDirectory(options);
-  try { return await gitRepositoryAction(projectRoot, options.action, options.value, { authorizeTarget: (target) => resolveGitProjectDirectory({ projectRoot: target, grantId: getIpcSecurity().grantForPath(target) }) }); }
+  try { return await gitRepositoryAction(projectRoot, options.action, options.value, { authorizeTarget: (target) => resolveGitProjectDirectory({ projectRoot: target, grantId: getIpcSecurity().grantForPath(target) }), managedFolders: ["rem-worktrees", "organization-worktrees", "workspaces"].map(folder => path.join(getGoferDataDir(), folder)) }); }
   catch (error) { return { ...await readGitStatus(projectRoot), error: String(error.stderr || error.message).replace(/^Command failed:[^\n]*\n?/, "").trim() }; }
   // Commits, branch deletes and cleanups change what other open views show. Previews only read.
-  finally { if (!/(^|-)preview$|^commit-diff$|^stash-list$/.test(String(options.action))) notifyGitChanged(projectRoot, ["index", "refs", "worktrees"]); }
+  finally { if (!/(^|-)preview$|^commit-diff$|^stash-list$|^integration-targets$/.test(String(options.action))) notifyGitChanged(projectRoot, ["index", "refs", "worktrees"]); }
 }
 
 async function gitFileAction(_event, options = {}) {

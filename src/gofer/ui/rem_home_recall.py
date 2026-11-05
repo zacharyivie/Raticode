@@ -48,7 +48,7 @@ def excerpt(message: dict[str, Any], query: str = "") -> dict[str, Any]:
     """Keep source IDs and report links, and mark shortened source text explicitly."""
     result: dict[str, Any] = {
         k: message[k]
-        for k in ("id", "role", "sender", "kind", "created_at", "work")
+        for k in ("id", "role", "sender", "kind", "created_at", "work", "refers_to")
         if k in message
     }
     body = str(message.get("body") or "")
@@ -98,6 +98,32 @@ class RemRecall:
         ):
             return False
         return True
+
+    def readable(self, db: Any, message: dict[str, Any]) -> bool:
+        """Whether Rem may read a chat message: its linked task is neither deleted nor closed."""
+        linked = message.get("work") or {}
+        if not linked.get("run_id"):
+            return True
+        try:
+            run = self.store.get(db, "runs", linked["run_id"])
+            task = self.store.get(db, "tasks", run["task_id"])
+        except KeyError:
+            # A finished one-time task removed after 30 days: the
+            # message is still conversation history.
+            return True
+        return self.permitted(run) and not task.get("deleted_at")
+
+    def referenced(self, identity: str, query: str) -> dict[str, Any]:
+        """The message the user replied to, read in full wherever it is in the chat.
+
+        It is marked ``unavailable`` once the chat no longer has it or Rem may no longer read it.
+        """
+        with self.store.read() as db:
+            row = db.execute("SELECT body FROM messages WHERE id=?", (identity,)).fetchone()
+            message = json.loads(row[0]) if row else None
+            if not message or not self.readable(db, message):
+                return {"id": identity, "unavailable": True}
+        return excerpt(message, query)
 
     def history(self, request: Recall, query: str) -> list[dict[str, Any]]:
         """Search the entire conversation, including neighbors of older matching messages."""
@@ -155,17 +181,8 @@ class RemRecall:
             budget = 24000
             for row in sorted(rows, key=lambda r: (selected[r["seq"]], r["seq"]), reverse=True):
                 message = json.loads(row["body"])
-                linked = message.get("work") or {}
-                if linked.get("run_id"):
-                    try:
-                        run = self.store.get(db, "runs", linked["run_id"])
-                        task = self.store.get(db, "tasks", run["task_id"])
-                    except KeyError:
-                        # A finished one-time task removed after 30 days: the
-                        # message is still conversation history.
-                        run, task = None, {}
-                    if (run and not self.permitted(run)) or task.get("deleted_at"):
-                        continue
+                if not self.readable(db, message):
+                    continue
                 item = excerpt(message, " ".join(request.queries) or query)
                 if len(item["body"]) > budget:
                     item.update(body=item["body"][:budget], truncated=True)

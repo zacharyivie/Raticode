@@ -3,6 +3,8 @@
 
 export const PANE_SIDE_OPTIONS = [["left", "Left"], ["right", "Right"]];
 
+export const ASSISTANT_PANE_CONTENT_OPTIONS = [["threads", "Threads"], ["rem", "Rem"]];
+
 export const TERMINAL_LOCATION_OPTIONS = [["panel", "Bottom panel"], ["editor", "Editor tab"]];
 
 export const BOTTOM_PANEL_STARTUP_OPTIONS = [

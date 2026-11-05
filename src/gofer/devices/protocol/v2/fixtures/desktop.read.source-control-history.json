@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000162",
+  "id": "10000000-0000-4000-8000-000000000162",
+  "sequence": 162,
+  "type": "desktop.read",
+  "payload": {
+    "op": "source_control.history",
+    "params": {
+      "project_id": "project-1",
+      "refs": [
+        "HEAD",
+        "refs/heads/main"
+      ],
+      "limit": 200
+    }
+  }
+}

@@ -336,7 +336,11 @@ function matchesBrowserBinding(input, binding, platform = process.platform) {
   if (modifiers.has("Meta") !== explicitMeta) return false;
   if (modifiers.has("Alt") !== Boolean(input.alt)) return false;
   if (modifiers.has("Shift") !== Boolean(input.shift)) return false;
-  return browserInputCode(input) === expectedCode;
+  const code = browserInputCode(input);
+  // Windows reports AltGr as Ctrl+Alt: AltGr+V types "@" on Hungarian layouts. Leave it as typing.
+  const key = String(input.key ?? "");
+  if (!mac && input.control && input.alt && /^Key[A-Z]$/.test(code) && [...key].length === 1 && !/\p{L}/u.test(key)) return false;
+  return code === expectedCode;
 }
 
 function browserInputCode(input) {

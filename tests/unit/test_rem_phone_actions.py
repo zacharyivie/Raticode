@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from gofer.ui.rem_home import RemHome
-from gofer.ui.rem_phone_actions import clean_phone_actions, phone_action
+from gofer.ui.rem_phone_actions import clean_phone_actions, missing_cards_note, phone_action
 from tests.unit.test_rem_home import home as home
 
 
@@ -124,3 +124,26 @@ def test_desktop_requests_never_carry_phone_actions(home: RemHome):
     # The local API can't mark a message as the phone's.
     with pytest.raises(ValueError):
         home.submit_message({"request_id": "desk-2", "body": "x", "source": "phone"})
+
+
+def test_missing_cards_are_admitted_in_the_reply(home: RemHome):
+    _, home.generate = _answer([{"type": "dial", "number": "*#06#"}])
+    home.submit_message({"request_id": "phone-2", "body": "Dial the code"}, source="phone")
+    home._reply()
+    reply = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-phone-2")
+    assert "phone_actions" not in reply
+    assert reply["body"].startswith("The timer card is ready on your phone.\n\nI couldn't make")
+
+
+def test_missing_cards_note_counts_what_was_kept():
+    timer = {"type": "timer", "seconds": 60}
+    assert missing_cards_note([], []) == ""
+    assert missing_cards_note([timer], [timer]) == ""
+    assert missing_cards_note(None, []) == ""
+    assert "that phone card" in missing_cards_note([{"type": "call"}], [])
+    assert "those phone cards" in missing_cards_note([{"type": "call"}, {"type": "x"}], [])
+    assert missing_cards_note([timer, {"type": "call"}], [timer]).endswith(
+        "only one is on your phone."
+    )
+    four = [timer] * 4
+    assert missing_cards_note(four, four[:3]).endswith("only 3 are on your phone.")

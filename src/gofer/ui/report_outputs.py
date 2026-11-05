@@ -18,6 +18,16 @@ REPORT_FORMATS = {"md", "html", "slides", "pdf"}
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 
 
+# Both stay OS errors for existing callers and are ValueErrors so tool servers
+# pass their actionable text to the agent (as io.UnsupportedOperation does).
+class ReportPathError(PermissionError, ValueError):
+    """The requested report path is outside the output folder."""
+
+
+class ReportExistsError(FileExistsError, ValueError):
+    """A report already exists at the requested path; reports are never replaced."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
@@ -220,19 +230,49 @@ def render_pdf(content: str) -> bytes:
     return data
 
 
+def _free_name(target: Path, root: Path) -> str:
+    """Suggest the first unused -vN name next to an existing report."""
+    stem = re.sub(r"-v\d+$", "", target.stem)
+    for version in range(2, 100):
+        candidate = target.with_name(f"{stem}-v{version}{target.suffix}")
+        taken = [candidate]
+        if target.suffix.lower() == ".pdf":
+            taken.append(candidate.with_name(candidate.name + ".html"))
+        if not any(item.exists() or item.is_symlink() for item in taken):
+            return candidate.relative_to(root).as_posix()
+    return target.with_name(f"{stem}-new{target.suffix}").relative_to(root).as_posix()
+
+
 def save_report(root: Path, relative: str, content: Any, report_format: str) -> dict[str, str]:
     if report_format not in REPORT_FORMATS:
         raise ValueError("Choose Markdown, HTML, Slides, or PDF.")
-    target = (root / relative).resolve()
-    if not relative or Path(relative).is_absolute() or not target.is_relative_to(root):
-        raise PermissionError("Use a report path inside the output folder.")
     extension = "html" if report_format == "slides" else report_format
+    if relative and Path(relative).is_absolute() and Path(relative).is_relative_to(root):
+        # Agents often echo the full path from the tool description. Accept it
+        # only when it is lexically inside the folder; links are still refused.
+        relative = Path(relative).relative_to(root).as_posix()
+    target = (root / relative).resolve()
+    if (
+        not relative
+        or relative == "."
+        or Path(relative).is_absolute()
+        or not target.is_relative_to(root)
+    ):
+        raise ReportPathError(
+            "Use a report path relative to the output folder, such as "
+            f"Reports/Topic/name.{extension}."
+        )
     if target.suffix.lower() != f".{extension}":
         raise ValueError(f"Save reports with the configured .{extension} extension.")
     if not isinstance(content, str) or len(content.encode()) > MAX_REPORT_BYTES:
         raise ValueError("Provide report text of at most 2 MB.")
-    if target.exists():
-        raise FileExistsError(f"Report already exists: {target.name}")
+    companion = root / (relative + ".html") if report_format == "pdf" else None
+    if target.exists() or (root / relative).is_symlink() or (companion and companion.exists()):
+        shown = target.relative_to(root).as_posix()
+        raise ReportExistsError(
+            f"A report already exists at {shown}. Saved reports are never replaced; "
+            f"save this one under a new name, such as {_free_name(target, root)}."
+        )
     prepared = prepare_report(content, report_format)
     if len(prepared.encode("utf-8")) > MAX_REPORT_BYTES:
         raise ValueError("The prepared report exceeds 2 MB. Shorten the report or its assets.")

@@ -3,9 +3,30 @@ import { test } from "node:test";
 import { canHighlight, codeLanguage, tokenize } from "./highlight.js";
 import { chartScale, chartSummary, parseRemChart } from "./remChart.js";
 import {
-  bodyWithoutCardLinks, checksSummary, elapsedLabel, latestSuggestionMessageId, messageCopyText, quoteForReply,
-  remPresence, replyMeta, resultActions, runSteps, stepText,
+  bodyWithoutCardLinks, checksSummary, collapseLimits, elapsedLabel, latestRemMessageId, latestSuggestionMessageId, messageCopyText, referenceLines,
+  remPresence, replyTarget, replyMeta, resultActions, runSteps, shouldCollapse, stepText,
 } from "./remRich.js";
+
+test("long messages fold to about a third of the screen, and only when that hides a useful amount", () => {
+  // The screenshot's window: a 940 px tall Rem fills with one pasted log.
+  assert.deepEqual(collapseLimits(940), { preview: 282, threshold: 423 });
+  // A phone (800 dp) and a landscape phone or short window keep a readable preview.
+  assert.deepEqual(collapseLimits(800), { preview: 240, threshold: 360 });
+  assert.deepEqual(collapseLimits(360), { preview: 168, threshold: 252 });
+  // A tall monitor doesn't let one message take most of the screen.
+  assert.deepEqual(collapseLimits(2160), { preview: 360, threshold: 540 });
+  assert.deepEqual(collapseLimits(undefined), collapseLimits(800));
+  assert.equal(shouldCollapse(423, 940), false);
+  assert.equal(shouldCollapse(424, 940), true);
+  // About 12 lines of 14 px text never fold on a laptop screen.
+  assert.equal(shouldCollapse(12 * 21, 940), false);
+});
+
+test("Rem's newest message is the one that opens in full", () => {
+  assert.equal(latestRemMessageId([{ id: "a", role: "rem" }, { id: "b", role: "user" }, { id: "c", role: "rem" }, { id: "d", role: "user" }]), "c");
+  assert.equal(latestRemMessageId([{ id: "b", role: "user" }]), null);
+  assert.equal(latestRemMessageId([]), null);
+});
 
 test("progress steps follow the run and say their state in words", () => {
   assert.deepEqual(runSteps("queued").map(step => step.state), ["current", "todo", "todo", "todo"]);
@@ -48,9 +69,20 @@ test("reply details, quotes and copy text", () => {
   assert.equal(replyMeta({ provider: "claude_code", model: "claude-sonnet-5-5", seconds: 4.24 }), "claude-sonnet-5-5 · 4.2 s");
   assert.equal(replyMeta({ provider: "codex", model: "cli-default", seconds: null }), "codex");
   assert.equal(replyMeta(null), "");
-  assert.equal(quoteForReply("**Done.** See [the report](</x.html>)."), "> Done. See the report.\n\n");
-  assert.equal(quoteForReply("x".repeat(400)).length, 2 + 280 + 2);
   assert.equal(messageCopyText({ body: "Lead.", details: "| a |\n|---|\n| 1 |" }), "Lead.\n\n| a |\n|---|\n| 1 |");
+});
+
+test("a reply links any message and shows a short preview of it", () => {
+  const at = "2026-11-03T10:00:00+00:00";
+  assert.deepEqual(replyTarget({ id: "r1", role: "rem", body: "**Done.** See [the report](</x.html>).", created_at: at, details: "hidden" }),
+    { id: "r1", role: "rem", body: "Done. See the report.", created_at: at });
+  assert.equal(replyTarget({ id: "r2", role: "rem", body: "x".repeat(400) }).body.length, 280);
+  const update = replyTarget({ id: "u", role: "rem", kind: "task_update", body: "", work: { title: "Audit" }, files: [{}, {}] });
+  assert.deepEqual([update.kind, update.title, update.files], ["task_update", "Audit", 2]);
+  assert.deepEqual(referenceLines(update), { author: "Rem · Task update", text: "Task: Audit" });
+  assert.deepEqual(referenceLines(replyTarget({ id: "f", role: "user", body: "", attachments: [{}] })), { author: "You", text: "1 file" });
+  assert.deepEqual(referenceLines({ id: "gone", unavailable: true }), { author: "an earlier message", text: "No longer in this chat" });
+  assert.equal(referenceLines(null), null);
 });
 
 test("presence names what Rem is doing", () => {

@@ -347,3 +347,115 @@ def test_update_failure_is_logged_and_still_reports(
         )
     assert update["body"] == "Found it." and "files" not in update
     assert "couldn't write the update" in caplog.text
+
+
+def _clip_in_raticode_data(home: RemHome) -> Path:
+    """A video in Raticode's own data, which is never sent unless the user names it."""
+    clip = home.data_dir / "rem-work" / "clips" / "dock duplicate you know.MP4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"\x00" * 2048)
+    return clip
+
+
+def test_a_link_request_handed_to_a_worker_gets_a_link_not_the_file(home: RemHome, video: Path):
+    clip = _clip_in_raticode_data(home)
+    ask(
+        home,
+        "link",
+        "Link me the video",
+        {
+            "reply": "I'll find it.",
+            "tasks": [recipe(None, title="Find the video", type="errand", send_files=True)],
+        },
+    )
+    run = latest_run(home, "Find the video")
+    update, prompt = finish(
+        home,
+        run,
+        f"Found the clip at `{clip}`.",
+        {"summary": "Here's the video.", "files": [str(clip)]},
+    )
+    assert "Raticode adds a link to each file" in prompt and "attaches each file" not in prompt
+    assert update["body"] == f"Here's the video.\n\n[{clip.name}](<{clip}>)"
+    assert "files" not in update and "reply_to" not in update
+    assert "may hold passwords" not in update["body"]
+
+
+def test_followed_up_and_scheduled_link_requests_get_links_too(home: RemHome, video: Path):
+    ask(home, "first", "Look for clips", {"reply": "Looking.", "tasks": [recipe(None)]})
+    first = latest_run(home, "Check the feature")
+    finish(home, first, "Found some.", {"summary": "Found some clips."})
+    ask(
+        home,
+        "link",
+        "Give me a link to the best one",
+        {
+            "reply": "Getting it.",
+            "controls": [
+                {
+                    "task_id": first["task_id"],
+                    "action": "follow_up",
+                    "message": "Name the best clip's path",
+                    "patch": {"send_files": True},
+                }
+            ],
+        },
+    )
+    update, _ = finish(
+        home,
+        latest_run(home, "Check the feature"),
+        f"Best: `{video}`.",
+        {"summary": "Here's the best.", "files": [str(video)]},
+    )
+    assert update["body"] == f"Here's the best.\n\n[{video.name}](<{video}>)"
+    assert "files" not in update
+
+    # A one-time task scheduled from a link request links its file when it runs.
+    soon = datetime.now(UTC) - timedelta(minutes=1)
+    with home.store.connect() as db:
+        home.store.message(db, "Link me the clip tomorrow", identity="later", role="user")
+        task = home.store.add_task(
+            db,
+            Recipe.model_validate(
+                recipe(
+                    None,
+                    title="Later",
+                    type="errand",
+                    schedule={"kind": "once", "timezone": "UTC", "at": soon.isoformat()},
+                    send_files=True,
+                )
+            ),
+            context={"source_message_id": "later"},
+        )
+        task["next_occurrence_at"] = soon.isoformat()
+        home.store.put(db, "tasks", task)
+    home.store.due(datetime.now(UTC))
+    later = latest_run(home, "Later")
+    assert later["deliver_files_to"] == "later"
+    update, _ = finish(
+        home, later, f"Found `{video}`.", {"summary": "Linked.", "files": [str(video)]}
+    )
+    assert update["body"] == f"Linked.\n\n[{video.name}](<{video}>)" and "files" not in update
+
+
+def test_a_link_update_never_links_a_guessed_or_missing_path(
+    home: RemHome, video: Path, outside: Path
+):
+    ask(
+        home,
+        "link",
+        "link me the clip",
+        {"reply": "Looking.", "tasks": [recipe(None, type="errand", send_files=True)]},
+    )
+    guessed = outside / "guessed.mp4"
+    guessed.write_bytes(b"x")
+    update, _ = finish(
+        home,
+        latest_run(home, "Check the feature"),
+        f"Found `{video}`.",
+        {"summary": "Here.", "files": [str(video), str(guessed), str(outside / "gone.mp4")]},
+    )
+    assert update["body"].startswith(f"Here.\n\n[{video.name}](<{video}>)\n\n")
+    assert "guessed.mp4: its path isn’t in our conversation" in update["body"]
+    assert "gone.mp4: that file doesn’t exist" in update["body"]
+    assert "files" not in update

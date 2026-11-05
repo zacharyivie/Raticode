@@ -698,6 +698,186 @@ def test_rem_chat_attachments_use_the_phone_file_channel(phone, tmp_path):
     assert "storageName" not in json.dumps(shown) and str(rem.data_dir) not in json.dumps(shown)
 
 
+def test_every_rem_chat_attachment_reaches_the_phone_whichever_device_sent_it(phone, tmp_path):
+    """The phone asks for an attachment by message and attachment ID; the desktop offers
+    its stored copy on the phone's Rem chat channel, whether the desktop window or a
+    phone attached it, and never takes a path from the phone."""
+    from gofer.ui.chat_media import attachment_thread_dir
+    from gofer.ui.rem_home import REM_ATTACHMENT_THREAD
+
+    app, peer, _, send = phone
+    rem = app.desktop.rem
+    rem.data_dir = tmp_path / "rem-data"
+    folder = attachment_thread_dir(rem.data_dir.resolve(), REM_ATTACHMENT_THREAD)
+    folder.mkdir(parents=True)
+    channel = app.desktop.files_thread(peer)
+    picture = b"\x89PNG desktop picture" * 2000
+    (folder / "771f264b-image.png").write_bytes(picture)
+    attached = {
+        "id": "771f264b",
+        "name": "image.png",
+        "size": len(picture),
+        "type": "image/png",
+        "storageName": "771f264b-image.png",
+        "path": str(folder / "771f264b-image.png"),
+    }
+    rem.store.messages.append(
+        {
+            "id": "desk",
+            "role": "user",
+            "body": "Look",
+            "created_at": "t3",
+            "attachments": [attached],
+        }
+    )
+    params = {"message_id": "desk", "file_id": "771f264b"}
+    assert send("desktop.action", "rem.attachment", params)["code"] == "unauthorized"
+    app.desktop.enable(peer, True)
+    assert send("desktop.read", "overview")["value"]["attachment_files"] is True
+    assert send("desktop.read", "rem.home")["value"]["attachment_files"] is True
+
+    # Sent from the desktop window: offered under the name it was attached with.
+    before = app.registry.db.execute("SELECT MAX(sequence) FROM device_outbox").fetchone()[0]
+    fetched = send("desktop.action", "rem.attachment", params)
+    assert fetched["ok"], fetched
+    assert fetched["value"]["name"] == "image.png" and fetched["value"]["size"] == len(picture)
+    assert str(tmp_path) not in json.dumps(fetched["value"])
+    offers = [e for e in app.pending(peer, before) if e["type"] == "file.offer"]
+    assert [(o["thread_id"], o["payload"]["file_id"], o["payload"]["name"]) for o in offers] == [
+        (channel, fetched["value"]["file_id"], "image.png")
+    ]
+    received, offset, sequence = b"", 0, 700
+    while True:
+        chunk = app.handle(
+            peer,
+            event(
+                "file.request" if not offset else "file.status",
+                sequence,
+                thread_id=channel,
+                payload={"file_id": fetched["value"]["file_id"]}
+                if not offset
+                else {
+                    "file_id": fetched["value"]["file_id"],
+                    "state": "receiving",
+                    "received_size": offset,
+                },
+            ),
+        )[-1]["payload"]
+        received += base64.urlsafe_b64decode(chunk["data"] + "==")
+        offset, sequence = len(received), sequence + 1
+        if chunk["eof"]:
+            break
+    assert received == picture
+    assert hashlib.sha256(received).hexdigest() == offers[0]["payload"]["sha256"]
+
+    # Sent from a phone: once the channel copy is released, the stored copy still reaches it.
+    uploaded = _upload(app, peer, channel, b"phone photo", 800)
+    assert send("desktop.action", "rem.message", {"body": "Mine", "attachment_ids": [uploaded]})[
+        "ok"
+    ]
+    payload = rem.calls[-1][1]
+    rem.store.messages.append(
+        {
+            "id": payload["request_id"],
+            "role": "user",
+            "body": "Mine",
+            "created_at": "t4",
+            "attachments": payload["attachments"],
+        }
+    )
+    again = send(
+        "desktop.action",
+        "rem.attachment",
+        {"message_id": payload["request_id"], "file_id": uploaded},
+    )
+    assert (
+        again["ok"]
+        and again["value"]["name"] == "photo.png"
+        and again["value"]["file_id"] != uploaded
+    )
+    chunk = app.handle(
+        peer,
+        event(
+            "file.request", 900, thread_id=channel, payload={"file_id": again["value"]["file_id"]}
+        ),
+    )[-1]["payload"]
+    assert base64.urlsafe_b64decode(chunk["data"] + "==") == b"phone photo"
+
+    # A name the phone wouldn't accept falls back to the stored name.
+    (folder / "aa-bad.txt").write_bytes(b"x")
+    rem.store.messages.append(
+        {
+            "id": "odd",
+            "role": "user",
+            "body": "",
+            "created_at": "t5",
+            "attachments": [
+                {"id": "aa", "name": " bad\n.txt", "size": 1, "storageName": "aa-bad.txt"}
+            ],
+        }
+    )
+    named = send("desktop.action", "rem.attachment", {"message_id": "odd", "file_id": "aa"})
+    assert named["ok"] and named["value"]["name"] == "aa-bad.txt"
+
+    # Only stored attachments of the user's own messages; nothing the phone names by path.
+    (tmp_path / "secret.txt").write_text("private")
+    (folder / "ln-link.txt").symlink_to(tmp_path / "secret.txt")
+    (folder / "big-big.bin").write_bytes(b"")
+    with open(folder / "big-big.bin", "r+b") as handle:
+        handle.truncate(module.MAX_FILE + 1)
+    rem.store.messages += [
+        {
+            "id": "tricks",
+            "role": "user",
+            "body": "",
+            "created_at": "t6",
+            "attachments": [
+                {"id": "up", "name": "x", "size": 1, "storageName": "../secret.txt"},
+                {"id": "ln", "name": "link.txt", "size": 7, "storageName": "ln-link.txt"},
+                {"id": "gone", "name": "gone.png", "size": 1, "storageName": "gone-gone.png"},
+                {
+                    "id": "big",
+                    "name": "big.bin",
+                    "size": module.MAX_FILE + 1,
+                    "storageName": "big-big.bin",
+                },
+                {"id": "none", "name": "none.png", "size": 1},
+            ],
+        },
+        {
+            "id": "rem-said",
+            "role": "rem",
+            "body": "",
+            "created_at": "t7",
+            "attachments": [attached],
+        },
+    ]
+    for message_id, identifier, code in [
+        ("tricks", "up", "not_found"),
+        ("tricks", "ln", "not_found"),
+        ("tricks", "gone", "not_found"),
+        ("tricks", "none", "not_found"),
+        ("tricks", "missing", "not_found"),
+        ("tricks", "big", "unavailable"),
+        ("rem-said", "771f264b", "not_found"),
+        ("nowhere", "771f264b", "not_found"),
+    ]:
+        refused = send(
+            "desktop.action", "rem.attachment", {"message_id": message_id, "file_id": identifier}
+        )
+        assert refused["ok"] is False and refused["code"] == code, (message_id, identifier, refused)
+        assert str(tmp_path) not in refused["detail"]
+    for bad in [
+        {},
+        {"message_id": "desk"},
+        {"message_id": "desk", "file_id": 5},
+        {"message_id": "", "file_id": "x"},
+    ]:
+        assert send("desktop.action", "rem.attachment", bad)["code"] == "invalid"
+    app.desktop.enable(peer, False)
+    assert send("desktop.action", "rem.attachment", params)["code"] == "unauthorized"
+
+
 def test_files_on_rem_replies_go_only_to_the_phone_that_asked(phone, tmp_path):
     app, peer, context, send = phone
     app.desktop.enable(peer, True)
@@ -1137,6 +1317,7 @@ def test_phone_retries_a_review_and_reads_the_reply_as_it_grows(phone):
         "text": "Here is the plan",
         "length": 16,
         "reset": False,
+        "attempt": None,
     }
     rem.store.conversation_setting["draft_reply"] = "Here is the plan for today."
     grown = send("desktop.read", "rem.draft", {"since": 16})["value"]
@@ -1148,6 +1329,69 @@ def test_phone_retries_a_review_and_reads_the_reply_as_it_grows(phone):
     rem.store.conversation_setting = {"turn_state": "idle", "draft_reply": "stale"}
     done = send("desktop.read", "rem.draft", {"since": 5})["value"]
     assert done["replying"] is False and done["text"] == "" and done["reset"] is True
+
+
+def test_a_new_reply_attempt_never_adds_to_the_phone_s_old_draft(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    rem.store.conversation_setting = {
+        "turn_state": "replying",
+        "draft_reply": "I'll check",
+        "draft_attempt": 1,
+    }
+    assert send("desktop.read", "rem.draft", {"since": 0})["value"]["text"] == "I'll check"
+    # Rem asked its model again (a repair, say) and the new text is already longer.
+    rem.store.conversation_setting = {
+        "turn_state": "replying",
+        "draft_reply": "Starting a worker on the audit now.",
+        "draft_attempt": 2,
+    }
+    again = send("desktop.read", "rem.draft", {"since": 10})["value"]
+    assert (again["start"], again["reset"]) == (0, True)
+    assert again["text"] == "Starting a worker on the audit now."
+    # Within one attempt, reads go on adding only the new text.
+    rem.store.conversation_setting["draft_reply"] += " It reports back."
+    grown = send("desktop.read", "rem.draft", {"since": 35})["value"]
+    assert (grown["start"], grown["text"], grown["reset"]) == (35, " It reports back.", False)
+
+
+def test_a_resent_draft_read_that_names_its_attempt_still_starts_over(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    rem.store.conversation_setting = {
+        "turn_state": "replying",
+        "draft_reply": "I'll check",
+        "draft_attempt": 1,
+    }
+    first = send("desktop.read", "rem.draft", {"since": 0})["value"]
+    assert (first["text"], first["attempt"]) == ("I'll check", 1)
+    rem.store.conversation_setting = {
+        "turn_state": "replying",
+        "draft_reply": "Starting a worker on the audit now.",
+        "draft_attempt": 2,
+    }
+    # The answer to this read is lost, so the phone sends the same read again.
+    for _ in range(2):
+        again = send("desktop.read", "rem.draft", {"since": 10, "attempt": 1})["value"]
+        assert (again["start"], again["reset"], again["attempt"]) == (0, True, 2)
+        assert again["text"] == "Starting a worker on the audit now."
+
+
+def test_a_phone_message_sent_while_rem_replies_shows_as_waiting(phone, home):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    assert send("desktop.action", "rem.message", {"body": "What is running?"})["ok"]
+    queued = send("desktop.action", "rem.message", {"body": "And what finished?"})
+    assert queued["ok"], queued
+    view = queued["value"]
+    assert view["turn_state"] == "replying"
+    assert [(m["body"], m.get("state")) for m in view["messages"][-2:]] == [
+        ("What is running?", None),
+        ("And what finished?", "waiting"),
+    ]
 
 
 def test_phone_reads_and_changes_rem_memories_like_the_desktop_panel(phone, home):
@@ -1272,3 +1516,65 @@ def test_phone_alerts_cover_only_its_own_requests_and_their_tasks(phone, home):
     # Another phone's requests are not this phone's alerts.
     app.desktop.db.execute("DELETE FROM device_rem_requests WHERE peer=?", (peer,))
     assert send("desktop.read", "rem.notices", {"after": 2})["value"]["notices"] == []
+
+
+def test_phone_voice_tidy_answers_pending_then_the_tidied_words(phone, monkeypatch, tmp_path):
+    from gofer.core import provider_preferences
+    from gofer.ui import voice_tidy
+
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
+    assert send("desktop.read", "overview")["value"]["voice_tidy"] is False
+    # With tidying off the heard words come straight back.
+    off = send("desktop.action", "rem.tidy", {"text": "hello there"})["value"]
+    assert (off["text"], off["tidied"]) == ("hello there", False)
+    assert send("desktop.action", "rem.tidy", {"text": " "})["code"] == "invalid"
+    assert send("desktop.action", "rem.tidy", {"text": "x" * 4001})["code"] == "invalid"
+
+    provider_preferences.save_voice_tidy_preference({"enabled": True})
+    assert send("desktop.read", "overview")["value"]["voice_tidy"] is True
+    assert send("desktop.read", "rem.home")["value"]["voice_tidy"] is True
+    chosen = {"enabled": True, "available": True, "context": True, "label": "Claude Haiku 5.5"}
+    monkeypatch.setattr(voice_tidy, "current", lambda default, rem: chosen)
+    seen: dict[str, Any] = {}
+    release = threading.Event()
+    finished = threading.Event()
+
+    def tidy(heard, selected, data_dir, *, context=""):
+        release.wait(5)
+        seen.update(heard=heard, context=context)
+        return {"text": "Hello there.", "tidied": True, "reason": "", "model": "Haiku", "ms": 1}
+
+    monkeypatch.setattr(voice_tidy, "tidy", tidy)
+    original = app.desktop.tidy_finished
+
+    def tidy_finished(*args: Any) -> None:
+        original(*args)
+        finished.set()
+
+    monkeypatch.setattr(app.desktop, "tidy_finished", tidy_finished)
+    request = event(
+        "desktop.action",
+        900,
+        thread_id=None,
+        payload={"op": "rem.tidy", "params": {"text": "hello there"}},
+    )
+    first = [r for r in app.handle(peer, request) if r["type"] == "desktop.result"]
+    # The phone's queue entry clears at once; the slow model call isn't on the lock.
+    assert json.loads(first[0]["payload"]["body"])["pending"] is True
+    release.set()
+    assert finished.wait(5)
+    later = [
+        e
+        for e in app.pending(peer, first[-1]["sequence"])
+        if e["type"] == "desktop.result" and e["request_id"] == request["request_id"]
+    ]
+    body = json.loads("".join(e["payload"]["body"] for e in later))
+    assert (body["text"], body["tidied"]) == ("Hello there.", True)
+    assert later[0]["payload"]["op"] == "rem.tidy" and later[0]["thread_id"] is None
+    assert seen["heard"] == "hello there" and "Check builds" in seen["context"]
+    # A resent request is answered from the record and isn't tidied twice.
+    seen.clear()
+    app.handle(peer, request)
+    assert seen == {}

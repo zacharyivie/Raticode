@@ -143,6 +143,24 @@ def generate_decision(
 
     Only Claude Code reports partial text; other providers answer all at once.
     """
+    return parse_decision(generate_text(prompt, config, cancel, data_dir, on_reply))
+
+
+def generate_text(
+    prompt: str,
+    config: dict[str, Any],
+    cancel: threading.Event,
+    data_dir: Path,
+    on_reply: Callable[[str], None] | None = None,
+    *,
+    system_prompt: str = "",
+    timeout: float = 180,
+) -> str:
+    """Run one tool-free, sessionless turn in an empty folder and return its text.
+
+    Claude Code takes system_prompt in place of its own instructions, which keeps
+    short calls short. Other providers read it at the top of the prompt.
+    """
     name = config.get("provider", "codex")
     if name not in CLI_PROVIDERS:
         raise ValueError(f"Unknown provider '{name}'")
@@ -153,6 +171,8 @@ def generate_decision(
         profile_name=None,
         data_dir=data_dir,
     )
+    if system_prompt and name != "claude_code":
+        prompt = f"{system_prompt}\n\n{prompt}"
     with tempfile.TemporaryDirectory(prefix="raticode-rem-conversation-") as directory:
         root = Path(directory)
         extra: list[str] = []
@@ -186,6 +206,8 @@ def generate_decision(
                 '{"mcpServers":{}}',
                 *no_saved_session(name),
             ]
+            if system_prompt:
+                extra += ["--system-prompt", system_prompt]
             if on_reply is not None:
                 written: list[str] = []
                 shown = [""]
@@ -233,7 +255,7 @@ def generate_decision(
                 prompt_override=prompt,
                 provider_settings=settings,
                 cancel_event=cancel,
-                timeout=180,
+                timeout=timeout,
                 # Partial-message events repeat the text many times over.
                 max_output_bytes=4_000_000 if on_reply is not None else 100000,
             )
@@ -242,7 +264,7 @@ def generate_decision(
         raise InterruptedError("Rem stopped")
     if not result.success:
         raise ValueError(result.message or result.output or "Rem could not reply")
-    return parse_decision(result.message or result.output or "")
+    return result.message or result.output or ""
 
 
 class MalformedDecision(ValueError):
@@ -253,27 +275,64 @@ class MalformedDecision(ValueError):
         self.text = text
 
 
+# Top-level fields of the objects Rem asks its models for: decisions, recall requests,
+# answers to workers, task updates and review verdicts.
+ANSWER_KEYS = frozenset(
+    {"reply", "recall", "next_message", "follow_up", "summary", "needs_user", "criteria"}
+)
+# Records a provider CLI writes about its own turn. When a turn ends without an answer,
+# its raw output is all that's left, and none of these records is Rem's answer.
+PROTOCOL_RECORDS = frozenset(
+    {
+        "system",
+        "assistant",
+        "user",
+        "result",
+        "stream_event",
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "item.started",
+        "item.updated",
+        "item.completed",
+        "error",
+    }
+)
+
+
 def parse_decision(text: str) -> dict[str, Any]:
     """Read the decision object, tolerating code fences or prose around it.
 
-    Models sometimes explain themselves before or after the JSON. Any such
-    reply, including an empty one, raises MalformedDecision so the caller can
-    ask again instead of showing a raw parser error.
+    Models sometimes explain themselves before or after the JSON, and that prose
+    can quote a small JSON example of its own. An object with one of the fields Rem
+    asked for wins over one without; provider protocol records never count. Any
+    reply without such an object, including an empty one, raises MalformedDecision
+    so the caller can ask again instead of showing a raw parser error.
     """
     stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
     try:
-        value = json.loads(stripped)
+        candidates = [json.loads(stripped)]
     except json.JSONDecodeError:
-        value = None
+        candidates = []
         decoder = json.JSONDecoder()
+        resume = 0
         for match in re.finditer(r"\{", stripped):
+            # Objects nested inside one already read are part of it, not answers.
+            if match.start() < resume:
+                continue
             try:
-                candidate, _ = decoder.raw_decode(stripped, match.start())
+                candidate, resume = decoder.raw_decode(stripped, match.start())
             except json.JSONDecodeError:
                 continue
-            if isinstance(candidate, dict):
-                value = candidate
-                break
+            candidates.append(candidate)
+    objects = [
+        c
+        for c in candidates
+        if isinstance(c, dict)
+        and not (c.get("type") in PROTOCOL_RECORDS and not ANSWER_KEYS & c.keys())
+    ]
+    value = next((c for c in objects if ANSWER_KEYS & c.keys()), objects[0] if objects else None)
     if not isinstance(value, dict):
         raise MalformedDecision(text)
     return value

@@ -66,7 +66,7 @@ from gofer.ui.rem_home_worktree import (
     plan_worktree,
     release_worktree,
 )
-from gofer.ui.swarm_tools import SwarmToolServer
+from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
 from gofer.utils.process import build_subprocess_env
 
@@ -1553,7 +1553,11 @@ class OrganizationManager:
                 tool["annotations"] = {"readOnlyHint": True}
                 tool["inputSchema"]["properties"]["action"]["enum"] = sorted(READ_ACTIONS)
             url = http.register(
-                lambda name, args: self.call(project, actor, args, **scope), [tool], HELP
+                lambda name, args: self.call(project, actor, args, **scope),
+                [tool],
+                HELP,
+                label="Organization",
+                failure_hint=TOOL_FAILURE_HINT,
             )
         try:
             yield url

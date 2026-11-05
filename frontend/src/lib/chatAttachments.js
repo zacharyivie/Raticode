@@ -99,11 +99,18 @@ export async function transcribeAudioBlob(blob, fetchImpl = fetch) {
   return String(payload.text || "").trim();
 }
 
+// Resolves to { sessionId, engine, engineName, notice }. engine is "macos", "windows" or
+// "offline"; notice says why the OS recognizer wasn't used, when it wasn't.
 export async function startStreamingTranscription(fetchImpl = fetch) {
   const payload = await postTranscriptionRequest("/chat/transcribe/start", {}, fetchImpl);
   const sessionId = String(payload.sessionId || "");
   if (!sessionId) throw new Error("The local transcription session did not start.");
-  return sessionId;
+  return {
+    sessionId,
+    engine: String(payload.engine || ""),
+    engineName: String(payload.engineName || ""),
+    notice: String(payload.notice || ""),
+  };
 }
 
 export async function streamTranscriptionChunk(sessionId, pcm, fetchImpl = fetch) {

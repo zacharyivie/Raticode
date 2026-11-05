@@ -12,6 +12,17 @@ test('versioned editor restoration preserves mixed tabs and their project identi
   assert.equal(restored.browserTabs['browser:docs'].url, 'https://example.test');
   assert.equal(restored.activity, 'search');
 });
+test('the main content is restored apart from the sidebar activity', () => {
+  const storage = memory();
+  const restore = mainContent => { saveEditorSession({ paths: [], activity: 'source-control', mainContent }, storage); return loadEditorSession(storage); };
+  assert.equal(restore('rem').mainContent, 'rem');
+  assert.equal(restore('rem').activity, 'source-control');
+  assert.equal(restore('second-brain').mainContent, 'second-brain');
+  // A swarm or organization must be chosen again, so the editor is restored.
+  assert.equal(restore('organizations').mainContent, 'editor');
+  // Sessions saved before this field existed follow the sidebar activity.
+  assert.equal(restore(undefined).mainContent, '');
+});
 test('malformed and old sessions fall back without restoring execution', () => {
   const storage = memory();
   for (const raw of ['broken', 'null', '{"version":1,"paths":[]}', '{"version":2,"paths":null}']) {

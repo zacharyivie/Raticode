@@ -336,6 +336,8 @@ def test_missing_tailscale_reports_why_and_binds_nothing(tmp_path, monkeypatch, 
         assert status["enabled"] is True and status["state"] == state and status["host"] is None
         assert fake.bound == []
         assert control.application is not None and control.application.tailnet_endpoint is None
+        # Not listening yet is not "off": phones keep the address they already have.
+        assert control.application.tailnet_known is False
         # Signing in later is picked up by checking again.
         fake.detection = RUNNING
         assert control.action({"action": "tailnet_check"})["tailnet"]["state"] == "listening"
@@ -431,3 +433,215 @@ def test_tailnet_wire_fixtures_match_the_desktop_validators() -> None:
     bad = json.loads(json.dumps(snapshot))
     bad["payload"]["connection"]["tailnet_endpoint"]["scope"] = "global"
     assert not Draft202012Validator(schema).is_valid(bad)
+
+
+@pytest.mark.parametrize(
+    "blip",
+    [
+        Detection("starting", source="cli"),
+        Detection("unavailable", source="cli"),
+        Detection("stopped", source="cli"),
+        Detection("not_detected", source="route"),
+    ],
+)
+def test_a_tailscale_blip_keeps_the_listener_and_phone_sessions(
+    tmp_path, monkeypatch, networked, blip
+):
+    """Waking from sleep or a slow `tailscale status` must not cut phones off."""
+    fake = FakeTailnet(monkeypatch, RUNNING)
+    control = DeviceControl(tmp_path, store=TestSecrets())
+    try:
+        control.action({"action": "enable"})
+        control.action({"action": "tailnet", "enabled": True})
+        fake.detection = blip
+        status = control.action({"action": "tailnet_check"})["tailnet"]
+        # The guidance names what Tailscale reported, and the socket stays bound.
+        assert status["state"] == blip.state
+        assert status["host"] == "100.101.1.2"
+        assert fake.released == []
+        assert control.listener is not None and "100.101.1.2" in control.listener.extra
+        assert control.application is not None
+        assert control.application.tailnet_endpoint == {
+            "host": "100.101.1.2",
+            "port": control.port,
+        }
+        fake.detection = RUNNING
+        assert control.action({"action": "tailnet_check"})["tailnet"]["state"] == "listening"
+        assert fake.bound == [("100.101.1.2", control.port)]
+    finally:
+        control.close()
+
+
+def test_a_new_tailscale_address_is_bound_before_the_old_one_closes(
+    tmp_path, monkeypatch, networked
+):
+    fake = FakeTailnet(monkeypatch, RUNNING)
+    order: list[str] = []
+    bind, release = DeviceListener.add_host, DeviceListener.remove_host
+
+    async def add_host(listener: DeviceListener, host: str, port: int) -> None:
+        order.append("bind " + host)
+        if host == "100.101.1.9":
+            raise OSError("address not available yet")
+        await bind(listener, host, port)
+
+    async def remove_host(listener: DeviceListener, host: str) -> None:
+        order.append("release " + host)
+        await release(listener, host)
+
+    monkeypatch.setattr(DeviceListener, "add_host", add_host)
+    monkeypatch.setattr(DeviceListener, "remove_host", remove_host)
+    control = DeviceControl(tmp_path, store=TestSecrets())
+    try:
+        control.action({"action": "enable"})
+        control.action({"action": "tailnet", "enabled": True})
+        # A new address that cannot be bound yet leaves the working one in place.
+        fake.detection = Detection("running", "100.101.1.9", ("100.101.1.9",), source="cli")
+        failed = control.action({"action": "tailnet_check"})["tailnet"]
+        assert failed["state"] == "error" and failed["host"] == "100.101.1.2"
+        fake.detection = Detection("running", "100.101.1.3", ("100.101.1.3",), source="cli")
+        moved = control.action({"action": "tailnet_check"})["tailnet"]
+        assert (moved["state"], moved["host"]) == ("listening", "100.101.1.3")
+        assert order == [
+            "bind 100.101.1.2",
+            "bind 100.101.1.9",
+            "bind 100.101.1.3",
+            "release 100.101.1.2",
+        ]
+        assert control.application is not None
+        assert control.application.tailnet_endpoint == {"host": "100.101.1.3", "port": control.port}
+    finally:
+        control.close()
+
+
+def test_phones_are_told_to_forget_the_address_only_when_the_option_is_off(application):
+    app, peer = application
+    app.lan_endpoint = {"host": "192.168.1.20", "port": 44233}
+    # On but not listening yet, for example right after the desktop starts.
+    app.tailnet_known = False
+    assert "tailnet_endpoint" not in snapshot_connection(
+        app, peer, 0, include_tailnet_endpoint=True
+    )
+    app.tailnet_endpoint = {"host": "100.101.1.2", "port": 44233}
+    listening = snapshot_connection(app, peer, 1, include_tailnet_endpoint=True)
+    assert listening["tailnet_endpoint"] == {"host": "100.101.1.2", "port": 44233}
+    app.tailnet_endpoint, app.tailnet_known = None, True
+    assert (
+        snapshot_connection(app, peer, 2, include_tailnet_endpoint=True)["tailnet_endpoint"] is None
+    )
+
+
+def test_restart_leaves_the_phone_address_alone_until_the_first_check(
+    tmp_path, monkeypatch, networked
+):
+    import threading
+
+    store = TestSecrets()
+    FakeTailnet(monkeypatch, RUNNING)
+    first = DeviceControl(tmp_path, store=store)
+    first.action({"action": "enable"})
+    first.action({"action": "tailnet", "enabled": True})
+    first.close()
+    release = threading.Event()
+
+    def slow() -> Detection:
+        release.wait(5)
+        return RUNNING
+
+    monkeypatch.setattr(control_module, "detect", slow)
+    restarted = DeviceControl(tmp_path, store=store)
+    try:
+        assert restarted.application is not None
+        assert restarted.application.tailnet_known is False
+        release.set()
+        assert restarted.tailnet_task is not None
+        restarted.tailnet_task.result(timeout=5)
+        assert restarted.application.tailnet_known is True
+        assert restarted.application.tailnet_endpoint is not None
+    finally:
+        release.set()
+        restarted.close()
+
+
+class _Session:
+    def __init__(self, peer: str | None, role: str) -> None:
+        self.peer, self.role = peer, role
+
+
+@pytest.mark.asyncio
+async def test_a_phone_that_signs_in_again_replaces_its_dead_sessions(registry_listener):
+    listener = registry_listener
+    phone, other_phone, desktop = "phone", "other-phone", "desktop"
+    tasks: dict[str, asyncio.Task[None]] = {}
+    writers: dict[str, object] = {}
+    for name, peer, role in [
+        ("old", phone, "controller"),
+        ("older", phone, "controller"),
+        ("other", other_phone, "controller"),
+        ("desk1", desktop, "desktop"),
+        ("desk2", desktop, "desktop"),
+        ("new", phone, "controller"),
+    ]:
+        writers[name] = object()
+        tasks[name] = asyncio.create_task(asyncio.sleep(30))
+        listener.sessions[writers[name]] = _Session(peer, role)
+        listener.connections[writers[name]] = tasks[name]
+    listener._supersede(writers["new"], listener.sessions[writers["new"]])
+    # A desktop's concurrent exchanges stay; a different desktop session cannot
+    # end a phone's, because only the phone's own pinned identity matches.
+    listener._supersede(writers["desk2"], listener.sessions[writers["desk2"]])
+    await asyncio.sleep(0)
+    assert tasks["old"].cancelled() and tasks["older"].cancelled()
+    assert not any(tasks[name].done() for name in ("other", "desk1", "desk2", "new"))
+    for task in tasks.values():
+        task.cancel()
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
+    listener.sessions.clear()
+    listener.connections.clear()
+
+
+@pytest.fixture
+async def registry_listener(tmp_path):
+    registry = DeviceRegistry(tmp_path, TestSecrets(), initialize=True)
+    listener = DeviceListener(registry, Invitations(registry))
+    yield listener
+    registry.close()
+
+
+@pytest.mark.asyncio
+async def test_supersede_runs_only_after_the_phone_proves_its_identity(tmp_path, monkeypatch):
+    """A connection that has not authenticated, or is still pairing, replaces nothing."""
+    from gofer.devices import service
+
+    seen: list[str] = []
+    real = service.DeviceListener._supersede
+
+    def spy(listener: DeviceListener, writer: Any, session: Any) -> None:
+        seen.append(session.stage)
+        real(listener, writer, session)
+
+    monkeypatch.setattr(service.DeviceListener, "_supersede", spy)
+    a = DeviceRegistry(tmp_path / "a", TestSecrets(), initialize=True)
+    b = DeviceRegistry(tmp_path / "b", TestSecrets(), initialize=True)
+    invites = Invitations(a)
+    listener = DeviceListener(a, invites)
+    port = await listener.start("127.0.0.1")
+    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port})
+    task = asyncio.create_task(pair_desktop(b, payload["uri"]))
+    try:
+        async with asyncio.timeout(5):
+            while not a.list():
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.3)
+            assert seen == []  # Waiting for confirmation is not proof of identity.
+            a.confirm(b.identity.device_id, b.identity.pin.hex())
+            await task
+            while not seen:
+                await asyncio.sleep(0.01)
+        assert seen[0] in ("ack", "active")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await listener.close()
+        a.close()
+        b.close()

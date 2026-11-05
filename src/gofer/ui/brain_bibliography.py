@@ -26,6 +26,66 @@ def issued_date(item: dict[str, Any]) -> str:
     return "-".join(str(part).zfill(2) if index else str(part) for index, part in enumerate(parts))
 
 
+def bibtex_entries(data: str) -> list[dict[str, str]]:
+    """Parse BibTeX entries as lowercase field dictionaries, keeping repeated citation keys."""
+    from bibtexparser.entrypoint import parse_string
+    from bibtexparser.model import DuplicateBlockKeyBlock
+
+    library = parse_string(data)
+    found = [(entry.start_line or 0, entry) for entry in library.entries]
+    # bibtexparser 2 sets aside entries that reuse a key without processing them. Parse each
+    # again with the file's @string macros so repeated keys still import, as they did in 1.x.
+    macros = "\n".join(block.raw or "" for block in library.strings)
+    for block in library.failed_blocks:
+        repeated = block.ignore_error_block if isinstance(block, DuplicateBlockKeyBlock) else None
+        if repeated is not None and repeated.raw:
+            again = parse_string(macros + "\n" + repeated.raw)
+            found.extend((block.start_line or 0, entry) for entry in again.entries)
+    found.sort(key=lambda pair: pair[0])
+    return [
+        {
+            **{
+                # Field names are case-insensitive in BibTeX; 1.x lowercased them.
+                field.key.lower(): "\n".join(line.strip() for line in str(field.value).splitlines())
+                for field in entry.fields
+            },
+            "ID": entry.key,
+        }
+        for _, entry in found
+    ]
+
+
+def bibtex_text(entries: list[dict[str, str]]) -> str:
+    """Write BibTeX ordered by citation key with sorted fields, matching bibtexparser 1.x."""
+    from bibtexparser.entrypoint import write_string
+    from bibtexparser.library import Library
+    from bibtexparser.model import Entry, Field
+    from bibtexparser.writer import BibtexFormat
+
+    style = BibtexFormat()  # type: ignore[no-untyped-call]  # __init__ lacks annotations
+    style.indent = " "
+    # One library per entry: bibtexparser 2 refuses to write repeated keys in one library.
+    return "\n".join(
+        write_string(
+            Library(
+                [
+                    Entry(
+                        entry["ENTRYTYPE"],
+                        entry["ID"],
+                        [
+                            Field(name, value)
+                            for name, value in sorted(entry.items())
+                            if name not in {"ENTRYTYPE", "ID"}
+                        ],
+                    )
+                ]
+            ),
+            bibtex_format=style,
+        )
+        for entry in sorted(entries, key=lambda entry: entry["ID"])
+    )
+
+
 def records(data: str, suffix: str) -> list[dict[str, Any]]:
     if suffix == ".json":
         value = json.loads(data)
@@ -33,9 +93,6 @@ def records(data: str, suffix: str) -> list[dict[str, Any]]:
             raise ValueError("Choose a CSL JSON array of bibliography records")
         return value
     if suffix == ".bib":
-        import bibtexparser
-
-        database = bibtexparser.loads(data)
         return [
             {
                 "id": entry.get("ID"),
@@ -49,7 +106,7 @@ def records(data: str, suffix: str) -> list[dict[str, Any]]:
                 "DOI": entry.get("doi", ""),
                 "issued": {"date-parts": [date_parts(entry.get("date") or entry.get("year", ""))]},
             }
-            for entry in database.entries
+            for entry in bibtex_entries(data)
         ]
     if suffix == ".ris":
         result = []
@@ -119,28 +176,27 @@ def bibliography_operation(library: BrainLibrary, params: dict[str, Any]) -> dic
                 for item in items
             )
         elif suffix == ".bib":
-            import bibtexparser
-
-            database = bibtexparser.bibdatabase.BibDatabase()
-            database.entries = [
-                {
-                    "ENTRYTYPE": "misc",
-                    "ID": str(item.get("id") or f"ref{index}"),
-                    "title": item.get("title", ""),
-                    "author": " and ".join(
-                        author.get(
-                            "literal", " ".join((author.get("given", ""), author.get("family", "")))
-                        )
-                        for author in item.get("author", [])
-                    ),
-                    "doi": item.get("DOI", ""),
-                    "url": item.get("URL", ""),
-                    "year": issued_date(item)[:4],
-                    "date": issued_date(item),
-                }
-                for index, item in enumerate(items)
-            ]
-            content = bibtexparser.dumps(database)
+            content = bibtex_text(
+                [
+                    {
+                        "ENTRYTYPE": "misc",
+                        "ID": str(item.get("id") or f"ref{index}"),
+                        "title": item.get("title", ""),
+                        "author": " and ".join(
+                            author.get(
+                                "literal",
+                                " ".join((author.get("given", ""), author.get("family", ""))),
+                            )
+                            for author in item.get("author", [])
+                        ),
+                        "doi": item.get("DOI", ""),
+                        "url": item.get("URL", ""),
+                        "year": issued_date(item)[:4],
+                        "date": issued_date(item),
+                    }
+                    for index, item in enumerate(items)
+                ]
+            )
         else:
             raise ValueError("Use a .json, .bib or .ris export filename")
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -43,10 +43,20 @@ async function integrationAction(root, action, value = {}, options = {}) {
     await git('-c', 'core.editor=true', kind, `--${command}`);
     return readGitStatus(root, options);
   }
+  if (action === 'integration-targets') return integrationTargets(git, snapshot, value);
   if (!['merge-preview', 'merge-branch', 'rebase-preview', 'rebase-branch'].includes(action)) throw new Error('Unknown integration action.');
   const { source, target } = value;
-  if (!snapshot.branches.includes(source) || !snapshot.branches.includes(target) || source === target) throw new Error('Choose two different local branches.');
   const rebase = action.startsWith('rebase-');
+  const targetType = value.targetType ?? 'local';
+  if (targetType !== 'local' && targetType !== 'remote') throw new Error('Choose a local or remote branch.');
+  if (targetType === 'local' && (!snapshot.branches.includes(source) || !snapshot.branches.includes(target) || source === target)) throw new Error('Choose two different local branches.');
+  if (targetType === 'remote') {
+    // A merge changes its target branch, so only a local branch can receive one. A rebase
+    // only reads its target, so a remote-tracking branch such as origin/main works too.
+    if (!rebase) throw new Error('Merges go into a local branch. Remote branches can only be rebase targets.');
+    if (!snapshot.branches.includes(source)) throw new Error('Choose an existing local branch to rebase.');
+    if (!(await readTargetRefs(git)).remote.includes(target)) throw new Error('Choose an existing remote branch.');
+  }
   const strategy = value.strategy || 'merge';
   const flags = { merge: [], squash: ['--squash'], 'ff-only': ['--ff-only'], 'no-ff': ['--no-ff'] }[strategy];
   if (!flags) throw new Error('Unknown merge strategy.');
@@ -60,7 +70,7 @@ async function integrationAction(root, action, value = {}, options = {}) {
   if (sourceRoot) await options.authorizeTarget?.(sourceRoot);
   if (sourceRoot && (await readGitStatus(sourceRoot, options)).entries.length) throw new Error('Commit or stash changes in the source worktree first. Only committed changes can be merged.');
   const sourceHash = String(await git('rev-parse', `refs/heads/${source}`)).trim();
-  const targetHash = String(await git('rev-parse', `refs/heads/${target}`)).trim();
+  const targetHash = String(await git('rev-parse', `refs/${targetType === 'remote' ? 'remotes' : 'heads'}/${target}`)).trim();
   const diff = String(await git('diff', '--no-ext-diff', '--no-textconv', '--no-color', `${targetHash}...${sourceHash}`, '--'));
   if (action.endsWith('-preview')) return { ...await preview(root, rebase ? sourceHash : targetHash,
     rebase ? ['rebase', targetHash] : ['merge', '--no-commit', ...flags, sourceHash], diff, run), sourceHash, targetHash, destinationRoot };
@@ -79,6 +89,54 @@ async function integrationAction(root, action, value = {}, options = {}) {
     return { ...result, error: String(error.stderr || error.message) };
   }
   return { ...await readGitStatus(root, options), destinationRoot, notice: strategy === 'squash' ? `Squash changes from ${source} are staged in ${target}. Review and commit them before removing the source worktree.` : `${rebase ? 'Rebased' : 'Merged'} ${source} ${rebase ? 'onto' : 'into'} ${target}. You can now remove the source worktree when you no longer need it.` };
+}
+
+const byName = (a, b) => a.localeCompare(b, 'en', { numeric: true, sensitivity: 'base' }) || (a < b ? -1 : a > b ? 1 : 0);
+
+// Local and remote-tracking branches, each list alphabetized. Symbolic refs such as
+// origin/HEAD are not branches; they name each remote's default branch.
+async function readTargetRefs(git) {
+  const local = [], remote = [], remoteHeads = [], upstreams = new Map();
+  const output = await git('for-each-ref', '--format=%(refname)%00%(symref)%00%(upstream)', 'refs/heads/', 'refs/remotes/');
+  for (const line of String(output).split('\n').filter(Boolean)) {
+    const [ref, symref, upstream] = line.split('\0');
+    if (ref.startsWith('refs/heads/')) {
+      local.push(ref.slice(11));
+      if (upstream) upstreams.set(ref.slice(11), upstream);
+    } else if (symref) {
+      if (symref.startsWith('refs/remotes/')) remoteHeads.push(symref.slice(13));
+    } else if (ref.startsWith('refs/remotes/')) remote.push(ref.slice(13));
+  }
+  return { local: local.sort(byName), remote: remote.sort(byName), remoteHeads, upstreams };
+}
+
+// Recommended targets come first in the picker: the checked-out branch, the source's
+// upstream, branches always kept (main, master, each remote's default and the cleanup
+// list), then each remote's default branch and its copies of those kept branches.
+async function integrationTargets(git, snapshot, value) {
+  const source = typeof value?.source === 'string' ? value.source : '';
+  const refs = await readTargetRefs(git);
+  const { readKeepPatterns, matchesPattern } = require('./git-cleanup.cjs');
+  const keep = await readKeepPatterns(git);
+  const remotes = [...(snapshot.remotes || [])].sort((a, b) => b.length - a.length);
+  const branchOf = name => { const remote = remotes.find(r => name.startsWith(`${r}/`)); return remote ? name.slice(remote.length + 1) : ''; };
+  const defaults = new Set(['main', 'master', ...refs.remoteHeads.map(branchOf).filter(Boolean)]);
+  const kept = name => defaults.has(name) || [...keep.project, ...keep.user].some(pattern => matchesPattern(name, pattern));
+  const local = refs.local.filter(name => name !== source);
+  const recommended = [];
+  const add = (name, type) => {
+    if (!name || !(type === 'local' ? local : refs.remote).includes(name)) return;
+    if (!recommended.some(item => item.name === name && item.type === type)) recommended.push({ name, type });
+  };
+  add(snapshot.branch, 'local');
+  const upstream = refs.upstreams.get(source) || '';
+  if (upstream.startsWith('refs/heads/')) add(upstream.slice(11), 'local');
+  else if (upstream.startsWith('refs/remotes/')) add(upstream.slice(13), 'remote');
+  const keptLocal = local.filter(kept);
+  for (const name of keptLocal) add(name, 'local');
+  for (const name of [...refs.remoteHeads].sort(byName)) add(name, 'remote');
+  for (const name of refs.remote) if (defaults.has(branchOf(name)) || keptLocal.includes(branchOf(name))) add(name, 'remote');
+  return { source, local, remote: refs.remote, recommended: recommended.slice(0, 8) };
 }
 
 async function preview(root, head, command, diff, run) {

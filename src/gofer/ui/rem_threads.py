@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from gofer.ui.swarm_tools import SwarmToolServer
+from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 
 INSTRUCTIONS = """Rem thread tools are available. Open projects are listed below.
 Global scope uses the configured provider permissions and selected Rem resources.
@@ -243,6 +243,8 @@ async def stream_with_thread_tools(
         actions.call,
         thread_tools(actions.global_scope, list(actions.projects.values()), worktrees=worktrees),
         base_instructions,
+        label="Rem thread",
+        failure_hint=TOOL_FAILURE_HINT,
     )
     try:
         resources = dict(workflow.get("remResources") or {})

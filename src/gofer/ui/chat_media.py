@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+from gofer.ui import system_speech
 from gofer.utils.atomic_output import (
     atomic_binary_output,
     open_binary_input,
@@ -35,6 +36,7 @@ CHAT_TRANSCRIPTION_SESSION_TTL_SECONDS = 15 * 60
 VOSK_MODEL_NAME = "vosk-model-en-us-0.22-lgraph"
 VOSK_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_MODEL_NAME}.zip"
 VOSK_MODEL_DOWNLOAD_MAX_BYTES = 160 * 1024 * 1024
+VOSK_MODEL_DOWNLOAD_MB = 130
 # Pinned from the fixed upstream HTTPS archive on 2026-09-10. Review both the
 # archive and member digests when intentionally changing the model version.
 VOSK_MODEL_SHA256 = "d9838b4aaa82a75c4a17f5aca300eaca129aaab2a7cbf951bafbb500eb9c4334"
@@ -63,6 +65,10 @@ VOSK_MODEL_FILES = {
     "conf/mfcc.conf": "df62f0c23a628b6a2c2e030d43b72ca992fcbe9f2d6d768946579ae25898570f",
     "README": "722534312e1a64c449a02aa487b231f018c234ea238f19cfe921fcfe19278df4",
 }
+SYSTEM_ENGINE = "system"
+OFFLINE_ENGINE = "offline"
+OFFLINE_ENGINE_NAME = "Raticode's offline speech model"
+OFFLINE_SWITCH = "You can choose Raticode's offline speech model in Settings > Devices."
 _SAFE_PART = re.compile(r"[^A-Za-z0-9_.-]+")
 _vosk_model: Any | None = None
 _vosk_model_path: Path | None = None
@@ -77,6 +83,11 @@ class _TranscriptionSession:
     committed: list[str] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
     updated_at: float = field(default_factory=time.monotonic)
+    # The OS recognizer, when one is used; the offline Vosk recognizer takes over if it fails.
+    speech: system_speech.SystemSpeechSession | None = None
+    data_dir: Path | None = None
+    engine: str = OFFLINE_ENGINE
+    notice: str = ""
 
 
 class ChatMediaError(ValueError):
@@ -158,6 +169,33 @@ def resolve_chat_attachment(
     return path
 
 
+def locate_chat_attachment(storage_name: Any, *, data_dir: Path, thread_id: Any = None) -> Path:
+    """Where an uploaded chat attachment is stored, so the window can preview it.
+
+    Only names Raticode gave uploads (a random 32-hex id and a file name) are accepted,
+    and only inside the chat attachment folders. A sent message may not say which
+    thread uploaded it (a forked thread keeps the name), so without ``thread_id`` every
+    thread's folder is checked; the random id makes the name unique.
+    """
+    name = str(storage_name or "")
+    if not re.fullmatch(r"[0-9a-f]{32}-[^/\\]+", name):
+        raise ChatMediaError("An attached file reference is invalid.")
+    root = data_dir.resolve() / "chat-attachments"
+    folders = [attachment_thread_dir(data_dir.resolve(), str(thread_id))] if thread_id else []
+    if root.is_dir():
+        folders += sorted(
+            entry for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink()
+        )
+    for folder in folders:
+        path = folder / name
+        try:
+            with open_binary_input(path):
+                return path
+        except OSError:
+            continue
+    raise ChatMediaError("This attached file is no longer available.")
+
+
 def copy_chat_attachments(payload: dict[str, Any], data_dir: Path) -> dict[str, bool]:
     """Give a fork its own attachment files, so deleting its source is harmless."""
     source_id = _safe_identifier(payload.get("sourceThreadId"), "thread")
@@ -233,8 +271,42 @@ def transcribe_chat_audio(
     return {"text": text}
 
 
-def start_chat_transcription(*, data_dir: Path) -> dict[str, str]:
-    session = _TranscriptionSession(recognizer=_new_vosk_recognizer(data_dir))
+def start_chat_transcription(
+    *,
+    data_dir: Path,
+    engine: str = SYSTEM_ENGINE,
+) -> dict[str, str]:
+    """Starts a dictation with the OS recognizer, or Raticode's offline model.
+
+    ``engine`` is the user's choice in Settings > Devices. Linux has no OS recognizer,
+    and an OS without a usable one falls back to the offline model, saying why.
+    """
+    speech: system_speech.SystemSpeechSession | None = None
+    notice = ""
+    if engine != OFFLINE_ENGINE:
+        found = system_speech.system_engine()
+        if found.present:
+            try:
+                speech = system_speech.SystemSpeechSession(found)
+            except (OSError, ValueError) as exc:
+                notice = _offline_notice(f"{found.name} couldn't start: {exc}")
+        elif found.id:
+            notice = _offline_notice(found.reason)
+    if speech is not None:
+        session = _TranscriptionSession(
+            recognizer=None,
+            speech=speech,
+            data_dir=data_dir,
+            engine=speech.engine.id,
+        )
+        name = speech.engine.name
+    else:
+        session = _TranscriptionSession(
+            recognizer=_new_vosk_recognizer(data_dir),
+            data_dir=data_dir,
+            notice=notice,
+        )
+        name = OFFLINE_ENGINE_NAME
     session_id = uuid.uuid4().hex
     with _transcription_sessions_lock:
         _prune_transcription_sessions()
@@ -243,9 +315,12 @@ def start_chat_transcription(*, data_dir: Path) -> dict[str, str]:
                 _transcription_sessions,
                 key=lambda key: _transcription_sessions[key].updated_at,
             )
-            _transcription_sessions.pop(oldest_id, None)
+            _close_session(_transcription_sessions.pop(oldest_id, None))
         _transcription_sessions[session_id] = session
-    return {"sessionId": session_id}
+    result = {"sessionId": session_id, "engine": session.engine, "engineName": name}
+    if notice:
+        result["notice"] = notice
+    return result
 
 
 def stream_chat_transcription(payload: dict[str, Any]) -> dict[str, str]:
@@ -254,15 +329,19 @@ def stream_chat_transcription(payload: dict[str, Any]) -> dict[str, str]:
     if len(pcm) % 2:
         raise ChatMediaError("The transcription audio chunk is not valid 16-bit PCM.")
     with session.lock:
-        if session.recognizer.AcceptWaveform(pcm):
-            text = _vosk_result_text(session.recognizer.Result())
-            if text:
-                session.committed.append(text)
-            partial = ""
-        else:
-            partial = _vosk_partial_text(session.recognizer.PartialResult())
         session.updated_at = time.monotonic()
-        return {"text": _combined_transcription(session.committed, partial)}
+        speech = session.speech
+        if speech is not None and not speech.failure:
+            speech.push(pcm)
+            return {"text": speech.text()}
+        switched = speech is not None
+        if switched:
+            _fall_back_to_offline(session)
+        text = _accept_offline_audio(session, pcm)
+        result = {"text": text}
+        if switched:
+            result.update({"engine": session.engine, "notice": session.notice})
+        return result
 
 
 def finish_chat_transcription(payload: dict[str, Any]) -> dict[str, str]:
@@ -272,23 +351,124 @@ def finish_chat_transcription(payload: dict[str, Any]) -> dict[str, str]:
     if session is None:
         raise ChatMediaError("The transcription session expired. Start recording again.")
     with session.lock:
-        final = _vosk_result_text(session.recognizer.FinalResult())
-        if final:
-            session.committed.append(final)
-        text = _combined_transcription(session.committed)
+        speech = session.speech
+        text = ""
+        if speech is not None and not speech.failure:
+            text = speech.finish()
+            if speech.failure and text:
+                # It stopped at the very end; the words it heard still count.
+                session.notice = f"{speech.failure} The words heard before it stopped are kept."
+                speech = None
+            elif not speech.failure:
+                speech = None
+        if speech is not None:
+            try:
+                _fall_back_to_offline(session)
+            except ChatMediaError as exc:
+                # No offline model to carry on with: the words already heard still count.
+                text = _combined_transcription(session.committed)
+                if not text:
+                    raise
+                session.notice = f"{exc} The words heard before it stopped are kept."
+        if session.recognizer is not None:
+            final = _vosk_result_text(session.recognizer.FinalResult())
+            if final:
+                session.committed.append(final)
+            text = _combined_transcription(session.committed)
     if not text:
         raise ChatMediaError(
             "No speech was detected. Test the microphone in Settings > Devices, "
             "then speak closer to the selected input."
         )
-    return {"text": text}
+    result = {"text": text}
+    if session.notice:
+        result["notice"] = session.notice
+    return result
 
 
 def cancel_chat_transcription(payload: dict[str, Any]) -> dict[str, bool]:
     session_id = _transcription_session_id(payload)
     with _transcription_sessions_lock:
-        removed = _transcription_sessions.pop(session_id, None) is not None
-    return {"cancelled": removed}
+        session = _transcription_sessions.pop(session_id, None)
+    _close_session(session)
+    return {"cancelled": session is not None}
+
+
+def transcription_engines(*, data_dir: Path, refresh: bool = False) -> dict[str, Any]:
+    """What Settings > Devices shows: the OS recognizer's state and the offline model's."""
+    found = system_speech.system_engine()
+    status = system_speech.check_system_engine(found, refresh=refresh)
+    return {
+        "system": status,
+        "offline": {
+            "name": OFFLINE_ENGINE_NAME,
+            "installed": _vosk_model_present(data_dir),
+            "downloadMb": VOSK_MODEL_DOWNLOAD_MB,
+        },
+    }
+
+
+def _offline_notice(reason: str) -> str:
+    return f"{reason.rstrip('.')}. Using {OFFLINE_ENGINE_NAME} instead."
+
+
+def _accept_offline_audio(session: _TranscriptionSession, pcm: bytes) -> str:
+    if session.recognizer.AcceptWaveform(pcm):
+        text = _vosk_result_text(session.recognizer.Result())
+        if text:
+            session.committed.append(text)
+        partial = ""
+    else:
+        partial = _vosk_partial_text(session.recognizer.PartialResult())
+    return _combined_transcription(session.committed, partial)
+
+
+def _fall_back_to_offline(session: _TranscriptionSession) -> None:
+    """The OS recognizer failed: keep its words and carry on with the offline model.
+
+    Audio recorded before the OS recognizer was ready is replayed, so nothing said is
+    lost. The offline model is only used here when it is already installed; its
+    download is too large to start in the middle of a dictation.
+    """
+    speech = session.speech
+    if speech is None:
+        return
+    reason = speech.failure or f"{speech.engine.name} stopped."
+    heard = speech.text()
+    replay = speech.replay()
+    speech.close()
+    session.speech = None
+    if heard:
+        session.committed.append(heard)
+    data_dir = session.data_dir
+    if data_dir is None or not _vosk_model_present(data_dir):
+        raise ChatMediaError(f"{reason} {OFFLINE_SWITCH}")
+    try:
+        session.recognizer = _new_vosk_recognizer(data_dir)
+    except ChatMediaError as exc:
+        raise ChatMediaError(f"{reason} {exc}") from exc
+    session.engine = OFFLINE_ENGINE
+    session.notice = _offline_notice(reason)
+    for chunk in replay:
+        _accept_offline_audio(session, chunk)
+
+
+def _close_session(session: _TranscriptionSession | None) -> None:
+    if session is not None and session.speech is not None:
+        session.speech.close()
+
+
+def _vosk_model_present(data_dir: Path) -> bool:
+    """A cheap check that the offline model was installed; loading it verifies every file."""
+    if _vosk_model is not None:
+        return True
+    try:
+        model_path = data_dir.resolve() / "speech-models" / VOSK_MODEL_NAME
+        return model_path.is_dir() and all(
+            (model_path / name).is_file() for name in VOSK_MODEL_FILES
+        )
+    except OSError:
+        return False
 
 
 def _transcribe_wav_locally(audio: bytes, data_dir: Path) -> str:
@@ -528,7 +708,7 @@ def _prune_transcription_sessions() -> None:
         if session.updated_at < cutoff
     ]
     for session_id in expired:
-        _transcription_sessions.pop(session_id, None)
+        _close_session(_transcription_sessions.pop(session_id, None))
 
 
 def _combined_transcription(committed: list[str], partial: str = "") -> str:

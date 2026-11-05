@@ -1,4 +1,5 @@
-"""Use Raticode from a paired phone: Rem, organizations, swarms, workflows, settings and usage.
+"""Use Raticode from a paired phone: Rem, organizations, swarms, workflows, source control,
+settings and usage.
 
 Nothing here runs unless the user turns on "Use Raticode from this phone" in
 Paired devices. It is off by default and requires thread sync. Every operation
@@ -8,6 +9,7 @@ and approval policies, so the phone gains no authority the desktop UI lacks.
 The phone never sends paths. Projects are named by the IDs in the phone's
 catalog; Rem tasks, runs, threads, organizations, swarms and workflows by their
 desktop IDs. Workflows are viewed and run, never edited (see ``workflows.py``).
+Source control is a read-only status view of open projects (``source_control.py``).
 Results are projections for the phone screens, without paths, credentials,
 grants or provider configuration.
 
@@ -16,8 +18,16 @@ uploads attachments on it, and the desktop offers it files Rem's replies name,
 read from an open project or the Second Brain folder. It is not a shared thread.
 Tapping a file link in a reply asks for that file directly (``files.link``);
 no model is involved, and the link must be in a message Rem or an agent wrote.
+Files attached to the user's messages, from the desktop window or any phone, are
+offered on the same channel when the phone asks for one by message and
+attachment ID (``rem.attachment``), so each device can show every attachment.
 Phones that opted in to Rem chat alerts poll ``rem.notices`` for Rem's replies and
 task updates to their own requests; the phone decides what an alert shows.
+
+``rem.tidy`` tidies a dictation with the model chosen in desktop Settings. It
+answers ``pending`` at once, so the request leaves the phone's queue, and the
+tidied words follow as a second result for the same request when the model is
+done. Neither device stores the words; a failure answers with the heard text.
 
 Excluded on purpose: browsing files and the code editor, terminals, the browser,
 pairing, provider credentials, skill and MCP server definitions, organization
@@ -61,6 +71,11 @@ READ_OPS = frozenset(
         "organizations.list",
         "organizations.read",
         "settings.get",
+        "source_control.commit",
+        "source_control.diff",
+        "source_control.history",
+        "source_control.list",
+        "source_control.read",
         "usage.overview",
         "workflows.list",
         "workflows.read",
@@ -69,8 +84,10 @@ READ_OPS = frozenset(
 ACTION_OPS = frozenset(
     {
         "files.link",
+        "rem.attachment",
         "rem.message",
         "rem.instruct",
+        "rem.tidy",
         "rem.memory.add",
         "rem.memory.edit",
         "rem.memory.forget",
@@ -320,15 +337,19 @@ def _text(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
 
 
-def _draft_delta(conversation: dict[str, Any], since: Any) -> dict[str, Any]:
+def _draft_delta(
+    conversation: dict[str, Any], since: Any, *, same_attempt: bool = True
+) -> dict[str, Any]:
     """Rem's reply text written since the phone's last read, while Rem is replying.
 
     `reset` means the draft started over (a new attempt), so `text` is all of it.
+    ``same_attempt`` is false when the reply started over since this phone's last read:
+    the phone's text belongs to the earlier attempt even if the new one is longer.
     """
     replying = conversation.get("turn_state") == "replying"
     draft = _text(conversation.get("draft_reply"), 4000) if replying else ""
     offset = since if isinstance(since, int) and not isinstance(since, bool) else 0
-    reset = not 0 <= offset <= len(draft)
+    reset = not 0 <= offset <= len(draft) or (offset > 0 and not same_attempt)
     start = 0 if reset else offset
     return {
         "replying": replying,
@@ -337,6 +358,8 @@ def _draft_delta(conversation: dict[str, Any], since: Any) -> dict[str, Any]:
         "text": draft[start:],
         "length": len(draft),
         "reset": reset,
+        # The reply attempt this text belongs to; the phone sends it back with its next read.
+        "attempt": conversation.get("draft_attempt") if replying else None,
     }
 
 
@@ -724,6 +747,8 @@ class DesktopControl:
         self.usage: Callable[[], dict[str, Any]] | None = None
         self.fetch_image: Callable[[str], dict[str, Any]] = fetch_image
         self.fetch_preview: Callable[[str], dict[str, Any]] = fetch_preview
+        # The reply attempt each phone last read Rem's draft from (_draft_delta).
+        self.draft_attempts: dict[str, Any] = {}
         from gofer.devices.workflows import PhoneWorkflows
 
         self.workflows = PhoneWorkflows(self)
@@ -777,24 +802,32 @@ class DesktopControl:
                 return project["name"]
         return Path(root).name[:160]
 
-    def gather(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    def gather(
+        self, event: dict[str, Any], projects: dict[str, dict[str, str]] | None = None
+    ) -> dict[str, Any] | None:
         """Read the desktop services a phone view needs, without the device lock.
 
-        Rem, organizations and usage keep their own locks and can be slow. Phones
+        Rem, organizations, usage and Git keep their own locks and can be slow. Phones
         poll their open screen, so holding the device lock here would stall the
         desktop window's own device calls. The caller checks authorization before
-        and again after, under the lock.
+        and again after, under the lock. ``projects`` is the phone's open projects,
+        read under the lock, for reads scoped to them.
         """
         if event["type"] != "desktop.read":
             return None
         payload = event["payload"]
         try:
-            return {"value": self._services(payload["op"], payload["params"])}
+            return {"value": self._services(payload["op"], payload["params"], projects)}
         except Exception as exc:  # noqa: BLE001
             # Answered by handle() exactly as if the read had failed there.
             return {"error": exc}
 
-    def _services(self, op: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _services(
+        self,
+        op: str,
+        params: dict[str, Any],
+        projects: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         if op == "media.image":
             return {"image": self.fetch_image(str(params.get("url") or ""))}
         if op == "media.preview":
@@ -850,6 +883,13 @@ class DesktopControl:
             from gofer.devices.workflows import gather
 
             return gather(op, params, self.workflows.base)
+        if op.startswith("source_control."):
+            from gofer.devices import source_control
+
+            data_dir = getattr(self.rem, "data_dir", None)
+            return source_control.gather(
+                op, params, projects or {}, Path(data_dir) if data_dir else None
+            )
         return {}
 
     def handle(
@@ -889,10 +929,16 @@ class DesktopControl:
                     detail="The desktop could not complete this request.",
                 )
             ]
+        known = payload["params"].get("known") if kind == "desktop.read" else None
+        return self._answer(peer, event, op, result, known)
+
+    def _answer(
+        self, peer: str, event: dict[str, Any], op: str, result: Any, known: Any = None
+    ) -> list[dict[str, Any]]:
         body = json.dumps(result, separators=(",", ":"), ensure_ascii=True)
         # Phones poll the open screen. An unchanged view is answered with its digest only.
         digest = hashlib.sha256(body.encode()).hexdigest()[:32]
-        if kind == "desktop.read" and payload["params"].get("known") == digest:
+        if known is not None and known == digest:
             body = json.dumps({"unchanged": True, "digest": digest})
         else:
             body = json.dumps(
@@ -941,7 +987,11 @@ class DesktopControl:
     def _read(
         self, peer: str, op: str, params: dict[str, Any], services: dict[str, Any] | None = None
     ) -> Any:
-        data = self._services(op, params) if services is None else services
+        if services is None:
+            scope = self.projects(peer) if op.startswith("source_control.") else None
+            data = self._services(op, params, scope)
+        else:
+            data = services
         if op == "overview":
             return {
                 "projects": [
@@ -955,6 +1005,7 @@ class DesktopControl:
                 "usage": self.usage is not None,
                 "media": True,
                 "file_links": True,
+                "attachment_files": True,
                 "task_retention": True,
                 "rich_results": True,
                 "draft_deltas": True,
@@ -965,13 +1016,30 @@ class DesktopControl:
                 # Phones read rem.notices for Rem chat alerts only from desktops that say so.
                 "rem_notices": self.rem is not None,
                 "workflows": self.workflows.available(),
+                # Phones read source_control.* only from desktops that say so here;
+                # history, commit and diff came later, with their own flag.
+                "source_control": True,
+                "source_control_history": True,
+                # Phones send rem.tidy only while this is on; see _tidy.
+                "voice_tidy": self._voice_tidy_on(),
             }
         if op == "media.image":
             return data["image"]
         if op == "media.preview":
             return data["preview"]
         if op == "rem.draft":
-            return _draft_delta(data["conversation"], params.get("since"))
+            attempt = data["conversation"].get("draft_attempt")
+            said = params.get("attempt")
+            if type(said) is int:
+                # The phone names the attempt its text came from, which stays right when
+                # it resends a read whose answer was lost.
+                same = said == attempt
+            else:
+                # An older phone: compare with what this phone was last told. One this
+                # desktop hasn't answered yet, say after a restart, starts over.
+                same = peer in self.draft_attempts and self.draft_attempts[peer] == attempt
+            self.draft_attempts[peer] = attempt
+            return _draft_delta(data["conversation"], params.get("since"), same_attempt=same)
         if op == "rem.home":
             return self._rem_home(peer, data)
         if op == "rem.notices":
@@ -992,6 +1060,10 @@ class DesktopControl:
             return self._usage(data)
         if op in {"workflows.list", "workflows.read"}:
             return self.workflows.read(peer, op, params, data)
+        if op.startswith("source_control."):
+            from gofer.devices import source_control
+
+            return source_control.read(op, data, self.projects(peer))
         raise Refused("invalid", "Unknown desktop request.")
 
     def _rem_home(self, peer: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1000,7 +1072,11 @@ class DesktopControl:
         data = data or self._services("rem.home", {})
         snapshot = data["conversation"]
         conversation = snapshot.get("conversation") or {}
-        messages = snapshot.get("messages") or []
+        # Messages sent while Rem was replying come last, marked waiting.
+        messages = [
+            *(snapshot.get("messages") or []),
+            *({**m, "state": "waiting"} for m in snapshot.get("waiting") or []),
+        ]
         # Decrypt the project catalog once, not once per task.
         catalog = self.projects(peer)
         roots = [p["root"] for p in catalog.values()] + list(data.get("roots") or [])
@@ -1060,6 +1136,7 @@ class DesktopControl:
             "files_thread": self.files_thread(peer),
             "media": True,
             "file_links": True,
+            "attachment_files": True,
             "task_retention": True,
             "rich_results": True,
             "draft_deltas": True,
@@ -1067,6 +1144,9 @@ class DesktopControl:
             "memories": True,
             "phone_actions": True,
             "screen_context": True,
+            # rem.message accepts refers_to, and messages carry what they reply to.
+            "replies": True,
+            "voice_tidy": self._voice_tidy_on(),
         }
 
     def _asked_by(self, peer: str, message: dict[str, Any]) -> bool:
@@ -1378,6 +1458,23 @@ class DesktopControl:
             item["state"] = _text(message["state"], 40)
         if message.get("kind") == "task_update":
             item["kind"] = "task_update"
+        referenced = message.get("referenced")
+        if isinstance(referenced, dict) and isinstance(message.get("refers_to"), str):
+            # Only a preview of the message replied to: its files and cards stay with it.
+            item["refers_to"] = _text(message["refers_to"], 128)
+            item["referenced"] = (
+                {"id": item["refers_to"], "unavailable": True}
+                if referenced.get("unavailable")
+                else {
+                    "id": item["refers_to"],
+                    "role": _text(referenced.get("role"), 20),
+                    "body": _text(referenced.get("body"), 300),
+                    "created_at": _text(referenced.get("created_at"), 80),
+                    "kind": _text(referenced.get("kind"), 40),
+                    "title": _text(referenced.get("title"), 160),
+                    "files": max(0, min(int(referenced.get("files") or 0), 99)),
+                }
+            )
         item.update(_rich_message(message))
         from gofer.ui.rem_home_memory import phone_record
 
@@ -1635,6 +1732,8 @@ class DesktopControl:
     def _act(self, peer: str, op: str, params: dict[str, Any], request: str) -> Any:
         if op == "files.link":
             return self._file_link(peer, params)
+        if op == "rem.attachment":
+            return self._rem_attachment(peer, params)
         if op.startswith("rem."):
             return self._rem_action(peer, op, params, request)
         if op.startswith("workflows."):
@@ -1695,6 +1794,8 @@ class DesktopControl:
         raise Refused("invalid", "Unknown desktop action.")
 
     def _rem_action(self, peer: str, op: str, params: dict[str, Any], request: str) -> Any:
+        if op == "rem.tidy":
+            return self._tidy(peer, params, request)
         rem = self._need(self.rem, "Rem")
         if op == "rem.message":
             self.db.execute(
@@ -1704,6 +1805,12 @@ class DesktopControl:
                 "request_id": request,
                 "body": _text(params.get("body"), 20000),
             }
+            refers_to = params.get("refers_to")
+            if refers_to is not None:
+                # The chat message this one replies to; the desktop looks it up itself.
+                if not isinstance(refers_to, str) or not 0 < len(refers_to) <= 128:
+                    raise Refused("invalid", "Reply to a message from this chat.")
+                message["refers_to"] = refers_to
             if params.get("screen") is not None:
                 # Text from the phone's screen for this reply only (rem_screen); never stored.
                 from gofer.ui.rem_screen import clean_screen
@@ -1719,7 +1826,12 @@ class DesktopControl:
                 or len(set(map(str, identifiers))) != len(identifiers)
             ):
                 raise Refused("invalid", f"Attach at most {REM_FILES} different files.")
-            sent = any(m.get("id") == request for m in rem.store.conversation()["messages"])
+            snapshot = rem.store.conversation()
+            # A resent request Rem already holds, answered or still waiting, isn't stored twice.
+            sent = any(
+                m.get("id") == request
+                for m in [*snapshot["messages"], *(snapshot.get("waiting") or [])]
+            )
             if identifiers and not sent:
                 message["attachments"] = self._rem_attachments(peer, rem, identifiers)
             try:
@@ -1781,6 +1893,64 @@ class DesktopControl:
             return self._rem_home(peer)
         raise Refused("invalid", "Unknown Rem action.")
 
+    @staticmethod
+    def _voice_tidy_on() -> bool:
+        from gofer.core.provider_preferences import voice_tidy_preference
+
+        return voice_tidy_preference().get("enabled") is True
+
+    def _tidy(self, peer: str, params: dict[str, Any], request: str) -> dict[str, Any]:
+        """Start tidying a dictation; the answer follows as a second result.
+
+        The provider call takes seconds and runs off the device lock and the
+        connection's loop. Every outcome answers, so the phone never waits on
+        a request the desktop forgot.
+        """
+        rem = self._need(self.rem, "Rem")
+        heard = params.get("text")
+        if not isinstance(heard, str) or not heard.strip():
+            raise Refused("invalid", "Nothing was heard to tidy.")
+        if len(heard) > 4000:
+            raise Refused("invalid", "This message is too long to tidy.")
+        if not self._voice_tidy_on():
+            return {"text": heard, "tidied": False, "reason": "Tidying is off on your desktop."}
+        source = {"request_id": request, "thread_id": None}
+        self.tidy_started(peer, source, heard, rem)
+        return {"pending": True}
+
+    def tidy_started(self, peer: str, source: dict[str, Any], heard: str, rem: Any) -> None:
+        import threading
+
+        from gofer.ui import voice_tidy
+
+        data_dir = Path(getattr(rem, "data_dir", None) or Path.home())
+
+        def work() -> None:
+            try:
+                chosen = voice_tidy.current(None, rem)
+                context = (
+                    voice_tidy.chat_context(rem)
+                    if chosen.get("available") and chosen.get("context")
+                    else ""
+                )
+                result = voice_tidy.tidy(heard, chosen, data_dir, context=context)
+            except Exception as exc:  # noqa: BLE001 - the phone still gets its words back
+                logger.warning("Phone voice tidy failed: %s", type(exc).__name__)
+                result = {"text": heard, "tidied": False, "reason": "Tidying failed."}
+            self.tidy_finished(peer, source, result)
+
+        threading.Thread(target=work, name="phone-voice-tidy", daemon=True).start()
+
+    def tidy_finished(self, peer: str, source: dict[str, Any], result: dict[str, Any]) -> None:
+        try:
+            with self.app.registry.transaction():
+                self.app._trusted(peer)
+                if not self.allowed(peer):
+                    return
+                self._answer(peer, source, "rem.tidy", result)
+        except Exception as exc:  # noqa: BLE001 - a revoked or full phone just misses it
+            logger.warning("Phone voice tidy answer not sent: %s", type(exc).__name__)
+
     def _rem_memories(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
         """What Rem remembers, as the phone's memory screen shows it."""
         listed = (data or self._services("rem.memories", {}))["memories"]
@@ -1822,6 +1992,72 @@ class DesktopControl:
         else:
             raise Refused("invalid", "Unknown Rem memory action.")
         return self._rem_memories()
+
+    def _rem_attachment(self, peer: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Offer one file attached to the user's message in Rem's chat to the phone.
+
+        The phone names the message and the attachment, never a path. The file is read
+        from Rem's chat attachment folder, where the desktop window and every phone's
+        uploads are stored, through the same scoped snapshot as any other phone file.
+        """
+        from gofer.ui.chat_media import attachment_thread_dir
+        from gofer.ui.rem_home import REM_ATTACHMENT_THREAD
+
+        message_id = params.get("message_id")
+        identifier = params.get("file_id")
+        if (
+            not isinstance(message_id, str)
+            or not 0 < len(message_id) <= 200
+            or not isinstance(identifier, str)
+            or not 0 < len(identifier) <= 128
+        ):
+            raise Refused("invalid", "This file can't be opened from the phone.")
+        rem = self._need(self.rem, "Rem")
+        snapshot = rem.store.conversation()
+        messages = [*(snapshot.get("messages") or []), *(snapshot.get("waiting") or [])]
+        message = next(
+            (m for m in messages if m.get("id") == message_id and m.get("role") == "user"), None
+        )
+        if message is None:
+            raise Refused("not_found", "This message is no longer in Rem's chat.")
+        attachment = next(
+            (
+                a
+                for a in message.get("attachments") or []
+                if isinstance(a, dict) and str(a.get("id") or "") == identifier
+            ),
+            None,
+        )
+        storage = attachment.get("storageName") if attachment else None
+        if (
+            attachment is None
+            or not isinstance(storage, str)
+            or storage in {"", ".", ".."}
+            or Path(storage).name != storage
+        ):
+            raise Refused("not_found", "This file is no longer in Rem's chat.")
+        folder = attachment_thread_dir(Path(rem.data_dir).resolve(), REM_ATTACHMENT_THREAD)
+        path = folder / storage
+        if not path.is_file():
+            raise Refused("not_found", "This file is no longer on the desktop.")
+        if path.stat().st_size > MAX_FILE:
+            raise Refused(
+                "unavailable",
+                "This file is larger than the 10 MB the phone can hold. Open it on the desktop.",
+            )
+        # The stored name has a unique prefix; the phone gets the name it was attached with.
+        name = _text(attachment.get("name"), 160)
+        thread = self.files_thread(peer)
+        try:
+            offer: dict[str, Any] = self.app.files.snapshot(
+                peer, thread, folder, path, name=name if _phone_name(name) else None
+            )
+        except PairingError as exc:
+            if str(exc) == "scoped_file_unavailable":
+                raise Refused("not_found", "This file is no longer on the desktop.") from None
+            raise _snapshot_refused(exc) from None
+        self.app._emit(peer, {"thread_id": thread, "request_id": str(uuid4())}, "file.offer", offer)
+        return {"file_id": offer["file_id"], "name": offer["name"], "size": offer["size"]}
 
     def _rem_attachments(self, peer: str, rem: Any, identifiers: list[Any]) -> list[dict[str, Any]]:
         """Copy files the phone uploaded on its channel into Rem's chat attachments."""

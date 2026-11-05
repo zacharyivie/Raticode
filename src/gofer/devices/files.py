@@ -395,7 +395,9 @@ class DeviceFiles:
         expected_identity: list[int] | None = None,
         *,
         limit: int = MAX_FILE,
+        name: str | None = None,
     ) -> dict[str, Any]:
+        """Offer a copy of ``path`` under ``root``; ``name`` replaces its file name in the offer."""
         # Reject symlinks in every relative component and keep directory descriptors
         # open through the read, so a rename cannot redirect a later path lookup.
         if (
@@ -453,7 +455,7 @@ class DeviceFiles:
             raise
         offer: dict[str, Any] = {
             "file_id": identifier,
-            "name": path.name[:160],
+            "name": (name or path.name)[:160],
             "mime": "application/octet-stream",
             "size": size,
             "sha256": digest,

@@ -56,4 +56,7 @@ test("layout settings fall back to safe values", () => {
   assert.equal(legacy.layout.projectPaneSide, "left");
   assert.equal(legacy.layout.assistantPaneSide, "right");
   assert.equal(legacy.layout.compactWidth, 1000);
+  assert.equal(legacy.layout.assistantPaneContent, "threads");
+  assert.equal(normalizeAppSettings({ layout: { assistantPaneContent: "rem" } }).layout.assistantPaneContent, "rem");
+  assert.equal(normalizeAppSettings({ layout: { assistantPaneContent: "editor" } }).layout.assistantPaneContent, "threads");
 });

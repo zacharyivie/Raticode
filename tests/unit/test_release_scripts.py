@@ -513,6 +513,14 @@ def test_macos_speech_dependency_and_permissions_are_packaged() -> None:
         assert version in selected[0].specifier
     mac = _read_json(REPO_ROOT / "frontend/package.json")["build"]["mac"]
     assert "Rem" in mac["extendInfo"]["NSMicrophoneUsageDescription"]
+    # macOS charges speech recognition to Raticode.app, which launches the helper.
+    assert "speech recognition" in mac["extendInfo"]["NSSpeechRecognitionUsageDescription"]
+    assert {
+        "from": "../dist/macos-speech/raticode-speech",
+        "to": "speech/raticode-speech",
+    } in mac["extraResources"]
+    scripts = _read_json(REPO_ROOT / "frontend/package.json")["scripts"]
+    assert "build-macos-speech-helper.cjs --require" in scripts["dist:mac"]
     for field in ("entitlements", "entitlementsInherit"):
         entitlements = plistlib.loads((REPO_ROOT / "frontend" / mac[field]).read_bytes())
         assert entitlements["com.apple.security.device.audio-input"] is True

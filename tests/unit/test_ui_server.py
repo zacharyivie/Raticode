@@ -591,6 +591,31 @@ def test_chat_images_load_through_the_backend(tmp_path: Path, monkeypatch) -> No
     assert cast(dict[str, Any], loaded.json())["image"]["mime"] == "image/png"
 
 
+def test_sent_chat_attachments_can_be_located_for_preview(tmp_path: Path) -> None:
+    uploaded = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/attachments",
+        body={
+            "threadId": "thread-a",
+            "files": [{"name": "cat.png", "type": "image/png", "data": "iVBORw0KGgo="}],
+        },
+    )
+    assert uploaded.status == 201
+    storage = cast(dict[str, Any], uploaded.json())["attachments"][0]["storageName"]
+    path = f"/api/chat/attachments/locate?storageName={storage}"
+    assert _request(tmp_path, "GET", path, authenticated=False).status == 401
+    located = _request(tmp_path, "GET", path)
+    assert located.status == 200
+    assert Path(cast(dict[str, Any], located.json())["path"]).name == storage
+    assert Path(cast(dict[str, Any], located.json())["path"]).read_bytes() == b"\x89PNG\r\n\x1a\n"
+    locate = "/api/chat/attachments/locate?storageName="
+    gone = _request(tmp_path, "GET", locate + "a" * 32 + "-gone.png")
+    assert gone.status == 404
+    assert "no longer available" in cast(dict[str, Any], gone.json())["error"]
+    assert _request(tmp_path, "GET", locate + "../etc/passwd").status == 404
+
+
 def test_ui_server_health_check_works_on_dynamic_port(tmp_path) -> None:
     response = _request(tmp_path, "GET", "/api/health")
 
@@ -1869,9 +1894,14 @@ def test_ui_server_uploads_binary_chat_attachments_and_transcribes_audio(
 
 def test_ui_server_streams_local_transcription_sessions(monkeypatch, tmp_path) -> None:
     session_id = "a" * 32
+    from gofer.core import provider_preferences
 
-    def fake_start(*, data_dir):
+    monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
+
+    def fake_start(*, data_dir, engine):
         assert data_dir == tmp_path
+        # The recognizer chosen in Settings > Devices; the OS's own until changed.
+        assert engine == "system"
         return {"sessionId": session_id}
 
     def fake_chunk(body):
@@ -1917,6 +1947,41 @@ def test_ui_server_streams_local_transcription_sessions(monkeypatch, tmp_path) -
     assert chunked.json() == {"text": "words as"}
     assert finished.json() == {"text": "words as spoken"}
     assert cancelled.json() == {"cancelled": True}
+
+
+def test_ui_server_reports_and_saves_the_speech_recognizer(monkeypatch, tmp_path) -> None:
+    from gofer.core import provider_preferences
+
+    monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
+    calls = []
+
+    def fake_engines(*, data_dir, refresh):
+        calls.append(refresh)
+        return {"system": {"id": "windows", "available": True}, "offline": {"installed": False}}
+
+    monkeypatch.setattr(server_module, "transcription_engines", fake_engines)
+    shown = _request(tmp_path, "GET", "/api/chat/transcribe/engines")
+    assert shown.json() == {
+        "engine": "system",
+        "system": {"id": "windows", "available": True},
+        "offline": {"installed": False},
+    }
+    _request(tmp_path, "GET", "/api/chat/transcribe/engines?refresh=1")
+    assert calls == [False, True]
+
+    saved = _request(tmp_path, "POST", "/api/chat/transcribe/engines", body={"engine": "offline"})
+    assert saved.json() == {"saved": True, "engine": "offline"}
+    started = {}
+
+    def fake_start(*, data_dir, engine):
+        started["engine"] = engine
+        return {"sessionId": "b" * 32}
+
+    monkeypatch.setattr(server_module, "start_chat_transcription", fake_start)
+    _request(tmp_path, "POST", "/api/chat/transcribe/start", body={})
+    assert started == {"engine": "offline"}
+    refused = _request(tmp_path, "POST", "/api/chat/transcribe/engines", body={"engine": "cloud"})
+    assert refused.status == 400
 
 
 def test_ui_server_chat_stream_provider_error_is_ndjson(monkeypatch, tmp_path) -> None:
@@ -2036,6 +2101,9 @@ def test_ui_server_unknown_invalid_json_and_options(tmp_path) -> None:
         "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     )
     assert "Authorization" in (options.header("Access-Control-Allow-Headers") or "")
+    assert "X-Gofer-Known" in (options.header("Access-Control-Allow-Headers") or "")
+    # The window may reuse this answer, instead of asking again before every poll.
+    assert options.header("Access-Control-Max-Age") == "600"
 
 
 def test_ui_server_rejects_deeply_nested_json_with_a_response(tmp_path) -> None:

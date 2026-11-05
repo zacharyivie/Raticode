@@ -48,6 +48,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # 4-core CI runner), and new workers wait when memory runs low. Pin both so
     # tests behave the same on every host; admission tests set their own values.
     monkeypatch.setattr(rem_home_module, "memory_available_bytes", lambda: 8 * 1024**3)
+    monkeypatch.setattr(rem_home_module, "swap_blocked", lambda: None)
 
     async def source(**kwargs: Any):
         instructions = kwargs["agent_instructions"]
@@ -2197,6 +2198,199 @@ def test_save_denial_ignores_successful_saves_and_unrelated_errors():
     )
 
 
+def save_through_rem_artifacts(
+    kwargs: dict[str, Any], path: str, call_id: str
+) -> list[dict[str, Any]]:
+    """Call the granted save tool over MCP and return the provider traces it would show."""
+    from tests.unit.test_swarm_tools import request
+
+    artifact = next(
+        s for s in kwargs["workflow"]["remResources"]["mcpServers"] if s["name"] == "rem_artifacts"
+    )
+    result = request(
+        artifact["url"],
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "save_report",
+                "arguments": {
+                    "path": path,
+                    "content": "<!doctype html><html><body>Findings</body></html>",
+                },
+            },
+        },
+    )[1]["result"]
+    trace = {"id": call_id, "kind": "tool"}
+    return [
+        {**trace, "title": "mcp__rem_artifacts__save_report", "phase": "start"},
+        {
+            **trace,
+            "title": "Tool result",
+            "phase": "result",
+            "status": "error" if result.get("isError") else "completed",
+            "output": result["content"][0]["text"],
+        },
+    ]
+
+
+def test_report_name_clash_is_explained_and_recovers_with_swarms_off(home: RemHome, tmp_path: Path):
+    """The work-machine incident: an earlier attempt's report blocked every save."""
+    original = home.source
+    outputs: list[str] = []
+    observed: list[dict[str, Any]] = []
+    earlier = tmp_path / "reports" / "rem" / "findings.html"
+    earlier.parent.mkdir(parents=True)
+    earlier.write_text("earlier attempt")
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            observed.append(kwargs)
+            for trace in save_through_rem_artifacts(kwargs, "findings.html", "save-1"):
+                yield {"type": "thought", "trace": trace}
+            outputs.append(trace["output"])
+            for trace in save_through_rem_artifacts(kwargs, "findings-v2.html", "save-2"):
+                yield {"type": "thought", "trace": trace}
+            outputs.append(trace["output"])
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    home.configure({"provider": "codex", "swarm_access": False})
+    task = home.create_task({"request_id": "research", **recipe(tmp_path, type="research")})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    # Swarms are off for the thread, and the report tool is still granted.
+    assert observed[0]["workflow"]["remSwarmAccess"]["enabled"] is False
+    assert "Swarm" not in outputs[0] and "orchestrator" not in outputs[0]
+    assert "already exists at findings.html" in outputs[0] and "findings-v2.html" in outputs[0]
+    assert earlier.read_text() == "earlier attempt"
+    assert [Path(a["path"]).name for a in run["artifacts"]] == ["findings-v2.html"]
+    instructions = observed[0]["agent_instructions"]
+    assert "Saved reports are never replaced" in instructions
+
+
+def test_identical_save_error_after_follow_up_stops_with_the_cause(home: RemHome, tmp_path: Path):
+    workers: list[str] = []
+    earlier = tmp_path / "reports" / "rem" / "findings.html"
+    earlier.parent.mkdir(parents=True)
+    earlier.write_text("earlier attempt")
+
+    async def source(**kwargs):
+        workers.append(kwargs["messages"][-1]["body"])
+        for trace in save_through_rem_artifacts(kwargs, "findings.html", f"save-{len(workers)}"):
+            yield {"type": "thought", "trace": trace}
+        # A different answer each turn, so only the repeated tool error can stop it.
+        yield {"type": "final", "message": {"body": f"Draft {len(workers)} is unsaved."}}
+
+    home.source = source
+    task = home.create_task({"request_id": "research", **recipe(tmp_path, type="research")})["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "blocked"
+    assert len(workers) == 2 and run["repair_count"] == 1
+    # The follow-up carried the tool's own explanation, not a bare "save again".
+    assert "The last save_report call returned" in workers[1]
+    assert "findings-v2.html" in workers[1]
+    assert "failed the same way again" in run["summary_short"]
+    assert "already exists" in run["summary_short"]
+
+
+def test_receipt_failure_after_writing_says_so_and_a_new_name_recovers(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import sqlite3
+
+    from gofer.ui.rem_home_artifacts import artifact_tools, validate_artifacts
+    from tests.unit.test_swarm_tools import request
+
+    task = home.create_task({"request_id": "create", **recipe(tmp_path, type="research")})["task"]
+    run = task["active_run"]
+    connect = home.store.connect
+    calls = {"count": 0, "fail_at": 2}
+
+    def flaky_connect(*args: Any, **kwargs: Any):
+        calls["count"] += 1
+        if calls["count"] == calls["fail_at"]:
+            raise sqlite3.OperationalError("database is locked")
+        return connect(*args, **kwargs)
+
+    with artifact_tools(home, run, "execute") as config:
+        assert config is not None
+
+        def save(path: str) -> dict[str, Any]:
+            return cast(
+                dict[str, Any],
+                request(
+                    config["url"],
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "save_report",
+                            "arguments": {
+                                "path": path,
+                                "content": "<!doctype html><html><body>F</body></html>",
+                            },
+                        },
+                    },
+                )[1]["result"],
+            )
+
+        monkeypatch.setattr(home.store, "connect", flaky_connect)
+        failed = save("research.html")
+        assert failed["isError"] is True
+        text = failed["content"][0]["text"]
+        assert "written to research.html" in text
+        assert "receipt couldn't be recorded (OperationalError)" in text
+        assert "new name" in text and str(tmp_path) not in text
+        assert (tmp_path / "reports" / "rem" / "research.html").exists()
+        calls.update(count=0, fail_at=0)
+        assert not save("research-v2.html").get("isError")
+    monkeypatch.setattr(home.store, "connect", connect)
+    with home.store.connect() as db:
+        saved = home.store.get(db, "runs", run["id"])
+    assert [Path(a["path"]).name for a in saved["artifacts"]] == ["research-v2.html"]
+    validate_artifacts(saved)
+
+
+def test_own_tool_failures_are_not_provider_refusals():
+    from gofer.ui.rem_home import save_denial, save_errors
+
+    traces = [
+        {"id": "s", "title": "mcp__rem_artifacts__save_report", "phase": "start"},
+        {
+            "id": "s",
+            "title": "Tool result",
+            "phase": "result",
+            "status": "error",
+            "output": "Report tool save_report failed (PermissionError).\n Try once more.",
+        },
+    ]
+    assert save_denial(traces) is None
+    assert list(save_errors(traces)) == [
+        "Report tool save_report failed (PermissionError). Try once more."
+    ]
+
+
+def test_only_research_workers_are_told_to_use_rem_artifacts(home: RemHome, tmp_path: Path):
+    original = home.source
+    instructions: list[str] = []
+
+    async def source(**kwargs):
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            instructions.append(kwargs["agent_instructions"])
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "errand", **recipe(tmp_path, type="errand")})["task"]
+    wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert "This task has no rem_artifacts tool" in instructions[0]
+    assert "using rem_artifacts.save_report" not in instructions[0]
+
+
 def test_outcome_update_drops_promises_rem_cannot_keep():
     from gofer.ui.rem_home import drop_unbacked_promises
 
@@ -2455,7 +2649,8 @@ def test_recall_cannot_execute_actions_or_run_without_a_final_decision(home: Rem
     home._reply()
     assert not home.store.tasks()
     assert home.store.conversation()["conversation"]["turn_state"] == "idle"
-    assert len(calls) == (3 if mode == "exhausted" else 1)
+    # A mixed reply is treated as the read it asked for, so it uses the reads left.
+    assert len(calls) == (1 if mode == "cancelled" else 3)
 
 
 def test_rem_repairs_invalid_internal_task_fields_without_reasking_user(home: RemHome):
@@ -2748,6 +2943,46 @@ def test_clear_history_drains_worker_and_conversation_before_erasing(home: RemHo
     assert home.store.conversation()["messages"] == []
 
 
+def test_a_clear_that_gives_up_answers_the_message_it_interrupted(
+    home: RemHome, monkeypatch: pytest.MonkeyPatch
+):
+    import gofer.ui.rem_home as rem_home_module
+
+    class Stuck:
+        def is_alive(self) -> bool:
+            return True
+
+    class Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            self.now += 100
+            return self.now
+
+        def sleep(self, _seconds: float) -> None:
+            pass
+
+        def time(self) -> float:
+            return time.time()
+
+    home.tick()
+    home.submit_message({"request_id": "asked", "body": "What is running?"})
+    home.workers["stuck"] = (Stuck(), threading.Event())  # type: ignore[assignment]
+    monkeypatch.setattr(rem_home_module, "time", Clock())
+    identity = home.store.conversation()["conversation"]["id"]
+    with pytest.raises(RemConflict, match="has not stopped yet"):
+        home.clear_history({"request_id": "clear", "conversation_id": identity, "confirm": True})
+    monkeypatch.setattr(rem_home_module, "time", time)
+    home.workers.pop("stuck")
+    state = home.store.conversation()["conversation"]
+    # The message wasn't answered, so it isn't marked handled.
+    assert state["turn_state"] == "replying" and state.get("processed") != "asked"
+    home.tick()
+    home.conversation_worker.join(timeout=5)
+    replies = [m["body"] for m in home.store.conversation()["messages"] if m["id"] == "reply-asked"]
+    assert replies == ["Hello."]
+
+
 def test_startup_does_not_discard_a_message_submitted_before_first_tick(home: RemHome):
     home.submit_message({"request_id": "fresh", "body": "Hello"})
     home.tick()
@@ -2779,6 +3014,211 @@ def test_restart_replays_saved_conversation_without_resending_or_duplicate_tasks
     assert home.store.conversation()["conversation"]["processed"] == "saved"
     assert len([m for m in home.store.conversation()["messages"] if m["role"] == "user"]) == 1
     assert not any("resend" in m["body"] for m in home.store.conversation()["messages"])
+
+
+def test_closing_mid_reply_leaves_the_request_for_the_next_backend(home: RemHome):
+    def closing(prompt, config, cancel):
+        home.close()  # Raticode quits while the chat model is still writing.
+        raise InterruptedError("Rem stopped")
+
+    home.generate = closing
+    home.submit_message({"request_id": "late", "body": "What's on my list?"})
+    home._reply()
+    state = home.store.conversation()
+    assert state["conversation"]["turn_state"] == "replying"
+    assert not any(m["id"] == "reply-late" for m in state["messages"])
+
+    restarted = RemHome(
+        home.data_dir,
+        source=home.source,
+        jobs=home.jobs,
+        steering=home.steering,
+        authorize=lambda c, r: None,
+        generate=lambda *args: {"reply": "Two tasks are running."},
+        start=False,
+    )
+    try:
+        restarted._recover()
+        restarted._reply()
+        state = restarted.store.conversation()
+        replies = [m["body"] for m in state["messages"] if m["id"] == "reply-late"]
+        assert replies == ["Two tasks are running."]
+        assert state["conversation"]["processed"] == "late"
+    finally:
+        restarted.close()
+
+
+def test_a_phone_message_sent_while_rem_replies_waits_and_is_answered_next(home: RemHome):
+    # The desktop window waits and resends by itself; a phone, an alert reply or voice
+    # mode used to get "Rem is still replying; try again shortly" instead.
+    prompts: list[str] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        return {"reply": f"Answer {len(prompts)}."}
+
+    home.generate = generate
+    home.submit_message({"request_id": "first", "body": "What is running?"})
+    queued = home.submit_message(
+        {"request_id": "second", "body": "Also, what finished overnight?"}, source="phone"
+    )
+    assert queued == {"accepted": True, "request_id": "second", "waiting": True}
+    # Resending the same request, as a phone does after a dropped link, keeps one copy.
+    again = home.submit_message(
+        {"request_id": "second", "body": "Also, what finished overnight?"}, source="phone"
+    )
+    assert again == queued
+    # A message from the desktop window waits too, so a reloaded window can't lose it.
+    assert home.submit_message({"request_id": "desk", "body": "From the desktop"})["waiting"]
+    state = home.store.conversation()
+    assert [m["id"] for m in state["waiting"]] == ["second", "desk"]
+    assert "waiting" not in state["conversation"]
+    assert state["waiting"][0]["waiting"] and state["waiting"][0]["role"] == "user"
+    assert "second" not in {m["id"] for m in state["messages"]}
+
+    home._reply()
+    # Rem answered the first request without seeing one it hadn't reached yet.
+    assert "what finished overnight" not in prompts[0]
+    for _ in range(2):
+        home.tick()
+        if home.conversation_worker:
+            home.conversation_worker.join(timeout=5)
+    state = home.store.conversation()
+    assert not state["waiting"]
+    assert [(m["id"], m["body"]) for m in state["messages"]] == [
+        ("first", "What is running?"),
+        ("reply-first", "Answer 1."),
+        ("second", "Also, what finished overnight?"),
+        ("reply-second", "Answer 2."),
+        ("desk", "From the desktop"),
+        ("reply-desk", "Answer 3."),
+    ]
+    assert state["messages"][2]["source"] == "phone"
+    assert state["conversation"]["processed"] == "desk"
+
+
+def test_a_phone_can_leave_only_a_few_messages_waiting(home: RemHome):
+    import gofer.ui.rem_home as rem_home_module
+
+    home.submit_message({"request_id": "busy", "body": "Start"})
+    for index in range(rem_home_module.MAX_WAITING_MESSAGES):
+        home.submit_message({"request_id": f"w{index}", "body": f"Next {index}"}, source="phone")
+    with pytest.raises(RemConflict, match="messages waiting"):
+        home.submit_message({"request_id": "extra", "body": "One more"}, source="phone")
+
+
+def test_each_model_call_in_a_reply_starts_its_shown_draft_over(home: RemHome):
+    seen: list[tuple[Any, Any]] = []
+
+    def generate(prompt, config, cancel):
+        conversation = home.store.conversation()["conversation"]
+        seen.append((conversation.get("draft_attempt"), conversation.get("draft_reply")))
+        home._draft_reply("I’ll have a worker look into the earlier tool and report back.")
+        if len(seen) == 1:
+            return {"reply": "Starting it.", "tasks": [recipe(title="")]}
+        return {"reply": "Starting it.", "tasks": [recipe(title="Check the tool")]}
+
+    home.generate = generate
+    home.submit_message({"request_id": "draft", "body": "Check the tool"})
+    home._reply()
+    # The repair call began with no text shown and a new attempt number.
+    assert seen == [(1, None), (2, None)]
+
+
+def test_a_failed_reply_keeps_the_decision_that_failed_for_tracing(home: RemHome):
+    bad = {
+        "reply": "I’ll update it.",
+        "controls": [{"task_id": "made-up", "action": "follow_up", "message": "Go"}],
+    }
+    home.generate = lambda *args: bad
+    home.submit_message({"request_id": "trace", "body": "Update the task"})
+    home._reply()
+    shown = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-trace")
+    assert shown["body"].startswith("I couldn’t finish that request")
+    # The apps never receive it; it stays in Rem's database for tracing.
+    assert "diagnostic" not in shown
+    with home.store.read() as db:
+        row = db.execute("SELECT body FROM messages WHERE id='reply-trace'").fetchone()
+    reply = json.loads(row[0])
+    assert reply["diagnostic"]["error"].startswith("UnusableControl: ")
+    assert json.loads(reply["diagnostic"]["decision"]) == bad
+
+
+def test_a_conversation_repair_note_applies_to_one_answer_only(home: RemHome):
+    async def source(**kwargs):
+        yield {"type": "final", "message": {"body": "Doing well, and you?"}}
+
+    checks: list[str] = []
+
+    def generate(prompt, config, cancel):
+        checks.append(prompt)
+        good = {
+            "criteria": [{"id": "check", "result": "pass", "evidence": "Friendly chat"}],
+            "summary": "We had a brief chat.",
+        }
+        if len(checks) == 1:
+            return {"criteria": [], "next_message": "", "summary": "Chatted."}
+        return {**good, "next_message": "Busy, thanks." if len(checks) == 3 else ""}
+
+    home.source, home.generate = source, generate
+    task = home.create_task(
+        {
+            "request_id": "chat",
+            **recipe(type="errand", execution_mode="conversation", conversation_turns=2),
+        }
+    )["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    assert "couldn't be used" in checks[1]
+    # Asking for the next exchange no longer repeats the note about the fixed answer.
+    assert "Supply your actual reply" in checks[2] and "couldn't be used" not in checks[2]
+
+
+def test_a_malformed_conversation_verdict_gets_one_more_try(home: RemHome):
+    async def source(**kwargs):
+        yield {"type": "final", "message": {"body": "All good here, thanks for asking."}}
+
+    checks: list[str] = []
+
+    def generate(prompt, config, cancel):
+        checks.append(prompt)
+        if len(checks) == 1:
+            return {"criteria": [], "next_message": "", "summary": "Chatted."}
+        return {
+            "criteria": [{"id": "check", "result": "pass", "evidence": "Friendly chat"}],
+            "next_message": "",
+            "summary": "We had a brief chat.",
+        }
+
+    home.source, home.generate = source, generate
+    task = home.create_task(
+        {"request_id": "chat", **recipe(type="errand", execution_mode="conversation")}
+    )["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    assert len(checks) == 2 and "couldn't be used" in checks[1]
+
+
+def test_an_empty_discussion_reply_is_retried(home: RemHome, instant_retries: None):
+    turns = 0
+
+    async def source(**kwargs):
+        nonlocal turns
+        turns += 1
+        yield {"type": "final", "message": {"body": "" if turns == 1 else "Doing well."}}
+
+    home.source = source
+    home.generate = lambda *args: {
+        "criteria": [{"id": "check", "result": "pass", "evidence": "Friendly chat"}],
+        "next_message": "",
+        "summary": "We had a brief chat.",
+    }
+    task = home.create_task(
+        {"request_id": "chat", **recipe(type="errand", execution_mode="conversation")}
+    )["task"]
+    run = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    assert (turns, run["transient_retries"]) == (2, 1)
 
 
 def test_research_review_ignores_bookkeeping_and_reports_next_steps_in_chat(
@@ -3082,6 +3522,92 @@ def test_workflow_follow_up_upgrades_research_scope_and_reuses_task_thread(
         assert db.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
 
 
+def test_follow_up_on_a_repeating_task_changes_only_that_run(home: RemHome, tmp_path: Path):
+    # 2026-11-01: a one-off question asked in the nightly audit's thread became a
+    # follow_up with patch {type: errand, ...}. The patch was saved to the task,
+    # so every later 4 AM run asked the question again instead of auditing.
+    task = home.create_task(
+        {
+            "request_id": "nightly",
+            **recipe(
+                tmp_path,
+                type="maintain",
+                prompt="Audit both apps every night",
+                schedule={"kind": "daily", "local_time": "04:00", "timezone": "UTC"},
+            ),
+        }
+    )["task"]
+    home.store.due(datetime.now(UTC) + timedelta(days=2))
+    nightly = wait_run(home, task["id"], {"succeeded"})
+    decisions = [
+        {
+            "reply": "I'll ask the audit worker.",
+            "controls": [
+                {
+                    "task_id": task["id"],
+                    "action": "follow_up",
+                    "message": "Who set the 400 kB budget?",
+                    "patch": {
+                        "type": "errand",
+                        "prompt": "Who set the 400 kB budget?",
+                        "acceptance_criteria": [{"id": "check", "description": "Name who set it."}],
+                    },
+                }
+            ],
+        }
+    ]
+    summarize = home.generate
+    # The decision answers the chat message; later calls write task summaries.
+    home.generate = lambda *args: decisions.pop() if decisions else summarize(*args)
+    home.submit_message({"request_id": "ask", "body": "Who set the budget at 400kb?"})
+    home._reply()
+    asked = wait_run(home, task["id"], {"succeeded"})
+    assert asked["id"] != nightly["id"]
+    assert asked["thread_id"] == nightly["thread_id"]
+    assert asked["recipe"]["type"] == "errand"
+    assert asked["recipe"]["acceptance_criteria"][0]["description"] == "Name who set it."
+
+    saved = home.store.tasks()[0]
+    assert saved["revision"] == 1
+    assert (saved["type"], saved["prompt"]) == ("maintain", "Audit both apps every night")
+    assert saved["acceptance_criteria"][0]["description"] == "It works"
+    with home.store.read() as db:
+        assert db.execute("SELECT count(*) FROM revisions").fetchone()[0] == 1
+
+    home.store.due(datetime.fromisoformat(saved["next_occurrence_at"]) + timedelta(minutes=1))
+    next_night = wait_run(home, task["id"], {"succeeded"})
+    assert next_night["id"] not in {nightly["id"], asked["id"]}
+    assert next_night["recipe"]["type"] == "maintain"
+    assert next_night["recipe"]["prompt"] == "Audit both apps every night"
+    assert next_night["thread_id"] == nightly["thread_id"]
+
+
+def test_follow_up_during_a_repeating_run_leaves_the_task_alone(home: RemHome, tmp_path: Path):
+    task = home.create_task(
+        {
+            "request_id": "nightly",
+            **recipe(
+                tmp_path,
+                type="maintain",
+                prompt="Audit both apps every night",
+                schedule={"kind": "daily", "local_time": "04:00", "timezone": "UTC"},
+            ),
+        }
+    )["task"]
+    with home.store.connect() as db:
+        run = home.store.add_run(db, home.store.get(db, "tasks", task["id"]), "occ", {})
+    result = home.instruct(
+        run["thread_id"],
+        {"request_id": "ask", "body": "Answer one question instead."},
+        recipe_patch={"type": "errand", "prompt": "Answer one question instead."},
+    )
+    assert result["run"]["pending_recipe"]["type"] == "errand"
+    assert result["run"]["pending_recipe"]["revision"] == 1
+    saved = home.store.tasks()[0]
+    assert (saved["revision"], saved["type"]) == (1, "maintain")
+    assert saved["prompt"] == "Audit both apps every night"
+
+
 def cards(home: RemHome, run_id: str) -> list[dict[str, Any]]:
     """Conversation messages that show a task card for one run."""
     return [
@@ -3323,6 +3849,177 @@ def test_transient_classification():
     assert not transient(ValueError("401 Unauthorized"))
     assert not transient(TimeoutError("Worker stop could not be confirmed"))
     assert not transient(ValueError("Reviewer did not return criterion evidence"))
+
+
+def test_transient_classification_covers_dropped_connections_and_missing_answers():
+    from gofer.ui.chat import NO_FINAL_ANSWER
+    from gofer.ui.rem_home import transient
+
+    # Claude Code's text once its own retries of a dropped connection run out.
+    assert transient(ValueError("API Error: Connection error."))
+    assert transient(ValueError("stream error: error sending request for url (https://x)"))
+    assert transient(ValueError("getaddrinfo EAI_AGAIN api.anthropic.com"))
+    assert transient(ValueError("TypeError: fetch failed"))
+    assert transient(ValueError(NO_FINAL_ANSWER))
+    assert transient(ValueError("Worker ended without a result"))
+    assert not transient(ValueError("Connection settings are invalid"))
+    assert not transient(ValueError("Not logged in. Run codex login."))
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        {"type": "error", "error": "API Error: Connection error."},
+        {"type": "error", "error": "The provider ended its turn without a final answer."},
+        # A turn that finished but whose final reply came back empty.
+        {"type": "final", "message": {"body": ""}},
+    ],
+)
+def test_dropped_connections_and_empty_turns_retry_the_worker(
+    home: RemHome, tmp_path: Path, instant_retries: None, first: dict[str, Any]
+):
+    original = home.source
+    workers = 0
+
+    async def source(**kwargs):
+        nonlocal workers
+        if "independent read-only reviewer" not in kwargs["agent_instructions"]:
+            workers += 1
+            if workers == 1:
+                yield first
+                return
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"blocked", "succeeded"})
+    assert run["state"] == "succeeded", run
+    assert (workers, run["transient_retries"]) == (2, 1)
+
+
+@pytest.mark.parametrize("ended", ["succeeded", "blocked", "queued"])
+def test_follow_up_that_moves_work_into_a_project_continues_in_a_new_thread(
+    home: RemHome, tmp_path: Path, ended: str
+):
+    # 2026-11-03: "implement the voice tidy feature" followed up a research task that
+    # had no project. Rem moved the work into the project, and the whole reply failed
+    # with "Changing projects requires updating the task first".
+    research = home.create_task(
+        {"request_id": "research", **recipe(None, type="research", title="Research tidying")}
+    )["task"]
+    first = research["active_run"]
+    if ended != "queued":
+        home._finish(first["id"], ended, "Saved the report.", 0)
+    home.generate = lambda *args: {
+        "reply": "I’ll have a worker implement it in Raticode.",
+        "controls": [
+            {
+                "task_id": research["id"],
+                "action": "follow_up",
+                "message": "Implement the proposed design.",
+                "patch": {
+                    "type": "develop",
+                    "project_dir": str(tmp_path),
+                    "acceptance_criteria": [{"id": "check", "description": "It works"}],
+                },
+            }
+        ],
+    }
+    home.submit_message({"request_id": "build", "body": "Implement the feature."})
+    home._reply()
+    reply = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-build")
+    assert reply["body"] == "I’ll have a worker implement it in Raticode."
+    run = wait_run(home, research["id"], {"succeeded", "blocked"})
+    assert run["state"] == "succeeded", run
+    assert run["thread_id"] != first["thread_id"]
+    assert run["recipe"]["project_dir"] == str(tmp_path)
+    task = home.store.tasks()[0]
+    assert (task["type"], task["project_dir"]) == ("develop", str(tmp_path))
+    with home.store.read() as db:
+        roots = {
+            home.store.get(db, "threads", t)["projectRoot"]
+            for t in (first["thread_id"], run["thread_id"])
+        }
+    assert roots == {"", str(tmp_path)}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [{"task_id": "made-up", "action": "follow_up", "message": "Add a case"}],
+        [
+            {"task_id": "TASK", "action": "follow_up", "message": "Add a case"},
+            {"task_id": "TASK", "action": "cancel"},
+        ],
+        [{"task_id": "TASK", "action": "pause", "patch": {"title": "Renamed"}}],
+    ],
+)
+def test_an_unusable_task_change_is_repaired_instead_of_failing_the_reply(
+    home: RemHome, tmp_path: Path, bad: list[dict[str, Any]]
+):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    wait_run(home, task["id"], {"succeeded"})
+    calls: list[str] = []
+    good = [{"task_id": task["id"], "action": "follow_up", "message": "Add a case"}]
+
+    def generate(prompt, config, cancel):
+        calls.append(prompt)
+        controls = (
+            good if len(calls) > 1 else json.loads(json.dumps(bad).replace("TASK", task["id"]))
+        )
+        return {"reply": "I’ll add the case.", "controls": controls}
+
+    home.generate = generate
+    home.submit_message({"request_id": "case", "body": "Add a case."})
+    home._reply()
+    assert len(calls) == 2 and "Repair the decision" in calls[1]
+    reply = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-case")
+    assert reply["body"] == "I’ll add the case."
+    assert home.store.tasks()[0]["active_run"]
+
+
+def test_a_reply_that_also_asks_to_read_acts_only_on_the_final_decision(home: RemHome):
+    calls: list[str] = []
+
+    def generate(prompt, config, cancel):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return {"recall": {"queries": ["Earlier"]}, "reply": "Done", "tasks": [recipe()]}
+        return {"reply": "Starting it.", "tasks": [recipe(title="Final")]}
+
+    home.generate = generate
+    home.submit_message({"request_id": "mixed", "body": "Build the thing from earlier"})
+    home._reply()
+    assert len(calls) == 2
+    assert [t["title"] for t in home.store.tasks()] == ["Final"]
+
+
+def test_a_task_update_that_fails_to_post_waits_before_trying_again(
+    home: RemHome, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    home._finish(task["active_run"]["id"], "succeeded", "Finished the feature.", 0)
+    original = home._outcome_parts
+    attempts = 0
+
+    def broken(*args: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(home, "_outcome_parts", broken)
+    for _ in range(3):
+        home.deliver_outcomes()
+    # Writing an update can call the chat model; it isn't retried on every tick.
+    assert attempts == 1
+    (entry,) = home.store.outbox()
+    monkeypatch.setattr(home, "_outcome_parts", original)
+    home.delivery_backoff[entry["id"]] = (1, 0.0)
+    home.deliver_outcomes()
+    assert not home.store.outbox()
+    assert entry["id"] not in home.delivery_backoff
+    assert any(m["id"] == entry["id"] for m in home.store.conversation()["messages"])
 
 
 def test_conversation_decision_retries_temporary_provider_errors(
@@ -4330,3 +5027,23 @@ def test_folders_opened_inside_protected_places_stay_shareable(
     assert not sensitive_path(guide, opened=skill.resolve())
     assert sensitive_path(sign_in, opened=house.resolve())
     assert sensitive_path(data / "rem-home.sqlite3", data, opened=tmp_path.resolve())
+
+
+def test_new_workers_wait_while_swap_is_nearly_full(
+    home: RemHome, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gofer.core.command_slots as command_slots
+    import gofer.ui.rem_home as rem_home_module
+
+    monkeypatch.setattr(rem_home_module, "swap_blocked", command_slots.swap_blocked)
+    monkeypatch.setattr(command_slots, "swap_used_share", lambda: 0.9)
+    limit, reason = home._admission()
+    # One worker can always start, whatever the swap.
+    assert reason is None
+    finished = threading.Thread(target=lambda: None)
+    finished.start()
+    finished.join()
+    monkeypatch.setattr(home, "workers", {"busy": (finished, threading.Event())})
+    assert home._admission() == (limit, "Waiting for free memory (swap is 90% full)")
+    monkeypatch.setattr(command_slots, "swap_used_share", lambda: 0.4)
+    assert home._admission() == (limit, None)

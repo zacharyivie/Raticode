@@ -218,6 +218,7 @@ class DeviceListener:
         # Optional extra addresses on the same port, such as a Tailscale address.
         self.extra: dict[str, asyncio.Server] = {}
         self.connections: dict[asyncio.StreamWriter, asyncio.Task[None]] = {}
+        self.sessions: dict[asyncio.StreamWriter, DeviceSession] = {}
         self.attempts: OrderedDict[str, tuple[float, float]] = OrderedDict()
         self.global_tokens = 32.0
         self.global_updated = time.monotonic()
@@ -287,10 +288,18 @@ class DeviceListener:
             session = DeviceSession(
                 self.registry, self.invitations, Frame.decode(first), self.application
             )
+            self.sessions[writer] = session
             output = session.receive(first)
+            superseded = False
             while True:
-                for frame in output:
-                    writer.write(packet(frame))
+                if not superseded and session.stage in ("ack", "active"):
+                    superseded = True
+                    self._supersede(writer, session)
+                # One write per batch. A phone that drops mid-reply makes asyncio warn
+                # "socket.send() raised exception." for every later write, and a reply
+                # is often dozens of frames. drain() still raises, ending the session.
+                if output:
+                    writer.write(b"".join(packet(frame) for frame in output))
                 await asyncio.wait_for(writer.drain(), timeout=5)
                 if pending_read is None or pending_read.done():
                     pending_read = asyncio.create_task(read_frame(reader))
@@ -323,11 +332,31 @@ class DeviceListener:
                 pending_read.cancel()
                 await asyncio.gather(pending_read, return_exceptions=True)
             self.connections.pop(writer, None)
+            self.sessions.pop(writer, None)
             writer.close()
             try:
                 await writer.wait_closed()
             except OSError:
                 pass
+
+    def _supersede(self, writer: asyncio.StreamWriter, session: DeviceSession) -> None:
+        """End a phone's older sessions once a newer one has signed in.
+
+        A phone keeps one connection. When its network changes, sleeps or Tailscale
+        moves, the old socket can die without a close and would otherwise hold one
+        of the 16 connection slots for up to five minutes. Only the same paired
+        phone, proven by its pinned identity, can replace its own session. Desktops
+        run several exchanges at once, so their sessions are left alone. Nothing is
+        lost: the desktop's outbox is durable and resumes from the phone's cursor.
+        """
+        if session.role != "controller" or session.peer is None:
+            return
+        for other_writer, other in list(self.sessions.items()):
+            if other_writer is writer or other.peer != session.peer or other.role != "controller":
+                continue
+            task = self.connections.get(other_writer)
+            if task is not None:
+                task.cancel()
 
     def _note_refusal(self, reason: str) -> None:
         if reason in ("session_timeout", "session_closed"):

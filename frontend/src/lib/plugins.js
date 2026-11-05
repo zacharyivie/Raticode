@@ -123,6 +123,24 @@ export function resolvePluginActivity(pluginSettings, activity, fallback = FALLB
   return pluginEnabled(pluginSettings, activity) ? activity : fallback;
 }
 
+// The main content area is chosen separately from the sidebar. "editor" shows
+// open files, graphs, and browser tabs; the other values are plugins with their
+// own workspace. A workspace whose plugin is turned off falls back to the editor.
+export const EDITOR_CONTENT = "editor";
+const WORKSPACE_PLUGIN_IDS = ["rem", "second-brain", "swarms", "organizations"];
+// Plugins whose home fills the main area. Clicking one in the activity rail
+// opens it; every other plugin changes only the sidebar.
+const HOME_PLUGIN_IDS = ["rem", "second-brain"];
+
+export function resolveMainContent(pluginSettings, content) {
+  return WORKSPACE_PLUGIN_IDS.includes(content) && pluginEnabled(pluginSettings, content) ? content : EDITOR_CONTENT;
+}
+
+// The main content shown at launch for the restored sidebar activity.
+export function initialMainContent(activity) {
+  return HOME_PLUGIN_IDS.includes(activity) ? activity : EDITOR_CONTENT;
+}
+
 // Moves `id` before or after `targetId`. Returns the original order when the
 // move changes nothing so callers can skip saving.
 export function movePlugin(order, id, targetId, placement = "before") {

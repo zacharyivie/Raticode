@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import secrets
 import socket
 import threading
@@ -15,6 +16,11 @@ from typing import Any
 MAX_REQUEST_BYTES = 1024 * 1024
 MCP_JSON_MAX_DEPTH = 64
 REQUEST_READ_DEADLINE_SECONDS = 5.0
+SWARM_FAILURE_HINT = "Retry or ask the orchestrator to inspect it."
+# Services outside swarms have no orchestrator, and identical retries rarely help.
+TOOL_FAILURE_HINT = "Try once more; if it fails again, report this error instead of repeating it."
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -22,6 +28,10 @@ class _Grant:
     callback: Callable[[str, dict[str, Any]], Any]
     tools: list[dict[str, Any]]
     instructions: str
+    # Names the service in unexpected-failure results. Rem's report, thread and
+    # fleet tools share this server, so a fixed "swarm" label misled workers.
+    label: str
+    failure_hint: str
 
 
 class SwarmToolServer:
@@ -192,6 +202,9 @@ class SwarmToolServer:
         callback: Callable[[str, dict[str, Any]], Any],
         tools: list[dict[str, Any]],
         instructions: str = "",
+        *,
+        label: str = "Swarm",
+        failure_hint: str = SWARM_FAILURE_HINT,
     ) -> str:
         token = secrets.token_urlsafe(32)
         with self._lock:
@@ -199,7 +212,7 @@ class SwarmToolServer:
                 raise ValueError("Swarm tools are closed.")
             if len(self._grants) >= 128:
                 raise ValueError("Too many active swarm tool sessions.")
-            self._grants[token] = _Grant(callback, tools, instructions)
+            self._grants[token] = _Grant(callback, tools, instructions, label, failure_hint)
         return f"http://{self._host}/{token}"
 
     def revoke(self, url: str) -> None:
@@ -251,13 +264,18 @@ class SwarmToolServer:
             }
         except (ValueError, KeyError) as exc:
             result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
-        except Exception:
+        except Exception as exc:
+            # Unexpected messages can carry private paths or internals, so the
+            # agent gets only the error type. The local log keeps the detail;
+            # request paths hold capabilities and are never logged.
+            log.exception("%s tool %s failed", grant.label, name)
             result = {
                 "isError": True,
                 "content": [
                     {
                         "type": "text",
-                        "text": "Swarm tool failed. Retry or ask the orchestrator to inspect it.",
+                        "text": f"{grant.label} tool {name} failed "
+                        f"({type(exc).__name__}). {grant.failure_hint}",
                     }
                 ],
             }

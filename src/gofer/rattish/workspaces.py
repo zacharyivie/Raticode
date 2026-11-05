@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import shutil
 import stat
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,6 +31,13 @@ from gofer.utils.paths import get_data_dir
 
 REGISTRY_VERSION = 1
 REGISTRY_FILE = "workspace-registry.json"
+# Request handlers look workflows up many times a second, and reading and
+# validating the registry takes about 11 ms with 80 workflows. A parsed copy is
+# reused while the file is unchanged, for at most this long, so a workspace moved
+# on disk is still noticed (see _read_registry).
+REGISTRY_CACHE_SECONDS = 2.0
+_registry_cache: dict[Path, tuple[tuple[int, int, int], float, dict[str, Any]]] = {}
+_registry_cache_lock = threading.Lock()
 WORKSPACE_DIRECTORY = ".raticode"
 WORKFLOW_ENTRYPOINT = "workflow.rattish"
 WORKFLOW_METADATA = "workflow.metadata.json"
@@ -435,8 +445,34 @@ def _empty_registry() -> dict[str, Any]:
     return {"registry_version": REGISTRY_VERSION, "workflows": []}
 
 
+def _registry_stamp(path: Path) -> tuple[int, int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    # Saving replaces the file, so a new inode marks a change even within one tick.
+    return (info.st_mtime_ns, info.st_size, info.st_ino)
+
+
 def _read_registry(registry_dir: Path) -> dict[str, Any]:
     path = registry_dir / "radish" / REGISTRY_FILE
+    stamp = _registry_stamp(path)
+    if stamp is None:
+        return _empty_registry()
+    with _registry_cache_lock:
+        cached = _registry_cache.get(path)
+    if cached and cached[0] == stamp and time.monotonic() - cached[1] < REGISTRY_CACHE_SECONDS:
+        # Callers may change the document before saving it, so each gets its own copy.
+        return copy.deepcopy(cached[2])
+    document = _load_registry(registry_dir, path)
+    stamp = _registry_stamp(path)
+    if stamp is not None:
+        with _registry_cache_lock:
+            _registry_cache[path] = (stamp, time.monotonic(), copy.deepcopy(document))
+    return document
+
+
+def _load_registry(registry_dir: Path, path: Path) -> dict[str, Any]:
     if not path.exists():
         return _empty_registry()
     try:

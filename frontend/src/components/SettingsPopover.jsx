@@ -31,6 +31,8 @@ import DeveloperSettings, { RemMemorySettings } from "./DeveloperSettings.jsx";
 import RemResources from "./RemResources.jsx";
 import ProviderSettings from "./ProviderSettings.jsx";
 import CommitMessageSettings from "./CommitMessageSettings.jsx";
+import VoiceTidySettings from "./VoiceTidySettings.jsx";
+import SpeechEngineSettings from "./SpeechEngineSettings.jsx";
 import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
 import { FEATURE_PREVIEWS } from "../lib/featurePreview.js";
@@ -38,8 +40,10 @@ import "./SettingsPopover.css";
 import { PLUGIN_ICONS } from "./pluginIcons.js";
 import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
 import { ARCHIVE_RETENTION_OPTIONS } from "../lib/threadActivity.js";
-import { audioInputConstraints, listAudioInputDevices } from "../lib/audioDevices.js";
+import { audioInputConstraints, createSilenceWatch, listAudioInputDevices, silentInputMessage } from "../lib/audioDevices.js";
+import { DICTATION_MODES } from "../lib/voiceShortcut.js";
 import {
+  ASSISTANT_PANE_CONTENT_OPTIONS,
   BOTTOM_PANEL_STARTUP_OPTIONS,
   LAYOUT_PRESETS,
   PANE_SIDE_OPTIONS,
@@ -312,6 +316,15 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
         onChange={(value) => onChange("devices.audioInputId", value)}
       />
     )),
+    row("dictationMode", "Dictation", "How the mic button and the dictation shortcut listen. Either way, stopping goes straight on to your words, tidied when Tidy voice messages is on.", (
+      <SelectControl value={settings.devices.dictationMode} onChange={(value) => onChange("devices.dictationMode", value)} options={DICTATION_MODES} />
+    )),
+    row("dictationAutoSend", "Send after dictation", "For hands-free use: sends the message as soon as your words are ready. When off, they wait in the message box for you to edit and send. Words that couldn't be tidied always wait.", (
+      <SwitchControl label="Send after dictation" checked={settings.devices.dictationAutoSend} onChange={(value) => onChange("devices.dictationAutoSend", value)} />
+    )),
+    row("speech", "Speech recognition", "Turns dictation into text on this computer, using the speech recognizer built into the operating system where there is one.", (
+      <SpeechEngineSettings />
+    ), { stacked: true }),
     {
       searchText: "Devices paired devices phone mobile desktop pairing QR trust revoke",
       element: <PairedDevices key="paired-devices" />,
@@ -378,6 +391,7 @@ function assistantRows(settings, onChange, row, providerState) {
     ?? chatModels[0];
   return [
     { searchText: "Rem commit messages provider model auto commit changes template format", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
+    { searchText: "Tidy voice messages dictation transcription speech punctuation model provider", element: <VoiceTidySettings key="voice-tidy" capabilities={capabilities} defaultProvider={provider?.id ?? settings.assistant.provider} /> },
     row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
     row("avatar", "Show Rem avatar", "Show Rem on the welcome screen of Rem’s home.", <SwitchControl checked={settings.assistant.avatarEnabled} onChange={(value) => onChange("assistant.avatarEnabled", value)} />),
     row("autoHideThoughts", "Auto-hide thoughts", "Collapse thoughts when Rem replies. You can reopen them at any time.", <SwitchControl checked={settings.assistant.autoHideThoughts} onChange={(value) => onChange("assistant.autoHideThoughts", value)} />),
@@ -431,6 +445,9 @@ function layoutRows(settings, onChange, row) {
     )),
     row("assistantPaneSide", "Rem pane side", "Dock Rem's chat to the left or right of the editor. On the same side as the project pane, Rem sits between it and the editor.", (
       <SelectControl label="Rem pane side" value={layout.assistantPaneSide} onChange={change("assistantPaneSide")} options={PANE_SIDE_OPTIONS} />
+    )),
+    row("assistantPaneContent", "Rem pane shows", "Show your threads, or Rem's own chat and tasks. With Rem here, opening the Rem plugin moves its chat into the editor area and puts your threads back in this pane.", (
+      <SelectControl label="Rem pane shows" value={layout.assistantPaneContent} onChange={change("assistantPaneContent")} options={ASSISTANT_PANE_CONTENT_OPTIONS} />
     )),
     row("terminalLocation", "Terminal location", "Open terminals in the bottom panel, or in one editor tab you can split and drag beside your files. Switching closes open terminals.", (
       <SelectControl label="Terminal location" value={layout.terminalLocation} onChange={change("terminalLocation")} options={TERMINAL_LOCATION_OPTIONS} />
@@ -572,6 +589,7 @@ function MicrophoneControl({ onChange, value }) {
   const [error, setError] = useState("");
   const [level, setLevel] = useState(0);
   const [testing, setTesting] = useState(false);
+  const [noSound, setNoSound] = useState("");
   const testRef = useRef(null);
 
   const refreshDevices = useCallback(async () => {
@@ -593,6 +611,7 @@ function MicrophoneControl({ onChange, value }) {
     }
     setTesting(false);
     setLevel(0);
+    setNoSound("");
   }, []);
 
   useEffect(() => {
@@ -636,6 +655,11 @@ function MicrophoneControl({ onChange, value }) {
       analyser.fftSize = 256;
       source.connect(analyser);
       const samples = new Uint8Array(analyser.fftSize);
+      // Exact zeros mean a muted or switched-off microphone. The 8-bit level rounds a
+      // quiet room to zero too, so that check reads the full-precision samples.
+      const exact = typeof analyser.getFloatTimeDomainData === "function" ? new Float32Array(analyser.fftSize) : null;
+      const watchSilence = createSilenceWatch();
+      const noSoundMessage = silentInputMessage(stream.getAudioTracks?.()[0]?.label || "");
       const sampleLevel = () => {
         analyser.getByteTimeDomainData(samples);
         let energy = 0;
@@ -644,6 +668,10 @@ function MicrophoneControl({ onChange, value }) {
           energy += amplitude * amplitude;
         }
         setLevel(Math.min(1, Math.sqrt(energy / samples.length) * 4));
+        if (!exact) return;
+        analyser.getFloatTimeDomainData(exact);
+        const signal = watchSilence(exact.some((sample) => sample !== 0), 80);
+        if (signal) setNoSound(signal === "silent" ? noSoundMessage : "");
       };
       const interval = window.setInterval(sampleLevel, 80);
       testRef.current = { context, interval, source, stream };
@@ -711,8 +739,8 @@ function MicrophoneControl({ onChange, value }) {
       </div>
       {error ? <p className="text-[10px] leading-4 text-red-600" role="alert">{error}</p> : null}
       {testing ? (
-        <p aria-live="polite" className="text-[10px] text-muted">
-          {level > 0.03 ? "Input detected" : "Listening for input…"}
+        <p aria-live="polite" className={`text-[10px] leading-4 ${noSound && level <= 0.03 ? "text-amber-700 dark:text-amber-300" : "text-muted"}`}>
+          {level > 0.03 ? "Input detected" : noSound || "Listening for input…"}
         </p>
       ) : null}
     </div>
@@ -1101,7 +1129,7 @@ export function settingsCategoriesForQuery(query) {
 function categoryKeywords(category) {
   return {
     general: "startup default workspace run target update queue local data directory storage artifacts autosave files archived threads delete cleanup retention",
-    devices: "microphone mic audio input device recording transcription test signal level paired devices phone mobile desktop pairing qr trust revoke",
+    devices: "microphone mic audio input device recording transcription dictation speech recognition recognizer offline model macOS Windows Linux test signal level paired devices phone mobile desktop pairing qr trust revoke",
     appearance: "theme dark light system motion animation",
     editor: "font line tab wrap minimap autosave markdown html preview code",
     browser: "homepage new tab search engine url web rem agent playwright chrome automation testing sign-in cookies sites allowlist blocklist downloads memory approval approve prompts full access permission scripts",

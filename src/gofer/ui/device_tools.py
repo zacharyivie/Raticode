@@ -7,7 +7,7 @@ from contextlib import aclosing
 from typing import Any, Protocol
 from uuid import UUID
 
-from gofer.ui.swarm_tools import SwarmToolServer
+from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 
 # The device protocol's job.submit intent limit; longer text fails on the wire.
 MAX_WORK_TEXT = 4000
@@ -161,7 +161,13 @@ async def stream_with_fleet_tools(
         read_only = read_only_override or read_only
     actions = FleetActions(control, read_only, file_scope)
     server = SwarmToolServer()
-    url = server.register(actions.call, fleet_tools(read_only, file_scope), INSTRUCTIONS)
+    url = server.register(
+        actions.call,
+        fleet_tools(read_only, file_scope),
+        INSTRUCTIONS,
+        label="Fleet",
+        failure_hint=TOOL_FAILURE_HINT,
+    )
     try:
         workflow = dict(kwargs.get("workflow") or {})
         resources = dict(workflow.get("remResources") or {})

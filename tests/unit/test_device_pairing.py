@@ -7,7 +7,11 @@ import base64
 import concurrent.futures
 import hashlib
 import json
+import logging
 import secrets
+import socket
+import struct
+import time
 import urllib.parse
 from typing import Any
 from uuid import uuid4
@@ -405,6 +409,86 @@ async def test_listener_rejects_unbounded_input_and_rate_limits(registry):
         assert len(listener.attempts) <= 256
     finally:
         await listener.close()
+
+
+def _reset(sock: socket.socket) -> None:
+    # Close with RST, as a phone that loses Wi-Fi or switches routes mid-reply does.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    sock.close()
+    time.sleep(0.05)
+
+
+def _socket_send_warnings(caplog: pytest.LogCaptureFixture) -> int:
+    return sum("socket.send() raised exception" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_phone_that_drops_mid_reply_ends_session_without_a_warning_per_frame(
+    registry, monkeypatch, caplog
+):
+    phone: socket.socket | None = None
+    replied = asyncio.Event()
+
+    class DroppedSession:
+        closed = False
+        stage = "active"
+
+        def __init__(self, *args: Any) -> None:
+            pass
+
+        def receive(self, raw: bytes) -> list[bytes]:
+            assert phone is not None
+            _reset(phone)  # The phone is gone by the time its reply is ready.
+            replied.set()
+            return [b"x" * MAX_CHUNK] * 40
+
+        def poll(self) -> list[bytes]:
+            raise AssertionError("the session must end on the failed reply")
+
+    monkeypatch.setattr("gofer.devices.service.DeviceSession", DroppedSession)
+    listener = DeviceListener(registry, Invitations(registry))
+    port = await listener.start()
+    try:
+        phone = socket.create_connection(("127.0.0.1", port))
+        first = Client(registry).drain()[0]
+        phone.sendall(len(first).to_bytes(4, "big") + first)
+        with caplog.at_level(logging.WARNING, logger="asyncio"):
+            async with asyncio.timeout(5):
+                await replied.wait()
+                while listener.connections:
+                    await asyncio.sleep(0.01)
+        assert _socket_send_warnings(caplog) == 0
+    finally:
+        await listener.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_flush_to_dropped_peer_raises_without_a_warning_per_frame(caplog):
+    from gofer.devices.client import _flush
+
+    accepted: asyncio.Queue[asyncio.StreamWriter] = asyncio.Queue()
+
+    async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await accepted.put(writer)
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    peer = socket.create_connection(("127.0.0.1", server.sockets[0].getsockname()[1]))
+    writer = await accepted.get()
+    _reset(peer)
+
+    class Pending:
+        def drain(self) -> bytes:
+            return b"x" * (MAX_CHUNK * 40)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="asyncio"):
+            with pytest.raises(OSError):
+                await _flush(Pending(), writer, str(uuid4()), "pair", 0)  # type: ignore[arg-type]
+        assert _socket_send_warnings(caplog) == 0
+    finally:
+        writer.close()
+        server.close()
+        await server.wait_closed()
 
 
 def test_local_control_gate_and_no_secrets_in_status(tmp_path):

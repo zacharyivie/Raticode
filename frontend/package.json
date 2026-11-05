@@ -1,6 +1,6 @@
 {
   "name": "gofer-flow-ui",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Local workflow automation studio for Raticode.",
   "author": "Raticode",
   "license": "AGPL-3.0-only",
@@ -26,18 +26,19 @@
     "test:mac-ui-browser": "node browser-tests/run-mac-ui-fixes.cjs",
     "test:editor-find-graph-browser": "node browser-tests/run-editor-find-graph.cjs",
     "test:browser": "npm run build && node ./browser-tests/run-studio-browser.cjs",
-    "dist": "npm run backend:build && npm run build && electron-builder",
+    "dist": "npm run backend:build && node ../scripts/build-macos-speech-helper.cjs && npm run build && electron-builder",
     "dist:linux": "npm run backend:build && npm run build && electron-builder --linux AppImage deb rpm",
     "dist:appimage": "npm run backend:build && npm run build && electron-builder --linux AppImage",
     "dist:deb": "npm run backend:build && npm run build && electron-builder --linux deb",
     "dist:rpm": "npm run backend:build && npm run build && electron-builder --linux rpm",
     "dist:win": "npm run backend:build && npm run build && electron-builder --win nsis",
-    "dist:mac": "npm run backend:build && npm run build && electron-builder --mac dmg zip",
+    "dist:mac": "npm run backend:build && node ../scripts/build-macos-speech-helper.cjs --require && npm run build && electron-builder --mac dmg zip",
     "preview": "vite preview",
     "lint": "eslint .",
     "test:platform": "node electron/tests/run-platform-smoke.cjs",
     "test:pairing-browser": "node browser-tests/run-paired-devices.cjs",
     "test:usage-browser": "node browser-tests/run-usage.cjs",
+    "test:dictation-browser": "node browser-tests/run-dictation-modes.cjs",
     "test:organizations-browser": "node browser-tests/run-organizations.cjs",
     "test:organizations-visual": "node browser-tests/run-organizations-visual.cjs",
     "test:second-brain-visual": "node browser-tests/run-second-brain-visual.cjs",
@@ -155,10 +156,15 @@
         {
           "from": "../dist/gof",
           "to": "backend/gof"
+        },
+        {
+          "from": "../dist/macos-speech/raticode-speech",
+          "to": "speech/raticode-speech"
         }
       ],
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Raticode uses your microphone to transcribe speech into Rem chat messages."
+        "NSMicrophoneUsageDescription": "Raticode uses your microphone to transcribe speech into Rem chat messages.",
+        "NSSpeechRecognitionUsageDescription": "Raticode uses macOS speech recognition on this Mac to turn your dictation into text."
       },
       "entitlements": "build-resources/entitlements.mac.plist",
       "entitlementsInherit": "build-resources/entitlements.mac.plist"
@@ -190,18 +196,18 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
-    "@vitejs/plugin-react": "^5.2.0",
+    "@vitejs/plugin-react": "^6.1.2",
     "autoprefixer": "^10.6.2",
     "concurrently": "^9.2.1",
     "electron": "^45.1.0",
-    "electron-builder": "^26.15.3",
+    "electron-builder": "^26.18.0",
     "eslint": "^9.39.5",
     "eslint-plugin-react": "^7.37.2",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.13.0",
-    "postcss": "^8.4.49",
+    "postcss": "^8.5.32",
     "tailwindcss": "^4.3.3",
-    "vite": "^7.3.6",
+    "vite": "^8.3.5",
     "wait-on": "^9.5.1"
   },
   "overrides": {

@@ -208,6 +208,7 @@ async def _flush(
     tls: DeviceTLS, writer: asyncio.StreamWriter, session: str, mode: str, index: int
 ) -> int:
     outgoing = tls.drain()
+    packets = []
     for offset in range(0, len(outgoing), MAX_CHUNK):
         frame = Frame(
             session,
@@ -216,8 +217,11 @@ async def _flush(
             index,
             outgoing[offset : offset + MAX_CHUNK],
         ).encode()
-        writer.write(packet(frame))
+        packets.append(packet(frame))
         index += 1
+    # One write, so a peer that drops mid-batch doesn't log a warning per frame.
+    if packets:
+        writer.write(b"".join(packets))
     await asyncio.wait_for(writer.drain(), 5)
     return index
 

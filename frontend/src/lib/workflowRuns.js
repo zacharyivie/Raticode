@@ -63,6 +63,12 @@ export function markWorkflowRunReviewed(records, key) {
   return records.map((record) => record.key === key ? { ...record, unread: false } : record);
 }
 
+// Runs whose workflow must be read on every poll: active ones, and ones the
+// last poll lost track of.
+export function watchesWorkflowRun(record) {
+  return ACTIVE.has(record.status) || record.status === "disconnected";
+}
+
 export function disconnectWorkflowRunRecords(records, workflowId = null) {
   return records.map((record) => (
     (!workflowId || record.workflowId === workflowId) && ACTIVE.has(record.status)

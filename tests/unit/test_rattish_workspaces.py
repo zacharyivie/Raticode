@@ -205,19 +205,27 @@ def test_workspace_operations_reject_linked_workspace_roots(tmp_path: Path, acti
     assert list(outside.iterdir()) == []
 
 
-@pytest.mark.parametrize("relative_path", [
-    "first.rattish", "workflow.rattish", "automations/workflow.rattish",
-    ".raticode/first.rattish", ".raticode/workflow.rattish",
-    ".raticode/custom/first.rattish", ".raticode/custom/child/workflow.rattish",
-    ".taskurotta/custom/workflow.rattish", ".raticode/custom/workflow.rad",
-])
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "first.rattish",
+        "workflow.rattish",
+        "automations/workflow.rattish",
+        ".raticode/first.rattish",
+        ".raticode/workflow.rattish",
+        ".raticode/custom/first.rattish",
+        ".raticode/custom/child/workflow.rattish",
+        ".taskurotta/custom/workflow.rattish",
+        ".raticode/custom/workflow.rad",
+    ],
+)
 def test_project_open_ignores_unmanaged_sources(tmp_path: Path, relative_path: str):
     from gofer.ui.api import open_project_payload
 
     project = tmp_path / "project"
     source = project / relative_path
     source.parent.mkdir(parents=True)
-    content = 'Rattish: 1\nWorkflow:\n  name: Unrelated\n'
+    content = "Rattish: 1\nWorkflow:\n  name: Unrelated\n"
     source.write_text(content)
     registry = tmp_path / "data"
     assert open_project_payload(project, registry_dir=registry)["workflows"] == []
@@ -231,7 +239,7 @@ def test_managed_workflow_opens_without_metadata(tmp_path: Path):
     project = tmp_path / "project"
     source = project / ".raticode" / "rem-created" / "workflow.rattish"
     source.parent.mkdir(parents=True)
-    source.write_text('Rattish: 1\nWorkflow:\n  name: Created by Rem\n')
+    source.write_text("Rattish: 1\nWorkflow:\n  name: Created by Rem\n")
     registry = tmp_path / "data"
     payload = open_project_payload(project, registry_dir=registry)
     assert len(payload["workflows"]) == 1
@@ -249,3 +257,44 @@ def test_discovery_does_not_follow_project_directory_or_file_links(tmp_path: Pat
     (project / "linked").symlink_to(outside, target_is_directory=True)
     (project / "linked.rattish").symlink_to(source)
     assert discover_registered_workflows(project, registry_dir=tmp_path / "data") == ()
+
+
+def test_registry_reads_reuse_one_parse_until_the_file_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gofer.rattish import workspaces
+
+    project = tmp_path / "project"
+    project.mkdir()
+    registry = tmp_path / "app-data"
+    create_registered_workflow(project, "Nightly", registry_dir=registry)
+    loads: list[Path] = []
+    load = workspaces._load_registry
+
+    def counting(registry_dir: Path, path: Path) -> dict[str, object]:
+        loads.append(path)
+        return load(registry_dir, path)
+
+    monkeypatch.setattr(workspaces, "_load_registry", counting)
+    monkeypatch.setattr(workspaces, "_registry_cache", {})
+    # Run monitoring looks workflows up many times a second; one parse serves them.
+    for _ in range(5):
+        assert [w.workflow_id for w in list_registered_workflows(registry_dir=registry)] == [
+            "nightly"
+        ]
+    assert len(loads) == 1
+    # Each caller gets its own copy, so a change made before saving can't leak.
+    first = workspaces._read_registry(registry)
+    first["workflows"].clear()
+    assert len(workspaces._read_registry(registry)["workflows"]) == 1
+    # Saving the registry is seen at once.
+    create_registered_workflow(project, "Weekly", registry_dir=registry)
+    assert {w.workflow_id for w in list_registered_workflows(registry_dir=registry)} == {
+        "nightly",
+        "weekly",
+    }
+    reads = len(loads)
+    # Unchanged files are read again after the cache window, so moves on disk show up.
+    monkeypatch.setattr(workspaces, "REGISTRY_CACHE_SECONDS", 0.0)
+    list_registered_workflows(registry_dir=registry)
+    assert len(loads) == reads + 1

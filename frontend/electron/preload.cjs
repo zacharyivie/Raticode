@@ -242,7 +242,8 @@ contextBridge.exposeInMainWorld("goferDesktop", {
       selectPath(options),
   },
   textFiles: {
-    openPreview: (targetPath) => invokeDesktop("gofer:open-media-preview", { targetPath: typeof targetPath === "string" ? targetPath : "", grantId: grantForPath(targetPath) }),
+    openPreview: (targetPath) =>
+      openMediaPreview(targetPath),
     closePreview: (id) => invokeDesktop("gofer:close-media-preview", { id: typeof id === "string" ? id : "" }),
     readPreview: (targetPath) =>
       readBinaryPreview(targetPath),
@@ -618,6 +619,21 @@ function readTextFile(targetPath) {
     grantId: grantForPath(targetPath),
     targetPath: typeof targetPath === "string" ? targetPath : "",
   });
+}
+
+// The main process answers missing: true for a moved or deleted file. Callers expect
+// the rejection older builds gave, so they can say the file is gone.
+async function openMediaPreview(targetPath) {
+  const payload = await invokeDesktop("gofer:open-media-preview", {
+    targetPath: typeof targetPath === "string" ? targetPath : "",
+    grantId: grantForPath(targetPath),
+  });
+  if (payload?.missing) {
+    const error = new Error(`Path does not exist: ${targetPath}`);
+    error.code = "ENOENT";
+    throw error;
+  }
+  return payload;
 }
 
 function readBinaryPreview(targetPath) {

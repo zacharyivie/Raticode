@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_PLUGIN_SETTINGS,
+  EDITOR_CONTENT,
   SIDEBAR_PLUGINS,
+  initialMainContent,
+  resolveMainContent,
   enabledPlugins,
   listedPlugins,
   movePlugin,
@@ -136,4 +139,17 @@ test("Rem is a standard plugin and keeps the sidebar choice saved while it was a
   assert.equal(off.locked, true);
   assert.deepEqual(off.order, normalizePluginOrder(["files", "rem"]));
   assert.equal(pluginEnabled(off, "rem"), true);
+});
+
+test("the main content is chosen apart from the sidebar plugin", () => {
+  const settings = normalizePluginSettings({ preview: { "second-brain": true, swarms: true } });
+  assert.equal(resolveMainContent(settings, "rem"), "rem");
+  assert.equal(resolveMainContent(settings, "swarms"), "swarms");
+  // Plugins without their own workspace, unknown values, and plugins that are
+  // off or hidden all show the editor.
+  for (const content of ["source-control", "workflows", "files", "bogus", "organizations"]) assert.equal(resolveMainContent(settings, content), EDITOR_CONTENT);
+  assert.equal(resolveMainContent(normalizePluginSettings({ enabled: { rem: false } }), "rem"), EDITOR_CONTENT);
+  assert.equal(initialMainContent("second-brain"), "second-brain");
+  assert.equal(initialMainContent("source-control"), EDITOR_CONTENT);
+  assert.equal(initialMainContent("swarms"), EDITOR_CONTENT);
 });

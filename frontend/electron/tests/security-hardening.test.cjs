@@ -615,6 +615,47 @@ for (const name of ["readTextFile", "readBinaryPreview", "readAttachmentFile"]) 
   }
 }
 
+test("media previews answer missing for moved files and still refuse anything else", async t => {
+  const { createMediaPreviews } = require("../media-preview.cjs");
+  const { inside, security } = await fixture(t);
+  const open = mainFunction("openMediaPreview", {
+    resolveExactPath: (target, options) => security.resolveDesktopPath(target, options),
+    mediaPreviews: createMediaPreviews(),
+  });
+  const owner = { sender: { id: 1 } };
+  const video = path.join(inside, "clip.mp4");
+  await fsp.writeFile(video, "frames");
+  await fsp.writeFile(path.join(inside, "notes.txt"), "text");
+  await fsp.mkdir(path.join(inside, "folder.mp4"));
+  assert.match(open(owner, { targetPath: video }).url, /^raticode-media:\/\/preview\//);
+  // A chat can still show a video from a worktree that was deleted since.
+  assert.deepEqual({ ...open(owner, { targetPath: path.join(inside, "gone", "rem-sample.mp4") }) }, { missing: true });
+  assert.deepEqual({ ...open(owner, { targetPath: path.join(video, "inner.mp4") }) }, { missing: true });
+  assert.throws(() => open(owner, { targetPath: path.join(inside, "notes.txt") }), /does not have a media preview/);
+  assert.throws(() => open(owner, { targetPath: path.join(inside, "folder.mp4") }), /ordinary file/);
+  const refused = mainFunction("openMediaPreview", {
+    resolveExactPath: () => { throw new Error("Path grant is invalid or expired."); },
+    mediaPreviews: createMediaPreviews(),
+  });
+  assert.throws(() => refused(owner, { targetPath: video }), /grant is invalid/);
+});
+
+test("the preload turns a missing media preview back into the rejection callers expect", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../preload.cjs"), "utf8");
+  const start = source.indexOf("async function openMediaPreview(");
+  const end = source.indexOf("\nfunction ", start);
+  const answers = { "/gone.mp4": { missing: true }, "/here.mp4": { id: "a", url: "raticode-media://preview/a" } };
+  const openPreview = vm.runInNewContext(`(${source.slice(start, end).trim()})`, {
+    grantForPath: () => "",
+    invokeDesktop: async (channel, payload) => {
+      assert.equal(channel, "gofer:open-media-preview");
+      return answers[payload.targetPath];
+    },
+  });
+  assert.equal((await openPreview("/here.mp4")).id, "a");
+  await assert.rejects(openPreview("/gone.mp4"), error => error.code === "ENOENT" && /Path does not exist: \/gone.mp4/.test(error.message));
+});
+
 test("bounded desktop reads preserve text, image bytes and size errors", async t => {
   const { inside } = await fixture(t);
   const context = {

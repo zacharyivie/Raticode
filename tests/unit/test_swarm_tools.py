@@ -200,6 +200,37 @@ def test_tool_validation_failure_remains_a_tool_result(tool_server: SwarmToolSer
     assert "orchestrator" in result["result"]["content"][0]["text"]
 
 
+def test_unexpected_failures_name_their_service_without_private_detail(
+    tool_server: SwarmToolServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken(_name: str, _args: dict[str, Any]) -> None:
+        raise PermissionError("[Errno 13] Permission denied: '/home/someone/private'")
+
+    swarm = tool_server.register(broken, [{"name": "accept"}])
+    report = tool_server.register(
+        broken,
+        [{"name": "save_report"}],
+        label="Report",
+        failure_hint=swarm_tools.TOOL_FAILURE_HINT,
+    )
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call"}
+    with caplog.at_level("ERROR", logger="gofer.ui.swarm_tools"):
+        text = request(report, {**call, "params": {"name": "save_report"}})[1]["result"]
+        swarm_text = request(swarm, {**call, "params": {"name": "accept"}})[1]["result"]
+    assert text["isError"] is True
+    message = text["content"][0]["text"]
+    # Rem's report tool shares this server; its failures must not read as swarm errors.
+    assert message.startswith("Report tool save_report failed (PermissionError).")
+    assert "swarm" not in message.lower() and "orchestrator" not in message
+    assert "/home/someone" not in message
+    assert swarm_text["content"][0]["text"] == (
+        "Swarm tool accept failed (PermissionError). Retry or ask the orchestrator to inspect it."
+    )
+    # The local log keeps the cause, but never the capability in the request path.
+    assert "/home/someone/private" in caplog.text
+    assert report.rsplit("/", 1)[-1] not in caplog.text
+
+
 @pytest.mark.parametrize("invalidate", ["revoke", "close"])
 def test_pending_request_cannot_outlive_its_grant(
     tool_server: SwarmToolServer, monkeypatch: pytest.MonkeyPatch, invalidate: str

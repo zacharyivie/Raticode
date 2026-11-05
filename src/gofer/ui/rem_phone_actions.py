@@ -205,3 +205,23 @@ def clean_phone_actions(raw: Any) -> list[dict[str, Any]]:
         return []
     kept = (phone_action(item) for item in raw)
     return [action for action in kept if action][:MAX_ACTIONS]
+
+
+def missing_cards_note(asked: Any, kept: list[dict[str, Any]]) -> str:
+    """A sentence for the reply when cards it promised didn't pass the rules, else ''.
+
+    Rem writes its reply before the cards are checked, so it may say a card is ready
+    on the phone when none is.
+    """
+    total = len(asked) if isinstance(asked, list) else 0
+    missing = total - len(kept)
+    if missing <= 0:
+        return ""
+    if not kept:
+        cards = "that phone card" if total == 1 else "those phone cards"
+        return (
+            f"I couldn't make {cards} after all, so there's nothing to open on your phone. "
+            "Ask again with the details, such as the time, place or number."
+        )
+    shown = "one is" if len(kept) == 1 else f"{len(kept)} are"
+    return f"Not every phone card I mentioned could be made; only {shown} on your phone."

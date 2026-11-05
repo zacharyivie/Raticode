@@ -182,8 +182,8 @@ test("branch cleanup removes outdated branches and their clean worktrees but kee
     git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
     git('commit', '--allow-empty', '-m', 'base');
     // Linear: A -> C1 -> B -> C2 -> C. A and B are behind C.
-    git('branch', 'a'); git('switch', '-c', 'work');
-    git('commit', '--allow-empty', '-m', 'c1'); git('branch', 'b');
+    git('branch', 'a'); git('switch', '-c', 'b');
+    git('commit', '--allow-empty', '-m', 'c1'); git('switch', '-c', 'work');
     git('commit', '--allow-empty', '-m', 'c2'); git('branch', 'c');
     // Diverged: D2 on its own commit, D3 on another. D1 is behind both.
     git('switch', '-c', 'd1', 'a'); git('switch', '-c', 'd2'); git('commit', '--allow-empty', '-m', 'only d2');
@@ -197,7 +197,9 @@ test("branch cleanup removes outdated branches and their clean worktrees but kee
     assert.deepEqual(plan.remove.map(item => item.branch).sort(), ['a', 'b', 'd1']);
     assert.equal(plan.remove.find(item => item.branch === 'b').worktree, path.join(root, 'clean'));
     assert.deepEqual(plan.kept.map(item => [item.branch, item.reason]).sort(), [['dirty', 'Uncommitted changes'], ['main', 'Current worktree']]);
-    assert.equal(plan.remove.find(item => item.branch === 'd1').newer.startsWith('d'), true);
+    // d1 sits on main's commit, so it is named after the protected branch rather than d2 or d3.
+    assert.equal(plan.remove.find(item => item.branch === 'd1').newer, 'main');
+    assert.equal(plan.remove.find(item => item.branch === 'b').newer, 'c');
 
     git('branch', 'late', 'a');
     await assert.rejects(gitRepositoryAction(repo, 'branch-cleanup', { items: plan.remove }), /changed/);
@@ -210,6 +212,149 @@ test("branch cleanup removes outdated branches and their clean worktrees but kee
     assert.equal(fs.readFileSync(path.join(root, 'dirty', 'notes.txt'), 'utf8'), 'keep me');
     assert.match(result.notice, /Deleted 3 branches and 1 worktree/);
     await assert.rejects(gitRepositoryAction(repo, 'branch-cleanup', { items: [] }), /no outdated branches/);
+  } finally {
+    if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("branch cleanup removes branches whose commits are all in a protected branch and keeps work in progress", async () => {
+  const { gitRepositoryAction } = require('./git-status.cjs');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-cleanup-protected-')));
+  const repo = path.join(root, 'repo');
+  const tree = name => path.join(repo, '.worktrees', name);
+  const managed = path.join(root, 'data', 'rem-worktrees');
+  const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = path.join(root, 'user.gitconfig');
+  const git = (...args) => childProcess.execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: 'pipe' });
+  const branches = () => git('for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads/').trim().split('\n').sort();
+  let busy;
+  try {
+    childProcess.execFileSync('git', ['init', '-b', 'main', repo]);
+    git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
+    fs.writeFileSync(path.join(repo, '.gitignore'), '.worktrees\nnode_modules\n');
+    git('add', '.gitignore'); git('commit', '-m', 'base');
+    for (const name of ['dev', 'test', 'stage', 'main']) git('config', '--add', 'raticode.cleanupKeep', name);
+    // The user's layout: the main folder is on test, dev and test point at the same commit,
+    // and a finished feature branch was fast-forwarded into dev.
+    git('switch', '-c', 'feature'); git('commit', '--allow-empty', '-m', 'feature work');
+    git('branch', 'dev'); git('branch', 'test'); git('branch', 'no-worktree');
+    for (const name of ['dirty', 'locked']) git('branch', name);
+    // busy was worked on before: it was fast-forwarded, so it has history beyond its creation.
+    git('branch', 'busy', 'main'); git('branch', '-f', 'busy', 'feature');
+    git('switch', 'test');
+    git('worktree', 'add', tree('feature'), 'feature');
+    git('worktree', 'add', '-b', 'unique', tree('unique'), 'dev');
+    fs.writeFileSync(path.join(tree('unique'), 'own.txt'), 'only here');
+    childProcess.execFileSync('git', ['-C', tree('unique'), 'add', 'own.txt']);
+    childProcess.execFileSync('git', ['-C', tree('unique'), 'commit', '-m', 'unique work']);
+    git('worktree', 'add', tree('dirty'), 'dirty');
+    fs.writeFileSync(path.join(tree('dirty'), 'draft.txt'), 'untracked draft');
+    git('worktree', 'add', tree('busy'), 'busy');
+    git('worktree', 'add', '--lock', tree('locked'), 'locked');
+    git('worktree', 'add', '-b', 'rem/task', path.join(managed, 'run-1'), 'dev');
+    // Just created for new work: identical to dev, clean, nothing committed yet.
+    git('worktree', 'add', '-b', 'fresh', tree('fresh'), 'dev');
+    // Two unprotected branches on the same commit: neither is behind the other.
+    git('branch', 'twin-a', 'unique'); git('branch', 'twin-b', 'unique');
+    // An ignored shared-packages link must be removed as a link, never followed.
+    const shared = path.join(root, 'shared-node-modules');
+    fs.mkdirSync(shared); fs.writeFileSync(path.join(shared, 'keep.js'), 'shared');
+    fs.symlinkSync(shared, path.join(tree('feature'), 'node_modules'));
+    if (process.platform === 'linux') busy = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: tree('busy'), stdio: 'ignore' });
+
+    const options = { managedFolders: [managed] };
+    const plan = await gitRepositoryAction(repo, 'branch-cleanup-preview', {}, options);
+    assert.deepEqual(plan.remove.map(item => [item.branch, item.newer, item.worktree]).sort(), [
+      ['feature', 'dev', tree('feature')],
+      ...(busy ? [] : [['busy', 'dev', tree('busy')]]),
+      ['no-worktree', 'dev', ''],
+    ].sort());
+    assert.deepEqual(plan.kept.map(item => [item.branch, item.reason]).sort(), [
+      ...(busy ? [['busy', 'In use by a running program']] : []),
+      // Protected branches behind the unique branch are listed as kept, never removed.
+      ['dev', 'Always kept in this project'],
+      ['dirty', 'Uncommitted changes'],
+      ['fresh', 'No commits made on it yet'],
+      ['locked', 'Worktree is locked'],
+      ['main', 'Always kept in this project'],
+      ['rem/task', 'Used by a Raticode task'],
+      ['test', 'Current worktree'],
+    ].sort());
+
+    const result = await gitRepositoryAction(repo, 'branch-cleanup', { items: plan.remove }, options);
+    assert.deepEqual(result.cleanup.failed, []);
+    assert.deepEqual(branches(), ['dev', 'dirty', 'fresh', 'locked', 'main', 'rem/task', 'test', 'twin-a', 'twin-b', 'unique', ...(busy ? ['busy'] : [])].sort());
+    assert.equal(fs.existsSync(tree('feature')), false);
+    assert.equal(fs.readFileSync(path.join(shared, 'keep.js'), 'utf8'), 'shared');
+    assert.equal(fs.readFileSync(path.join(tree('unique'), 'own.txt'), 'utf8'), 'only here');
+    assert.equal(fs.readFileSync(path.join(tree('dirty'), 'draft.txt'), 'utf8'), 'untracked draft');
+    for (const name of ['dirty', 'fresh', 'locked', 'unique', ...(busy ? ['busy'] : [])]) assert.equal(fs.existsSync(tree(name)), true);
+    assert.equal(fs.existsSync(path.join(managed, 'run-1')), true);
+  } finally {
+    busy?.kill();
+    if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("branch cleanup rechecks every branch and worktree while it deletes", async () => {
+  const { gitRepositoryAction, runGit } = require('./git-status.cjs');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-cleanup-race-')));
+  const repo = path.join(root, 'repo');
+  const tree = name => path.join(root, name);
+  const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = path.join(root, 'user.gitconfig');
+  const git = (...args) => childProcess.execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: 'pipe' });
+  try {
+    childProcess.execFileSync('git', ['init', '-b', 'main', repo]);
+    git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com');
+    git('commit', '--allow-empty', '-m', 'base');
+    for (const name of ['dev', 'release']) git('config', '--add', 'raticode.cleanupKeep', name);
+    git('switch', '-c', 'release'); git('commit', '--allow-empty', '-m', 'release only'); git('branch', 'via-release');
+    git('switch', '-c', 'dev', 'main'); git('commit', '--allow-empty', '-m', 'landed');
+    git('switch', 'main');
+    // Finished branches that were fast-forwarded to dev's commit.
+    for (const name of ['gains-file', 'gains-commit', 'moves', 'settled']) { git('branch', name); git('branch', '-f', name, 'dev'); }
+    git('config', 'branch.settled.description', 'old settings');
+    git('worktree', 'add', tree('gains-file'), 'gains-file');
+    git('worktree', 'add', tree('gains-commit'), 'gains-commit');
+
+    const plan = await gitRepositoryAction(repo, 'branch-cleanup-preview');
+    assert.deepEqual(plan.remove.map(item => [item.branch, item.newer]).sort(), [
+      ['gains-commit', 'dev'], ['gains-file', 'dev'], ['moves', 'dev'], ['settled', 'dev'], ['via-release', 'release'],
+    ]);
+    // After the plan is confirmed, other tools change things just before Raticode reaches each branch.
+    const changes = [
+      [args => args.includes('--quiet') && args.includes('refs/heads/gains-commit'),
+        () => childProcess.execFileSync('git', ['-C', tree('gains-commit'), 'commit', '--allow-empty', '-m', 'meanwhile'])],
+      [args => args.includes('remove') && args.includes(tree('gains-file')),
+        () => fs.writeFileSync(path.join(tree('gains-file'), 'new.txt'), 'written meanwhile')],
+      [args => args.includes('update-ref') && args.includes('refs/heads/moves'), () => git('branch', '-f', 'moves', 'release')],
+      [args => args.includes('merge-base') && args.includes('refs/heads/release'), () => git('branch', '-f', 'release', 'main')],
+    ];
+    const runner = (args, ...rest) => {
+      const index = changes.findIndex(([matches]) => matches(args));
+      if (index >= 0) changes.splice(index, 1)[0][1]();
+      return runGit(args, ...rest);
+    };
+    const result = await gitRepositoryAction(repo, 'branch-cleanup', { items: plan.remove }, { runGit: runner });
+    assert.deepEqual(changes, []);
+    assert.deepEqual(result.cleanup.removed.map(item => item.branch), ['settled']);
+    const failed = Object.fromEntries(result.cleanup.failed.map(item => [item.branch, item.error]));
+    assert.deepEqual(Object.keys(failed).sort(), ['gains-commit', 'gains-file', 'moves', 'via-release']);
+    assert.equal(failed['gains-commit'], 'Branch moved.');
+    assert.match(failed['gains-file'], /contains modified or untracked files/);
+    assert.match(failed.moves, /moves/);
+    assert.equal(failed['via-release'], 'release no longer contains its commits.');
+    // Nothing that changed was lost.
+    assert.match(git('log', '-1', '--format=%s', 'gains-commit'), /meanwhile/);
+    assert.equal(fs.existsSync(tree('gains-commit')), true);
+    assert.equal(fs.readFileSync(path.join(tree('gains-file'), 'new.txt'), 'utf8'), 'written meanwhile');
+    assert.equal(git('rev-parse', 'moves').trim(), git('rev-parse', 'via-release').trim());
+    assert.match(git('log', '-1', '--format=%s', 'via-release'), /release only/);
+    assert.equal(git('for-each-ref', 'refs/heads/settled').trim(), '');
+    assert.throws(() => git('config', 'branch.settled.description'));
   } finally {
     if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
     fs.rmSync(root, { recursive: true, force: true });
@@ -236,7 +381,8 @@ test("branch cleanup always keeps project and user patterns stored in Git config
     const plan = await gitRepositoryAction(repo, 'branch-cleanup-keep', { scope: 'user', patterns: ['test'] });
     assert.deepEqual(plan.keepPatterns.user, ['test']);
     assert.equal(git('config', '--local', '--get-all', 'raticode.cleanupKeep'), 'stage\nrelease/*\n');
-    assert.deepEqual(plan.remove.map(item => item.branch), ['old']);
+    // dev points at main's commit and main is a protected default branch, so dev is a duplicate.
+    assert.deepEqual(plan.remove.map(item => item.branch).sort(), ['dev', 'old']);
     assert.deepEqual(plan.kept.map(item => [item.branch, item.reason]).sort(), [
       ['release/1', 'Always kept in this project'], ['stage', 'Always kept in this project'], ['test', 'Always kept in all projects'],
     ]);
@@ -244,7 +390,7 @@ test("branch cleanup always keeps project and user patterns stored in Git config
     await assert.rejects(gitRepositoryAction(repo, 'branch-cleanup-keep', { scope: 'system', patterns: [] }), /project or user/);
     const cleared = await gitRepositoryAction(repo, 'branch-cleanup-keep', { scope: 'project', patterns: [] });
     assert.deepEqual(cleared.keepPatterns.project, []);
-    assert.deepEqual(cleared.remove.map(item => item.branch).sort(), ['old', 'release/1', 'stage']);
+    assert.deepEqual(cleared.remove.map(item => item.branch).sort(), ['dev', 'old', 'release/1', 'stage']);
   } finally {
     if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
     fs.rmSync(root, { recursive: true, force: true });

@@ -221,11 +221,12 @@ def test_rem_messages_are_idempotent_and_followups_stay_managed(api):
     message = {"request_id": "hello", "body": "Hello"}
     assert request("POST", "/api/rem/messages", body=message).status == 200
     assert request("POST", "/api/rem/messages", body=message).status == 200
-    assert (
-        request("POST", "/api/rem/messages", body={"request_id": "other", "body": "More"}).status
-        == 409
-    )
-    assert len(request("GET", "/api/rem/conversation").json()["messages"]) == 1
+    # A message sent while Rem replies waits for its turn instead of being refused.
+    other = request("POST", "/api/rem/messages", body={"request_id": "other", "body": "More"})
+    assert other.status == 200 and other.json()["waiting"] is True
+    conversation = request("GET", "/api/rem/conversation").json()
+    assert len(conversation["messages"]) == 1
+    assert [m["id"] for m in conversation["waiting"]] == ["other"]
     task = request(
         "POST",
         "/api/rem/tasks",
@@ -457,3 +458,20 @@ def test_rem_polls_get_run_summaries_and_unchanged_answers(api):
     grown = request("GET", f"{thread_path}?known={thread['version']}").json()
     assert grown["messages"][-1]["body"] == "Halfway"
     assert grown["version"] != thread["version"]
+
+
+def test_rem_polls_can_send_their_version_in_a_header(api):
+    request, _service = api
+    tasks = request("GET", "/api/rem/tasks").json()
+    # A fixed address lets the browser reuse its cross-origin check between polls.
+    assert request("GET", "/api/rem/tasks", headers={"X-Gofer-Known": tasks["version"]}).json() == {
+        "unchanged": True,
+        "version": tasks["version"],
+    }
+    conversation = request("GET", "/api/rem/conversation").json()
+    unchanged = request(
+        "GET", "/api/rem/conversation", headers={"X-Gofer-Known": conversation["version"]}
+    ).json()
+    assert unchanged["unchanged"] is True and "messages" not in unchanged
+    # A stale version still gets the full view.
+    assert "tasks" in request("GET", "/api/rem/tasks", headers={"X-Gofer-Known": "old"}).json()

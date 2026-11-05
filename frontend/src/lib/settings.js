@@ -85,6 +85,8 @@ export const KEYBINDING_COMMANDS = [
   { id: "view.toggleProjectPane", label: "Toggle project pane", group: "View", scope: "global", defaultBinding: "Ctrl+KeyB" },
   { id: "view.toggleAssistantPane", label: "Toggle Rem", group: "View", scope: "global", defaultBinding: "Ctrl+KeyL" },
   { id: "workflow.run", label: "Run workflow", group: "Workflow", scope: "global", defaultBinding: "Mod+Enter" },
+  // Ctrl+Alt+V, or Command+Option+V on a Mac. Pressing it again while listening means Done.
+  { id: "voice.dictate", label: "Dictate a message", group: "Rem", scope: "global", defaultBinding: "Mod+Alt+KeyV" },
   { id: "file.new", label: "New file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyN" },
   { id: "file.save", label: "Save active file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyS" },
   { id: "file.close", label: "Close active file", group: "Code editor", scope: "code", defaultBinding: "Mod+KeyW" },
@@ -120,6 +122,10 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
   },
   devices: {
     audioInputId: "default",
+    // "toggle": press the mic once to start and again to stop. "hold": listen while held.
+    dictationMode: "toggle",
+    // Send the message as soon as dictation finishes, for hands-free use.
+    dictationAutoSend: false,
   },
   editor: {
     autosaveDelay: 1000,
@@ -188,6 +194,8 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     // the project pane outermost, next to the window border.
     projectPaneSide: "left",
     assistantPaneSide: "right",
+    // "rem" shows Rem's own chat in the side pane in place of threads.
+    assistantPaneContent: "threads",
     // "editor" opens terminals as a tab beside files instead of in the panel.
     terminalLocation: "panel",
     projectPaneAtStartup: true,
@@ -250,6 +258,8 @@ export function normalizeAppSettings(value = {}) {
   settings.appearance.theme = enumValue(settings.appearance.theme, ["system", "light", "dark"], "system");
   settings.appearance.reducedMotion = enumValue(settings.appearance.reducedMotion, ["system", "on", "off"], "system");
   settings.devices.audioInputId = safeString(settings.devices.audioInputId, "default", 512) || "default";
+  settings.devices.dictationMode = enumValue(settings.devices.dictationMode, ["toggle", "hold"], "toggle");
+  settings.devices.dictationAutoSend = settings.devices.dictationAutoSend === true;
   settings.editor.autosaveDelay = boundedNumber(settings.editor.autosaveDelay, 250, 10000, 1000);
   settings.editor.fontSize = boundedNumber(settings.editor.fontSize, 10, 24, 13);
   settings.editor.lineHeight = boundedNumber(settings.editor.lineHeight, 14, 40, 20);
@@ -299,6 +309,7 @@ export function normalizeAppSettings(value = {}) {
   settings.layout.graphInspectorWidth = boundedNumber(settings.layout.graphInspectorWidth, 280, 520, 340);
   settings.layout.projectPaneSide = enumValue(settings.layout.projectPaneSide, ["left", "right"], "left");
   settings.layout.assistantPaneSide = enumValue(settings.layout.assistantPaneSide, ["left", "right"], "right");
+  settings.layout.assistantPaneContent = enumValue(settings.layout.assistantPaneContent, ["threads", "rem"], "threads");
   settings.layout.terminalLocation = enumValue(settings.layout.terminalLocation, ["panel", "editor"], "panel");
   settings.layout.projectPaneAtStartup = settings.layout.projectPaneAtStartup !== false;
   settings.layout.assistantPaneAtStartup = settings.layout.assistantPaneAtStartup !== false;
@@ -347,7 +358,7 @@ export function settingBinding(settings, commandId) {
 // one gesture and migrate previously accepted, unusable chords to their defaults.
 export const CHORD_COMMAND_IDS = new Set([
   "settings.open", "file.open", "project.open", "browser.open", "browser.reopenClosedTab", "view.graph", "view.code",
-  "view.toggleProjectPane", "view.toggleAssistantPane", "workflow.run",
+  "view.toggleProjectPane", "view.toggleAssistantPane", "workflow.run", "voice.dictate",
 ]);
 
 export function normalizedBinding(binding, platform = globalThis.navigator?.platform ?? "") {
@@ -382,8 +393,19 @@ export function matchesCommand(event, settings, commandId, platform = globalThis
       && /Mac|iPhone|iPad/i.test(platform) && matchesKeybinding(event, "Ctrl+KeyF", platform));
 }
 
+// Windows reports AltGr as Ctrl+Alt, so on layouts such as Hungarian AltGr+V types "@"
+// and arrives as Ctrl+Alt+V. A key that types a symbol is typing, never a shortcut.
+export function typesAltGraphCharacter(event, platform = globalThis.navigator?.platform ?? "") {
+  if (/Mac|iPhone|iPad/i.test(platform)) return false;
+  if (event.getModifierState?.("AltGraph")) return true;
+  if (!event.ctrlKey || !event.altKey) return false;
+  const key = String(event.key ?? "");
+  return /^Key[A-Z]$/.test(eventCode(event)) && [...key].length === 1 && !/\p{L}/u.test(key);
+}
+
 export function matchesKeybinding(event, binding, platform = globalThis.navigator?.platform ?? "") {
   if (!binding || event.repeat || /\s/.test(String(binding).trim())) return false;
+  if (typesAltGraphCharacter(event, platform)) return false;
   const parts = String(binding).split("+").filter(Boolean);
   const code = parts.at(-1);
   const modifiers = new Set(parts.slice(0, -1));

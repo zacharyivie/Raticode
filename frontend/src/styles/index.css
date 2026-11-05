@@ -750,14 +750,14 @@ already carries an authored dark: variant for the same property.
    without moving DOM nodes, which would reload the editor's webviews. Panes on
    the same edge keep the project pane outermost. */
 .studio-panes > .studio-sidebar { order: 0; }
-.studio-panes .studio-chat { order: 3; }
+.studio-panes :is(.studio-chat, .studio-rem-pane) { order: 3; }
 .studio-panes > section { order: 2; }
-.studio-panes[data-assistant-side="left"] .studio-chat {
+.studio-panes[data-assistant-side="left"] :is(.studio-chat, .studio-rem-pane) {
   order: 1;
   border-left-width: 0;
   border-right-width: 1px;
 }
-.studio-panes[data-assistant-side="left"] .studio-chat > [role="separator"] {
+.studio-panes[data-assistant-side="left"] :is(.studio-chat, .studio-rem-pane) > [role="separator"] {
   left: auto;
   right: -3px;
 }

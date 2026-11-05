@@ -280,7 +280,7 @@ async function switchGitBranch(projectRoot, branch, options = {}) {
 }
 
 async function gitRepositoryAction(projectRoot, action, value = "", options = {}) {
-  if (/^(merge-|rebase-|stash-(list|preview|drop|clear|apply-selected)$)/.test(action)) {
+  if (/^(merge-|rebase-|stash-(list|preview|drop|clear|apply-selected)$|integration-targets$)/.test(action)) {
     return require("./git-integration.cjs").integrationAction(projectRoot, action, value, options);
   }
   if (["branch-cleanup-preview", "branch-cleanup", "branch-cleanup-keep"].includes(action)) {

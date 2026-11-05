@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+import nodeAssert from "node:assert/strict";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,7 +7,30 @@ import { after, before, beforeEach, test } from "node:test";
 import vm from "node:vm";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { isDeepStrictEqual } from "node:util";
 import { createServer } from "vite";
+
+// When a comparison involving a test DOM node fails, Node and the test reporter describe
+// both values by walking everything reachable from them: the whole test document and
+// React's fiber tree. That grows without bound; on 2026-11-04 one failing focus check
+// pushed this machine past 90% of RAM and swap. Such failures are reported with short
+// descriptions of the nodes instead.
+const NODE_COMPARISONS = new Set(["equal", "strictEqual", "notEqual", "notStrictEqual", "deepEqual", "deepStrictEqual", "notDeepEqual", "notDeepStrictEqual"]);
+const assert = new Proxy(nodeAssert, {
+  get(target, name, receiver) {
+    const method = Reflect.get(target, name, receiver);
+    if (!NODE_COMPARISONS.has(name)) return method;
+    return (actual, expected, message) => {
+      if (!holdsTestNode(actual) && !holdsTestNode(expected)) return method(actual, expected, message);
+      // Node builds the large description even when given a message, so compare here.
+      // This is node:assert/strict, where equal is strictEqual and deepEqual is deepStrictEqual.
+      const same = /deep/i.test(name) ? isDeepStrictEqual(actual, expected) : Object.is(actual, expected);
+      if (same !== name.startsWith("not")) return;
+      const brief = { actual: describeTestValue(actual), expected: describeTestValue(expected) };
+      throw new nodeAssert.AssertionError({ ...brief, message: message ?? `${name}: ${brief.actual} vs ${brief.expected}`, operator: name });
+    };
+  },
+});
 
 const frontendRoot = path.resolve(import.meta.dirname, "../..");
 const repoRoot = path.resolve(frontendRoot, "..");
@@ -49,6 +72,16 @@ before(async () => {
     root: frontendRoot,
     server: { hmr: false, middlewareMode: true, watch: null },
   });
+  // Vite 8 transforms a lazily imported module only when a test first renders it, so
+  // React.lazy content can arrive after the test's act() flush. Transform the app's
+  // modules up front (without running them) so lazy views resolve as soon as they render.
+  for (const folder of ["src/components", "src/lib", "src/pages"]) {
+    for (const name of fs.readdirSync(path.join(frontendRoot, folder))) {
+      if (/\.jsx?$/.test(name) && !name.includes(".test.")) {
+        await viteServer.environments.ssr.transformRequest(`/${folder}/${name}`);
+      }
+    }
+  }
   ({ apiUrl } = await viteServer.ssrLoadModule("/src/lib/api.js"));
   appModule = await viteServer.ssrLoadModule("/src/pages/App.jsx");
   crashBoundaryModule = await viteServer.ssrLoadModule("/src/components/AppCrashBoundary.jsx");
@@ -446,6 +479,117 @@ test("device settings select and test a microphone with a live input meter", asy
   } finally { await offDom.unmount(); }
 });
 
+test("testing a microphone that sends no sound says it may be muted, and clears once sound arrives", async () => {
+  let exactSamples = 0;
+  class SilentAudioContext {
+    async resume() {}
+    async close() {}
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() {
+      return {
+        fftSize: 0,
+        getByteTimeDomainData(samples) { samples.fill(exactSamples ? 160 : 128); },
+        getFloatTimeDomainData(samples) { samples.fill(exactSamples); },
+      };
+    }
+  }
+  function SettingsHarness() {
+    const [settings, setSettings] = React.useState(settingsModule.DEFAULT_APP_SETTINGS);
+    return React.createElement(settingsPopoverModule.default, {
+      onChange: (path, value) => setSettings((current) => settingsModule.updateSetting(current, path, value)),
+      onClose() {}, onResetAll() {}, open: true, settings,
+    });
+  }
+  const dom = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+  ]));
+  const track = { label: "C920 PRO HD Webcam Analog Stereo", stop() {} };
+  navigator.mediaDevices = {
+    async enumerateDevices() { return [{ deviceId: "webcam", kind: "audioinput", label: track.label }]; },
+    async getUserMedia() { return { getTracks: () => [track], getAudioTracks: () => [track] }; },
+  };
+  window.AudioContext = SilentAudioContext;
+  try {
+    await dom.click(dom.byText("Devices"));
+    await dom.flush();
+    await dom.click(dom.byLabel("Test microphone"));
+    await dom.flush();
+    assert.match(dom.text(), /Listening for input…/);
+    // The meter samples every 80 ms; two seconds of zeros is 25 samples.
+    for (let tick = 0; tick < 25; tick += 1) await dom.flush(100);
+    assert.match(dom.text(), /C920 PRO HD Webcam Analog Stereo is sending no sound\. It may be muted/);
+    exactSamples = 0.25;
+    await dom.flush(100);
+    assert.match(dom.text(), /Input detected/);
+    assert.doesNotMatch(dom.text(), /sending no sound/);
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("device settings show the OS speech recognizer, why it can't be used and the offline choice", async () => {
+  function SettingsHarness() {
+    const [settings, setSettings] = React.useState(settingsModule.DEFAULT_APP_SETTINGS);
+    return React.createElement(settingsPopoverModule.default, {
+      onChange: (path, value) => setSettings((current) => settingsModule.updateSetting(current, path, value)),
+      onClose() {}, onResetAll() {}, open: true, settings,
+    });
+  }
+  const saved = [];
+  let checks = 0;
+  const macos = {
+    engine: "system",
+    system: { id: "macos", name: "macOS speech recognition", available: false, reason: "Speech recognition is off for Raticode. Turn it on in System Settings > Privacy & Security > Speech Recognition." },
+    offline: { name: "Raticode's offline speech model", installed: false, downloadMb: 130 },
+  };
+  const dom = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+    (url, options = {}) => {
+      if (!url.startsWith("/api/chat/transcribe/engines")) return null;
+      if (options.method === "POST") {
+        saved.push(JSON.parse(options.body));
+        return { ok: true, status: 200, json: async () => ({ saved: true, engine: "offline" }) };
+      }
+      checks += 1;
+      if (checks > 1) assert.equal(url, "/api/chat/transcribe/engines?refresh=1");
+      return { ok: true, status: 200, json: async () => macos };
+    },
+  ]));
+  try {
+    await dom.click(dom.byText("Devices"));
+    await dom.flush();
+    await dom.flush();
+    assert.match(dom.text(), /Speech recognition is off for Raticode\. .*Until then, dictation uses Raticode's offline model if it's installed\./);
+    const select = dom.byLabel("Speech recognition");
+    assert.deepEqual([...select.options].map((option) => option.textContent), ["Built into macOS", "Raticode offline model"]);
+    await dom.change(select, "offline");
+    await dom.flush();
+    assert.deepEqual(saved, [{ engine: "offline" }]);
+    assert.match(dom.text(), /downloads once, about 130 MB/);
+    await dom.click(dom.byText("Check again"));
+    await dom.flush();
+    assert.equal(checks, 2);
+  } finally { await dom.unmount(); }
+
+  const linux = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+    jsonResponse("/api/chat/transcribe/engines", {
+      engine: "system",
+      system: { id: "", name: "", available: false, reason: "Linux doesn't include a speech recognizer, so Raticode uses its own offline model." },
+      offline: { name: "Raticode's offline speech model", installed: true, downloadMb: 130 },
+    }),
+  ]));
+  try {
+    await linux.click(linux.byText("Devices"));
+    await linux.flush();
+    await linux.flush();
+    // Nothing to choose on Linux: it says so instead of offering a recognizer it doesn't have.
+    assert.equal(allElements(linux.container).some((node) => node.getAttribute?.("aria-label") === "Speech recognition"), false);
+    assert.match(linux.text(), /Linux doesn't include a speech recognizer, so Raticode uses its own offline model\. Raticode's offline speech model is installed\./);
+  } finally { await linux.unmount(); }
+});
+
 test("settings search only takes focus on open and compact switches keep their control focused", async () => {
   function SettingsHarness() {
     const [settings, setSettings] = React.useState(settingsModule.DEFAULT_APP_SETTINGS);
@@ -773,12 +917,13 @@ test("Rem composer grows with its draft up to its height limit", async () => {
   await dom.unmount();
 });
 
-test("Rem transcription streams partial text into the composer", async () => {
-  let processor;
-  class FakeAudioContext {
+function fakeDictationAudio() {
+  const audio = { processors: [], contexts: 0 };
+  audio.AudioContext = class {
     constructor() {
       this.sampleRate = 48_000;
       this.destination = {};
+      audio.contexts += 1;
     }
     async resume() {}
     async close() {}
@@ -786,74 +931,1024 @@ test("Rem transcription streams partial text into the composer", async () => {
       return { connect() {}, disconnect() {} };
     }
     createScriptProcessor() {
-      processor = { connect() {}, disconnect() {}, onaudioprocess: null };
+      const processor = { connect() {}, disconnect() {}, onaudioprocess: null };
+      audio.processors.push(processor);
       return processor;
     }
     createGain() {
       return { connect() {}, disconnect() {}, gain: { value: 1 } };
     }
-  }
+  };
+  // Speech-like audio into the newest recording session.
+  audio.speak = () => audio.processors.at(-1).onaudioprocess({
+    inputBuffer: { getChannelData: () => Float32Array.from({ length: 16384 }, (_, i) => Math.sin(i / 10) * 0.3) },
+  });
+  // What a muted or switched-off microphone sends: exact zeros, 341 ms per buffer.
+  audio.silence = (buffers = 1) => {
+    for (let index = 0; index < buffers; index += 1) {
+      audio.processors.at(-1).onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(16384) } });
+    }
+  };
+  return audio;
+}
 
-  function ComposerHarness() {
-    const [draft, setDraft] = React.useState("Existing note");
+function composerHarness(initialDraft, props = {}) {
+  return function ComposerHarness() {
+    const [draft, setDraft] = React.useState(initialDraft);
     return React.createElement(chatComposerModule.default, {
-      attachments: [],
-      audioInputDeviceId: "studio-mic",
-      draft,
-      onAttachmentsChange() {},
-      onDraftChange: setDraft,
-      onSend() {},
-      onStop() {},
-      sending: false,
+      attachments: [], draft, onAttachmentsChange() {}, onDraftChange: setDraft, onSend() {}, onStop() {}, sending: false, ...props,
     });
-  }
+  };
+}
 
+test("a microphone that sends no sound is named while listening, and dictation carries on once it's unmuted", async () => {
+  const audio = fakeDictationAudio();
+  const sessions = [];
   const fetchMock = createFetchMock([
     (url, options) => {
-      const request = JSON.parse(options.body);
+      const request = options.body ? JSON.parse(options.body) : {};
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
       if (url === "/api/chat/transcribe/start") {
-        return { ok: true, status: 201, json: async () => ({ sessionId: "session-1" }) };
+        sessions.push(`s${sessions.length + 1}`);
+        return { ok: true, status: 201, json: async () => ({ sessionId: sessions.at(-1), engine: "offline" }) };
       }
+      if (url === "/api/chat/transcribe/chunk") return { ok: true, status: 200, json: async () => ({ text: "hello there" }) };
+      if (url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: request.sessionId === "s1" ? "hello there" : "" }) };
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("Draft")), fetchMock);
+  const headset = "Stealth 600P Gen 2 USB Analog Stereo";
+  const track = { label: headset, stop() {} };
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [track], getAudioTracks: () => [track] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    // A second of zeros is too soon to say anything.
+    audio.silence(3);
+    await dom.flush();
+    assert.doesNotMatch(dom.text(), /sending no sound/);
+    audio.silence(3);
+    await dom.flush();
+    assert.match(dom.text(), /Stealth 600P Gen 2 USB Analog Stereo is sending no sound\. It may be muted on the device/);
+    assert.ok(dom.byLabel("Stop dictating"), "it keeps listening");
+
+    // Unmuted: the warning goes and the words arrive as usual.
+    audio.speak();
+    await dom.flush();
+    assert.doesNotMatch(dom.text(), /sending no sound/);
+    assert.equal(dom.first("textarea").value, "Draft hello there");
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft hello there");
+
+    // A dictation that heard only zeros ends by naming the microphone; the draft is untouched.
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.silence(2);
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft hello there");
+    assert.equal(dom.text().match(/sending no sound/g)?.length, 1);
+    assert.match(dom.text(), /Stealth 600P Gen 2 USB Analog Stereo is sending no sound/);
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("desktop dictation listens until Done, pauses on the line and keeps earlier words", async () => {
+  const audio = fakeDictationAudio();
+  const sessions = [];
+  const fetchMock = createFetchMock([
+    (url, options) => {
+      const request = options.body ? JSON.parse(options.body) : {};
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+      if (url === "/api/chat/transcribe/start") {
+        sessions.push({ id: `session-${sessions.length + 1}`, chunks: 0, finished: false });
+        return { ok: true, status: 201, json: async () => ({ sessionId: sessions.at(-1).id, engine: "macos", engineName: "macOS speech recognition" }) };
+      }
+      const session = sessions.find((item) => item.id === request.sessionId);
       if (url === "/api/chat/transcribe/chunk") {
-        assert.equal(request.sessionId, "session-1");
         assert.ok(Buffer.from(request.data, "base64").length > 0);
-        return { ok: true, status: 200, json: async () => ({ text: "add a review" }) };
+        session.chunks += 1;
+        return { ok: true, status: 200, json: async () => ({ text: session.id === "session-1" ? "add a review" : "and run it" }) };
       }
       if (url === "/api/chat/transcribe/finish") {
-        assert.equal(request.sessionId, "session-1");
-        return { ok: true, status: 200, json: async () => ({ text: "add a review node" }) };
+        session.finished = true;
+        return { ok: true, status: 200, json: async () => ({ text: session.id === "session-1" ? "add a review node" : "and run it now" }) };
       }
-      if (url === "/api/chat/transcribe/cancel") {
-        return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("Existing note", { audioInputDeviceId: "studio-mic" })), fetchMock);
+  let requestedConstraints;
+  let stoppedTracks = 0;
+  navigator.mediaDevices = {
+    getUserMedia: async (constraints) => {
+      requestedConstraints = constraints;
+      return { getTracks: () => [{ stop() { stoppedTracks += 1; } }] };
+    },
+  };
+  window.AudioContext = audio.AudioContext;
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    assert.equal(requestedConstraints.audio.deviceId.exact, "studio-mic");
+    // The phone's dotted line is the listening control; Done replaces Send.
+    assert.equal(dom.byLabel("Pause listening").getAttribute("data-voice-dots"), "listening");
+    assert.ok(dom.byLabel("Stop dictating"));
+    assert.equal(reactProps(dom.byLabel("Attach files")).disabled, true);
+    audio.speak();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Existing note add a review");
+    assert.equal(reactProps(dom.first("textarea")).readOnly, true);
+
+    // Pausing ends the session but keeps its words; the microphone is released.
+    await dom.click(dom.byLabel("Pause listening"));
+    await dom.flush();
+    assert.equal(sessions[0].finished, true);
+    assert.ok(stoppedTracks > 0);
+    assert.equal(dom.byLabel("Keep talking").getAttribute("data-voice-dots"), "paused");
+    assert.equal(dom.first("textarea").value, "Existing note add a review node");
+
+    // Talking again adds to the words already heard.
+    await dom.click(dom.byLabel("Keep talking"));
+    await dom.flush();
+    assert.equal(sessions.length, 2);
+    audio.speak();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Existing note add a review node and run it");
+
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Existing note add a review node and run it now");
+    assert.equal(reactProps(dom.first("textarea")).readOnly, false);
+    assert.ok(dom.byLabel("Dictate a message"));
+    assert.ok(dom.byLabel("Send message"));
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("dictation keys: the shortcut starts and finishes, Space pauses and resumes, Esc discards", async () => {
+  const voiceShortcut = await viteServer.ssrLoadModule("/src/lib/voiceShortcut.js");
+  const audio = fakeDictationAudio();
+  const sessions = [];
+  const fetchMock = createFetchMock([
+    (url, options) => {
+      const request = options.body ? JSON.parse(options.body) : {};
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+      if (url === "/api/chat/transcribe/start") {
+        sessions.push(`s${sessions.length + 1}`);
+        return { ok: true, status: 201, json: async () => ({ sessionId: sessions.at(-1) }) };
+      }
+      if (url === "/api/chat/transcribe/chunk") return { ok: true, status: 200, json: async () => ({ text: request.sessionId === "s1" ? "first part" : "second part" }) };
+      if (url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: request.sessionId === "s1" ? "first part" : "second part" }) };
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("Draft")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    // Discoverable: the hint, the title and aria-keyshortcuts name the shortcut.
+    assert.match(dom.text(), /Ctrl\+Alt\+V to dictate/);
+    const mic = dom.byLabel("Dictate a message");
+    assert.equal(mic.getAttribute("title"), "Dictate (Ctrl+Alt+V)");
+    assert.equal(mic.getAttribute("aria-keyshortcuts"), "Control+Alt+V");
+
+    // The shortcut finds this box and starts listening; keys then work from the message box.
+    await React.act(async () => { await voiceShortcut.requestVoiceDictation(); });
+    await dom.flush();
+    assert.equal(document.activeElement, dom.first("textarea"));
+    assert.equal(dom.byLabel("Pause listening").getAttribute("aria-keyshortcuts"), "Space");
+    assert.equal(dom.byLabel("Discard dictation").getAttribute("aria-keyshortcuts"), "Escape");
+    assert.equal(dom.byLabel("Stop dictating").getAttribute("aria-keyshortcuts"), "Enter Control+Alt+V");
+    assert.match(dom.text(), /Space pauses · Enter finishes · Esc discards/);
+    audio.speak();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft first part");
+
+    await dom.keyDown(dom.first("textarea"), " ", { code: "Space" });
+    await dom.flush();
+    assert.ok(dom.byLabel("Keep talking"));
+    assert.match(dom.text(), /Space keeps talking/);
+    // The read-only box never gains a typed space.
+    assert.equal(dom.first("textarea").value, "Draft first part");
+    await dom.keyDown(dom.first("textarea"), " ", { code: "Space" });
+    await dom.flush();
+    assert.equal(sessions.length, 2);
+    audio.speak();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft first part second part");
+
+    // Pressing the shortcut again means Done.
+    await React.act(async () => { await voiceShortcut.requestVoiceDictation(); });
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft first part second part");
+    assert.ok(dom.byLabel("Dictate a message"));
+
+    // Esc drops only what was said this time; the draft, including earlier dictation, stays.
+    await React.act(async () => { await voiceShortcut.requestVoiceDictation(); });
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    assert.match(dom.first("textarea").value, /second part second part$/);
+    await dom.keyDown(dom.first("textarea"), "Escape");
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft first part second part");
+    assert.ok(dom.byLabel("Dictate a message"));
+    // Outside dictation, Space and Esc are left alone.
+    await dom.keyDown(dom.first("textarea"), "Escape");
+    assert.equal(dom.first("textarea").value, "Draft first part second part");
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("Ctrl+Alt+V in the app shows Rem when hidden and starts dictating in its message box", async () => {
+  const audio = fakeDictationAudio();
+  const started = [];
+  const dom = await mountReact(
+    React.createElement(appModule.default),
+    createFetchMock([
+      jsonResponse("/api/workflows", workflowsPayload([])),
+      (url) => {
+        if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+        if (url === "/api/chat/transcribe/start") {
+          started.push(url);
+          return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+        }
+        return null;
+      },
+    ]),
+  );
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    await dom.flush();
+    const assistantPane = allElements(dom.container).find((element) => element.getAttribute?.("data-chat-pane") === "true");
+    const paneWrapper = () => dom.ancestor(assistantPane, (element) => ["true", "false"].includes(element.getAttribute?.("aria-hidden")));
+    await dom.dispatchWindow("keydown", { code: "KeyL", ctrlKey: true, key: "l" });
+    await dom.flush();
+    assert.equal(paneWrapper().getAttribute("class"), "hidden");
+
+    // AltGr+V typing "@" on a Hungarian layout is typing, not the shortcut.
+    await dom.dispatchWindow("keydown", { code: "KeyV", ctrlKey: true, altKey: true, key: "@" });
+    await dom.flush(100);
+    assert.equal(paneWrapper().getAttribute("class"), "hidden");
+    assert.equal(started.length, 0);
+
+    await dom.dispatchWindow("keydown", { code: "KeyV", ctrlKey: true, altKey: true, key: "v" });
+    await dom.flush(100);
+    await dom.flush(100);
+    assert.equal(paneWrapper().getAttribute("class"), "contents");
+    assert.equal(started.length, 1);
+    assert.ok(allElements(assistantPane).some((element) => element.getAttribute?.("aria-label") === "Stop dictating"));
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("in Hold to talk, holding Ctrl+Alt+V listens and letting go of V goes on to the words", async () => {
+  const audio = fakeDictationAudio();
+  const finished = [];
+  const dom = await mountReact(
+    React.createElement(appModule.default),
+    createFetchMock([
+      jsonResponse("/api/workflows", workflowsPayload([])),
+      (url) => {
+        if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+        if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+        if (url === "/api/chat/transcribe/chunk") return { ok: true, status: 200, json: async () => ({ text: "check the build" }) };
+        if (url === "/api/chat/transcribe/finish") {
+          finished.push(url);
+          return { ok: true, status: 200, json: async () => ({ text: "check the build" }) };
+        }
+        return null;
+      },
+    ]),
+    { storage: { "raticode.settings.v1": JSON.stringify({ devices: { dictationMode: "hold" } }) } },
+  );
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    await dom.flush();
+    const assistantPane = allElements(dom.container).find((element) => element.getAttribute?.("data-chat-pane") === "true");
+    const mic = () => allElements(assistantPane).find((node) => node.getAttribute?.("data-dictation-mode"));
+    assert.equal(mic().getAttribute("data-dictation-mode"), "hold");
+    await dom.dispatchWindow("keydown", { code: "KeyV", ctrlKey: true, altKey: true, key: "v" });
+    await dom.flush(100);
+    await dom.flush(100);
+    assert.equal(mic().getAttribute("aria-label"), "Let go to stop dictating");
+    audio.speak();
+    await dom.flush();
+    // Another key coming up isn't letting go of the shortcut.
+    await dom.dispatchWindow("keyup", { code: "KeyA", key: "a" });
+    await dom.flush();
+    assert.equal(finished.length, 0);
+    await dom.dispatchWindow("keyup", { code: "KeyV", key: "v", ctrlKey: true, altKey: true });
+    await dom.flush();
+    await dom.flush();
+    assert.equal(finished.length, 1);
+    assert.equal(mic().getAttribute("aria-label"), "Dictate a message");
+    assert.equal(allElements(assistantPane).find((node) => node.tagName === "TEXTAREA").value, "check the build");
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("Settings > Devices chooses how dictation listens", async () => {
+  const saved = [];
+  function SettingsHarness() {
+    const [settings, setSettings] = React.useState(settingsModule.DEFAULT_APP_SETTINGS);
+    return React.createElement(settingsPopoverModule.default, {
+      onChange: (path, value) => { saved.push([path, value]); setSettings((current) => settingsModule.updateSetting(current, path, value)); },
+      onClose() {}, onResetAll() {}, open: true, settings,
+    });
+  }
+  const dom = await mountReact(React.createElement(SettingsHarness), createFetchMock([
+    jsonResponse("/api/devices", { experimental_network: false, enabled: true, peers: [] }),
+  ]));
+  try {
+    await dom.click(dom.byText("Devices"));
+    await dom.flush();
+    assert.match(dom.text(), /DictationHow the mic button and the dictation shortcut listen\. Either way, stopping goes straight on to your words/);
+    const select = allElements(dom.container).find((node) => node.tagName === "SELECT" && [...(node.options ?? [])].some((option) => option.getAttribute?.("value") === "hold"));
+    assert.deepEqual([...select.options].map((option) => option.textContent), ["Press to start and stop", "Hold to talk"]);
+    assert.equal(reactProps(select).value, "toggle");
+    await dom.change(select, "hold");
+    assert.deepEqual(saved, [["devices.dictationMode", "hold"]]);
+    // Hands-free: off unless chosen.
+    assert.match(dom.text(), /Send after dictationFor hands-free use: sends the message as soon as your words are ready\./);
+    const autoSend = dom.byLabel("Send after dictation");
+    assert.equal(autoSend.getAttribute("aria-checked"), "false");
+    await dom.click(autoSend);
+    assert.deepEqual(saved.at(-1), ["devices.dictationAutoSend", true]);
+  } finally { await dom.unmount(); }
+});
+
+function dictationFetch({ tidy = false, heard = "book a room for friday", tidyRequests = [], tidyAnswer = { text: "Book a room for Friday.", tidied: true, reason: "" } } = {}) {
+  const sessions = [];
+  return {
+    sessions,
+    fetchMock: createFetchMock([
+      (url, options) => {
+        const request = options.body ? JSON.parse(options.body) : {};
+        if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: tidy }) };
+        if (url === "/api/chat/transcribe/start") {
+          sessions.push({ id: `s${sessions.length + 1}`, finished: false, cancelled: false });
+          return { ok: true, status: 201, json: async () => ({ sessionId: sessions.at(-1).id }) };
+        }
+        const session = sessions.find((item) => item.id === request.sessionId);
+        if (url === "/api/chat/transcribe/chunk") return { ok: true, status: 200, json: async () => ({ text: heard }) };
+        if (url === "/api/chat/transcribe/finish") {
+          session.finished = true;
+          return { ok: true, status: 200, json: async () => ({ text: heard }) };
+        }
+        if (url === "/api/chat/transcribe/cancel") {
+          if (session) session.cancelled = true;
+          return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+        }
+        if (url === "/api/chat/voice-tidy") {
+          tidyRequests.push(request.text);
+          return { ok: true, status: 200, json: async () => tidyAnswer };
+        }
+        return null;
+      },
+    ]),
+  };
+}
+
+test("Hold to talk listens only while the mic is held, and letting go goes straight on to the tidied words", async () => {
+  const voiceShortcut = await viteServer.ssrLoadModule("/src/lib/voiceShortcut.js");
+  const audio = fakeDictationAudio();
+  const tidyRequests = [];
+  const { sessions, fetchMock } = dictationFetch({ tidy: true, tidyRequests });
+  voiceShortcut.setDictationMode("hold");
+  const dom = await mountReact(React.createElement(composerHarness("Note:")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  const mic = () => allElements(dom.container).find((node) => node.getAttribute?.("data-dictation-mode"));
+  try {
+    assert.match(dom.byLabel("Dictate a message").getAttribute("title"), /^Hold to dictate \(or hold Ctrl\+Alt\+V\)$/);
+    assert.match(dom.text(), /hold Ctrl\+Alt\+V to dictate/);
+    // A click does nothing by itself: holding is what listens.
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    assert.equal(sessions.length, 0);
+
+    await dom.pointer(mic(), "onPointerDown");
+    await dom.flush();
+    assert.equal(sessions.length, 1);
+    assert.equal(mic().getAttribute("aria-label"), "Let go to stop dictating");
+    assert.equal(mic().getAttribute("aria-pressed"), "true");
+    // The line shows the voice but isn't a pause button while holding, and nothing says Done.
+    assert.equal(allElements(dom.container).some((node) => node.getAttribute?.("aria-label") === "Pause listening"), false);
+    assert.doesNotMatch(dom.text(), /Done/);
+    assert.match(dom.text(), /Let go to finish · Esc discards/);
+    audio.speak();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Note:", "hidden until tidied");
+
+    await dom.pointer(mic(), "onPointerUp");
+    await dom.flush();
+    await dom.flush();
+    assert.equal(sessions[0].finished, true);
+    assert.deepEqual(tidyRequests, ["book a room for friday"]);
+    assert.equal(dom.first("textarea").value, "Note: Book a room for Friday.");
+    assert.equal(reactProps(dom.first("textarea")).readOnly, false);
+    assert.ok(dom.byLabel("Dictate a message"));
+
+    // A quick tap explains holding instead of failing, and leaves the message alone.
+    await dom.pointer(mic(), "onPointerDown");
+    await dom.pointer(mic(), "onPointerUp");
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Note: Book a room for Friday.");
+    assert.match(dom.text(), /Hold to talk: keep the mic pressed while you speak/);
+    assert.doesNotMatch(dom.text(), /No speech was detected/);
+    assert.equal(tidyRequests.length, 1);
+
+    // Holding the mic with the keyboard works the same way.
+    await dom.keyDown(mic(), " ");
+    await dom.flush();
+    assert.equal(mic().getAttribute("aria-pressed"), "true");
+    audio.speak();
+    await dom.flush();
+    reactProps(mic()).onKeyUp(testEvent(mic(), { key: " " }));
+    await dom.flush();
+    await dom.flush();
+    assert.equal(tidyRequests.length, 2);
+    assert.equal(dom.first("textarea").value, "Note: Book a room for Friday. Book a room for Friday.");
+
+    // Switching to another window while holding counts as letting go.
+    await dom.pointer(mic(), "onPointerDown");
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    await dom.dispatchWindow("blur");
+    await dom.flush();
+    await dom.flush();
+    assert.equal(tidyRequests.length, 3);
+    assert.equal(mic().getAttribute("aria-pressed"), "false");
+  } finally {
+    voiceShortcut.setDictationMode("toggle");
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("letting go of the mic before it opens, or stopping a dictation that is still starting, keeps the message as it was", async () => {
+  const voiceShortcut = await viteServer.ssrLoadModule("/src/lib/voiceShortcut.js");
+  const audio = fakeDictationAudio();
+  const { sessions, fetchMock } = dictationFetch();
+  const dom = await mountReact(React.createElement(composerHarness("Draft")), fetchMock);
+  let openMic;
+  navigator.mediaDevices = { getUserMedia: () => new Promise((resolve) => { openMic = () => resolve({ getTracks: () => [{ stop() {} }] }); }) };
+  window.AudioContext = audio.AudioContext;
+  const mic = () => allElements(dom.container).find((node) => node.getAttribute?.("data-dictation-mode"));
+  try {
+    // Press to start and stop: a second press while the microphone opens ends it quietly.
+    await dom.click(mic());
+    await dom.flush();
+    assert.equal(mic().getAttribute("aria-label"), "Stop dictating");
+    await dom.click(mic());
+    await dom.flush();
+    assert.equal(mic().getAttribute("aria-label"), "Dictate a message");
+    openMic();
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft");
+    assert.equal(sessions.every((session) => !session.finished), true);
+    assert.doesNotMatch(dom.text(), /No speech|denied/);
+
+    // Hold to talk: let go before the microphone opened.
+    voiceShortcut.setDictationMode("hold");
+    await dom.flush();
+    await dom.pointer(mic(), "onPointerDown");
+    await dom.flush();
+    await dom.pointer(mic(), "onPointerUp");
+    await dom.flush();
+    openMic();
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft");
+    assert.equal(mic().getAttribute("aria-pressed"), "false");
+    assert.match(dom.text(), /Hold to talk: keep the mic pressed/);
+  } finally {
+    voiceShortcut.setDictationMode("toggle");
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("a long silence stops listening and goes on to the words, as stopping does", async () => {
+  const audio = fakeDictationAudio();
+  const { sessions, fetchMock } = dictationFetch();
+  const dom = await mountReact(React.createElement(composerHarness("")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  const realNow = Date.now;
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    const start = realNow();
+    Date.now = () => start + 46_000;
+    await dom.flush(1000);
+    await dom.flush();
+    await dom.flush();
+    assert.equal(sessions[0].finished, true);
+    assert.equal(dom.first("textarea").value, "book a room for friday");
+    assert.ok(dom.byLabel("Dictate a message"));
+  } finally {
+    Date.now = realNow;
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("dictation leaves the words to edit, and Send after dictation sends them once they're tidied", async () => {
+  const voiceShortcut = await viteServer.ssrLoadModule("/src/lib/voiceShortcut.js");
+  const audio = fakeDictationAudio();
+  const sent = [];
+  let tidyAnswer = { text: "Book a room for Friday.", tidied: true, reason: "" };
+  const fetchMock = createFetchMock([
+    (url) => {
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+      if (url === "/api/chat/transcribe/chunk" || url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: "book a room for friday" }) };
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      if (url === "/api/chat/voice-tidy") return { ok: true, status: 200, json: async () => tidyAnswer };
+      return null;
+    },
+  ]);
+  function Harness() {
+    const [draft, setDraft] = React.useState("Note:");
+    // Like the real chats, sending reads the draft from state and clears it.
+    return React.createElement(chatComposerModule.default, {
+      attachments: [], draft, onAttachmentsChange() {}, onDraftChange: setDraft, onStop() {}, sending: false,
+      onSend: () => { sent.push(draft); setDraft(""); },
+    });
+  }
+  const dom = await mountReact(React.createElement(Harness), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  const dictate = async () => {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    await dom.flush();
+  };
+  try {
+    // Off by default: the tidied words wait in the box, ready to edit.
+    await dictate();
+    assert.equal(dom.first("textarea").value, "Note: Book a room for Friday.");
+    assert.equal(reactProps(dom.first("textarea")).readOnly, false);
+    assert.deepEqual(sent, []);
+
+    // On: they are sent as soon as the box shows them, with what was already there.
+    voiceShortcut.setDictationAutoSend(true);
+    await dom.change(dom.first("textarea"), "Also:");
+    await dictate();
+    assert.deepEqual(sent, ["Also: Book a room for Friday."]);
+    assert.equal(dom.first("textarea").value, "");
+
+    // Words that couldn't be tidied wait in the box with the reason, even with it on.
+    tidyAnswer = { text: "book a room for friday", tidied: false, reason: "Tidying took too long." };
+    await dictate();
+    assert.deepEqual(sent, ["Also: Book a room for Friday."]);
+    assert.equal(dom.first("textarea").value, "book a room for friday");
+    assert.match(dom.text(), /Not tidied: Tidying took too long\./);
+  } finally {
+    voiceShortcut.setDictationAutoSend(false);
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("Enter finishes a dictation and Discard drops only the words just said", async () => {
+  const audio = fakeDictationAudio();
+  const fetchMock = createFetchMock([
+    (url) => {
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+      if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+      if (url === "/api/chat/transcribe/chunk") return { ok: true, status: 200, json: async () => ({ text: "scratch that" }) };
+      if (url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: "scratch that idea" }) };
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("Keep this")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Keep this scratch that");
+    await dom.click(dom.byLabel("Discard dictation"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Keep this");
+    assert.ok(dom.byLabel("Dictate a message"));
+
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    await dom.keyDown(dom.first("textarea"), "Enter");
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Keep this scratch that idea");
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("with tidying on, long dictation is tidied every 15 or more words once 5 seconds have passed, and a pause tidies the rest", async () => {
+  const audio = fakeDictationAudio();
+  const words = Array.from({ length: 60 }, (_, index) => `word${index + 1}`);
+  const said = (count) => words.slice(0, count).join(" ");
+  let heard = "";
+  const asked = [];
+  const answers = [];
+  const fetchMock = createFetchMock([
+    (url, options) => {
+      const request = options.body ? JSON.parse(options.body) : {};
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+      if (url === "/api/chat/transcribe/chunk" || url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: heard }) };
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      if (url === "/api/chat/voice-tidy") {
+        asked.push(request.text);
+        return new Promise((resolve) => answers.push((text, tidied = true) => resolve({ ok: true, status: 200, json: async () => ({ text, tidied, reason: tidied ? "" : "Tidying took too long." }) })));
       }
       return null;
     },
   ]);
-  const dom = await mountReact(React.createElement(ComposerHarness), fetchMock);
-  const stopTrack = () => {};
-  let requestedConstraints;
-  navigator.mediaDevices = {
-    getUserMedia: async (constraints) => {
-      requestedConstraints = constraints;
-      return { getTracks: () => [{ stop: stopTrack }] };
-    },
+  const dom = await mountReact(React.createElement(composerHarness("Note:")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  const realNow = Date.now;
+  const start = realNow();
+  let clock = start;
+  Date.now = () => clock;
+  const speak = async (count, at) => {
+    clock = start + at;
+    heard = said(count);
+    audio.speak();
+    await dom.flush();
+    await dom.flush();
   };
-  window.AudioContext = FakeAudioContext;
-  await dom.click(dom.byLabel("Transcribe message locally"));
-  assert.equal(requestedConstraints.audio.deviceId.exact, "studio-mic");
-  assert.ok(dom.byLabel("Stop transcription"));
-  processor.onaudioprocess({
-    inputBuffer: { getChannelData: () => Float32Array.from({ length: 16384 }, (_, i) => Math.sin(i / 10)) },
-  });
-  await dom.flush();
-  assert.equal(dom.first("textarea").value, "Existing note add a review");
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    // Nothing said yet: a pause has nothing to tidy.
+    await dom.flush(2000);
+    assert.equal(asked.length, 0);
+    // Sixteen words in a second: a fast talker isn't cut off before five seconds.
+    await speak(16, 1000);
+    assert.equal(asked.length, 0);
+    assert.equal(dom.first("textarea").value, "Note:", "hidden until tidied");
+    // Past five seconds the next words send everything so far, without waiting for a pause.
+    await speak(19, 5200);
+    assert.deepEqual(asked, [said(19)]);
+    // Words said while it is out wait; the answer shows in the box while listening goes on.
+    await speak(30, 5600);
+    answers[0]("Word1 to word19");
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Note: Word1 to word19");
+    assert.equal(reactProps(dom.first("textarea")).readOnly, true);
+    assert.ok(dom.byLabel("Stop dictating"));
+    assert.equal(asked.length, 1, "fewer than 15 new words since the last round");
+    // Fifteen more words, but under five seconds since the last round: not yet.
+    await speak(35, 8000);
+    assert.equal(asked.length, 1);
+    // The wait runs out: the round goes on its own timer while the speaker keeps talking.
+    clock = start + 10300;
+    await dom.flush(5000);
+    await dom.flush();
+    assert.deepEqual(asked, [said(19), said(35)]);
+    // A failed round changes nothing on screen.
+    answers[1](said(35), false);
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Note: Word1 to word19");
+    assert.doesNotMatch(dom.text(), /Not tidied/);
+    // Quiet by now, but the words that just failed aren't asked again in a loop.
+    await dom.flush();
+    assert.equal(asked.length, 2);
+    // A few last words: the pause tidies them though neither threshold is met.
+    await speak(38, 10800);
+    clock = start + 13000;
+    await dom.flush(2000);
+    await dom.flush();
+    assert.deepEqual(asked.at(-1), said(38));
+    answers[2]("Word1 to word38.");
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Note: Word1 to word38.");
+    // Stopping: the last round already covers everything said, so there is no wait and no new request.
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    await dom.flush();
+    assert.equal(asked.length, 3);
+    assert.equal(dom.first("textarea").value, "Note: Word1 to word38.");
+    assert.equal(reactProps(dom.first("textarea")).readOnly, false);
+  } finally {
+    Date.now = realNow;
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
 
-  await dom.click(dom.byLabel("Stop transcription"));
-  await dom.flush();
-  assert.equal(dom.first("textarea").value, "Existing note add a review node");
-  assert.ok(dom.byLabel("Transcribe message locally"));
-  delete window.AudioContext;
-  await dom.unmount();
+test("stopping while a tidy round is out waits for it when it covers everything, and tidies again when it doesn't", async () => {
+  const audio = fakeDictationAudio();
+  let heard = "";
+  let finishText = "";
+  const asked = [];
+  const answers = [];
+  const fetchMock = createFetchMock([
+    (url, options) => {
+      const request = options.body ? JSON.parse(options.body) : {};
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+      if (url === "/api/chat/transcribe/chunk") return { ok: true, status: 200, json: async () => ({ text: heard }) };
+      if (url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: finishText || heard }) };
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      if (url === "/api/chat/voice-tidy") {
+        asked.push(request.text);
+        return new Promise((resolve) => answers.push((text) => resolve({ ok: true, status: 200, json: async () => ({ text, tidied: true, reason: "" }) })));
+      }
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    // The round out covers every word: stopping waits for it instead of asking twice.
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    heard = "check the build";
+    audio.speak();
+    await dom.flush();
+    await dom.flush(2000);
+    assert.deepEqual(asked, ["check the build"]);
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    assert.equal(asked.length, 1);
+    answers[0]("Check the build.");
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Check the build.");
+
+    // The last words came in after the round went out: it is dropped and everything is tidied.
+    await dom.change(dom.first("textarea"), "");
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    heard = "open the logs";
+    audio.speak();
+    await dom.flush();
+    await dom.flush(2000);
+    assert.equal(asked.at(-1), "open the logs");
+    finishText = "open the logs please";
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    await dom.flush();
+    assert.equal(asked.at(-1), "open the logs please");
+    answers.at(-1)("Open the logs, please.");
+    // The dropped round's late answer can't overwrite the newer words.
+    answers.at(-2)("Open the logs.");
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Open the logs, please.");
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("stopping waits for the last buffer of audio still on its way, so the end of the last word isn't cut off", async () => {
+  const audio = fakeDictationAudio();
+  // A live audio context, as in the app; the shared stand-in has no state, so other tests don't wait.
+  audio.AudioContext.prototype.state = "running";
+  const chunks = [];
+  const fetchMock = createFetchMock([
+    (url, options) => {
+      const request = options.body ? JSON.parse(options.body) : {};
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+      if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+      if (url === "/api/chat/transcribe/chunk") {
+        chunks.push(request.data);
+        return { ok: true, status: 200, json: async () => ({ text: chunks.length > 1 ? "book a room for friday" : "book a room" }) };
+      }
+      if (url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: chunks.length > 1 ? "book a room for friday" : "book a room" }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    assert.equal(chunks.length, 1);
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    // The last buffer arrives just after the stop: it still reaches the recognizer.
+    const processor = audio.processors.at(-1);
+    assert.equal(typeof processor.onaudioprocess, "function", "still capturing the tail");
+    processor.onaudioprocess({ inputBuffer: { getChannelData: () => Float32Array.from({ length: 16384 }, (_, i) => Math.sin(i / 9) * 0.3) } });
+    await dom.flush();
+    await dom.flush();
+    assert.equal(chunks.length, 2);
+    assert.equal(dom.first("textarea").value, "book a room for friday");
+    assert.equal(processor.onaudioprocess, null, "and then the microphone closes");
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("stopping doesn't hang when no more audio comes", async () => {
+  const audio = fakeDictationAudio();
+  audio.AudioContext.prototype.state = "running";
+  const fetchMock = createFetchMock([
+    (url) => {
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+      if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+      if (url === "/api/chat/transcribe/chunk" || url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: "check the build" }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+    await dom.click(dom.byLabel("Stop dictating"));
+    // Nothing more arrives: the wait ends on its own after a moment.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await dom.flush();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "check the build");
+    assert.ok(dom.byLabel("Dictate a message"));
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("voice tidying hides dictated words until the tidied text is ready and keeps them when it fails", async () => {
+  const audio = fakeDictationAudio();
+  let tidyAnswer;
+  const tidyRequests = [];
+  const fetchMock = createFetchMock([
+    (url, options) => {
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      const request = options.body ? JSON.parse(options.body) : {};
+      if (url === "/api/chat/transcribe/start") return { ok: true, status: 201, json: async () => ({ sessionId: "s" }) };
+      if (url === "/api/chat/transcribe/chunk") return { ok: true, status: 200, json: async () => ({ text: "um check quad code" }) };
+      if (url === "/api/chat/transcribe/finish") return { ok: true, status: 200, json: async () => ({ text: "um check quad code today" }) };
+      if (url === "/api/chat/voice-tidy") {
+        tidyRequests.push(request.text);
+        return tidyAnswer();
+      }
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("Note:")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  const speak = async () => {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    audio.speak();
+    await dom.flush();
+  };
+  try {
+    let answer;
+    tidyAnswer = () => new Promise((resolve) => { answer = resolve; });
+    await speak();
+    // Heard words stay out of the box while listening, and no note explains it: the line moves.
+    assert.equal(dom.first("textarea").value, "Note:");
+    assert.doesNotMatch(dom.text(), /tidied/i);
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Note:");
+    assert.equal(allElements(dom.container).find((node) => node.getAttribute?.("data-dictation")).getAttribute("data-dictation"), "tidying");
+    assert.match(dom.text(), /Tidying your words/);
+    assert.deepEqual(tidyRequests, ["um check quad code today"]);
+    answer({ ok: true, status: 200, json: async () => ({ text: "Check Claude Code today.", tidied: true, reason: "" }) });
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Note: Check Claude Code today.");
+    // No undo: the tidied words are ordinary text to edit.
+    assert.equal(/undo/i.test(dom.text()), false);
+    assert.equal(reactProps(dom.first("textarea")).readOnly, false);
+
+    tidyAnswer = () => ({ ok: true, status: 200, json: async () => ({ text: "um check quad code today", tidied: false, reason: "Claude Haiku 5.5 needs Claude Code 2.1.293 or later. Run claude update, then try again." }) });
+    await dom.change(dom.first("textarea"), "");
+    await speak();
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "um check quad code today");
+    assert.match(dom.text(), /Not tidied: Claude Haiku 5\.5 needs Claude Code 2\.1\.293/);
+    // Editing clears the note.
+    await dom.change(dom.first("textarea"), "um check Claude Code today");
+    assert.doesNotMatch(dom.text(), /Not tidied/);
+
+    tidyAnswer = () => { throw new TypeError("Failed to fetch"); };
+    await dom.change(dom.first("textarea"), "");
+    await speak();
+    await dom.click(dom.byLabel("Stop dictating"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "um check quad code today");
+    assert.match(dom.text(), /Not tidied: Couldn't reach the tidying service/);
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("dictation keeps heard words when recognition fails and says which recognizer took over", async () => {
+  const audio = fakeDictationAudio();
+  let chunkAnswer;
+  const fetchMock = createFetchMock([
+    (url) => {
+      if (url === "/api/provider/voice-tidy?resolve=0") return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      if (url === "/api/chat/transcribe/start") {
+        return { ok: true, status: 201, json: async () => ({ sessionId: "s", engine: "offline", notice: "This copy of Raticode doesn't include its macOS speech helper. Using Raticode's offline speech model instead." }) };
+      }
+      if (url === "/api/chat/transcribe/chunk") return chunkAnswer();
+      if (url === "/api/chat/transcribe/cancel") return { ok: true, status: 200, json: async () => ({ cancelled: true }) };
+      return null;
+    },
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("Plan:")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) };
+  window.AudioContext = audio.AudioContext;
+  try {
+    chunkAnswer = () => ({ ok: true, status: 200, json: async () => ({ text: "ship the release" }) });
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    assert.match(dom.text(), /Using Raticode's offline speech model instead/);
+    audio.speak();
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Plan:");
+
+    chunkAnswer = () => ({ ok: false, status: 400, json: async () => ({ error: "Speech recognition is off for Raticode. Turn it on in System Settings > Privacy & Security > Speech Recognition." }) });
+    audio.speak();
+    await dom.flush();
+    await dom.flush();
+    // Listening stops, and the words heard so far land in the box, untidied, with the reason.
+    assert.equal(dom.first("textarea").value, "Plan: ship the release");
+    assert.match(dom.text(), /Speech recognition is off for Raticode\..*Your words so far are kept, untidied\./);
+    assert.ok(dom.byLabel("Dictate a message"));
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
+});
+
+test("a microphone that can't open leaves the message as it was", async () => {
+  const fetchMock = createFetchMock([
+    (url) => (url === "/api/provider/voice-tidy?resolve=0" ? { ok: true, status: 200, json: async () => ({ enabled: false }) } : null),
+  ]);
+  const dom = await mountReact(React.createElement(composerHarness("Draft")), fetchMock);
+  navigator.mediaDevices = { getUserMedia: async () => { throw Object.assign(new Error("denied"), { name: "NotAllowedError" }); } };
+  window.AudioContext = fakeDictationAudio().AudioContext;
+  try {
+    await dom.click(dom.byLabel("Dictate a message"));
+    await dom.flush();
+    assert.equal(dom.first("textarea").value, "Draft");
+    assert.match(dom.text(), /Microphone access was denied/);
+    assert.ok(dom.byLabel("Dictate a message"));
+  } finally {
+    delete window.AudioContext;
+    await dom.unmount();
+  }
 });
 
 test("app crash fallback exposes recovery actions and complete diagnostics", () => {
@@ -3744,6 +4839,8 @@ test("application menus use configured shortcuts and expose recent projects", as
 
   await dom.click(dom.byText("Terminal"));
   assert.match(dom.ancestor(dom.byText("Toggle Terminal"), "BUTTON").textContent, /Ctrl\+Shift\+`/);
+  await dom.click(dom.byText("View"));
+  assert.match(dom.ancestor(dom.byText("Dictate a Message"), "BUTTON").textContent, /Ctrl\+Alt\+V/);
   await dom.unmount();
 });
 
@@ -4575,6 +5672,38 @@ test("workflow list reports backend run and compile state instead of a stale Rea
   assert.notEqual(runItem.getAttribute("disabled"), null);
   assert.match(runItem.getAttribute("title"), /Fix this workflow's errors/);
   await dom.unmount();
+});
+
+test("run monitoring reads only workflows that can have changed between full scans", async () => {
+  const nightly = { ...workflowFixture({ id: "nightly", name: "Nightly" }), sourceFormat: "rattish", latestRun: { id: "run-2", status: "running" } };
+  const idle = { ...workflowFixture({ id: "idle", name: "Idle" }), sourceFormat: "rattish", latestRun: { id: "run-1", status: "success" } };
+  let report = { ...workflowFixture({ id: "report", name: "Report" }), sourceFormat: "rattish", latestRun: { id: "run-3", status: "success" } };
+  const running = { id: "run-2", status: "running", startedAt: "2026-10-26T12:00:00Z" };
+  const fetchMock = createFetchMock([
+    (url) => url === "/api/workflows" ? { ok: true, status: 200, json: async () => workflowsPayload([nightly, idle, report]) } : null,
+    jsonResponse("/api/workflows/nightly/logs?limit=100", { runs: [running], pagination: { total: 1 } }),
+    jsonResponse("/api/workflows/nightly/logs?status=running", { runs: [running] }),
+  ]);
+  const logReads = () => fetchMock.calls.map(call => call.url).filter(url => /\/api\/workflows\/[^/]+\/logs/.test(url));
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock);
+  try {
+    await dom.flush();
+    await dom.flush();
+    // The first poll is a full scan: every workflow's history is read.
+    assert.deepEqual(new Set(logReads().map(url => url.split("/")[3])), new Set(["nightly", "idle", "report"]));
+    const before = logReads().length;
+    // A new run of Report changes its latest run in the workflow list.
+    report = { ...report, latestRun: { id: "run-4", status: "running" } };
+    await dom.flush(5_000);
+    await dom.flush();
+    await dom.flush();
+    const next = logReads().slice(before).map(url => url.split("/")[3]);
+    assert.ok(next.length > 0, "the next poll ran");
+    // Nightly is running and Report changed; Idle waits for the next full scan.
+    assert.deepEqual(new Set(next), new Set(["nightly", "report"]));
+  } finally {
+    await dom.unmount();
+  }
 });
 
 test("App keeps the new workflow name field enabled after deleting a workflow", async () => {
@@ -8481,7 +9610,7 @@ test("source control branch cleanup lists outdated branches and deletes them onl
   await dom.click(dom.byLabel("Source control"));
   await dom.click(dom.byText("Branches"));
   await dom.click(dom.byLabel("Clean up branches"));
-  assert.match(dom.byLabel("Branches to delete").textContent, /old.*Behind main · \/workspace\/old.*stale.*Behind main/);
+  assert.match(dom.byLabel("Branches to delete").textContent, /old.*Already in main · \/workspace\/old.*stale.*Already in main/);
   assert.match(dom.byLabel("Outdated branches kept").textContent, /busy · Uncommitted changes/);
   await dom.click(dom.byText("Cancel"));
   assert.deepEqual(calls.map(([action]) => action), ["branch-cleanup-preview"]);
@@ -11028,8 +12157,11 @@ function installTestDom() {
   };
 }
 
+// Ids only ever go up, as in a browser, so clearing a timer that already ran can't hit another.
+let nextTimerId = 1;
+
 function addTimer(timers, callback, delay = 0, repeating = false) {
-  const timer = { callback, delay, id: timers.length + 1, repeating };
+  const timer = { callback, delay, id: nextTimerId++, repeating };
   timers.push(timer);
   return timer.id;
 }
@@ -11092,6 +12224,17 @@ class TestNode {
     node.parentNode = null;
     return node;
   }
+}
+
+function holdsTestNode(value) {
+  return value instanceof TestNode || (Array.isArray(value) && value.some((item) => item instanceof TestNode));
+}
+
+function describeTestValue(value) {
+  if (Array.isArray(value)) return `[${value.map(describeTestValue).join(", ")}]`;
+  if (!(value instanceof TestNode)) return value === null || typeof value !== "object" ? String(value) : "[object]";
+  const label = value.getAttribute?.("aria-label");
+  return `<${String(value.nodeName).toLowerCase()}${label ? ` aria-label="${label}"` : ""}>`;
 }
 
 class TestElement extends TestNode {
@@ -12826,7 +13969,7 @@ test("worktree context menus preview each selected operation without Git mutatio
       assert.throws(() => dom.byLabel("Preview diff"));
       assert.deepEqual(calls.at(-1), { root: "/repo", action: `${kind === "rebase" ? "rebase" : "merge"}-preview`, value: { source: "feature", target: "main", ...(["merge", "rebase"].includes(kind) ? {} : { strategy: kind }) } });
     }
-    assert.ok(calls.every(call => call.action === "stash-list" || call.action.endsWith("-preview")));
+    assert.ok(calls.every(call => ["stash-list", "integration-targets"].includes(call.action) || call.action.endsWith("-preview")));
     await dom.keyDown(row, "F10", { shiftKey: true, target: icon });
     const actions = menu("Actions for feature");
     assert.ok(actions);
@@ -13623,6 +14766,38 @@ test("local HTML website clicks hand off to browser tabs for ordinary and modifi
   }
 });
 
+test("right-clicking a branch and choosing Rebase can target origin/main", async () => {
+  const calls = [];
+  const snapshot = { active: true, root: "/repo", branch: "main", branches: ["main", "feature"], remotes: ["origin"], entries: [] };
+  const workspace = {
+    trustProjectRoot: async () => {}, listDirectory: async () => ({ entries: [] }),
+    gitStatus: async () => snapshot, gitHistory: async () => ({ commits: [] }),
+    gitWorktrees: async () => ({ active: true, worktrees: [{ path: "/repo", branch: "main" }] }),
+    gitRepoAction: async (_root, action, value) => {
+      if (action === "stash-list") return { stashes: [] };
+      calls.push([action, value]);
+      if (action === "integration-targets") return { source: value.source, local: ["main"], remote: ["origin/feature", "origin/main"], recommended: [{ name: "main", type: "local" }, { name: "origin/main", type: "remote" }] };
+      if (action.endsWith("-preview")) return { conflicts: [], sourceHash: "s", targetHash: "t" };
+      return { ...snapshot, notice: "Rebased feature onto origin/main." };
+    },
+  };
+  const dom = await mountReact(React.createElement(codeFileExplorerModule.default, { workflow: { projectRoot: "/repo" } }), createFetchMock([]), { desktop: { workspace } });
+  window.dispatchEvent = () => true;
+  try {
+    await dom.click(dom.byLabel("Source control")); await dom.flush(); await dom.click(dom.byText("Branches"));
+    await dom.pointer(dom.byLabel("Branch feature"), "onContextMenu", { clientX: 100, clientY: 100 });
+    const menu = allElements(document.body).find(el => el.getAttribute("role") === "menu");
+    await dom.click(allElements(menu).find(el => el.getAttribute("data-operation") === "rebase")); await dom.flush();
+    await dom.focus(dom.byLabel("Target branch")); await dom.flush();
+    const recommended = allElements(dom.container).find(el => el.getAttribute("aria-label") === "Remote branch origin/main");
+    assert.equal(recommended.getAttribute("aria-disabled"), null, "origin/main is available for a rebase");
+    await dom.click(recommended); await dom.flush();
+    assert.deepEqual(calls.at(-1), ["rebase-preview", { source: "feature", target: "origin/main", targetType: "remote" }]);
+    await dom.click(dom.byLabel("Rebase")); await dom.flush();
+    assert.deepEqual(calls.at(-1), ["rebase-branch", { source: "feature", target: "origin/main", targetType: "remote", sourceHash: "s", targetHash: "t" }]);
+  } finally { await dom.unmount(); }
+});
+
 test("Branches lists inactive branches without checkout and offers deletion and worktree picking", async () => {
   const calls = [], selected = [];
   let picker = null;
@@ -13656,7 +14831,7 @@ test("Branches lists inactive branches without checkout and offers deletion and 
     assert.equal(allElements(menu()).filter(el => el.tagName === 'BUTTON').length, 7);
     await dom.click(allElements(menu()).find(el => el.getAttribute('data-operation') === 'rebase'));
     assert.equal(reactProps(dom.byLabel('Integration operation')).value, 'rebase');
-    assert.deepEqual(calls, [['rebase-preview', { source: 'feature', target: 'main' }]]);
+    assert.deepEqual(calls, [['integration-targets', { source: 'feature' }], ['rebase-preview', { source: 'feature', target: 'main' }]]);
     calls.length = 0;
     await dom.click(dom.byLabel('Actions for branch feature'));
     await dom.click(allElements(menu()).find(el => el.getAttribute('data-operation') === 'worktree-branch'));
@@ -13669,7 +14844,8 @@ test("Branches lists inactive branches without checkout and offers deletion and 
     // Refresh restores the fixture's worktrees, then delete the unused branch.
     await dom.click(dom.byLabel('Refresh source control')); await dom.flush();
     await dom.click(dom.byLabel('Delete branch feature'));
-    assert.deepEqual(calls.at(-1), ['branch-delete', 'feature']);
+    // The open target picker re-reads its branch list when branches change; that is read-only.
+    assert.deepEqual(calls.filter(([action]) => action !== 'integration-targets').at(-1), ['branch-delete', 'feature']);
     assert.equal(allElements(dom.container).some(el => el.getAttribute('aria-label') === 'Branch feature'), false);
   } finally { window.confirm = oldConfirm; await dom.unmount(); }
 });
@@ -16975,6 +18151,56 @@ test("dedicated commit provider and model persist independently, report failures
   } finally { await dom.unmount(); }
 });
 
+test("voice tidy settings start from the default provider's fast model and explain why it can't run", async () => {
+  const settings = await viteServer.ssrLoadModule("/src/components/VoiceTidySettings.jsx");
+  const capabilities = [
+    { id: "claude_code", displayName: "Claude Code", enabled: true, available: true, models: [{ id: "claude-opus-5-5", displayName: "Opus 5.5" }] },
+    { id: "codex", displayName: "Codex", enabled: true, available: true, models: [{ id: "gpt-6-luna", displayName: "GPT-6 Luna" }, { id: "gpt-6-astra", displayName: "Astra" }] },
+  ];
+  let stored = { enabled: false, provider: "", model: "", effort: "", context: true };
+  const saves = [];
+  const gets = [];
+  const resolved = (defaultProvider) => {
+    const provider = stored.provider || defaultProvider;
+    if (provider === "claude_code") {
+      return { provider, followsDefault: !stored.provider, model: "claude-haiku-5-5", label: "Claude Haiku 5.5", providerName: "Claude Code", available: false, context: stored.context,
+        reason: "Claude Haiku 5.5 needs Claude Code 2.1.293 or later. Run claude update, then try again." };
+    }
+    return { provider, followsDefault: !stored.provider, model: stored.model || "gpt-6-luna", label: stored.model ? "Astra" : "GPT-6 Luna", providerName: "Codex", effort: "low", available: true, context: stored.context, reason: "" };
+  };
+  const fetchMock = createFetchMock([(url, options) => {
+    if (!url.startsWith("/api/provider/voice-tidy")) return null;
+    if (options?.method === "POST") {
+      const changes = JSON.parse(options.body);
+      saves.push(changes);
+      stored = { ...stored, ...("provider" in changes ? { model: "" } : {}), ...changes };
+      return { ok: true, json: async () => ({ saved: true, ...stored }) };
+    }
+    gets.push(url);
+    const query = new URLSearchParams(url.split("?")[1] || "");
+    return { ok: true, json: async () => ({ ...stored, selection: resolved(query.get("defaultProvider")) }) };
+  }]);
+  const dom = await mountReact(React.createElement(settings.default, { capabilities, defaultProvider: "claude_code" }), fetchMock);
+  try {
+    await dom.flush();
+    assert.match(gets[0], /defaultProvider=claude_code/);
+    assert.match(textOf(dom.byLabel("Voice tidy provider")), /Same as default provider \(Claude Code\)/);
+    assert.match(textOf(dom.byLabel("Voice tidy model")), /Fast model \(Claude Haiku 5\.5\)/);
+    assert.match(dom.text(), /needs Claude Code 2\.1\.293 or later\. Run claude update.*Until then your words appear as heard/);
+    await React.act(async () => reactProps(dom.byLabel("Tidy voice messages")).onChange({ target: { checked: true } })); await dom.flush();
+    assert.deepEqual(saves.at(-1), { enabled: true });
+    await dom.change(dom.byLabel("Voice tidy provider"), "codex"); await dom.flush();
+    assert.deepEqual(saves.at(-1), { provider: "codex" });
+    assert.match(textOf(dom.byLabel("Voice tidy model")), /Fast model \(GPT-6 Luna\)/);
+    assert.match(dom.text(), /Uses GPT-6 Luna at low effort\. What you dictate goes to Codex, with names from Rem's chat/);
+    await dom.change(dom.byLabel("Voice tidy model"), "gpt-6-astra"); await dom.flush();
+    assert.deepEqual(saves.at(-1), { provider: "codex", model: "gpt-6-astra" });
+    await React.act(async () => reactProps(dom.byLabel("Use Rem's chat to spell names")).onChange({ target: { checked: false } })); await dom.flush();
+    assert.deepEqual(saves.at(-1), { context: false });
+    assert.doesNotMatch(dom.text(), /with names from Rem's chat/);
+  } finally { await dom.unmount(); }
+});
+
 test("commit template drafts survive clear and type, persist on blur, and reset independently", async () => {
   const settings = await viteServer.ssrLoadModule("/src/components/CommitMessageSettings.jsx");
   const defaultTemplate = "fix | feat | test | chore: one line high level executive summary of changes. Only absolutely necessary technical terms; no jargon.\n\n - one line summary of most important change\n - one line summary of second most important change\n - ...\n - one line summary of last important change";
@@ -17499,6 +18725,113 @@ test("Rem keeps all eight turns in the UI, storage and archive across Codex Curs
   } finally { await dom.unmount(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("branch targets are typeable: recommended first, then local and remote branches alphabetized, with origin/main as a rebase target", async () => {
+  const { default: Controls } = await viteServer.ssrLoadModule("/src/components/GitIntegrationControls.jsx");
+  const calls = [];
+  const targets = {
+    source: "feature", local: ["Alpha", "main", "release/2", "release/10", "zeta"], remote: ["origin/dev", "origin/main", "upstream/zz"],
+    recommended: [{ name: "main", type: "local" }, { name: "origin/main", type: "remote" }],
+  };
+  const workspace = { gitRepoAction: async (_root, action, value) => {
+    calls.push({ action, value });
+    if (action === "stash-list") return { stashes: [] };
+    if (action === "integration-targets") return targets;
+    if (action.endsWith("-preview")) return { conflicts: [], sourceHash: "s1", targetHash: `hash-${value.target}` };
+    return { notice: "Done" };
+  } };
+  const dom = await mountReact(React.createElement(Controls, {
+    rootPath: "/repo", source: "feature", sourceControl: { branch: "main", branches: ["main", "feature", "zeta", "Alpha", "release/10", "release/2"] }, worktrees: [],
+    onSourceChange() {}, onChanged() {},
+  }), createFetchMock([]), { desktop: { workspace } });
+  window.dispatchEvent = () => true;
+  const input = () => dom.byLabel("Target branch");
+  const options = () => allElements(dom.container).filter(el => el.getAttribute("role") === "option");
+  const listed = () => options().map(el => el.getAttribute("aria-label"));
+  const headings = () => allElements(dom.byLabel("Target branch choices")).filter(el => el.getAttribute("role") === "presentation").map(textOf);
+  try {
+    await dom.flush();
+    assert.equal(input().getAttribute("role"), "combobox");
+    assert.equal(reactProps(input()).value, "main");
+    assert.deepEqual(calls.filter(call => call.action === "integration-targets").map(call => call.value), [{ source: "feature" }]);
+
+    await dom.focus(input()); await dom.flush();
+    assert.equal(input().getAttribute("aria-expanded"), "true");
+    assert.deepEqual(headings(), ["Recommended", "Local branches", "Remote branches"]);
+    assert.deepEqual(listed(), [
+      "Local branch main", "Remote branch origin/main",
+      "Local branch Alpha", "Local branch main", "Local branch release/2", "Local branch release/10", "Local branch zeta",
+      "Remote branch origin/dev", "Remote branch origin/main", "Remote branch upstream/zz",
+    ]);
+    // A merge changes its target, so remote branches are listed but only usable for a rebase.
+    const remoteMain = options().find(el => el.getAttribute("aria-label") === "Remote branch origin/main" && el.getAttribute("aria-disabled"));
+    assert.equal(remoteMain.getAttribute("aria-disabled"), "true");
+    assert.match(textOf(remoteMain), /Rebase only/);
+    await dom.click(remoteMain);
+    assert.equal(reactProps(input()).value, "main");
+
+    // Typing filters: local matches first, then remote, and recommendations step aside.
+    await dom.change(input(), "MA");
+    assert.deepEqual(headings(), ["Local branches", "Remote branches"]);
+    assert.deepEqual(listed(), ["Local branch main", "Remote branch origin/main"]);
+    await dom.change(input(), "nothing-like-this");
+    assert.match(dom.text(), /No branches match/);
+    await dom.keyDown(input(), "Escape");
+    assert.equal(input().getAttribute("aria-expanded"), "false");
+    assert.equal(reactProps(input()).value, "main", "Escape restores the chosen branch");
+
+    // Leaving the field with a partial name keeps the chosen branch and starts no preview.
+    const previews = () => calls.filter(call => call.action.endsWith("-preview")).length;
+    const before = previews();
+    await dom.change(input(), "zet"); await dom.blur(input()); await dom.flush();
+    assert.equal(reactProps(input()).value, "main");
+    assert.equal(previews(), before);
+    // An exact name picks the local branch; arrow keys pick from the list.
+    await dom.change(input(), "Zeta"); await dom.blur(input()); await dom.flush();
+    assert.equal(reactProps(input()).value, "zeta");
+    assert.deepEqual(calls.at(-1), { action: "merge-preview", value: { source: "feature", target: "zeta" } });
+    await dom.change(input(), "release");
+    await dom.keyDown(input(), "ArrowDown"); await dom.keyDown(input(), "ArrowDown");
+    assert.equal(input().getAttribute("aria-activedescendant"), options()[1].getAttribute("id"));
+    await dom.keyDown(input(), "Enter"); await dom.flush();
+    assert.equal(reactProps(input()).value, "release/10");
+
+    // Rebase onto origin/main by typing it.
+    await dom.change(dom.byLabel("Integration operation"), "rebase");
+    await dom.change(input(), "origin/main"); await dom.keyDown(input(), "Enter"); await dom.flush();
+    assert.equal(reactProps(input()).value, "origin/main");
+    assert.deepEqual(calls.at(-1), { action: "rebase-preview", value: { source: "feature", target: "origin/main", targetType: "remote" } });
+    assert.match(dom.text(), /Uses origin\/main as of the last fetch/);
+    assert.match(dom.text(), /No conflicts, safe to rebase/);
+    await dom.click(dom.byLabel("Rebase")); await dom.flush();
+    assert.deepEqual(calls.at(-1), { action: "rebase-branch", value: { source: "feature", target: "origin/main", targetType: "remote", sourceHash: "s1", targetHash: "hash-origin/main" } });
+  } finally { await dom.unmount(); }
+});
+
+test("switching from rebase to a merge drops a remote target instead of merging into it", async () => {
+  const { default: Controls } = await viteServer.ssrLoadModule("/src/components/GitIntegrationControls.jsx");
+  const calls = [];
+  const workspace = { gitRepoAction: async (_root, action, value) => {
+    calls.push({ action, value });
+    if (action === "stash-list") return { stashes: [] };
+    if (action === "integration-targets") return { local: ["main"], remote: ["origin/main"], recommended: [] };
+    return { conflicts: [], sourceHash: "s", targetHash: "t" };
+  } };
+  const dom = await mountReact(React.createElement(Controls, {
+    rootPath: "/repo", source: "feature", request: { kind: "rebase" }, sourceControl: { branch: "main", branches: ["main", "feature"] }, worktrees: [],
+    onSourceChange() {}, onChanged() {},
+  }), createFetchMock([]), { desktop: { workspace } });
+  try {
+    await dom.flush();
+    await dom.focus(dom.byLabel("Target branch"));
+    await dom.click(allElements(dom.container).find(el => el.getAttribute("aria-label") === "Remote branch origin/main")); await dom.flush();
+    assert.deepEqual(calls.at(-1).value, { source: "feature", target: "origin/main", targetType: "remote" });
+    await dom.change(dom.byLabel("Integration operation"), "squash"); await dom.flush();
+    assert.equal(reactProps(dom.byLabel("Target branch")).value, "main");
+    assert.deepEqual(calls.at(-1), { action: "merge-preview", value: { source: "feature", target: "main", strategy: "squash" } });
+    assert.ok(calls.every(call => call.action !== "merge-preview" || call.value.targetType === undefined), "no merge ever targets a remote branch");
+  } finally { await dom.unmount(); }
+});
+
 test("branch previews follow selections, ignore stale results, and hand actual conflicts to Rem", async () => {
   const { default: Controls } = await viteServer.ssrLoadModule("/src/components/GitIntegrationControls.jsx");
   const calls = [], pending = [], events = [], selected = [], closed = [];
@@ -17517,9 +18850,11 @@ test("branch previews follow selections, ignore stale results, and hand actual c
   try {
     assert.equal(pending.length, 1);
     await dom.change(dom.byLabel("Target branch"), "");
+    await dom.keyDown(dom.byLabel("Target branch"), "Enter");
     assert.doesNotMatch(dom.text(), /Checking for conflicts/);
     assert.equal(reactProps(dom.byLabel("Merge")).disabled, true);
     await dom.change(dom.byLabel("Target branch"), "release");
+    await dom.keyDown(dom.byLabel("Target branch"), "Enter");
     await React.act(async () => pending[0]({ notice: "Old result", conflicts: [] }));
     assert.doesNotMatch(dom.text(), /safe to|Old result/);
     assert.equal(reactProps(dom.byLabel("Merge")).disabled, true);
@@ -18200,11 +19535,13 @@ test("Rem leads the activity rail and Second Brain follows Swarms in arrow-key t
     assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
     await dom.keyDown(dom.byLabel("File explorer"), "End", rail);
     assert.equal(dom.byLabel("Second Brain").getAttribute("aria-selected"), "true");
-    // Arrow keys only move between panels; choosing Rem opens its conversation.
+    // Arrow keys only move between panels; clicking Rem or Second Brain opens its home.
     assert.deepEqual(opened, []);
     assert.deepEqual(remOpened, []);
     await dom.click(dom.byLabel("Rem"));
     assert.deepEqual(remOpened, [true]);
+    await dom.click(dom.byLabel("Second Brain"));
+    assert.deepEqual(opened, [true]);
   } finally { await dom.unmount(); }
 });
 
@@ -18374,6 +19711,72 @@ test("Feature Preview turns on every experimental feature, restarting the backen
   } finally { await hiddenDom.unmount(); }
 });
 
+test("an opened task fills the Rem sidebar with a back arrow, and the chat keeps its width", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  remStore.resetRemHomeStore();
+  const created = new Date().toISOString();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [{ id: "m1", role: "rem", created_at: created, body: "Started a research thread.", work: { task_id: "t1", run_id: "r1", thread_id: "thread-worker" } }] }),
+    jsonResponse("/api/rem/tasks", { tasks: [{ id: "t1", title: "Sync research", type: "research", revision: 1, state: "enabled", schedule: { kind: "once" }, active_run: { id: "r1", state: "executing", thread_id: "thread-worker" } }] }),
+  ]);
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const hasLabel = label => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
+  const until = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const inSidebar = node => Boolean(node) && Boolean(dom.ancestor(node, item => item === dom.container || item.getAttribute?.("id") === "sidebar-panel-rem").getAttribute?.("id"));
+  const taskPane = () => find(node => node.getAttribute?.("aria-label") === "Task: Sync research");
+  const taskCard = () => find(node => node.tagName === "BUTTON" && node.getAttribute("title") === "Task details");
+  try {
+    await until(() => hasLabel("Rem"));
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => taskCard());
+    // With another plugin in the sidebar, a task card in the chat opens the task in Rem's sidebar.
+    await dom.click(dom.byLabel("Source control"));
+    await dom.click(taskCard());
+    await until(() => taskPane());
+    assert.ok(taskPane(), "the task opens");
+    assert.ok(inSidebar(taskPane()), "the task opens in the Rem sidebar, not beside the chat");
+    assert.equal(dom.byLabel("Rem").getAttribute("aria-selected"), "true", "the Rem sidebar comes forward");
+    assert.ok(hasLabel("Conversation with Rem"), "the chat stays open");
+    assert.equal(find(node => node.getAttribute?.("class")?.includes("rem-task-open")), undefined, "the task replaces the list");
+
+    // The back arrow returns to every task.
+    await dom.click(dom.byLabel("Back to all tasks"));
+    assert.equal(taskPane(), undefined);
+    assert.equal(hasLabel("Back to all tasks"), false);
+    const row = find(node => node.tagName === "BUTTON" && node.getAttribute("title") === "Research · Sync research");
+    assert.ok(row, "the task list is back");
+
+    // Opening a task from the list doesn't replace what the main area shows.
+    await dom.click(dom.byLabel("Workflows"));
+    await dom.click(dom.ancestor(dom.byText("Workflow A"), node => node.getAttribute?.("role") === "button"));
+    await dom.flush();
+    assert.equal(hasLabel("Conversation with Rem"), false);
+    // Arrow keys move the sidebar to Rem without opening its chat (clicking Rem in the rail opens it).
+    await dom.keyDown(dom.byLabel("Workflows"), "ArrowUp", { currentTarget: { parentElement: { querySelector: () => null } } });
+    await until(() => find(node => node.tagName === "BUTTON" && node.getAttribute("title") === "Research · Sync research"));
+    await dom.click(find(node => node.tagName === "BUTTON" && node.getAttribute("title") === "Research · Sync research"));
+    assert.ok(taskPane());
+    assert.equal(hasLabel("Conversation with Rem"), false, "the workflow stays in the main area");
+    assert.ok(hasLabel("Workflow graph visualization"));
+
+    // "View in conversation" shows Rem's chat when it was hidden; the task stays open beside it.
+    await dom.click(find(node => node.getAttribute?.("class")?.includes("rem-update-message")));
+    await until(() => hasLabel("Conversation with Rem"));
+    assert.ok(hasLabel("Conversation with Rem"));
+    assert.ok(taskPane());
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
 test("Rem opens its conversation from the rail and sends thread links to the Rem pane", async () => {
   const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
   remStore.resetRemHomeStore();
@@ -18440,7 +19843,7 @@ test("Organizations leaves the sidebar when its backend switch is off", async ()
   }
 });
 
-test("the sidebar activity decides what the main content area shows", async () => {
+test("switching plugins changes the sidebar and keeps the main content until something is opened", async () => {
   const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
   remStore.resetRemHomeStore();
   const fetchMock = createFetchMock([
@@ -18451,44 +19854,176 @@ test("the sidebar activity decides what the main content area shows", async () =
   const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage: experimentalPluginStorage() });
   const hasLabel = label => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
   const settle = async (label) => {
-    for (let attempt = 0; attempt < 20 && !hasLabel(label); attempt += 1) {
+    for (let attempt = 0; attempt < 200 && !hasLabel(label); attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 10));
       await dom.flush();
     }
   };
+  const selected = label => dom.byLabel(label).getAttribute("aria-selected") === "true";
   try {
-    await dom.flush();
+    await settle("Rem");
+    // Choosing Rem opens its conversation over the workflow graph opened at startup.
     await dom.click(dom.byLabel("Rem"));
     await settle("Conversation with Rem");
     assert.ok(hasLabel("Conversation with Rem"));
 
     assert.equal(hasLabel("Organizations"), false, "experimental plugins are off by default");
-    for (const activity of ["Workflows", "File explorer", "Search", "Source control", "Swarms"]) {
-      await dom.click(dom.byLabel("Rem"));
-      await settle("Conversation with Rem");
+    for (const activity of ["Source control", "Workflows", "File explorer", "Search", "Swarms"]) {
       await dom.click(dom.byLabel(activity));
-      assert.equal(hasLabel("Conversation with Rem"), false, `${activity} hides Rem's conversation`);
+      assert.ok(selected(activity), `${activity} shows its sidebar`);
+      assert.ok(hasLabel("Conversation with Rem"), `${activity} keeps Rem's conversation`);
+      assert.equal(hasLabel("Back to editor"), false, `${activity} leaves Second Brain closed`);
     }
 
+    // Choosing a workflow opens it in the main area, and the sidebar stays put.
+    await dom.click(dom.byLabel("Workflows"));
+    await dom.click(dom.ancestor(dom.byText("Workflow A"), node => node.getAttribute?.("role") === "button"));
+    await dom.flush();
+    assert.equal(hasLabel("Conversation with Rem"), false);
+    assert.ok(hasLabel("Workflow graph visualization"));
+    assert.ok(selected("Workflows"));
+
+    // Arrow keys move the sidebar to Rem without opening its conversation; Rem's
+    // own row in the sidebar opens it.
+    await dom.keyDown(dom.byLabel("Workflows"), "ArrowUp", { currentTarget: { parentElement: { querySelector: () => null } } });
+    await dom.flush();
+    assert.equal(hasLabel("Conversation with Rem"), false);
+    assert.ok(selected("Rem"));
+    const remHomeRow = () => allElements(dom.container).find(node => String(node.getAttribute?.("class") || "").includes("rem-side-home"));
+    for (let attempt = 0; attempt < 200 && !remHomeRow(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+    await dom.click(remHomeRow());
+    await settle("Conversation with Rem");
+    assert.ok(hasLabel("Conversation with Rem"));
+    assert.ok(selected("Rem"));
+
+    await dom.click(dom.byLabel("Source control"));
+    assert.ok(hasLabel("Conversation with Rem"));
+
+    // Choosing the graph's editor tab brings it back without moving the sidebar.
+    await dom.click(allElements(dom.container).find(node => node.getAttribute?.("role") === "tab" && textOf(node).includes("Workflow A")));
+    await dom.flush();
+    assert.equal(hasLabel("Conversation with Rem"), false);
+    assert.ok(selected("Source control"));
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+  }
+});
+
+test("Rem keeps unchanged task objects across polls so only changed task cards re-render", async () => {
+  const { mergeTasks } = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const idle = { id: "idle", title: "Weekly health", last_run: { id: "r1", state: "succeeded" } };
+  const busy = { id: "busy", title: "Sync research", active_run: { id: "r2", state: "working", phase_label: "Step 1" } };
+  const next = mergeTasks([{ ...idle, last_run: { ...idle.last_run } }, { ...busy, active_run: { ...busy.active_run, phase_label: "Step 2" } }, { id: "new", title: "New" }], [idle, busy]);
+  assert.equal(next[0], idle, "an unchanged task keeps its object");
+  assert.notEqual(next[1], busy);
+  assert.equal(next[1].active_run.phase_label, "Step 2");
+  assert.deepEqual(next.map(task => task.id), ["idle", "busy", "new"], "the server's order and new tasks win");
+});
+
+test("Rem can fill the side pane, and opening the Rem plugin puts threads back there", async () => {
+  const remStore = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const remComposer = await viteServer.ssrLoadModule("/src/lib/remComposer.js");
+  remStore.resetRemHomeStore();
+  remComposer.resetRemComposer();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const storage = { [settingsModule.SETTINGS_STORAGE_KEY]: JSON.stringify({ plugins: { enabled: EXPERIMENTAL_PLUGINS_ON }, layout: { assistantPaneContent: "rem" } }) };
+  const dom = await mountReact(React.createElement(appModule.default), fetchMock, { storage });
+  const find = predicate => allElements(dom.container).find(predicate);
+  const remPane = () => find(node => node.getAttribute?.("data-rem-pane") === "true");
+  const threadsShown = () => dom.ancestor(find(node => node.getAttribute?.("data-chat-pane") === "true"), node => node.getAttribute?.("aria-hidden") != null).getAttribute("aria-hidden") === "false";
+  const threadBox = () => find(node => node.tagName === "TEXTAREA" && node.getAttribute("placeholder") === "Message this workflow");
+  const remBox = () => find(node => node.tagName === "TEXTAREA" && node.getAttribute("aria-label") === "Message Rem");
+  const until = async (predicate) => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  const openWorkflow = async () => {
+    await dom.click(dom.byLabel("Workflows"));
+    await dom.click(dom.ancestor(dom.byText("Workflow A"), node => node.getAttribute?.("role") === "button"));
+    await dom.flush();
+  };
+  try {
+    // Rem's chat fills the side pane; threads stay mounted but hidden.
+    await until(() => remBox());
+    assert.ok(remPane());
+    assert.ok(dom.ancestor(remBox(), node => node === remPane()), "Rem's message box is in the side pane");
+    assert.equal(threadsShown(), false);
+    await dom.change(remBox(), "Draft for Rem");
+    // Rem's chat moves between panes as one instance instead of rendering again.
+    const firstBox = remBox();
+
+    // Opening the Rem plugin moves its chat to the main area and threads back to the side pane.
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => !remPane() && remBox());
+    assert.equal(remPane(), undefined);
+    assert.ok(threadsShown());
+    assert.equal(reactProps(remBox()).value, "Draft for Rem", "Rem's draft survives the move");
+    assert.equal(remBox(), firstBox, "Rem's chat moved without remounting");
+    assert.equal(allElements(dom.container).filter(node => node.getAttribute?.("aria-label") === "Message Rem").length, 1, "Rem's chat appears once");
+    await dom.change(threadBox(), "Draft for a thread");
+
+    // Leaving Rem's main view brings Rem back to the side pane, and threads keep their draft.
+    await openWorkflow();
+    await until(() => remPane());
+    assert.ok(remPane());
+    assert.equal(threadsShown(), false);
+    assert.equal(reactProps(remBox()).value, "Draft for Rem");
+    assert.equal(remBox(), firstBox, "Rem's chat moved back without remounting");
+    await dom.click(dom.byLabel("Rem"));
+    await until(() => !remPane());
+    assert.equal(reactProps(threadBox()).value, "Draft for a thread");
+
+    // Opening a thread from Rem shows threads in the side pane until the person goes back to Rem.
+    await openWorkflow();
+    await until(() => remPane());
+    await dom.dispatchWindow("gofer:rem-open-thread", { detail: {} });
+    assert.equal(remPane(), undefined);
+    assert.ok(threadsShown());
+    await dom.click(dom.byLabel("Back to Rem"));
+    await until(() => remPane());
+    assert.ok(remPane());
+    assert.equal(allElements(dom.container).some(node => node.getAttribute?.("aria-label") === "Back to Rem"), false);
+  } finally {
+    await dom.unmount();
+    remStore.resetRemHomeStore();
+    remComposer.resetRemComposer();
+  }
+});
+
+test("Second Brain stays open while switching plugins and closes back to the editor without moving the sidebar", async () => {
+  const dom = await mountReact(React.createElement(appModule.default), createFetchMock([
+    jsonResponse("/api/workflows", workflowsPayload([workflowFixture({ id: "a", name: "Workflow A" })])),
+  ]), { storage: experimentalPluginStorage() });
+  const hasLabel = label => allElements(dom.container).some(node => node.getAttribute?.("aria-label") === label);
+  const settle = async (label) => {
+    for (let attempt = 0; attempt < 200 && !hasLabel(label); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await dom.flush();
+    }
+  };
+  try {
+    await settle("Second Brain");
     await dom.click(dom.byLabel("Second Brain"));
     await settle("Back to editor");
     assert.ok(hasLabel("Back to editor"));
     await dom.click(dom.byLabel("File explorer"));
-    assert.equal(hasLabel("Back to editor"), false);
-
-    await dom.click(dom.byLabel("Second Brain"));
-    await settle("Back to editor");
+    assert.ok(hasLabel("Back to editor"), "switching plugins keeps Second Brain open");
     await dom.click(dom.byLabel("Back to editor"));
     assert.equal(hasLabel("Back to editor"), false);
     assert.equal(dom.byLabel("File explorer").getAttribute("aria-selected"), "true");
   } finally {
     await dom.unmount();
-    remStore.resetRemHomeStore();
   }
-  assert.equal(appModule.editorActivity("rem"), "files");
-  assert.equal(appModule.editorActivity("second-brain", "workflows"), "workflows");
-  assert.equal(appModule.editorActivity("swarms"), "swarms");
-  assert.equal(appModule.editorActivity("search", "workflows"), "search");
 });
 
 test("Rem keeps original replies and links task updates to the archived worker", async () => {
@@ -18609,6 +20144,116 @@ test("Rem messages show their date and time, and back-to-back Rem replies are di
     await dom.unmount();
     store.resetRemHomeStore();
   }
+});
+
+async function waitForNode(dom, find, attempts = 40) {
+  for (let attempt = 0; attempt < attempts && !find(); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await dom.flush();
+  }
+  return find();
+}
+
+test("attachments in the composer show thumbnails and type tiles, preview on click and can be removed", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const picked = [
+    new File([png], "cat.png", { type: "image/png" }),
+    new File(["# Plan\nShip it."], "notes.md", { type: "text/markdown" }),
+    new File(["%PDF-1.7"], "plan.pdf", { type: "application/pdf" }),
+  ].map((file, index) => ({ file, id: `a${index}`, name: file.name, size: file.size, type: file.type }));
+  let changed;
+  function ComposerHarness() {
+    const [attachments, setAttachments] = React.useState(picked);
+    return React.createElement(chatComposerModule.default, {
+      attachments, draft: "", onDraftChange() {}, onSend() {}, onStop() {}, sending: false,
+      onAttachmentsChange(next) { changed = next; setAttachments(next); }, onAttachmentErrorChange() {},
+    });
+  }
+  const dom = await mountReact(React.createElement(ComposerHarness), createFetchMock([]));
+  try {
+    await dom.flush();
+    const tile = name => allElements(dom.container).find(node => node.getAttribute?.("aria-label") === `Preview ${name}`)?.parentNode;
+    assert.deepEqual(["cat.png", "notes.md", "plan.pdf"].map(name => tile(name).getAttribute("data-attachment-kind")), ["image", "text", "pdf"]);
+    // The picture shows itself before it is sent; other files show their type.
+    const thumb = allElements(tile("cat.png")).find(node => node.tagName === "IMG");
+    assert.match(reactProps(thumb).src, /^blob:/);
+    assert.match(textOf(tile("plan.pdf")), /PDF · /);
+    assert.match(textOf(tile("notes.md")), /MD · /);
+
+    await dom.click(dom.byLabel("Preview notes.md"));
+    const viewer = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "text" && textOf(node).includes("Ship it.")));
+    assert.ok(viewer, "the text preview opens");
+    assert.equal(textOf(allElements(viewer).find(node => node.tagName === "PRE")), "# Plan\nShip it.");
+    await dom.click(allElements(viewer).find(node => node.getAttribute?.("aria-label") === "Close"));
+
+    await dom.click(dom.byLabel("Preview plan.pdf"));
+    const card = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "file"));
+    assert.match(textOf(card), /PDFs open in the editor's preview/);
+    // A file not yet sent has no path, so there is nothing to open elsewhere.
+    assert.doesNotMatch(textOf(card), /Open in editor/);
+    await dom.click(allElements(card).find(node => node.getAttribute?.("aria-label") === "Close"));
+
+    await dom.click(dom.byLabel("Remove cat.png"));
+    assert.deepEqual(changed.map(item => item.name), ["notes.md", "plan.pdf"]);
+  } finally { await dom.unmount(); }
+});
+
+test("sent attachments preview from their stored uploads and say when one is gone", async () => {
+  const opened = [], links = [], apps = [];
+  const stored = "b".repeat(32) + "-notes.txt";
+  const attachments = [
+    { id: "1", name: "chart.png", size: 2048, type: "image/png", path: "/data/chat-attachments/rem-home/a-chart.png" },
+    { id: "2", name: "notes.txt", size: 11, type: "text/plain", storageName: stored },
+    { id: "3", name: "report.pdf", size: 900, type: "application/pdf", path: "/data/chat-attachments/t/c-report.pdf" },
+    { id: "4", name: "old.png", size: 10, type: "image/png", storageName: "c".repeat(32) + "-old.png" },
+    { id: "5", name: "dump.json", size: 4, type: "application/json", path: "/data/chat-attachments/t/d-dump.json" },
+  ];
+  const fetchMock = createFetchMock([
+    url => String(url).includes(`/api/chat/attachments/locate?storageName=${stored}`) ? { ok: true, status: 200, json: async () => ({ path: "/data/chat-attachments/t/" + stored }) } : null,
+    url => String(url).includes("/api/chat/attachments/locate?") ? { ok: false, status: 404, json: async () => ({ error: "This attached file is no longer available." }) } : null,
+  ]);
+  const desktop = {
+    textFiles: {
+      openPreview: async path => { opened.push(path); return { id: path, url: `raticode-media://preview/${path.split("/").at(-1)}` }; },
+      closePreview: async () => {},
+      readAttachment: async path => ({ data: path.endsWith(".json") ? "AAEC" : btoa("hello world") }),
+    },
+    workspace: { openPath: async path => apps.push(path) },
+  };
+  const dom = await mountReact(React.createElement(chatComposerModule.MessageAttachments, { attachments, onOpenLink: path => links.push(path) }), fetchMock, { desktop });
+  try {
+    const tile = name => allElements(dom.container).find(node => node.getAttribute?.("aria-label") === `Preview ${name}`)?.parentNode;
+    await waitForNode(dom, () => tile("old.png").getAttribute("data-attachment-missing"));
+    // Only pictures and videos load a thumbnail; the missing picture says so.
+    assert.deepEqual(opened, ["/data/chat-attachments/rem-home/a-chart.png"]);
+    assert.equal(reactProps(allElements(tile("chart.png")).find(node => node.tagName === "IMG")).src, "raticode-media://preview/a-chart.png");
+    assert.match(textOf(tile("old.png")), /No longer available/);
+
+    // A sent text file is found by its stored name and shown as text.
+    await dom.click(dom.byLabel("Preview notes.txt"));
+    const viewer = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "text" && allElements(node).some(child => child.tagName === "PRE")));
+    assert.equal(textOf(allElements(viewer).find(node => node.tagName === "PRE")), "hello world");
+    await dom.click(allElements(viewer).find(node => node.getAttribute?.("aria-label") === "Close"));
+
+    // Files the window can't show offer the editor and their usual app.
+    await dom.click(dom.byLabel("Preview report.pdf"));
+    let card = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "file" && textOf(node).includes("Open in editor")));
+    await dom.click(allElements(card).find(node => node.tagName === "BUTTON" && textOf(node).includes("Open in editor")));
+    assert.deepEqual(links, ["/data/chat-attachments/t/c-report.pdf"]);
+    await dom.click(dom.byLabel("Preview report.pdf"));
+    card = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "file" && textOf(node).includes("Open in its app")));
+    await dom.click(allElements(card).find(node => node.tagName === "BUTTON" && textOf(node).includes("Open in its app")));
+    assert.deepEqual(apps, ["/data/chat-attachments/t/c-report.pdf"]);
+
+    await dom.click(dom.byLabel("Preview dump.json"));
+    card = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") === "text" && textOf(node).includes("doesn't look like text")));
+    assert.ok(card, "binary content is not shown as text");
+    await dom.click(allElements(card).find(node => node.getAttribute?.("aria-label") === "Close"));
+
+    await dom.click(dom.byLabel("Preview old.png"));
+    card = await waitForNode(dom, () => allElements(dom.container).find(node => node.getAttribute?.("data-media-viewer") && textOf(node).includes("no longer available")));
+    assert.ok(card, "a missing file says so in the preview");
+  } finally { await dom.unmount(); }
 });
 
 test("pictures and videos on Rem's replies show inline, open large, and say when they can't be shown", async () => {
@@ -18961,6 +20606,28 @@ test("Rem delivers a message sent while it is replying once the reply finishes",
   } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
 });
 
+test("a message a phone sent while Rem was replying shows as waiting on the desktop", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", {
+      conversation: { id: "rem", turn_state: "replying" },
+      messages: [{ id: "first", request_id: "first", role: "user", body: "What is running?" }],
+      waiting: [{ id: "phone-1", request_id: "phone-1", role: "user", body: "And what finished?", source: "phone", waiting: true }],
+    }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement("div"), fetchMock);
+  try {
+    await store.refreshRemHome();
+    const messages = store.getState().messages;
+    assert.deepEqual(messages.map(message => message.id), ["first", "phone-1"]);
+    assert.equal(messages[1].pending, true);
+    assert.equal(messages[1].waiting, true, "It shows Sends when Rem finishes replying");
+  } finally { store.setRemHomeContext(null); store.resetRemHomeStore(); await dom.unmount(); }
+});
+
 test("Rem keeps working when its context is rejected and keeps unsent messages after polling", async () => {
   const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
   store.resetRemHomeStore();
@@ -19081,11 +20748,11 @@ test("Rem polls that find nothing new download, store and re-render nothing", as
   let phase = "Working";
   const urls = [];
   // Versions stand in for the backend's content hashes.
-  const fetchMock = createFetchMock([(url) => {
+  const fetchMock = createFetchMock([(url, options = {}) => {
     if (!url.startsWith("/api/rem/")) return null;
-    urls.push(url);
-    const [path, query = ""] = url.split("?");
-    const known = new URLSearchParams(query).get("known");
+    const known = options.headers?.["X-Gofer-Known"] ?? null;
+    urls.push(known ? `${url} known=${known}` : url);
+    const path = url;
     const answer = (version, payload, keep = {}) => ({ ok: true, json: async () => known === version ? { unchanged: true, version, ...keep } : { ...payload, version } });
     if (path === "/api/rem/conversation") return answer(`c${messages.length}`, { conversation: { id: "rem", turn_state: "idle" }, messages: structuredClone(messages), context_ready: true }, { context_ready: true });
     if (path === "/api/rem/tasks") return answer(`t-${phase}`, { tasks: [{ id: "task", active_run: { id: "run", thread_id: "worker", state: "executing", phase_label: phase } }] });
@@ -19106,7 +20773,8 @@ test("Rem polls that find nothing new download, store and re-render nothing", as
     emitted = 0;
     urls.length = 0;
     await store.refreshRemHome();
-    assert.deepEqual(urls.sort(), ["/api/rem/conversation?known=c1", "/api/rem/tasks?known=t-Working", "/api/rem/threads/worker?known=w1"]);
+    // The version travels in a header, so each poll's address stays the same.
+    assert.deepEqual(urls.sort(), ["/api/rem/conversation known=c1", "/api/rem/tasks known=t-Working", "/api/rem/threads/worker known=w1"]);
     assert.equal(emitted, 0, "An unchanged poll doesn't re-render Rem");
     assert.equal(store.getState(), first);
     assert.equal(synced.length, 1, "An unchanged thread isn't announced again");
@@ -19160,6 +20828,64 @@ test("typing to Rem re-renders the composer, not the messages", async () => {
     await dom.unmount();
     store.resetRemHomeStore();
     composer.resetRemComposer();
+  }
+});
+
+test("long Rem messages fold with Show more, Rem's newest reply opens in full, and short ones never fold", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const log = Array.from({ length: 60 }, (_, line) => `[electron] at frame ${line}`).join("\n");
+  const report = Array.from({ length: 40 }, (_, line) => `- Finding ${line} with [a link](https://example.com/${line}).`).join("\n");
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [
+      { id: "paste", role: "user", body: log, created_at: "2026-11-03T21:23:00Z", attachments: [{ id: "f1", name: "trace.txt", size: 12 }] },
+      { id: "old", role: "rem", body: `Older report.\n\n${report}\n\nEnd of older report.`, created_at: "2026-11-03T21:24:00Z" },
+      { id: "short", role: "user", body: "Thanks", created_at: "2026-11-03T21:25:00Z" },
+      { id: "new", role: "rem", body: `Newest report.\n\n${report}`, created_at: "2026-11-03T21:26:00Z" },
+    ] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  // The test page has no layout: a message's text is as tall as its length suggests.
+  const height = Object.getOwnPropertyDescriptor(TestElement.prototype, "offsetHeight");
+  Object.defineProperty(TestElement.prototype, "offsetHeight", { configurable: true, get() { return textOf(this).length > 400 ? 1400 : 40; } });
+  const view = await mountReact(React.createElement(workspace.default, { onOpenLink: () => {} }), fetchMock);
+  try {
+    for (let attempt = 0; attempt < 40 && !textOf(view.container).includes("Newest report"); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await view.flush();
+    }
+    // The screenshot's 940 px window; resizing measures the messages again.
+    window.innerHeight = 940;
+    await view.dispatchWindow("resize");
+    const toggles = () => allElements(view.container).filter(node => node.getAttribute?.("class") === "rem-fold-toggle");
+    const folds = () => allElements(view.container).filter(node => node.getAttribute?.("class") === "rem-fold");
+    assert.deepEqual(toggles().map(node => [textOf(node), node.getAttribute("aria-expanded")]),
+      [["Show more", "false"], ["Show more", "false"], ["Show less", "true"]]);
+    // A folded message keeps all of its text, its files, and its Reply and Copy actions.
+    assert.ok(textOf(view.container).includes("[electron] at frame 59"));
+    assert.ok(textOf(view.container).includes("End of older report."));
+    assert.ok(view.byText("trace.txt"));
+    assert.equal(allElements(view.container).filter(node => node.getAttribute?.("aria-label") === "Reply to this message").length, 4);
+    // Folded text is clipped to a third of the 940 px window and controlled by its toggle.
+    const [paste, older, short, newest] = folds();
+    assert.equal(paste.getAttribute("data-folded"), "true");
+    assert.equal(paste.style.maxHeight, "282px");
+    assert.equal(toggles()[0].getAttribute("aria-controls"), paste.getAttribute("id"));
+    assert.equal(newest.getAttribute("data-folded"), null);
+    assert.equal(short.getAttribute("data-folded"), null, "A short message never folds");
+    await view.click(toggles()[0]);
+    assert.deepEqual([textOf(toggles()[0]), toggles()[0].getAttribute("aria-expanded")], ["Show less", "true"]);
+    assert.equal(paste.getAttribute("data-folded"), null);
+    // Show less folds it again; the older reply is untouched.
+    await view.click(toggles()[0]);
+    assert.equal(toggles()[0].getAttribute("aria-expanded"), "false");
+    assert.equal(older.getAttribute("data-folded"), "true");
+  } finally {
+    await view.unmount();
+    if (height) Object.defineProperty(TestElement.prototype, "offsetHeight", height); else delete TestElement.prototype.offsetHeight;
+    store.resetRemHomeStore();
   }
 });
 
@@ -19876,6 +21602,10 @@ test("Layout settings apply arrangements, terminal location and reset", async ()
     await dom.change(dom.byLabel("Rem pane side"), "right");
     assert.equal(latest.layout.assistantPaneSide, "right");
     assert.equal(dom.ancestor(dom.byExactText("Panes right"), "BUTTON").getAttribute("aria-checked"), "true");
+
+    assert.equal(reactProps(dom.byLabel("Rem pane shows")).value, "threads");
+    await dom.change(dom.byLabel("Rem pane shows"), "rem");
+    assert.equal(latest.layout.assistantPaneContent, "rem");
 
     await dom.change(dom.byLabel("Terminal location"), "editor");
     await dom.change(dom.byLabel("Open at startup"), "runs");

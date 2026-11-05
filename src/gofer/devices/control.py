@@ -173,6 +173,8 @@ class DeviceControl:
             self._start_chat()
             asyncio.run_coroutine_threadsafe(self._remote_loop(), self.loop)
             if registry.tailnet_enabled():
+                # Unknown until the first check, so phones keep their saved address.
+                application.tailnet_known = False
                 # Detection runs a short subprocess; never make startup wait for it.
                 self._tailnet_start()
             self.error = None
@@ -241,10 +243,10 @@ class DeviceControl:
             )
         if not enabled:
             state = "off"
-        elif host:
-            state = "listening"
         elif error:
             state = "error"
+        elif host and (detection is None or detection.host or running):
+            state = "listening"
         elif detection is None or running:
             state = "checking"
         else:
@@ -294,22 +296,34 @@ class DeviceControl:
             )
 
     async def _tailnet_apply(self, detection: Detection | None) -> None:
+        """Follow the check. ``None`` means the user turned the option off.
+
+        A check that finds no address (Tailscale restarting, waking from sleep, a slow
+        ``tailscale status``) keeps the current socket: closing it would end every
+        phone session on it, and a socket on an address that comes back keeps working.
+        Only the opt-out or a different address moves it, binding the new one first.
+        """
         listener, port = self.listener, self.port
-        host = str(ipaddress.ip_address(detection.host)) if detection and detection.host else None
+        if detection is None:
+            wanted = None
+        elif detection.host:
+            wanted = str(ipaddress.ip_address(detection.host))
+        else:
+            wanted = self.tailnet_host
         error = None
-        if host != self.tailnet_host and listener is not None and port is not None:
-            if self.tailnet_host is not None:
-                await listener.remove_host(self.tailnet_host)
-                with self.tailnet_lock:
-                    self.tailnet_host = None
-            if host is not None:
-                try:
+        if wanted != self.tailnet_host and listener is not None and port is not None:
+            try:
+                if wanted is not None:
                     # Same port as the LAN listener, so one access rule covers both.
-                    await listener.add_host(host, port)
-                    with self.tailnet_lock:
-                        self.tailnet_host = host
-                except OSError:
-                    error = "listen_failed"
+                    await listener.add_host(wanted, port)
+            except OSError:
+                error = "listen_failed"
+            else:
+                previous = self.tailnet_host
+                with self.tailnet_lock:
+                    self.tailnet_host = wanted
+                if previous is not None:
+                    await listener.remove_host(previous)
         with self.tailnet_lock:
             self.tailnet_detection = detection
             self.tailnet_error = error
@@ -320,6 +334,9 @@ class DeviceControl:
                 if self.tailnet_host and port is not None
                 else None
             )
+            # While on but not listening, say nothing, so phones keep the address they
+            # have instead of forgetting it during a short gap. Off is a definite null.
+            self.application.tailnet_known = detection is None or self.tailnet_host is not None
 
     def _tailnet_action(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:

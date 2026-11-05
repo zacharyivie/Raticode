@@ -75,6 +75,7 @@ export default function CodeFileExplorer({
   secondBrainOpen = false,
   onOpenRemHome,
   remHomeOpen = false,
+  remProjectOptions = [],
   onFilesystemChange,
   onCloseActiveFile,
   onOpenFile,
@@ -225,6 +226,10 @@ export default function CodeFileExplorer({
   }
   const [localSidebarView, setLocalSidebarView] = useState("files");
   const sidebarView = resolvePluginActivity(pluginSettings, controlledSidebarView || localSidebarView);
+  // Rem's panel stays mounted once shown, so a task being edited there survives
+  // switching to another plugin and back.
+  const [remPanelMounted, setRemPanelMounted] = useState(false);
+  if (sidebarView === "rem" && !remPanelMounted) setRemPanelMounted(true);
   const setSidebarView = useCallback((value) => { setLocalSidebarView(value); onSidebarViewChange?.(value); }, [onSidebarViewChange]);
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   const searchEnabled = pluginEnabled(pluginSettings, "search");
@@ -1259,7 +1264,7 @@ export default function CodeFileExplorer({
                 tabIndex={sidebarView === id ? 0 : -1}
                 draggable={!pluginsLocked}
                 className={`relative grid h-10 w-full shrink-0 place-items-center ${railOnRight ? "border-r-2" : "border-l-2"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${sidebarView === id ? "border-brand text-ink" : "border-transparent text-muted hover:bg-slate-100 hover:text-ink"} ${pluginDrag?.id === id ? "opacity-40" : ""}`}
-                onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); setContextMenu(null); setRecentMenuOpen(false); }}
+                onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); if (id === "second-brain") onOpenSecondBrain?.(); setContextMenu(null); setRecentMenuOpen(false); }}
                 onDragStart={(event) => {
                   if (pluginsLocked) { event.preventDefault(); return; }
                   event.dataTransfer?.setData(PLUGIN_DRAG_TYPE, id);
@@ -1326,7 +1331,7 @@ export default function CodeFileExplorer({
           <div className="min-h-0 flex-1 overflow-y-auto px-2">{workflowsContent}</div>
         </div>
       ) : null}
-      {sidebarView === "rem" ? <Suspense fallback={<section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" className="flex-1 p-3 text-xs text-muted">Loading Rem…</section>}><RemHomeSidebar active open={remHomeOpen} onOpen={() => onOpenRemHome?.()} /></Suspense> : null}
+      {remPanelMounted && railIds.includes("rem") ? <Suspense fallback={sidebarView === "rem" ? <section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" className="flex-1 p-3 text-xs text-muted">Loading Rem…</section> : null}><RemHomeSidebar active={sidebarView === "rem"} open={remHomeOpen} onOpen={() => onOpenRemHome?.()} projectOptions={remProjectOptions} /></Suspense> : null}
       {railIds.includes("organizations") ? <OrganizationSidebar active={sidebarView === "organizations"} selectedId={selectedOrganizationId} onSelect={onOpenOrganization} /> : null}
       {sidebarView === "second-brain" ? <Suspense fallback={<section id="sidebar-panel-second-brain" role="tabpanel" aria-labelledby="sidebar-tab-second-brain" className="flex-1 p-3 text-xs text-muted">Loading Second Brain…</section>}><SecondBrainSidebar active open={secondBrainOpen} onOpen={() => onOpenSecondBrain?.()} /></Suspense> : null}
       {railIds.includes("swarms") ? <SwarmSidebar key={`swarms:${rootPath}`} rootPath={rootPath} active={sidebarView === "swarms"} selectedId={selectedSwarmId} onSelect={onOpenSwarm} /> : null}
@@ -1906,11 +1911,11 @@ export default function CodeFileExplorer({
           <h2 className="text-sm font-semibold">Clean up branches?</h2>
           {branchCleanup.loading ? <p role="status" className="mt-3 text-xs text-muted">Checking branches…</p> : null}
           {branchCleanup.plan ? <>
-            <p className="mt-3 text-xs">{branchCleanup.plan.remove.length ? "These branches have no commits of their own. A newer local branch already contains everything on them. Their worktree folders will be deleted too." : "There are no outdated branches to clean up."}</p>
+            <p className="mt-3 text-xs">{branchCleanup.plan.remove.length ? "These branches have no commits of their own. A branch you always keep, or a newer branch, already contains everything on them. Their worktree folders will be deleted too." : "There are no outdated branches to clean up."}</p>
             {branchCleanup.plan.remove.length ? <ul aria-label="Branches to delete" className="mt-3 max-h-60 space-y-1.5 overflow-y-auto text-xs">
               {branchCleanup.plan.remove.map(item => <li key={item.branch} className="rounded bg-slate-50 px-2 py-1.5">
                 <span className="block break-all font-medium">{item.branch}</span>
-                <span className="block break-all text-[11px] text-muted">Behind {item.newer}{item.worktree ? ` · ${item.worktree}` : ""}</span>
+                <span className="block break-all text-[11px] text-muted">Already in {item.newer}{item.worktree ? ` · ${item.worktree}` : ""}</span>
               </li>)}
             </ul> : null}
             {branchCleanup.plan.kept.length ? <>

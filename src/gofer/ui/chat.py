@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat as stat_module
 import sys
 import tempfile
@@ -1212,7 +1213,9 @@ async def run_workflow_chat(
         nonlocal parsed_answer, parsed_error
         for line in protocol.feed(chunk):
             if payload := _json_object(line):
-                parsed_error = _provider_error_message([payload]) or parsed_error
+                parsed_error = _provider_error_message([payload]) or (
+                    None if payload.get("type") in TERMINAL_PROVIDER_RECORDS else parsed_error
+                )
                 if not _provider_error_message([payload]):
                     answer = _provider_final_message(provider, [payload])
                     if answer:
@@ -1246,7 +1249,10 @@ async def run_workflow_chat(
             parsed_error or stderr or stdout or f"Provider exited with {returncode}"
         )
 
-    final_message = parsed_answer or _provider_final_message(provider, _json_payloads(stdout))
+    payloads = _json_payloads(stdout)
+    final_message = parsed_answer or _provider_final_message(provider, payloads)
+    if not final_message and payloads:
+        raise ChatProviderError(NO_FINAL_ANSWER)
     return {
         "provider": provider,
         "model": model,
@@ -1654,7 +1660,9 @@ async def stream_workflow_chat(
                 or payload.get("thread_id")
                 or previous.get("session_id"),
                 "result": retained_text(answer) if answer else previous.get("result"),
-                "error": error or previous.get("error"),
+                "error": error
+                if payload.get("type") in TERMINAL_PROVIDER_RECORDS
+                else error or previous.get("error"),
             }
         ]
 
@@ -1945,6 +1953,15 @@ async def stream_workflow_chat(
                                     "changes": changes,
                                 }
             provider_error = _provider_error_message(provider_payloads)
+            answer = _provider_final_message(provider, provider_payloads)
+            if (
+                not (returncode or provider_error or parse_error)
+                and not answer
+                and provider_payloads
+            ):
+                # The CLI exited cleanly, but its records hold no answer, as when its
+                # stream ended early. Its raw protocol output isn't an answer either.
+                parse_error = NO_FINAL_ANSWER
             if returncode != 0 or provider_error or parse_error:
                 yield {
                     "type": "error",
@@ -1953,8 +1970,9 @@ async def stream_workflow_chat(
                     "effort": effort,
                     "error": provider_error
                     or (stderr if returncode else None)
+                    or provider_exit_message(returncode)
                     or parse_error
-                    or stdout
+                    or plain_output(stdout)
                     or f"Provider exited with {returncode}",
                     "errorKind": "provider" if provider_error or returncode else "protocol",
                     "parseError": parse_error,
@@ -1971,12 +1989,7 @@ async def stream_workflow_chat(
                 "provider": provider,
                 "model": model,
                 "effort": effort,
-                "message": {
-                    "role": "assistant",
-                    "body": _provider_final_message(provider, provider_payloads)
-                    or stdout
-                    or stderr,
-                },
+                "message": {"role": "assistant", "body": answer or stdout or stderr},
                 **turn_metadata(),
             }
             return
@@ -2369,8 +2382,47 @@ def _provider_final_message(provider: str, payloads: list[dict[str, Any]]) -> st
     return None
 
 
+# Records that end a provider's turn. Their own outcome replaces any earlier error, such
+# as an API call the provider retried and then completed.
+TERMINAL_PROVIDER_RECORDS = frozenset({"result", "turn.completed", "turn.failed"})
+# A clean exit whose protocol records hold no answer. Rem retries it like a dropped
+# connection, so keep its wording in step with rem_home.TRANSIENT_ERROR.
+NO_FINAL_ANSWER = "The provider ended its turn without a final answer."
+# A quoted key followed by a colon, as in a JSON record or a cut-off piece of one.
+_PROTOCOL_KEY = re.compile(r'\\?"[A-Za-z_][A-Za-z0-9_]*\\?"\s*:')
+
+
+def provider_exit_message(returncode: int | None) -> str | None:
+    """A readable reason when the provider process was stopped by a signal."""
+    if returncode is None:
+        return None
+    number = -returncode if returncode < 0 else returncode - 128 if returncode > 128 else 0
+    if number <= 0:
+        return None
+    if number == signal.SIGKILL:
+        return (
+            "The provider was stopped by the system (SIGKILL). This usually means the "
+            "computer ran out of memory, often because a test or build used too much."
+        )
+    try:
+        name = signal.Signals(number).name
+    except ValueError:
+        return None
+    return f"The provider was stopped by {name}."
+
+
+def plain_output(text: str) -> str:
+    """``text`` unless it is the provider's protocol output, which is no message."""
+    return "" if _PROTOCOL_KEY.search(text) else text
+
+
 def _provider_error_message(payloads: list[dict[str, Any]]) -> str | None:
     for payload in reversed(payloads):
+        # Claude Code's system records are status notices. An api_retry notice names
+        # the failed attempt's category ("unknown" for a dropped connection) while
+        # the CLI retries it; the turn's result says whether it finally failed.
+        if payload.get("type") == "system":
+            continue
         error = payload.get("error")
         if isinstance(error, dict):
             error = error.get("message")

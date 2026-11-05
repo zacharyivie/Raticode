@@ -563,3 +563,68 @@ def test_claude_adapter_permission_modes(mode):
         provider_settings=ResolvedProviderSettings(subscription="claude_code", approval_mode=mode),
     )
     assert command[command.index("--permission-mode") + 1] == mode
+
+
+# Codex reports each reconnect attempt as an error record before the turn it retried
+# finishes; a final failure ends with turn.failed. Rem's chat decisions run through
+# Subscription.execute, so a recovered call must not fail them.
+CODEX_RECONNECT = {
+    "type": "error",
+    "message": "Reconnecting... 1/5 (stream disconnected before completion: connection reset)",
+}
+CODEX_ANSWER = {"type": "item.completed", "item": {"type": "agent_message", "text": "Done"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "records,success,message",
+    [
+        ([CODEX_RECONNECT, CODEX_ANSWER, {"type": "turn.completed"}], True, "Done"),
+        (
+            [
+                CODEX_RECONNECT,
+                {"type": "turn.failed", "error": {"message": "exceeded retry limit"}},
+            ],
+            False,
+            "exceeded retry limit",
+        ),
+        # The error record's own text, which says why, instead of a generic failure.
+        ([CODEX_RECONNECT], False, CODEX_RECONNECT["message"]),
+    ],
+)
+async def test_codex_turn_that_recovers_from_a_reconnect_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, records, success, message
+) -> None:
+    async def fake_stream_subprocess(*_args, **_kwargs):
+        for record in records:
+            text = json.dumps(record) + "\n"
+            yield {"type": "chunk", "stream": "stdout", "text": text, "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
+
+    monkeypatch.setattr(base, "stream_subprocess", fake_stream_subprocess)
+    result = await CodexSubscription().execute(
+        prompt="hello", working_dir=tmp_path, tools=[], mcp_servers=[], env={}
+    )
+    assert (result.success, result.message) == (success, message)
+
+
+@pytest.mark.asyncio
+async def test_claude_result_after_an_api_retry_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    records = [
+        {"type": "system", "subtype": "api_retry", "attempt": 1, "error": "unknown"},
+        {"type": "result", "subtype": "success", "is_error": False, "result": '{"reply":"Hi"}'},
+    ]
+
+    async def fake_stream_subprocess(*_args, **_kwargs):
+        for record in records:
+            text = json.dumps(record) + "\n"
+            yield {"type": "chunk", "stream": "stdout", "text": text, "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
+
+    monkeypatch.setattr(base, "stream_subprocess", fake_stream_subprocess)
+    result = await ClaudeCodeSubscription().execute(
+        prompt="hello", working_dir=tmp_path, tools=[], mcp_servers=[], env={}
+    )
+    assert (result.success, result.message) == (True, '{"reply":"Hi"}')

@@ -13,7 +13,14 @@ from typer.testing import CliRunner
 
 from gofer.cli.main import app
 from gofer.ui.chat import build_chat_prompt
-from gofer.ui.report_outputs import ReportTools, prepare_report, render_pdf, with_report_outputs
+from gofer.ui.report_outputs import (
+    ReportExistsError,
+    ReportPathError,
+    ReportTools,
+    prepare_report,
+    render_pdf,
+    with_report_outputs,
+)
 from gofer.ui.second_brain import SecondBrain, serve_stdio, with_second_brain
 
 HTML = (
@@ -114,6 +121,50 @@ def test_reports_stay_inside_output_folder(tmp_path, path):
     (root / "link").symlink_to(tmp_path, target_is_directory=True)
     with pytest.raises(PermissionError):
         ReportTools(root, "html").call("save_report", {"path": path, "content": HTML})
+
+
+def test_existing_report_error_names_a_free_path_and_keeps_the_file(tmp_path):
+    tools = ReportTools(tmp_path, "html")
+    tools.call("save_report", {"path": "Reports/Topic/review.html", "content": HTML})
+    (tmp_path / "Reports/Topic/review-v2.html").write_text("taken")
+    with pytest.raises(ReportExistsError) as caught:
+        tools.call("save_report", {"path": "Reports/Topic/review.html", "content": "<p>new</p>"})
+    # Existing callers still see an OS error; tool servers pass the text on.
+    assert isinstance(caught.value, FileExistsError) and isinstance(caught.value, ValueError)
+    message = str(caught.value)
+    assert "Reports/Topic/review.html" in message and "Reports/Topic/review-v3.html" in message
+    assert str(tmp_path) not in message
+    assert "First finding" in (tmp_path / "Reports/Topic/review.html").read_text()
+
+
+def test_pdf_name_is_taken_when_only_its_source_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr("gofer.ui.report_outputs.render_pdf", lambda _: b"%PDF-1.7\nfixture")
+    (tmp_path / "review.pdf.html").write_text("existing")
+    with pytest.raises(ReportExistsError, match="review-v2.pdf"):
+        ReportTools(tmp_path, "pdf").call("save_report", {"path": "review.pdf", "content": HTML})
+    assert (tmp_path / "review.pdf.html").read_text() == "existing"
+
+
+def test_absolute_path_inside_the_output_folder_is_saved(tmp_path):
+    root = tmp_path / "reports" / "rem"
+    root.mkdir(parents=True)
+    result = ReportTools(root, "html").call(
+        "save_report", {"path": str(root / "Reports/Topic/full.html"), "content": HTML}
+    )
+    assert Path(result["path"]) == (root / "Reports/Topic/full.html").resolve()
+
+
+@pytest.mark.parametrize("path", ["", ".", "../escape.html", "/tmp/escape.html", "link/a.html"])
+def test_outside_paths_explain_the_relative_form(tmp_path, path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "link").symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ReportPathError) as caught:
+        ReportTools(root, "html").call("save_report", {"path": path, "content": HTML})
+    assert isinstance(caught.value, PermissionError) and isinstance(caught.value, ValueError)
+    assert "relative to the output folder" in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+    assert not (tmp_path / "escape.html").exists() and not (tmp_path / "a.html").exists()
 
 
 @pytest.mark.parametrize("format", ["slides", "pdf"])

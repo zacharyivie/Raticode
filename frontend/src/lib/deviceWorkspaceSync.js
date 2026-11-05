@@ -31,7 +31,14 @@ export function reconcileDesktopThread(local, remote) {
 
 // Re-exported for existing callers; App loads only deviceMessages.js eagerly.
 export { applyPhoneSettings, mergeDeviceMessages, orderDeviceMessages, phoneSettings } from "./deviceMessages.js";
-export function startDeviceWorkspaceSync({ storage = window.localStorage, repository = conversationRepository(), interval = 5000, getContext = () => ({}), deleteThread = null } = {}) {
+// A Rem task thread changes on nearly every poll while its worker runs, and each
+// exchange sends its whole transcript, which the backend decrypts, stores and
+// returns. The phone shows live task progress from Rem itself, so while a task
+// thread keeps running in the same place, its shared copy is refreshed at most
+// this often. Starting, finishing and moving between groups go at once.
+export const RUNNING_TASK_RESEND_MS = 30_000;
+
+export function startDeviceWorkspaceSync({ storage = window.localStorage, repository = conversationRepository(), interval = 5000, getContext = () => ({}), deleteThread = null, now = Date.now } = {}) {
   const host = window;
   if (!host.goferDesktop?.workspace?.pathGrantForApi) return () => {};
   const emit = (name, detail) => { if (!stopped && host.dispatchEvent) host.dispatchEvent(new CustomEvent(name, { detail })); };
@@ -39,6 +46,8 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
   let timer;
   const controller = new AbortController();
   const sent = new Map();
+  // When each thread was last sent, and whether it was running and in which group.
+  const sentState = new Map();
   const peers = new Map();
   const runningByThread = new Map();
   // Rem home reports when its task threads run. Without this, a running task
@@ -170,12 +179,16 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
           const fingerprint = JSON.stringify({ metadata, workflow, mobileGroup, revision: revisions.get(entry.id) });
           const key = `${peer}:${entry.id}`;
           if (sent.get(key) === fingerprint) continue;
+          const last = sentState.get(key);
+          if (metadata.managedRunId && running.has(entry.id) && last?.running && last.group === mobileGroup
+            && now() - last.at < RUNNING_TASK_RESEND_MS) continue;
           const messages = (await repository.all(entry.id)).filter(m => ["user", "assistant", "system"].includes(m.role)).map(m => ({ id: String(m.id), role: m.role, body: m.body, ...Object.fromEntries(["kind", "groupId", "trace", "running", "startedAt", "completedAt", "durationMs", "attachments"].filter(key => m[key] != null).map(key => [key, m[key]])) }));
           const result = await action({ action: "workspace_exchange", device_id: peer, metadata: sharedMetadata, workflow, messages,
             revision: revisions.get(entry.id), grantId: window.goferDesktop?.workspace?.pathGrantForApi?.(metadata.projectRoot) });
           await importThread(result);
           revisions.set(entry.id, result.revision);
           sent.set(key, JSON.stringify({ metadata: read(storage, metaKey(entry.id), metadata), workflow, mobileGroup, revision: result.revision }));
+          sentState.set(key, { at: now(), running: running.has(entry.id), group: mobileGroup });
         }
       }
       // Paired desktops this one can run threads on, for the composer's Run on menu.

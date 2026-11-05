@@ -80,7 +80,7 @@ async def test_global_handoff_restarts_in_selected_root_with_original_permission
             self.closed = False
             instances.append(self)
 
-        def register(self, callback: Any, tools: Any, instructions: str) -> str:
+        def register(self, callback: Any, tools: Any, instructions: str, **_labels: Any) -> str:
             self.callback = callback
             return "http://127.0.0.1/tools"
 
@@ -144,7 +144,7 @@ async def test_global_research_retains_selected_resources_without_project_handof
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str, web: bool, shell: bool
 ) -> None:
     class FakeTools:
-        def register(self, *args: Any) -> str:
+        def register(self, *args: Any, **_labels: Any) -> str:
             return "http://127.0.0.1/tools"
 
         def revoke(self, url: str) -> None:
@@ -241,7 +241,7 @@ async def test_failed_turn_does_not_apply_queued_action(monkeypatch: pytest.Monk
     class FakeTools:
         callback: Any = None
 
-        def register(self, callback: Any, *args: Any) -> str:
+        def register(self, callback: Any, *args: Any, **_labels: Any) -> str:
             FakeTools.callback = callback
             return "local"
 
@@ -314,7 +314,7 @@ async def test_handoff_to_new_worktree_keeps_it_open_with_parent_grant(
         callback: Any = None
         instructions = ""
 
-        def register(self, callback: Any, tools: Any, instructions: str) -> str:
+        def register(self, callback: Any, tools: Any, instructions: str, **_labels: Any) -> str:
             FakeTools.callback = callback
             FakeTools.instructions = instructions
             return "local"
@@ -374,7 +374,7 @@ async def test_continuation_prompt_says_the_selection_already_happened(
     class FakeTools:
         callback: Any = None
 
-        def register(self, callback: Any, *args: Any) -> str:
+        def register(self, callback: Any, *args: Any, **_labels: Any) -> str:
             FakeTools.callback = callback
             return "http://127.0.0.1/tools"
 

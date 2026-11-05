@@ -60,6 +60,26 @@ Devices microphone input. If access was denied, enable Raticode under System Set
 Privacy & Security > Microphone and restart it. The first transcription downloads
 the local speech model and needs an internet connection.
 
+Mac dictation uses Apple's on-device speech recognizer through a small helper,
+`frontend/native/macos/RaticodeSpeech.swift`. `npm run dist:mac` builds it with
+`scripts/build-macos-speech-helper.cjs` (needs Xcode or the Command Line Tools)
+into `Contents/Resources/speech/raticode-speech`. The app's Info.plist declares
+`NSSpeechRecognitionUsageDescription`. macOS charges the permission to
+Raticode.app, so without that declaration it ends the helper. That is also why
+development builds, which run inside Electron.app, fall back to the offline
+model. Before publishing, dictate with speech recognition allowed and denied.
+Check Settings > Devices > Speech recognition with Dictation off in System
+Settings > Keyboard; the on-device language comes with Dictation. Also check
+that a refusal mid-dictation hands over to the offline model.
+
+On Windows, dictation drives the offline `System.Speech` recognizer through
+Windows PowerShell 5.1 (`src/gofer/ui/system_speech.py`). It needs no
+packaging step. Before publishing, check it on Windows 10 and 11, including
+11 24H2. Microsoft deprecated Windows Speech Recognition, and whether a
+recognizer is still installed there is unconfirmed. Also test a PC with no
+speech language installed and a PC where PowerShell is restricted. Each should
+show its reason under Settings > Devices.
+
 ## Optional signing setup for later
 
 Complete the provider setup below, then set the **repository** Actions variable

@@ -12,11 +12,19 @@ export default defineConfig({
   base: "./",
   build: {
     chunkSizeWarningLimit: 500,
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        manualChunks(id) {
-          if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(id)) return "react";
-          if (id.includes("node_modules") && /(?:react-markdown|remark-|rehype-|micromark|mdast-|hast-|unist-|unified)/.test(id)) return "markdown";
+        // A group also takes in the modules it imports. React ranks higher so the markdown
+        // group cannot pull React (and with it markdown) onto the startup path.
+        codeSplitting: {
+          groups: [
+            { name: "react", priority: 2, test: /\/node_modules\/(?:react|react-dom|scheduler)\// },
+            {
+              name: "markdown",
+              priority: 1,
+              test: (id) => id.includes("node_modules") && /(?:react-markdown|remark-|rehype-|micromark|mdast-|hast-|unist-|unified)/.test(id),
+            },
+          ],
         },
       },
     },

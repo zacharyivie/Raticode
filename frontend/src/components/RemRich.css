@@ -7,13 +7,14 @@
 .rem-result-checks { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 12px; font-weight: 500; color: var(--rem-muted); }
 .rem-result-checks[data-tone=success] { color: var(--rem-success); }
 .rem-result-checks[data-tone=danger] { color: var(--rem-danger); }
-.rem-result-files { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+/* minmax(0, 1fr): a long file title shortens instead of widening the column past the pane. */
+.rem-result-files { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 0; padding: 0; list-style: none; }
 .rem-result-files li { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--rem-soft-line); border-radius: 12px; background: var(--rem-raised); }
 .rem-result-thumb { display: grid; place-items: center; width: 44px; height: 44px; flex-shrink: 0; border-radius: 9px; background: var(--rem-accent-soft); color: var(--rem-accent); }
 .rem-result-file { flex: 1; min-width: 0; }
 .rem-result-file strong { display: block; overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .rem-result-file small { display: block; color: var(--rem-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.rem-result-open { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border: 1px solid var(--rem-line); border-radius: 8px; color: var(--rem-accent); font-size: 12px; font-weight: 500; }
+.rem-result-open { display: inline-flex; flex-shrink: 0; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border: 1px solid var(--rem-line); border-radius: 8px; color: var(--rem-accent); font-size: 12px; font-weight: 500; }
 .rem-result-open:hover { background: var(--rem-accent-soft); }
 .rem-result-thread { margin-top: 8px; }
 
@@ -29,7 +30,7 @@
 .rem-msg-meta { margin-left: 6px; color: var(--rem-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 .rem-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; }
-.rem-progress-steps { display: grid; flex: 1; min-width: 220px; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 0; padding: 0; list-style: none; }
+.rem-progress-steps { display: grid; flex: 1; min-width: min(220px, 100%); grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 0; padding: 0; list-style: none; }
 .rem-progress-steps li { position: relative; display: flex; gap: 4px; padding-top: 7px; color: var(--rem-muted); font-size: 11px; }
 .rem-progress-steps li::before { content: ""; position: absolute; inset: 0 0 auto; height: 3px; border-radius: 999px; background: var(--rem-soft-line); }
 .rem-progress-steps li[data-state=done]::before { background: var(--rem-accent); }
@@ -41,6 +42,11 @@
 .rem-progress-time { color: var(--rem-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rem-work:has(.rem-progress) { flex-wrap: wrap; }
 .rem-work .rem-progress { flex-basis: 100%; order: 3; padding-left: 40px; }
+/* A narrow side pane gives the steps the card's full width. */
+@container rem-home (max-width: 420px) {
+  .rem-work .rem-progress { padding-left: 0; }
+  .rem-progress-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 8px; }
+}
 
 .rem-turn { display: flex; align-items: center; gap: 8px; }
 .rem-turn-label { color: var(--rem-muted); font-size: 12.5px; }
@@ -63,3 +69,29 @@
 .rem-result-actions button { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border: 1px solid var(--rem-line); border-radius: 8px; background: var(--rem-raised); color: var(--rem-accent); font-size: 12.5px; font-weight: 500; }
 .rem-result-actions button:hover:not(:disabled) { background: var(--rem-accent-soft); }
 .rem-result-actions button:disabled { opacity: .6; }
+
+/* The message a reply refers to, in its bubble and above the message box. */
+.rem-quote { display: flex; align-items: stretch; gap: 4px; max-width: 100%; margin-bottom: 6px; white-space: normal; }
+.rem-quote-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; padding: 4px 10px; border-left: 3px solid var(--rem-accent); border-radius: 4px 8px 8px 4px; background: var(--rem-accent-soft); color: inherit; text-align: left; font-size: 12px; line-height: 1.4; }
+button.rem-quote-main:hover { background: color-mix(in srgb, var(--rem-accent) 16%, transparent); }
+.rem-quote-author { font-weight: 600; color: var(--rem-accent); }
+.rem-quote-text { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; opacity: .85; overflow-wrap: anywhere; }
+.rem-quote[data-unavailable] .rem-quote-main { border-left-color: var(--rem-muted); }
+.rem-quote[data-unavailable] .rem-quote-author { color: var(--rem-muted); }
+.rem-quote[data-unavailable] .rem-quote-text { font-style: italic; }
+.rem-msg[data-role=user] .rem-quote-main { border-left-color: var(--rem-bubble-ink); background: color-mix(in srgb, var(--rem-bubble-ink) 8%, transparent); }
+.rem-msg[data-role=user] .rem-quote-author { color: inherit; }
+.rem-quote[data-composing] { margin: 0 0 6px; }
+.rem-quote-cancel { display: grid; place-items: center; width: 28px; flex-shrink: 0; border-radius: 6px; color: var(--rem-muted); }
+.rem-quote-cancel:hover { background: var(--rem-accent-soft); color: var(--rem-ink); }
+.rem-msg[data-role=user] .rem-msg-foot { justify-content: flex-end; }
+.rem-msg[data-role=user] .rem-msg-foot .rem-msg-time { margin: 0 4px; }
+
+/* A long message's folded text: a preview that fades out above Show more. clip, unlike
+   hidden, can't be scrolled, so focusing a hidden link opens the message instead. */
+.rem-fold[data-folded] { overflow: hidden; overflow: clip; -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3em), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 3em), transparent); }
+.rem-fold-toggle { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; margin: 2px 0 0 -6px; padding: 0 8px 0 6px; border-radius: 7px; color: var(--rem-accent); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.rem-fold-toggle:hover { background: var(--rem-accent-soft); }
+.rem-bubble .rem-fold-toggle { color: inherit; opacity: .85; }
+.rem-bubble .rem-fold-toggle:hover { opacity: 1; background: color-mix(in srgb, currentColor 10%, transparent); }
+@media (forced-colors: active) { .rem-fold[data-folded] { -webkit-mask-image: none; mask-image: none; } }

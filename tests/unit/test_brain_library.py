@@ -939,6 +939,67 @@ def test_bibliography_roundtrip_keeps_doi_and_dates(library, tmp_path):
         assert reference["issued"]["date-parts"] == [[2026, 3, 14]]
 
 
+def test_bibtex_import_keeps_mixed_case_fields_macros_and_repeated_keys():
+    from gofer.ui.brain_bibliography import records
+
+    source = """@string{jn = "Journal of Things"}
+@Article{Key1,
+  Title = {A {Study} of
+           Things},
+  AUTHOR = {Doe, Jane and Smith, John},
+  year = 2024, journal = jn,
+  DOI = {10.1/abc}, URL = {https://x.y}
+}
+@misc{key2, title="Second", date = {2023-05-01}}
+@misc{key2, Title={Repeated
+     key}, journal = jn, year = {2022}}
+"""
+    assert records(source, ".bib") == [
+        {
+            "id": "Key1",
+            "title": "A {Study} of\nThings",
+            "author": [{"literal": "Doe, Jane"}, {"literal": "Smith, John"}],
+            "URL": "https://x.y",
+            "DOI": "10.1/abc",
+            "issued": {"date-parts": [[2024]]},
+        },
+        {
+            "id": "key2",
+            "title": "Second",
+            "author": [],
+            "URL": "",
+            "DOI": "",
+            "issued": {"date-parts": [[2023, 5, 1]]},
+        },
+        {
+            "id": "key2",
+            "title": "Repeated\nkey",
+            "author": [],
+            "URL": "",
+            "DOI": "",
+            "issued": {"date-parts": [[2022]]},
+        },
+    ]
+
+
+def test_bibtex_export_sorts_by_key_and_writes_repeated_keys():
+    from gofer.ui.brain_bibliography import bibtex_text, records
+
+    text = bibtex_text(
+        [
+            {"ENTRYTYPE": "misc", "ID": "zeta", "title": "Z & {Q}", "doi": ""},
+            {"ENTRYTYPE": "misc", "ID": "alpha", "title": "First", "doi": "10/x"},
+            {"ENTRYTYPE": "misc", "ID": "alpha", "title": "Second", "doi": ""},
+        ]
+    )
+    assert text == (
+        "@misc{alpha,\n doi = {10/x},\n title = {First}\n}\n\n"
+        "@misc{alpha,\n doi = {},\n title = {Second}\n}\n\n"
+        "@misc{zeta,\n doi = {},\n title = {Z & {Q}}\n}\n"
+    )
+    assert [item["title"] for item in records(text, ".bib")] == ["First", "Second", "Z & {Q}"]
+
+
 def test_link_repair_writes_relative_markdown_targets(library, tmp_path):
     brain, _ = opened(library, tmp_path)
     root = Path(brain["root"])

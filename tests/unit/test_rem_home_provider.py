@@ -267,3 +267,25 @@ def test_conversation_provider_reads_json_after_prose(tmp_path: Path, monkeypatc
     assert provider_module.generate_decision(
         "Fix it", {"provider": "claude_code"}, threading.Event(), tmp_path
     ) == {"reply": "Started."}
+
+
+def test_decision_parser_skips_a_json_example_quoted_before_the_answer():
+    text = (
+        'The config uses {"mcpServers":{}} as before.\n'
+        '{"criteria":[{"id":"a","result":"pass","evidence":"Saw {x}"}],"feedback":""}'
+    )
+    assert provider_module.parse_decision(text)["criteria"][0]["id"] == "a"
+
+
+def test_decision_parser_never_takes_a_provider_record_for_the_answer():
+    # A turn that ended without an answer leaves only the CLI's own records.
+    stdout = "\n".join(
+        json.dumps(record)
+        for record in (
+            {"type": "system", "subtype": "init", "session_id": "s"},
+            {"type": "assistant", "message": {"content": []}},
+            {"type": "result", "subtype": "success", "is_error": False, "result": ""},
+        )
+    )
+    with pytest.raises(provider_module.MalformedDecision):
+        provider_module.parse_decision(stdout)

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from gofer.core.command_slots import start_leftover_reclaimer
 from gofer.core.provider_auth import ProviderAuthSessions
 from gofer.core.provider_capabilities import (
     CLI_PROVIDERS,
@@ -41,6 +42,10 @@ from gofer.core.provider_preferences import (
     commit_message_preference,
     save_commit_message_preference,
     save_provider_preference,
+    save_speech_preference,
+    save_voice_tidy_preference,
+    speech_preference,
+    voice_tidy_preference,
 )
 from gofer.core.resources import ResourceLimits, bundle_resource_limits_from_env
 from gofer.core.scheduler import WorkflowScheduler
@@ -141,12 +146,15 @@ from gofer.ui.chat_media import (
     attachment_thread_dir,
     cancel_chat_transcription,
     finish_chat_transcription,
+    locate_chat_attachment,
     start_chat_transcription,
     store_chat_attachments,
     stream_chat_transcription,
     transcribe_chat_audio,
+    transcription_engines,
 )
 from gofer.ui.chat_steering import ChatSteering, ChatSteeringConflict, ChatTurn
+from gofer.ui.file_mentions import with_file_mentions
 from gofer.ui.generation_jobs import GenerationJobs
 from gofer.ui.link_previews import LinkPreviews, PreviewError, chat_image
 from gofer.ui.organization_operations import READ_OPERATIONS
@@ -166,6 +174,8 @@ UI_MAX_HANDLERS = 32
 UI_MAX_EXPENSIVE_REQUESTS = 8
 UI_READ_TIMEOUT_SECONDS = 15.0
 UI_REQUEST_READ_DEADLINE_SECONDS = 30.0
+# How long the browser may reuse a CORS preflight answer for one address.
+CORS_PREFLIGHT_MAX_AGE_SECONDS = 600
 UI_JSON_MAX_DEPTH = 64
 UI_JOB_DEADLINE_SECONDS = 24 * 60 * 60
 COMMIT_MESSAGE_MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -1003,13 +1013,17 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         service = self.server.rem_home
         parsed = urlparse(self.path)
         parts = parsed.path.removeprefix("/api/rem/").split("/")
-        known = parse_qs(parsed.query).get("known", [""])[0]
+        # Clients send the version they have in a header; older ones in the query.
+        known = self.headers.get("X-Gofer-Known") or parse_qs(parsed.query).get("known", [""])[0]
         try:
             if method == "GET" and parts == ["conversation"]:
                 # A restarted backend has no desktop context until the renderer
                 # sends it again; queued tasks wait for it.
+                snapshot = service.store.conversation()
+                # Full file paths in Rem's text become links in the desktop chat.
+                snapshot["messages"] = with_file_mentions(snapshot["messages"])
                 result = rem_poll_result(
-                    {**service.store.conversation(), "context_ready": service.has_context},
+                    {**snapshot, "context_ready": service.has_context},
                     known,
                     keep=("context_ready",),
                 )
@@ -1412,6 +1426,20 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
             return
+        if parsed.path == "/api/chat/attachments/locate":
+            # The window previews a sent attachment from where the upload stored it.
+            query = parse_qs(parsed.query)
+            try:
+                path = locate_chat_attachment(
+                    query.get("storageName", [""])[0],
+                    data_dir=self._request_data_dir(query),
+                    thread_id=query.get("threadId", [""])[0] or None,
+                )
+            except ChatMediaError as exc:
+                self._send_json({"error": str(exc)}, status=404)
+                return
+            self._send_json({"path": str(path)})
+            return
         if parsed.path == "/api/media-image":
             # Inline images in chat load through here, so sites never see the
             # renderer's own request (its address, cookies or referrer).
@@ -1588,6 +1616,36 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/provider/auth":
             provider = parse_qs(parsed.query).get("provider", [""])[0]
             self._send_json(self.server.provider_auth.status(provider))
+            return
+
+        if parsed.path == "/api/chat/transcribe/engines":
+            query = parse_qs(parsed.query)
+            refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
+            self._send_json(
+                {
+                    **speech_preference(),
+                    **transcription_engines(
+                        data_dir=self._request_data_dir(query), refresh=refresh
+                    ),
+                }
+            )
+            return
+
+        if parsed.path == "/api/provider/voice-tidy":
+            query = parse_qs(parsed.query)
+            if query.get("resolve", ["1"])[0] in {"0", "false"}:
+                # The chat box only needs to know whether to hide words while listening.
+                self._send_json({**voice_tidy_preference(), "selection": None})
+                return
+            from gofer.ui import voice_tidy
+
+            default = query.get("defaultProvider", [""])[0] or None
+            self._send_json(
+                {
+                    **voice_tidy_preference(),
+                    "selection": voice_tidy.current(default, self.server.rem_home),
+                }
+            )
             return
 
         if parsed.path == "/api/provider/commit-settings":
@@ -1949,6 +2007,24 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(auth_payload)
             except (ValueError, OSError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/chat/transcribe/engines":
+            try:
+                save_speech_preference(self._read_json())
+            except (ValueError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"saved": True, **speech_preference()})
+            return
+
+        if parsed.path == "/api/provider/voice-tidy":
+            try:
+                save_voice_tidy_preference(self._read_json())
+            except (ValueError, OSError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"saved": True, **voice_tidy_preference()})
             return
 
         if parsed.path == "/api/provider/commit-settings":
@@ -2378,7 +2454,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             try:
                 self._read_json()
-                payload = start_chat_transcription(data_dir=self._request_data_dir(query))
+                payload = start_chat_transcription(
+                    data_dir=self._request_data_dir(query),
+                    engine=speech_preference()["engine"],
+                )
             except (ChatMediaError, json.JSONDecodeError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
@@ -2491,6 +2570,30 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     {"error": str(exc) or "Rem could not generate the theme."}, status=400
                 )
+            return
+
+        if parsed.path == "/api/chat/voice-tidy":
+            from gofer.ui import voice_tidy
+
+            try:
+                body = self._read_json()
+                heard = body.get("text")
+                if not isinstance(heard, str):
+                    raise ValueError("text must be a string")
+                default = body.get("defaultProvider")
+                chosen = voice_tidy.current(
+                    default if isinstance(default, str) and default else None,
+                    self.server.rem_home,
+                )
+                context = (
+                    voice_tidy.chat_context(self.server.rem_home)
+                    if chosen.get("available") and chosen.get("context")
+                    else ""
+                )
+                data_dir = self._request_data_dir(parse_qs(parsed.query))
+                self._send_json(voice_tidy.tidy(heard, chosen, data_dir, context=context))
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
             return
 
         if parsed.path == "/api/chat/commit-message":
@@ -3165,6 +3268,11 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self._send_common_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        # The desktop window calls this API from another origin with a bearer
+        # token, so each request needs this check first. Without a cache time the
+        # browser repeats it about every five seconds per address, nearly doubling
+        # the requests polling makes.
+        self.send_header("Access-Control-Max-Age", str(CORS_PREFLIGHT_MAX_AGE_SECONDS))
         self.end_headers()
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -3656,7 +3764,7 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Access-Control-Allow-Headers",
             "Authorization, Content-Type, X-Gofer-Desktop-Grant-Secret, "
-            "X-Gofer-UI-Token, X-Gofer-Webhook-Token",
+            "X-Gofer-Known, X-Gofer-UI-Token, X-Gofer-Webhook-Token",
         )
 
     def _allow_host(self) -> bool:
@@ -4023,6 +4131,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = Non
     server.watcher.start()
     server.start_continuous_monitor()
     stop_usage_refresh = start_background_refresh(server.data_dir)
+    stop_reclaimer = start_leftover_reclaimer()
     _install_shutdown_handlers(server)
     print(f"GOFER_UI_READY {json.dumps(ready_payload(server), sort_keys=True)}", flush=True)
     try:
@@ -4030,6 +4139,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = Non
     except KeyboardInterrupt:
         pass
     finally:
+        stop_reclaimer()
         stop_usage_refresh()
         server.stop_continuous_monitor()
         stop_rattish_runs_for_shutdown(server.data_dir)

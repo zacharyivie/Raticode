@@ -1,19 +1,83 @@
 // Rich parts of a Rem message: result card, details, follow-ups, message actions and
 // live progress. The phone draws the same parts from the same fields (RemRich.kt).
-import { useEffect, useState } from "react";
-import { ArrowDown, Check, Copy, ExternalLink, FileText, MessageSquare, MessageSquareQuote } from "lucide-react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ArrowDown, Check, ChevronDown, ChevronUp, Copy, ExternalLink, FileText, MessageSquare, Reply, X } from "lucide-react";
 import ChatSources from "./ChatSources.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import { openRemThread, retryRemReview, runRemTaskNow, suggestMessage } from "../lib/remHomeStore.js";
-import { artifactLine, bodyWithoutCardLinks, resultActions, checksSummary, elapsedLabel, messageCopyText, quoteForReply, replyMeta, runSteps, stepText } from "../lib/remRich.js";
+import { replyToRemMessage } from "../lib/remComposer.js";
+import { artifactLine, collapseLimits, resultActions, checksSummary, elapsedLabel, messageCopyText, referenceLines, replyMeta, replyTarget, runSteps, stepText } from "../lib/remRich.js";
 import "./RemRich.css";
 
+// Messages you opened or folded stay that way while this window is open.
+const foldChoices = new Map();
+// The conversation passes a function that keeps it at the newest message, when you are
+// there, after a message finds it is long and gains its Show more or Show less.
+export const FoldPinContext = createContext(null);
+
+// A long message's text folds to a preview with Show more under it. Only the text folds;
+// quotes, files, cards and actions stay visible. The whole text stays in the page, so
+// screen readers, copy and find still get all of it, and tabbing to a link in the
+// hidden part opens the message.
+export function FoldableText({ id, startOpen = false, children }) {
+  const contentRef = useRef(null);
+  const toggleRef = useRef(null);
+  const keepToggleInView = useRef(false);
+  const contentId = useId();
+  const [limits, setLimits] = useState(() => collapseLimits(typeof window === "undefined" ? 0 : window.innerHeight));
+  const [long, setLong] = useState(false);
+  const [open, setOpen] = useState(() => foldChoices.get(id) ?? startOpen);
+  const keepPinned = useContext(FoldPinContext);
+  // Measured before paint, so a long message never shows unfolded first.
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content) return undefined;
+    const measure = () => {
+      const next = collapseLimits(window.innerHeight);
+      setLimits(current => current.preview === next.preview ? current : next);
+      setLong(content.offsetHeight > next.threshold);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    observer?.observe(content);
+    window.addEventListener("resize", measure);
+    return () => { observer?.disconnect(); window.removeEventListener("resize", measure); };
+  }, []);
+  useLayoutEffect(() => { keepPinned?.(); }, [long, keepPinned]);
+  // Folding a message you scrolled down through brings its preview and Show more back into view.
+  useLayoutEffect(() => {
+    if (open || !keepToggleInView.current) return;
+    keepToggleInView.current = false;
+    document.getElementById(contentId)?.scrollIntoView?.({ block: "nearest" });
+    toggleRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [open, contentId]);
+  const choose = next => {
+    foldChoices.set(id, next);
+    keepToggleInView.current = !next;
+    setOpen(next);
+  };
+  const folded = long && !open;
+  return <>
+    <div id={contentId} className="rem-fold" data-folded={folded || undefined} style={folded ? { maxHeight: limits.preview } : undefined}
+      onFocus={event => {
+        if (!folded || event.target === event.currentTarget) return;
+        if (event.target.getBoundingClientRect().bottom > event.currentTarget.getBoundingClientRect().bottom) choose(true);
+      }}>
+      <div ref={contentRef}>{children}</div>
+    </div>
+    {long ? <button ref={toggleRef} type="button" className="rem-fold-toggle" aria-expanded={open} aria-controls={contentId} onClick={() => choose(!open)}>
+      {open ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+      <span>{open ? "Show less" : "Show more"}</span>
+    </button> : null}
+  </>;
+}
+
 // Extra depth under a short reply. Closed by default so the reply stays the lead.
-export function MessageDetails({ details, onOpenLink }) {
+export function MessageDetails({ details, fileMentions = null, onOpenLink }) {
   if (!details) return null;
   return <details className="rem-details">
     <summary>Details</summary>
-    <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" value={details} />
+    <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={fileMentions} value={details} />
   </details>;
 }
 
@@ -69,7 +133,7 @@ export function FollowUps({ suggestions }) {
   </div>;
 }
 
-// Copy, quote into a reply, and how long the reply took. Shown on hover or focus.
+// Copy, reply, and how long the reply took. Shown on hover or focus.
 export function MessageActions({ message }) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -81,15 +145,33 @@ export function MessageActions({ message }) {
   const copy = async () => {
     try { await navigator.clipboard.writeText(messageCopyText(message)); setCopied(true); } catch { /* the button stays as it was */ }
   };
-  const quote = quoteForReply(bodyWithoutCardLinks(message.body, message.result));
+  const text = messageCopyText(message);
   return <div className="rem-msg-actions">
-    <button type="button" onClick={copy} aria-label={copied ? "Copied" : "Copy message"} title="Copy message">
+    {/* A message that is still sending has no ID in the chat yet. */}
+    {!message.pending && !message.failed ? <button type="button" onClick={() => replyToRemMessage(replyTarget(message))} aria-label="Reply to this message" title="Reply to this message">
+      <Reply size={13} aria-hidden="true" /><span>Reply</span>
+    </button> : null}
+    {text ? <button type="button" onClick={copy} aria-label={copied ? "Copied" : "Copy message"} title="Copy message">
       {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}<span aria-live="polite">{copied ? "Copied" : "Copy"}</span>
-    </button>
-    {quote ? <button type="button" onClick={() => suggestMessage(quote)} title="Quote this in a new message">
-      <MessageSquareQuote size={13} aria-hidden="true" /><span>Ask about this</span>
     </button> : null}
     {meta ? <small className="rem-msg-meta" title="Chat model and reply time">{meta}</small> : null}
+  </div>;
+}
+
+// The message a reply refers to: above the reply's own words, and above the message
+// box while you write one. onShow scrolls to it when it is in the chat; onCancel unlinks.
+export function ReplyQuote({ reference, onShow, onCancel, composing = false }) {
+  const lines = referenceLines(reference);
+  if (!lines) return null;
+  const label = `${composing ? "Replying to" : "In reply to"} ${lines.author}`;
+  const body = <>
+    <span className="rem-quote-author">{label}</span>
+    <span className="rem-quote-text">{lines.text}</span>
+  </>;
+  return <div className="rem-quote" data-composing={composing || undefined} data-unavailable={reference.unavailable || undefined}>
+    {onShow ? <button type="button" className="rem-quote-main" onClick={onShow} title="Show this message" aria-label={`${label}: ${lines.text}. Show this message`}>{body}</button>
+      : <div className="rem-quote-main" aria-label={`${label}: ${lines.text}`} role="group">{body}</div>}
+    {onCancel ? <button type="button" className="rem-quote-cancel" onClick={onCancel} aria-label="Don't reply to this message" title="Don't reply to this message"><X size={14} aria-hidden="true" /></button> : null}
   </div>;
 }
 

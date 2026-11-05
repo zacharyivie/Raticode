@@ -31,7 +31,31 @@ window.__opened = [];
 window.addEventListener("gofer:rem-open-thread", event => window.__opened.push(event.detail.threadId));
 // The offline scene exercises the real request path against a backend without the Rem service.
 const nativeFetch = window.fetch.bind(window);
-if (scene === "media") {
+if (scene === "attachments") {
+  // You sent a picture, a video, notes, a PDF and a file that has since gone; two more wait in the composer.
+  const urls = JSON.parse(new URLSearchParams(location.search).get("media"));
+  const [picture, video] = Object.keys(urls);
+  const folder = picture.slice(0, picture.lastIndexOf("/"));
+  window.goferDesktop = { textFiles: {
+    openPreview: async target => { if (!urls[target]) throw new Error("ENOENT"); return { id: target, url: urls[target] }; },
+    closePreview: async () => {},
+    readAttachment: async () => ({ data: btoa("# Launch notes\\n\\n- Ship the phone build\\n- Check the chart\\n") }),
+  }, workspace: { openPath: async () => {} } };
+  const sent = [picture, video, folder + "/notes.md", folder + "/report.pdf", folder + "/gone.png"]
+    .map((file, index) => ({ id: "s" + index, name: file.split("/").at(-1), size: 48213, type: "", path: file }));
+  const messages = [{ id: "ask", role: "user", body: "Here's what I have so far.", attachments: sent, created_at: new Date().toISOString() }];
+  window.fetch = async input => {
+    const url = String(input);
+    const payload = url.endsWith("/conversation") ? { conversation: { id: "rem", turn_state: "idle" }, messages } : url.endsWith("/tasks") ? { tasks: [] } : {};
+    return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+  };
+  const canvas = Object.assign(document.createElement("canvas"), { width: 320, height: 200 });
+  const paint = canvas.getContext("2d"); const gradient = paint.createLinearGradient(0, 0, 320, 200);
+  gradient.addColorStop(0, "#4f46e5"); gradient.addColorStop(1, "#f472b6"); paint.fillStyle = gradient; paint.fillRect(0, 0, 320, 200);
+  const photo = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+  const { attachToRemComposer } = await import("/src/lib/remComposer.js");
+  attachToRemComposer([new File([photo], "photo.png", { type: "image/png" }), new File(["a,b\\n1,2\\n"], "data.csv", { type: "text/csv" })]);
+} else if (scene === "media") {
   // Rem replies with a picture, a video, a file that has since gone and a text file.
   const urls = JSON.parse(new URLSearchParams(location.search).get("media"));
   const [picture, video] = Object.keys(urls);
@@ -66,16 +90,51 @@ if (scene === "media") {
       : url.includes("/threads/") ? { metadata: { id: url.split("/").at(-1), updatedAt: new Date().toISOString() }, messages: [] } : {};
     return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
   };
+} else if (scene === "reply") {
+  // A small backend: it stores what is posted and previews the message a reply refers to.
+  const at = new Date().toISOString();
+  window.__posted = [];
+  window.__chat = [
+    { id: "rem-old", role: "rem", body: "The **deploy** failed on step three because the cache key changed. " + "Rebuilding fixes it. ".repeat(20), created_at: at },
+    ...Array.from({ length: 12 }, (_, index) => ({ id: "fill-" + index, role: index % 2 ? "rem" : "user", body: "Filler message " + index, created_at: at })),
+    { id: "u-gone", role: "user", body: "What about that one?", refers_to: "cleared", created_at: at },
+  ];
+  const preview = id => {
+    const found = window.__chat.find(message => message.id === id);
+    return found ? { id, role: found.role, body: found.body.replace(/[*_\x60]/g, "").slice(0, 279) + "…", created_at: found.created_at } : { id, unavailable: true };
+  };
+  window.fetch = async (input, options = {}) => {
+    const url = String(input);
+    if (url.endsWith("/messages") && options.method === "POST") {
+      const body = JSON.parse(options.body);
+      window.__posted.push(body);
+      window.__chat.push({ id: body.request_id, request_id: body.request_id, role: "user", body: body.body, created_at: new Date().toISOString(), ...(body.refers_to ? { refers_to: body.refers_to } : {}) });
+      return new Response(JSON.stringify({ accepted: true, request_id: body.request_id }), { headers: { "Content-Type": "application/json" } });
+    }
+    const messages = window.__chat.map(message => message.refers_to ? { ...message, referenced: preview(message.refers_to) } : message);
+    const payload = url.endsWith("/conversation") ? { conversation: { id: "rem", turn_state: "idle" }, messages } : url.endsWith("/tasks") ? { tasks: [] } : {};
+    return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
+  };
 } else {
   window.fetch = async (input, options) => String(input).includes("/api/rem/") ? new Response(JSON.stringify({ detail: "Not Found" }), { status: 404, headers: { "Content-Type": "application/json" } }) : nativeFetch(input, options);
   if (scene !== "offline") await store.loadRemHomeFixture(scene === "empty" ? "empty" : scene === "replying" ? "replying" : "busy");
 }
 
+// ?side=<px> sets the project sidebar's width, rail included (240 to 420 in the app).
+const side = Number(new URLSearchParams(location.search).get("side")) || 272;
+// ?pane=<px> renders Rem's chat alone in a side pane of that width, as Settings > Layout can place it.
+const pane = Number(new URLSearchParams(location.search).get("pane")) || 0;
 function App() {
+  if (pane) return <main style={{ height: "100vh", display: "flex" }}>
+    <section style={{ flex: 1, minWidth: 0 }} />
+    <aside className="studio-rem-pane bg-white" data-rem-pane="true" style={{ width: pane, flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", borderLeft: "1px solid rgb(var(--color-line))" }}>
+      <RemHomeWorkspace projectOptions={SAMPLE_PROJECTS} />
+    </aside>
+  </main>;
   return <main style={{ height: "100vh", display: "flex" }}>
-    <aside className="studio-sidebar bg-white" style={{ width: 272, flexShrink: 0, display: "flex", borderRight: "1px solid rgb(var(--color-line))" }}>
-      <div style={{ width: 40, borderRight: "1px solid rgb(var(--color-line))" }} />
-      <RemHomeSidebar active open onOpen={() => {}} />
+    <aside className="studio-sidebar bg-white" style={{ width: side, flexShrink: 0, display: "flex", borderRight: "1px solid rgb(var(--color-line))" }}>
+      <div style={{ width: 40, flexShrink: 0, borderRight: "1px solid rgb(var(--color-line))" }} />
+      <RemHomeSidebar active open onOpen={() => {}} projectOptions={SAMPLE_PROJECTS} />
     </aside>
     <section style={{ flex: 1, minWidth: 0, display: "flex" }}><RemHomeWorkspace projectOptions={SAMPLE_PROJECTS} /></section>
   </main>;
@@ -85,7 +144,8 @@ createRoot(document.getElementById("root")).render(<App />);`;
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root, logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  // A private optimizer cache keeps the running dev app's shared one untouched.
+  vite = await createServer({ root, logLevel: "error", cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "rem-home-vite-")), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "rem-home-capture",
     resolveId(id) { if (id === "/rem-home-entry.jsx") return id; },
     load(id) { if (id === "/rem-home-entry.jsx") return entry; },
@@ -122,12 +182,12 @@ async function main() {
     assert.ok(overflow === false || (Array.isArray(overflow) && overflow.length === 0), `Overflow in ${name}: ${JSON.stringify(overflow)}`);
     fs.writeFileSync(path.join(out, `${name}.png`), (await win.webContents.capturePage()).toPNG());
   }
-  const scenes = (process.env.CAPTURE_SCENES || "busy,running,blocked,new,menu,empty,offline,replying,history").split(",");
+  const scenes = (process.env.CAPTURE_SCENES || "busy,running,blocked,new,menu,empty,offline,replying,history,reply").split(",");
   for (const theme of (process.env.CAPTURE_THEMES || "light,dark").split(",")) {
     for (const width of (process.env.CAPTURE_WIDTHS || "1440,980").split(",").map(Number)) {
       for (const scene of scenes) {
         win.setSize(width, 900);
-        await win.loadURL(`${base}?scene=${scene}${scene === "media" ? `&media=${encodeURIComponent(JSON.stringify(mediaUrls))}` : ""}`); await sleep(900);
+        await win.loadURL(`${base}?scene=${scene}${scene === "media" || scene === "attachments" ? `&media=${encodeURIComponent(JSON.stringify(mediaUrls))}` : ""}`); await sleep(900);
         await evaluate(`document.documentElement.classList.toggle('dark', ${theme === "dark"})`); await sleep(200);
         const tag = `${theme}-${width}-${scene}`;
         if (scene === "history") {
@@ -145,9 +205,10 @@ async function main() {
           await click("Open thread", ".rem-task-updates button");
           assert.deepEqual(await evaluate("window.__opened"), ["thread-vector-worker"]);
           await shot(tag);
+          // The task stays open in the sidebar while the chat scrolls to the message.
           await evaluate("document.querySelector('.rem-update-message').click()");
           await sleep(250);
-          assert.equal(await evaluate("document.querySelector('.rem-sheet')"), null);
+          assert.equal(await evaluate("Boolean(document.querySelector('.rem-side .rem-sheet'))"), true, "The task stays open beside the chat");
           assert.equal(await evaluate("document.activeElement.dataset.messageId"), "audit-ack");
           const box = await evaluate("(() => { const b = document.activeElement.getBoundingClientRect(); return { top: b.top, bottom: b.bottom }; })()");
           assert.ok(box.top >= 0 && box.bottom <= 900, "Message navigation did not reveal the original reply");
@@ -255,6 +316,63 @@ async function main() {
           await shot(tag);
         }
         if (scene === "replying") { await shot(tag); }
+        if (scene === "reply") {
+          const inMessage = (id, code) => evaluate(`(() => { const el = document.querySelector('[data-message-id=${JSON.stringify(id)}]'); return ${code}; })()`);
+          // Any message can be replied to, Rem's and your own; the message box says which.
+          assert.equal(await inMessage("u-gone", "Boolean(el.querySelector('button[aria-label=\"Reply to this message\"]'))"), true, "Your own messages offer Reply");
+          await inMessage("rem-old", "el.querySelector('button[aria-label=\"Reply to this message\"]').click()"); await sleep(200);
+          assert.equal(await evaluate("document.querySelector('.rem-composer .rem-quote-author').textContent"), "Replying to Rem");
+          assert.match(await evaluate("document.querySelector('.rem-composer .rem-quote-text').textContent"), /^The deploy failed on step three/);
+          assert.equal(await evaluate("document.activeElement === document.querySelector('.rem-composer textarea')"), true, "Reply puts the cursor in the message box");
+          await click("Don't reply to this message");
+          assert.equal(await evaluate("document.querySelector('.rem-composer .rem-quote')"), null);
+          await inMessage("rem-old", "el.querySelector('button[aria-label=\"Reply to this message\"]').click()"); await sleep(200);
+          await evaluate("document.querySelector('.rem-composer textarea').focus()");
+          await win.webContents.insertText("Why did the cache key change?");
+          await shot(`${tag}-composing`);
+          await click("Send"); await sleep(600);
+          assert.deepEqual(await evaluate("window.__posted.map(p => [p.body, p.refers_to])"), [["Why did the cache key change?", "rem-old"]]);
+          assert.equal(await evaluate("document.querySelector('.rem-composer .rem-quote')"), null, "Sending clears the reply");
+          await evaluate("__rem.refreshRemHome()"); await sleep(300);
+          const sent = await evaluate("window.__posted[0].request_id");
+          assert.equal(await inMessage(sent, "el.querySelector('.rem-quote-author').textContent"), "In reply to Rem");
+          await shot(`${tag}-sent`);
+          // The quote shows the original, far up the chat.
+          await evaluate("document.querySelector('.rem-stream').scrollTop = document.querySelector('.rem-stream').scrollHeight"); await sleep(150);
+          await inMessage(sent, "el.querySelector('button.rem-quote-main').click()"); await sleep(250);
+          assert.equal(await evaluate("document.activeElement.dataset.messageId"), "rem-old");
+          const box = await evaluate("(() => { const b = document.activeElement.getBoundingClientRect(); return { top: b.top, bottom: b.bottom }; })()");
+          assert.ok(box.top >= 0 && box.top <= 900, "The quote did not reveal the original message");
+          // A message that has left the chat says so and can't be opened.
+          assert.equal(await inMessage("u-gone", "el.querySelector('.rem-quote-text').textContent"), "No longer in this chat");
+          assert.equal(await inMessage("u-gone", "Boolean(el.querySelector('button.rem-quote-main'))"), false);
+          await inMessage("u-gone", "el.querySelector('button[aria-label=\"Reply to this message\"]').click()"); await sleep(200);
+          assert.equal(await evaluate("document.querySelector('.rem-composer .rem-quote-author').textContent"), "Replying to You");
+          await shot(tag);
+        }
+        if (scene === "attachments") {
+          await sleep(600);
+          const tile = name => `[aria-label="Preview ${name}"]`;
+          // Pictures show themselves in the composer and on the sent message; other files show their type.
+          assert.equal(await evaluate(`document.querySelector('.rem-composer ${tile("photo.png")} img')?.naturalWidth`), 320);
+          assert.equal(await evaluate(`document.querySelector('.rem-bubble-files ${tile("chart.png")} img')?.naturalWidth`), 640);
+          assert.ok(await evaluate(`document.querySelector('.rem-bubble-files ${tile("demo.mp4")} video')?.readyState`) >= 1, "Video thumbnail loads");
+          assert.match(await evaluate(`document.querySelector('.rem-bubble-files ${tile("report.pdf")}').textContent`), /PDF/);
+          assert.match(await evaluate(`document.querySelector('.rem-bubble-files ${tile("gone.png")}').textContent`), /No longer available/);
+          assert.match(await evaluate(`document.querySelector('.rem-composer ${tile("data.csv")}').textContent`), /CSV/);
+          await shot(tag);
+          await click("Preview notes.md"); await sleep(500);
+          assert.match(await evaluate("document.querySelector('[data-media-viewer=text] pre')?.textContent || ''"), /Ship the phone build/);
+          await shot(`${tag}-text`);
+          await click("Close");
+          await click("Preview report.pdf"); await sleep(400);
+          assert.match(await evaluate("document.querySelector('[data-media-viewer=file]')?.textContent || ''"), /Open in editor/);
+          await shot(`${tag}-file`);
+          await click("Close");
+          await click("Preview photo.png"); await sleep(400);
+          assert.equal(await evaluate("document.querySelector('[data-media-viewer=image] img')?.naturalWidth"), 320);
+          await click("Close");
+        }
         if (scene === "media") {
           await sleep(600);
           // The picture decodes and the video's first frame loads inline; the missing file says so.
@@ -273,6 +391,76 @@ async function main() {
           await shot(`${tag}-player`);
           await click("Close");
         }
+      }
+    }
+  }
+  // An opened task fills the Rem sidebar, never the chat, at the narrowest and
+  // widest sidebar, and the back arrow returns to every task.
+  const sideOverflow = `(() => {
+    const panel = document.querySelector('#sidebar-panel-rem').getBoundingClientRect();
+    const name = e => (e.tagName.toLowerCase() + '.' + String(e.className?.baseVal ?? e.className).trim().split(/\\s+/).slice(0, 2).join('.')).slice(0, 60);
+    const all = [...document.querySelectorAll('#sidebar-panel-rem *')].filter(e => !e.closest('.rem-menu'));
+    const scrollers = all.filter(e => e.scrollWidth > e.clientWidth + 1 && ['auto', 'scroll'].includes(getComputedStyle(e).overflowX)).map(name);
+    const outside = all.filter(e => { const box = e.getBoundingClientRect(); return box.width > 0 && box.height > 0 && (box.right > panel.right + 1 || box.left < panel.left - 1); })
+      .filter((e, _, list) => !list.includes(e.parentElement)).map(name);
+    return { scrollers, outside: outside.slice(0, 8) };
+  })()`;
+  for (const theme of (process.env.CAPTURE_THEMES || "light,dark").split(",")) {
+    for (const width of (process.env.CAPTURE_SIDES || "240,420").split(",").map(Number)) {
+      for (const scene of ["running", "blocked", "new"]) {
+        win.setSize(1200, 900);
+        await win.loadURL(`${base}?scene=${scene === "new" ? "busy" : scene}&side=${width}`); await sleep(900);
+        await evaluate(`document.documentElement.classList.toggle('dark', ${theme === "dark"})`); await sleep(200);
+        const tag = `side-${theme}-${width}-${scene}`;
+        if (scene === "running") await openTask("Local-first sync engines");
+        if (scene === "blocked") await openTask("CSV export for Runs");
+        if (scene === "new") { await click("New task"); await click("Weekly", "[role=radio]"); }
+        assert.equal(await evaluate("Boolean(document.querySelector('#sidebar-panel-rem .rem-sheet')) && !document.querySelector('.rem-home .rem-sheet')"), true, `${tag}: the task opens in the sidebar, not the chat`);
+        assert.equal(await evaluate("document.querySelectorAll('.rem-task-row').length"), 0, `${tag}: the task replaces the list`);
+        for (const top of [0, 1e9]) {
+          await evaluate(`document.querySelector('.rem-sheet-scroll').scrollTop = ${top}`); await sleep(150);
+          const found = await evaluate(sideOverflow);
+          assert.deepEqual(found, { scrollers: [], outside: [] }, `${tag} spills sideways: ${JSON.stringify(found)}`);
+          fs.writeFileSync(path.join(out, `${tag}-${top ? "end" : "top"}.png`), (await win.webContents.capturePage()).toPNG());
+        }
+        // The back arrow sits at the top left, like leaving a thread.
+        const back = await evaluate("(() => { const header = document.querySelector('.rem-sheet-header').getBoundingClientRect(); const button = document.querySelector('[aria-label=\"Back to all tasks\"]').getBoundingClientRect(); return button.left - header.left < 16 && button.top - header.top < 16; })()");
+        assert.equal(back, true, `${tag}: back arrow at the top left`);
+        await click("Back to all tasks");
+        assert.equal(await evaluate("document.querySelectorAll('.rem-task-row').length > 0 && !document.querySelector('.rem-sheet')"), true, `${tag}: back returns to every task`);
+      }
+    }
+  }
+  // Rem in a side pane never scrolls sideways: every scene at the narrowest
+  // allowed pane width, the default width and the width from the user's report.
+  // Code blocks and charts keep their own sideways scroll; nothing else may.
+  const paneOverflow = `(() => {
+    const pane = document.querySelector('[data-rem-pane]').getBoundingClientRect();
+    const own = e => e.closest('pre, .rc-chart-scroll, [data-media-viewer], .rem-menu');
+    const name = e => (e.tagName.toLowerCase() + '.' + String(e.className?.baseVal ?? e.className).trim().split(/\\s+/).slice(0, 2).join('.')).slice(0, 60);
+    const all = [...document.querySelectorAll('[data-rem-pane] *')].filter(e => !own(e));
+    const scrollers = all.filter(e => e.scrollWidth > e.clientWidth + 1 && ['auto', 'scroll'].includes(getComputedStyle(e).overflowX)).map(name);
+    const outside = all.filter(e => { const box = e.getBoundingClientRect(); return box.width > 0 && box.height > 0 && (box.right > pane.right + 1 || box.left < pane.left - 1); })
+      .filter((e, _, list) => !list.includes(e.parentElement)).map(name);
+    // Content also stays inside its message column, so cards never spill past their edges.
+    const spill = all.filter(e => { const body = e.parentElement?.closest('.rem-msg-body'); if (!body) return false; const box = e.getBoundingClientRect(); return box.width > 0 && box.right > body.getBoundingClientRect().right + 1; })
+      .filter((e, _, list) => !list.includes(e.parentElement)).map(name);
+    return { scrollers, outside: [...outside, ...spill].slice(0, 8) };
+  })()`;
+  for (const theme of (process.env.CAPTURE_THEMES || "light,dark").split(",")) {
+    for (const width of (process.env.CAPTURE_PANES || "300,380,571").split(",").map(Number)) {
+      for (const scene of (process.env.CAPTURE_PANE_SCENES || "busy,replying,history,reply,media,attachments,empty").split(",")) {
+        win.setSize(1440, 900);
+        await win.loadURL(`${base}?scene=${scene}&pane=${width}${scene === "media" || scene === "attachments" ? `&media=${encodeURIComponent(JSON.stringify(mediaUrls))}` : ""}`); await sleep(900);
+        await evaluate(`document.documentElement.classList.toggle('dark', ${theme === "dark"})`); await sleep(200);
+        // Expand every Details section so their contents are measured too.
+        await evaluate("document.querySelectorAll('[data-rem-pane] details').forEach(d => { d.open = true; })"); await sleep(200);
+        for (const top of [0, 1e9]) {
+          await evaluate(`document.querySelector('.rem-stream').scrollTop = ${top}`); await sleep(150);
+          const found = await evaluate(paneOverflow);
+          assert.deepEqual(found, { scrollers: [], outside: [] }, `Rem side pane ${theme} ${width}px ${scene} scrolls sideways: ${JSON.stringify(found)}`);
+        }
+        fs.writeFileSync(path.join(out, `pane-${theme}-${width}-${scene}.png`), (await win.webContents.capturePage()).toPNG());
       }
     }
   }

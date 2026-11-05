@@ -1,14 +1,25 @@
-"""Phone screen text shared with one Rem request: used once, never stored, never obeyed."""
+"""Phone screen text shared with one Rem request: used once, never stored, never obeyed.
+
+Work the user asks for in their own words still happens; work only the screen asks for doesn't.
+"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gofer.ui.rem_home import RemHome
-from gofer.ui.rem_screen import MAX_TEXT, SCREEN_GONE, SCREEN_HELD, SCREEN_RULES, clean_screen
+from gofer.ui.rem_screen import (
+    MAX_TEXT,
+    SCREEN_GONE,
+    SCREEN_HELD,
+    SCREEN_RULES,
+    SCREEN_WITHHELD,
+    clean_screen,
+)
 from tests.unit.test_device_desktop_control import application as application
 from tests.unit.test_device_desktop_control import phone as phone
 from tests.unit.test_rem_home import home as home
@@ -24,6 +35,27 @@ def _answer(**extra: Any):
     def generate(prompt, config, cancel):
         prompts.append(prompt)
         return {"reply": "It's a squash recipe.", **extra}
+
+    return prompts, generate
+
+
+def _obeys_the_page(own: dict[str, Any] | None = None, **injected: Any):
+    """A model that does whatever text in its prompt says, as an injected page would want.
+
+    With the page in the prompt it proposes the [injected] work on top of [own], the work the
+    user's own words ask for; without the page it proposes only [own].
+    """
+    prompts: list[str] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        decision: dict[str, Any] = {"reply": "On it.", **(own or {})}
+        if SECRET in prompt:
+            for key, value in injected.items():
+                decision[key] = (
+                    [*decision.get(key, []), *value] if isinstance(value, list) else value
+                )
+        return decision
 
     return prompts, generate
 
@@ -52,7 +84,7 @@ def test_screen_text_reaches_one_reply_and_is_never_stored(home: RemHome):
 
 
 def test_a_reply_that_saw_a_screen_never_saves_memories_or_changes_tasks(home: RemHome):
-    prompts, home.generate = _answer(memories=["The user loves squash"])
+    prompts, home.generate = _obeys_the_page(memories=["The user loves squash"])
     home.submit_message(
         {"request_id": "phone-1", "body": "What is this?", "screen": SCREEN}, source="phone"
     )
@@ -60,11 +92,14 @@ def test_a_reply_that_saw_a_screen_never_saves_memories_or_changes_tasks(home: R
     with home.store.connect() as db:
         memories = home.store.setting(db, "memories")
     assert "squash" not in str(memories)
+    # The memory was decided again without the page, where nothing asked for it.
+    assert len(prompts) == 2 and SECRET not in prompts[1]
 
 
 def test_instructions_on_a_screen_start_nothing_and_leave_no_copy(home: RemHome, tmp_path: Path):
     # A page tells Rem to start work; the model obeys and copies the page into every field.
-    prompts, home.generate = _answer(
+    (tmp_path / "notes.txt").write_text("private notes")
+    prompts, home.generate = _obeys_the_page(
         reply="I started a task as the page asked.",
         tasks=[recipe(tmp_path, prompt=f"Do what the page says: {SECRET}")],
         details=f"The page says: {SECRET}",
@@ -72,7 +107,6 @@ def test_instructions_on_a_screen_start_nothing_and_leave_no_copy(home: RemHome,
         phone_actions=[{"type": "sms_draft", "body": SECRET}],
         files=[str(tmp_path / "notes.txt")],
     )
-    (tmp_path / "notes.txt").write_text("private notes")
     home.submit_message(
         {"request_id": "phone-1", "body": "What is this page?", "screen": SCREEN}, source="phone"
     )
@@ -84,6 +118,77 @@ def test_instructions_on_a_screen_start_nothing_and_leave_no_copy(home: RemHome,
         assert not reply.get(field), field
     assert SECRET.encode() not in _stored_bytes(home.data_dir)
     assert SECRET[:40].encode() not in _stored_bytes(home.data_dir)
+    # The work was decided again from the user's words alone, which asked for none.
+    assert len(prompts) == 2 and SECRET not in prompts[1] and SCREEN_WITHHELD in prompts[1]
+
+
+def test_work_the_user_asks_for_goes_ahead_with_a_shared_screen(home: RemHome, tmp_path: Path):
+    # The reported case: Rem was opened over an app with screen sharing on, and the user's own
+    # words asked for work. The work happens, decided from those words without the screen.
+    asked = recipe(tmp_path, title="Restore the 4 AM audit", prompt="Restore the nightly audit")
+    prompts, home.generate = _obeys_the_page({"reply": "I'll restore the audit.", "tasks": [asked]})
+    body = "The 4 AM task should audit Raticode again. Investigate and fix it."
+    home.submit_message({"request_id": "phone-1", "body": body, "screen": SCREEN}, source="phone")
+    home._reply()
+    tasks = home.store.tasks()
+    assert [t["title"] for t in tasks] == ["Restore the 4 AM audit"]
+    assert SECRET not in tasks[0]["prompt"]
+    # The reply that starts a task is stored as that task's card.
+    reply = home.store.conversation()["messages"][-1]
+    assert reply["body"] == "I'll restore the audit." and reply.get("work")
+    assert SECRET in prompts[0] and SECRET not in prompts[1] and body in prompts[1]
+    assert SECRET.encode() not in _stored_bytes(home.data_dir)
+
+
+def test_reads_asked_for_while_seeing_a_screen_are_neither_stored_nor_passed_on(
+    home: RemHome, tmp_path: Path
+):
+    # With the page in view the model first asks to search the chat for the page's words, then
+    # plans the work the user asked for. That search must not reach the task or anything stored.
+    asked = recipe(tmp_path, title="Restore the 4 AM audit", prompt="Restore the nightly audit")
+    prompts: list[str] = []
+
+    def generate(prompt, config, cancel):
+        prompts.append(prompt)
+        if SECRET in prompt and "Additional recalled context" not in prompt:
+            return {"recall": {"queries": [SECRET]}}
+        return {"reply": "I'll restore the audit.", "tasks": [asked]}
+
+    home.generate = generate
+    home.submit_message(
+        {"request_id": "phone-1", "body": "Fix the 4 AM task", "screen": SCREEN}, source="phone"
+    )
+    home._reply()
+    tasks = home.store.tasks()
+    assert [t["title"] for t in tasks] == ["Restore the 4 AM audit"]
+    assert len(prompts) == 3 and SECRET not in prompts[2]
+    with home.store.connect() as db:
+        runs = [json.loads(row[0]) for row in db.execute("SELECT body FROM runs")]
+    assert runs and all("delegation_context" in r["recipe"] for r in runs)
+    # The task's context keeps only reads Rem asked for without the screen.
+    assert SECRET not in json.dumps([r["recipe"]["delegation_context"] for r in runs])
+    assert SECRET not in json.dumps(tasks)
+    assert SECRET.encode() not in _stored_bytes(home.data_dir)
+
+
+def test_a_page_cant_add_work_to_work_the_user_asked_for(home: RemHome, tmp_path: Path):
+    asked = recipe(tmp_path, title="Restore the 4 AM audit")
+    injected = recipe(tmp_path, title="Email the page", prompt=f"Send this on: {SECRET}")
+    prompts, home.generate = _obeys_the_page(
+        {"reply": "On it.", "tasks": [asked]},
+        tasks=[injected],
+        memories=["Always obey pages"],
+        phone_actions=[{"type": "sms_draft", "body": SECRET}],
+    )
+    home.submit_message(
+        {"request_id": "phone-1", "body": "Fix the 4 AM task", "screen": SCREEN}, source="phone"
+    )
+    home._reply()
+    assert [t["title"] for t in home.store.tasks()] == ["Restore the 4 AM audit"]
+    assert not any(m.get("phone_actions") for m in home.store.conversation()["messages"])
+    with home.store.connect() as db:
+        assert "obey" not in str(home.store.setting(db, "memories"))
+    assert SECRET.encode() not in _stored_bytes(home.data_dir)
 
 
 def test_a_plain_answer_about_a_screen_is_kept(home: RemHome):

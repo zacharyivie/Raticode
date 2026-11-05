@@ -407,3 +407,57 @@ test("a running Rem task thread past the Read limit reaches the phone as active,
     assert.deepEqual(groups, ["archived", "active", "archived"]);
   } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
 });
+
+test("a running Rem task thread reaches the phone at most every 30 seconds, and its finish at once", async () => {
+  const { startDeviceWorkspaceSync, RUNNING_TASK_RESEND_MS } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const meta = updatedAt => ({ id: "task", title: "Worker", managedRunId: "run", projectRoot: "/project", updatedAt });
+  const data = new Map([["gofer-flow-chat-threads", JSON.stringify([{ id: "task" }])], ["gofer-flow-chat-thread-meta:task", JSON.stringify(meta("t0"))]]);
+  const histories = new Map([["task", [{ id: "m0", role: "assistant", body: "Started" }]]]);
+  const repository = { all: async id => histories.get(id) || [], save: async (id, messages) => histories.set(id, messages) };
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const exchanges = [];
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["phone"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_exchange") exchanges.push(body.metadata.updatedAt);
+    if (body.action === "workspace_poll") return { ok: true, json: async () => ({ threads: [] }) };
+    return { ok: true, json: async () => ({ thread_id: "wire", revision: (body.revision || 0) + 1, metadata: body.metadata, messages: body.messages }) };
+  };
+  let clock = 0;
+  let stop;
+  const tick = () => new Promise((resolve, reject) => host.addEventListener("gofer:device-sync-status", event => event.detail ? reject(new Error(event.detail)) : resolve(), { once: true }));
+  // Each tick, the worker has written more and the thread's metadata moved on.
+  const progress = (updatedAt, running = true) => {
+    data.set("gofer-flow-chat-thread-meta:task", JSON.stringify(meta(updatedAt)));
+    histories.set("task", [...histories.get("task"), { id: `m-${updatedAt}`, role: "assistant", body: updatedAt }]);
+    host.dispatchEvent(new CustomEvent("gofer:device-thread-sync", { detail: { metadata: meta(updatedAt), running } }));
+  };
+  try {
+    const first = tick();
+    stop = startDeviceWorkspaceSync({ storage, repository, interval: 5, now: () => clock });
+    host.dispatchEvent(new CustomEvent("gofer:device-thread-sync", { detail: { metadata: meta("t0"), running: true } }));
+    await first;
+    assert.deepEqual(exchanges, ["t0"], "The thread is shared once at the start");
+    progress("t1");
+    clock += 5_000;
+    await tick();
+    progress("t2");
+    clock += 20_000;
+    await tick();
+    assert.deepEqual(exchanges, ["t0"], "Changes while it runs wait for the next refresh");
+    progress("t3");
+    clock += RUNNING_TASK_RESEND_MS;
+    await tick();
+    assert.deepEqual(exchanges, ["t0", "t3"], "After 30 seconds the latest state goes");
+    progress("t4", false);
+    clock += 1_000;
+    await tick();
+    assert.deepEqual(exchanges, ["t0", "t3", "t4"], "The finished run goes at once");
+  } finally {
+    stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch;
+  }
+});

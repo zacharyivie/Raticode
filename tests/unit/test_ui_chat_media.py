@@ -13,6 +13,7 @@ import pytest
 from gofer.ui import chat_media
 from gofer.ui.chat_media import (
     ChatMediaError,
+    locate_chat_attachment,
     resolve_chat_attachment,
     store_chat_attachments,
     transcribe_chat_audio,
@@ -228,3 +229,27 @@ def test_fork_attachment_copy_rejects_traversal_and_missing_sources(tmp_path) ->
                 },
                 tmp_path,
             )
+
+
+def test_locate_chat_attachment_finds_uploads_and_refuses_anything_else(tmp_path) -> None:
+    note = {"name": "notes.txt", "type": "text/plain", "data": base64.b64encode(b"hi").decode()}
+    stored = store_chat_attachments({"threadId": "thread-one", "files": [note]}, tmp_path)
+    name = stored["attachments"][0]["storageName"]
+    expected = (tmp_path / "chat-attachments" / "thread-one" / name).resolve()
+    # With or without the thread that uploaded it (a forked thread may not know it).
+    assert locate_chat_attachment(name, data_dir=tmp_path, thread_id="thread-one") == expected
+    assert locate_chat_attachment(name, data_dir=tmp_path) == expected
+    assert locate_chat_attachment(name, data_dir=tmp_path, thread_id="other") == expected
+    for bad in ("", "notes.txt", "../" + name, name + "/x", "0" * 32 + "-a\\b"):
+        with pytest.raises(ChatMediaError, match="invalid"):
+            locate_chat_attachment(bad, data_dir=tmp_path)
+    missing = "f" * 32 + "-gone.png"
+    with pytest.raises(ChatMediaError, match="no longer available"):
+        locate_chat_attachment(missing, data_dir=tmp_path)
+    # A link planted under an upload's name is not followed.
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret")
+    linked = "e" * 32 + "-secret.txt"
+    (tmp_path / "chat-attachments" / "thread-one" / linked).symlink_to(outside)
+    with pytest.raises(ChatMediaError, match="no longer available"):
+        locate_chat_attachment(linked, data_dir=tmp_path)

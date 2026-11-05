@@ -21,8 +21,12 @@
 > address by hand and must be inside those ranges. The opt-in is stored in the
 > registry `config` table. Detection runs off the request lock and is retried
 > every 20 seconds until the desktop is listening, then every 120 seconds, so
-> Tailscale may start after Raticode. Turning it off closes the extra socket and
-> ends the sessions that arrived through it. Phones learn the address only by
+> Tailscale may start after Raticode. A check that finds no address keeps the
+> bound socket and its sessions; a new address is bound before the old one closes.
+> Turning it off closes the extra socket and ends the sessions that arrived
+> through it. When a phone signs in again with its pinned identity, the listener
+> ends that phone's older sessions, so sockets left dead by network changes or
+> sleep cannot fill the 16-connection limit. Desktop peers keep parallel sessions. Phones learn the address only by
 > sending `sync.request.include_tailnet_endpoint: true`; see
 > [mobile-desktop-parity.md](../mobile-desktop-parity.md). Pairing still happens
 > over the LAN. The tailnet policy is the user's firewall for tailnet traffic.

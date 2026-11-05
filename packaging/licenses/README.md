@@ -33,7 +33,8 @@ Desktop installers also carry it in their resources/third-party-licenses folder.
 * tokenizers 0.23.2: its wheel omits the Apache-2.0 license. The supplied notice is
   copied from `tokenizers/LICENSE` in the locked sdist after checking its uv.lock hash.
 * py-rust-stemmers 0.1.8 declares no license metadata. Its wheel's LICENSE is MIT.
-* bibtexparser 1.4.4 is dual-licensed "LGPLv3 or BSD"; Raticode uses it under BSD.
+* bibtexparser 2.1.0 declares `License-Expression: MIT` and ships its MIT LICENSE.
+  Version 1.x was dual-licensed "LGPLv3 or BSD".
 * onnxruntime ships its third-party notices in ThirdPartyNotices.txt; the collector
   copies it alongside the onnxruntime license.
 * The local lodash.isequal adapter is application code and uses the application

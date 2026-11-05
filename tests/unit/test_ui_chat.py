@@ -1747,6 +1747,141 @@ async def test_stream_workflow_chat_passes_cancel_event(monkeypatch, tmp_path) -
     assert events[-1]["type"] == "final"
 
 
+# Claude Code reports a retried API call as a system record with subtype api_retry and an
+# error category; a dropped connection has no status, so the category is "unknown". On
+# 2026-11-03 a review that recovered from one finished normally but was recorded as a
+# provider error and blocked its task.
+CLAUDE_RETRY = (
+    '{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,'
+    '"retry_delay_ms":512,"error_status":null,"error":"unknown"}\n'
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result,expected",
+    [
+        ('{"type":"result","subtype":"success","is_error":false,"result":"Verdict"}\n', "final"),
+        (
+            '{"type":"result","subtype":"error_during_execution","is_error":true,'
+            '"result":"API Error: Connection error."}\n',
+            "error",
+        ),
+    ],
+)
+async def test_a_retried_api_call_is_not_a_failed_turn(monkeypatch, tmp_path, result, expected):
+    monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/claude")
+
+    async def fake_stream_subprocess(*_args, **_kwargs):
+        for text in (CLAUDE_RETRY, '{"type":"assistant","message":{"content":[]}}\n', result):
+            yield {"type": "chunk", "stream": "stdout", "text": text, "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
+
+    monkeypatch.setattr(chat, "stream_subprocess", fake_stream_subprocess)
+    events = [
+        event
+        async for event in stream_workflow_chat(
+            provider="claude_code",
+            model="sonnet",
+            messages=[{"role": "user", "body": "review"}],
+            workflow=None,
+            working_dir=tmp_path,
+            data_dir=tmp_path,
+        )
+    ]
+
+    # The retry alone never fails the turn; the turn's own result decides.
+    assert events[-1]["type"] == expected, events[-1]
+    if expected == "final":
+        assert events[-1]["message"]["body"] == "Verdict"
+    else:
+        assert events[-1]["error"] == "API Error: Connection error."
+
+
+@pytest.mark.asyncio
+async def test_a_retried_api_call_is_not_a_failed_reply(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/claude")
+
+    async def fake_run_subprocess(_command, **kwargs):
+        result = '{"type":"result","subtype":"success","is_error":false,"result":"Verdict"}\n'
+        stdout = CLAUDE_RETRY + result
+        kwargs["on_stdout"](stdout)
+        return 0, stdout, ""
+
+    monkeypatch.setattr(chat, "run_subprocess", fake_run_subprocess)
+    result = await run_workflow_chat(
+        provider="claude_code",
+        model="sonnet",
+        messages=[{"role": "user", "body": "review"}],
+        workflow=None,
+        working_dir=tmp_path,
+        data_dir=tmp_path,
+    )
+    assert result["message"]["body"] == "Verdict"
+
+
+# A CLI can exit cleanly after its stream ends early, leaving records but no answer.
+# Its raw JSON lines used to become the turn's "answer", which Rem then sent to review.
+CLAUDE_NO_ANSWER = (
+    '{"type":"system","subtype":"init","session_id":"s"}\n'
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}\n'
+)
+
+
+@pytest.mark.asyncio
+async def test_a_clean_exit_without_an_answer_is_not_a_final_answer(monkeypatch, tmp_path):
+    monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/claude")
+
+    async def fake_stream_subprocess(*_args, **_kwargs):
+        yield {"type": "chunk", "stream": "stdout", "text": CLAUDE_NO_ANSWER, "returncode": None}
+        yield {"type": "exit", "stream": None, "text": "", "returncode": 0}
+
+    monkeypatch.setattr(chat, "stream_subprocess", fake_stream_subprocess)
+    events = [
+        event
+        async for event in stream_workflow_chat(
+            provider="claude_code",
+            model="sonnet",
+            messages=[{"role": "user", "body": "work"}],
+            workflow=None,
+            working_dir=tmp_path,
+            data_dir=tmp_path,
+        )
+    ]
+    assert events[-1]["type"] == "error", events[-1]
+    assert events[-1]["error"] == chat.NO_FINAL_ANSWER
+    assert events[-1]["errorKind"] == "protocol"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_one_shot_exit_without_an_answer_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/claude")
+
+    async def fake_run_subprocess(_command, **kwargs):
+        kwargs["on_stdout"](CLAUDE_NO_ANSWER)
+        return 0, CLAUDE_NO_ANSWER, ""
+
+    monkeypatch.setattr(chat, "run_subprocess", fake_run_subprocess)
+    with pytest.raises(chat.ChatProviderError, match="without a final answer"):
+        await run_workflow_chat(
+            provider="claude_code",
+            model="sonnet",
+            messages=[{"role": "user", "body": "work"}],
+            workflow=None,
+            working_dir=tmp_path,
+            data_dir=tmp_path,
+        )
+
+
+def test_retry_notices_are_not_provider_errors() -> None:
+    retry = json.loads(CLAUDE_RETRY)
+    assert chat._provider_error_message([retry]) is None
+    failed = {"type": "turn.failed", "error": {"message": "x"}}
+    assert chat._provider_error_message([failed]) == "x"
+    refused = {"type": "result", "is_error": True, "result": "No"}
+    assert chat._provider_error_message([refused]) == "No"
+
+
 @pytest.mark.asyncio
 async def test_stream_workflow_chat_yields_error_on_nonzero_exit(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(chat.shutil, "which", lambda _binary: "/usr/bin/codex")

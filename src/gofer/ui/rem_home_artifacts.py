@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from gofer.ui.report_outputs import ReportTools
-from gofer.ui.swarm_tools import SwarmToolServer
+from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 from gofer.utils.atomic_output import mkdir_without_links, open_binary_input
 
 if TYPE_CHECKING:
     from gofer.ui.rem_home import RemHome
+
+log = logging.getLogger(__name__)
 
 
 def artifact_root(run: dict[str, Any]) -> Path:
@@ -73,15 +77,31 @@ def artifact_tools(
         if artifact_root({**run, "config": refreshed}) != root:
             raise ValueError("The report destination changed; update the task before saving")
         result = reports.call(name, arguments)
-        with open_binary_input(Path(result["path"])) as handle:
-            data = handle.read(2 * 1024 * 1024 + 1)
-        receipt = {**result, "sha256": hashlib.sha256(data).hexdigest(), "epoch": run["epoch"]}
-        with home.store.connect() as db:
-            current = home.store.get(db, "runs", run["id"])
-            receipt["superseded"] = current["epoch"] != run["epoch"]
-            current.setdefault("artifacts", []).append(receipt)
-            home.store.put(db, "runs", current)
-            home.store.event(db, "artifact.saved", {"run_id": run["id"], "path": result["path"]})
+        try:
+            with open_binary_input(Path(result["path"])) as handle:
+                data = handle.read(2 * 1024 * 1024 + 1)
+            receipt = {
+                **result,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "epoch": run["epoch"],
+            }
+            with home.store.connect() as db:
+                current = home.store.get(db, "runs", run["id"])
+                receipt["superseded"] = current["epoch"] != run["epoch"]
+                current.setdefault("artifacts", []).append(receipt)
+                home.store.put(db, "runs", current)
+                home.store.event(
+                    db, "artifact.saved", {"run_id": run["id"], "path": result["path"]}
+                )
+        except (OSError, sqlite3.Error) as exc:
+            # The file exists now, so an identical retry would only report a
+            # name clash. Say what happened and how to recover.
+            log.exception("Rem report receipt was not recorded")
+            shown = Path(result["path"]).relative_to(reports.root).as_posix()
+            raise ValueError(
+                f"The report was written to {shown}, but its receipt couldn't be recorded "
+                f"({type(exc).__name__}). Save it again under a new name."
+            ) from exc
         return result
 
     server = SwarmToolServer()
@@ -105,6 +125,8 @@ def artifact_tools(
             }
         ],
         "Save reports only through this granted output service.",
+        label="Report",
+        failure_hint=TOOL_FAILURE_HINT,
     )
     try:
         yield {"name": "rem_artifacts", "type": "http", "url": url}

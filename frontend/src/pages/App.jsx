@@ -82,8 +82,12 @@ import MarkdownContent from "../components/MarkdownContent.jsx";
 import ChatComposer, { MessageAttachments } from "../components/ChatComposer.jsx";
 const SettingsPopover = lazy(() => import("../components/SettingsPopover.jsx"));
 import { commandSlotSettings, defaultSettingsSnapshot, normalizeAppSettings } from "../lib/settings.js";
-import { pluginAvailable, pluginEnabled, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
+import { VOICE_COMMAND_ID, requestVoiceDictation, setDictationAutoSend, setDictationMode, setVoiceBinding } from "../lib/voiceShortcut.js";
+import { EDITOR_CONTENT, initialMainContent, pluginAvailable, pluginEnabled, resolveMainContent, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
 import RaticodeMark from "../components/RaticodeMark.jsx";
+import RatFaceIcon from "../components/RatFaceIcon.jsx";
+import { createPortal } from "react-dom";
+import { createRemHost, RemSlot } from "../components/RemSlot.jsx";
 import UnifiedBottomPanel from "../components/UnifiedBottomPanel.jsx";
 import { useWorkflowRunRegistry } from "../lib/useWorkflowRunRegistry.js";
 import { initialWorkflowParameters, normalizeWorkflowFilesystemAccess } from "../lib/workflowRunSetup.js";
@@ -430,11 +434,15 @@ export default function App() {
   const [requestedSidebarActivity, setSidebarActivity] = useState(initialEditorSession?.activity || (initialStudioSession.view === "code" ? "files" : settings.general.initialActivity || "workflows"));
   // Turning a plugin off moves its view to files without losing the choice.
   const sidebarActivity = resolvePluginActivity(settings.plugins, requestedSidebarActivity);
-  // The sidebar activity owns the main content area. Rem and Second Brain show
-  // their workspaces, Swarms and Organizations show files until one is opened,
-  // and every other activity shows open files and browser tabs.
-  const remHomeOpen = sidebarActivity === "rem";
-  const secondBrainOpen = sidebarActivity === "second-brain";
+  // The main content area changes only when something is opened, not when the
+  // sidebar switches plugins, so Rem's conversation stays visible while the
+  // sidebar shows source control or workflows. Clicking Rem or Second Brain in
+  // the rail opens its home; Swarms and Organizations show their workspace once
+  // one is opened.
+  const [requestedMainContent, setMainContent] = useState(() => initialEditorSession?.mainContent || initialMainContent(requestedSidebarActivity));
+  const mainContent = resolveMainContent(settings.plugins, requestedMainContent);
+  const remHomeOpen = mainContent === "rem";
+  const secondBrainOpen = mainContent === "second-brain";
   useEffect(() => {
     setRemHomeContext(async () => {
       const workspace = window.goferDesktop?.workspace;
@@ -474,17 +482,47 @@ export default function App() {
   const [activeCodeDocumentState, setActiveCodeDocumentState] = useState(null);
   const { projectPaneVisible, setProjectPaneVisible, assistantPaneVisible, setAssistantPaneVisible, closeCompactPane } = useResponsivePanes(settings.layout);
   const [assistantFocusRequest, setAssistantFocusRequest] = useState(0);
+  // With Rem's chat in the side pane, asking about code or opening a thread
+  // brings threads forward until the person goes back to Rem.
+  const [threadsRequested, setThreadsRequested] = useState(false);
   useEffect(() => {
-    const openRem = () => { setAssistantPaneVisible(true); setAssistantFocusRequest(current => current + 1); };
-    const showPane = () => setAssistantPaneVisible(true);
+    const openRem = () => { setThreadsRequested(true); setAssistantPaneVisible(true); setAssistantFocusRequest(current => current + 1); };
+    const showThread = () => { setThreadsRequested(true); setAssistantPaneVisible(true); };
+    const showTask = () => { setThreadsRequested(false); setAssistantPaneVisible(true); };
     window.addEventListener("gofer:rem-context", openRem);
-    window.addEventListener("gofer:rem-open-thread", showPane);
-    window.addEventListener("gofer:rem-show-task", showPane);
-    return () => { window.removeEventListener("gofer:rem-context", openRem); window.removeEventListener("gofer:rem-open-thread", showPane); window.removeEventListener("gofer:rem-show-task", showPane); };
+    window.addEventListener("gofer:rem-open-thread", showThread);
+    window.addEventListener("gofer:rem-show-task", showTask);
+    return () => { window.removeEventListener("gofer:rem-context", openRem); window.removeEventListener("gofer:rem-open-thread", showThread); window.removeEventListener("gofer:rem-show-task", showTask); };
   }, [setAssistantPaneVisible]);
   // "Ask Rem about this" attaches files to Rem's chat when the Rem plugin is on,
   // otherwise to the open thread in the Rem pane.
   const remPluginOn = pluginEnabled(settings.plugins, "rem");
+  // Settings > Layout can show Rem's chat in the side pane in place of threads.
+  // Rem's chat is shown in one place at a time, so while it fills the main area
+  // (the Rem plugin) the side pane shows threads.
+  const remPaneLayout = settings.layout.assistantPaneContent === "rem" && remPluginOn;
+  const sidePaneShowsRem = remPaneLayout && !remHomeOpen && !threadsRequested;
+  // Rem's chat mounts the first time it is shown and then stays mounted, moving
+  // between the main area and the side pane without re-rendering its history.
+  const [remHost] = useState(() => (typeof document === "undefined" ? null : createRemHost()));
+  const [remMounted, setRemMounted] = useState(false);
+  if ((remHomeOpen || sidePaneShowsRem) && !remMounted) setRemMounted(true);
+  // An opened task shows in the Rem sidebar, so opening one from the chat brings
+  // that sidebar forward. "View in conversation" there shows Rem's chat if it is
+  // hidden: in the side pane with that layout, otherwise in the main area.
+  const remChatRef = useRef({});
+  remChatRef.current = { visible: remHomeOpen || sidePaneShowsRem, sidePane: remPaneLayout, showMain: () => showMainContent("rem") };
+  useEffect(() => {
+    const showTask = () => { setSidebarActivity("rem"); setProjectPaneVisible(true); };
+    const showMessage = () => {
+      const rem = remChatRef.current;
+      if (rem.sidePane) { setThreadsRequested(false); setAssistantPaneVisible(true); return; }
+      if (!rem.visible) rem.showMain();
+    };
+    window.addEventListener("gofer:rem-task-sheet", showTask);
+    window.addEventListener("gofer:rem-show-message", showMessage);
+    return () => { window.removeEventListener("gofer:rem-task-sheet", showTask); window.removeEventListener("gofer:rem-show-message", showMessage); };
+  }, [setProjectPaneVisible, setAssistantPaneVisible]);
   useEffect(() => {
     const receive = event => {
       const paths = event.detail?.paths || [];
@@ -498,6 +536,8 @@ export default function App() {
       setSelectedSwarm(null);
       setSelectedOrganization(null);
       setSidebarActivity("rem");
+      setMainContent("rem");
+      setThreadsRequested(false);
       void import("../lib/remComposer.js").then(({ attachPathsToRemComposer }) => attachPathsToRemComposer(paths));
     };
     window.addEventListener("gofer:rem-attach-files", receive);
@@ -551,8 +591,8 @@ export default function App() {
   runRegistryRecordsRef.current = runRegistry.records;
   const [pinnedRun, setPinnedRun] = useState(initialEditorSession?.pinnedRun || null);
   useEffect(() => {
-    saveEditorSession({ ...withoutAgentBrowserTabs(codeOpenPaths, activeCodePath, browserTabs), workflowTabs, activity: sidebarActivity, pinnedRun });
-  }, [codeOpenPaths, activeCodePath, workflowTabs, browserTabs, sidebarActivity, pinnedRun]);
+    saveEditorSession({ ...withoutAgentBrowserTabs(codeOpenPaths, activeCodePath, browserTabs), workflowTabs, activity: sidebarActivity, mainContent, pinnedRun });
+  }, [codeOpenPaths, activeCodePath, workflowTabs, browserTabs, sidebarActivity, mainContent, pinnedRun]);
   const pinnedRunRef = useRef(pinnedRun);
   pinnedRunRef.current = pinnedRun;
   const setRunState = useCallback((update) => {
@@ -632,10 +672,17 @@ export default function App() {
   const activeWorkflow = workflows.find(item => item.id === activeWorkflowId);
   const browsingWorkspace = activeWorkspaceForProject(workflows, undefined, activeProjectRoot) ?? projectWorkspace(activeProjectRoot);
   const swarmProjectRoot = browsingWorkspace?.projectRoot || activeProjectRoot || "";
-  const swarmOpen = sidebarActivity === "swarms" && samePath(selectedSwarm?.projectRoot, swarmProjectRoot);
-  const organizationOpen = sidebarActivity === "organizations" && Boolean(selectedOrganization);
+  const swarmOpen = mainContent === "swarms" && samePath(selectedSwarm?.projectRoot, swarmProjectRoot);
+  const organizationOpen = mainContent === "organizations" && Boolean(selectedOrganization);
   const editorContentOpen = !remHomeOpen && !secondBrainOpen && !swarmOpen && !organizationOpen;
   const codeWorkspaceWorkflow = workflows.find(item => samePath(item.sourcePath, activeCodePath)) ?? activeWorkflow ?? browsingWorkspace;
+  // Rem's chat looks the same in the main area and in the side pane.
+  const remHomeProps = {
+    onOpenLink: href => void openMarkdownFileLink(href),
+    onOpenSettings: () => { setSettingsCategory("assistant"); setSettingsOpen(true); },
+    projectOptions: mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots),
+    avatar: { enabled: settings.assistant.avatarEnabled, animated: settings.assistant.avatarAnimated, reducedMotion: settings.appearance.reducedMotion },
+  };
 
 
   const changeSetting = useCallback((path, value) => {
@@ -873,6 +920,13 @@ export default function App() {
     };
   }, [activeProjectRoot, lastWorktreeByProject, recentProjectRoots]);
 
+  // Chat boxes show the dictation shortcut in their titles and hints.
+  useEffect(() => {
+    setVoiceBinding(settingBinding(settings, VOICE_COMMAND_ID));
+    setDictationMode(settings.devices?.dictationMode);
+    setDictationAutoSend(settings.devices?.dictationAutoSend);
+  }, [settings]);
+
   useEffect(() => {
     function runShortcutAction(action) {
       if (action === "settings.open") setSettingsOpen(true);
@@ -884,6 +938,8 @@ export default function App() {
       if (action === "view.code") changeStudioViewRef.current?.("code");
       if (action === "view.toggleProjectPane") setProjectPaneVisible((current) => !current);
       if (action === "view.toggleAssistantPane") setAssistantPaneVisible((current) => !current);
+      // Dictate into the chat box in use, or show Rem and dictate there.
+      if (action === VOICE_COMMAND_ID) void requestVoiceDictation({ reveal: () => setAssistantPaneVisible(true) });
       if (action === "terminal.new") window.dispatchEvent(new CustomEvent("gofer:new-terminal"));
       if (action === "panel.toggle") window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel"));
       if (action === "workflow.run" && activeWorkflow && !runState.running
@@ -929,6 +985,7 @@ export default function App() {
         "view.toggleProjectPane",
         "view.toggleAssistantPane",
         "workflow.run",
+        VOICE_COMMAND_ID,
       ]) {
         const segments = settingBinding(settings, commandId).split(" ").filter(Boolean);
         if (segments.length > 1) {
@@ -952,7 +1009,25 @@ export default function App() {
       if (!action) return;
       event.preventDefault();
       event.stopPropagation();
+      if (action === VOICE_COMMAND_ID) {
+        pressDictationShortcut(event);
+        return;
+      }
       runShortcutAction(action);
+    }
+    // In Hold to talk, dictation listens until the shortcut is let go: any of its keys
+    // coming up, or the window losing focus. In Press to start and stop, letting go does nothing.
+    function pressDictationShortcut(down) {
+      void requestVoiceDictation({ kind: "press", reveal: () => setAssistantPaneVisible(true) });
+      const keys = new Set([down.code, "Control", "Alt", "AltGraph", "Meta", "Shift"]);
+      const release = () => {
+        window.removeEventListener("keyup", keyUp, true);
+        window.removeEventListener("blur", release);
+        void requestVoiceDictation({ kind: "release" });
+      };
+      const keyUp = (event) => { if (keys.has(event.code) || keys.has(event.key)) release(); };
+      window.addEventListener("keyup", keyUp, true);
+      window.addEventListener("blur", release);
     }
     const unsubscribeCommand = window.goferBrowser?.onCommand?.((command) => {
       if (command?.action === "application-shortcut" && command.commandId) {
@@ -1038,27 +1113,26 @@ export default function App() {
     }
   }, [activeWorkflowId, workflows, codeOpenPaths, workflowTabs, documentSession]);
 
-  // Leaving Swarms or Organizations closes the open item, so returning shows
-  // files until the user opens one again.
-  function selectSidebarActivity(next) {
-    setSidebarActivity(next);
+  // Leaving a swarm or organization closes it, so its sidebar row is no longer
+  // marked open.
+  function showMainContent(next) {
+    setMainContent(next);
+    if (next === "rem") setThreadsRequested(false);
     if (next !== "swarms") setSelectedSwarm(null);
     if (next !== "organizations") setSelectedOrganization(null);
   }
 
   function showEditorContent() {
-    setSelectedSwarm(null);
-    setSelectedOrganization(null);
-    setSidebarActivity(current => editorActivity(current));
+    showMainContent(EDITOR_CONTENT);
   }
 
   // Background opens prepare the graph tab without replacing an open workspace such as Rem's home.
   function openWorkflowGraph(target, { background = false } = {}) {
     if (!target?.id) return;
     if (!background) {
+      setMainContent(EDITOR_CONTENT);
       setSelectedSwarm(null);
       setSelectedOrganization(null);
-      setSidebarActivity(current => editorActivity(current, "workflows"));
     }
     const path = `workflow-graph:${encodeURIComponent(target.id)}`;
     setWorkflowTabs(current => ({ ...current, [path]: { kind: "workflow", workflowId: target.id,
@@ -1105,6 +1179,7 @@ export default function App() {
 
   function changeStudioView(nextView) {
     if (nextView === "graph") { openWorkflowGraph(activeWorkflow); return; }
+    showEditorContent();
     setStudioView("code");
     setCodeEditorOpened(true);
     if (workflowTabs[activeCodePath] && activeWorkflow?.sourcePath) openCodeFile(activeWorkflow.sourcePath);
@@ -1261,7 +1336,7 @@ export default function App() {
       if (info?.isDirectory) {
         await openProjectAtPath(info.path || path, { rememberProject: true });
         setStudioView("code");
-        selectSidebarActivity("files");
+        setSidebarActivity("files");
         setProjectPaneVisible(true);
         return;
       }
@@ -3814,6 +3889,7 @@ export default function App() {
     if (action === "view.code") changeStudioView("code");
     if (action === "view.projectPane") setProjectPaneVisible((current) => !current);
     if (action === "view.assistantPane") setAssistantPaneVisible((current) => !current);
+    if (action === "view.dictate") void requestVoiceDictation({ reveal: () => setAssistantPaneVisible(true) });
     if (action === "view.panel") {
       window.dispatchEvent(new CustomEvent("gofer:toggle-bottom-panel"));
     }
@@ -3954,13 +4030,14 @@ export default function App() {
         onDuplicateWorkflow={duplicateWorkflow}
         onCodeFileOpen={(...args) => { openCodeFile(...args); closeCompactPane(); }}
         selectedSwarmId={samePath(selectedSwarm?.projectRoot, swarmProjectRoot) ? selectedSwarm.id : null}
-        onOpenOrganization={(id) => { selectSidebarActivity("organizations"); setSelectedOrganization({ id }); closeCompactPane(); }}
+        onOpenOrganization={(id) => { setSidebarActivity("organizations"); showMainContent("organizations"); setSelectedOrganization({ id }); closeCompactPane(); }}
         selectedOrganizationId={selectedOrganization ? selectedOrganization.id : null}
-        onOpenSecondBrain={() => { selectSidebarActivity("second-brain"); closeCompactPane(); }}
+        onOpenSecondBrain={() => { setSidebarActivity("second-brain"); showMainContent("second-brain"); closeCompactPane(); }}
         secondBrainOpen={secondBrainOpen}
-        onOpenRemHome={() => { selectSidebarActivity("rem"); closeCompactPane(); }}
+        onOpenRemHome={() => { setSidebarActivity("rem"); showMainContent("rem"); closeCompactPane(); }}
         remHomeOpen={remHomeOpen}
-        onOpenSwarm={(id, agentId) => { selectSidebarActivity("swarms"); setSelectedSwarm({ id, agentId, projectRoot: swarmProjectRoot }); closeCompactPane(); }}
+        remProjectOptions={remHomeProps.projectOptions}
+        onOpenSwarm={(id, agentId) => { setSidebarActivity("swarms"); showMainContent("swarms"); setSelectedSwarm({ id, agentId, projectRoot: swarmProjectRoot }); closeCompactPane(); }}
         activeCodePath={activeCodePath}
         onCloseCodeFile={closeActiveCodeFile}
         onCodeFilesystemChange={handleCodeFilesystemChange}
@@ -3989,7 +4066,7 @@ export default function App() {
           })
         }
         onSelect={(id) => { openWorkflowGraph(workflows.find(item => item.id === id)); closeCompactPane(); }}
-        onActivityChange={(next) => { selectSidebarActivity(next); setProjectPaneVisible(true); }}
+        onActivityChange={(next) => { setSidebarActivity(next); setProjectPaneVisible(true); }}
         onViewChange={changeStudioView}
       />}
 
@@ -4000,8 +4077,8 @@ export default function App() {
               </div>
             ) : null}
         {organizationOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading organization...</p>}><OrganizationWorkspace key={selectedOrganization.id} rootPath={swarmProjectRoot} projectOptions={recentProjectRoots} organizationId={selectedOrganization.id} defaults={settings.assistant} memorySettings={settings.memory} onSelect={id => setSelectedOrganization({ id })} onClose={() => setSelectedOrganization(null)} /></Suspense> : null}
-        {secondBrainOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading Second Brain...</p>}><SecondBrainWorkspace assistant={settings.assistant} memorySettings={settings.memory} onClose={() => selectSidebarActivity("files")} /></Suspense> : null}
-        {remHomeOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading Rem...</p>}><RemHomeWorkspace onOpenLink={href => void openMarkdownFileLink(href)} onOpenSettings={() => { setSettingsCategory("assistant"); setSettingsOpen(true); }} projectOptions={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots)} avatar={{ enabled: settings.assistant.avatarEnabled, animated: settings.assistant.avatarAnimated, reducedMotion: settings.appearance.reducedMotion }} /></Suspense> : null}
+        {secondBrainOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading Second Brain...</p>}><SecondBrainWorkspace assistant={settings.assistant} memorySettings={settings.memory} onClose={showEditorContent} /></Suspense> : null}
+        {remHomeOpen ? <RemSlot host={remHost} /> : null}
         {swarmOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace projectPaths={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots).map(root => pathValue(lastWorktreeByProject, root) || root)} selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
         <div className={`${editorContentOpen ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
             {!workflowTabs[activeCodePath] && (activeCodePath || sidebarActivity !== "workflows") && topBarNotice?.message ? (
@@ -4143,8 +4220,19 @@ export default function App() {
         </Suspense>
       ) : null}
 
-      <div className={assistantPaneVisible ? "contents" : "hidden"} aria-hidden={!assistantPaneVisible}>
+      {sidePaneShowsRem ? <div className={assistantPaneVisible ? "contents" : "hidden"} aria-hidden={!assistantPaneVisible}>
+        <RemSidePane
+          width={chatPaneWidth}
+          onResizeStart={(event) => startPaneResize(event, { max: 520, min: 300, width: chatPaneWidth, onResize: (width) => changeSetting("layout.assistantPaneWidth", width) })}
+          onResizeKeyDown={(event) => handlePaneResizeKeyDown(event, { defaultValue: 380, max: 520, min: 300, onResize: (width) => changeSetting("layout.assistantPaneWidth", width), width: chatPaneWidth })}
+        >
+          <RemSlot host={remHost} />
+        </RemSidePane>
+      </div> : null}
+      {/* Threads stay mounted while Rem fills the side pane, so their drafts survive. */}
+      <div className={assistantPaneVisible && !sidePaneShowsRem ? "contents" : "hidden"} aria-hidden={!assistantPaneVisible || sidePaneShowsRem}>
         <ChatPane
+          onShowRem={remPaneLayout && !remHomeOpen && threadsRequested ? () => setThreadsRequested(false) : undefined}
           composerFocusRequest={assistantFocusRequest}
           memorySettings={settings.memory}
           agentBrowser={settings.browser.agentBrowser}
@@ -4190,6 +4278,7 @@ export default function App() {
         />
       </div>
       </div>
+      {remMounted && remPluginOn && remHost ? createPortal(<Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading Rem...</p>}><RemHomeWorkspace {...remHomeProps} /></Suspense>, remHost) : null}
       {runPreview ? (
         <Suspense fallback={null}><RunPreviewDialog
           plan={runPreview.plan}
@@ -4369,12 +4458,6 @@ export function workflowRunFailureMessage(run) {
 
 function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
-}
-
-// Opening a file, graph, or browser tab from Rem or Second Brain moves the
-// sidebar to an editor activity so the sidebar and main content stay in step.
-export function editorActivity(current, fallback = "files") {
-  return current === "rem" || current === "second-brain" ? fallback : current;
 }
 
 export function paneWidthForKey(
@@ -4861,6 +4944,7 @@ export function WorkflowSidebar({
   secondBrainOpen,
   onOpenRemHome,
   remHomeOpen,
+  remProjectOptions,
   onCloseCodeFile,
   onCodeFilesystemChange,
   onCreate,
@@ -5055,6 +5139,7 @@ export function WorkflowSidebar({
             secondBrainOpen={secondBrainOpen}
             onOpenRemHome={onOpenRemHome}
             remHomeOpen={remHomeOpen}
+            remProjectOptions={remProjectOptions}
             onOpenSwarm={onOpenSwarm}
             selectedSwarmId={selectedSwarmId}
             onSelectProject={onSelectProject}
@@ -5806,6 +5891,7 @@ const APPLICATION_MENUS = [
     null,
     ["view.projectPane", "Project Files", "Ctrl+B", "project-check"],
     ["view.assistantPane", "Rem", "", "assistant-check"],
+    ["view.dictate", "Dictate a Message", ""],
     ["view.panel", "Bottom Panel", "panel.toggle"],
     null,
     ["view.zoomIn", "Zoom In", "Ctrl++"],
@@ -5962,6 +6048,7 @@ const APPLICATION_MENU_BINDINGS = {
   "help.settings": "settings.open",
   "terminal.toggle": "panel.toggle",
   "view.assistantPane": "view.toggleAssistantPane",
+  "view.dictate": VOICE_COMMAND_ID,
   "view.code": "view.code",
   "view.graph": "view.graph",
   "view.panel": "panel.toggle",
@@ -6142,6 +6229,30 @@ function WorkflowSaveStatus({ saveState, onRetry }) {
   );
 }
 
+// Rem's chat in the side pane, used in place of threads when Settings > Layout
+// asks for it. It docks and resizes like the threads pane.
+function RemSidePane({ width, onResizeStart, onResizeKeyDown, children }) {
+  return (
+    <aside className="studio-rem-pane relative flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-l border-line" data-rem-pane="true" style={{ width }}>
+      <div
+        aria-label="Resize Rem pane"
+        aria-orientation="vertical"
+        aria-valuemax={520}
+        aria-valuemin={300}
+        aria-valuenow={width}
+        aria-valuetext={`${width} pixels wide`}
+        className="absolute left-[-3px] top-0 z-20 h-full w-1.5 cursor-col-resize transition hover:bg-brand/40"
+        role="separator"
+        tabIndex={0}
+        title="Resize Rem pane"
+        onKeyDown={onResizeKeyDown}
+        onPointerDown={onResizeStart}
+      />
+      {children}
+    </aside>
+  );
+}
+
 function updateButtonLabel(updateState) {
   if (updateState?.supported === false) return updateState.platform === "darwin" ? "Download Mac installer" : "Open update downloads";
   if (updateState?.downloaded) return "Restart to update";
@@ -6162,6 +6273,7 @@ function updateButtonTitle(updateState) {
 }
 
 export function ChatPane({
+  onShowRem,
   swarmProjectPaths = [],
   activeWorkflowId,
   activeProjectRoot,
@@ -7816,6 +7928,17 @@ export function ChatPane({
       />
       <div className="flex h-[54px] shrink-0 items-center justify-between border-b border-line px-3.5">
         <div className="flex min-w-0 items-center gap-1 text-xs font-semibold text-muted">
+          {onShowRem ? (
+            <button
+              aria-label="Back to Rem"
+              className="studio-icon-button -ml-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-slate-100 hover:text-ink"
+              title="Back to Rem"
+              type="button"
+              onClick={onShowRem}
+            >
+              <RatFaceIcon aria-hidden="true" size={17} />
+            </button>
+          ) : null}
           {activeThread ? (
             <button
               aria-label="Back to active threads"
@@ -8282,7 +8405,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
                 </button>
               </div>
             ) : null}
-            {isUser ? <MessageAttachments attachments={editing ? editAttachments : message.attachments} inverse /> : null}
+            {isUser ? <MessageAttachments attachments={editing ? editAttachments : message.attachments} inverse onOpenLink={onOpenLink} /> : null}
             {isUser && editing ? (
               <div className="space-y-2">
                 <textarea

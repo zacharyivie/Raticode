@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from collections.abc import Set as AbstractSet
@@ -113,6 +114,52 @@ def duplicate_notices(messages: list[dict[str, Any]]) -> set[str]:
     return duplicates
 
 
+PREVIEW_LENGTH = 280
+_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKUP = re.compile(r"(?m)^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)|[*_`~]{1,3}")
+
+
+def reference_preview(message: dict[str, Any] | None, identity: str) -> dict[str, Any]:
+    """What a reply shows of the message it refers to: who wrote it, when, and its opening words.
+
+    A message that is no longer in the chat is marked ``unavailable``. Files, phone cards and
+    details stay with the original message; only their count and the task title are shown.
+    """
+    if not message:
+        return {"id": identity, "unavailable": True}
+    body = _MARKUP.sub("", _LINK.sub(r"\1", str(message.get("body") or "")))
+    body = " ".join(body.split())
+    if len(body) > PREVIEW_LENGTH:
+        body = body[: PREVIEW_LENGTH - 1].rstrip() + "…"
+    preview: dict[str, Any] = {
+        "id": identity,
+        "role": message.get("role") or "rem",
+        "body": body,
+        "created_at": message.get("created_at") or "",
+    }
+    if message.get("kind") == "task_update":
+        preview["kind"] = "task_update"
+    title = (message.get("work") or {}).get("title")
+    if isinstance(title, str) and title:
+        preview["title"] = title[:160]
+    files = len(message.get("attachments") or []) + len(message.get("files") or [])
+    if files:
+        preview["files"] = files
+    return preview
+
+
+def with_references(
+    messages: list[dict[str, Any]], known: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Add each reply's ``referenced`` preview, looked up among ``known`` messages by ID."""
+    return [
+        {**m, "referenced": reference_preview(known.get(m["refers_to"]), m["refers_to"])}
+        if isinstance(m.get("refers_to"), str)
+        else m
+        for m in messages
+    ]
+
+
 def ran_at(task: dict[str, Any]) -> str:
     """When a task last ran: its newest run's start or finish, or its creation time."""
     times = [
@@ -155,6 +202,7 @@ def begin_cycle(
         stop_reason=None,
         error_detail=None,
         unresolved_fingerprint=None,
+        last_save_error=None,
         review_refresh_count=0,
         review_receipt_retry=False,
         review_format_retry=False,
@@ -556,10 +604,26 @@ class RemHomeStore:
             messages = [
                 json.loads(r["body"]) for r in db.execute("SELECT body FROM messages ORDER BY seq")
             ]
+            for message in messages:
+                # A failed reply's diagnostic (the decision that failed) stays in this
+                # database for tracing; the apps and Rem's own prompts never need it.
+                message.pop("diagnostic", None)
             hidden = duplicate_notices(messages)
+            known = {m["id"]: m for m in messages}
+            conversation = self.setting(db, "conversation")
             return {
-                "conversation": self.setting(db, "conversation"),
-                "messages": [m for m in messages if m["id"] not in hidden],
+                # Waiting messages are listed below, once.
+                "conversation": {k: v for k, v in conversation.items() if k != "waiting"},
+                "messages": with_references([m for m in messages if m["id"] not in hidden], known),
+                # Messages sent while Rem was replying. They join messages when Rem
+                # starts on them, so Rem's history never holds one it hasn't reached.
+                "waiting": with_references(
+                    [
+                        {**item, "role": "user", "request_id": item["id"], "waiting": True}
+                        for item in conversation.get("waiting") or []
+                    ],
+                    known,
+                ),
             }
 
     def messages_after(self, after: int, limit: int = 300) -> dict[str, Any]:

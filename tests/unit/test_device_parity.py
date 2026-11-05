@@ -320,7 +320,7 @@ def test_global_phone_turn_selects_project_and_continues_with_desktop_policy(
         def __init__(self) -> None:
             instances.append(self)
 
-        def register(self, callback: Any, *args: Any) -> str:
+        def register(self, callback: Any, *args: Any, **_labels: Any) -> str:
             self.callback = callback
             return "http://127.0.0.1/disposable-tools"
 

@@ -3,7 +3,232 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used the Gofer Flow name.
 
-## 0.5.0 - Unreleased
+## 0.5.1 - 2026-11-05
+
+Changes since the `v0.5.0` tag.
+
+### Added
+
+- Files attached in Rem's chat show on the phone whichever device sent them.
+  Pictures and videos attached in the desktop window load on the phone by
+  themselves and other files download when tapped; files the phone sent come
+  back from the computer after the phone's own copy is gone. A file deleted on
+  the computer, or a phone that isn't connected, is shown as such. Needs phone
+  version 0.18.0.
+- In Source Control, the target branch for a merge or rebase is a list you can
+  type in to search. It shows recommended branches first, then local branches,
+  then remote branches such as `origin/main`, each in alphabetical order. A
+  branch can now be rebased onto a remote branch, so right-clicking a branch
+  and choosing Rebase can target `origin/main`. Merges still only go into
+  local branches.
+- Asking Rem to link a file ("link me the video") gives a link you can click
+  instead of trying to send the file, so it no longer refuses with a warning
+  about passwords. Asking Rem to send a file works as before.
+- Full file paths in Rem's desktop chat are links you can click, including
+  paths with spaces. Raticode finds them by checking which files exist; no
+  model is involved.
+- Files you attach in Rem's chat or a thread show a thumbnail or a file-type
+  tile instead of just their name, before and after sending, on the desktop and
+  the phone. Click or tap one to preview it: pictures and videos open large,
+  text and code show as text, and other files open in their app.
+- Reply to any message in Rem's chat, yours or Rem's, on the desktop and the
+  phone. The message box shows which message you're replying to, and the sent
+  message shows it above your words; click or tap it to scroll back to it. Rem
+  reads the whole message you replied to, however far back it is, along with
+  its task when it has one, so "continue" on an older task's update continues
+  that task. A reply to a message that is no longer in the chat says so. Reply
+  replaces **Ask about this**, which pasted a quote into the message box.
+- Long messages in Rem's chat fold to a preview about a third of the screen
+  tall, with **Show more** to read the rest and **Show less** to fold it again,
+  on the desktop and the phone. Only messages at least half again as tall as
+  the preview fold. Rem's newest message opens in full; older long replies and
+  long messages you sent, such as pasted logs, start folded. Files, cards,
+  Reply and Copy stay visible, and copy, find and screen readers still get the
+  whole message.
+- **Tidy voice messages** (Settings > Rem, off by default). After you dictate in
+  the message box or in voice mode on the phone, a fast model adds punctuation,
+  drops filler words and fixes misheard names using Rem's chat, and your words
+  appear only once that is done, ready to edit. There is no undo; edit the
+  words directly. The first choice follows your default provider: Claude Haiku
+  5.5 for Claude Code (needs Claude Code 2.1.293 or later; run `claude update`),
+  GPT-6 Luna for Codex, Qwen 3.8 Flash for OpenCode, and the fastest listed
+  model elsewhere. If tidying is off, unavailable, slower than 15 seconds or
+  changes too much, the words appear as heard with a note saying why.
+- The desktop microphone works like voice mode on the phone. The same dotted
+  line rises with your voice while you talk. Choose how it listens under
+  Settings > Devices > Dictation: **Press to start and stop** (the default),
+  where you press the mic once to start and again to stop, or **Hold to talk**,
+  where it listens only while you hold the mic. Either way, stopping goes
+  straight on to your words; there is no Done step. The words wait in the
+  message box for you to edit and send. For hands-free use, turn on **Send
+  after dictation** in the same place to send them as soon as they're ready;
+  words that couldn't be tidied still wait for you. In Press to start and stop,
+  Enter also stops, a long silence stops on its own, and clicking the line
+  pauses and resumes. Words already in the box and words heard before a pause
+  stay. **Discard** drops only what you just said. With **Tidy voice messages**
+  on, your words stay hidden until the tidying model has finished, which starts
+  as soon as you stop.
+- Dictation uses the speech recognizer built into the operating system, on the
+  computer: Apple's on-device recognizer on macOS, which asks once for speech
+  recognition permission, and the offline recognizer behind Windows speech
+  recognition on Windows. Linux has no built-in recognizer, so it keeps
+  Raticode's offline model. Settings > Devices > Speech recognition shows
+  whether the system recognizer is ready, says why when it isn't, and lets you
+  choose Raticode's offline model instead. If the system recognizer refuses
+  while you talk, the offline model takes over, if it's installed, and nothing
+  you said is lost.
+- Press Ctrl+Alt+V (Command+Option+V on a Mac) to dictate while Raticode is
+  in front. It starts in the message box you're using, or opens Rem's chat and
+  starts there. In Press to start and stop, press it again, or Enter, to stop;
+  in Hold to talk, hold it while you speak and let go to stop. While you
+  dictate, Space pauses and resumes (Press to start and stop only), and Esc
+  discards only what you just said. The mic button's tooltip and the hint under
+  the message box show the keys, and **View > Dictate a Message** starts and
+  stops dictation in either mode. Change or clear the shortcut under Settings >
+  Keybindings. On keyboards where AltGr+V types a character, such as
+  Hungarian, AltGr+V still types it.
+
+### Changed
+
+- Update Typer to 0.27.3, APScheduler to 3.11.3, pydantic-settings to 2.16.1,
+  cryptography to 50.0.2, bibtexparser to 2.1.0, electron-builder to 26.18.0,
+  PostCSS to 8.5.32, `actions/checkout` to 7.0.1 and
+  `actions/download-artifact` to 8.0.2. Second Brain's BibTeX import and export
+  keep working the same way on bibtexparser 2, including field names in any
+  case and repeated citation keys. bibtexparser 2 is MIT-licensed and adds
+  pylatexenc (MIT).
+- Build the desktop window with Vite 8.3.5 and `@vitejs/plugin-react` 6.1.2,
+  which needs Vite 8. Startup still loads only the app's own code and React;
+  markdown support and the code editor load when first used, as before.
+
+### Fixed
+
+- Stopping dictation, or letting go of the mic in Hold to talk, no longer cuts
+  off the end of the last word: the last fraction of a second of audio still on
+  its way is now heard before the microphone closes. With **Tidy voice
+  messages** on, a pause in speaking now tidies the words so far as intended;
+  before, the steady stream of audio kept postponing it.
+- With **Tidy voice messages** on, a long dictation is tidied as you go instead
+  of in one block when you stop: once at least 15 new words and 5 seconds since
+  the last round have passed, and at every two-second pause. The tidied words
+  show in the message box while it keeps listening, and each round re-tidies
+  the whole dictation, so a sentence cut in half is mended. When you stop, a
+  round that already covers everything is used at once. A round that fails
+  changes nothing on screen and isn't retried until you say more.
+- Voice tidying keeps swearing as you said it instead of softening or
+  masking it, and a tidy that masks words you said is refused, so your words
+  appear as heard. When speech recognition itself wrote a swear word as
+  "f***", tidying writes it out only when the first letter, length and
+  sentence leave one possible word, and otherwise leaves the mask. Masked
+  words also no longer lose asterisks when the tidied text is cleaned up.
+- An opened Rem task now shows in the Rem sidebar in place of the task list,
+  with a back arrow at the top left that returns to every task, like leaving a
+  thread. The chat keeps its full width instead of sharing it with the task.
+  Opening a task from a card in the chat brings the Rem sidebar forward, and
+  **View in conversation** keeps the task open while the chat scrolls to the
+  message. Half-edited tasks survive switching to another plugin and back, and
+  the form fits the sidebar at its narrowest.
+- Rem's chat no longer scrolls sideways in the side pane. Saved-report cards
+  shorten long titles and keep their **Open** button in view, and a task's
+  progress steps wrap onto two rows in narrow panes.
+- Moving Rem's chat between the main area and the side pane no longer freezes
+  the window. The chat now moves as it is instead of being rebuilt, so it keeps
+  your place, an open task form and the memory panel, and messages scrolled out
+  of view skip layout until they come near. With a 700-message history a move
+  went from over a second to about 60 ms. While Rem works, a status update
+  redraws only the task cards that changed.
+- Dictating into a microphone that sends no sound, such as a headset with its
+  mic muted or switched off, no longer just shows a flat line. After two
+  seconds Raticode names the microphone, says it may be muted or off, and keeps
+  listening, so your words come through as soon as it's unmuted. The microphone
+  test in Settings > Devices says the same.
+- Phones connected through Tailscale no longer drop when the desktop's Tailscale
+  briefly restarts, wakes from sleep or answers slowly, and no longer forget the
+  desktop's Tailscale address right after the desktop starts. A phone that
+  reconnects replaces its own dead sessions, so they can't use up the desktop's
+  connection slots.
+- Sharing your phone screen with a voice request no longer blocks work you ask
+  for in your own words. Rem decides that work again without the screen, so
+  anything only the screen asks for still doesn't happen.
+- A message you send while Rem is still replying, from the desktop or the
+  phone, including a reply typed into a Rem alert or said in voice mode, no
+  longer comes back with "Rem is still replying; try again shortly" on the
+  phone, and on the desktop it is no longer lost if the window reloads while it
+  waits. Rem keeps it, shows it as **Sends when Rem finishes replying** on both,
+  and answers it next, in the order it arrived. Up to five can wait.
+- Rem's reply as it is being written on the phone no longer comes out garbled
+  when Rem has to ask its model again partway through, for example to fix its
+  own task changes, even if the phone lost its connection in between. The
+  phone now starts over with the new text.
+- If clearing Rem's history gives up because a worker won't stop, the message
+  Rem was answering is answered again instead of being left without a reply.
+- A delegated conversation no longer stops when Rem's own verdict on it comes
+  back malformed once; Rem asks again. A worker that answers a conversation
+  with nothing is retried, as empty worker turns already were.
+- When Rem can't finish a request, the decision that failed is kept with its
+  error reply in Rem's own records, so the cause can be traced later. It isn't
+  sent to the apps, and nothing is kept when the request carried text from the
+  phone's screen.
+- Asking Rem to build what an earlier research task proposed no longer fails
+  with "Changing projects requires updating the task first". When Rem moves a
+  task's work into a project, the work continues in a new thread in that
+  project.
+- Rem fixes its own mistakes in a reply's task changes, such as a change to a
+  task that doesn't exist, two changes to one task or a field the action can't
+  change, by asking its model once more. Before, the whole reply failed.
+- A dropped connection no longer stops Rem's work for good. Claude Code's
+  "API Error: Connection error.", Codex's "error sending request" and similar
+  network errors now retry after a short wait, as overloads already did. So
+  does a worker turn that ends cleanly with no answer, which used to send the
+  provider's raw output to review or block the task with "Worker ended without
+  a result".
+- Rem's own chat replies on Codex no longer fail when Codex reconnected and
+  then finished, and Codex's error text is shown instead of "Provider reported
+  a failed response". This also applies to workflow agent nodes.
+- A desktop or worker thread whose provider exits without an answer shows
+  "The provider ended its turn without a final answer." instead of the
+  provider's raw output.
+- Closing Raticode while Rem is replying no longer answers your message with
+  "Rem stopped". Rem answers it after it starts again.
+- A reply that asks to read earlier messages and also proposes tasks now does
+  the read and decides again, never acting on that first reply. Before, the
+  reply failed.
+- Rem reads a reviewer's verdict even when the review quotes a small JSON
+  example before it, and never mistakes a provider's own records for its
+  answer.
+- A task update that keeps failing to post waits longer between tries instead
+  of retrying, and possibly calling the chat model, several times a second.
+- A Rem research report that couldn't be saved no longer fails with "Swarm tool
+  failed. Retry or ask the orchestrator to inspect it.", even with Swarms turned
+  off. Rem's report tool shares a tool server with Swarms, and that server hid
+  the real reason. Now the worker is told when a report name is already taken
+  and which free name to use, when a path is outside the report folder, or when
+  a report was written but its receipt couldn't be recorded. Saved reports are
+  still never replaced, and a full path inside the report folder now works.
+  Rem's follow-up quotes the save error, and Rem stops after one follow-up when
+  the save fails the same way again instead of asking for more identical
+  saves. Tasks other than research are no longer told to save with a report
+  tool they don't have.
+- A picture or video in a chat whose file was moved or deleted still says it's
+  no longer on this computer, without the desktop logging an error and stack
+  trace each time the chat shows it.
+- When the phone drops its connection partway through a reply, the desktop ends
+  that session quietly instead of logging "socket.send() raised exception." for
+  each remaining piece of the reply. The phone resumes where it left off when it
+  reconnects, as before.
+- A Claude Code turn that hit a dropped connection, retried and then finished
+  normally no longer counts as failed. Before, the retry left behind an
+  "unknown" error that blocked a finished Rem task after its review had passed.
+- **Clean up branches** in Source control now also removes a branch, and its
+  worktree, when a branch you always keep (or the default branch) is on the
+  same commit, such as a finished branch that `dev` was fast-forwarded to. It
+  still keeps branches with their own commits, worktrees with uncommitted or
+  untracked files, and locked ones. It now also keeps worktrees a program is
+  working in, worktrees whose branch has no commits yet, and Rem's, swarms' and
+  organizations' task worktrees. Each branch is checked again right before it
+  is deleted, so one that changes during cleanup is kept.
+
+## 0.5.0 - 2026-11-03
 
 Changes since the `v0.4.0` tag.
 

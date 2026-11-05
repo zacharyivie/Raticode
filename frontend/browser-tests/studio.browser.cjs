@@ -1,11 +1,11 @@
-/* global requestAnimationFrame, DataTransfer, File, structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
+/* global requestAnimationFrame, PerformanceObserver, performance, DataTransfer, File, structuredClone, HTMLInputElement, indexedDB, IDBDatabase, localStorage, Storage, Response, ReadableStream, HTMLTextAreaElement, Event, TextEncoder, __dirname, clearTimeout, console, document, getComputedStyle, KeyboardEvent, MouseEvent, process, self, setTimeout, window */
 
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
-const { URL } = require("node:url");
+const { URL, pathToFileURL } = require("node:url");
 const { app, BrowserWindow } = require("electron");
 
 const frontendRoot = path.resolve(__dirname, "..");
@@ -14,6 +14,12 @@ const timeout = setTimeout(() => fail(new Error("Browser studio smoke test timed
 
 let server;
 let windowRef;
+// GOFER_REM_PANE_PERF=1 serves a long, busy Rem history and times moving Rem's chat
+// between the main area and the side pane. GOFER_REM_PANE_PERF_OUTPUT saves the result.
+let remPerf = null;
+// GOFER_LOAD_PERF=1 reproduces a busy desktop and measures the window's CPU
+// (busy-load-perf.cjs). GOFER_LOAD_PERF_OUTPUT saves the result.
+let busyLoad = null;
 const rendererErrors = [];
 
 app.disableHardwareAcceleration();
@@ -33,7 +39,17 @@ function observeRendererErrors(browserWindow) {
 }
 
 async function run() {
+  if (process.env.GOFER_REM_PANE_PERF === "1") remPerf = await remPerfFixture();
+  if (process.env.GOFER_LOAD_PERF === "1") busyLoad = await require("./busy-load-perf.cjs").busyLoadFixture(frontendRoot);
   const baseUrl = await startServer();
+  const additionalArguments = [];
+  if (busyLoad && process.env.GOFER_LOAD_PERF_CROSS_ORIGIN === "1") {
+    const api = await require("./busy-load-perf.cjs").startApiServer(busyLoad, (url, response, request) => {
+      if (request.method === "GET") routeApi(url.pathname, response); else { response.writeHead(200, { "Content-Type": "application/json" }); response.end("{}"); }
+    });
+    busyLoad.apiServer = api.server;
+    additionalArguments.push(`--gofer-api-base-url=${api.base}`, "--gofer-api-token=load-perf-token");
+  }
   windowRef = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -46,6 +62,7 @@ async function run() {
       nodeIntegration: false,
       preload: path.join(__dirname, "studio-preload-mock.cjs"),
       sandbox: false,
+      additionalArguments,
     },
   });
 
@@ -65,6 +82,23 @@ async function run() {
     clearTimeout(timeout);
     assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
     console.log("Browser empty workspace responsiveness regressions passed.");
+    await cleanup(0);
+    return;
+  }
+  if (busyLoad) {
+    clearTimeout(timeout);
+    const result = await require("./busy-load-perf.cjs").measureBusyLoad({ app, windowRef, evaluate, waitFor, state: busyLoad });
+    if (process.env.GOFER_LOAD_PERF_OUTPUT) fs.writeFileSync(process.env.GOFER_LOAD_PERF_OUTPUT, JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(result, null, 2));
+    await cleanup(0);
+    return;
+  }
+  if (remPerf) {
+    clearTimeout(timeout);
+    const result = await measureRemPaneSwitch();
+    if (process.env.GOFER_REM_PANE_PERF_OUTPUT) fs.writeFileSync(process.env.GOFER_REM_PANE_PERF_OUTPUT, JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(result, null, 2));
+    assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
     await cleanup(0);
     return;
   }
@@ -126,6 +160,8 @@ async function run() {
   }
   if (process.env.GOFER_REM_ONLY === "1") {
     await exerciseRemAvatar();
+    await exerciseSidebarKeepsMainContent();
+    await exerciseRemSidePane();
     clearTimeout(timeout);
     console.log("Browser Rem avatar regression test passed.");
     await cleanup(0);
@@ -573,6 +609,52 @@ async function exerciseThreadSearchNavigation() {
   await waitFor(() => evaluate(() => Boolean(document.querySelector("button[title='Send message']"))));
   assert.ok(Math.abs(await evaluate(() => [...window.CSS.highlights.get("rem-thread-match")][0].getBoundingClientRect().top) - matchTop) < 3, "Live completion must preserve the match position");
   console.log("Search navigation: old and same-thread matches, bounded pages, Unicode, Markdown, expanded thoughts, source-only text and return to latest passed.");
+}
+
+// Switching plugins changes only the sidebar, so Rem's conversation stays open
+// until a workflow is chosen.
+// Settings > Layout can put Rem's chat in the side pane. Opening the Rem plugin
+// then moves the chat to the main area and puts threads back in the side pane.
+async function exerciseRemSidePane() {
+  await evaluate(() => {
+    const settings = JSON.parse(localStorage.getItem("raticode.settings.v1") || "{}");
+    localStorage.setItem("raticode.settings.v1", JSON.stringify({ ...settings, layout: { ...settings.layout, assistantPaneContent: "rem" } }));
+  });
+  await windowRef.reload();
+  // The editor is showing after the earlier steps, so Rem's chat starts in the side pane.
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-rem-pane] .rem-home")?.offsetParent)), 25, "Rem in the side pane");
+  assert.equal(await evaluate(() => Boolean(document.querySelector("[data-chat-pane]")?.offsetParent)), false, "Threads are hidden while Rem fills the side pane");
+  assert.ok(await evaluate(() => document.querySelector("[data-rem-pane]").getBoundingClientRect().left > document.querySelector(".studio-panes > section").getBoundingClientRect().right - 2), "Rem's pane docks right of the editor");
+  await wait(300);
+  fs.writeFileSync("/tmp/raticode-rem-side-pane.png", (await windowRef.webContents.capturePage()).toPNG());
+  await evaluate(() => document.querySelector(".studio-sidebar #sidebar-tab-rem").click());
+  await waitFor(() => evaluate(() => !document.querySelector("[data-rem-pane]") && Boolean(document.querySelector(".studio-panes > section .rem-home"))), 25, "Rem moves to the main area");
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-chat-pane]")?.offsetParent)), 25, "threads return to the side pane");
+  assert.equal(await evaluate(() => document.querySelectorAll(".rem-home").length), 1, "Rem's chat appears once");
+  await wait(300);
+  fs.writeFileSync("/tmp/raticode-rem-plugin-threads-side.png", (await windowRef.webContents.capturePage()).toPNG());
+  console.log("Rem side pane: shown in place of threads, and opening the Rem plugin swapped threads back.");
+}
+
+async function exerciseSidebarKeepsMainContent() {
+  const remHomeShown = () => evaluate(() => Boolean(document.querySelector(".rem-home")?.offsetParent));
+  assert.equal(await remHomeShown(), true, "Rem's conversation starts open");
+  for (const id of ["source-control", "workflows", "search", "files"]) {
+    await evaluate(id => document.querySelector(`.studio-sidebar #sidebar-tab-${id}`).click(), id);
+    await waitFor(() => evaluate(id => document.querySelector(`#sidebar-panel-${id}`)?.hidden === false, id), 25, `${id} sidebar`);
+    assert.equal(await remHomeShown(), true, `${id} keeps Rem's conversation`);
+    if (id === "workflows") { await wait(300); fs.writeFileSync("/tmp/raticode-sidebar-workflows-rem-open.png", (await windowRef.webContents.capturePage()).toPNG()); }
+  }
+  await evaluate(() => document.querySelector(".studio-sidebar #sidebar-tab-workflows").click());
+  await waitFor(() => evaluate(() => [...document.querySelectorAll("#sidebar-panel-workflows [role='button']")].some(row => row.textContent.includes("Demo workflow"))));
+  await evaluate(() => [...document.querySelectorAll("#sidebar-panel-workflows [role='button']")].find(row => row.textContent.includes("Demo workflow")).click());
+  await waitFor(() => evaluate(() => !document.querySelector(".rem-home")), 25, "workflow replaces Rem's conversation");
+  await waitFor(() => evaluate(() => [...document.querySelectorAll("[role='tab'][aria-selected='true']")].some(tab => tab.closest("[aria-label='Editor tabs']"))), 25, "selected workflow tab");
+  assert.equal(await evaluate(() => document.querySelector("#sidebar-tab-workflows").getAttribute("aria-selected")), "true", "Choosing a workflow keeps the Workflows sidebar");
+  assert.match(await evaluate(() => document.querySelector("[aria-label='Editor tabs'] [role='tab'][aria-selected='true']")?.textContent || ""), /Demo workflow/);
+  await wait(300);
+  fs.writeFileSync("/tmp/raticode-sidebar-workflow-opened.png", (await windowRef.webContents.capturePage()).toPNG());
+  console.log("Sidebar switches kept Rem's conversation; choosing a workflow opened it.");
 }
 
 async function exerciseRemAvatar() {
@@ -1689,6 +1771,8 @@ async function startServer() {
         request.on("end", () => json(response, { workflow: { ...workflowFixture(), ...JSON.parse(body) } }));
         return;
       }
+      if (remPerf && url.pathname.startsWith("/api/rem/")) { routeRemPerf(url, response); return; }
+      if (busyLoad && require("./busy-load-perf.cjs").routeBusyLoad(busyLoad, url, response, json, request)) return;
       routeApi(url.pathname, response);
       return;
     }
@@ -1719,6 +1803,116 @@ async function startServer() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   return `http://127.0.0.1:${address.port}/`;
+}
+
+// Ten copies of the busy sample: about 100 messages with task cards, saved
+// reports, sources and follow-ups. Tasks change on every poll, as while Rem works.
+async function remPerfFixture() {
+  const { remHomeScene } = await import(pathToFileURL(path.join(frontendRoot, "src/lib/remHomeSample.js")).href);
+  const scene = remHomeScene("busy");
+  const copies = Number(process.env.GOFER_REM_PANE_PERF_COPIES || 10);
+  const messages = Array.from({ length: copies }, (_, copy) => scene.messages.map(message => ({ ...message, id: `${message.id}-${copy}` }))).flat();
+  return { conversation: scene.conversation, messages, tasks: scene.tasks, polls: 0 };
+}
+
+function routeRemPerf(url, response) {
+  const version = url.searchParams.get("version");
+  if (url.pathname === "/api/rem/conversation") {
+    json(response, version === "c1" ? { unchanged: true, version: "c1" } : { version: "c1", conversation: remPerf.conversation, messages: remPerf.messages, context_ready: true });
+    return;
+  }
+  if (url.pathname === "/api/rem/tasks") {
+    remPerf.polls += 1;
+    const tasks = remPerf.tasks.map(task => task.active_run ? { ...task, active_run: { ...task.active_run, phase_label: `Step ${remPerf.polls}` } } : task);
+    json(response, { version: `t${remPerf.polls}`, tasks });
+    return;
+  }
+  if (url.pathname.startsWith("/api/rem/threads/")) {
+    json(response, { metadata: { id: decodeURIComponent(url.pathname.split("/").at(-1)), updatedAt: new Date().toISOString() }, messages: [] });
+    return;
+  }
+  json(response, {});
+}
+
+// Times each switch from the click to the first painted frame showing the result,
+// and sums the main-thread long tasks it caused.
+async function measureRemPaneSwitch() {
+  await evaluate(() => {
+    const settings = JSON.parse(localStorage.getItem("raticode.settings.v1") || "{}");
+    localStorage.setItem("raticode.settings.v1", JSON.stringify({ ...settings, layout: { ...settings.layout, assistantPaneContent: "rem" } }));
+  });
+  await windowRef.reload();
+  await waitFor(() => evaluate(() => document.querySelectorAll("[data-rem-pane] .rem-msg").length > 50), 50, "Rem history in the side pane");
+  // A long history opens at its newest message even though older ones lay out late.
+  await waitFor(() => evaluate(() => { const stream = document.querySelector("[data-rem-pane] .rem-stream"); return stream.scrollHeight - stream.scrollTop - stream.clientHeight < 2; }), 50, "Rem opens at the newest message");
+  const time = (action) => evaluate(action => new Promise(resolve => {
+    const longTasks = [];
+    const observer = new PerformanceObserver(list => longTasks.push(...list.getEntries().map(entry => entry.duration)));
+    observer.observe({ type: "longtask" });
+    const main = () => document.querySelector(".studio-panes > section .rem-home .rem-msg");
+    const side = () => document.querySelector("[data-rem-pane] .rem-msg");
+    const start = performance.now();
+    let done;
+    if (action === "plugin") { document.querySelector(".studio-sidebar #sidebar-tab-workflows").click(); done = () => document.querySelector("#sidebar-panel-workflows")?.hidden === false && main(); }
+    if (action === "toSide") { [...document.querySelectorAll("#sidebar-panel-workflows [role='button']")].find(row => row.textContent.includes("Demo workflow")).click(); done = () => side() && !main(); }
+    if (action === "toMain") { document.querySelector(".studio-sidebar #sidebar-tab-rem").click(); done = () => main() && !side(); }
+    const clicked = performance.now() - start;
+    const check = () => {
+      if (!done()) { requestAnimationFrame(check); return; }
+      requestAnimationFrame(() => setTimeout(() => {
+        const painted = performance.now() - start;
+        setTimeout(() => {
+          observer.disconnect();
+          resolve({ clicked: Math.round(clicked), painted: Math.round(painted), longTaskMs: Math.round(longTasks.reduce((sum, value) => sum + value, 0)), longTasks: longTasks.length });
+        }, 400);
+      }, 0));
+    };
+    check();
+  }), action);
+  // One Rem instance moves between panes: the node survives and the stream keeps
+  // its place, whether it follows the newest message or was scrolled up.
+  // Message heights change with the pane's width, so the check is that the message
+  // being read is still in view, not an exact offset.
+  await evaluate(() => {
+    window.__remNode = document.querySelector(".rem-home");
+    const stream = document.querySelector(".rem-stream");
+    stream.scrollTop = 900;
+    const top = stream.getBoundingClientRect().top + 40;
+    window.__reading = [...stream.querySelectorAll("[data-message-id]")].find(message => message.getBoundingClientRect().bottom > top)?.dataset.messageId;
+  });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  await time("toMain");
+  assert.deepEqual(await evaluate(() => {
+    const view = document.querySelector(".rem-stream").getBoundingClientRect();
+    const box = document.querySelector(`[data-message-id="${window.__reading}"]`).getBoundingClientRect();
+    return { same: document.querySelector(".rem-home") === window.__remNode, reading: Boolean(window.__reading) && box.bottom > view.top && box.top < view.bottom };
+  }), { same: true, reading: true }, "Rem kept its node and the message being read in the main area");
+  await evaluate(() => { const stream = document.querySelector(".rem-stream"); stream.scrollTop = stream.scrollHeight; });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  await time("plugin");
+  await time("toSide");
+  assert.deepEqual(await evaluate(() => { const stream = document.querySelector("[data-rem-pane] .rem-stream"); return { same: document.querySelector(".rem-home") === window.__remNode, atEnd: stream.scrollHeight - stream.scrollTop - stream.clientHeight < 2 }; }), { same: true, atEnd: true }, "Rem kept following the newest message in the side pane");
+  const runs = { plugin: [], toSide: [], toMain: [] };
+  // The first move warms up lazy chunks; it is reported apart from the rest.
+  const warm = { toMain: await time("toMain"), plugin: await time("plugin"), toSide: await time("toSide") };
+  for (let round = 0; round < Number(process.env.GOFER_REM_PANE_PERF_ROUNDS || 5); round += 1) {
+    runs.toMain.push(await time("toMain"));
+    runs.plugin.push(await time("plugin"));
+    runs.toSide.push(await time("toSide"));
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  // Background cost while tasks change on every poll and Rem sits in the side pane.
+  const idle = await evaluate(() => new Promise(resolve => {
+    const longTasks = [];
+    const observer = new PerformanceObserver(list => longTasks.push(...list.getEntries().map(entry => entry.duration)));
+    observer.observe({ type: "longtask" });
+    setTimeout(() => { observer.disconnect(); resolve({ seconds: 8, longTaskMs: Math.round(longTasks.reduce((sum, value) => sum + value, 0)), longTasks: longTasks.length, longest: Math.round(Math.max(0, ...longTasks)) }); }, 8000);
+  }));
+  const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+  const summary = Object.fromEntries(Object.entries(runs).map(([action, list]) => [action, {
+    clickedMs: median(list.map(item => item.clicked)), paintedMs: median(list.map(item => item.painted)), longTaskMs: median(list.map(item => item.longTaskMs)),
+  }]));
+  return { messages: remPerf.messages.length, rendered: await evaluate(() => document.querySelectorAll(".rem-msg").length), polls: remPerf.polls, warm, summary, idle, runs };
 }
 
 function routeApi(pathname, response) {

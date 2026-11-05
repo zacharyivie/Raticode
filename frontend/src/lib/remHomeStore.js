@@ -11,7 +11,7 @@ import { mergeTaskThreadMetadata, threadIndexEntry } from "./threadActivity.js";
 // renders what the server reports. It never launches work or decides completion.
 
 function initialState() {
-  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], tasks: [], fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null };
+  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], tasks: [], fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
 }
 
 // Files attached in Rem's chat upload to this chat attachment thread.
@@ -36,7 +36,6 @@ const finishedThreadVersions = new Map();
 // parses and re-renders nothing. Older backends send no version.
 let versions = { conversation: "", tasks: "" };
 const threadVersions = new Map();
-const withVersion = (path, version) => version ? `${path}?known=${encodeURIComponent(version)}` : path;
 // Task threads last seen running, so a finish between polls still counts as completion.
 const runningThreads = new Set();
 const clearedThreads = new Set();
@@ -55,10 +54,18 @@ class RemServiceError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
 
-export async function request(path, { method = "GET", body } = {}) {
+// `known` is the version this window already has. It goes in a header, not the
+// URL, so a poll's address never changes and the browser can reuse its
+// cross-origin permission check instead of asking the backend again each time.
+export async function request(path, { method = "GET", body, known = "" } = {}) {
   let response;
+  const headers = { ...(known ? { "X-Gofer-Known": known } : {}), ...(body === undefined ? {} : { "Content-Type": "application/json" }) };
   try {
-    response = await fetch(apiUrl(`/rem${path}`), body === undefined ? { method } : { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    response = await fetch(apiUrl(`/rem${path}`), {
+      method,
+      ...(Object.keys(headers).length ? { headers } : {}),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
   } catch {
     throw new RemServiceError("Raticode's backend isn't reachable.", 0);
   }
@@ -118,7 +125,7 @@ export function syncRemThread(threadId, { poll = false } = {}) {
 async function syncThreadSnapshot(threadId, poll) {
   const generation = historyGeneration;
   if (state.resetting || clearedThreads.has(threadId)) return null;
-  const { version = "", ...remote } = await request(withVersion(`/threads/${encodeURIComponent(threadId)}`, poll ? threadVersions.get(threadId) : ""));
+  const { version = "", ...remote } = await request(`/threads/${encodeURIComponent(threadId)}`, { known: poll ? threadVersions.get(threadId) : "" });
   if (generation !== historyGeneration || state.resetting) return null;
   if (remote.unchanged) return null;
   if (!remote.metadata) return null;
@@ -180,8 +187,8 @@ export async function refreshRemHome() {
     // not on every poll.
     if (!configuredContext) await syncContext();
     const [conversation, tasks] = await Promise.all([
-      request(withVersion("/conversation", versions.conversation)),
-      request(withVersion("/tasks", versions.tasks)),
+      request("/conversation", { known: versions.conversation }),
+      request("/tasks", { known: versions.tasks }),
     ]);
     if (state.fixture || state.resetting || generation !== historyGeneration) return;
     versions = { conversation: conversation.version || "", tasks: tasks.version || "" };
@@ -198,10 +205,11 @@ export async function refreshRemHome() {
         error: "",
         ...(conversation.unchanged ? {} : {
           conversation: conversation.conversation ?? current.conversation,
-          // Keep optimistic messages until the server reports their request.
-          messages: mergeMessages(conversation.messages ?? [], current.messages),
+          // Keep optimistic messages until the server reports their request. Messages sent
+          // while Rem was replying, from here or a phone, wait on the server and show as waiting.
+          messages: mergeMessages([...(conversation.messages ?? []), ...(conversation.waiting ?? []).map(message => ({ ...message, pending: true, waiting: true }))], current.messages),
         }),
-        ...(tasks.unchanged ? {} : { tasks: tasks.tasks ?? [] }),
+        ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks) }),
       }));
       if (!tasks.unchanged) notifyFinishedRuns(previousTasks, tasks.tasks ?? []);
     }
@@ -248,6 +256,15 @@ function notifyFinishedRuns(previous, tasks) {
     }
   }, () => {});
 }
+// Tasks the server didn't change keep their objects, so only the chat rows
+// showing a changed task re-render while Rem works.
+export function mergeTasks(server, current = []) {
+  const previous = new Map(current.map(task => [task.id, task]));
+  return server.map(task => {
+    const old = previous.get(task.id);
+    return old && JSON.stringify(old) === JSON.stringify(task) ? old : task;
+  });
+}
 function mergeMessages(server, current) {
   const known = new Set(server.map(message => message.request_id).filter(Boolean));
   // Messages the server didn't change keep their objects, so their rows stay cached.
@@ -276,8 +293,16 @@ export function connectRemHome() {
 export function dismissNotice() { set({ notice: "" }); }
 
 // View state shared by the sidebar and the conversation pane.
-export function openTaskSheet(taskId) { set({ sheet: { mode: "task", taskId } }); }
-export function openNewTask() { set({ sheet: { mode: "new" } }); }
+// A task opens in the Rem sidebar; the app brings that sidebar forward when the
+// request came from elsewhere, such as a task card in the chat.
+export function openTaskSheet(taskId) { set({ sheet: { mode: "task", taskId } }); announceTaskSheet(); }
+export function openNewTask() { set({ sheet: { mode: "new" } }); announceTaskSheet(); }
+function announceTaskSheet() { globalThis.window?.dispatchEvent?.(new CustomEvent("gofer:rem-task-sheet")); }
+// Scrolls Rem's chat to a message, showing the chat first when it is hidden.
+export function showRemMessage(id) {
+  set({ messageRequest: { id, seq: ++sequence } });
+  globalThis.window?.dispatchEvent?.(new CustomEvent("gofer:rem-show-message", { detail: { id } }));
+}
 export function closeTaskSheet() { set({ sheet: null }); }
 export function suggestMessage(text) { set({ composerRequest: { text, id: ++sequence } }); }
 export function focusRemComposer() { set({ composerRequest: { id: ++sequence } }); }
@@ -298,11 +323,13 @@ async function command(run, failure, conflict = "") {
   }
 }
 
-export async function sendRemMessage(body, attachments = [], retryId = null) {
+// `reference` is the preview of the message this one replies to (replyTarget in remRich.js).
+export async function sendRemMessage(body, attachments = [], retryId = null, reference = null) {
   const text = body.trim();
   if (!text && !attachments.length) return false;
   const id = retryId || requestId("rem-msg");
-  const pending = { id, request_id: id, role: "user", body: text, created_at: new Date().toISOString(), pending: true, ...(attachments.length ? { attachments } : {}) };
+  const link = reference?.id ? { refers_to: reference.id, referenced: reference } : {};
+  const pending = { id, request_id: id, role: "user", body: text, created_at: new Date().toISOString(), pending: true, ...(attachments.length ? { attachments } : {}), ...link };
   set(current => ({ ...current, messages: [...current.messages, pending] }));
   if (state.fixture) {
     set(current => ({
@@ -318,7 +345,7 @@ export async function sendRemMessage(body, attachments = [], retryId = null) {
     // Uploaded references replace local files, so a retry doesn't upload them again.
     const uploaded = await uploadChatAttachments(attachments, REM_ATTACHMENT_THREAD);
     if (uploaded !== attachments) patchMessage(id, { attachments: uploaded });
-    const payload = { request_id: id, body: text, ...(uploaded.length ? { attachments: uploaded } : {}) };
+    const payload = { request_id: id, body: text, ...(uploaded.length ? { attachments: uploaded } : {}), ...(link.refers_to ? { refers_to: link.refers_to } : {}) };
     return whenRemIsFree(id, () => request("/messages", { method: "POST", body: payload }));
   }, "Rem didn't get that."));
   sendQueue = turn.catch(() => {});
@@ -329,9 +356,9 @@ export async function sendRemMessage(body, attachments = [], retryId = null) {
 
 function patchMessage(id, patch) { set(current => ({ ...current, messages: current.messages.map(message => message.id === id ? { ...message, ...patch } : message) })); }
 
-// Rem answers one message at a time and refuses another while it replies. A
-// message sent meanwhile waits for that reply, then goes with the same request
-// ID, so a retry can never deliver it twice.
+// Rem keeps a few messages sent while it replies and refuses more, or answers an
+// older backend's refusal the same way. A refused message waits for the reply,
+// then goes with the same request ID, so a retry can never deliver it twice.
 async function whenRemIsFree(id, send) {
   const deadline = Date.now() + REPLY_WAIT_MS;
   for (let checkedIdle = false; ;) {
@@ -355,14 +382,14 @@ export function retryRemMessage(id) {
   const message = state.messages.find(item => item.id === id);
   if (!message) return;
   set(current => ({ ...current, messages: current.messages.filter(item => item.id !== id) }));
-  void sendRemMessage(message.body, message.attachments || [], message.request_id || message.id);
+  void sendRemMessage(message.body, message.attachments || [], message.request_id || message.id, message.referenced);
 }
 
 // Moves an unsent message back into the composer to change it before sending.
 export function editRemMessage(id) {
   const message = state.messages.find(item => item.id === id);
   if (!message) return;
-  set(current => ({ ...current, messages: current.messages.filter(item => item.id !== id), composerRequest: { text: message.body, attachments: message.attachments || [], id: ++sequence } }));
+  set(current => ({ ...current, messages: current.messages.filter(item => item.id !== id), composerRequest: { text: message.body, attachments: message.attachments || [], replyTo: message.referenced || null, id: ++sequence } }));
 }
 
 export async function sendManagedRemInstruction(threadId, body) {
@@ -475,7 +502,7 @@ export async function clearRemHistory() {
     contextPending = Promise.resolve();
     pendingClear = null;
     storage.removeItem("gofer-flow-rem-reset-pending");
-    set({ ...initialState(), status: "ready", fixture: state.fixture, conversation: result.conversation, composerRequest: { text: "", id: ++sequence } });
+    set({ ...initialState(), status: "ready", fixture: state.fixture, conversation: result.conversation, composerRequest: { text: "", replyTo: null, id: ++sequence } });
     await syncContext();
     return true;
   } catch (error) {

@@ -169,8 +169,9 @@
 .rem-home-main { position: relative; display: flex; flex: 1; min-height: 0; }
 .rem-convo { position: relative; display: flex; flex: 1; min-width: 0; flex-direction: column; }
 .rem-drop { position: absolute; inset: 8px; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--rem-accent); border-radius: 14px; background: color-mix(in srgb, var(--rem-raised) 94%, transparent); color: var(--rem-accent); font-size: 12px; font-weight: 600; pointer-events: none; }
-.rem-bubble-files > div > span { border-color: color-mix(in srgb, var(--rem-bubble-ink) 22%, transparent); background: color-mix(in srgb, var(--rem-bubble-ink) 7%, transparent); color: var(--rem-bubble-ink); white-space: normal; }
-.rem-bubble-files > div > span > span:last-child { color: inherit; opacity: .7; }
+.rem-bubble-files [data-attachment-kind] { border-color: color-mix(in srgb, var(--rem-bubble-ink) 22%, transparent); background: color-mix(in srgb, var(--rem-bubble-ink) 7%, transparent); color: var(--rem-bubble-ink); white-space: normal; }
+.rem-bubble-files .attachment-name { color: inherit; }
+.rem-bubble-files .attachment-meta { color: inherit; opacity: .7; }
 .rem-stream { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable both-edges; }
 .rem-stream-inner { display: flex; flex-direction: column; min-height: 100%; width: min(680px, 100%); margin: 0 auto; padding: 12px 20px 24px; }
 .rem-day { display: flex; flex-direction: column; gap: 4px; }
@@ -178,7 +179,13 @@
 .rem-day-label span { padding: 2px 10px; border-radius: 999px; color: var(--rem-muted); font-size: 11px; font-weight: 500; }
 
 .rem-msg { display: flex; gap: 10px; align-items: flex-start; }
+/* Off-screen messages skip style, layout and paint until they scroll near, so a
+   long history doesn't stall loading Rem or moving it between panes. The
+   containment clips to the padding box; 4px of padding, cancelled by the
+   margin, keeps focus rings inside it. */
+.rem-stream .rem-msg { content-visibility: auto; contain-intrinsic-size: auto 120px; padding: 4px; margin: -4px; }
 .rem-msg[data-first] { margin-top: 10px; }
+.rem-stream .rem-msg[data-first] { margin-top: 6px; }
 .rem-msg[data-role=user] { flex-direction: column; align-items: flex-end; }
 .rem-bubble { max-width: min(78%, 520px); padding: 8px 14px; border-radius: 18px 18px 6px 18px; background: var(--rem-bubble); color: var(--rem-bubble-ink); font-size: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .rem-msg[data-pending] .rem-bubble { opacity: .65; }
@@ -255,21 +262,43 @@
 .rem-composer { flex-shrink: 0; width: min(680px, 100%); margin: 0 auto; padding: 4px 20px 18px; }
 
 /* ---------- Task sheet ---------- */
-.rem-sheet { display: flex; width: 400px; flex-shrink: 0; flex-direction: column; min-height: 0; border-left: 1px solid var(--rem-soft-line); background: var(--rem-panel); }
-.rem-sheet-scrim { display: none; }
-@container rem-home (max-width: 900px) {
-  .rem-sheet { position: absolute; inset: 0 0 0 auto; z-index: 20; width: min(420px, 100%); box-shadow: -12px 0 32px rgb(15 23 42 / .16); }
-  .rem-sheet-scrim { display: block; position: absolute; inset: 0; z-index: 10; background: var(--color-scrim); }
+/* An opened task fills the Rem sidebar in place of the task list. Its colors
+   come from the sidebar's own palette, which differs by theme. */
+.rem-side-task {
+  --rem-panel: transparent;
+  --rem-raised: rgb(var(--color-raised));
+  --rem-line: rgb(var(--color-line));
+  --rem-soft-line: rgb(var(--color-line) / .6);
+  --rem-ink: rgb(var(--color-ink));
+  --rem-muted: rgb(var(--color-muted));
+  --rem-sage: rgb(var(--color-success-soft));
+  --rem-sage-ink: rgb(var(--color-success));
+  --rem-accent: rgb(var(--color-brand));
+  --rem-accent-soft: rgb(var(--color-brand) / .14);
+  --rem-success: rgb(var(--color-success));
+  --rem-success-soft: rgb(var(--color-success-soft));
+  --rem-attention: rgb(var(--color-warning));
+  --rem-attention-soft: rgb(var(--color-warning-soft));
+  --rem-danger: rgb(var(--color-danger));
+  --rem-danger-soft: rgb(var(--color-danger-soft));
+  container: rem-side-task / inline-size;
+  font-size: 13px;
+  line-height: 1.5;
 }
-.rem-sheet-header { display: flex; align-items: center; gap: 10px; height: 56px; flex-shrink: 0; padding: 0 10px 0 16px; border-bottom: 1px solid var(--rem-soft-line); }
+.rem-side-task svg { flex-shrink: 0; }
+.rem-side-task :is(input, select, textarea):focus-visible { outline: 2px solid var(--rem-accent); outline-offset: 1px; }
+.rem-side-task .rem-weekdays button[aria-pressed=true] { color: rgb(var(--color-canvas)); }
+.dark .rem-side-task .rem-weekdays button[aria-pressed=true] { color: #fff; }
+.rem-sheet { display: flex; flex: 1; min-width: 0; flex-direction: column; min-height: 0; background: var(--rem-panel); }
+.rem-sheet-header { display: flex; align-items: center; gap: 8px; height: 52px; flex-shrink: 0; padding: 0 8px 0 6px; border-bottom: 1px solid var(--rem-soft-line); }
+.rem-sheet-back { display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 6px; color: var(--rem-muted); }
+.rem-sheet-back:hover { background: rgb(var(--color-ink) / .08); color: var(--rem-ink); }
 .rem-sheet-header h3 { flex: 1; margin: 0; font-size: 14px; font-weight: 600; }
 .rem-sheet-type { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; border-radius: 8px; background: var(--rem-accent-soft); color: var(--rem-accent); }
 .rem-sheet-title { flex: 1; min-width: 0; height: 32px; padding: 0 8px; margin-left: -8px; border: 1px solid transparent; border-radius: 6px; background: transparent !important; color: var(--rem-ink); font-size: 14px; font-weight: 600; }
 .rem-sheet-title:hover { border-color: var(--rem-soft-line); }
 .rem-sheet-title::placeholder { color: var(--rem-ink); opacity: .55; }
-.rem-sheet-close { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 6px; color: var(--rem-muted); }
-.rem-sheet-close:hover { background: rgb(var(--color-ink) / .07); color: var(--rem-ink); }
-.rem-sheet-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
+.rem-sheet-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 14px 12px; }
 .rem-sheet-gone { padding: 24px 16px; color: var(--rem-muted); }
 
 .rem-status { --tone: var(--rem-muted); --tone-soft: var(--rem-raised); display: grid; gap: 10px; margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--rem-soft-line); border-radius: 12px; background: var(--rem-raised); }
@@ -336,7 +365,7 @@
 .rem-criteria-add button { display: grid; place-items: center; width: 34px; height: 34px; flex-shrink: 0; border: 1px solid var(--rem-line); border-radius: 10px; color: var(--rem-ink); }
 .rem-criteria-add button:disabled { opacity: .4; }
 
-.rem-sheet-footer { flex-shrink: 0; padding: 12px 16px 14px; border-top: 1px solid var(--rem-soft-line); }
+.rem-sheet-footer { flex-shrink: 0; padding: 10px 12px 12px; border-top: 1px solid var(--rem-soft-line); }
 .rem-sheet-steer { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 12px; color: var(--rem-accent); }
 .rem-sheet-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .rem-spacer { flex: 1; }
@@ -351,7 +380,18 @@
 .rem-button[data-variant=quiet-danger] { border-color: transparent; width: 32px; padding: 0; justify-content: center; color: var(--rem-muted); }
 .rem-button[data-variant=quiet-danger]:hover { color: var(--rem-danger); background: var(--rem-danger-soft); }
 .rem-sheet-confirm p { margin: 0 0 10px; font-size: 12.5px; }
-.rem-sheet-confirm div { display: flex; gap: 6px; }
+.rem-sheet-confirm div { display: flex; flex-wrap: wrap; gap: 6px; }
+/* The sidebar can be as narrow as 200px: choices stack and status text wraps. */
+.rem-status-line { flex-wrap: wrap; }
+@container rem-side-task (max-width: 300px) {
+  .rem-types { grid-template-columns: 1fr; }
+  .rem-types button { flex-direction: row; justify-content: flex-start; padding: 7px 10px; }
+  .rem-segments { grid-template-columns: repeat(2, 1fr); }
+  .rem-weekdays { flex-wrap: wrap; }
+  .rem-weekdays button { flex: 1 0 calc(25% - 4px); }
+  .rem-status { padding: 10px; }
+  .rem-status-line small { margin-left: 0; white-space: normal; }
+}
 
 /* Task history links point back to immutable conversation messages. */
 .rem-task-updates { margin: 0 0 24px; font-size: 13px; }
@@ -361,5 +401,5 @@
 .rem-task-updates time { display: block; color: rgb(var(--color-muted)); font-size: 12px; }
 .rem-update-message { display: block; text-align: left; color: inherit; background: none; border: 0; padding: 6px 0; line-height: 1.5; cursor: pointer; }
 .rem-update-message:hover { text-decoration: underline; }
-.rem-update-message:disabled { cursor: default; opacity: .6; }
 .rem-msg[data-message-id]:focus { outline: 2px solid rgb(var(--color-brand)); outline-offset: 6px; border-radius: 8px; }
+.rem-stream .rem-msg[data-message-id]:focus { outline-offset: 2px; }

@@ -375,7 +375,7 @@ Choose **New theme** to open the composer directly below the button. Describe a 
 use dictation, or attach reference files with the paperclip, paste, or drag and drop.
 Pasted text of 16 KB or more becomes a text attachment. Attach up to five files,
 20 MB per file and 40 MB total, using the same limits as Rem chat. Dictation uses the
-microphone selected in Settings > Devices. Press Enter or the **Generate preview**
+microphone and speech recognizer selected in Settings > Devices. Press Enter or the **Generate preview**
 button to request a standalone demo and reusable design instructions. Rename it and choose **Save theme** to add it to the gallery and select it.
 Unaccepted previews are not saved. Custom themes persist with desktop Memory settings.
 Preview documents run in sandboxed frames with scripts and remote assets disabled.

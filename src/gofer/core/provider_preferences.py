@@ -109,6 +109,67 @@ def save_commit_message_preference(changes: dict[str, Any]) -> None:
     _save_preference("commitMessage", {**changes, "provider": provider, "model": model})
 
 
+def voice_tidy_preference() -> dict[str, Any]:
+    """Voice tidying is off until the user turns it on.
+
+    An empty provider follows the default provider in Settings, and an empty
+    model uses that provider's fast model, so the first choice tracks the
+    default provider until the user picks one.
+    """
+    return {
+        "enabled": False,
+        "provider": "",
+        "model": "",
+        "effort": "",
+        "context": True,
+        **provider_preference("voiceTidy"),
+    }
+
+
+def save_voice_tidy_preference(changes: dict[str, Any]) -> None:
+    from gofer.core.provider_capabilities import PROVIDER_BINARIES
+
+    if not changes or set(changes) - {"enabled", "provider", "model", "effort", "context"}:
+        raise ValueError("Unknown voice tidy setting")
+    changes = dict(changes)
+    for field in ("enabled", "context"):
+        if field in changes and not isinstance(changes[field], bool):
+            raise ValueError(f"{field} must be a boolean")
+    for field in ("provider", "model", "effort"):
+        if field in changes:
+            value = changes[field]
+            if not isinstance(value, str) or len(value) > 256:
+                raise ValueError(f"{field} must be a string of at most 256 characters")
+            changes[field] = value.strip()
+    if "provider" in changes:
+        if changes["provider"] and changes["provider"] not in PROVIDER_BINARIES:
+            raise ValueError("Unknown voice tidy provider")
+        # A new provider starts again from its own fast model.
+        changes.setdefault("model", "")
+        changes.setdefault("effort", "")
+    provider = changes.get("provider", voice_tidy_preference()["provider"])
+    model = changes.get("model", "")
+    if model and not provider:
+        raise ValueError("Choose a provider before choosing a voice tidy model")
+    if model and model in provider_preference(provider).get("deniedModels", []):
+        raise ValueError("Allow this model before selecting it for voice tidying")
+    _save_preference("voiceTidy", changes)
+
+
+def speech_preference() -> dict[str, Any]:
+    """Which speech-to-text dictation uses: the OS's own recognizer, or Raticode's offline model."""
+    engine = provider_preference("speech").get("engine")
+    return {"engine": engine if engine in {"system", "offline"} else "system"}
+
+
+def save_speech_preference(changes: dict[str, Any]) -> None:
+    if not changes or set(changes) - {"engine"}:
+        raise ValueError("Unknown speech setting")
+    if changes.get("engine") not in {"system", "offline"}:
+        raise ValueError("Choose system or offline speech recognition")
+    _save_preference("speech", {"engine": changes["engine"]})
+
+
 def _save_preference(key: str, changes: dict[str, Any]) -> None:
     with _lock:
         preferences = provider_preferences()
