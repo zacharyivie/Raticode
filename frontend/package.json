@@ -200,7 +200,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.2",
     "autoprefixer": "^10.6.2",
-    "concurrently": "^9.2.1",
+    "concurrently": "^10.0.6",
     "electron": "^45.1.0",
     "electron-builder": "^26.18.0",
     "eslint": "^9.39.5",
