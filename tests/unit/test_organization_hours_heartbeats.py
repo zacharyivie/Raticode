@@ -17,7 +17,7 @@ from gofer.ui.organizations import OrganizationManager
 NY = "America/New_York"
 
 
-def hours(*windows: tuple[list[int], str, str], zone: str = "UTC", **extra: Any) -> dict:
+def hours(*windows: tuple[list[int], str, str], zone: str = "UTC", **extra: Any) -> dict[str, Any]:
     return {
         "mode": "scheduled",
         "timezone": zone,
@@ -172,7 +172,9 @@ def window_from_now(start_minutes: int, end_minutes: int) -> dict[str, Any]:
     return hours((list(range(7)), start.strftime("%H:%M"), end.strftime("%H:%M")))
 
 
-def set_hours(manager: OrganizationManager, org: dict[str, Any], value: dict, actor="user") -> Any:
+def set_hours(
+    manager: OrganizationManager, org: dict[str, Any], value: dict[str, Any], actor="user"
+) -> Any:
     revision = read(manager, org)["revision"]
     return act(
         manager,
