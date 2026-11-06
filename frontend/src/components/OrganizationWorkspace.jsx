@@ -215,7 +215,7 @@ function AttentionStrip({ attention, usage, onWork, onActivity }) {
   </div>;
 }
 
-function StartSheet({ organization, busy, onStart, onCancel }) {
+export function StartSheet({ organization, busy, onStart, onCancel }) {
   const { config, runtime, diagnostics = {} } = organization;
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState("");

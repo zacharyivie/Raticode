@@ -115,6 +115,18 @@
       "ast_sha256": "dbade98b111d102e28327c33e235604e42815126c5bb4cf5cbed6ef34eefee2d",
       "ir_sha256": "846904b38e620cca4b17de7df89dc4a3ca76ded9cb9937c2297cfbe9f127b130"
     },
+    "rem-prompt": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "f2d5cede32c16eed20adf502b3db0769ae033466376d07ec0b153692c8a6ddf2",
+      "ir_sha256": "8901cc7cddc8a9dcc3de55fae40ab3fae27fba8e54f54c0c70127145d84a4806"
+    },
+    "rem-task": {
+      "outcome": "ir",
+      "invalid_code": "RATTISH_MISSING_FIELD",
+      "ast_sha256": "c31821ffc76861bfc4d7269872bfd4c4f3383310534480f645cd5c3323807c40",
+      "ir_sha256": "1f2668436fff2d6dfa2a3aad86aae9b69f27f1cd0523e574b0173c6a4360e0a8"
+    },
     "shell-script": {
       "outcome": "ir",
       "invalid_code": "RATTISH_MISSING_FIELD",

@@ -42,6 +42,13 @@ def isolated_gofer_data_dir(
     monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
     # Fake providers must not start inside the user's real systemd session.
     monkeypatch.setattr(command_slots, "_systemd_ready", False)
+    # Nothing a test starts may open a window, notification, tray icon or wallet
+    # prompt on the developer's desktop. Tests that need these set them explicitly.
+    for name in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_PID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/raticode-test-session-bus"
+    )
 
     return get_data_dir()
 

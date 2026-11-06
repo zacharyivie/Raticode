@@ -8,7 +8,7 @@ pageClass: docs-layout
 
 Build workflows you can inspect. Work with Rem in your project. Keep the files, conversations, and execution on machines you control.
 
-Raticode brings a code editor, visual workflow graph, coding agent, terminal, and source control into one desktop workspace. Its `gof` CLI runs Rattish workflows without a desktop window. You can start with a shell command and add agents, branches, file operations, and review steps as your process grows.
+Raticode brings a code editor, visual workflow graph, coding agent, terminal, and source control into one desktop workspace. Its `Raticode` CLI runs Rattish workflows without a desktop window. You can start with a shell command and add agents, branches, file operations, and review steps as your process grows.
 
 ## Start with a working project
 
@@ -37,7 +37,7 @@ Use the search button in the navbar to search page content. The outline on the r
 | --- | --- | --- |
 | Desktop studio and workflow engine | Your computer | Project folders and required local programs |
 | Rem and agent nodes | Through your configured provider | Its CLI login, account, or API profile |
-| CLI workflows | The machine running `gof` | Files, interpreters, and provider access on that machine |
+| CLI workflows | The machine running `Raticode` | Files, interpreters, and provider access on that machine |
 | Mobile controller and fleet | Paired desktop backends | Experimental setup and explicit device grants |
 
 Raticode does not require a Raticode account. AI providers and connected tools have their own accounts and data policies. Local execution does not mean an AI request is offline.

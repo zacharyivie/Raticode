@@ -1,6 +1,6 @@
 import { filterHistory, layoutHistoryGraph } from "../lib/gitHistoryGraph.js";
 import HistoryBranchFilter from "./HistoryBranchFilter.jsx";
-import GitHistoryLane, { GitHistoryRefs } from "./GitHistoryLane.jsx";
+import GitHistoryLane, { GitHistoryRefs, GitHistoryStats } from "./GitHistoryLane.jsx";
 import { dismissGenerationJob, latestGenerationJob, jobIsRunning } from "../lib/generationJobs.js";
 import { pathKey as normalizeWorkspacePath, samePath, pathWithin, displayPath } from "../lib/workspacePaths.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
@@ -1765,11 +1765,16 @@ export default function CodeFileExplorer({
                       <span className="min-w-0 flex-1">
                         <span className={`block text-[11px] font-medium leading-4 text-ink ${isExpanded ? "whitespace-pre-wrap break-words" : "truncate"}`}>{isExpanded ? (commit.message || commit.subject) : commit.subject}</span>
                         <GitHistoryRefs commit={commit} />
-                        <span className="flex min-w-0 items-center gap-1.5 text-[9px] leading-3 text-muted">
-                          <span className="truncate">{commit.author}</span>
-                          <span aria-hidden="true">·</span>
-                          <span className="shrink-0">{relativeCommitTime(commit.authoredAt)}</span>
-                          <span className="shrink-0 font-mono">{commit.shortHash}</span>
+                        <span className="scm-history-meta text-[9px] leading-3 text-muted">
+                          <span className="scm-history-author" title={commit.author}>{commit.author}</span>
+                          <span className="scm-history-when">
+                            <span aria-hidden="true">·</span>
+                            <span className="scm-history-time">{relativeCommitTime(commit.authoredAt)}</span>
+                          </span>
+                          <span className="scm-history-id">
+                            <span className="scm-history-hash font-mono">{commit.shortHash}</span>
+                            <GitHistoryStats commit={commit} />
+                          </span>
                         </span>
                       </span>
                     </button>
@@ -1783,14 +1788,6 @@ export default function CodeFileExplorer({
                       {isCopied ? <Check size={11} /> : <Copy size={11} />}
                     </button>
                   </div>
-                  {isExpanded ? (
-                    <div className="border-t border-line/80 px-1.5 pb-2 pt-1.5 text-[10px]">
-                      <div className="flex items-center gap-2 font-mono text-[9px]" aria-label={`${commit.insertions ?? 0} insertions, ${commit.deletions ?? 0} deletions${commit.binaryFiles ? `, ${commit.binaryFiles} binary files without line counts` : ""}`}>
-                        {!commit.binaryFiles || commit.insertions || commit.deletions ? <><span className="font-medium text-emerald-600">+{commit.insertions ?? 0}</span><span className="font-medium text-red-600">-{commit.deletions ?? 0}</span></> : null}
-                        {commit.binaryFiles ? <span className="text-muted">{commit.binaryFiles} binary {commit.binaryFiles === 1 ? "file" : "files"}</span> : null}
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
                 </div>
                   <GitHistoryLane row={row} width={historyGraph.width} />

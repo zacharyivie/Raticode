@@ -46,14 +46,14 @@ The first machine-readable artifacts now live beside the specification:
 ## Current command-line slice
 
 ```bash
-gof rattish create "Review PR" --project ./project-folder
-gof rattish list
-gof rattish check ./workflow.rattish
-gof rattish format ./workflow.rattish
-gof rattish compile ./workflow.rattish
-gof rattish inspect-ir ./workflow.rattish
-gof rattish preflight ./workflow.rattish
-gof rattish run ./workflow.rattish --input count=3
+Raticode rattish create "Review PR" --project ./project-folder
+Raticode rattish list
+Raticode rattish check ./workflow.rattish
+Raticode rattish format ./workflow.rattish
+Raticode rattish compile ./workflow.rattish
+Raticode rattish inspect-ir ./workflow.rattish
+Raticode rattish preflight ./workflow.rattish
+Raticode rattish run ./workflow.rattish --input count=3
 ```
 
 `create` allocates a globally unique static workflow ID, creates
@@ -84,7 +84,7 @@ input returns `2`.
 
 ### Resuming a run
 
-`gof workflow resume ID --run-id RUN`, the desktop's **Resume** and a paired phone's
+`Raticode workflow resume ID --run-id RUN`, the desktop's **Resume** and a paired phone's
 **Resume** resume a `failed`, `stopped` or `interrupted` run as a new run. The earlier run's
 artifact is never changed. The new artifact names it in `resumed_from.run_id`.
 
@@ -146,7 +146,7 @@ must not maintain independent interpretations of the language.
 ## Migration from Radish
 
 The language is now Rattish. New sources use `.rattish`, the version directive
-`Rattish: 1`, and the `gof rattish` command group. The language version remains 1.
+`Rattish: 1`, and the `Raticode rattish` command group. The language version remains 1.
 The parser also accepts the legacy `Radish: 1` directive, case-insensitively.
 Formatting emits `rattish: 1`.
 

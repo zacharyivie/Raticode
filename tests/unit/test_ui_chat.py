@@ -150,10 +150,56 @@ def test_ensure_local_gofer_cli_copies_source_binary(monkeypatch, tmp_path) -> N
     copied = ensure_local_gofer_cli(data_dir)
 
     assert copied is not None
-    assert copied == tmp_path / ".gofer-trusted-bin" / "gof"
+    assert copied == tmp_path / ".gofer-trusted-bin" / "Raticode"
     assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
     assert copied.stat().st_mode & 0o111
     assert not copied.is_relative_to(data_dir)
+
+
+def test_ensure_local_gofer_cli_removes_helper_left_by_the_gof_command(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "source-cli"
+    source.write_text("#!/bin/sh\necho raticode\n", encoding="utf-8")
+    monkeypatch.setattr(chat, "_gofer_cli_source_path", lambda: source)
+    trusted = tmp_path / ".gofer-trusted-bin"
+    trusted.mkdir()
+    (trusted / "gof").write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+    unrelated = trusted / "notes.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+
+    copied = ensure_local_gofer_cli(tmp_path / "gofer-data")
+
+    assert copied == trusted / "Raticode"
+    assert not (trusted / "gof").exists()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+
+
+def test_ensure_local_gofer_cli_keeps_old_helper_when_new_one_is_unavailable(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(chat, "_gofer_cli_source_path", lambda: None)
+    trusted = tmp_path / ".gofer-trusted-bin"
+    trusted.mkdir()
+    (trusted / "gof").write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+
+    assert ensure_local_gofer_cli(tmp_path / "gofer-data") is None
+    assert (trusted / "gof").exists()
+
+
+def test_cli_source_path_looks_up_the_raticode_command(monkeypatch) -> None:
+    monkeypatch.delenv("GOFER_CLI_SOURCE_PATH", raising=False)
+    monkeypatch.setattr(chat.sys, "frozen", False, raising=False)
+    looked_up: list[str] = []
+
+    def which(name: str) -> str:
+        looked_up.append(name)
+        return f"/venv/bin/{name}"
+
+    monkeypatch.setattr(chat.shutil, "which", which)
+
+    assert chat._gofer_cli_source_path() == Path("/venv/bin/Raticode")
+    assert looked_up == ["Raticode"]
 
 
 def test_ensure_local_gofer_cli_preserves_windows_command_shim(
@@ -168,7 +214,7 @@ def test_ensure_local_gofer_cli_preserves_windows_command_shim(
     copied = ensure_local_gofer_cli(tmp_path / "gofer-data")
 
     assert copied is not None
-    assert copied == tmp_path / ".gofer-trusted-bin" / "gof.cmd"
+    assert copied == tmp_path / ".gofer-trusted-bin" / "Raticode.cmd"
     assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
@@ -2296,7 +2342,7 @@ async def test_turns_without_a_shell_or_with_queuing_off_skip_command_slots(monk
     seen, _ = await _run_fake_claude(
         monkeypatch, tmp_path, {"chatThreadId": "t", "remResources": {"shell": False}}
     )
-    # The hook rewrites commands to start with gof, which a turn without a
+    # The hook rewrites commands to start with Raticode, which a turn without a
     # shell may run, so it is left out.
     assert "--settings" not in seen["argv"]
     command_slots.write_settings(

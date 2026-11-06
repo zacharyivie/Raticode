@@ -266,3 +266,61 @@ export const RECIPES = [
   ["digest", "Prepare a research digest", "Collect recent additions into one cited digest."],
   ["refresh-comparison", "Refresh a comparison when sources change", "Draft a revised comparison for review when cited sources change."],
 ];
+
+// Projects, connections and topics for the visual fixture. Production derives these in the
+// library service from real files, receipts and similarity.
+const SAMPLE_TOPICS = [
+  { id: "topic-search", label: "search · ranking · retrieval", terms: ["search", "ranking", "retrieval"], members: ["doc-fts5", "doc-rrf", "doc-whiteboard", "doc-w3c"], central: "doc-fts5", x: -0.7, y: -0.2 },
+  { id: "topic-brain", label: "brain · citations · reports", terms: ["brain", "citations", "reports"], members: ["doc-second-brain-report", "doc-perf", "doc-index-review", "doc-citation-ux", "doc-obsidian", "doc-zotero"], central: "doc-second-brain-report", x: 0.1, y: 0.35 },
+  { id: "topic-runtime", label: "runtime · snapshots · providers", terms: ["runtime", "snapshots", "providers"], members: ["doc-event-journal", "doc-run-snapshots", "doc-provider-notes"], central: "doc-event-journal", x: 0.75, y: -0.3 },
+];
+function sampleAssignments() {
+  const assignments = {};
+  for (const item of SAMPLE_DOCUMENTS.filter(doc => doc.brainId === "brain-research")) {
+    if (!item.project) continue;
+    const projectId = item.project === "Raticode" || item.path.startsWith("Reports/Raticode/") ? "folder:raticode" : "named:secondbrain";
+    const folder = item.path.startsWith("Reports/");
+    assignments[item.id] = { projectId, basis: folder ? (item.id === "doc-perf" ? "observed" : "folder") : "written", detail: folder ? (item.id === "doc-perf" ? "Saved by a Rem task · Measure indexing speed" : "In Raticode/") : "The file names it", kind: item.type === "report" ? "reports" : "knowledge", others: [] };
+  }
+  return assignments;
+}
+export function sampleGraphData(action, params = {}) {
+  const assignments = sampleAssignments();
+  const count = (projectId, kind) => Object.values(assignments).filter(item => item.projectId === projectId && item.kind === kind).length;
+  const projects = [
+    { id: "folder:raticode", name: "Raticode", aliases: ["Taskurotta"], roots: ["/home/you/Projects/Raticode"], color: "", source: "folder", saved: false, counts: { reports: count("folder:raticode", "reports"), knowledge: count("folder:raticode", "knowledge"), conversations: 2 } },
+    { id: "named:secondbrain", name: "Second Brain", aliases: [], roots: [], color: "", source: "named", saved: false, counts: { reports: count("named:secondbrain", "reports"), knowledge: count("named:secondbrain", "knowledge"), conversations: 0 } },
+  ];
+  const conversations = [
+    { threadId: "thread-1", title: "Plan the connected Second Brain", projectRoot: "/home/you/Projects/Raticode", updatedAt: at(1), messageCount: 18, snapshot: "Rem Conversations/threads/a.json", projectId: "folder:raticode" },
+    { threadId: "thread-2", title: "Fix search ranking", projectRoot: "/home/you/Projects/Raticode", updatedAt: at(4), messageCount: 9, snapshot: "Rem Conversations/threads/b.json", projectId: "folder:raticode" },
+  ];
+  if (action === "projects") return { projects, assignments, conversations, unassigned: ["doc-readwise", "doc-notion", "doc-whiteboard"], suggestedMerges: [] };
+  if (action === "topics") {
+    const topicOf = Object.fromEntries(SAMPLE_TOPICS.flatMap(topic => topic.members.map(id => [id, topic.id])));
+    const topics = SAMPLE_TOPICS.map(topic => ({ ...topic, name: "", named: false, size: topic.members.length, projects: [...new Set(topic.members.map(id => assignments[id]?.projectId).filter(Boolean))].map(projectId => ({ projectId, count: topic.members.filter(id => assignments[id]?.projectId === projectId).length })) }));
+    return { basis: "words", documents: 16, topics, edges: [{ a: "topic-brain", b: "topic-search", weight: 2.4, written: 2, similar: 1 }, { a: "topic-brain", b: "topic-runtime", weight: 0.6, written: 0, similar: 1 }], loose: ["doc-release", "doc-release-copy"], topicOf };
+  }
+  if (action === "topic_layout") {
+    const topic = SAMPLE_TOPICS.find(item => item.id === params.topicId) || SAMPLE_TOPICS[0];
+    const nodes = topic.members.map((docId, index) => ({ docId, x: Math.cos((2 * Math.PI * index) / topic.members.length), y: Math.sin((2 * Math.PI * index) / topic.members.length) }));
+    return { topicId: topic.id, nodes, edges: nodes.slice(1).map(node => ({ a: topic.central, b: node.docId, kind: "similar", score: 0.4 })), shown: nodes.length, total: nodes.length };
+  }
+  if (action === "connections") {
+    const item = SAMPLE_DOCUMENTS.find(doc => doc.id === params.id);
+    const citedBy = SAMPLE_DOCUMENTS.filter(doc => (doc.cites || []).includes(params.id)).map(doc => doc.id);
+    const assignment = assignments[params.id];
+    const topic = SAMPLE_TOPICS.find(entry => entry.members.includes(params.id));
+    return {
+      docId: params.id,
+      madeBy: item?.type === "report" ? [{ kind: "rem_task", basis: "observed", title: "Measure indexing speed", provider: "claude_code", model: "claude-opus-5-5", at: at(25), hashMatches: true }] : [],
+      project: assignment ? { ...assignment, name: projects.find(project => project.id === assignment.projectId)?.name } : null,
+      suggestedProject: assignment ? null : { projectId: "named:secondbrain", name: "Second Brain", basis: "suggested", detail: "3 of the 5 most similar documents" },
+      links: { cites: item?.cites || [], citedBy },
+      usedBy: SAMPLE_REPORTS.filter(report => report.citations.some(citation => citation.docId === params.id)).map(report => ({ kind: "report", basis: "cited", reportId: report.id, title: report.title, count: report.citations.filter(citation => citation.docId === params.id).length, changed: 0, at: report.generatedAt })),
+      similar: (item?.related || []).map((docId, index) => ({ docId, score: 0.4 - index * 0.05, revision: false, basis: "words" })),
+      topic: topic ? { id: topic.id, label: topic.label, size: topic.members.length } : null,
+    };
+  }
+  throw new Error(`The visual fixture has no ${action} data.`);
+}

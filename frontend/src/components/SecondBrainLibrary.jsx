@@ -3,7 +3,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { CircleCheck, ClipboardPaste, CopyCheck, FileWarning, FolderOpen, Globe, Inbox, Library, Link2, Pencil, Play, Plus, Quote, RefreshCw, ScanText, Tags, Trash2, Unlink, FilePlus2, Repeat, CalendarClock, HardDrive } from "lucide-react";
 import { formatDay, formatTime, extractionLabel } from "../lib/secondBrain.js";
 import { HEALTH_KINDS, RECIPES } from "../lib/secondBrain.js";
-import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, saveJob, removeJob, removeDocument, updateBrain, notify, navigate, uid } from "../lib/secondBrainStore.js";
+import { useSecondBrain, openDocument, openDialog, updateDocument, addToCollection, evidenceItem, resolveHealth, startTask, saveJob, removeJob, removeDocument, updateBrain, notify, navigate, uid, backfillProvenance } from "../lib/secondBrainStore.js";
 import { DraftInput, Empty, Menu, Pill, ProgressBar, TypeIcon } from "./SecondBrainParts.jsx";
 import JobSourceRules from "./SecondBrainJobSources.jsx";
 import { defaultJobSourceRules, describeJobSources, jobScopeLabel, jobSourceRules, jobSourceRulesError } from "../lib/secondBrainJobSources.js";
@@ -192,6 +192,11 @@ export function BrainSettingsView({ brain }) {
         </> : null}
       </fieldset> : null}
       <p className="sb-hint">Exact search always works offline, without a model. Changing Rem’s chat model never rebuilds this index.</p>
+    </section>
+    <section><h4>Projects and connections</h4>
+      <p className="sb-hint">Projects come from a Rem run that saved a file, a project named in the file, its Reports/&lt;Project&gt;/ folder, or your choice. Similar documents and topics are suggestions computed on this computer: from the local embedding model when related-meaning search is on, otherwise from the words documents share. No text is sent anywhere to group or link documents, and inferred groups are never written into your files.</p>
+      <div className="sb-actions"><button type="button" className="sb-button" onClick={() => backfillProvenance(brain.id)}>Find report history</button></div>
+      <p className="sb-hint">Looks up reports Rem tasks saved here and the Rem conversations that saved older reports. Only Raticode’s records change; files are never edited.</p>
     </section>
     <section><h4>Privacy</h4>
       <label className="sb-check"><input type="checkbox" checked={!settings.researchProvider && !settings.researchProfile} onChange={event => set({ researchProvider: event.target.checked ? null : { id: provider.id, model: provider.model, profile: provider.profile || null, effort: provider.effort || "" }, researchProfile: "" })} />Use the current Rem provider by default</label>

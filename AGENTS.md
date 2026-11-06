@@ -4,7 +4,7 @@ This file provides guidance for AI coding agents, including Codex, Claude Code, 
 
 ## Project Summary
 
-`gofer-flow` is a Python CLI and desktop workflow studio. Workflows use the Rattish language in `workflow.rattish`; the compiler validates them and emits versioned JSON IR. Execution supports explicit routes, joins, branches, and cycles.
+Raticode is a Python CLI (the `Raticode` command) and desktop workflow studio. Workflows use the Rattish language in `workflow.rattish`; the compiler validates them and emits versioned JSON IR. Execution supports explicit routes, joins, branches, and cycles.
 
 ## Commands
 
@@ -97,5 +97,21 @@ Node step-2:
   `*.browser.cjs` entry script calls `runInBackgroundDisplay()` from
   `frontend/electron/tests/background-display.cjs` before anything else, and
   scripts that spawn Electron go through its `backgroundLaunch()`. On Linux this
-  runs Electron on a hidden Xvfb display (install `xvfb-run`). Set
-  `RATICODE_TEST_VISIBLE=1` only to watch a run.
+  runs Electron on a hidden Xvfb display (install `xvfb-run`) and a private,
+  empty D-Bus session, so tests can't add tray icons, notifications or wallet
+  prompts to the desktop. `electron/tests/background-display.test.cjs` fails if
+  an entry script or launcher skips the helper. Set `RATICODE_TEST_VISIBLE=1`
+  only when the user asks to watch a run.
+- A test that starts a Vite dev server passes `cacheDir: testViteCacheDir()`
+  from `frontend/electron/tests/test-vite-cache.cjs`. Worktrees link
+  `node_modules` to the main checkout, so the default cache is the one the
+  developer's running dev app uses.
+- A plain `xvfb-run` does not hide Electron on a Wayland desktop; launch
+  through the scripts above instead of wrapping Electron yourself.
+- Agents must not run `npm run electron:dev` to check a change: it opens a
+  visible window and shares the developer's profile and port 5173. Use the
+  real-Electron test scripts, or a throwaway harness started through
+  `backgroundLaunch()` with its own profile. `dev-runner.cjs` refuses a profile
+  that a running window holds, so the running window isn't brought forward.
+- Standalone browsers for UI checks (Chromium, Playwright) must run headless.
+  Python tests run with no display and no session bus (`tests/conftest.py`).

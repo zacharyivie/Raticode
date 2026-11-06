@@ -116,7 +116,7 @@ backend with the opt-in below. To opt in for a backend without a window:
 export RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1
 export RATICODE_DEVICE_HOST=192.168.1.20
 export RATICODE_DEVICE_PORT=18766
-/home/doonk/Projects/.gofer-trusted-bin/gof ui serve --host 127.0.0.1 --port 8765 --data-dir /absolute/path/to/disposable-raticode-data
+/home/doonk/Projects/.gofer-trusted-bin/Raticode ui serve --host 127.0.0.1 --port 8765 --data-dir /absolute/path/to/disposable-raticode-data
 ```
 
 Use each machine's actual private interface address. Wildcard, multicast and

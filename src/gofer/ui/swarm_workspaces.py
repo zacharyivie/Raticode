@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.utils.atomic_output import open_binary_input
+from gofer.utils.brand_compat import LEGACY_SWARM_BRANCH_PREFIX
 from gofer.utils.process import build_subprocess_env
 
 # Untracked files that look like credentials stay out of the start snapshot.
@@ -63,7 +64,7 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None, timeout: floa
             "-c",
             "commit.gpgsign=false",
             "-c",
-            "user.name=Taskurotta",
+            "user.name=Raticode",
             "-c",
             "user.email=swarm@localhost",
             *args,
@@ -231,7 +232,7 @@ def cleanup_accepted_attempt(workspace: dict[str, Any], attempt: dict[str, Any])
 
 
 def _delete_branch(root: Path, branch: str | None, revision: str) -> None:
-    if branch and branch.startswith(("raticode/swarm/", "taskurotta/swarm/")):
+    if branch and branch.startswith(("raticode/swarm/", LEGACY_SWARM_BRANCH_PREFIX)):
         # Compare-and-delete: never remove a ref that moved after inspection.
         git(root, "update-ref", "-d", f"refs/heads/{branch}", revision)
 

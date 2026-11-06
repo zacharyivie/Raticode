@@ -1,0 +1,60 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "rem-task",
+  "runtime_handler": "raticode.rem_task",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+      "instructions": {"type": "string", "maxLength": 20000},
+      "wait": {"type": "boolean"}
+    },
+    "required": ["task_id"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "instructions": "",
+    "wait": true
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "closed",
+    "ports": {
+      "instructions": {
+        "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"},
+        "required": false,
+        "delivery": "local_binding",
+        "encoding": "identity"
+      }
+    }
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "task_id": {"type": "string"},
+        "run_id": {"type": "string"},
+        "title": {"type": "string"},
+        "state": {"type": "string"},
+        "succeeded": {"type": "boolean"},
+        "summary": {"type": "string"},
+        "result": {"type": "string"},
+        "artifacts": {"type": "array", "items": {"type": "string"}},
+        "thread_id": {"type": "string"},
+        "attached": {"type": "boolean"}
+      },
+      "required": ["task_id", "run_id", "title", "state", "succeeded", "summary", "result", "artifacts", "thread_id", "attached"],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": ["cancelled", "configuration", "internal", "output_validation", "rem", "timeout"],
+  "effects": ["provider", "state_write"],
+  "preflight_checks": [
+    {"id": "task-available", "severity": "error", "description": "The Rem task must exist and must not be deleted."}
+  ],
+  "static_diagnostics": []
+}

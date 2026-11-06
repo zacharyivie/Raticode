@@ -2,6 +2,7 @@
 // Visual regression audit with a real isolated backend and a fake provider.
 // Run through run-organizations-visual.cjs. No user projects or providers are used.
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -26,7 +27,7 @@ async function main() {
   });
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(root, "frontend"), logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "organization-capture",
     resolveId(id) { if (id === "/organization-entry.jsx") return id; },
     load(id) { if (id === "/organization-entry.jsx") return `import React, {useState} from "react"; import {createRoot} from "react-dom/client"; import OrganizationWorkspace from "/src/components/OrganizationWorkspace.jsx"; import "/src/styles/index.css"; function App() { const [id,setId] = useState(location.hash.slice(1) || "new"); return <main style={{height:"100vh",display:"flex"}}><OrganizationWorkspace key={id} rootPath={${JSON.stringify(ready.project)}} organizationId={id} onSelect={setId} onClose={()=>{}} /></main>; } createRoot(document.getElementById("root")).render(<App/>);`; },

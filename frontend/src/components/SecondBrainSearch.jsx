@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { BookmarkPlus, ChevronDown, Copy, FilePlus2, FolderOpen, Library, ListFilter, MessageSquareQuote, PanelLeft, Plus, Search, SearchX, Sparkles, Star, TriangleAlert, Upload, X, Scale, ScrollText } from "lucide-react";
 import { DATE_FIELDS, DOCUMENT_TYPES, EMPTY_FILTERS, MATCH_LABELS, MATCH_MODES, ORIGINS, READING_STATES, EXTRACTION_STATES, CITATION_FILTERS, SEARCH_IN, SEARCH_MODES, SORTS, activeFilterCount, describeQuery, facetCounts, formatDay, parseQuery, queryText, searchLibrary, typeLabel, dateFieldLabel, readingLabel, originLabel, extractionLabel, citationFilterLabel, parseDateBound, matchesFilters, highlightSegments } from "../lib/secondBrain.js";
 import { useSecondBrain, viewFor, libraryFor, updateSearch, resetSearch, openDocument, toggleSelection, clearSelection, openDialog, addToCollection, evidenceItem, notify, createCollection, navigate, isSampleLibrary } from "../lib/secondBrainStore.js";
+import { fuseResults } from "../lib/secondBrainGraph.js";
 import { Chip, DraftInput, Empty, Menu, Pill, Popover, Segmented, TypeIcon, Highlight, BrainMark, askRem } from "./SecondBrainParts.jsx";
 import { brainRequest } from "../lib/secondBrainApi.js";
 import SecondBrainReader from "./SecondBrainReader.jsx";
@@ -174,6 +175,7 @@ function ResultItem({ result, active, selected, multiBrain, brainOf, collections
         {doc.reading?.starred ? <Star size={12} className="sb-star" aria-label="Starred" /> : null}
         {!doc.reading?.read ? <span className="sb-unread" aria-label="Unread" title="Unread" /> : null}
         {result.matchKind !== "filter" ? <span className="sb-match" data-kind={result.matchKind}>{MATCH_LABELS[result.matchKind]}</span> : null}
+        {result.matchedBy?.length > 1 ? <span className="sb-match" data-kind="meaning" title="Found by its words and by its meaning">+ meaning</span> : null}
       </div>
       <div className="sb-result-path sb-mono">{multiBrain ? <span className="sb-result-brain"><BrainMark brain={sourceBrain} size="sm" />{sourceBrain?.name}</span> : null}{doc.path}</div>
       <div className="sb-result-meta">
@@ -183,7 +185,7 @@ function ResultItem({ result, active, selected, multiBrain, brainOf, collections
         <span>Modified {formatDay(doc.dates.modified, { relative: true })}</span>
         {doc.dates.published ? <span>Published {formatDay(doc.dates.published)}</span> : null}
         {doc.extraction !== "ready" ? <Pill tone={doc.extraction === "failed" ? "danger" : "warning"}>{extractionLabel(doc.extraction)}</Pill> : null}
-        {doc.origin === "generated" ? <span>Generated</span> : null}
+        {doc.origin === "generated" ? <span>Generated</span> : doc.origin === "agent" ? <span>Saved by an agent</span> : null}
       </div>
       {result.matchKind !== "filter" ? <div className="sb-passages">
         {result.passages.map(({ block, segments }) => <button key={block.id} type="button" tabIndex={-1} className="sb-passage" onClick={() => openDocument(doc.id, { blockId: block.id })}>
@@ -239,7 +241,9 @@ export default function SearchView({ brain }) {
   const { results } = useMemo(() => {
     const exact = searchLibrary(scopedLibrary.documents, { ...search, mode: isSampleLibrary() ? search.mode : "exact", filters: { ...EMPTY_FILTERS, ...search.filters } }, scopedLibrary);
     if (isSampleLibrary() || !meaningEnabled || search.mode === "exact" || semantic.key !== searchKey || semantic.error) return exact;
-    const seen = new Set(search.mode === "hybrid" ? exact.results.map(item => item.doc.id) : []);
+    // Combined mode ranks every document by both lists (reciprocal rank fusion), so a
+    // document found by words and by meaning moves up instead of being listed twice.
+    const seen = new Set();
     const related = [];
     for (const hit of semantic.hits) {
       const doc = scopedLibrary.documents.find(item => item.id === hit.docId);
@@ -251,7 +255,7 @@ export default function SearchView({ brain }) {
       seen.add(doc.id);
       related.push({ doc, score: hit.score, matchKind: "meaning", passageCount: 1, passages: [{ block, segments: highlightSegments(block.text, []) }] });
     }
-    return { ...exact, results: search.mode === "semantic" ? related : [...exact.results, ...related] };
+    return { ...exact, results: search.mode === "semantic" ? related : fuseResults(exact.results, related) };
   }, [scopedLibrary, search, semantic, searchKey, meaningEnabled]);
 
   const passageTotal = results.reduce((total, result) => total + result.passageCount, 0);

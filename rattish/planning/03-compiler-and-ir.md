@@ -161,7 +161,7 @@ Compiled IR belongs in managed application data rather than the portable workflo
 
 ## Source change behavior
 
-**Accepted in principle.** Gofer tracks `.rattish` changes and recompiles after a debounce.
+**Accepted in principle.** Raticode tracks `.rattish` changes and recompiles after a debounce.
 
 **Proposed transaction:**
 
@@ -173,7 +173,7 @@ Compiled IR belongs in managed application data rather than the portable workflo
 6. Atomically publish the artifact and update the registry.
 7. Run deployment preflight and record readiness separately.
 
-If compilation fails, Gofer retains the last valid IR but marks it stale. New runs are
+If compilation fails, Raticode retains the last valid IR but marks it stale. New runs are
 blocked until current source compiles. A run already using an immutable IR revision may
 finish.
 
@@ -229,13 +229,13 @@ The CLI must support machine-readable diagnostics for agent correction loops.
 ## Proposed CLI
 
 ```bash
-gof rattish check workflow.rattish
-gof rattish check workflow.rattish --json
-gof rattish compile workflow.rattish --output workflow.json
-gof rattish format workflow.rattish
-gof rattish explain workflow.rattish
-gof rattish inspect-ir workflow.json
-gof workflow preflight workflow.rattish
+Raticode rattish check workflow.rattish
+Raticode rattish check workflow.rattish --json
+Raticode rattish compile workflow.rattish --output workflow.json
+Raticode rattish format workflow.rattish
+Raticode rattish explain workflow.rattish
+Raticode rattish inspect-ir workflow.json
+Raticode workflow preflight workflow.rattish
 ```
 
 The exact commands and whether direct IR output is exposed outside development mode remain

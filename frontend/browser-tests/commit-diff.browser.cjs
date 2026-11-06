@@ -1,5 +1,6 @@
 /* global __dirname, process, console, clearTimeout, window, document, setTimeout */
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -11,7 +12,7 @@ const deadline = setTimeout(() => app.exit(1), 60000);
 let server;
 app.whenReady().then(async () => {
   const { createServer } = await import("vite");
-  server = await createServer({ root: path.resolve(__dirname, ".."), configFile: false,
+  server = await createServer({ cacheDir: testViteCacheDir(), root: path.resolve(__dirname, ".."), configFile: false,
     server: { host: "127.0.0.1", port: 0 }, plugins: [
       { name: "commit-diff-fixture", configureServer(dev) {
         dev.middlewares.use(async (req, res, next) => {

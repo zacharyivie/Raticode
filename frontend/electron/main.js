@@ -71,6 +71,8 @@ const { createOpenWith } = require("./open-with.cjs");
 const { PARTITIONS: BROWSER_PARTITIONS } = require("./browser-policy.cjs");
 const { searchProject, replaceProject } = require("./project-search.cjs");
 const { createAppLog } = require("./app-log.cjs");
+const { createBackendOutput } = require("./backend-log.cjs");
+const util = require("node:util");
 const { createArchiveQueue } = require("./archive-queue.cjs");
 const conversationArchives = createArchiveQueue();
 const { createPathGrantQueue } = require("./path-grant-queue.cjs");
@@ -115,7 +117,7 @@ const VITE_DEV_SERVER_URL =
   "http://127.0.0.1:5173";
 const BACKEND_READY_PREFIX = "GOFER_UI_READY ";
 const ELECTRON_READY_MESSAGE = "GOFER_ELECTRON_READY";
-const BACKEND_EXECUTABLE_NAME = process.platform === "win32" ? "gof.exe" : "gof";
+const BACKEND_EXECUTABLE_NAME = process.platform === "win32" ? "Raticode.exe" : "Raticode";
 // Release downloads avoid the REST API's 60 requests/hour limit for anonymous callers.
 const RELEASES_URL = "https://github.com/zacharyivie/Raticode/releases";
 const isProduction =
@@ -175,7 +177,7 @@ function createWindow(apiBaseUrl, apiToken = "", { show = true } = {}) {
   legacyProjectMigrationToken = "";
   try {
     if (!trustedProjectStore().read().legacyRecentProjectsMigrated) legacyProjectMigrationToken = crypto.randomUUID();
-  } catch { writeBackendLog("TRUSTED_PROJECT_REGISTRY_UNAVAILABLE\n"); }
+  } catch { writeBackendLog("TRUSTED_PROJECT_REGISTRY_UNAVAILABLE\n", "warn"); }
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 960,
@@ -245,6 +247,14 @@ function createWindow(apiBaseUrl, apiToken = "", { show = true } = {}) {
     webPreferences.allowRunningInsecureContent = false;
   });
   mainWindow.webContents.on("did-attach-webview", (_event, guestContents) => browsers.hardenGuest(guestContents));
+
+  mainWindow.on("unresponsive", () => applicationLog?.write("warn", "renderer", "The Raticode window stopped responding"));
+  mainWindow.on("responsive", () => applicationLog?.write("info", "renderer", "The Raticode window is responding again"));
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
+    // -3 is an aborted load, which a normal navigation or reload causes.
+    if (!isMainFrame || errorCode === -3) return;
+    applicationLog?.write("error", "renderer", `The Raticode window could not load ${String(validatedUrl || "").split(/[?#]/)[0]}: ${errorDescription} (${errorCode})`);
+  });
 
   mainWindow.webContents.once("did-finish-load", () => {
     if (!isSmokeTest) return;
@@ -364,6 +374,9 @@ function startBackend(port = 0) {
         ...reportPdfService?.env,
         GOFER_DESKTOP_GRANT_SECRET: desktopGrantSecret,
         GOFER_UI_EMIT_READY_TOKEN: "1",
+        // Backend log records arrive on stderr as JSON lines for Settings > Developer.
+        GOFER_LOG_FORMAT: "desktop",
+        GOFER_LOG_LEVEL: process.env.GOFER_LOG_LEVEL || "debug",
         // Dictation on macOS uses Apple's on-device recognizer through this helper.
         ...(process.platform === "darwin" ? { GOFER_SPEECH_HELPER: macosSpeechHelperPath() } : {}),
         // Lets the backend grant and revoke Rem's per-turn browser access.
@@ -376,6 +389,8 @@ function startBackend(port = 0) {
     });
     backendProcess = child;
     backendLogStream = createBackendLogStream();
+    const backendStarted = Date.now();
+    applicationLog?.write("info", "backend", `Starting backend: ${path.basename(backendCommand.command)} ${args.slice(0, backendCommand.args.length + 2).join(" ")} (process ${child.pid ?? "not started"})`);
 
     let settled = false;
     let stdoutBuffer = "";
@@ -386,7 +401,7 @@ function startBackend(port = 0) {
     function succeed(apiBaseUrl, apiToken = "") {
       if (settled) return;
       settled = true;
-      writeBackendLog(`READY ${apiBaseUrl}\n`);
+      applicationLog?.write("info", "backend", `Backend ready at ${apiBaseUrl} after ${((Date.now() - backendStarted) / 1000).toFixed(1)} s`);
       resolve({ apiBaseUrl, apiToken });
     }
 
@@ -404,7 +419,7 @@ function startBackend(port = 0) {
 
       for (const line of lines) {
         if (!line.startsWith(BACKEND_READY_PREFIX)) {
-          writeBackendLog(`${line}\n`);
+          backendOutput.stdoutLine(line);
           console.log(`[gofer-backend] ${line}`);
           continue;
         }
@@ -425,18 +440,28 @@ function startBackend(port = 0) {
       }
     }
 
-    child.stdout.on("data", handleOutput);
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
-      stderrBuffer = (stderrBuffer + text).slice(-65536);
-      writeBackendLog(text);
-      process.stderr.write(`[gofer-backend] ${text}`);
+    const backendOutput = createBackendOutput({
+      write: (level, source, message, component) => applicationLog?.write(level, source, message, component),
+      echo: (line) => {
+        stderrBuffer = (stderrBuffer + line + "\n").slice(-65536);
+        process.stderr.write(`[gofer-backend] ${line}\n`);
+      },
     });
+    child.stdout.on("data", handleOutput);
+    // Decode across reads so a character split between chunks stays intact.
+    child.stderr.setEncoding?.("utf8");
+    child.stderr.on("data", (text) => backendOutput.stderr(text));
     child.on("error", (error) => {
+      applicationLog?.write("error", "backend", `Could not start the backend (${error.code || error.name}): ${backendCommand.command}`);
       fail(error);
     });
     child.on("exit", (code, signal) => {
-      writeBackendLog(`BACKEND_EXIT ${JSON.stringify({ code, signal, expected: isQuitting || expectedBackendStops.has(child) })}\n`);
+      backendOutput.end();
+      const expected = isQuitting || expectedBackendStops.has(child);
+      const ran = ((Date.now() - backendStarted) / 1000).toFixed(1);
+      applicationLog?.write(expected ? "info" : "error", "backend", expected
+        ? `Backend stopped after ${ran} s (${signal ? `signal ${signal}` : `exit code ${code}`})`
+        : `Backend ${settled ? "stopped unexpectedly" : "exited before it was ready"} after ${ran} s (${signal ? `signal ${signal}` : `exit code ${code}`})`);
       if (backendProcess === child) {
         backendPathGrants.reset();
         backendProcess = undefined;
@@ -460,7 +485,7 @@ function getBackendCommand() {
   if (!isProduction) {
     return {
       command: "uv",
-      args: ["run", "gof"],
+      args: ["run", "Raticode"],
     };
   }
 
@@ -561,8 +586,20 @@ function createBackendLogStream() {
   return null;
 }
 
-function writeBackendLog(message) {
-  applicationLog?.write("info", "backend", message);
+// Main-process warnings and errors also go to the app log, which is the only place
+// they can be read in a packaged app started from Finder or the Dock.
+function captureMainConsole(log) {
+  for (const method of ["warn", "error"]) {
+    const original = console[method].bind(console);
+    console[method] = (...args) => {
+      original(...args);
+      try { log.write(method, "desktop", util.format(...args)); } catch { /* logging must never throw. */ }
+    };
+  }
+}
+
+function writeBackendLog(message, level = "info") {
+  applicationLog?.write(level, "desktop", String(message).trimEnd());
   if (!backendLogStream) return;
   backendLogStream.write(message);
 }
@@ -637,7 +674,9 @@ app.whenReady().then(async () => {
       if (["warning", "error"].includes(level)) applicationLog.write(level === "error" ? "error" : "warn", "renderer", message);
     });
   });
-  app.on("render-process-gone", (_event, _contents, details) => applicationLog.write("error", "renderer", JSON.stringify(details)));
+  app.on("render-process-gone", (_event, contents, details) => applicationLog.write("error", "renderer", `${contents === mainWindow?.webContents ? "The Raticode window's page" : "A page"} stopped: ${details.reason}, exit code ${details.exitCode}`));
+  app.on("child-process-gone", (_event, details) => applicationLog.write(details.reason === "clean-exit" ? "debug" : "error", "desktop", `Electron ${details.type}${details.name ? ` (${details.name})` : ""} process ended: ${details.reason}, exit code ${details.exitCode}`));
+  captureMainConsole(applicationLog);
   Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([
     { role: "appMenu" },
     { role: "editMenu" },
@@ -808,6 +847,7 @@ function setupIpcHandlers() {
     },
     developerInfo,
     developerAction,
+    developerLog,
     featurePreview,
     setFeaturePreview,
     rendererLog,
@@ -1974,7 +2014,16 @@ function developerInfo() {
   return { version: app.getVersion(), platform: `${process.platform} ${process.arch}`, electron: process.versions.electron,
     node: process.versions.node, dataDir: getGoferDataDir(), userData: app.getPath("userData"), logs: app.getPath("logs"),
     appLog: applicationLog?.file || "", backend: backendProcess && !backendProcess.killed ? "Running" : "Stopped",
-    archiveFolder: remSettings().archiveFolder };
+    archiveFolder: remSettings().archiveFolder, packaged: app.isPackaged,
+    backendLogLevel: process.env.GOFER_LOG_LEVEL || "debug",
+    externalBackend: Boolean(process.env.GOFER_API_BASE_URL || process.env.VITE_API_BASE_URL) };
+}
+// The Developer tab's live log. Reads come from memory; `history` reads the end of
+// the log files written before this session once.
+async function developerLog(_event, { after = 0, limit = 1000, history = false } = {}) {
+  if (!applicationLog) return { entries: [], cursor: 0, latest: 0, missed: 0, counts: {}, history: null };
+  const live = applicationLog.read({ after, limit });
+  return { ...live, history: history ? await applicationLog.history() : null };
 }
 async function developerAction(_event, { action } = {}) {
   if (action === "logs") return shell.openPath(app.getPath("logs"));
@@ -1982,14 +2031,6 @@ async function developerAction(_event, { action } = {}) {
   if (action === "user-data") return shell.openPath(app.getPath("userData"));
   if (action === "devtools") { mainWindow?.webContents.openDevTools({ mode: "detach" }); return; }
   if (action === "restart") return restartBackend();
-  if (action === "read-log") {
-    const file = applicationLog?.file;
-    if (!file || !fs.existsSync(file)) return "";
-    const size = fs.statSync(file).size;
-    const fd = fs.openSync(file, "r");
-    try { const buffer = Buffer.alloc(Math.min(size, 64000)); fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length)); return buffer.toString("utf8"); }
-    finally { fs.closeSync(fd); }
-  }
   throw new Error("Unknown developer action.");
 }
 function featurePreviewFile() {
@@ -2290,14 +2331,14 @@ function migrateLegacyProjects(event, payload) {
     }
     event.returnValue = true;
   } catch {
-    writeBackendLog("LEGACY_PROJECT_MIGRATION_FAILED\n");
+    writeBackendLog("LEGACY_PROJECT_MIGRATION_FAILED\n", "error");
   }
 }
 
 function readTrustedRoots() {
   let roots = [];
   try { roots = trustedProjectStore().read().roots; }
-  catch { writeBackendLog("TRUSTED_PROJECT_REGISTRY_UNAVAILABLE\n"); }
+  catch { writeBackendLog("TRUSTED_PROJECT_REGISTRY_UNAVAILABLE\n", "warn"); }
   // These paths were accepted and persisted by main after native selection.
   // Restore them during migration without exposing a new grant to the renderer.
   try {
@@ -2352,11 +2393,11 @@ async function sendBackendPathGrant(handle) {
     if (payload?.grantId !== handle.grantId || typeof payload?.path !== "string" || payload.path !== handle.path) {
       throw new Error("Registration acknowledgment does not match");
     }
-    writeBackendLog(`PATH_GRANT_REGISTERED ${JSON.stringify({ path: handle.path, status, durationMs: Date.now() - startedAt })}\n`);
+    writeBackendLog(`PATH_GRANT_REGISTERED ${JSON.stringify({ path: handle.path, status, durationMs: Date.now() - startedAt })}\n`, "debug");
   } catch (error) {
     if (error?.name === "TimeoutError" || error?.name === "AbortError") reason = "timeout";
     // Do not log headers, grant IDs, response bodies, or raw network errors.
-    writeBackendLog(`PATH_GRANT_REGISTER_FAILED ${JSON.stringify({ path: handle?.path, reason, status, durationMs: Date.now() - startedAt })}\n`);
+    writeBackendLog(`PATH_GRANT_REGISTER_FAILED ${JSON.stringify({ path: handle?.path, reason, status, durationMs: Date.now() - startedAt })}\n`, "warn");
     const detail = reason === "timeout" ? "The backend timed out."
       : reason === "http-error" ? `The backend rejected registration with HTTP ${status}.`
         : reason === "backend-unavailable" ? "The backend is not ready."

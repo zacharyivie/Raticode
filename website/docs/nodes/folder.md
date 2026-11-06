@@ -58,6 +58,6 @@ For example, refer to `node.step.output.path` from a compatible downstream bindi
 
 The directory must exist and be accessible. When the node has `needs`, preflight skips the existence check because an upstream step may create it earlier in the run; the node then reports a missing directory when it runs. Its contents can still change before later steps read them.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

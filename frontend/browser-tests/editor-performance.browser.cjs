@@ -1,6 +1,7 @@
 /* global __dirname, process, console, clearTimeout, window, performance, setTimeout */
 // Real Monaco, production editor component, generated text and no provider processes.
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const { app, BrowserWindow } = require("electron");
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -16,7 +17,7 @@ let server;
 app.whenReady().then(async () => {
   const { createServer } = await import("vite");
   const baseline = process.env.GOFER_PERF_BASELINE;
-  server = await createServer({ root, configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
+  server = await createServer({ cacheDir: testViteCacheDir(), root, configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
     {
       name: "editor-measurement",
       enforce: "pre",

@@ -28,11 +28,11 @@ def license_build(tmp_path, monkeypatch):
     (root / "uv.lock").write_text(
         "\n".join(
             f'[[package]]\nname = "{name}"\nversion = "1"'
-            for name in ("gofer-flow", "pyinstaller", "pyinstaller-hooks-contrib", "example")
+            for name in ("raticode", "pyinstaller", "pyinstaller-hooks-contrib", "example")
         )
     )
     distributions = {}
-    for name in ("gofer-flow", "pyinstaller", "pyinstaller-hooks-contrib", "example"):
+    for name in ("raticode", "pyinstaller", "pyinstaller-hooks-contrib", "example"):
         location = root / name
         location.mkdir()
         (location / "LICENSE").write_text(f"{name} license")
@@ -40,7 +40,7 @@ def license_build(tmp_path, monkeypatch):
             metadata={"Name": name, "License-Expression": "MIT"},
             version="1",
             files=[Path("LICENSE")],
-            requires=["example"] if name == "gofer-flow" else [],
+            requires=["example"] if name == "raticode" else [],
             locate_file=lambda file, location=location: location / file,
         )
     package = root / "frontend/node_modules/example-js"
@@ -149,7 +149,7 @@ def test_bundle_rejects_tampered_mpl_source(license_build, monkeypatch):
     example = distributions.pop("example")
     example.metadata["Name"] = "certifi"
     distributions["certifi"] = example
-    distributions["gofer-flow"].requires = ["certifi"]
+    distributions["raticode"].requires = ["certifi"]
     lock = root / "uv.lock"
     lock.write_text(
         lock.read_text().replace('name = "example"', 'name = "certifi"')
@@ -226,7 +226,7 @@ def test_every_shipped_python_package_has_a_review_for_its_locked_version():
     for package in tomllib.loads((ROOT / "uv.lock").read_text())["package"]:
         packages.setdefault(package["name"], []).append(package)
     # The same closure collect-licenses.py bundles, read from the lock instead of an install.
-    pending = [("gofer-flow", ("xlsx",)), ("pyinstaller", ()), ("pyinstaller-hooks-contrib", ())]
+    pending = [("raticode", ("xlsx",)), ("pyinstaller", ()), ("pyinstaller-hooks-contrib", ())]
     seen: set[tuple[str, tuple[str, ...]]] = set()
     while pending:
         name, extras = pending.pop()
@@ -240,7 +240,7 @@ def test_every_shipped_python_package_has_a_review_for_its_locked_version():
             pending += [(item["name"], tuple(item.get("extra", []))) for item in dependencies]
 
     unreviewed = []
-    for name in sorted({name for name, _ in seen} - {"gofer-flow"}):
+    for name in sorted({name for name, _ in seen} - {"raticode"}):
         versions = [package["version"] for package in packages[name]]
         reviewed = [
             version

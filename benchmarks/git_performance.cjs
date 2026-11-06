@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const cp = require('node:child_process');
 const { performance } = require('node:perf_hooks');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskurotta-perf-git-'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-perf-git-'));
 const calls = [];
 const mod = { exports: {} };
 vm.runInNewContext(fs.readFileSync(path.resolve('frontend/electron/git-status.cjs'), 'utf8'), { require: name => name === 'node:child_process' ? { execFile(...args) { calls.push(args[1]); return cp.execFile(...args); } } : require(name), module: mod, process, Buffer, structuredClone });

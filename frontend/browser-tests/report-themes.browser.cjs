@@ -1,4 +1,5 @@
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 let themeJob = null;
 let jobNumber = 0;
 let holdTheme = false;
@@ -21,7 +22,7 @@ const demo = '<!doctype html><html><head><style>body{background:#123449;color:#f
 async function run() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "theme-ui-test",
     resolveId(id) { if (id === "/themes-entry.jsx") return id; },
     load(id) { if (id === "/themes-entry.jsx") return `

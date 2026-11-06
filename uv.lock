@@ -732,122 +732,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gofer-flow"
-version = "0.5.1"
-source = { editable = "." }
-dependencies = [
-    { name = "anyio" },
-    { name = "apscheduler" },
-    { name = "bibtexparser" },
-    { name = "fastembed" },
-    { name = "jsonschema" },
-    { name = "networkx" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pypdf" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "questionary" },
-    { name = "referencing" },
-    { name = "rich" },
-    { name = "sqlalchemy" },
-    { name = "tomli-w" },
-    { name = "typer" },
-    { name = "tzdata" },
-    { name = "vosk", version = "0.3.44", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
-    { name = "vosk", version = "0.3.45", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
-    { name = "watchdog" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "cryptography" },
-    { name = "jsonschema" },
-    { name = "keyring" },
-    { name = "mypy" },
-    { name = "pyopenssl" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pytest-mock" },
-    { name = "ruff" },
-    { name = "segno" },
-    { name = "tink" },
-    { name = "types-pyyaml" },
-]
-devices = [
-    { name = "cryptography" },
-    { name = "keyring" },
-    { name = "pyopenssl" },
-    { name = "segno" },
-    { name = "tink" },
-]
-xlsx = [
-    { name = "openpyxl" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "jsonschema" },
-    { name = "pip-audit" },
-    { name = "pyinstaller" },
-    { name = "setuptools" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anyio", specifier = ">=4.15.1" },
-    { name = "apscheduler", specifier = ">=3.11.3" },
-    { name = "bibtexparser", specifier = ">=2.1.0,<3" },
-    { name = "cryptography", marker = "extra == 'dev'", specifier = "==50.0.2" },
-    { name = "cryptography", marker = "extra == 'devices'", specifier = "==50.0.2" },
-    { name = "fastembed", specifier = ">=0.7" },
-    { name = "jsonschema", specifier = ">=4.23" },
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
-    { name = "keyring", marker = "extra == 'dev'", specifier = "==25.7.0" },
-    { name = "keyring", marker = "extra == 'devices'", specifier = "==25.7.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.1" },
-    { name = "networkx", specifier = ">=3.3" },
-    { name = "openpyxl", marker = "extra == 'xlsx'", specifier = ">=3.1" },
-    { name = "pydantic", specifier = ">=2.13.5" },
-    { name = "pydantic-settings", specifier = ">=2.16.1" },
-    { name = "pyopenssl", marker = "extra == 'dev'", specifier = "==26.4.0" },
-    { name = "pyopenssl", marker = "extra == 'devices'", specifier = "==26.4.0" },
-    { name = "pypdf", specifier = ">=6.21.4" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14" },
-    { name = "python-dotenv", specifier = ">=1.2.3" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "questionary", specifier = ">=2.0" },
-    { name = "referencing", specifier = ">=0.35" },
-    { name = "rich", specifier = ">=13.7" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
-    { name = "segno", marker = "extra == 'dev'", specifier = "==1.6.6" },
-    { name = "segno", marker = "extra == 'devices'", specifier = "==1.6.6" },
-    { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "tink", marker = "extra == 'dev'", specifier = "==1.16.1" },
-    { name = "tink", marker = "extra == 'devices'", specifier = "==1.16.1" },
-    { name = "tomli-w", specifier = ">=1.0" },
-    { name = "typer", extras = ["all"], specifier = ">=0.27.3" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12" },
-    { name = "tzdata", specifier = ">=2026.4" },
-    { name = "vosk", marker = "sys_platform != 'darwin'", specifier = ">=0.3.45" },
-    { name = "vosk", marker = "sys_platform == 'darwin'", specifier = "==0.3.44" },
-    { name = "watchdog", specifier = ">=6.0.0" },
-]
-provides-extras = ["devices", "xlsx", "dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "jsonschema", specifier = ">=4.23" },
-    { name = "pip-audit", specifier = ">=2.10.0" },
-    { name = "pyinstaller", specifier = ">=6.21.0" },
-    { name = "setuptools", specifier = ">=83.0.0" },
-]
-
-[[package]]
 name = "greenlet"
 version = "3.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2514,6 +2398,122 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f6/45/eafb0bba0f9988f6a2520f9ca2df2c82ddfa8d67c95d6625452e97b204a5/questionary-2.1.1.tar.gz", hash = "sha256:3d7e980292bb0107abaa79c68dd3eee3c561b83a0f89ae482860b181c8bd412d", size = 25845, upload-time = "2025-08-28T19:00:20.851Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3c/26/1062c7ec1b053db9e499b4d2d5bc231743201b74051c973dadeac80a8f43/questionary-2.1.1-py3-none-any.whl", hash = "sha256:a51af13f345f1cdea62347589fbb6df3b290306ab8930713bfae4d475a7d4a59", size = 36753, upload-time = "2025-08-28T19:00:19.56Z" },
+]
+
+[[package]]
+name = "raticode"
+version = "0.5.1"
+source = { editable = "." }
+dependencies = [
+    { name = "anyio" },
+    { name = "apscheduler" },
+    { name = "bibtexparser" },
+    { name = "fastembed" },
+    { name = "jsonschema" },
+    { name = "networkx" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pypdf" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "questionary" },
+    { name = "referencing" },
+    { name = "rich" },
+    { name = "sqlalchemy" },
+    { name = "tomli-w" },
+    { name = "typer" },
+    { name = "tzdata" },
+    { name = "vosk", version = "0.3.44", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "vosk", version = "0.3.45", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
+    { name = "watchdog" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "cryptography" },
+    { name = "jsonschema" },
+    { name = "keyring" },
+    { name = "mypy" },
+    { name = "pyopenssl" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-mock" },
+    { name = "ruff" },
+    { name = "segno" },
+    { name = "tink" },
+    { name = "types-pyyaml" },
+]
+devices = [
+    { name = "cryptography" },
+    { name = "keyring" },
+    { name = "pyopenssl" },
+    { name = "segno" },
+    { name = "tink" },
+]
+xlsx = [
+    { name = "openpyxl" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "jsonschema" },
+    { name = "pip-audit" },
+    { name = "pyinstaller" },
+    { name = "setuptools" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.15.1" },
+    { name = "apscheduler", specifier = ">=3.11.3" },
+    { name = "bibtexparser", specifier = ">=2.1.0,<3" },
+    { name = "cryptography", marker = "extra == 'dev'", specifier = "==50.0.2" },
+    { name = "cryptography", marker = "extra == 'devices'", specifier = "==50.0.2" },
+    { name = "fastembed", specifier = ">=0.7" },
+    { name = "jsonschema", specifier = ">=4.23" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
+    { name = "keyring", marker = "extra == 'dev'", specifier = "==25.7.0" },
+    { name = "keyring", marker = "extra == 'devices'", specifier = "==25.7.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.1" },
+    { name = "networkx", specifier = ">=3.3" },
+    { name = "openpyxl", marker = "extra == 'xlsx'", specifier = ">=3.1" },
+    { name = "pydantic", specifier = ">=2.13.5" },
+    { name = "pydantic-settings", specifier = ">=2.16.1" },
+    { name = "pyopenssl", marker = "extra == 'dev'", specifier = "==26.4.0" },
+    { name = "pyopenssl", marker = "extra == 'devices'", specifier = "==26.4.0" },
+    { name = "pypdf", specifier = ">=6.21.4" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14" },
+    { name = "python-dotenv", specifier = ">=1.2.3" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "questionary", specifier = ">=2.0" },
+    { name = "referencing", specifier = ">=0.35" },
+    { name = "rich", specifier = ">=13.7" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
+    { name = "segno", marker = "extra == 'dev'", specifier = "==1.6.6" },
+    { name = "segno", marker = "extra == 'devices'", specifier = "==1.6.6" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "tink", marker = "extra == 'dev'", specifier = "==1.16.1" },
+    { name = "tink", marker = "extra == 'devices'", specifier = "==1.16.1" },
+    { name = "tomli-w", specifier = ">=1.0" },
+    { name = "typer", extras = ["all"], specifier = ">=0.27.3" },
+    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12" },
+    { name = "tzdata", specifier = ">=2026.4" },
+    { name = "vosk", marker = "sys_platform != 'darwin'", specifier = ">=0.3.45" },
+    { name = "vosk", marker = "sys_platform == 'darwin'", specifier = "==0.3.44" },
+    { name = "watchdog", specifier = ">=6.0.0" },
+]
+provides-extras = ["devices", "xlsx", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "jsonschema", specifier = ">=4.23" },
+    { name = "pip-audit", specifier = ">=2.10.0" },
+    { name = "pyinstaller", specifier = ">=6.21.0" },
+    { name = "setuptools", specifier = ">=83.0.0" },
 ]
 
 [[package]]

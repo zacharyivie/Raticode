@@ -57,9 +57,14 @@ let workflowDialogsModule;
 let chatAttachmentsModule;
 let chatComposerModule;
 
+// Worktrees link node_modules to the main checkout, so Vite's default cache there is
+// the one the developer's running dev app serves from. Keep this test's cache apart.
+const viteCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-test-app-vite-"));
+
 before(async () => {
   viteServer = await createServer({
     appType: "custom",
+    cacheDir: viteCacheDir,
     customLogger: {
       clearScreen() {},
       error() {},
@@ -104,6 +109,7 @@ before(async () => {
 
 after(async () => {
   await viteServer?.close();
+  fs.rmSync(viteCacheDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -5458,6 +5464,108 @@ test("Rattish graph restores selection and emits targeted inspector mutations", 
   await dom.unmount();
 });
 
+test("Rem task nodes pick their task by title and explain how they run", async () => {
+  const mutations = [];
+  const node = (id, type, configuration) => ({
+    id,
+    label: id,
+    type,
+    configuration,
+    execution: { allow_fail: false, max_concurrency: 1, retry_count: 0, retry_delay_ms: 1000 },
+    authoredFields: { type: { value: type } },
+    bindings: [],
+    needs: [],
+    diagnostics: [],
+  });
+  const document = {
+    workflowId: "rem-chain",
+    source: "Rattish: 1\nWorkflow:\n  name: Rem chain\n",
+    workflow: { name: "Rem chain", fields: { name: { value: "Rem chain" } } },
+    nodeContracts: [
+      {
+        nodeType: "rem-task",
+        configurationSchema: {
+          type: "object",
+          properties: {
+            task_id: { type: "string" },
+            instructions: { type: "string" },
+            wait: { type: "boolean" },
+          },
+        },
+        defaults: { instructions: "", wait: true },
+      },
+    ],
+    graph: {
+      nodes: [
+        node("draft", "rem-task", { task_id: "task-old", instructions: "", wait: true }),
+        node("publish", "rem-task", { task_id: "task-gone", instructions: "", wait: false }),
+      ],
+      edges: [],
+    },
+  };
+  const workflow = appModule.rattishGraphWorkflow(
+    { ...workflowFixture({ id: "rem-chain", name: "Rem chain" }), sourceFormat: "rattish", nodes: [], edges: [] },
+    document,
+  );
+  const fetchMock = createFetchMock([
+    (url) =>
+      String(url).endsWith("/rem/tasks")
+        ? {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              tasks: [
+                { id: "task-old", title: "Draft the notes", type: "develop" },
+                { id: "task-new", title: "Publish the notes", type: "errand" },
+              ],
+            }),
+          }
+        : null,
+  ]);
+  const dom = await mountReact(
+    React.createElement(DagCanvasHarness, {
+      workflow,
+      rattishDocument: document,
+      onRattishMutation(next) {
+        mutations.push(next);
+        return Promise.resolve(null);
+      },
+      onWorkflowChange() {},
+    }),
+    fetchMock,
+  );
+
+  // The canvas says what each node does without opening it.
+  assert.match(dom.text(), /run Rem task and wait/);
+  assert.match(dom.text(), /start Rem task/);
+  await dom.pointer(dom.ancestor(dom.byText("draft"), "ARTICLE"), "onPointerDown");
+  await dom.flush();
+  await dom.click(dom.byText("Action"));
+  await dom.flush();
+  await dom.flush();
+  const picker = dom.controlAfterLabel("Rem task");
+  assert.equal(picker.tagName, "SELECT");
+  assert.equal(reactProps(picker).value, "task-old");
+  assert.match(dom.text(), /Draft the notes · develop/);
+  assert.match(dom.text(), /Publish the notes · errand/);
+  assert.match(dom.text(), /Stopping the workflow stops the run it started/);
+  await dom.change(picker, "task-new");
+  assert.deepEqual(mutations.at(-1), [
+    { kind: "set_field", target: { node: "draft" }, field: "task-id", value: "task-new" },
+  ]);
+
+  // A node whose task was deleted says so instead of showing a bare ID.
+  await dom.pointer(dom.ancestor(dom.byText("publish"), "ARTICLE"), "onPointerDown");
+  await dom.flush();
+  await dom.click(dom.byText("Action"));
+  await dom.flush();
+  await dom.flush();
+  assert.match(dom.text(), /Task not found in Rem/);
+  assert.match(dom.text(), /This task was deleted or isn.t in Rem/);
+  assert.ok(fetchMock.calls.some((call) => String(call.url).endsWith("/rem/tasks")));
+  await dom.unmount();
+});
+
 test("Rattish edits become dirty immediately without adding a code-mode top bar", async () => {
   const savedSource = "Rattish: 1\n\nWorkflow:\n  name: Demo\n";
   const editedSource = `${savedSource}\nNode prepare:\n  type: bash-command\n  command: echo ready\n`;
@@ -9824,7 +9932,18 @@ test("commit history refreshes in the background and rows expand on click", asyn
   assert.equal(commitButton.parentNode.getAttribute("title"), null);
   assert.match(dom.text(), /Ship it/);
   assert.doesNotMatch(dom.text(), /Full commit details\./);
-  assert.throws(() => dom.byLabel("17 insertions, 3 deletions, 1 binary files without line counts"));
+  // Line counts sit right after the ID in the collapsed row, without opening the commit.
+  const statsLabel = "17 insertions, 3 deletions, 1 binary file without line counts";
+  const stats = dom.byTitle(statsLabel);
+  const hash = dom.byText("abc123d");
+  assert.equal(stats.parentNode, hash.parentNode);
+  const facts = stats.parentNode.childNodes.filter(node => node.nodeType === 1);
+  assert.equal(facts[facts.indexOf(stats) - 1], hash);
+  const shownCounts = stats.childNodes.filter(node => node.nodeType === 1 && node.getAttribute("aria-hidden") === "true");
+  assert.deepEqual(shownCounts.map(node => directText(node)), ["+17", "-3", "1"]);
+  assert.ok(allElements(shownCounts[2]).some(node => String(node.tagName).toLowerCase() === "svg"), "Binary files show as an icon with their count");
+  assert.ok(allElements(stats).some(node => String(node.getAttribute?.("class") ?? node.className) === "sr-only" && directText(node) === statsLabel));
+  assert.ok(commitButton.contains(stats), "Counts must belong to the commit's row button");
 
   await dom.click(refreshButton);
   assert.equal(historyCalls, 2);
@@ -9848,7 +9967,7 @@ test("commit history refreshes in the background and rows expand on click", asyn
     (node) => node.tagName === "P" && directText(node) === "Ada",
   );
   assert.equal(authorLines.length, 0, "author name should only appear once, in the row header");
-  assert.ok(dom.byLabel("17 insertions, 3 deletions, 1 binary files without line counts"));
+  assert.equal(allElements(dom.container).filter(node => node.getAttribute?.("title") === statsLabel).length, 1, "Expanding must not repeat the line counts");
 
   await dom.click(commitButton);
   assert.equal(commitButton.getAttribute("aria-expanded"), "false");
@@ -13689,6 +13808,24 @@ test("Ask Rem keeps the selected text attached in a new thread scoped to its own
   assert.equal(dom.first("textarea").value, "Why does this work?");
   assert.match(dom.text(), /editor-selection.txt/);
   await dom.unmount();
+});
+
+test("thread composer takes selected log entries asked about when Rem's plugin is off", async () => {
+  const fetchMock = createFetchMock([jsonResponse("/api/provider/capabilities", { providers: [] })]);
+  const dom = await mountReact(React.createElement(appModule.ChatPane, { workflows: [], width: 380 }), fetchMock);
+  const file = () => new File(["Raticode application log entries selected in Settings > Developer.\n"], "raticode-log-2-entries.txt", { type: "text/plain" });
+  try {
+    await dom.dispatchWindow("gofer:rem-thread-attach-files", { detail: { files: [file()], draft: "" } });
+    await dom.flush();
+    assert.ok(dom.byLabel("Remove raticode-log-2-entries.txt"));
+    assert.equal(dom.first("textarea").value, "", "no question is written for the person");
+    assert.equal(fetchMock.calls.filter(call => call.url?.includes("/chat/stream")).length, 0, "nothing is sent until the person sends it");
+    await dom.change(dom.first("textarea"), "Why did it stop?");
+    await dom.dispatchWindow("gofer:rem-thread-attach-files", { detail: { files: [new File(["x"], "raticode-log-entry.txt", { type: "text/plain" })], draft: "" } });
+    await dom.flush();
+    assert.ok(dom.byLabel("Remove raticode-log-entry.txt"));
+    assert.equal(dom.first("textarea").value, "Why did it stop?", "a typed question is kept");
+  } finally { await dom.unmount(); }
 });
 
 test("thread composer attaches files asked about or copied in Raticode", async () => {
@@ -19649,6 +19786,235 @@ test("the Plugins settings section toggles, reorders, and restores sidebar plugi
   assert.ok(settingsPopoverModule.settingsCategoriesForQuery("plugins").includes("plugins"));
 });
 
+test("Developer shows a running application log that filters by level, source and text", async () => {
+  const at = (minute) => new Date(Date.UTC(2026, 10, 5, 15, minute)).toISOString();
+  const server = [
+    { seq: 1, time: at(1), level: "info", source: "backend", message: "Backend ready at http://127.0.0.1:41000 after 2.1 s" },
+    { seq: 2, time: at(2), level: "debug", source: "devices", message: "A connection over Tailscale closed before identifying itself", component: "gofer.devices.service" },
+    { seq: 3, time: at(3), level: "warn", source: "devices", message: "Phone \"Pixel\" could not sign in over Tailscale while checking the device's identity", component: "gofer.devices.service" },
+  ];
+  const reads = [];
+  let missed = 0;
+  const developer = {
+    info: async () => ({ version: "0.5.1", platform: "darwin arm64", electron: "45", node: "22", backend: "Running", dataDir: "/data", userData: "/user", appLog: "/Users/me/Library/Logs/Raticode/app.jsonl" }),
+    action: async () => undefined,
+    entries: async ({ after = 0, history = false } = {}) => {
+      reads.push({ after, history });
+      const entries = server.filter((entry) => entry.seq > after);
+      const result = { entries, cursor: entries.at(-1)?.seq ?? after, latest: server.length, more: false, missed, counts: {}, history: history ? { entries: [{ time: new Date(Date.UTC(2026, 10, 5, 14, 0)).toISOString(), level: "error", source: "backend", message: "Backend stopped unexpectedly after 3.0 s (exit code 1)\nTraceback (most recent call last):\nOSError: [Errno 48] Address already in use" }], truncated: false } : null };
+      missed = 0;
+      return result;
+    },
+  };
+  const element = React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "developer", settings: settingsModule.normalizeAppSettings({}), onChange: () => {}, onClose: () => {},
+  });
+  const dom = await mountReact(element, createFetchMock([]), { desktop: { developer, features: { get: async () => ({}), set: async () => ({}) } } });
+  const rowTexts = () => allElements(dom.byLabel("Application log entries")).filter((node) => String(node.getAttribute?.("class") || "").includes("app-log-message")).map(textOf);
+  try {
+    await dom.flush();
+    await dom.flush();
+    assert.deepEqual(reads[0], { after: 0, history: true });
+    assert.deepEqual(rowTexts(), [
+      "Phone \"Pixel\" could not sign in over Tailscale while checking the device's identity",
+      "Backend ready at http://127.0.0.1:41000 after 2.1 s",
+      "Backend stopped unexpectedly after 3.0 s (exit code 1)+2 lines",
+    ], "newest first; debug hidden; a traceback shows its first line and how much more there is");
+    assert.ok(dom.byText("Before this launch"));
+    assert.equal(dom.byTitle("Show debug").getAttribute("aria-pressed"), "false");
+    assert.match(textOf(dom.byTitle("Show errors")), /Errors\s*1/);
+
+    await dom.click(dom.byTitle("Show debug"));
+    assert.equal(rowTexts().length, 4);
+    await dom.click(dom.byTitle("Show info"));
+    assert.ok(!rowTexts().some((text) => text.startsWith("Backend ready")));
+    await dom.click(dom.byTitle("Show info"));
+
+    await dom.change(dom.byLabel("Search the log"), "tailscale");
+    assert.equal(rowTexts().length, 2);
+    await dom.change(dom.byLabel("Search the log"), "");
+    await dom.change(dom.controlAfterLabel("Source"), "backend");
+    assert.deepEqual(rowTexts(), ["Backend ready at http://127.0.0.1:41000 after 2.1 s", "Backend stopped unexpectedly after 3.0 s (exit code 1)+2 lines"]);
+    await dom.change(dom.controlAfterLabel("Source"), "all");
+
+    // New entries arrive on the next poll, with only the new part requested.
+    server.push({ seq: 4, time: at(4), level: "info", source: "devices", message: "Phone \"Pixel\" connected over Tailscale (resumed, signed in after 180 ms)" });
+    await dom.flush(1000);
+    await dom.flush();
+    assert.ok(reads.some((read) => read.after === 3 && !read.history));
+    assert.equal(rowTexts()[0], "Phone \"Pixel\" connected over Tailscale (resumed, signed in after 180 ms)");
+
+    // Pausing holds the view still and counts what arrives meanwhile.
+    await dom.click(dom.byText("Following"));
+    server.push({ seq: 5, time: at(5), level: "error", source: "backend", message: "Rem transcription failed" });
+    missed = 2;
+    await dom.flush(1000);
+    await dom.flush();
+    assert.ok(dom.byText("Paused, 1 new"));
+    assert.ok(!rowTexts().includes("Rem transcription failed"));
+    assert.ok(dom.byText("2 entries arrived faster than this view could keep them. They are in the log file."));
+    await dom.click(dom.byText("Paused, 1 new"));
+    assert.equal(rowTexts()[0], "Rem transcription failed");
+
+    await dom.change(dom.controlAfterLabel("Include earlier launches"), false);
+    assert.ok(!rowTexts().some((text) => text.startsWith("Backend stopped unexpectedly")));
+    assert.match(dom.text(), /Left out on purpose: message and conversation content/);
+  } finally { await dom.unmount(); }
+});
+
+test("Developer log rows can be drag-selected, then copied or sent to Rem from a right-click menu", async () => {
+  const at = (minute) => new Date(Date.UTC(2026, 10, 5, 15, minute)).toISOString();
+  const server = [
+    { seq: 1, time: at(1), level: "info", source: "backend", message: "Backend ready at http://127.0.0.1:41000 after 2.1 s" },
+    { seq: 2, time: at(3), level: "warn", source: "devices", message: "Phone \"Pixel\" could not sign in over Tailscale", component: "gofer.devices.service" },
+  ];
+  const developer = {
+    info: async () => ({ version: "0.5.1", platform: "darwin arm64", electron: "45", node: "22", backend: "Running", dataDir: "/data", userData: "/user", appLog: "/Users/me/Library/Logs/Raticode/app.jsonl" }),
+    action: async () => undefined,
+    entries: async ({ after = 0, history = false } = {}) => {
+      const entries = server.filter((entry) => entry.seq > after);
+      return { entries, cursor: entries.at(-1)?.seq ?? after, more: false, missed: 0, history: history ? { entries: [{ time: new Date(Date.UTC(2026, 10, 5, 14, 0)).toISOString(), level: "error", source: "backend", message: "Backend stopped unexpectedly (exit code 1)\nTraceback (most recent call last):\nOSError: [Errno 48] Address already in use" }], truncated: false } : null };
+    },
+  };
+  const element = React.createElement(settingsPopoverModule.default, {
+    open: true, initialCategory: "developer", settings: settingsModule.normalizeAppSettings({}), onChange: () => {}, onClose: () => {},
+  });
+  const dom = await mountReact(element, createFetchMock([]), { desktop: { developer, features: { get: async () => ({}), set: async () => ({}) } } });
+  const copied = [];
+  globalThis.navigator.clipboard = { writeText: async (text) => { copied.push(text); } };
+  const asked = [];
+  const listen = (event) => asked.push(event.detail);
+  window.addEventListener("gofer:rem-attach-files", listen);
+  const list = () => dom.byLabel("Application log entries");
+  const rows = () => allElements(list()).filter((node) => node.getAttribute?.("role") === "option");
+  const selectedTexts = () => rows().filter((row) => row.getAttribute("aria-selected") === "true").map((row) => textOf(allElements(row).find((node) => String(node.getAttribute?.("class") || "").includes("app-log-message"))));
+  const menuButton = (label) => allElements(document.body).find((node) => node.tagName === "BUTTON" && node.getAttribute?.("role") === "menuitem" && textOf(node) === label);
+  try {
+    await dom.flush();
+    await dom.flush();
+    assert.equal(list().getAttribute("role"), "listbox");
+    assert.equal(list().getAttribute("aria-multiselectable"), "true");
+    assert.equal(rows().length, 3);
+
+    // Press on the newest row and drag down to the earlier launch's entry.
+    await dom.pointer(list(), "onMouseDown", { target: rows()[0] });
+    await dom.pointer(list(), "onMouseMove", { target: rows()[1], buttons: 1 });
+    await dom.pointer(list(), "onMouseMove", { target: rows()[2], buttons: 1 });
+    assert.equal(selectedTexts().length, 3);
+    assert.ok(dom.byText("3 entries selected"));
+    assert.ok(dom.byText("Paused"), "selecting holds the list still");
+
+    // New entries wait while rows are selected, and the selection stays put.
+    server.push({ seq: 3, time: at(4), level: "error", source: "backend", message: "Rem transcription failed" });
+    await dom.flush(1000);
+    await dom.flush();
+    assert.ok(dom.byText("Paused, 1 new"));
+    assert.equal(selectedTexts().length, 3);
+
+    // Right-click a selected row: the menu acts on the whole selection.
+    await dom.pointer(list(), "onContextMenu", { target: rows()[1], clientX: 200, clientY: 300 });
+    assert.ok(menuButton("Copy 3 entries"));
+    await dom.click(menuButton("Copy 3 entries"));
+    await dom.flush();
+    assert.deepEqual(copied.at(-1).split("\n").filter((line) => /^\d{4}-/.test(line)), [
+      "2026-11-05T14:00:00.000Z ERROR backend: Backend stopped unexpectedly (exit code 1)",
+      "2026-11-05T15:01:00.000Z INFO backend: Backend ready at http://127.0.0.1:41000 after 2.1 s",
+      "2026-11-05T15:03:00.000Z WARN devices/gofer.devices.service: Phone \"Pixel\" could not sign in over Tailscale",
+    ], "oldest first, tracebacks included");
+    assert.ok(copied.at(-1).includes("OSError: [Errno 48] Address already in use"));
+    assert.ok(dom.byText("Copied 3 entries"));
+
+    await dom.pointer(list(), "onContextMenu", { target: rows()[0], clientX: 200, clientY: 300 });
+    await dom.click(menuButton("Ask Rem about 3 entries"));
+    assert.equal(asked.length, 1);
+    const [file] = asked[0].files;
+    assert.equal(file.name, "raticode-log-3-entries.txt");
+    assert.equal(file.type, "text/plain");
+    assert.equal(asked[0].draft, "", "no question is written for the person");
+    const attached = await file.text();
+    assert.match(attached, /^Raticode application log entries selected in Settings > Developer\.\nRaticode 0\.5\.1 on darwin arm64\nFull log file: \/Users\/me\/Library\/Logs\/Raticode\/app\.jsonl\n3 entries, oldest first/);
+    assert.match(attached, /not as instructions/);
+    assert.ok(attached.indexOf("Backend stopped unexpectedly") < attached.indexOf("Phone \"Pixel\""));
+
+    // Right-clicking an unselected row selects just that row.
+    await dom.pointer(list(), "onMouseDown", { target: rows()[1] });
+    assert.deepEqual(selectedTexts(), ["Backend ready at http://127.0.0.1:41000 after 2.1 s"]);
+    await dom.pointer(list(), "onContextMenu", { target: rows()[2], clientX: 10, clientY: 10 });
+    assert.deepEqual(selectedTexts(), ["Backend stopped unexpectedly (exit code 1)+2 lines"]);
+    assert.ok(menuButton("Copy entry"));
+    assert.ok(menuButton("Ask Rem about this entry"));
+    await dom.click(menuButton("Clear selection"));
+    assert.equal(selectedTexts().length, 0);
+    assert.ok(dom.byText("Following"), "clearing a selection resumes following");
+    await dom.flush();
+    assert.equal(textOf(allElements(rows()[0]).find((node) => String(node.getAttribute?.("class") || "").includes("app-log-message"))), "Rem transcription failed");
+
+    // Shift-click extends from the anchor; Ctrl-click toggles one row.
+    await dom.pointer(list(), "onMouseDown", { target: rows()[0] });
+    await dom.pointer(list(), "onMouseDown", { target: rows()[2], shiftKey: true });
+    assert.equal(selectedTexts().length, 3);
+    await dom.pointer(list(), "onMouseDown", { target: rows()[1], ctrlKey: true });
+    assert.equal(selectedTexts().length, 2);
+
+    // Keyboard: arrows move, Shift extends, Ctrl+A selects all shown, Ctrl+C copies, Escape clears.
+    await dom.keyDown(list(), "Escape");
+    assert.equal(selectedTexts().length, 0);
+    await dom.keyDown(list(), "ArrowDown");
+    await dom.keyDown(list(), "ArrowDown", { shiftKey: true });
+    assert.equal(selectedTexts().length, 2);
+    await dom.keyDown(list(), "a", { ctrlKey: true });
+    assert.equal(selectedTexts().length, 4);
+    await dom.keyDown(list(), "c", { metaKey: true });
+    await dom.flush();
+    assert.equal(copied.at(-1).split("\n").filter((line) => /^\d{4}-/.test(line)).length, 4);
+
+    // The details toggle still opens a traceback without changing the selection.
+    const toggle = allElements(rows()[3]).find((node) => node.getAttribute?.("data-log-toggle") === "true");
+    await dom.click(toggle);
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    assert.ok(allElements(rows()[3]).some((node) => node.tagName === "PRE" && textOf(node).includes("OSError: [Errno 48]")));
+    assert.equal(selectedTexts().length, 4);
+
+    // Filters still work and actions use only the rows still shown.
+    await dom.change(dom.byLabel("Search the log"), "pixel");
+    assert.equal(rows().length, 1);
+    assert.ok(dom.byText("1 entry selected"));
+    await dom.click(dom.byExactText("Ask Rem"));
+    assert.match(await asked.at(-1).files[0].text(), /1 entry, oldest first/);
+  } finally { window.removeEventListener("gofer:rem-attach-files", listen); await dom.unmount(); }
+});
+
+test("Selected log entries asked about reach Rem's message box, focus it and keep what was typed", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  const composer = await viteServer.ssrLoadModule("/src/lib/remComposer.js");
+  store.resetRemHomeStore();
+  composer.resetRemComposer();
+  store.setRemHomeContext(null);
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", { conversation: { id: "rem", turn_state: "idle" }, messages: [] }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default), fetchMock);
+  try {
+    await store.refreshRemHome();
+    await dom.flush();
+    const log = (name) => new File(["Raticode application log entries selected in Settings > Developer.\n"], name, { type: "text/plain" });
+    await React.act(async () => { composer.attachFilesToRemComposer([log("raticode-log-2-entries.txt")]); });
+    await dom.flush();
+    assert.ok(dom.byLabel("Remove raticode-log-2-entries.txt"));
+    assert.equal(dom.byLabel("Message Rem").value, "", "no question is written for the person");
+    assert.equal(document.activeElement, dom.byLabel("Message Rem"), "the cursor is in Rem's message box");
+    await dom.change(dom.byLabel("Message Rem"), "Why did the phone drop?");
+    await React.act(async () => { composer.attachFilesToRemComposer([log("raticode-log-entry.txt")]); });
+    await dom.flush();
+    assert.ok(dom.byLabel("Remove raticode-log-entry.txt"));
+    assert.ok(dom.byLabel("Remove raticode-log-2-entries.txt"), "earlier attachments stay");
+    assert.equal(dom.byLabel("Message Rem").value, "Why did the phone drop?", "a typed question is kept");
+    assert.equal(fetchMock.calls.filter(call => call.options?.method === "POST").length, 0, "nothing is sent");
+  } finally { store.resetRemHomeStore(); composer.resetRemComposer(); await dom.unmount(); }
+});
+
 test("Feature Preview turns on every experimental feature, restarting the backend only when needed", async () => {
   const changes = [];
   const calls = [];
@@ -20096,6 +20462,38 @@ test("Rem displays proactive task results and problems without sending a user me
     assert.equal(allElements(dom.byLabel("Conversation with Rem")).filter(node => node.tagName === "BUTTON" && textOf(node) === "Open thread").length, 2);
     assert.equal(store.getState().conversation.turn_state, "idle");
     assert.equal(fetchMock.calls.filter(call => call.url === "/api/rem/messages").length, 0);
+  } finally {
+    await dom.unmount();
+    store.resetRemHomeStore();
+  }
+});
+
+test("Rem's chat marks messages a workflow sent so they aren't mistaken for the user's", async () => {
+  const store = await viteServer.ssrLoadModule("/src/lib/remHomeStore.js");
+  const workspace = await viteServer.ssrLoadModule("/src/components/RemHomeWorkspace.jsx");
+  store.resetRemHomeStore();
+  store.setRemHomeContext(null);
+  const at = new Date().toISOString();
+  const fetchMock = createFetchMock([
+    jsonResponse("/api/rem/conversation", {
+      conversation: { id: "rem", turn_state: "idle" },
+      messages: [
+        { id: "mine", role: "user", body: "Typed by me", created_at: at },
+        { id: "workflow-1", role: "user", body: "Summarize the release", created_at: at, source: "workflow", workflow: { id: "digest", name: "Release digest", allow_actions: false } },
+        { id: "reply-workflow-1", role: "rem", body: "Three bugs were fixed.", created_at: at },
+      ],
+    }),
+    jsonResponse("/api/rem/tasks", { tasks: [] }),
+  ]);
+  const dom = await mountReact(React.createElement(workspace.default), fetchMock);
+  try {
+    await store.refreshRemHome();
+    await dom.flush();
+    const chat = textOf(dom.byLabel("Conversation with Rem"));
+    assert.ok(chat.includes("From workflow Release digest"));
+    assert.equal(chat.split("From workflow").length, 2, "Only the workflow's message is labelled");
+    const label = dom.byText("From workflow Release digest");
+    assert.match(label.getAttribute("title"), /may only ask/);
   } finally {
     await dom.unmount();
     store.resetRemHomeStore();

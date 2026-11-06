@@ -12,7 +12,6 @@ import urllib.parse
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
@@ -27,6 +26,7 @@ from gofer.utils.atomic_output import (
     open_binary_input,
     scandir_without_links,
 )
+from gofer.utils.version import installed_version
 
 BUNDLE_FORMAT_VERSION = 1
 MANIFEST_PATH = "manifest.json"
@@ -1743,7 +1743,4 @@ def _data_dir(data_dir: Path | None) -> Path:
 
 
 def _gofer_version() -> str:
-    try:
-        return version("gofer-flow")
-    except PackageNotFoundError:
-        return "unknown"
+    return installed_version() or "unknown"

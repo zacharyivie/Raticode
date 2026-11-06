@@ -628,7 +628,31 @@ def test_rattish_graph_type_changes_always_compile(tmp_path: Path) -> None:
         tmp_path,
     )
     node_types = [contract["nodeType"] for contract in opened["nodeContracts"]]
-    assert {"agent", "loop", "workflow", "notification"} <= set(node_types)
+    assert {"agent", "loop", "workflow", "notification", "rem-task"} <= set(node_types)
+    # A Rem task node needs one of Rem's tasks to start, like a Workflow node needs a child.
+    with pytest.raises(RattishEditorError, match="Ask Rem to create the task first"):
+        mutate_rattish_document_payload(
+            "graph-only",
+            [{"kind": "change_node_type", "node": "review", "node_type": "rem-task"}],
+            opened["sourceRevision"],
+            tmp_path,
+        )
+    from gofer.ui.rem_home_models import Recipe
+    from gofer.ui.rem_home_store import RemHomeStore
+
+    rem = RemHomeStore(tmp_path)
+    with rem.connect() as db:
+        rem.add_task(
+            db,
+            Recipe.model_validate(
+                {
+                    "title": "Graph task",
+                    "type": "errand",
+                    "prompt": "Check the graph.",
+                    "schedule": {"kind": "once", "at": "2099-01-01T00:00:00+00:00"},
+                }
+            ),
+        )
 
     revision = opened["sourceRevision"]
     for node_type in node_types:

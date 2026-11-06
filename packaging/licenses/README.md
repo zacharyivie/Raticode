@@ -12,7 +12,7 @@ declarations require updating that review after reading the upstream terms; a
 README alone does not satisfy the collector.
 
 Standalone CLI users can export the embedded bundle with
-`gof licenses --output ./third-party-licenses`. The destination must not exist.
+`Raticode licenses --output ./third-party-licenses`. The destination must not exist.
 Desktop installers also carry it in their resources/third-party-licenses folder.
 
 ## Reviewed metadata gaps

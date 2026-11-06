@@ -7,18 +7,20 @@ This directory contains the AUR packaging files for the Raticode desktop app.
 After the package is published to AUR:
 
 ```bash
-yay -S gofer-flow
+yay -S raticode-desktop
 ```
 
-The package installs the release AppImage to `/opt/gofer-flow/gofer-flow.AppImage`,
-adds a `/usr/bin/gofer-flow` launcher, and installs desktop/icon metadata.
+The package installs the release AppImage to `/opt/raticode-desktop/Raticode.AppImage`,
+adds a `/usr/bin/raticode-desktop` launcher, and installs desktop/icon metadata.
+The command line tool is a separate package, `raticode-cli`, which installs
+`/usr/bin/Raticode`.
 
 ## Build Locally
 
 The `PKGBUILD` expects a GitHub release asset named:
 
 ```text
-Raticode-0.1.0-x86_64.AppImage
+Raticode-0.5.1-x86_64.AppImage
 ```
 
 For a local pre-release test, place that file beside the `PKGBUILD`, then run:
@@ -30,13 +32,13 @@ makepkg -f
 To install the local package:
 
 ```bash
-sudo pacman -U gofer-flow-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U raticode-desktop-0.5.1-1-x86_64.pkg.tar.zst
 ```
 
 ## Release Checksums
 
 ```text
-4b25cea0265aeb1d7508ed3597c0955e51a0e77ddda40278834b75456d2f1696  Raticode-0.1.0-x86_64.AppImage
+9e20abc5d50c308344a434b528b91e9f8a360f028248cb8b1d3cd0ad4440fb08  Raticode-0.5.1-x86_64.AppImage
 ```
 
 Update `sha256sums_x86_64` in `PKGBUILD` and regenerate `.SRCINFO` whenever the

@@ -41,7 +41,7 @@ stay disabled.
 | Run commands | Shell commands, scripts and tests | Codex `features.shell_tool`, Claude `Bash`, Cursor/Copilot/OpenCode shell |
 | Search the web | Web search and page reading | Codex `web_search`, Claude `WebSearch`/`WebFetch`, Cursor/Copilot/OpenCode web tools |
 | Subagents | Handing parts of a task to helper agents | Codex `features.multi_agent`, Claude `Agent`, Cursor `task_tool_call`, Copilot `task`, OpenCode `task` |
-| Browser | Opening, reading and testing pages in the browser chosen in Settings > Browser | An MCP server named `browser` for every provider: `gof ui browser` for Raticode tabs, or a pinned `@playwright/mcp` server started with `npx` |
+| Browser | Opening, reading and testing pages in the browser chosen in Settings > Browser | An MCP server named `browser` for every provider: `Raticode ui browser` for Raticode tabs, or a pinned `@playwright/mcp` server started with `npx` |
 
 File reading and editing are always available, subject to the thread's permissions.
 They include image viewing (Codex `tools.view_image`), notebook edits (Claude
@@ -117,7 +117,7 @@ inside the thread's project and trusted folders.
 Access to the desktop browser is granted per Rem turn. When a turn starts with the
 Browser switch on, the backend asks the desktop app for a random capability bound to
 that thread. It writes the capability to a file readable only by the current user,
-under `<data dir>/browser-grants/`, and passes the file to the turn's `gof ui
+under `<data dir>/browser-grants/`, and passes the file to the turn's `Raticode ui
 browser` MCP server. The desktop identifies the thread from the capability, never
 from the request. When the turn ends, the backend revokes the capability and deletes
 the file. Capabilities expire after 12 hours at most, and none survive a desktop
@@ -138,7 +138,7 @@ See [the integrated browser](browser.md) for the browser itself.
 Skills and MCP servers come from one Raticode-wide library, and each thread turns
 entries on or off. The menu lists:
 
-- skill folders in Raticode's skills folder (`gof rem skill path`), `~/.agents/skills`,
+- skill folders in Raticode's skills folder (`Raticode rem skill path`), `~/.agents/skills`,
   `~/.claude/skills` and `$CODEX_HOME/skills`, plus folders registered anywhere else;
 - MCP servers saved in `<data dir>/rem-resources.json`.
 
@@ -147,11 +147,11 @@ saves it to the library and turns it on for the current selection. Agents and sc
 use the CLI, and the open menu picks changes up within a few seconds:
 
 ```bash
-gof rem skill new release-notes -d "Write release notes from git history"
-gof rem skill add /path/to/skill-folder
-gof rem mcp add docs --url https://example.com/mcp -d "Product docs"
-gof rem mcp add github -- npx -y @modelcontextprotocol/server-github
-gof rem resources --format json
+Raticode rem skill new release-notes -d "Write release notes from git history"
+Raticode rem skill add /path/to/skill-folder
+Raticode rem mcp add docs --url https://example.com/mcp -d "Product docs"
+Raticode rem mcp add github -- npx -y @modelcontextprotocol/server-github
+Raticode rem resources --format json
 ```
 
 Threads store a link to a library server, not a copy. Each turn resolves the link
@@ -251,14 +251,19 @@ collapsed independently.
 
 ## Developer settings and logs
 
-Settings > Developer shows the application and desktop data directories, the current
-app log path, runtime versions, and backend state. It can open those folders, display the
-recent log, copy diagnostics, open developer tools, or restart the backend.
+Settings > Developer starts with a running application log that can be filtered by level
+(debug, info, warn, error), source and text, and that can include the end of earlier
+launches. Rows can be drag-selected; a right-click menu copies them or attaches them to
+Rem's message box (or the open thread when the Rem plugin is off) for the user to send. Below it are the application and desktop data directories, the current app log
+path, runtime versions, and backend state. It can open those folders, copy diagnostics,
+open developer tools, or restart the backend.
 
 Desktop installations write timestamped JSON records to `app.jsonl` in Electron's logs
 directory. The exact platform-specific path is shown in Developer settings. Desktop
-errors, backend output, renderer warnings, uncaught errors, and React boundary failures
-share this log. Rotation retains the current file and three backups of up to 5 MB each.
+errors, backend log records (sent as `GOFER_LOG` JSON lines on stderr when
+`GOFER_LOG_FORMAT=desktop`), other backend output, renderer warnings, uncaught errors,
+React boundary failures and paired-device connection events share this log. Native
+Chromium output goes only to a terminal. Rotation retains the current file and three backups of up to 5 MB each.
 Common credential fields are redacted. Conversation bodies are archived separately;
 logs are not a transcript. Existing logs from older installations are left in place.
 

@@ -2,7 +2,7 @@
 
 Each provider turn gets small wrapper scripts at the front of PATH. A wrapper
 hands ordinary commands straight to the real program and sends recognised
-tests, builds and browser runs through ``gof slot run``, which waits for one of
+tests, builds and browser runs through ``Raticode slot run``, which waits for one of
 a few lock files per class. ``flock`` releases a lock when its holder exits, so
 a crashed agent never leaves a slot taken. This is cooperative throttling, not
 a security boundary: an agent can still start a program another way.
@@ -478,7 +478,7 @@ def _shell_alternatives(values: tuple[str, ...]) -> str:
     return "|".join(_shell_quote(value) for value in values)
 
 
-def wrapper_script(tool: str, bin_dir: Path, gof: Path) -> str:
+def wrapper_script(tool: str, bin_dir: Path, cli: Path) -> str:
     rule = TOOLS[tool]
     trivial = TRIVIAL_ONLY_ARGUMENTS | ({"-v"} if rule.short_version else set())
     lines = [
@@ -534,7 +534,7 @@ def wrapper_script(tool: str, bin_dir: Path, gof: Path) -> str:
         "  esac",
         "fi",
         'if [ -z "$class" ]; then exec "$real" "$@"; fi',
-        f'exec {_shell_quote(str(gof))} slot run --class "$class" -- "$real" "$@"',
+        f'exec {_shell_quote(str(cli))} slot run --class "$class" -- "$real" "$@"',
         "",
     ]
     return "\n".join(lines)
@@ -554,7 +554,7 @@ HOOK_WORDS = (
 )
 
 
-def hook_script(gof: Path) -> str:
+def hook_script(cli: Path) -> str:
     words = "|".join(f"*{_shell_quote(word)}*" for word in HOOK_WORDS)
     return "\n".join(
         [
@@ -562,7 +562,7 @@ def hook_script(gof: Path) -> str:
             "# Raticode command slot hook for Claude Code. Raticode rewrites this file.",
             "input=$(cat)",
             f'case "$input" in {words})',
-            f"  printf '%s' \"$input\" | exec {_shell_quote(str(gof))} slot hook claude;;",
+            f"  printf '%s' \"$input\" | exec {_shell_quote(str(cli))} slot hook claude;;",
             "esac",
             "exit 0",
             "",
@@ -570,7 +570,7 @@ def hook_script(gof: Path) -> str:
     )
 
 
-def install(root: Path, gof: Path, search_path: str | None = None) -> Path:
+def install(root: Path, cli: Path, search_path: str | None = None) -> Path:
     """Write wrappers, the hook and lock files. Returns the wrapper directory.
 
     Only programs found on ``search_path`` get a wrapper, so ``command -v`` keeps
@@ -592,11 +592,11 @@ def install(root: Path, gof: Path, search_path: str | None = None) -> Path:
     for tool in TOOLS:
         target = bin_dir / tool
         if any(os.access(Path(folder) / tool, os.X_OK) for folder in folders):
-            _write_if_changed(target, wrapper_script(tool, bin_dir, gof), 0o700)
+            _write_if_changed(target, wrapper_script(tool, bin_dir, cli), 0o700)
         else:
             with contextlib.suppress(OSError):
                 target.unlink()
-    _write_if_changed(root / "hooks" / "claude-pre-tool-use", hook_script(gof), 0o700)
+    _write_if_changed(root / "hooks" / "claude-pre-tool-use", hook_script(cli), 0o700)
     for kind in CLASSES:
         for index in range(MAX_SLOTS):
             path = _slot_path(root, kind, index)
@@ -687,20 +687,20 @@ def scope_prefix() -> list[str]:
 
 def turn_environment(
     data_dir: Path,
-    gof: Path | None,
+    cli: Path | None,
     *,
     thread_id: str,
     label: str,
 ) -> dict[str, str]:
     """Environment for one provider turn, or nothing when queuing is off."""
-    if os.name == "nt" or gof is None:
+    if os.name == "nt" or cli is None:
         return {}
     root = slots_root(data_dir)
     if not read_settings(root).enabled:
         return {}
     search_path = os.environ.get(PATH_ENV, "")
     try:
-        bin_dir = install(root, gof, search_path)
+        bin_dir = install(root, cli, search_path)
     except OSError:
         return {}
     env = {
@@ -1007,7 +1007,7 @@ def _short_command(argv: list[str]) -> str:
 def run(kind: str, argv: list[str]) -> int:
     """Run ``argv`` while holding a slot of ``kind``; return its exit status."""
     if kind not in CLASSES or not argv:
-        print("usage: gof slot run --class test|build|browser -- COMMAND...", file=sys.stderr)
+        print("usage: Raticode slot run --class test|build|browser -- COMMAND...", file=sys.stderr)
         return 2
     root_value = os.environ.get(ROOT_ENV)
     if os.environ.get(HELD_ENV) or not root_value:
@@ -1474,7 +1474,7 @@ def classify_shell(text: str, depth: int = 0) -> tuple[str | None, bool]:
     return best, hidden
 
 
-def claude_hook(payload: dict[str, Any], gof: str) -> dict[str, Any] | None:
+def claude_hook(payload: dict[str, Any], cli: str) -> dict[str, Any] | None:
     """PreToolUse response that queues hidden gated commands and lengthens their timeout."""
     if payload.get("tool_name") != "Bash" or os.environ.get(HELD_ENV):
         return None
@@ -1482,7 +1482,7 @@ def claude_hook(payload: dict[str, Any], gof: str) -> dict[str, Any] | None:
     if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
         return None
     command = tool_input["command"]
-    if command.startswith(shlex.quote(gof) + " slot ") or command.startswith(gof + " slot "):
+    if command.startswith(shlex.quote(cli) + " slot ") or command.startswith(cli + " slot "):
         return None
     kind, hidden = classify_shell(command)
     if kind is None:
@@ -1490,7 +1490,7 @@ def claude_hook(payload: dict[str, Any], gof: str) -> dict[str, Any] | None:
     updated = dict(tool_input)
     if hidden:
         updated["command"] = (
-            f"{shlex.quote(gof)} slot run --class {kind} -- bash -c {shlex.quote(command)}"
+            f"{shlex.quote(cli)} slot run --class {kind} -- bash -c {shlex.quote(command)}"
         )
     timeout = tool_input.get("timeout")
     if not isinstance(timeout, (int, float)) or timeout < CLAUDE_GATED_TIMEOUT_MS:
@@ -1514,7 +1514,7 @@ def status(root: Path) -> dict[str, Any]:
 
 
 def main(argv: list[str]) -> int:
-    """``gof slot`` entry point; kept free of the Typer CLI so it starts quickly."""
+    """``Raticode slot`` entry point; kept free of the Typer CLI so it starts quickly."""
     if argv[:1] == ["run"]:
         rest = argv[1:]
         kind = ""
@@ -1540,9 +1540,9 @@ def main(argv: list[str]) -> int:
         print(json.dumps(status(Path(root)), indent=2))
         return 0
     print(
-        "usage: gof slot run --class test|build|browser -- COMMAND...\n"
-        "       gof slot status\n"
-        "       gof slot hook claude",
+        "usage: Raticode slot run --class test|build|browser -- COMMAND...\n"
+        "       Raticode slot status\n"
+        "       Raticode slot hook claude",
         file=sys.stderr,
     )
     return 2

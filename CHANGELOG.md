@@ -1,7 +1,88 @@
 # Changelog
 
 This file records the major user-facing changes in Raticode. Releases through
-version 0.1.3 used the Gofer Flow name.
+version 0.1.3 used an earlier product name.
+
+## Unreleased
+
+### Changed
+
+- The command line tool is now `Raticode` instead of `gof`. Change scripts,
+  scheduled jobs and aliases that call `gof`. The standalone downloads are now
+  `raticode-cli-linux-x64`, `raticode-cli-macos-arm64` and
+  `raticode-cli-windows-x64.exe`, and the Linux packages are `raticode-cli`,
+  which replace the earlier Linux CLI package on upgrade. The Windows installer adds the
+  same folder to your PATH, which now holds `Raticode.exe`. Rem's helper copy
+  of the CLI is renamed when the app starts, and the old copy is removed.
+  Workflows, schedules, settings and other saved data are unchanged.
+- The Python package is now `raticode`, so optional spreadsheet support
+  installs with `pip install 'raticode[xlsx]'`. The Arch packages are
+  `raticode-cli` and `raticode-desktop`.
+- Documentation uses the Raticode name throughout.
+- Source control History shows each commit's added and removed lines right
+  after its ID, on the same line as the author and time, so you no longer open
+  a commit to see them. Binary files show as a count, merges count against
+  their first parent, and a commit without line counts shows none rather than
+  +0. When the panel is too narrow for one line, the ID and its counts move to
+  the next line together.
+
+### Added
+
+- Organizations open on five tabs: Organization, Projects, Issues, Workers and
+  Knowledge. Write a one-line mission and organization milestones; give each
+  project milestones that contain epics; run tickets on a board with keys such
+  as `STU-12`; edit each worker's persona and responsibilities on an org chart;
+  and keep shared decisions, specs and findings in a knowledge graph that links
+  to tickets. Click anything to see its links in a side sheet, or press Ctrl K
+  to find it.
+- Every ticket shows evidence you can check. Runs post short claims backed by a
+  project check, a quote from a note, a commit or a file. Raticode checks quotes,
+  commits and files itself. Project checks run when you press Run checks on the
+  ticket, or after every run if the project allows it. Raticode flags failed
+  checks and changed sources. If a claim doesn't hold up, accepting the ticket
+  asks you to confirm.
+- Organization knowledge can include notes from the Second Brain and can be
+  saved back to it. Raticode records which notes each run read.
+- Organization details open in the main area with a back control at the top
+  left, and Escape returns to the list. The org chart drags and zooms (Ctrl with
+  the wheel or with + and −), the Issues board scrolls sideways, and folders are
+  added and removed from the Projects tab. Workers can be removed.
+- Workers can be limited to creating, editing, moving or cancelling tickets in
+  chosen projects. Raticode enforces this on every ticket action a worker takes.
+- Each organization can keep a shared Git repository for its knowledge,
+  decisions and notes. Runs change it on their own branch, and accepting the
+  ticket merges the changes.
+- Waiting Organizations tickets say why they haven't started, such as no worker
+  assigned, the organization paused, a cancelled dependency or the worker busy
+  with another ticket. Old low-priority tickets no longer jump ahead of critical
+  ones, and tickets in a cancelled epic or milestone wait instead of running.
+- Only you or Rem can schedule recurring Organizations tickets, at least 15
+  minutes apart. Rem needs your approval, as for routines.
+- Organizations have working hours. Choose 24/7, or weekly hours in a time
+  zone, including overnight hours such as 22:00 to 06:00. Outside them nothing
+  starts and check-ins wait. At closing time, running work either stops and
+  runs first when hours open, or finishes; you choose. The header shows when
+  hours open or close. An organization can also keep running after Raticode
+  restarts instead of pausing. Rem needs your approval to widen the hours or
+  turn that on.
+- Workers can plan ahead and pick what's next. Moving a ticket to In progress,
+  on the board, from Start next or by a worker, puts it first in its worker's
+  queue, and it starts as soon as the worker is free. Workers can also take an
+  unassigned ticket for themselves. Their ticket permissions still apply. The
+  board's Running column is now called In progress.
+- Worker check-ins (heartbeats) close themselves when they finish, so the next
+  one comes on time instead of waiting in Review. A failed check-in is
+  replaced, up to three times in a row. After that, check-ins stop and Needs
+  you says why, with a Resume check-ins button. Set how often each worker
+  checks in from its details.
+- Workflows can talk to Rem. A Rem prompt node sends a message to Rem's chat
+  and passes Rem's reply to the next steps; the message shows as coming from
+  the workflow. Unless you turn on Allow actions, Rem only answers it and won't
+  start, change, remember or send anything for the workflow. A Rem task node
+  runs one of Rem's existing tasks, as its Run button does, and waits for the
+  result, so a workflow can run tasks one after another and hand each task's
+  result to the next. A task that fails, is stopped or is deleted fails its
+  node with the reason, and stopping the workflow stops the task it started.
 
 ## 0.5.1 - 2026-11-05
 
@@ -103,6 +184,10 @@ Changes since the `v0.5.0` tag.
 
 ### Fixed
 
+- Full file paths in Rem's chat on the phone are links, including paths with
+  spaces and paths written as code, and tapping one downloads and opens the file.
+  The desktop tells the phone which paths name real files; every file check still
+  applies when one is tapped.
 - Stopping dictation, or letting go of the mic in Hold to talk, no longer cuts
   off the end of the last word: the last fraction of a second of audio still on
   its way is now heard before the microphone closes. With **Tidy voice
@@ -1331,7 +1416,7 @@ Changes since the `v0.3.0` tag.
 
 ### Changed
 
-- Renamed the user-facing application from Gofer Flow to Raticode.
+- Renamed the user-facing application to Raticode.
 - Made Rattish source files the editable workflow definition while compiled IR
   and run artifacts remain internal implementation details.
 - Moved workflow organization from a global workspace model to project folders.

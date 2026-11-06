@@ -15,7 +15,7 @@ const steps = [
   {
     n: '03',
     title: 'Run it anywhere',
-    body: 'Run from the studio, on a cron schedule, when files change, or headless with the gof CLI on any machine. Every run keeps a snapshot you can inspect.',
+    body: 'Run from the studio, on a cron schedule, when files change, or headless with the Raticode CLI on any machine. Every run keeps a snapshot you can inspect.',
     visual: 'cli',
   },
 ]
@@ -47,7 +47,7 @@ const steps = [
               </svg>
             </template>
             <template v-else>
-              <pre><span class="p">$</span> gof rattish run triage
+              <pre><span class="p">$</span> Raticode rattish run triage
 <span class="ok">✓</span> fetch-issues   12 new
 <span class="ok">✓</span> triage         4 easy
 <span class="run">›</span> draft-fixes    looping 4×</pre>

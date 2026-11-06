@@ -2,6 +2,7 @@
 // Visual audit of the Second Brain sidebar and workspace with the seeded library.
 // Run through run-second-brain-visual.cjs. No backend, providers or user folders are used.
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -50,7 +51,7 @@ createRoot(document.getElementById("root")).render(<App />);`;
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root, logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ cacheDir: testViteCacheDir(), root, logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "second-brain-capture",
     resolveId(id) { if (id === "/second-brain-entry.jsx") return id; },
     load(id) { if (id === "/second-brain-entry.jsx") return entry; },
@@ -76,7 +77,7 @@ async function main() {
     assert.ok(overflow === false || (Array.isArray(overflow) && overflow.length === 0), `Overflow in ${name}: ${JSON.stringify(overflow)}`);
     fs.writeFileSync(path.join(out, `${name}.png`), (await win.webContents.capturePage()).toPNG());
   }
-  const scenes = (process.env.CAPTURE_SCENES || "search,reader,filters,details,original,collection,compare,report,builder,import,export,health,inbox,jobs,settings,switcher,empty,toast").split(",");
+  const scenes = (process.env.CAPTURE_SCENES || "search,reader,filters,details,original,collection,compare,report,builder,import,export,health,inbox,jobs,settings,switcher,empty,toast,projects,project,map,topic").split(",");
   for (const theme of (process.env.CAPTURE_THEMES || "light,dark").split(",")) {
     for (const width of (process.env.CAPTURE_WIDTHS || "1440,980").split(",").map(Number)) {
       for (const scene of scenes) {
@@ -104,6 +105,10 @@ async function main() {
         if (scene === "import") { await evaluate("__sb.openDialog('import')"); await sleep(200); await evaluate("(() => { const i = document.querySelector('.sb-modal input'); i.focus(); })()"); await win.webContents.insertText("/tmp/field-research.zip"); await evaluate("document.querySelector('.sb-modal input').blur()"); await clickText("Preview import"); await shot(tag); }
         if (scene === "export") { await evaluate("__sb.openDialog('export')"); await sleep(200); assert.equal(await evaluate("document.activeElement.classList.contains('sb-modal') && getComputedStyle(document.activeElement).outlineStyle"), "none", `Focus ring around the whole dialog in ${tag}`); await evaluate("[...document.querySelectorAll('.sb-modal input[type=checkbox]')][0].click()"); await shot(tag); }
         if (scene === "health") { await evaluate("__sb.navigate('health')"); await shot(tag); }
+        if (scene === "projects") { await evaluate("__sb.navigate('projects', { projectId: '' })"); await sleep(300); await shot(tag); }
+        if (scene === "project") { await evaluate("__sb.navigate('projects', { projectId: 'folder:raticode', projectTab: 'reports' })"); await sleep(300); await shot(tag); }
+        if (scene === "map") { await evaluate("__sb.navigate('map', { mapTopicId: '' })"); await sleep(300); await shot(tag); }
+        if (scene === "topic") { await evaluate("__sb.navigate('map', { mapTopicId: 'topic-brain' })"); await sleep(300); await shot(tag); }
         if (scene === "inbox") { await evaluate("__sb.navigate('inbox')"); await shot(tag); }
         if (scene === "jobs") { await evaluate("__sb.navigate('jobs')"); await clickText("New job"); await shot(tag); }
         if (scene === "settings") { await evaluate("__sb.navigate('settings')"); await shot(tag); }

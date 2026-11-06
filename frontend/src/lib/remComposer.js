@@ -35,6 +35,14 @@ export async function attachPathsToRemComposer(paths) {
   focusRemComposer();
 }
 
+// Attaches files made in the app (such as selected log entries) and offers a
+// starting question without replacing anything the person already typed.
+export function attachFilesToRemComposer(files, draft = "") {
+  attachToRemComposer(files);
+  if (draft && !composer.draft.trim()) updateRemComposer({ draft });
+  focusRemComposer();
+}
+
 // Applies a store request (a suggestion, an edited message, a cleared history)
 // once. Returns whether it is new, so returning to Rem doesn't replay it.
 export function applyRemComposerRequest(request) {

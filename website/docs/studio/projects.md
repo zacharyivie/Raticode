@@ -30,7 +30,7 @@ my-project/
 
 `workflow.rattish` is the executable source. Metadata records graph positions and editor state. Compiled artifacts and run records are managed internally. Edit the source through the studio or CLI; do not hand-edit compiled IR to change behavior.
 
-Use `gof rattish list --format json` to inspect registered workflow paths. Copy the actual source path when scripting instead of constructing one from a title.
+Use `Raticode rattish list --format json` to inspect registered workflow paths. Copy the actual source path when scripting instead of constructing one from a title.
 
 ## Rem has its own scope
 

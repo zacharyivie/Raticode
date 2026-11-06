@@ -5,6 +5,7 @@ const desktopIpcHandlers = [
   ["gofer:api-session", "apiSession"],
   ["gofer:developer-info", "developerInfo"],
   ["gofer:developer-action", "developerAction"],
+  ["gofer:developer-log", "developerLog"],
   ["gofer:feature-preview", "featurePreview"],
   ["gofer:set-feature-preview", "setFeaturePreview"],
   ["gofer:renderer-log", "rendererLog"],

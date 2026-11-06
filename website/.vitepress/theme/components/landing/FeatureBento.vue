@@ -101,8 +101,8 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         <article class="tile tile-cli rc-reveal" style="--rc-delay: 120ms">
           <span class="kicker">Headless</span>
           <h3>The same engine, no UI</h3>
-          <p>Ship workflows to a server and run them with the standalone gof CLI on Linux, macOS or Windows.</p>
-          <pre aria-hidden="true"><span>$</span> gof rattish run nightly-triage</pre>
+          <p>Ship workflows to a server and run them with the standalone Raticode CLI on Linux, macOS or Windows.</p>
+          <pre aria-hidden="true"><span>$</span> Raticode rattish run nightly-triage</pre>
         </article>
       </div>
     </div>

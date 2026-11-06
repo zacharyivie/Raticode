@@ -401,7 +401,7 @@ def rattish_assistant_skill_path() -> Path:
     packaged = rattish_asset_root() / "assistant-skill" / "SKILL.md"
     if packaged.is_file():
         return packaged
-    repository = Path(__file__).parents[3] / "skills" / "gofer-flow-workflow-builder" / "SKILL.md"
+    repository = Path(__file__).parents[3] / "skills" / "raticode-workflow-builder" / "SKILL.md"
     if repository.is_file():
         return repository
     raise RattishArtifactError("Raticode workflow-builder skill is not installed.")

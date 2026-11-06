@@ -5,7 +5,7 @@ Raticode is a desktop studio and Python CLI for building and running AI coding w
 For current workflow authoring, start with the [Rattish guide](rattish/spec/README.md).
 The TOML examples below document the legacy workflow interface.
 
-The installed command is `gof`.
+The installed command is `Raticode`.
 
 ## What It Can Do
     
@@ -57,13 +57,13 @@ pip install -e ".[dev,xlsx]"
 Confirm the CLI is available:
 
 ```bash
-gof --help
+Raticode --help
 ```
 
 Run the React workflow studio:
 
 ```bash
-gof ui serve
+Raticode ui serve
 
 # In another shell:
 source "$HOME/.nvm/nvm.sh"
@@ -86,8 +86,9 @@ dependencies, including `concurrently`, `wait-on`, Vite, and Electron.
 The dev launcher uses a separate Electron profile at
 `~/.config/raticode-dev` on Linux, so an installed app cannot intercept its launch.
 `GOFER_DATA_DIR` isolates Raticode data without changing provider CLI settings.
-To retain the older dev data directory, use
-`GOFER_DATA_DIR="$HOME/.local/state/taskurotta-dev/data/gofer"`.
+To keep using an existing dev data directory, point `GOFER_DATA_DIR` at its
+`data/gofer` folder, for example
+`GOFER_DATA_DIR="$HOME/.local/state/<previous-dev-dir>/data/gofer"`.
 Avoid overriding `XDG_CONFIG_HOME` just to isolate the app: provider CLIs inherit it
 and may lose access to their normal login. Cursor then reports authentication
 required and cannot supply its model catalog. If you intentionally use a separate
@@ -112,14 +113,15 @@ Linux and macOS desktop packages are built from the Electron app in
 Arch users will be able to install Raticode from AUR after publication:
 
 ```bash
-yay -S gofer-flow
+yay -S raticode-desktop
 ```
 
 The AUR packaging files live in `packaging/arch`.
 
-On Windows, the normal installer includes the bundled `gof.exe` backend. During
-setup, the "Add gof CLI to my user PATH" option is checked by default so users
-can run `gof` from new PowerShell or Command Prompt sessions after installation.
+On Windows, the normal installer includes the `Raticode.exe` CLI in its
+`resources\backend` folder, next to the desktop app's own `Raticode.exe`. During
+setup, the "Add the Raticode CLI to my user PATH" option is checked by default so users
+can run `Raticode` from new PowerShell or Command Prompt sessions after installation.
 
 On macOS, release builds publish a `.dmg`. Until the app is signed and notarized
 with an Apple Developer account, users may need to approve the app in System
@@ -148,26 +150,26 @@ trash instead of recursive removal, and external URL opening is restricted to
 
 Release builds also publish standalone CLI binaries:
 
-- Linux: `gof-linux-x64`
-- Windows: `gof-windows-x64.exe`
-- macOS: `gof-macos-<arch>`
-- Debian/Ubuntu: `gofer-flow-cli_<version>_amd64.deb`
-- Red Hat/Fedora: `gofer-flow-cli-<version>-1.<dist>.x86_64.rpm`
-- Arch/AUR: `gofer-flow-cli`
+- Linux: `raticode-cli-linux-x64`
+- Windows: `raticode-cli-windows-x64.exe`
+- macOS: `raticode-cli-macos-<arch>`
+- Debian/Ubuntu: `raticode-cli_<version>_amd64.deb`
+- Red Hat/Fedora: `raticode-cli-<version>-1.<dist>.x86_64.rpm`
+- Arch/AUR: `raticode-cli`
 
 These artifacts are intended for servers, CI, containers, and enterprise
 automation where the Electron frontend is unnecessary. A Linux container can
 install only the CLI with a pattern like:
 
 ```dockerfile
-ADD gof-linux-x64 /usr/local/bin/gof
-RUN chmod +x /usr/local/bin/gof
+ADD raticode-cli-linux-x64 /usr/local/bin/Raticode
+RUN chmod +x /usr/local/bin/Raticode
 ```
 
 Arch users can install the CLI-only package after AUR publication:
 
 ```bash
-yay -S gofer-flow-cli
+yay -S raticode-cli
 ```
 
 ## Release Builds
@@ -221,44 +223,44 @@ only. See `LICENSE` for the full terms.
 
 ```bash
 # Create a minimal workflow TOML scaffold
-gof workflow create --name "Daily Analysis"
+Raticode workflow create --name "Daily Analysis"
 
 # Build a workflow interactively
-gof workflow build
+Raticode workflow build
 
 # Save an interactively built workflow somewhere specific
-gof workflow build --output ./daily-analysis.toml
+Raticode workflow build --output ./daily-analysis.toml
 
 # List stored workflows
-gof workflow list
+Raticode workflow list
 
 # Validate a stored workflow ID or TOML path
-gof workflow validate daily-analysis
-gof workflow validate ./daily-analysis.toml
+Raticode workflow validate daily-analysis
+Raticode workflow validate ./daily-analysis.toml
 
 # Explain where references come from and when they resolve
-gof workflow validate daily-analysis --explain-bindings
-gof workflow validate daily-analysis --explain-bindings --json
+Raticode workflow validate daily-analysis --explain-bindings
+Raticode workflow validate daily-analysis --explain-bindings --json
 
 # Show the workflow graph
-gof workflow show daily-analysis
+Raticode workflow show daily-analysis
 
 # Run a workflow
-gof workflow run daily-analysis
-gof workflow run ./daily-analysis.toml
+Raticode workflow run daily-analysis
+Raticode workflow run ./daily-analysis.toml
 
 # Simulate a workflow without executing nodes
-gof workflow run daily-analysis --dry-run
+Raticode workflow run daily-analysis --dry-run
 
 # Print node output while running
-gof workflow run daily-analysis --verbose
+Raticode workflow run daily-analysis --verbose
 
 # Edit a workflow interactively
-gof workflow edit daily-analysis
+Raticode workflow edit daily-analysis
 
 # Delete a stored workflow
-gof workflow rm daily-analysis
-gof workflow rm daily-analysis --yes
+Raticode workflow rm daily-analysis
+Raticode workflow rm daily-analysis --yes
 ```
 
 Workflows can be resolved by stored workflow ID or by a direct `.toml` path.
@@ -267,31 +269,31 @@ Workflows can be resolved by stored workflow ID or by a direct `.toml` path.
 
 ```bash
 # Create an agent interactively or with flags
-gof agent create
-gof agent create \
+Raticode agent create
+Raticode agent create \
   --name "Reviewer" \
   --subscription codex \
   --working-dir . \
   --prompt "Review the current repository changes."
 
 # List all agents
-gof agent list
+Raticode agent list
 
 # List agents for one workflow
-gof agent list --workflow daily-analysis
+Raticode agent list --workflow daily-analysis
 
 # Run a named agent directly
-gof agent run reviewer
+Raticode agent run reviewer
 
 # Edit an agent interactively
-gof agent edit reviewer
+Raticode agent edit reviewer
 
 # Edit an agent with flags
-gof agent edit reviewer --subscription claude_code --tools "Read,Write"
+Raticode agent edit reviewer --subscription claude_code --tools "Read,Write"
 
 # Remove an agent from its workflow
-gof agent rm reviewer
-gof agent rm reviewer --yes
+Raticode agent rm reviewer
+Raticode agent rm reviewer --yes
 ```
 
 Agent subscriptions currently support:
@@ -308,7 +310,7 @@ create a provider profile with `--api-key-secret` so Raticode resolves
 `GOFER_SECRET_<NAME>` at runtime.
 
 ```bash
-gof provider profile create ci-openai \
+Raticode provider profile create ci-openai \
   --subscription openai_api \
   --model gpt-5-mini \
   --api-key-secret OPENAI_CI_KEY
@@ -330,22 +332,22 @@ Schedule management:
 
 ```bash
 # Add a workflow TOML file to the scheduler database
-gof schedule add ./daily-analysis.toml
+Raticode schedule add ./daily-analysis.toml
 
 # List scheduled workflows
-gof schedule list
+Raticode schedule list
 
 # Remove a scheduled workflow
-gof schedule remove daily-analysis
+Raticode schedule remove daily-analysis
 
 # Start the scheduler in the background
-gof schedule start
+Raticode schedule start
 
 # Start the scheduler in the foreground
-gof schedule start --foreground
+Raticode schedule start --foreground
 
 # Stop the background scheduler
-gof schedule stop
+Raticode schedule stop
 ```
 
 The default scheduler database is `schedules.db` in the Raticode data directory. You can override it with `--db`.
@@ -405,13 +407,13 @@ The request payload, normalized headers, source, received timestamp, request ID,
 Runs created from webhook triggers can be replayed from the CLI or UI run history:
 
 ```bash
-gof workflow trigger incident-response \
+Raticode workflow trigger incident-response \
   --trigger-id github \
   --payload-file event.json \
   --header "X-GitHub-Event: issues" \
   --token "$GOFER_GITHUB_WEBHOOK_TOKEN"
 
-gof workflow trigger incident-response --trigger-id github --replay-run-id run-20260626.log
+Raticode workflow trigger incident-response --trigger-id github --replay-run-id run-20260626.log
 ```
 
 If a workflow needs exact replay of sensitive payload fields, it must opt in explicitly:
@@ -519,7 +521,7 @@ type = "bash_command"
 command = "echo {{nodes.test.exit_code}}"
 ```
 
-Pass inputs with `gof workflow run development-checks --input project_dir=/work/repo`
+Pass inputs with `Raticode workflow run development-checks --input project_dir=/work/repo`
 or `--inputs-json`. Exact references preserve booleans, numbers, arrays, and objects;
 embedded references are converted to text. Use `set`, `update`, or `clear` for ordered
 mutations. Concurrent writers must all use `merge`, which stores values by invocation
@@ -549,7 +551,7 @@ ID, or validation rejects the workflow as nondeterministic.
 
 ### Runtime bindings and shell expansion
 
-`gof workflow plan` and `gof workflow validate --explain-bindings` show each explicit
+`Raticode workflow plan` and `Raticode workflow validate --explain-bindings` show each explicit
 Raticode reference with its producer, source and destination types, resolution phase,
 status, secret readiness, and any string coercion. Exact references, including
 `workflow.*`, `run.*`, and `secret.*` inputs, resolve without becoming templates.
@@ -682,14 +684,14 @@ CLI approval workflow:
 
 ```bash
 # List pending approvals
-gof workflow approvals
+Raticode workflow approvals
 
 # Approve or reject a pending gate by run ID and node ID
-gof workflow approve 2026-06-24T10-15-300000-0400.log review-deploy \
+Raticode workflow approve 2026-06-24T10-15-300000-0400.log review-deploy \
   --workflow deploy-flow \
   --by alice \
   --notes "Change reviewed"
-gof workflow reject 2026-06-24T10-15-300000-0400.log review-deploy \
+Raticode workflow reject 2026-06-24T10-15-300000-0400.log review-deploy \
   --workflow deploy-flow \
   --by bob \
   --notes "Rollback plan missing"
@@ -745,7 +747,7 @@ exports use DEFLATE.
 
 Workflow bundle import is validated before the bundled workflow TOML is trusted, so
 CLI/UI import and preview use host-side bundle limits. Configure those limits with
-environment variables on the `gof` or UI server process:
+environment variables on the `Raticode` or UI server process:
 
 ```bash
 GOFER_BUNDLE_MAX_ENTRIES=1000
@@ -980,8 +982,10 @@ Frontend checks are split by runtime:
 - `npm run test:browser` builds the Vite app, serves the built files with
   mocked API responses, and drives the workflow studio in Electron/Chromium.
   Use it for browser-level regressions around canvas pointer events, dialogs,
-  panels, responsive layout, and save payload serialization. In headless Linux
-  CI, run it under `xvfb-run -a`.
+  panels, responsive layout, and save payload serialization. On Linux every
+  real-Electron test moves itself to a hidden Xvfb display and a private D-Bus
+  session, so no window, tray icon or notification appears on your desktop
+  (install `xvfb-run`). Set `RATICODE_TEST_VISIBLE=1` to watch a run.
 
 Run focused tests while developing:
 
@@ -1006,7 +1010,7 @@ for experimental testing. See the
 
 Turn on **Phone and desktop pairing** in Settings > Developer > Feature Preview;
 the desktop restarts its backend to apply it. While it is off, Settings hides
-paired devices. A backend started without the desktop app, such as `gof ui serve`,
+paired devices. A backend started without the desktop app, such as `Raticode ui serve`,
 reads `RATICODE_DEVICE_EXPERIMENTAL_NETWORK=1` instead, and the desktop uses that
 variable until you make a choice in Feature Preview. Phones connect only over the local network; there is no internet relay. Desktop
 creates a phone invitation only when it has a private address. Set

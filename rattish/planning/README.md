@@ -6,7 +6,7 @@ Raticode workflows.
 Rattish source uses the `.rattish` extension. A Rattish compiler will parse and analyze that
 source, expand authoring defaults, and emit versioned JSON IR. The executor will accept
 the IR and will not interpret Rattish source. Users will normally work only with `.rattish`
-files and the graph and text views in Gofer Studio.
+files and the graph and text views in Raticode.
 
 ## Status
 

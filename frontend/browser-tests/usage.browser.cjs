@@ -1,6 +1,7 @@
 /* global __dirname, console, setTimeout, clearTimeout */
 // Real settings UI against deterministic usage responses. No provider calls.
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -60,7 +61,7 @@ const overview = {
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(__dirname, ".."), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "usage-ui-test",
     resolveId(id) { if (id === "/usage-entry.jsx") return id; },
     load(id) { if (id === "/usage-entry.jsx") return `import React from "react"; import {createRoot} from "react-dom/client"; import SettingsPopover from "/src/components/SettingsPopover.jsx"; import {DEFAULT_APP_SETTINGS} from "/src/lib/settings.js"; import "/src/styles/index.css"; createRoot(document.getElementById("root")).render(React.createElement(SettingsPopover, {open: true, initialCategory: "usage", settings: DEFAULT_APP_SETTINGS}));`; },

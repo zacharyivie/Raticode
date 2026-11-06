@@ -22,14 +22,14 @@ Set font size, line height, blinking cursor, and scrollback capacity in the same
 
 ## Use the CLI
 
-If `gof` is on your PATH, you can validate the current workflow without running it:
+If `Raticode` is on your PATH, you can validate the current workflow without running it:
 
 ```bash
-gof rattish check PATH_TO_WORKFLOW --format json
-gof rattish preflight PATH_TO_WORKFLOW --format json
+Raticode rattish check PATH_TO_WORKFLOW --format json
+Raticode rattish preflight PATH_TO_WORKFLOW --format json
 ```
 
-Use the actual source path returned by `gof rattish list --format json`. If `gof` is not found, see [Installation](../installation.md).
+Use the actual source path returned by `Raticode rattish list --format json`. If `Raticode` is not found, see [Installation](../installation.md).
 
 For source development, select the project's Node version through nvm before npm commands. Provider CLIs launched in a terminal use that shell's environment; desktop discovery can have a different PATH.
 

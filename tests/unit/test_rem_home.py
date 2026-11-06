@@ -4934,7 +4934,7 @@ def test_agent_sign_ins_and_secret_files_need_the_request_to_name_them(
     data = root / "gofer"
     (root / ".gofer-trusted-bin").mkdir(parents=True)
     (data / "chat-attachments").mkdir(parents=True)
-    assert sensitive_path(root / ".gofer-trusted-bin" / "gof", data)
+    assert sensitive_path(root / ".gofer-trusted-bin" / "Raticode", data)
     assert sensitive_path(data / "rem-home.sqlite3", data)
     assert not sensitive_path(data / "chat-attachments" / "photo.jpg", data)
     # An ordinary folder holding data_dir isn't treated as Raticode's own.

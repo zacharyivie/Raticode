@@ -10,7 +10,7 @@ const {
   BrowserWindow
 } = require('electron');
 const distRoot = path.resolve(__dirname, '../dist');
-const artifactRoot = process.env.GOFER_BROWSER_ARTIFACTS || path.join(require('node:os').tmpdir(), 'taskurotta-workflow-tabs');
+const artifactRoot = process.env.GOFER_BROWSER_ARTIFACTS || path.join(require('node:os').tmpdir(), 'raticode-workflow-tabs');
 fs.mkdirSync(artifactRoot, {
   recursive: true
 });

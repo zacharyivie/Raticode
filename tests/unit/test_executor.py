@@ -2934,7 +2934,7 @@ async def test_agent_node_can_call_skill_without_prompt_path(tmp_path: Path) -> 
                 type=OperationType.AGENT,
                 agent_id="builder",
                 working_dir=tmp_path,
-                skill_name="gofer-flow-workflow-builder",
+                skill_name="raticode-workflow-builder",
             ),
         )
     )
@@ -2942,7 +2942,7 @@ async def test_agent_node_can_call_skill_without_prompt_path(tmp_path: Path) -> 
     result = await WorkflowExecutor(wf, {"claude_code": sub}, log_base_dir=tmp_path / "logs").run()
 
     assert result.success
-    assert sub.calls[0]["prompt"] == "/gofer-flow-workflow-builder"
+    assert sub.calls[0]["prompt"] == "/raticode-workflow-builder"
 
 
 async def test_agent_node_logs_thoughts_and_message_separately(tmp_path: Path) -> None:
@@ -4460,9 +4460,9 @@ async def test_approval_gate_pauses_and_resumes_after_approval(tmp_path: Path) -
     assert "deploy" in result.node_outputs
     assert notifications.notifications
     assert "Approve deploy" in notifications.notifications[0].body
-    assert "Approve with: gof workflow approve" in notifications.notifications[0].body
+    assert "Approve with: Raticode workflow approve" in notifications.notifications[0].body
     assert "--by alice" in notifications.notifications[0].body
-    assert "Reject with: gof workflow reject" in notifications.notifications[0].body
+    assert "Reject with: Raticode workflow reject" in notifications.notifications[0].body
     assert approval.data["approveCommand"]
     assert "--by alice" in str(approval.data["approveCommand"])
     assert "--by alice" in str(approval.data["rejectCommand"])

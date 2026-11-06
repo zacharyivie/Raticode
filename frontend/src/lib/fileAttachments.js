@@ -21,6 +21,14 @@ export function askRemAboutFiles(paths) {
   if (files.length) window.dispatchEvent(new CustomEvent(REM_ATTACH_FILES_EVENT, { detail: { paths: files } }));
 }
 
+// Sends text to Rem as a file attachment, for content that isn't on disk such as
+// selected log entries. `draft` fills the message box when it is empty.
+export function askRemAboutText({ name, text, draft = "" }) {
+  if (!text) return;
+  const file = new File([text], name || "context.txt", { type: "text/plain" });
+  window.dispatchEvent(new CustomEvent(REM_ATTACH_FILES_EVENT, { detail: { files: [file], draft } }));
+}
+
 // Copying files puts their paths on the system clipboard and remembers them, so
 // pasting that same text into a chat attaches the files instead. The file
 // explorer can paste them too.

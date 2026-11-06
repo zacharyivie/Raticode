@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Installation
 
-Choose the desktop app for the studio, or install only `gof` for a server, container, or CI machine.
+Choose the desktop app for the studio, or install only `Raticode` for a server, container, or CI machine.
 
 ## Choose a download
 
@@ -22,10 +22,10 @@ Do not substitute an Apple Silicon package for an Intel Mac build. Only use an a
 
 ## Windows
 
-Run the setup executable and choose an installation directory. The installer includes `gof.exe`. Its **Add gof CLI to my user PATH** option is enabled by default. Open a new PowerShell or Command Prompt window to pick up that PATH change:
+Run the setup executable and choose an installation directory. The installer includes the `Raticode.exe` CLI in its `resources\backend` folder. Its **Add the Raticode CLI to my user PATH** option is enabled by default. Open a new PowerShell or Command Prompt window to pick up that PATH change:
 
 ```powershell
-gof --help
+Raticode --help
 ```
 
 The v0.3.9 installer is unsigned and may show an Unknown publisher or SmartScreen prompt. Confirm you obtained the exact release artifact and follow your organization's installation policy.
@@ -59,13 +59,15 @@ Replace the version and filename when using another release. The repository cont
 
 ## Standalone CLI
 
-Download `gof-linux-x64`, `gof-macos-arm64`, or `gof-windows-x64.exe` from the release. On Unix, give the file execute permission, rename it to `gof`, and put it in a directory on your PATH. On Windows, rename it to `gof.exe` and add its folder to your user PATH. Linux CLI-only `.deb` and `.rpm` packages are also listed in the release.
+Download `raticode-cli-linux-x64`, `raticode-cli-macos-arm64`, or `raticode-cli-windows-x64.exe` from the release. On Unix, give the file execute permission, rename it to `Raticode`, and put it in a directory on your PATH. On Windows, rename it to `Raticode.exe` and add its folder to your user PATH. Linux CLI-only `.deb` and `.rpm` packages are also listed in the release.
 
 ```bash
-gof --help
-gof rattish --help
-gof rattish docs --format json
+Raticode --help
+Raticode rattish --help
+Raticode rattish docs --format json
 ```
+
+Releases up to 0.5.1 named these files `gof-*` and installed the command as `gof`. Later releases install `Raticode`, and their Linux packages replace the earlier CLI package on upgrade. Change scripts, scheduled jobs, and shell aliases that call `gof` to call `Raticode`. If you installed an earlier standalone binary by hand, delete it from your PATH. Workflows, schedules, and settings stay where they are.
 
 The CLI binary includes the Python backend. Commands that invoke scripts or coding providers still need those interpreters and provider CLIs on the execution machine.
 

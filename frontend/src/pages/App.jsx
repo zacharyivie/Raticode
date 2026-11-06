@@ -70,7 +70,7 @@ const ExportWorkflowDialog = lazy(() => import("../components/WorkflowDialogs.js
 const WorkflowListItem = lazy(() => import("../components/WorkflowListItem.jsx"));
 const ChatSources = lazy(() => import("../components/ChatSources.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
-const OrganizationWorkspace = lazy(() => import("../components/OrganizationWorkspace.jsx"));
+const OrganizationHome = lazy(() => import("../components/OrganizationHome.jsx"));
 const SecondBrainWorkspace = lazy(() => import("../components/SecondBrainWorkspace.jsx"));
 const RemHomeWorkspace = lazy(() => import("../components/RemHomeWorkspace.jsx"));
 const SwarmWorkspace = lazy(() => import("../components/SwarmWorkspace.jsx"));
@@ -526,11 +526,16 @@ export default function App() {
   useEffect(() => {
     const receive = event => {
       const paths = event.detail?.paths || [];
-      if (!paths.length) return;
+      // Files made in the app, such as selected log entries, arrive ready to attach.
+      const files = event.detail?.files || [];
+      const draft = event.detail?.draft || "";
+      if (!paths.length && !files.length) return;
+      // Asking from Settings (the Developer log) shows Rem instead of the popover.
+      setSettingsOpen(false);
       if (!remPluginOn) {
         setAssistantPaneVisible(true);
         setAssistantFocusRequest(current => current + 1);
-        window.dispatchEvent(new CustomEvent("gofer:rem-thread-attach-files", { detail: { paths } }));
+        window.dispatchEvent(new CustomEvent("gofer:rem-thread-attach-files", { detail: { paths, files, draft } }));
         return;
       }
       setSelectedSwarm(null);
@@ -538,7 +543,10 @@ export default function App() {
       setSidebarActivity("rem");
       setMainContent("rem");
       setThreadsRequested(false);
-      void import("../lib/remComposer.js").then(({ attachPathsToRemComposer }) => attachPathsToRemComposer(paths));
+      void import("../lib/remComposer.js").then(({ attachPathsToRemComposer, attachFilesToRemComposer }) => {
+        if (files.length) attachFilesToRemComposer(files, draft);
+        if (paths.length) void attachPathsToRemComposer(paths);
+      });
     };
     window.addEventListener("gofer:rem-attach-files", receive);
     return () => window.removeEventListener("gofer:rem-attach-files", receive);
@@ -4076,7 +4084,7 @@ export default function App() {
                 <strong>Draft recovery: </strong>{rattishEditorState.recoveryWarning}
               </div>
             ) : null}
-        {organizationOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading organization...</p>}><OrganizationWorkspace key={selectedOrganization.id} rootPath={swarmProjectRoot} projectOptions={recentProjectRoots} organizationId={selectedOrganization.id} defaults={settings.assistant} memorySettings={settings.memory} onSelect={id => setSelectedOrganization({ id })} onClose={() => setSelectedOrganization(null)} /></Suspense> : null}
+        {organizationOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading organization...</p>}><OrganizationHome key={selectedOrganization.id} rootPath={swarmProjectRoot} projectOptions={recentProjectRoots} organizationId={selectedOrganization.id} defaults={settings.assistant} memorySettings={settings.memory} onSelect={id => setSelectedOrganization({ id })} onClose={() => setSelectedOrganization(null)} /></Suspense> : null}
         {secondBrainOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading Second Brain...</p>}><SecondBrainWorkspace assistant={settings.assistant} memorySettings={settings.memory} onClose={showEditorContent} /></Suspense> : null}
         {remHomeOpen ? <RemSlot host={remHost} /> : null}
         {swarmOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace projectPaths={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots).map(root => pathValue(lastWorktreeByProject, root) || root)} selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
@@ -6777,7 +6785,12 @@ export function ChatPane({
   const attachFilePathsRef = useRef(attachFilePaths);
   attachFilePathsRef.current = attachFilePaths;
   useEffect(() => {
-    const receive = event => { if (event.detail?.paths?.length) attachFilePathsRef.current(event.detail.paths); };
+    const receive = event => {
+      const { paths = [], files = [], draft = "" } = event.detail || {};
+      if (paths.length) attachFilePathsRef.current(paths);
+      if (files.length) addAttachmentsRef.current(files);
+      if (files.length && draft) setDraft(current => (current.trim() ? current : draft));
+    };
     window.addEventListener("gofer:rem-thread-attach-files", receive);
     return () => window.removeEventListener("gofer:rem-thread-attach-files", receive);
   }, []);

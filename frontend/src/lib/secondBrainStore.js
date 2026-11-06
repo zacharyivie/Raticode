@@ -1,18 +1,19 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { brainRequest } from "./secondBrainApi.js";
 import { EMPTY_FILTERS } from "./secondBrain.js";
+import { mergedProject } from "./secondBrainGraph.js";
 
 // One shared library state for the sidebar and workspace. Each brain keeps its
 // own view state so switching brains restores the query, tabs and selection.
 // Edits publish optimistically and are serialized to the persistent library service.
 
 export const DEFAULT_SEARCH = Object.freeze({ text: "", filters: EMPTY_FILTERS, mode: "exact", searchIn: "all", match: "all", sort: "relevance", savedId: "" });
-const newView = () => ({ section: "search", collectionId: "", reportId: "", search: { ...DEFAULT_SEARCH }, tabs: [], activeDocId: "", focus: null, selection: [] });
+const newView = () => ({ section: "search", collectionId: "", reportId: "", projectId: "", projectTab: "reports", mapTopicId: "", search: { ...DEFAULT_SEARCH }, tabs: [], activeDocId: "", focus: null, selection: [] });
 let sequence = 0;
 export const uid = prefix => `${prefix}-${Date.now().toString(36)}-${(++sequence).toString(36)}`;
 
 function initialState() {
-  return { loaded: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], jobs: [], citations: [], views: {}, tasks: [], dialog: null, toast: null };
+  return { loaded: false, brains: [], activeBrainId: "", documents: [], collections: [], savedSearches: [], reports: [], health: [], jobs: [], citations: [], projects: [], topics: [], views: {}, tasks: [], dialog: null, toast: null };
 }
 function seededState(sample) {
   return {
@@ -25,6 +26,8 @@ function seededState(sample) {
     reports: structuredClone(sample.SAMPLE_REPORTS),
     health: structuredClone(sample.SAMPLE_HEALTH),
     jobs: structuredClone(sample.SAMPLE_JOBS),
+    projects: [],
+    topics: [],
     citations: [
       { id: "cit-1", brainId: "brain-research", docId: "doc-event-journal", blockId: "ej-2", quote: "Readers never infer order from wall-clock timestamps", note: "Key ordering rule", version: "3a9f2c1", createdAt: new Date(Date.now() - 4 * 86400000).toISOString() },
       { id: "cit-2", brainId: "brain-research", docId: "doc-fts5", blockId: "fts-2", quote: "render match spans as escaped text", note: "", version: "c40e118", createdAt: new Date(Date.now() - 9 * 86400000).toISOString() },
@@ -50,7 +53,7 @@ function set(next) {
   if (!fixture && before.loaded && state.loaded) persistChanges(before, state);
 }
 function persistChanges(before, after) {
-  for (const kind of ["documents", "collections", "savedSearches", "reports", "citations", "jobs"]) {
+  for (const kind of ["documents", "collections", "savedSearches", "reports", "citations", "jobs", "projects", "topics"]) {
     if (before[kind] === after[kind]) continue;
     const old = new Map(before[kind].map(item => [item.id, item]));
     const next = new Map(after[kind].map(item => [item.id, item]));
@@ -294,4 +297,56 @@ export function saveJob(job) { job = { ...job, provider: job.provider || researc
 export function removeJob(id) { set(current => ({ ...current, jobs: current.jobs.filter(job => job.id !== id) })); }
 export function captureSource({ title, url, excerpt }) {
   return startTask({ kind: "capture", label: "Capturing source", title, url, excerpt });
+}
+
+// Projects and topic names. Merging keeps the absorbed project's name as an alias.
+export function saveProject(project) { set(current => ({ ...current, projects: current.projects.some(item => item.id === project.id) ? current.projects.map(item => item.id === project.id ? project : item) : [...current.projects, project] })); }
+export function deleteProject(id) { set(current => ({ ...current, projects: current.projects.filter(item => item.id !== id) })); }
+export function mergeProjects(from, into) {
+  const merged = mergedProject(into, from, state.activeBrainId, uid);
+  set(current => ({ ...current, projects: [...current.projects.filter(item => item.id !== merged.id && item.id !== from.id), merged] }));
+  notify(`“${from.name}” is now part of “${merged.name}”.`);
+  return merged;
+}
+export function setDocumentProject(docId, name) { updateDocument(docId, { project: name }); }
+export function nameTopic(topic, name) {
+  const record = { id: topic.id, brainId: state.activeBrainId, name, members: topic.members };
+  set(current => ({ ...current, topics: name ? [...current.topics.filter(item => item.id !== topic.id), record] : current.topics.filter(item => item.id !== topic.id) }));
+}
+
+// The key changes whenever something that affects projects, connections or topics changes.
+export function graphKey(current, brainId = current.activeBrainId) {
+  const brain = current.brains.find(item => item.id === brainId);
+  const projects = JSON.stringify(current.projects.filter(item => item.brainId === brainId));
+  const topics = JSON.stringify(current.topics.filter(item => item.brainId === brainId));
+  const chosen = current.documents.filter(doc => doc.brainId === brainId && doc.project).map(doc => `${doc.id}=${doc.project}`).join("|");
+  return [brainId, brain?.index.generation, brain?.settings.semantic, current.reports.filter(item => item.brainId === brainId).length, projects, topics, chosen].join("\u0001");
+}
+
+// Loads one derived view (projects, topics, connections) from the library service.
+export function useBrainData(action, params, key, enabled = true) {
+  const [result, setResult] = useState({ data: null, error: "", loading: enabled });
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let active = true;
+    setResult(previous => ({ ...previous, loading: true, error: "" }));
+    const load = fixture
+      ? import("./secondBrainSample.js").then(sample => sample.sampleGraphData(action, params))
+      : flushLibraryWrites().then(() => brainRequest(action, params));
+    load.then(data => { if (active) setResult({ data, error: "", loading: false }); })
+      .catch(error => { if (active) setResult({ data: null, error: error.message, loading: false }); });
+    return () => { active = false; };
+    // The key captures every input that changes the result.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action, key, enabled]);
+  return result;
+}
+export async function backfillProvenance(brainId = state.activeBrainId) {
+  if (fixture) { notify("This visual fixture does not execute backend operations.", "info"); return null; }
+  try {
+    const result = await brainRequest("backfill_provenance", { brainId });
+    await refreshLibrary();
+    notify(result.created || result.updated ? `Found the history of ${result.created + result.updated} report${result.created + result.updated === 1 ? "" : "s"}.` : "Every report with a known history already shows it.");
+    return result;
+  } catch (error) { notify(error.message, "danger"); return null; }
 }

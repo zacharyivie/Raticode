@@ -273,7 +273,7 @@ partial publication are the guarantees this design can enforce.
 
 ## Third-party notices
 
-Install both locked dependency sets before building the backend. `gof.spec` runs
+Install both locked dependency sets before building the backend. `raticode.spec` runs
 `scripts/collect-licenses.py` in the build environment. Source validation also runs
 the collector. A missing license text, dependency version mismatch, or change from
 `packaging/licenses/reviewed.json` fails the build. Review upstream terms before
@@ -287,7 +287,7 @@ from their locked URLs and checked against their locked SHA-256 hashes.
 The frozen CLI embeds this bundle. Desktop packages also expose it under
 `resources/third-party-licenses`; Debian and RPM CLI packages install it under
 their documentation/license directories. Standalone users can export it with
-`gof licenses --output <new-directory>`. Final package checks inspect the embedded
+`Raticode licenses --output <new-directory>`. Final package checks inspect the embedded
 inventory before accepting a backend.
 
 `native-inventory.json` records the destination, build input and SHA-256 of every

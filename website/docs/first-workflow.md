@@ -15,7 +15,7 @@ This example uses file nodes, so it needs neither a coding provider nor a shell 
 Open a project in the studio and create a workflow in Workflows. From the CLI, the equivalent is:
 
 ```bash
-gof rattish create "Hello Raticode" --project ./my-project --format json
+Raticode rattish create "Hello Raticode" --project ./my-project --format json
 ```
 
 Use a real project folder. The JSON response's `workflow.sourcePath` is the exact file to edit. The ID is allocated by Raticode; do not assume it is the display name with spaces removed.
@@ -53,9 +53,9 @@ Open the graph view. You should see two nodes connected by one route. Layout cha
 In the following commands, replace `WORKFLOW_PATH` with the returned source path:
 
 ```bash
-gof rattish format WORKFLOW_PATH
-gof rattish check WORKFLOW_PATH --format json
-gof rattish preflight WORKFLOW_PATH --format json
+Raticode rattish format WORKFLOW_PATH
+Raticode rattish check WORKFLOW_PATH --format json
+Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
 `check` should return `ok: true`. Preflight checks the destination paths and their write policies. Neither validation command creates the reports.
@@ -65,7 +65,7 @@ gof rattish preflight WORKFLOW_PATH --format json
 Review the path and the overwrite behavior, then choose **Run** in the studio. To execute it from the CLI:
 
 ```bash
-gof rattish run WORKFLOW_PATH --format json
+Raticode rattish run WORKFLOW_PATH --format json
 ```
 
 This command performs the file write. It is separate from validation. Inspect the run status, then open `reports/hello.txt` in the editor. It should contain `Hello from Raticode!`.

@@ -74,7 +74,7 @@ const published = new Date(`${desktopRelease.publishedAt}T12:00:00Z`).toLocaleDa
         <article class="cli rc-reveal">
           <span class="kicker">Standalone CLI</span>
           <h3>Headless boxes welcome</h3>
-          <p>The gof binary runs the same workflows with no desktop UI, on servers, CI runners and remote machines.</p>
+          <p>The Raticode binary runs the same workflows with no desktop UI, on servers, CI runners and remote machines.</p>
           <ul>
             <li v-for="bin in cliBinaries" :key="bin.assetName">
               <a :href="assetUrl(bin.assetName)">

@@ -12,7 +12,7 @@ Go from a fresh installation to a project where Rem can help and a workflow you 
 
 Open the [download section](/#download) and choose your desktop platform. The current published artifacts cover Windows x64, Linux x64, and macOS Apple Silicon. The desktop packages include the workflow backend; you do not need to install Python or Node.js to use a packaged app.
 
-- **Windows:** run the setup executable. Leave **Add gof CLI to my user PATH** enabled if you want terminal access. Open a new terminal after installation.
+- **Windows:** run the setup executable. Leave **Add the Raticode CLI to my user PATH** enabled if you want terminal access. Open a new terminal after installation.
 - **macOS:** open the disk image, copy Raticode into Applications, then open it. Follow the release's signing guidance if macOS blocks first launch.
 - **Linux:** install the `.deb` or `.rpm`, or mark the AppImage executable and open it.
 

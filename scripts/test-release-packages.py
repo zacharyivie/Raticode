@@ -75,17 +75,25 @@ def probe(binary: Path) -> None:
         if required not in entries:
             raise RuntimeError(f"Packaged backend missing {required}: {binary}")
     # Probe away from the source checkout to catch accidental source-file dependencies.
-    with tempfile.TemporaryDirectory(prefix="gof-probe-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="raticode-probe-") as temporary:
         output = run(binary.resolve(), "--version", cwd=Path(temporary))
         run(binary.resolve(), "--help", cwd=Path(temporary))
         run(binary.resolve(), "ui", "serve", "--help", cwd=Path(temporary))
-    if output.strip() != f"gof {VERSION}":
+    if output.strip() != f"Raticode {VERSION}":
         raise RuntimeError(f"Wrong packaged version for {binary}: {output}")
     print(f"Verified {binary.name}: {output.strip()}")
 
 
 def probe_tree(root: Path) -> None:
-    binaries = [p for p in root.rglob("gof*") if p.name in {"gof", "gof.exe"} and p.is_file()]
+    # The desktop executable is also named Raticode on macOS and Windows; probe only
+    # the CLI copies in the packaged backend folder or a system bin directory.
+    binaries = [
+        p
+        for p in root.rglob("Raticode*")
+        if p.name in {"Raticode", "Raticode.exe"}
+        and p.parent.name in {"backend", "bin"}
+        and p.is_file()
+    ]
     if not binaries:
         raise RuntimeError(f"No backend found in extracted distribution: {root}")
     for binary in binaries:
@@ -97,9 +105,9 @@ def linux_packages() -> tuple[list[Path], list[Path]]:
     packages = []
     for pattern in (
         f"Raticode-{VERSION}-amd64.deb",
-        f"gofer-flow-cli_{VERSION}_amd64.deb",
+        f"raticode-cli_{VERSION}_amd64.deb",
         f"Raticode-{VERSION}-x86_64.rpm",
-        f"gofer-flow-cli-{VERSION}-1*.x86_64.rpm",
+        f"raticode-cli-{VERSION}-1*.x86_64.rpm",
     ):
         matches = sorted(RELEASE.glob(pattern))
         if len(matches) != 1 or not matches[0].is_file():
@@ -117,14 +125,14 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="raticode-package-test-") as temporary:
         root = Path(temporary)
         if sys.platform == "win32":
-            probe(RELEASE / "gof-windows-x64.exe")
+            probe(RELEASE / "raticode-cli-windows-x64.exe")
             installer = RELEASE / f"Raticode-Setup-{VERSION}.exe"
             target = root / "installed"
             # NSIS requires /D to be the final argument. No shell quoting involved.
             run(installer, "/S", f"/D={target}")
             probe_tree(target)
         elif sys.platform == "darwin":
-            probe(RELEASE / "gof-macos-arm64")
+            probe(RELEASE / "raticode-cli-macos-arm64")
             archive = RELEASE / f"Raticode-{VERSION}-arm64.zip"
             run("ditto", "-x", "-k", archive, root / "zip")
             probe_tree(root / "zip")
@@ -146,7 +154,7 @@ def main() -> None:
                 run("hdiutil", "detach", mount)
         else:
             debs, rpms = linux_packages()
-            probe(RELEASE / "gof-linux-x64")
+            probe(RELEASE / "raticode-cli-linux-x64")
             appimage = RELEASE / f"Raticode-{VERSION}-x86_64.AppImage"
             appimage.chmod(appimage.stat().st_mode | 0o111)
             run(appimage, "--appimage-extract", cwd=root)

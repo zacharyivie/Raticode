@@ -37,7 +37,7 @@ def prepared(
     version = candidate.versions()
     artifacts = []
     for index, (group, expected) in enumerate(candidate.required_files(version, signed).items(), 1):
-        folder = source / f"gofer-flow-{group}"
+        folder = source / f"raticode-{group}"
         folder.mkdir()
         for name in expected:
             (folder / name).write_text(f"fixture {name}")
@@ -212,13 +212,13 @@ def test_staging_rejects_incomplete_or_changed_build_outputs(
     tmp_path: Path,
     change: str,
 ) -> None:
-    folder = tmp_path / "input/gofer-flow-linux"
+    folder = tmp_path / "input/raticode-linux"
     if change == "missing":
-        (folder / "gof-linux-x64").unlink()
+        (folder / "raticode-cli-linux-x64").unlink()
     elif change == "extra":
         (folder / "unexpected.exe").write_text("unexpected")
     elif change == "corrupt":
-        (folder / "gof-linux-x64").write_text("different bytes")
+        (folder / "raticode-cli-linux-x64").write_text("different bytes")
     else:
         checksum = folder / "checksums-linux.txt"
         checksum.write_text("\n".join(checksum.read_text().splitlines()[1:]) + "\n")
@@ -322,11 +322,11 @@ def test_publication_fails_closed(
     elif change == "moved-tag":
         github.sha = "b" * 40
     elif change == "corrupt":
-        github.files[1]["gof-linux-x64"] = b"tampered"
+        github.files[1]["raticode-cli-linux-x64"] = b"tampered"
     elif change == "extra-asset":
         github.files[1]["surprise.exe"] = b"extra"
     elif change == "missing-asset":
-        del github.files[1]["gof-linux-x64"]
+        del github.files[1]["raticode-cli-linux-x64"]
     elif change == "failed-run":
         github.run["conclusion"] = "failure"
     elif change == "pending-run":
@@ -370,10 +370,10 @@ def test_stage_refuses_to_overwrite_changed_remote_asset(
     output, _ = prepared
     github = GitHub(candidate, monkeypatch)
     candidate.stage(REPO, output)
-    github.files[1]["gof-linux-x64"] = b"tampered"
+    github.files[1]["raticode-cli-linux-x64"] = b"tampered"
     with pytest.raises(ValueError, match="Existing draft asset differs"):
         candidate.stage(REPO, output)
-    assert github.files[1]["gof-linux-x64"] == b"tampered"
+    assert github.files[1]["raticode-cli-linux-x64"] == b"tampered"
 
 
 def test_tag_without_candidate_never_creates_a_release(
@@ -427,7 +427,7 @@ def test_signed_policy_cannot_accept_unsigned_artifacts(
     for group in ("windows", "macos"):
         with pytest.raises(ValueError, match="missing|unexpected"):
             candidate.verify_group(
-                tmp_path / f"input/gofer-flow-{group}",
+                tmp_path / f"input/raticode-{group}",
                 group,
                 candidate.versions(),
                 not manifest["signed"],
@@ -439,7 +439,7 @@ def test_signed_policy_cannot_accept_unsigned_artifacts(
 def test_signed_candidate_still_rejects_failed_platform_verification(
     candidate: Any, prepared: Any, tmp_path: Path, group: str
 ) -> None:
-    folder = tmp_path / f"input/gofer-flow-{group}"
+    folder = tmp_path / f"input/raticode-{group}"
     if group == "windows":
         path = folder / "signatures-windows.json"
         evidence = json.loads(path.read_text())

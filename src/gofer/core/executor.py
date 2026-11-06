@@ -5,7 +5,6 @@ import copy
 import csv
 import hashlib
 import hmac
-import importlib.metadata
 import json
 import locale
 import os
@@ -134,6 +133,7 @@ from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
 from gofer.utils.run_state import clear_stop_marker, clear_workflow_stop, workflow_run_stop_path
+from gofer.utils.version import installed_version
 
 log = get_logger(__name__)
 AGENT_MEMORY_COMPACT_CHAR_LIMIT = 32_000
@@ -829,7 +829,7 @@ def _load_tabular(
             import openpyxl
         except ImportError as exc:
             raise ImportError(
-                "openpyxl is required for .xlsx support: pip install 'gofer-flow[xlsx]'"
+                "openpyxl is required for .xlsx support: pip install 'raticode[xlsx]'"
             ) from exc
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         try:
@@ -923,10 +923,7 @@ def _local_vector_strategy(
 
 
 def _gofer_version() -> str:
-    try:
-        return importlib.metadata.version("gofer-flow")
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
+    return installed_version() or "unknown"
 
 
 def _hash_file(path: Path, max_bytes: int) -> str:
@@ -4860,7 +4857,8 @@ class WorkflowExecutor:
         node_id: str,
         approvers: Sequence[str] | None = None,
     ) -> str:
-        command = f"gof workflow {action} {run_id} {node_id} --workflow {self._workflow.config.id}"
+        workflow_id = self._workflow.config.id
+        command = f"Raticode workflow {action} {run_id} {node_id} --workflow {workflow_id}"
         if approvers:
             command = f"{command} --by {shlex.quote(str(approvers[0]))}"
         return command

@@ -53,7 +53,7 @@ safer than repeatedly migrating cached IR.
 An explicit source migration command can update language versions:
 
 ```bash
-gof rattish migrate workflow.rattish --to 2
+Raticode rattish migrate workflow.rattish --to 2
 ```
 
 Source migration should:

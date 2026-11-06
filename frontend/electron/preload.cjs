@@ -147,6 +147,7 @@ contextBridge.exposeInMainWorld("goferDesktop", {
   developer: {
     info: () => invokeDesktop("gofer:developer-info"),
     action: (action) => invokeDesktop("gofer:developer-action", { action }),
+    entries: (options = {}) => invokeDesktop("gofer:developer-log", options),
     log: (message) => invokeDesktop("gofer:renderer-log", { message }),
   },
   features: {

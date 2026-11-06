@@ -1,5 +1,6 @@
 /* global window, document, Event, DataTransfer, DragEvent, KeyboardEvent, __dirname, console, setTimeout, clearTimeout */
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const { app, BrowserWindow, ipcMain, protocol } = require("electron");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -50,7 +51,7 @@ app.whenReady().then(async () => {
   protocol.handle("raticode-media", request => { requests.push(request.headers.get("range")); return previews.handle(request); });
   const frontend = path.resolve(__dirname, "..");
   const { createServer } = await import("vite");
-  server = await createServer({ root: frontend, configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [(await import("@vitejs/plugin-react")).default(), {
+  server = await createServer({ cacheDir: testViteCacheDir(), root: frontend, configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [(await import("@vitejs/plugin-react")).default(), {
     name: "file-media-fixture", configureServer(dev) { dev.middlewares.use(async (req, res, next) => {
       if (!req.url.startsWith("/?")) return next();
       res.setHeader("Content-Type", "text/html");

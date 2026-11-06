@@ -63,6 +63,6 @@ For example, refer to `node.step.output.loop` from a compatible downstream bindi
 
 The compiler validates the loop target and control-flow placement. There is no separate executable or credential dependency.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

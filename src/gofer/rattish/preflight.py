@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 import os
 import shutil
+import sqlite3
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -433,6 +434,53 @@ def _approval_store_ready(
         f"Approval store root {context.data_dir} is not writable.",
         {"path": str(context.data_dir)},
     )
+
+
+def _rem_ready(node: Mapping[str, Any], context: PreflightContext) -> PreflightFailure | None:
+    from gofer.ui.rem_workflow import existing_store
+
+    _ = node
+    try:
+        store = existing_store(context.data_dir)
+    except (OSError, sqlite3.Error) as exc:
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_REM_UNAVAILABLE",
+            f"Rem's task store can't be opened: {exc}",
+            {"path": str(context.data_dir)},
+        )
+    if store is None:
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_REM_UNAVAILABLE",
+            "Rem hasn't been set up in this Raticode data folder. Open Rem in Raticode first.",
+            {"path": str(context.data_dir)},
+        )
+    return None
+
+
+def _rem_task_available(
+    node: Mapping[str, Any], context: PreflightContext
+) -> PreflightFailure | None:
+    from gofer.ui.rem_workflow import RemWorkflowError, existing_store, task_record
+
+    task_id = str(node["configuration"]["task_id"])
+    try:
+        store = existing_store(context.data_dir)
+        if store is None:
+            raise RemWorkflowError("rem", "", "")
+        task_record(store, task_id)
+    except RemWorkflowError:
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_REM_TASK_UNAVAILABLE",
+            f"Rem task {task_id!r} doesn't exist or was deleted. Choose another task.",
+            {"task_id": task_id},
+        )
+    except (OSError, sqlite3.Error) as exc:
+        return PreflightFailure(
+            "RATTISH_PREFLIGHT_REM_UNAVAILABLE",
+            f"Rem's task store can't be opened: {exc}",
+            {"task_id": task_id},
+        )
+    return None
 
 
 def _loop_source_ready(
@@ -1028,6 +1076,8 @@ DEFAULT_PREFLIGHT_CHECKS = PreflightRegistry(
         ("raticode.python_script", "interpreter-available"): _python_interpreter_available,
         ("raticode.python_script", "script-readable"): _script_readable,
         ("raticode.read_file", "path-readable"): _read_path_readable,
+        ("raticode.rem_prompt", "rem-ready"): _rem_ready,
+        ("raticode.rem_task", "task-available"): _rem_task_available,
         ("raticode.read_file", "encoding-supported"): _read_encoding_supported,
         ("raticode.file", "path-readable"): _read_path_readable,
         ("raticode.folder", "path-readable"): _folder_path_readable,

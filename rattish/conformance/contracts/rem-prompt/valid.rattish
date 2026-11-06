@@ -1,0 +1,7 @@
+Rattish: 1
+Workflow:
+  name: Rem prompt contract
+Node example:
+  type: rem-prompt
+  prompt: Summarize what changed in the release notes.
+  allow-actions: false

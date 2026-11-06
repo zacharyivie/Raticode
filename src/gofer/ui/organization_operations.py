@@ -14,7 +14,14 @@ from zoneinfo import ZoneInfo
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from gofer.ui.organization_store import OrganizationConfig, Task, now, project_identity
+from gofer.ui.organization_hours import hours_state
+from gofer.ui.organization_store import (
+    OrganizationConfig,
+    Task,
+    now,
+    project_identity,
+    ticket_prefix,
+)
 from gofer.utils.atomic_output import open_binary_input
 
 
@@ -183,6 +190,49 @@ def _read_evidence(
     return source, content
 
 
+def plan_hold(config: dict[str, Any], task: dict[str, Any]) -> str:
+    """Why a ticket's plan stops it from running: its epic or milestone was cancelled."""
+    epic = next((e for e in config.get("epics", []) if e["id"] == task.get("epicId")), None)
+    if epic is None:
+        return ""
+    if epic.get("status") == "cancelled":
+        return f"Its epic, {epic['title']}, is cancelled. Move the ticket or reopen the epic."
+    milestone = next(
+        (m for m in config.get("milestones", []) if m["id"] == epic.get("milestoneId")), None
+    )
+    if milestone and milestone.get("status") == "cancelled":
+        return (
+            f"Its milestone, {milestone['title']}, is cancelled. Move the ticket or reopen "
+            "the milestone."
+        )
+    return ""
+
+
+def dependency_reason(org: dict[str, Any], task: dict[str, Any]) -> str:
+    """Name the tickets this one waits for, and say when one can never finish."""
+    tasks = {t["id"]: t for t in org["runtime"]["tasks"]}
+    waiting = [d for d in task.get("dependsOn", []) if tasks.get(d, {}).get("status") != "done"]
+    if not waiting:
+        return ""
+    prefix = ticket_prefix(org["config"])
+
+    def key(tid: str) -> str:
+        number = tasks[tid].get("number")
+        return f"{prefix}-{number}" if number else tasks[tid]["title"][:60]
+
+    missing = [d for d in waiting if d not in tasks]
+    cancelled = [key(d) for d in waiting if d in tasks and tasks[d]["status"] == "cancelled"]
+    if missing:
+        return "It depends on a ticket that no longer exists. Remove that dependency."
+    if cancelled:
+        return (
+            f"Waiting for {', '.join(cancelled)}, which "
+            + ("was" if len(cancelled) == 1 else "were")
+            + " cancelled. Remove the dependency or reopen it."
+        )
+    return "Waiting for " + ", ".join(key(d) for d in waiting)
+
+
 def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None = None) -> str:
     at = at or datetime.now(UTC)
     config, runtime = org["config"], org["runtime"]
@@ -201,11 +251,12 @@ def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None =
         return "Waiting for independent review"
     if task["approvalRequired"] and task["approvedRevision"] is None:
         return "Waiting for plan approval"
-    done = {t["id"] for t in runtime["tasks"] if t["status"] == "done"}
-    if set(task.get("dependsOn", [])) - done:
-        return "Waiting for dependencies"
+    if waiting := dependency_reason(org, task):
+        return waiting
     if task["status"] != "todo":
         return str(task.get("blockReason") or task["status"].replace("_", " "))
+    if hold := plan_hold(config, task):
+        return hold
     employee = next((e for e in config["employees"] if e["id"] == task["assignee"]), None)
     if not employee:
         return "Assign an employee"
@@ -257,12 +308,27 @@ def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None =
         return "Organization is archived"
     if runtime["state"] != "running":
         return "Organization is paused"
+    hours = hours_state(config, at)
+    if not hours["open"]:
+        return "Off hours until " + (hours["opensAt"] or "working hours are set")
     return "Ready"
 
 
 def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
     tasks = org["runtime"]["tasks"]
     reasons = {t["id"]: task_reason(org, t) for t in tasks}
+    # "Ready" work still waits while its worker runs another ticket; say which.
+    prefix = ticket_prefix(org["config"])
+    names = {e["id"]: e["name"] for e in org["config"]["employees"]}
+    busy = {t["assignee"]: t for t in tasks if t["claim"]}
+    for task in tasks:
+        current = busy.get(task["assignee"])
+        if reasons[task["id"]] == "Ready" and current and current["id"] != task["id"]:
+            reasons[task["id"]] = (
+                ("Next up: " if task.get("pulledAt") else "Queued: ")
+                + f"{names.get(task['assignee'], 'its worker')} is working on "
+                f"{prefix}-{current.get('number') or '?'}"
+            )
     warnings = []
     accounts = org["runtime"].get("usage", {}).get(datetime.now(UTC).strftime("%Y-%m"), {})
     policies = {
@@ -304,7 +370,20 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
         + (f"; {available} employees are available" if available < config["maxConcurrency"] else "")
         + "."
     )
+    runtime = org["runtime"]
+    heartbeats = {
+        e["id"]: {
+            "intervalSeconds": e["heartbeatSeconds"],
+            "nextAt": runtime.get("heartbeats", {}).get(e["id"]),
+            "failures": runtime.get("heartbeatFailures", {}).get(e["id"], 0),
+            "stalled": runtime.get("heartbeatStalls", {}).get(e["id"]),
+        }
+        for e in config["employees"]
+        if e.get("heartbeatSeconds")
+    }
     return {
+        "hours": hours_state(config),
+        "heartbeats": heartbeats,
         "configuredConcurrency": config["maxConcurrency"],
         "effectiveConcurrency": effective,
         "concurrencyNote": note,
@@ -657,6 +736,7 @@ READ_OPERATIONS = {
     "workflow_preview",
 }
 WRITE_OPERATIONS = {
+    "heartbeat_resume",
     "routine_save",
     "routine_trigger",
     "memory_save",
@@ -719,6 +799,7 @@ def operation(
             raise ValueError("Task not found")
         return workflow_preview(org, task, manager.data_dir)
     if employee_id and action in {
+        "heartbeat_resume",
         "routine_save",
         "routine_trigger",
         "resume_all",
@@ -855,6 +936,31 @@ def operation(
                 task["status"] = "in_review"
             task["revision"] += 1
             result.update(artifact)
+        elif action == "heartbeat_resume":
+            eid = params.get("employeeId")
+            if eid not in {e["id"] for e in current["config"]["employees"]}:
+                raise ValueError("Choose a worker")
+            cleared = []
+            for task in runtime["tasks"]:
+                if (
+                    task["assignee"] == eid
+                    and (task.get("heartbeat") or task["title"] == "Heartbeat: review assignments")
+                    and task["status"] == "blocked"
+                ):
+                    task.update(
+                        status="cancelled",
+                        cancellation="acknowledged",
+                        revision=task["revision"] + 1,
+                    )
+                    task["comments"].append(
+                        {"actor": actor, "at": now(), "body": "Heartbeats resumed."}
+                    )
+                    cleared.append(task["id"])
+            runtime.setdefault("heartbeatFailures", {}).pop(eid, None)
+            runtime.setdefault("heartbeatStalls", {}).pop(eid, None)
+            runtime.setdefault("heartbeats", {})[eid] = now()
+            result.update(employeeId=eid, cancelled=cleared)
+            return {"employeeId": eid, "cancelled": cleared, "action": action}
         elif action == "routing_experiment":
             ids = params.get("taskIds")
             if not isinstance(ids, list) or not 1 <= len(ids) <= 10 or len(set(ids)) != len(ids):

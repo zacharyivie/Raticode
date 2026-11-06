@@ -1,5 +1,6 @@
 /* global __dirname, process, console, clearTimeout, setTimeout, window, document, KeyboardEvent, Event, HTMLInputElement */
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const { app, BrowserWindow, ipcMain, clipboard, dialog, session: electronSession, Menu, shell, webContents } = require("electron");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -28,7 +29,7 @@ app.whenReady().then(async () => {
   const frontend = path.resolve(__dirname, "..");
   process.chdir(frontend);
   const { createServer } = await import("vite");
-  server = await createServer({ root: frontend, cacheDir: "/tmp/rem-mac-ui-vite", configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
+  server = await createServer({ root: frontend, cacheDir: testViteCacheDir("mac-ui"), configFile: false, server: { host: "127.0.0.1", port: 0 }, plugins: [
     (await import("@vitejs/plugin-react")).default(), { name: "mac-ui-fixture", configureServer(dev) { dev.middlewares.use(async (req, res, next) => {
       if (req.url === "/page") { res.setHeader("Content-Type", "text/html"); res.end("<html><title>Find fixture</title><body>needle one<br>needle two<br>other text</body></html>"); return; }
       if (req.url !== "/") return next();

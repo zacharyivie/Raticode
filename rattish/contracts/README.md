@@ -34,6 +34,8 @@ The first representative set covers the contracts that force the most reusable b
 - `break.json` closes one explicitly named loop lineage without cancelling work already
   running in that lineage.
 - `workflow.json` derives its inputs and output from a versioned child interface.
+- `rem-prompt.json` and `rem-task.json` hand a prompt or an existing task run to Rem and
+  wait for its reply or the run's final state.
 
 Filesystem mutation contracts never follow an authored path outside the project root.
 Copy, move, and delete operate on directories as well as files. A final symlink is treated

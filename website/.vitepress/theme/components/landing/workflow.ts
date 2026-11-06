@@ -1,5 +1,5 @@
 // The example workflow shown on the landing page. The Rattish source below passes
-// `gof rattish check` and `gof rattish preflight`; keep the graph in step with it.
+// `Raticode rattish check` and `Raticode rattish preflight`; keep the graph in step with it.
 
 export type NodeState = 'idle' | 'running' | 'done' | 'failed'
 

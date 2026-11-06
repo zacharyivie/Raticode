@@ -23,12 +23,12 @@ nvm use
 cd frontend
 npm ci --include=dev
 npm exec vite -- build --config benchmarks/vite.config.js
-PERF_RESULT=/tmp/editor-performance.json xvfb-run -a node benchmarks/run.cjs
-PERF_SPLIT=1 PERF_RESULT=/tmp/editor-split.json xvfb-run -a node benchmarks/run.cjs
-PERF_SCALE=3 PERF_AVATAR=1 xvfb-run -a node benchmarks/run.cjs
+PERF_RESULT=/tmp/editor-performance.json node benchmarks/run.cjs
+PERF_SPLIT=1 PERF_RESULT=/tmp/editor-split.json node benchmarks/run.cjs
+PERF_SCALE=3 PERF_AVATAR=1 node benchmarks/run.cjs
 ```
 
-The fixture mounts ten persistent text tabs. One holds 2,000,000 characters. It measures 80 Monaco edits, full-document reads and React commits; immediately saves and checks the exact contents; measures Git requests over 2.3 seconds; and opens another tab. It then decodes the four avatar bitmaps five times and disposes each bitmap. Renderer CPU covers that combined sequence. Retained heap comes from Chromium after an explicit garbage collection. The earlier `heapBytes` sample is not collected after GC and should not support a memory claim. Rendering uses Xvfb and software graphics, not a physical GPU.
+The fixture mounts ten persistent text tabs. One holds 2,000,000 characters. It measures 80 Monaco edits, full-document reads and React commits; immediately saves and checks the exact contents; measures Git requests over 2.3 seconds; and opens another tab. It then decodes the four avatar bitmaps five times and disposes each bitmap. Renderer CPU covers that combined sequence. Retained heap comes from Chromium after an explicit garbage collection. The earlier `heapBytes` sample is not collected after GC and should not support a memory claim. Rendering uses Xvfb and software graphics, not a physical GPU. On Linux, `run.cjs` starts Electron on its own hidden Xvfb display; a plain `xvfb-run` would not hide it on a Wayland desktop.
 
 For a before/after comparison, use the same benchmark files and dependencies in a separate checkout of the baseline commit. Alternate before and after process launches. The recorded results contain three runs per variant. Dynamic module URLs are incidental ephemeral loopback URLs. The split check opens a second pane and requires exactly two idle Git refreshes, keeping keyboard focus separate from visibility. Avatar checks capture all four poses at the requested device scale and at 100% and 150% zoom.
 

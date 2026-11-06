@@ -44,7 +44,7 @@ Rattish is its own language. YAML-looking layout does not mean every YAML constr
 
 ## Workflow location
 
-Create a registered workflow with `gof rattish create "Name" --project PROJECT --format json`. Edit its returned `workflow.sourcePath`. Standalone `.rattish` files are also accepted by the CLI.
+Create a registered workflow with `Raticode rattish create "Name" --project PROJECT --format json`. Edit its returned `workflow.sourcePath`. Standalone `.rattish` files are also accepted by the CLI.
 
 Registered workflows resolve relative paths from their registered project root. For an unregistered source, its directory is the default root. Authored filesystem paths can also be absolute or home-relative; workflow file nodes follow OS permissions. Prefer project-relative resources for portability and review any path outside the project.
 
@@ -57,10 +57,10 @@ Read [Routes](./routes.md), [Inputs and bindings](./inputs.md), and [Loops](./lo
 ## Find the exact contract
 
 ```bash
-gof rattish docs --format json
-gof rattish format WORKFLOW_PATH
-gof rattish check WORKFLOW_PATH --format json
-gof rattish preflight WORKFLOW_PATH --format json
+Raticode rattish docs --format json
+Raticode rattish format WORKFLOW_PATH
+Raticode rattish check WORKFLOW_PATH --format json
+Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
 Installed docs and machine contracts match the CLI doing the compilation. Its diagnostics take precedence over an example for a different version. The [node reference](../nodes/index.md) lists all 22 built-in types.

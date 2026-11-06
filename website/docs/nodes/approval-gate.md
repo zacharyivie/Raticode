@@ -75,6 +75,6 @@ For example, refer to `node.step.output.decision` from a compatible downstream b
 
 The approval request store must be writable. Approval still requires someone to answer through the supported runtime UI; compilation cannot provide the decision.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

@@ -1,5 +1,6 @@
 /* global __dirname, console, setTimeout, clearTimeout, process, fetch */
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -21,7 +22,7 @@ async function main() {
   });
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root: path.join(root, "frontend"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ cacheDir: testViteCacheDir(), root: path.join(root, "frontend"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "organization-ui-test",
     resolveId(id) { if (["/organization-entry.jsx", "/organization-global-entry.jsx"].includes(id)) return id; },
     load(id) { if (id === "/organization-global-entry.jsx") return `import React, {useState} from "react"; import {createRoot} from "react-dom/client"; import OrganizationWorkspace from "/src/components/OrganizationWorkspace.jsx"; import OrganizationSidebar from "/src/components/OrganizationSidebar.jsx"; import "/src/styles/index.css";

@@ -1669,7 +1669,7 @@ def _preview_tabular(
             import openpyxl
         except ImportError as exc:
             raise ImportError(
-                "openpyxl is required for .xlsx support: pip install 'gofer-flow[xlsx]'"
+                "openpyxl is required for .xlsx support: pip install 'raticode[xlsx]'"
             ) from exc
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
         try:

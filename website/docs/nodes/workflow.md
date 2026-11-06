@@ -80,6 +80,6 @@ Successful output follows the child's declared public output schema.
 
 Compilation requires a resolvable child interface. Preflight recursively checks its resources. Nested calls do not remove the need to review the child's commands, paths, and provider settings.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

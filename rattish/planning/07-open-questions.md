@@ -23,9 +23,9 @@ documents rather than remaining in this list.
 ## Limits, time, scheduling, and recovery
 
 - What cancellation grace period applies after timeout or FAIL?
-- What happens to a local operation that was running when Gofer or the computer stops?
+- What happens to a local operation that was running when Raticode or the computer stops?
 - Which recovery policies are author-configurable?
-- Can Gofer reattach to any supported long-running provider or subprocess operations?
+- Can Raticode reattach to any supported long-running provider or subprocess operations?
 
 ## Schemas and files
 

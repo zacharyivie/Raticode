@@ -486,3 +486,59 @@ def test_rem_chat_links_reach_files_outside_open_folders_like_its_reply_files(li
     )
     assert symlinked["code"] == "unauthorized"
     assert len(_offers(app, peer, before)) == offered
+
+
+def test_phones_get_the_full_paths_rem_wrote_and_can_open_them(linked, tmp_path, monkeypatch):
+    app, peer, _, send, report, _ = linked
+    rem = app.desktop.rem
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    folder = tmp_path / "My Videos"
+    folder.mkdir()
+    clip = folder / "dock #2 take?.mp4"
+    clip.write_bytes(b"clip")
+    notes = tmp_path / "home" / "notes" / "plan.md"
+    notes.parent.mkdir(parents=True)
+    notes.write_text("plan")
+    secret = tmp_path / "auth.json"
+    secret.write_text("{}")
+    body = (
+        f"The clip is at {clip}. Open `{report}` or ~/notes/plan.md, "
+        f"not {tmp_path}/missing.txt or {secret}."
+    )
+    rem.store.messages += [
+        {"id": "paths", "role": "rem", "body": body, "details": f"- {notes}", "created_at": "t9"},
+        {"id": "mine", "role": "user", "body": f"Look at {clip}", "created_at": "t10"},
+    ]
+    shown = {m["id"]: m for m in send("desktop.read", "rem.home")["value"]["messages"]}
+    # Only existing files, as written; the phone gets text to underline, never more.
+    assert shown["paths"]["file_mentions"] == [
+        str(clip),
+        str(report),
+        "~/notes/plan.md",
+        str(secret),
+        str(notes),
+    ]
+    assert "file_mentions" not in shown["mine"]
+    for href, name in (
+        (str(clip), "dock #2 take?.mp4"),
+        (str(report), "launch plan.html"),
+        ("~/notes/plan.md", "plan.md"),
+        (str(notes), "plan.md"),
+    ):
+        result = send(
+            "desktop.action", "files.link", {"source": "rem", "message_id": "paths", "href": href}
+        )
+        assert result["ok"], (href, result)
+        assert result["value"]["name"] == name
+    # Being linked grants nothing: secret-looking files still stay on the desktop.
+    refused = send(
+        "desktop.action",
+        "files.link",
+        {"source": "rem", "message_id": "paths", "href": str(secret)},
+    )
+    assert refused["code"] == "unauthorized"
+    # The user's own message gives the phone nothing, even for a real file.
+    mine = send(
+        "desktop.action", "files.link", {"source": "rem", "message_id": "mine", "href": str(clip)}
+    )
+    assert mine["code"] == "not_found"

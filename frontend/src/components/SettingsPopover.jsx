@@ -115,11 +115,14 @@ export default function SettingsPopover({
   useEffect(() => {
     if (!open) return undefined;
     const focusFrame = window.requestAnimationFrame(() => searchRef.current?.focus());
+    // Menus opened from Settings (such as the Developer log's) render outside the
+    // panel and handle their own Escape; they mark themselves to keep it open.
+    const keepsOpen = (target) => Boolean(target?.closest?.("[data-settings-keep-open]"));
     function handlePointerDown(event) {
-      if (!panelRef.current?.contains(event.target)) onCloseRef.current?.();
+      if (!panelRef.current?.contains(event.target) && !keepsOpen(event.target)) onCloseRef.current?.();
     }
     function handleKeyDown(event) {
-      if (event.key === "Escape") onCloseRef.current?.();
+      if (event.key === "Escape" && !keepsOpen(event.target)) onCloseRef.current?.();
     }
     window.addEventListener("pointerdown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown, true);
@@ -153,7 +156,7 @@ export default function SettingsPopover({
     <section
       ref={panelRef}
       aria-label="Application settings"
-      className="settings-popover fixed right-3 top-[58px] z-[120] flex h-[min(650px,calc(100vh-72px))] w-[min(780px,calc(100vw-24px))] min-h-0 overflow-hidden rounded-xl border border-line bg-white text-ink shadow-panel max-[600px]:flex-col"
+      className="settings-popover fixed right-3 top-[58px] z-[120] flex h-[min(650px,calc(100vh-72px))] w-[min(780px,calc(100vw-24px))] min-h-0 overflow-clip rounded-xl border border-line bg-white text-ink shadow-panel max-[600px]:flex-col"
       role="dialog"
     >
       <aside className="flex w-44 shrink-0 flex-col border-r border-line bg-slate-50 p-2 max-[600px]:w-full max-[600px]:border-r-0 max-[600px]:border-b">
@@ -215,7 +218,9 @@ export default function SettingsPopover({
           ><X aria-hidden="true" size={14} /></button>
         </div>
 
-        <div className="workflow-scrollbar min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4 max-[600px]:px-3">
+        {/* The panel clips instead of hiding overflow, so focus can never scroll it
+            and leave half of Settings empty. Positioned content scrolls with this list. */}
+        <div className="workflow-scrollbar relative min-h-0 flex-1 overflow-y-auto px-5 pb-8 pt-4 max-[600px]:px-3">
           {query ? (
             matchingCategories.length ? matchingCategories.map((categoryId) => (
               <SettingsCategory
@@ -274,11 +279,11 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
   if (category === "providers") return [{ searchText: "Providers enabled disabled executable coding harness path apps models allowed denied", element: <ProviderSettings key="providers" providerState={providerState} /> }];
   if (category === "usage") return [{ searchText: "Usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh", element: <UsageDashboard key="usage" /> }];
   if (category === "developer") return [
+    { searchText: "Developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> },
     {
       searchText: `Feature Preview experimental preview try turn on enable ${FEATURE_PREVIEWS.map((feature) => feature.label).join(" ")}`,
       element: <FeaturePreviewSettings key="feature-preview" settings={settings} onChange={onChange} />,
     },
-    { searchText: "Developer diagnostics logs logging app data storage version backend restart tools", element: <DeveloperSettings key="developer" /> },
   ];
   if (category === "memory") return [{ searchText: "Rem memory conversation archive folder Second Brain knowledge notes reports HTML Markdown theme gallery generation provider model effort screenshot", element: <RemMemorySettings audioInputDeviceId={settings.devices.audioInputId} key="memory" value={settings.memory} onChange={onChange} providerState={providerState} /> }];
   if (category === "general") return [
@@ -1138,7 +1143,7 @@ function categoryKeywords(category) {
     usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
     assistant: "commit messages auto commit template format default scope current directory global projects rem provider model effort chat faster speed codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
-    developer: "developer diagnostics logs logging app data storage version backend restart tools feature preview experimental",
+    developer: "developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools feature preview experimental",
     layout: "width pane sidebar panel inspector arrangement preset position side left right swap mirror dock chat rem files explorer project activity bar terminal tab editor startup open hidden compact narrow reset",
     plugins: "plugins sidebar rail activity bar icons order reorder drag lock unlock show hide enable disable",
   }[category] ?? "";

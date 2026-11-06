@@ -1,17 +1,19 @@
 import { useEffect, useMemo } from "react";
-import { ArrowLeft, CircleAlert, CircleCheck, Download, FolderOpen, HardDrive, HeartPulse, Inbox, Info, Library, Loader2, Repeat, ScrollText, Search, Settings2, Trash2, Upload, X } from "lucide-react";
+import { ArrowLeft, CircleAlert, CircleCheck, Download, FolderKanban, FolderOpen, HardDrive, HeartPulse, Inbox, Info, Library, Loader2, Network, Repeat, ScrollText, Search, Settings2, Trash2, Upload, X } from "lucide-react";
 import { useSecondBrain, viewFor, navigate, openDialog, cancelTask, dismissTask, dismissToast, dismissError, adoptLegacyRoot, ensureLibrary, setResearchProvider, refreshLibrary, startTask } from "../lib/secondBrainStore.js";
 import { BrainMark, Pill, ProgressBar } from "./SecondBrainParts.jsx";
 import SearchView from "./SecondBrainSearch.jsx";
 import { CollectionsView } from "./SecondBrainCollections.jsx";
 import { ReportsView } from "./SecondBrainReports.jsx";
+import { ProjectsView } from "./SecondBrainProjects.jsx";
+import TopicMap from "./SecondBrainMap.jsx";
 import { InboxView, HealthView, JobsView, BrainSettingsView } from "./SecondBrainLibrary.jsx";
 import SecondBrainDialogs from "./SecondBrainDialogs.jsx";
 import "./SecondBrainWorkspace.css";
 import { useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import { ResearchProviderContext, researchProviderDetails } from "./SecondBrainProvider.jsx";
 
-const SECTIONS = [["search", "Search", Search], ["collections", "Collections", Library], ["reports", "Reports", ScrollText], ["inbox", "Inbox", Inbox], ["health", "Library health", HeartPulse], ["jobs", "Research jobs", Repeat]];
+const SECTIONS = [["search", "Search", Search], ["projects", "Projects", FolderKanban], ["map", "Map", Network], ["collections", "Collections", Library], ["reports", "Reports", ScrollText], ["inbox", "Inbox", Inbox], ["health", "Library health", HeartPulse], ["jobs", "Research jobs", Repeat]];
 
 const TOAST_ICONS = { success: CircleCheck, danger: CircleAlert, warning: CircleAlert, info: Info };
 
@@ -81,7 +83,7 @@ export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySe
       </div> : null}
     </header>
     {brain && brain.state === "available" ? <nav className="sb-tabs" aria-label="Second Brain sections">
-      {SECTIONS.map(([id, label, Icon]) => <button key={id} type="button" aria-current={view.section === id ? "page" : undefined} onClick={() => navigate(id, id === "collections" ? { collectionId: "" } : id === "reports" ? { reportId: "" } : {})}><Icon size={15} aria-hidden="true" />{label}{counts[id] ? <span className="sb-count" aria-label={`${counts[id]} items`}>{counts[id]}</span> : null}</button>)}
+      {SECTIONS.map(([id, label, Icon]) => <button key={id} type="button" aria-current={view.section === id ? "page" : undefined} onClick={() => navigate(id, id === "collections" ? { collectionId: "" } : id === "reports" ? { reportId: "" } : id === "projects" ? { projectId: "" } : id === "map" ? { mapTopicId: "" } : {})}><Icon size={15} aria-hidden="true" />{label}{counts[id] ? <span className="sb-count" aria-label={`${counts[id]} items`}>{counts[id]}</span> : null}</button>)}
     </nav> : null}
     <div className="sb-body">
       {!store.loaded ? <p role="status" className="sb-center sb-hint">Loading Second Brain…</p> : !brain ? <div className="sb-center"><div className="sb-welcome"><Library size={30} aria-hidden="true" /><h3>Open a Second Brain</h3><p>A brain is an ordinary folder of notes, reports and documents. Raticode indexes it so you can search, read and cite it with Rem. Files stay usable in other apps.</p>
@@ -89,6 +91,8 @@ export default function SecondBrainWorkspace({ onClose, assistant = {}, memorySe
         : brain.state === "unavailable" ? <div className="sb-center"><div className="sb-welcome"><HardDrive size={30} aria-hidden="true" /><h3>{brain.name} is unavailable</h3><p>Raticode can’t reach <code className="sb-mono">{brain.root}</code>. Connect the drive that holds it, or locate the folder if it moved. Collections, citations and saved searches are kept until you remove the brain.</p>
           <div className="sb-empty-actions"><button className="sb-button sb-primary" type="button" onClick={() => openDialog("locate", { brainId: brain.id })}><FolderOpen size={14} />Locate folder</button><button className="sb-button" type="button" onClick={() => openDialog("remove", { brainId: brain.id })}><Trash2 size={14} />Remove from list</button></div></div></div>
         : view.section === "search" ? <SearchView key={brain.id} brain={brain} />
+        : view.section === "projects" ? <ProjectsView key={brain.id} brain={brain} />
+        : view.section === "map" ? <TopicMap key={brain.id} brain={brain} />
         : view.section === "collections" ? <CollectionsView brain={brain} provider={provider} />
         : view.section === "reports" ? <ReportsView brain={brain} />
         : view.section === "inbox" ? <InboxView brain={brain} />

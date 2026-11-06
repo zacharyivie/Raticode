@@ -1,7 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { apiUrl } from "./api.js";
 
-// Raticode-wide skills and MCP servers. Agents add entries with `gof rem`, so
+// Raticode-wide skills and MCP servers. Agents add entries with `Raticode rem`, so
 // every open tools menu refreshes on focus and while it stays open.
 const EMPTY = Object.freeze({ loaded: false, error: "", skillsDir: "", skills: [], mcpServers: [] });
 let state = EMPTY;

@@ -41,8 +41,38 @@ Related meaning uses FastEmbed's `BAAI/bge-small-en-v1.5` locally. Enabling it d
 public model weights into app data; document text stays on the computer. Cloud embeddings
 use an existing OpenAI-compatible API profile and require the brain's cloud permission.
 The selected embedding profile and model are independent of Rem's chat model.
-Old-model vectors are not mixed into current retrieval. Similar-document suggestions use
-the stored passage embeddings, independently of recorded links.
+Old-model vectors are not mixed into current retrieval. Passages are embedded in windows
+of roughly 180–380 words that keep their block IDs, stored as float32 blobs in the
+`embeddings` table, and searched as one NumPy matrix cached per index generation. Vectors
+from the earlier JSON `vectors` table are dropped and rebuilt the next time a brain embeds.
+Combined search fuses document ranks from exact and meaning search (reciprocal rank
+fusion, k = 60). Similar-document suggestions use per-document centroids of those vectors,
+or hashed TF-IDF vectors of distinctive words when related meaning is off, independently of
+recorded links.
+
+## Projects, provenance, connections and topics
+
+`brain_graph.py` derives these on request; nothing inferred is written to brain files.
+
+- Projects: saved `projects` records (name, other names, folders) live in portable
+  metadata. A document's project is resolved from the user's choice, observed report
+  provenance (`projectRoot`), the file's own `project`, then `Reports/<Project>/` folders.
+  Git worktrees resolve to their repository. Each assignment carries its basis.
+- Provenance: `rem_artifacts.save_report` and Rem thread `save_note` create report records
+  with `provenance` (run, task, thread, project folder, provider, requested model).
+  Backfill reads Rem's run receipts read-only and the archived conversations in the brain;
+  it never edits files and never overwrites existing provenance. Rem-saved files have
+  origin `agent`: labelled, but still eligible as evidence.
+- Connections: written links, report citations, Rem thread reads (an `observations` row per
+  thread and document, recorded by the Second Brain tools), organization tickets that read
+  or quote a note (from organization knowledge whose source or mirror is in the brain), and
+  suggested similar documents.
+- Topics: Louvain communities over a k-nearest-neighbour similarity graph plus written
+  links, with disconnected communities split. NetworkX's `leiden_communities` only
+  dispatches to optional backends, so it is not used. Labels use class-based TF-IDF.
+  Topic IDs are matched across runs by member overlap; named `topics` records are portable.
+  `projects` and `topics` are omitted from `brain.json` and packages until used, so older
+  builds can still open brains without them.
 
 Supported limits are 20,000 source documents, 32 MB per source file, 2 MB extracted text
 per document, 500 PDF pages, 64 MB portable metadata and a 1 GB expanded import package.

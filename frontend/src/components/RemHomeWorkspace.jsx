@@ -196,6 +196,12 @@ function Welcome({ offline, loading, avatar }) {
   </div>;
 }
 
+// A message one of the user's workflows sent through a Rem prompt node.
+function WorkflowSource({ workflow }) {
+  const name = workflow?.name || "a workflow";
+  return <span className="rem-msg-source" title={workflow?.allow_actions ? "This workflow may start and change tasks." : "This workflow may only ask; Rem won't start or change anything for it."}>From workflow {name}</span>;
+}
+
 // Rows re-render only when their own props change, not on every keystroke or poll.
 // [newest] opens a long reply in full when it first shows; older long messages start folded.
 const Message = memo(function Message({ message, first, now, tasks, onOpenLink, live = true, followUps = false, newest = false, onShowMessage = null }) {
@@ -210,7 +216,7 @@ const Message = memo(function Message({ message, first, now, tasks, onOpenLink, 
       </div>
       {message.failed ? <p className="rem-msg-failed">Didn’t send. <button type="button" onClick={() => retryRemMessage(message.id)}>Try again</button> <button type="button" onClick={() => editRemMessage(message.id)}>Edit</button></p>
         : message.pending && message.waiting ? <p className="rem-msg-waiting" role="status">Sends when Rem finishes replying</p>
-        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{stamp}</div>}
+        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{message.source === "workflow" ? <WorkflowSource workflow={message.workflow} /> : null}{stamp}</div>}
     </div>;
   }
   // A Rem message right after another Rem message gets a faint rule above it (data-follows).

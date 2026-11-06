@@ -68,20 +68,20 @@ jobs:
           - name: linux
             os: ubuntu-24.04
             electron_builder_args: --linux AppImage deb rpm --x64
-            artifact-name: gofer-flow-linux
+            artifact-name: raticode-linux
             artifact-glob: |
               frontend/release/*.AppImage
               frontend/release/*.AppImage.blockmap
               frontend/release/*.deb
               frontend/release/*.rpm
               frontend/release/latest-linux.yml
-              frontend/release/gof-linux-x64
+              frontend/release/raticode-cli-linux-x64
               frontend/release/checksums-linux.txt
               frontend/release/package-tests-linux.json
           - name: windows
             os: windows-2022
             electron_builder_args: --win nsis --x64
-            artifact-name: gofer-flow-windows
+            artifact-name: raticode-windows
             artifact-glob: |
               frontend/release/*.exe
               frontend/release/*.exe.blockmap
@@ -92,14 +92,14 @@ jobs:
           - name: macos
             os: macos-15
             electron_builder_args: --mac dmg zip --arm64
-            artifact-name: gofer-flow-macos
+            artifact-name: raticode-macos
             artifact-glob: |
               frontend/release/*.dmg
               frontend/release/*.dmg.blockmap
               frontend/release/*.zip
               frontend/release/*.zip.blockmap
               frontend/release/latest-mac.yml
-              frontend/release/gof-macos-*
+              frontend/release/raticode-cli-macos-*
               frontend/release/checksums-macos.txt
               frontend/release/package-tests-macos.json
               frontend/release/notarization-macos-*.json
@@ -236,18 +236,18 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          cp dist/gof frontend/release/gof-linux-x64
-          chmod +x frontend/release/gof-linux-x64
+          cp dist/Raticode frontend/release/raticode-cli-linux-x64
+          chmod +x frontend/release/raticode-cli-linux-x64
 
       - name: Build Linux CLI packages
         if: runner.os == 'Linux'
         shell: bash
-        run: scripts/package-cli-linux.sh dist/gof frontend/release
+        run: scripts/package-cli-linux.sh dist/Raticode frontend/release
 
       - name: Copy Windows CLI artifact
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Copy-Item dist/gof.exe frontend/release/gof-windows-x64.exe
+        run: Copy-Item dist/Raticode.exe frontend/release/raticode-cli-windows-x64.exe
 
       - name: Copy macOS CLI artifact
         if: runner.os == 'macOS'
@@ -259,8 +259,8 @@ jobs:
             x86_64) artifact_arch="x64" ;;
             *) artifact_arch="$arch" ;;
           esac
-          cp dist/gof "frontend/release/gof-macos-${artifact_arch}"
-          chmod +x "frontend/release/gof-macos-${artifact_arch}"
+          cp dist/Raticode "frontend/release/raticode-cli-macos-${artifact_arch}"
+          chmod +x "frontend/release/raticode-cli-macos-${artifact_arch}"
 
       - name: Verify Windows release signatures
         if: inputs.signed_release && runner.os == 'Windows'
@@ -288,7 +288,7 @@ jobs:
         shell: bash
         run: |
           files=()
-          for pattern in *.AppImage *.AppImage.blockmap *.deb *.rpm latest-linux.yml gof-linux-x64 package-tests-linux.json; do
+          for pattern in *.AppImage *.AppImage.blockmap *.deb *.rpm latest-linux.yml raticode-cli-linux-x64 package-tests-linux.json; do
             for file in $pattern; do
               [ -e "$file" ] && files+=("$file")
             done
@@ -320,7 +320,7 @@ jobs:
         shell: bash
         run: |
           files=()
-          for pattern in *.dmg *.dmg.blockmap *.zip *.zip.blockmap latest-mac.yml gof-macos-* notarization-macos-*.json package-tests-macos.json; do
+          for pattern in *.dmg *.dmg.blockmap *.zip *.zip.blockmap latest-mac.yml raticode-cli-macos-* notarization-macos-*.json package-tests-macos.json; do
             for file in $pattern; do
               [ -e "$file" ] && files+=("$file")
             done

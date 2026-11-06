@@ -56,6 +56,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from gofer.devices.files import MAX_FILE
 from gofer.devices.registry import PairingError
+from gofer.ui.file_mentions import file_mentions
 
 READ_OPS = frozenset(
     {
@@ -159,6 +160,8 @@ SENSITIVE = (
 _CANONICAL_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Files on one Rem chat message, in either direction.
 REM_FILES = 8
+# Full file paths found in one Rem message's text, sent so the phone can link them.
+MENTIONS = 32
 # Phone alerts per read; older ones are counted, not sent.
 REM_NOTICES = 8
 # Where a tapped file link came from: Rem's chat, a Rem task thread, a shared thread.
@@ -629,6 +632,23 @@ def link_paths(href: str) -> list[str]:
         candidates = [value, unquote(value)]
     paths = [_LINE_SUFFIX.sub(r"\1", c) for c in candidates]
     return [p for p in dict.fromkeys(paths) if p and "\x00" not in p]
+
+
+def _file_mentions(message: dict[str, Any]) -> list[str]:
+    """Full paths of existing files in a Rem message's text and Details, as written.
+
+    The desktop chat links the same paths (``with_file_mentions``). The phone gets only
+    the text to underline; a tap sends it back through ``files.link``, which applies
+    every file check again, so a path here grants nothing.
+    """
+    if message.get("role") == "user":
+        return []
+    text = "\n".join(
+        value for value in (message.get("body"), message.get("details")) if isinstance(value, str)
+    )
+    if not text:
+        return []
+    return [m["text"] for m in file_mentions(text) if len(m["text"]) <= 1024][:MENTIONS]
 
 
 def _authored(messages: list[Any], identity: str, roles: set[str]) -> str | None:
@@ -1108,6 +1128,9 @@ class DesktopControl:
             actions = self._phone_actions(peer, message)
             if actions:
                 item["phone_actions"] = actions
+            mentions = _file_mentions(message)
+            if mentions:
+                item["file_mentions"] = mentions
             items.append(item)
         shown = _newest(items)
         return {
@@ -1371,7 +1394,10 @@ class DesktopControl:
             raise Refused("not_found", "This message is no longer on the desktop.")
         if href not in body:
             raise Refused("not_found", "That link isn't in this message on the desktop.")
-        path = _linked_file(link_paths(href), base)
+        # A full path Rem wrote as plain text is exactly the text the phone linked; it is
+        # read as written, so spaces, "#", "?" and "~/" name the file the desktop found.
+        mentioned = source == "rem" and href in {m["text"] for m in file_mentions(body)}
+        path = _linked_file([os.path.expanduser(href)] if mentioned else link_paths(href), base)
         self._refuse_sensitive_link(
             peer,
             path,

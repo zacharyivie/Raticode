@@ -54,7 +54,7 @@ See [Permissions and local data](./advanced/security.md) before enabling broader
 
 ## API profiles for workflow agents
 
-Workflow agent nodes can also use direct OpenAI or Anthropic API profiles. These profiles are distinct from a coding CLI subscription and are not ordinary Rem chat providers. Configure them using `gof provider create` and the options shown by `--help`; keep API credentials in environment variables or supported secret references.
+Workflow agent nodes can also use direct OpenAI or Anthropic API profiles. These profiles are distinct from a coding CLI subscription and are not ordinary Rem chat providers. Configure them using `Raticode provider create` and the options shown by `--help`; keep API credentials in environment variables or supported secret references.
 
 Rattish chooses the provider, model, and effort in source. A profile supplies deployment configuration such as environment values and secret references. It does not override those compiled model choices.
 

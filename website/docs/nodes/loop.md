@@ -74,6 +74,6 @@ The source contract returns an object; the runtime exposes iteration-specific da
 
 Filesystem-backed sources require a path, but availability is checked when the loop activates. Source sizes and aggregate reads have runtime bounds. Read [Loops and fan-out](../workflows/loops.md) for lifecycle and concurrency details.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

@@ -14,6 +14,18 @@ export function commitLabels(commit) {
   });
 }
 
+// Line counts come from git's numstat; a commit without them shows no counts rather than +0.
+export function commitStats(commit) {
+  const count = value => Number.isSafeInteger(value) && value >= 0;
+  if (!count(commit.insertions) || !count(commit.deletions)) return null;
+  const binaryFiles = count(commit.binaryFiles) ? commit.binaryFiles : 0;
+  const { insertions, deletions } = commit;
+  const parts = [`${insertions} ${insertions === 1 ? "insertion" : "insertions"}`, `${deletions} ${deletions === 1 ? "deletion" : "deletions"}`];
+  if (binaryFiles) parts.push(`${binaryFiles} binary ${binaryFiles === 1 ? "file" : "files"} without line counts`);
+  if ((commit.parents?.length || 0) > 1) parts.push("compared with the first parent");
+  return { insertions, deletions, binaryFiles, lines: !binaryFiles || insertions > 0 || deletions > 0, label: parts.join(", ") };
+}
+
 // Project edges through hidden commits so search cannot imply a false branch split.
 export function filterHistory(commits, query = "") {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);

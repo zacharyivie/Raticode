@@ -29,7 +29,7 @@ for dmg in frontend/release/*.dmg; do
   spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 done
 # The standalone CLI needs its own ticket, separate from the enclosing app.
-for cli in frontend/release/gof-macos-*; do
+for cli in frontend/release/raticode-cli-macos-*; do
   codesign --verify --strict --verbose=2 "$cli"
   archive="$RUNNER_TEMP/raticode-cli-notarization.zip"
   ditto -c -k --keepParent "$cli" "$archive"

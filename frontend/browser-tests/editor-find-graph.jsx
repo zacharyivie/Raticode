@@ -15,15 +15,15 @@ const refs = [
   { id: "refs/remotes/origin/coworker", name: "origin/coworker", type: "remote" },
 ];
 const commits = [
-  { hash: "merge", shortHash: "abc1201", subject: "Merge editor search changes", parents: ["local", "remote"], labels: [refs[0]], isHead: true },
+  { hash: "merge", shortHash: "abc1201", subject: "Merge editor search changes", parents: ["local", "remote"], labels: [refs[0]], isHead: true, insertions: 42, deletions: 7, binaryFiles: 0 },
   { hash: "remote", shortHash: "def2202", subject: "Fix remote sync", parents: ["base"], labels: [refs[1]] },
-  { hash: "local", shortHash: "fab3203", subject: "Add configurable Find", message: "Add configurable Find\n\nKeep search within the active editor.", parents: ["base"], labels: [] },
-  { hash: "base", shortHash: "dab4204", subject: "Release Raticode", parents: [], labels: [refs[2]] },
+  { hash: "local", shortHash: "fab3203", subject: "Add configurable Find", message: "Add configurable Find\n\nKeep search within the active editor.", parents: ["base"], labels: [], insertions: 12, deletions: 3, binaryFiles: 1 },
+  { hash: "base", shortHash: "dab4204", subject: "Release Raticode", parents: [], labels: [refs[2]], insertions: 0, deletions: 0, binaryFiles: 2 },
 ].map(commit => ({ author: "Ada", authoredAt: "2026-09-30T12:00:00Z", ...commit }));
 // A twelve-way merge keeps twelve lanes open, far wider than a third of the sidebar.
 const wideCommits = [
-  { hash: "octopus", shortHash: "e999999", subject: "Merge twelve parallel branches", parents: Array.from({ length: 12 }, (_, index) => `wide-${index}`), labels: [] },
-  ...Array.from({ length: 12 }, (_, index) => ({ hash: `wide-${index}`, shortHash: `e${String(index).padStart(6, "0")}`, subject: `Parallel branch ${index + 1} with a commit subject long enough to need truncating`, parents: ["base"], labels: [] })),
+  { hash: "octopus", shortHash: "e999999", subject: "Merge twelve parallel branches", author: "A contributor with a very long display name", parents: Array.from({ length: 12 }, (_, index) => `wide-${index}`), labels: [], insertions: 1, deletions: 1, binaryFiles: 0 },
+  ...Array.from({ length: 12 }, (_, index) => ({ hash: `wide-${index}`, shortHash: `e${String(index).padStart(6, "0")}`, subject: `Parallel branch ${index + 1} with a commit subject long enough to need truncating`, parents: ["base"], labels: [], insertions: 123456 * (index + 1), deletions: 98765 * (index + 1), binaryFiles: index % 3 })),
   commits.at(-1),
 ].map(commit => ({ author: "Ada", authoredAt: "2026-09-30T12:00:00Z", ...commit }));
 let wideHistory = false;
@@ -84,6 +84,8 @@ function Fixture() {
   const [settings, setSettings] = useState(DEFAULT_APP_SETTINGS);
   const [paths, setPaths] = useState(["/fixture/sample.js"]);
   const [navigation, setNavigation] = useState(null);
+  const [sidebarWidth, setSidebarWidth] = useState(330);
+  window.setSidebarWidth = setSidebarWidth;
   window.deleteFixtureFile = () => {
     window.fixturePhase = "deleting";
     fileExists = false;
@@ -110,7 +112,7 @@ function Fixture() {
   };
   window.setFindBinding = binding => setSettings(current => updateSetting(current, "keybindings.editor.find", binding));
   return <div style={{ display: "flex", height: "100vh" }}>
-    <div style={{ width: 330, flexShrink: 0 }}><CodeFileExplorer sidebarView="source-control" hideProjectSelector workflow={{ projectRoot: "/fixture" }} /></div>
+    <div style={{ width: sidebarWidth, flexShrink: 0 }}><CodeFileExplorer sidebarView="source-control" hideProjectSelector workflow={{ projectRoot: "/fixture" }} /></div>
     <div style={{ flex: 1, minWidth: 0, display: "flex" }}><CodeWorkspace active navigationRequest={navigation} activePath={paths[0]} openPaths={paths} onClosePath={path => { window.closedFiles.push(path); setPaths(current => current.filter(item => item !== path)); }} workflow={{ projectRoot: "/fixture" }} theme="light" settings={settings} /></div>
   </div>;
 }

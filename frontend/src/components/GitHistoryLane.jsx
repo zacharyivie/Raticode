@@ -1,5 +1,5 @@
-import { CircleDot, Cloud, GitBranch, Tag } from "lucide-react";
-import { commitLabels, GRAPH_COLORS, GRAPH_PATTERNS, GRAPH_LANE_SPACING, GRAPH_LANE_INSET } from "../lib/gitHistoryGraph.js";
+import { Binary, CircleDot, Cloud, GitBranch, Tag } from "lucide-react";
+import { commitLabels, commitStats, GRAPH_COLORS, GRAPH_PATTERNS, GRAPH_LANE_SPACING, GRAPH_LANE_INSET } from "../lib/gitHistoryGraph.js";
 
 export default function GitHistoryLane({ row, width }) {
   const x = lane => GRAPH_LANE_INSET + lane * GRAPH_LANE_SPACING;
@@ -15,6 +15,16 @@ export default function GitHistoryLane({ row, width }) {
       fill="none" stroke={segment.color} strokeWidth="2.5" strokeDasharray={pattern(segment.color)} vectorEffect="non-scaling-stroke" strokeLinecap="round" />)}
     </svg></span>
     <span className={`scm-history-dot ${row.commit.isHead ? "scm-history-head" : ""}`} style={{ left: x(row.lane), borderColor: row.color, backgroundColor: row.commit.isHead ? "var(--scm-graph-background)" : row.color }} />
+  </span>;
+}
+
+export function GitHistoryStats({ commit }) {
+  const stats = commitStats(commit);
+  if (!stats) return null;
+  return <span className="scm-history-stats font-mono font-medium" title={stats.label}>
+    <span className="sr-only">{stats.label}</span>
+    {stats.lines ? <><span aria-hidden="true" className="text-emerald-600">+{stats.insertions}</span><span aria-hidden="true" className="text-red-600">-{stats.deletions}</span></> : null}
+    {stats.binaryFiles ? <span aria-hidden="true" className="scm-history-binary"><Binary size={9} className="shrink-0" />{stats.binaryFiles}</span> : null}
   </span>;
 }
 

@@ -4,7 +4,8 @@ import { createPortal } from "react-dom";
 export const integrationOperations = [["merge", "Merge"], ["squash", "Squash merge"], ["ff-only", "Fast-forward only"], ["no-ff", "Merge with a merge commit"], ["rebase", "Rebase"]];
 export const historyOperations = [["commit-diff", "Open commit diff"], ["reset-soft", "Soft reset"], ["reset-hard", "Hard reset"], ["branch-commit", "Checkout new branch here"], ["worktree-commit", "Create worktree here"], ["detach-commit", "Detach at commit"]];
 
-export default function WorktreeContextMenu({ source, x, y, trigger, disabled, onClose, onSelect, operations = integrationOperations }) {
+// `layer` lifts the menu above popovers such as Settings (z-index 120).
+export default function WorktreeContextMenu({ source, x, y, trigger, disabled, onClose, onSelect, operations = integrationOperations, layer = "z-[90]", label }) {
   const [keyboardNavigation, setKeyboardNavigation] = useState(false);
   const menuRef = useRef(null);
   const closeRef = useRef(onClose);
@@ -30,8 +31,8 @@ export default function WorktreeContextMenu({ source, x, y, trigger, disabled, o
     const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
     items[next]?.focus();
   }
-  return createPortal(<div ref={menuRef} data-keyboard-navigation={keyboardNavigation} onPointerMove={() => setKeyboardNavigation(false)} className="fixed z-[90]" style={{ left: Math.max(8, Math.min(x, window.innerWidth - width - 8)), top: Math.max(8, Math.min(y, window.innerHeight - height - 8)), width }} onKeyDown={navigate} onContextMenu={event => event.preventDefault()}>
-    <div role="menu" aria-label={`Actions for ${source}`} className="overflow-y-auto rounded-lg border border-line bg-white p-1 shadow-panel" style={{ maxHeight: window.innerHeight - 16 }}>
+  return createPortal(<div ref={menuRef} data-settings-keep-open="true" data-keyboard-navigation={keyboardNavigation} onPointerMove={() => setKeyboardNavigation(false)} className={`fixed ${layer}`} style={{ left: Math.max(8, Math.min(x, window.innerWidth - width - 8)), top: Math.max(8, Math.min(y, window.innerHeight - height - 8)), width }} onKeyDown={navigate} onContextMenu={event => event.preventDefault()}>
+    <div role="menu" aria-label={label || `Actions for ${source}`} className="overflow-y-auto rounded-lg border border-line bg-white p-1 shadow-panel" style={{ maxHeight: window.innerHeight - 16 }}>
       {operations.map(([kind, label, unavailable]) => <button key={kind} type="button" role="menuitem" data-operation={kind} className="worktree-menu-item flex min-h-8 w-full items-center rounded px-2 text-left text-xs text-ink disabled:opacity-40" disabled={disabled || unavailable} onMouseEnter={event => { setKeyboardNavigation(false); event.currentTarget.focus(); }} onClick={() => { onSelect(kind); trigger?.focus(); }}>{label}</button>)}
     </div>
   </div>, document.body);

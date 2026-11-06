@@ -38,15 +38,24 @@ An existing packaged desktop profile remains in use when no current profile exis
 an explicit `--user-data-dir` takes precedence. Embedded browser tabs use a new
 partition, so websites may require signing in again.
 
-The Python import package `gofer`, the `gof` executable, `GOFER_*` configuration,
-`gofer-flow` distribution/package identifiers, and `com.goferflow.desktop` app ID
-remain stable. This keeps installations, CLI callers, secrets, scheduler data,
-and OS application identity compatible. These are technical identifiers rather
-than product display names.
+The command line tool is `Raticode`, and the Python distribution, Linux CLI
+packages and Arch packages use `raticode`, `raticode-cli` and `raticode-desktop`.
+Releases up to 0.5.1 installed the command as `gof`. The Linux CLI packages
+replace the earlier package on upgrade, and the desktop app removes its old
+helper copy of the CLI from the trusted helper folder. Version lookups also
+accept the earlier Python distribution name, so an environment installed before
+the rename keeps working until it is synced again.
+
+The Python import package `gofer`, `GOFER_*` configuration, data folders such as
+`~/.local/share/gofer` and `.gofer-trusted-bin`, the desktop app's npm package
+name, Linux executable and package names, and its macOS and Windows app ID
+remain stable. This keeps installations, secrets, scheduler data, desktop
+profiles and OS application identity compatible. These are technical
+identifiers rather than product display names.
 
 Repository links use the canonical `zacharyivie/Raticode` GitHub repository, also
 used by this checkout's origin and the desktop update check. GitHub redirects the
-previous `zacharyivie/gofer-flow` address, but release metadata must not rely on
+repository's previous address, but release metadata must not rely on
 it. Release preparation uses the actual repository identity provided by GitHub
 Actions. Previous binaries and draft candidates built before the rename are not
 Raticode builds.

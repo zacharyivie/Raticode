@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Clock3, Download, Eye, FolderOpen, FolderPlus, HardDrive, MoreHorizontal, PackageOpen, Plus, Quote, ScrollText, Search, Settings2, TriangleAlert, Trash2, Upload, Library } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Clock3, Download, Eye, FolderKanban, FolderOpen, FolderPlus, HardDrive, MoreHorizontal, Network, PackageOpen, Plus, Quote, ScrollText, Search, Settings2, TriangleAlert, Trash2, Upload, Library } from "lucide-react";
 import { searchLibrary, formatDay } from "../lib/secondBrain.js";
-import { useSecondBrain, setActiveBrain, applySavedSearch, navigate, openDialog, openDocument, updateSearch, libraryFor, viewFor, ensureLibrary } from "../lib/secondBrainStore.js";
+import { useSecondBrain, setActiveBrain, applySavedSearch, navigate, openDialog, openDocument, updateSearch, libraryFor, viewFor, ensureLibrary, graphKey, useBrainData } from "../lib/secondBrainStore.js";
 import { BrainMark, Menu, TypeIcon, ProgressBar, useDismiss } from "./SecondBrainParts.jsx";
 import "./SecondBrainSidebar.css";
 
@@ -74,6 +74,8 @@ export default function SecondBrainSidebar({ active, open, onOpen }) {
   const current = (section, id = "") => open && view.section === section && (!id || view.collectionId === id || view.reportId === id || view.search.savedId === id);
   const go = (section, extra) => { navigate(section, extra); onOpen(); };
   const unavailable = brain?.state === "unavailable";
+  const projectsData = useBrainData("projects", { brainId: brain?.id }, brain ? graphKey(store, brain.id) : "", Boolean(active && brain && !unavailable));
+  const projects = projectsData.data?.projects || [];
   return <section id="sidebar-panel-second-brain" role="tabpanel" aria-labelledby="sidebar-tab-second-brain" hidden={!active} className={`sb-sidebar min-h-0 min-w-0 flex-1 flex-col text-ink ${active ? "flex" : "hidden"}`}>
     <div className="sb-sidebar-heading ui-panel-header"><strong className="ui-section-title">Second Brain</strong>
       <Menu label="Add a brain" triggerClassName="sb-side-icon" trigger={<Plus size={15} />} items={[
@@ -94,6 +96,11 @@ export default function SecondBrainSidebar({ active, open, onOpen }) {
       <div className="sb-side-scroll">
         <Group title="Saved searches">
           {savedSearches.map(item => { const Icon = item.builtIn ? VIEW_ICONS[item.icon] || Search : Search; return <button key={item.id} type="button" className="sb-side-row" aria-current={current("search", item.id) ? "page" : undefined} onClick={() => { applySavedSearch(item.id); onOpen(); }}><Icon size={14} aria-hidden="true" /><span>{item.name}</span><small>{counts[item.id]}</small></button>; })}
+        </Group>
+        <Group title="Projects" count={projects.length} action={<button type="button" className="sb-side-icon" aria-label="Topic map" title="Topic map" onClick={() => go("map", { mapTopicId: "" })}><Network size={14} /></button>}>
+          {projects.slice(0, 8).map(item => <button key={item.id} type="button" className="sb-side-row" aria-current={open && view.section === "projects" && view.projectId === item.id ? "page" : undefined} onClick={() => go("projects", { projectId: item.id, projectTab: "reports" })}><FolderKanban size={14} aria-hidden="true" /><span>{item.name}</span><small>{item.counts.reports + item.counts.knowledge}</small></button>)}
+          {projects.length > 8 ? <button type="button" className="sb-side-row" onClick={() => go("projects", { projectId: "" })}><FolderKanban size={14} aria-hidden="true" /><span>All {projects.length} projects</span></button> : null}
+          {!projects.length && projectsData.data ? <p className="sb-side-hint">Reports saved in Reports/&lt;Project&gt;/ folders or by Rem tasks show up here.</p> : null}
         </Group>
         <Group title="Collections" count={collections.length} action={<button type="button" className="sb-side-icon" aria-label="New collection" title="New collection" onClick={() => { openDialog("new-collection"); onOpen(); }}><Plus size={14} /></button>}>
           {collections.map(item => <button key={item.id} type="button" className="sb-side-row" aria-current={current("collections", item.id) ? "page" : undefined} onClick={() => go("collections", { collectionId: item.id })}><Library size={14} aria-hidden="true" /><span>{item.name}</span><small>{item.sections.reduce((total, section) => total + section.items.length, 0)}</small></button>)}

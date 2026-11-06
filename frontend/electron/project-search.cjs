@@ -7,6 +7,8 @@ const { Worker, isMainThread, parentPort, workerData } = require("node:worker_th
 const run = promisify(execFile);
 const digest = (buffer) => createHash("sha256").update(buffer).digest("hex");
 const safeFiles = require("./safe-files.cjs");
+// The earlier brand's variable name still works for existing benchmark setups.
+const LEGACY_READ_CONCURRENCY_ENV = `${require("./brand-compat.json").brand.toUpperCase()}_SEARCH_READ_CONCURRENCY`;
 const excluded = new Set([".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next"]);
 
 function compileRegex(source, flags, field) {
@@ -53,7 +55,7 @@ async function scanProject(root, options = {}) {
     candidates.sort();
   }
   // Opt in for native filesystem benchmarks; default remains serial until measured.
-  const requestedConcurrency = Number(options.readConcurrency ?? process.env.TASKUROTTA_SEARCH_READ_CONCURRENCY ?? 1);
+  const requestedConcurrency = Number(options.readConcurrency ?? process.env.RATICODE_SEARCH_READ_CONCURRENCY ?? process.env[LEGACY_READ_CONCURRENCY_ENV] ?? 1);
   const concurrency = Number.isInteger(requestedConcurrency) ? Math.max(1, Math.min(4, requestedConcurrency)) : 1;
   async function loadCandidate(relativePath) {
     if (Date.now() > deadline) return {};

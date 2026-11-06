@@ -2,6 +2,7 @@
 // Visual and interaction audit of the Rem home (task sidebar + conversation).
 // Run through run-rem-home-visual.cjs. Scenes use explicit fixtures; no backend or providers.
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -145,7 +146,7 @@ async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
   // A private optimizer cache keeps the running dev app's shared one untouched.
-  vite = await createServer({ root, logLevel: "error", cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), "rem-home-vite-")), server: { host: "127.0.0.1", port: 0 }, plugins: [{
+  vite = await createServer({ root, logLevel: "error", cacheDir: testViteCacheDir("rem-home"), server: { host: "127.0.0.1", port: 0 }, plugins: [{
     name: "rem-home-capture",
     resolveId(id) { if (id === "/rem-home-entry.jsx") return id; },
     load(id) { if (id === "/rem-home-entry.jsx") return entry; },

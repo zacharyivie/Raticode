@@ -62,6 +62,6 @@ Successful output is a string by default, or the value validated by the declared
 
 The chosen provider and working directory must be available. A task label is not an assurance that the provider cannot change files through its own tools; use compatible permissions.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_permissions import provider_permission_args
+from gofer.ui.organization_hours import OperatingHours
 from gofer.utils.process import build_subprocess_env
 
 
@@ -145,6 +146,18 @@ class ExecutionTarget(BaseModel):
         return self
 
 
+TicketAction = Literal["create", "edit", "move", "cancel"]
+TICKET_ACTIONS: list[str] = ["create", "edit", "move", "cancel"]
+
+
+def ticket_allowed(employee: dict[str, Any], project: str | None, action: str) -> bool:
+    """Whether a worker's ticket permissions allow an action in a project."""
+    access = employee.get("ticketAccess")
+    if access is None:
+        return True
+    return action in access.get(project or "*", [])
+
+
 class Employee(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$")
@@ -168,6 +181,12 @@ class Employee(BaseModel):
     workspacePaths: list[str] | None = None
     secretRefs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # How this worker thinks and works, in a sentence or two, and what they own.
+    persona: str = Field(default="", max_length=500)
+    responsibilities: list[str] = Field(default_factory=list, max_length=20)
+    # Per-project ticket permissions. None keeps the organization-wide rules. Otherwise each
+    # project ID, or "*" for tickets outside any project, lists what this worker may do.
+    ticketAccess: dict[str, list[TicketAction]] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -190,6 +209,14 @@ class Employee(BaseModel):
             raise ValueError("Employee name is required")
         if any(s.name in {"organizations", "rem_threads"} for s in self.resources.mcpServers):
             raise ValueError("Organization and thread tools are supplied by the runtime")
+        self.responsibilities = [r.strip() for r in self.responsibilities if r.strip()]
+        if self.ticketAccess is not None:
+            self.ticketAccess = {
+                key: sorted(set(actions), key=TICKET_ACTIONS.index)
+                for key, actions in self.ticketAccess.items()
+            }
+        if any(len(r) > 200 for r in self.responsibilities):
+            raise ValueError("Keep each responsibility under 200 characters")
         return self
 
 
@@ -203,10 +230,43 @@ class Goal(BaseModel):
     status: Literal["active", "achieved", "cancelled"] = "active"
 
 
+PORTABLE_ID = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$"
+DATE = r"^\d{4}-\d{2}-\d{2}$"
+
+
+class Milestone(BaseModel):
+    """A dated outcome. Without projectId it belongs to the whole organization; project
+    milestones may serve one organization milestone through parentId."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=PORTABLE_ID)
+    title: str = Field(min_length=1, max_length=200)
+    short: str = Field(default="", max_length=40)
+    dueAt: str | None = Field(default=None, pattern=DATE)
+    projectId: str | None = None
+    parentId: str | None = None
+    status: Literal["active", "done", "cancelled"] = "active"
+
+
+class Epic(BaseModel):
+    """A body of work inside a project milestone. Tickets point at it through epicId."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=PORTABLE_ID)
+    title: str = Field(min_length=1, max_length=200)
+    milestoneId: str | None = None
+    projectId: str | None = None
+    owner: str | None = None
+    description: str = Field(default="", max_length=4000)
+    status: Literal["active", "done", "cancelled"] = "active"
+
+
 class OrganizationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
+    # One line the whole organization works toward. Shown first and given to every run.
+    mission: str = Field(default="", max_length=500)
     instructions: str = ""
     slug: str = Field(default="organization", pattern=r"^[a-z0-9][a-z0-9_-]{0,99}$")
     employees: list[Employee] = Field(default_factory=list, max_length=100)
@@ -241,6 +301,21 @@ class OrganizationConfig(BaseModel):
     remSecondBrain: dict[str, Any] = Field(default_factory=dict)
     remReportTheme: dict[str, Any] = Field(default_factory=dict)
     executionTargets: list[ExecutionTarget] = Field(default_factory=list, max_length=100)
+    milestones: list[Milestone] = Field(default_factory=list, max_length=500)
+    epics: list[Epic] = Field(default_factory=list, max_length=2000)
+    # Ticket keys read PREFIX-12. Empty uses letters from the organization slug.
+    ticketPrefix: str = Field(default="", pattern=r"^([A-Z][A-Z0-9]{0,7})?$")
+    # Mirror knowledge entries as Markdown into the organization's Second Brain folder.
+    knowledgeToSecondBrain: bool = False
+    # A Git repository Raticode keeps for the whole organization: shared notes, decisions and
+    # files every project can use. Runs change it on their own branch; accepting merges it.
+    sharedRepository: bool = False
+    # When workers may work. Outside these hours nothing starts, and running work stops or
+    # finishes as chosen. Defaults to always, which is how organizations worked before.
+    operatingHours: OperatingHours = Field(default_factory=OperatingHours)
+    # Keep running after Raticode restarts instead of pausing. Interrupted tickets still
+    # wait for review either way.
+    resumeAfterRestart: bool = False
 
     @model_validator(mode="after")
     def validate_graph(self) -> OrganizationConfig:
@@ -308,9 +383,90 @@ class OrganizationConfig(BaseModel):
                 not Path(path).is_absolute() for path in employee.workspacePaths
             ):
                 raise ValueError("Employee workspace grants must be absolute paths")
+        validate_plan(self, ids)
         self.remSecondBrain.pop("grantId", None)
         return self
 
+
+def validate_plan(config: OrganizationConfig, employees: set[str]) -> None:
+    """Milestones, epics and project checks must form a consistent plan."""
+    projects = {p["id"] for p in config.projects}
+    for employee in config.employees:
+        if employee.ticketAccess and set(employee.ticketAccess) - projects - {"*"}:
+            raise ValueError(f"{employee.name}'s ticket permissions name an unknown project")
+    for initiative in config.projects:
+        if not isinstance(initiative.get("autoRunChecks", False), bool):
+            raise ValueError("autoRunChecks must be true or false")
+        checks = initiative.get("checks", [])
+        if not isinstance(checks, list) or len(checks) > 20:
+            raise ValueError("A project can define up to 20 checks")
+        names = set()
+        for check in checks:
+            if (
+                not isinstance(check, dict)
+                or set(check) - {"name", "command"}
+                or not isinstance(check.get("name"), str)
+                or not 1 <= len(check["name"].strip()) <= 100
+                or not isinstance(check.get("command"), str)
+                or not 1 <= len(check["command"].strip()) <= 1000
+            ):
+                raise ValueError("Project checks need a name and a command")
+            if check["name"] in names:
+                raise ValueError("Project check names must be unique")
+            names.add(check["name"])
+    milestones = {m.id: m for m in config.milestones}
+    if len(milestones) != len(config.milestones):
+        raise ValueError("Milestone IDs must be unique")
+    for milestone in config.milestones:
+        if milestone.projectId is not None and milestone.projectId not in projects:
+            raise ValueError(f"Milestone {milestone.title} belongs to an unknown project")
+        if milestone.parentId is not None:
+            parent = milestones.get(milestone.parentId)
+            if milestone.projectId is None:
+                raise ValueError("Only project milestones can serve an organization milestone")
+            if parent is None or parent.projectId is not None:
+                raise ValueError(f"Milestone {milestone.title} serves an unknown milestone")
+    epic_ids = set()
+    for epic in config.epics:
+        if epic.id in epic_ids:
+            raise ValueError("Epic IDs must be unique")
+        epic_ids.add(epic.id)
+        if epic.milestoneId is not None:
+            home = milestones.get(epic.milestoneId)
+            if home is None or home.projectId is None:
+                raise ValueError(f"Epic {epic.title} needs a project milestone")
+            if epic.projectId not in {None, home.projectId}:
+                raise ValueError(f"Epic {epic.title} must belong to its milestone's project")
+            epic.projectId = home.projectId
+        if epic.projectId is None or epic.projectId not in projects:
+            raise ValueError(f"Epic {epic.title} needs a project")
+        if epic.owner is not None and epic.owner not in employees:
+            raise ValueError(f"Epic {epic.title} has an unknown owner")
+
+
+def ticket_prefix(config: dict[str, Any]) -> str:
+    if config.get("ticketPrefix"):
+        return str(config["ticketPrefix"])
+    letters = re.sub(r"[^A-Za-z0-9]", "", str(config.get("slug") or config.get("name") or ""))
+    prefix = letters[:3].upper()
+    return prefix if prefix[:1].isalpha() else "T" + prefix[:2]
+
+
+def number_tickets(tasks: list[dict[str, Any]]) -> None:
+    """Give unnumbered tasks the next ticket numbers in creation order.
+
+    Tasks saved before ticket numbers existed get the same numbers whenever they are
+    read, and keep them once they are next written.
+    """
+    highest = max((t.get("number") or 0 for t in tasks), default=0)
+    for task in tasks:
+        if not task.get("number"):
+            highest += 1
+            task["number"] = highest
+
+
+# Knowledge entries, typed links between work and knowledge, and claims with evidence.
+PLAN_RECORDS = ("knowledge", "links", "claims")
 
 TaskStatus = Literal["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"]
 
@@ -357,6 +513,20 @@ class Task(BaseModel):
     acceptedAt: str | None = None
     # The task's own git worktree and branch when the organization isolates work.
     worktree: dict[str, str] | None = None
+    # The removed worktree's branch, kept so finished work stays inspectable.
+    releasedWorktree: dict[str, str] | None = None
+    # The ticket's worktree of the organization's shared repository, while it is open.
+    sharedWorktree: dict[str, str] | None = None
+    # A heartbeat check-in Raticode created, not work someone planned.
+    heartbeat: bool = False
+    # When a worker, you or Rem asked to work on this next ("move to In progress").
+    pulledAt: str | None = None
+    # Ticket fields: the epic this belongs to, its number in PREFIX-n, what done means,
+    # and knowledge entries the plan links to.
+    epicId: str | None = None
+    number: int | None = Field(default=None, ge=1)
+    doneWhen: str = Field(default="", max_length=1000)
+    knowledge: list[str] = Field(default_factory=list, max_length=50)
 
 
 class OrganizationStore:
@@ -613,6 +783,7 @@ class OrganizationStore:
             task = Task.model_validate(json.loads(item["body"])).model_dump()
             task["comments"] = comments.get(task["id"], [])
             org["runtime"]["tasks"].append(task)
+        number_tickets(org["runtime"]["tasks"])
         for kind in (
             "attempts",
             "requests",
@@ -624,6 +795,7 @@ class OrganizationStore:
             "usage",
             "webhooks",
             "webhookReceipts",
+            *PLAN_RECORDS,
         ):
             org["runtime"][kind] = {
                 item["id"]: json.loads(item["body"])
@@ -670,7 +842,9 @@ class OrganizationStore:
             "usage",
             "webhooks",
             "webhookReceipts",
+            *PLAN_RECORDS,
         }
+        number_tickets(runtime.get("tasks", []))
         for kind in collections - {"tasks"}:
             for key, value in runtime.get(kind, {}).items():
                 db.execute(
@@ -805,6 +979,13 @@ class OrganizationStore:
                 )
                 if (task["claim"] and (disruptive or task["assignee"] in affected)) or orphaned:
                     task.update(claim=None, status="blocked", revision=task["revision"] + 1)
+                    task["blockReason"] = (
+                        "Its worker, project, goal or reviewer was removed. "
+                        "Reassign it, then reopen it."
+                        if orphaned
+                        else "Stopped because the configuration changed while it ran. "
+                        "Review it, then reopen it."
+                    )
                     task["comments"].append(
                         {
                             "actor": "system",
@@ -1144,14 +1325,27 @@ class OrganizationStore:
             "checkedAt": now(),
         }
 
-    def events(self, project: str, oid: str, after: int = 0) -> list[dict[str, Any]]:
+    def events(
+        self, project: str, oid: str, after: int = 0, recent: int = 0
+    ) -> list[dict[str, Any]]:
+        """Activity after a cursor, or the latest `recent` entries a person would read:
+        no run transcripts, restart recoveries or internal checkpoints."""
         self.get(project, oid)
         with self.connect() as db:
-            rows = db.execute(
-                "SELECT * FROM organization_events WHERE organization=? "
-                "AND sequence>? ORDER BY sequence LIMIT 500",
-                (oid, after),
-            ).fetchall()
+            if recent:
+                rows = db.execute(
+                    "SELECT * FROM (SELECT * FROM organization_events WHERE organization=? "
+                    "AND kind NOT IN ('turn_event', 'runtime_recovered', 'consent_checked', "
+                    "'check_started', 'memory_check') ORDER BY sequence DESC LIMIT ?) "
+                    "ORDER BY sequence",
+                    (oid, min(max(recent, 1), 500)),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM organization_events WHERE organization=? "
+                    "AND sequence>? ORDER BY sequence LIMIT 500",
+                    (oid, after),
+                ).fetchall()
         return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
 
     def turn_events(self, oid: str, turn: str, limit: int = 2000) -> list[dict[str, Any]]:
@@ -1193,6 +1387,14 @@ class OrganizationStore:
             g["id"] for g in config.get("goalRecords", [])
         }:
             raise ValueError("Unknown goal")
+        if task.get("epicId"):
+            epic = next((e for e in config.get("epics", []) if e["id"] == task["epicId"]), None)
+            if epic is None:
+                raise ValueError("Unknown epic")
+            # A ticket counts against its epic's project budget, so they always agree.
+            if task.get("project") not in {None, epic["projectId"]}:
+                raise ValueError("A ticket's project must match its epic's project")
+            task["project"] = epic["projectId"]
         graph = {t["id"]: t.get("dependsOn", []) for t in tasks}
         graph[task["id"]] = task.get("dependsOn", [])
 

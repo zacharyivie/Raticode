@@ -1103,13 +1103,14 @@ def test_semantic_search_uses_real_stored_vectors_and_excludes_old_models(
     current["settings"]["semantic"] = True
     library.put_brain(current)
     monkeypatch.setattr(library, "_embedding", lambda *args, **kwargs: [1.0, 0.0])
+    monkeypatch.setattr(library, "_embed_many", lambda texts, *args: [[1.0, 0.0] for _ in texts])
     library.embed(brain["id"], threading.Event())
     result = library.search(
         {"brainId": brain["id"], "query": "different wording", "mode": "semantic"}
     )
     assert result["hits"] and result["hits"][0]["docId"] == doc["id"]
     with library.connect() as db:
-        db.execute("UPDATE vectors SET version='other-model'")
+        db.execute("UPDATE embeddings SET version='other-model'")
     assert (
         library.search({"brainId": brain["id"], "query": "different wording", "mode": "semantic"})[
             "hits"
@@ -1231,7 +1232,9 @@ def test_registered_mcp_reads_only_selected_brains_and_rechecks_privacy(
             for item in library.entities("documents")
             if item["path"] == "Reports/thread-note.md"
         )
-        assert generated["origin"] == "generated"
+        # Rem-saved files are labelled as agent knowledge but stay usable as evidence.
+        assert generated["origin"] == "agent" and generated["type"] == "report"
+        assert report["provenance"]["savedVia"] == "rem_thread"
         with pytest.raises(ValueError, match="not selected"):
             call("search", {"brainId": "not-selected"})
         library.update_brain({"id": brain["id"], "patch": {"settings": {"allowCloud": False}}})

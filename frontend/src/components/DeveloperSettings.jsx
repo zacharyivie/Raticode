@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
+import AppLogViewer from "./AppLogViewer.jsx";
 import ReportThemeSettings from "./ReportThemeSettings.jsx";
 
 export default function DeveloperSettings() {
   const [info, setInfo] = useState(null);
-  const [log, setLog] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const bridge = window.goferDesktop?.developer;
@@ -12,18 +12,20 @@ export default function DeveloperSettings() {
     setError(""); setBusy(true);
     try {
       if (action === "copy") await navigator.clipboard.writeText(JSON.stringify(await bridge.info(), null, 2));
-      else { const result = await bridge.action(action); if (action === "read-log") setLog(result); else if (typeof result === "string" && result) throw new Error(result); }
+      else { const result = await bridge.action(action); if (typeof result === "string" && result) throw new Error(result); }
       setInfo(await bridge.info());
     } catch (cause) { setError(cause.message); }
     finally { setBusy(false); }
   }
   if (!bridge) return <p className="py-3 text-xs text-muted">Developer diagnostics are available in the desktop app.</p>;
   return <div className="space-y-4 py-3">
-    <p className="text-xs text-muted">The app log records desktop, backend, and renderer errors. It keeps up to four 5 MB files. Conversation content belongs in Rem&apos;s archive.</p>
-    {info ? <dl className="space-y-2 text-xs">{[["Version", info.version], ["Platform", info.platform], ["Electron / Node", `${info.electron} / ${info.node}`], ["Backend", info.backend], ["Application data", info.dataDir], ["Desktop settings and chat history", info.userData], ["App log", info.appLog], ["Conversation archive", info.archiveFolder || "Not configured"]].map(([label, value]) => <div key={label}><dt className="font-semibold">{label}</dt><dd className="select-text break-all text-muted">{value}</dd></div>)}</dl> : <p className="text-xs text-muted">Loading diagnostics…</p>}
-    <div className="flex flex-wrap gap-2">{[["logs", "Open logs folder"], ["read-log", "View recent log"], ["data", "Open app data"], ["user-data", "Open desktop data"], ["copy", "Copy diagnostics"], ["devtools", "Open developer tools"], ["restart", "Restart backend"]].map(([action, label]) => <button key={action} type="button" disabled={busy} className="rounded border border-line px-2 py-1 text-xs hover:bg-slate-50 focus-visible:outline disabled:opacity-40" onClick={() => { if (action !== "restart" || window.confirm("Restart the backend? Active requests will be interrupted. You will be asked to save or preserve unsaved file drafts.")) void act(action); }}>{label}</button>)}</div>
-    {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
-    {log !== null ? <pre aria-label="Recent app log" className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-50 p-2 text-[10px]">{log || "No log entries yet."}</pre> : null}
+    <AppLogViewer bridge={bridge} logFile={info?.appLog} version={info?.version} platform={info?.platform} />
+    <div className="space-y-3 border-t border-line pt-3">
+      <h3 className="text-xs font-semibold">Diagnostics</h3>
+      {info ? <dl className="space-y-2 text-xs">{[["Version", info.version], ["Platform", info.platform], ["Electron / Node", `${info.electron} / ${info.node}`], ["Backend", info.backend], ["Application data", info.dataDir], ["Desktop settings and chat history", info.userData], ["App log", info.appLog], ["Conversation archive", info.archiveFolder || "Not configured"]].map(([label, value]) => <div key={label}><dt className="font-semibold">{label}</dt><dd className="select-text break-all text-muted">{value}</dd></div>)}</dl> : <p className="text-xs text-muted">Loading diagnostics…</p>}
+      <div className="flex flex-wrap gap-2">{[["logs", "Open logs folder"], ["data", "Open app data"], ["user-data", "Open desktop data"], ["copy", "Copy diagnostics"], ["devtools", "Open developer tools"], ["restart", "Restart backend"]].map(([action, label]) => <button key={action} type="button" disabled={busy} className="rounded border border-line px-2 py-1 text-xs hover:bg-slate-50 focus-visible:outline disabled:opacity-40" onClick={() => { if (action !== "restart" || window.confirm("Restart the backend? Active requests will be interrupted. You will be asked to save or preserve unsaved file drafts.")) void act(action); }}>{label}</button>)}</div>
+      {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
+    </div>
   </div>;
 }
 
