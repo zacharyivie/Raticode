@@ -54,7 +54,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "pytest-mock>=3.14",
-    "mypy>=2.3.1",
+    "mypy>=2.4.1",
     "types-PyYAML>=6.0.12",
     "ruff>=0.4",
 ]
