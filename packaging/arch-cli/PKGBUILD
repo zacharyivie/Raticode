@@ -1,6 +1,6 @@
 # Maintainer: Raticode <maintainers@raticode.local>
 pkgname=raticode-cli
-pkgver=0.5.1
+pkgver=0.5.2
 pkgrel=1
 pkgdesc="Command line workflow automation tool for Raticode"
 arch=("x86_64")

@@ -3,7 +3,9 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used an earlier product name.
 
-## Unreleased
+## 0.5.2 - 2026-11-06
+
+Changes since the `v0.5.1` tag.
 
 ### Changed
 

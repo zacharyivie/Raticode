@@ -1,6 +1,6 @@
 # Maintainer: Raticode <maintainers@raticode.local>
 pkgname=raticode-desktop
-pkgver=0.5.1
+pkgver=0.5.2
 pkgrel=1
 pkgdesc="Local workflow automation studio for Raticode"
 arch=("x86_64")

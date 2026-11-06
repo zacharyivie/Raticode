@@ -1,6 +1,6 @@
 pkgbase = raticode-cli
 	pkgdesc = Command line workflow automation tool for Raticode
-	pkgver = 0.5.1
+	pkgver = 0.5.2
 	pkgrel = 1
 	url = https://github.com/zacharyivie/Raticode
 	arch = x86_64
@@ -8,7 +8,7 @@ pkgbase = raticode-cli
 	conflicts = gofer-flow-cli
 	replaces = gofer-flow-cli
 	options = !strip
-	source_x86_64 = raticode-cli-linux-x64-0.5.1::https://github.com/zacharyivie/Raticode/releases/download/v0.5.1/raticode-cli-linux-x64
+	source_x86_64 = raticode-cli-linux-x64-0.5.2::https://github.com/zacharyivie/Raticode/releases/download/v0.5.2/raticode-cli-linux-x64
 	sha256sums_x86_64 = SKIP
 
 pkgname = raticode-cli
