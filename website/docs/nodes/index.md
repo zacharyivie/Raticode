@@ -43,6 +43,8 @@ Each reference page contains a complete source example, the node's configuration
 | [workflow](./workflow.md) | Call a child workflow's public interface |
 | [approval-gate](./approval-gate.md) | Obtain a human decision |
 | [notification](./notification.md) | Notify a desktop or external channel |
+| [rem-prompt](./rem-prompt.md) | Ask Rem and use its reply |
+| [rem-task](./rem-task.md) | Run one of Rem's tasks and wait for its result |
 | [http-request](./http-request.md) | Call a service and expose its response |
 
 ## Local retrieval
@@ -85,9 +87,9 @@ Do not invent node types named start, pass, fail, branch, or join. Use shared fi
 Copy a complete example into `workflow.rattish` in a disposable project and create any prerequisite files mentioned on its page. Check and preflight do not execute nodes:
 
 ```bash
-gof rattish format workflow.rattish
-gof rattish check workflow.rattish --format json
-gof rattish preflight workflow.rattish --format json
+Raticode rattish format workflow.rattish
+Raticode rattish check workflow.rattish --format json
+Raticode rattish preflight workflow.rattish --format json
 ```
 
 An environment-dependent preflight diagnostic can mean a provider, notifier, interpreter, index, or opener is missing. Resolve that requirement before execution rather than bypassing the check.

@@ -9,18 +9,18 @@ pageClass: docs-layout
 Watchers respond to filesystem changes instead of requiring a manual run.
 
 ::: warning Rattish compatibility boundary
-The current `gof watch` service discovers legacy `.toml` workflows in its data directory. It does not discover project-registered `workflow.rattish` sources. Rattish 1 does not define a watch declaration. These docs do not create TOML as a workaround.
+The current `Raticode watch` service discovers legacy `.toml` workflows in its data directory. It does not discover project-registered `workflow.rattish` sources. Rattish 1 does not define a watch declaration. These docs do not create TOML as a workaround.
 :::
 
 ## Existing watcher service
 
-For already compatible watcher registrations, `gof watch list` displays the path, glob, mode, concurrency, recursion, and debounce. `gof watch start` runs watchers in the foreground. Ctrl+C stops that process. `--poll-interval` controls filesystem scan frequency, not the workflow's timeout.
+For already compatible watcher registrations, `Raticode watch list` displays the path, glob, mode, concurrency, recursion, and debounce. `Raticode watch start` runs watchers in the foreground. Ctrl+C stops that process. `--poll-interval` controls filesystem scan frequency, not the workflow's timeout.
 
 The watcher only operates while that process is running. It does not create an OS service or guarantee that a sleeping computer will process every event immediately.
 
 ## Connect a Rattish workflow
 
-Use a filesystem service you explicitly configure to call `gof rattish run WORKFLOW_PATH`. The external tool owns event selection and debounce; Raticode owns that invoked workflow's validation and execution.
+Use a filesystem service you explicitly configure to call `Raticode rattish run WORKFLOW_PATH`. The external tool owns event selection and debounce; Raticode owns that invoked workflow's validation and execution.
 
 Start with one watched input directory and a separate output directory. Writing reports back into the same watched glob can retrigger the workflow. Add exclusions, bounded concurrency, and clear failure handling before using the watcher unattended.
 

@@ -610,7 +610,7 @@ def test_global_health_reports_workflow_assistant_cli_packaging(
     assert any(
         item["id"] == "packaging.gofer_cli"
         and item["severity"] == "warning"
-        and "no authoritative 'gof' executable" in item["message"]
+        and "no authoritative 'Raticode' executable" in item["message"]
         for item in payload["warnings"]
     )
 

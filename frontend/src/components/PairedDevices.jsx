@@ -36,7 +36,9 @@ function Step({ number, title, children }) {
 }
 
 function Toggle({ checked, disabled, saving = false, title, description, hint, onChange }) {
-  return <label aria-busy={saving} className={`flex items-start gap-4 py-3 ${disabled ? "cursor-default" : "cursor-pointer"}`}>
+  // relative: keeps the hidden checkbox inside this row. Without it, focusing the
+  // switch scrolled the whole Settings panel to reach the checkbox.
+  return <label aria-busy={saving} className={`relative flex items-start gap-4 py-3 ${disabled ? "cursor-default" : "cursor-pointer"}`}>
     <span className="min-w-0 flex-1"><span className="block font-medium">{title}</span>
       <span className="mt-0.5 block text-muted">{description}</span>
       {saving ? <span role="status" className="mt-1 block text-[11px] font-medium text-info">Saving…</span>

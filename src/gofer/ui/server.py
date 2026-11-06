@@ -164,7 +164,7 @@ from gofer.ui.organizations import OrganizationManager
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_models import RemConflict
 from gofer.ui.swarms import SwarmManager
-from gofer.utils.logging import get_logger
+from gofer.utils.logging import configure_backend_logging, get_logger, reset_backend_logging
 from gofer.utils.paths import get_data_dir, restrict_to_owner
 
 log = get_logger(__name__)
@@ -512,6 +512,13 @@ class GoferUiServer(ThreadingHTTPServer):
             steering=self.chat_steering,
             authorize=self._authorize_rem_home,
             context=self._rem_home_context,
+        )
+        # Reports Rem tasks save into a brain get a report record with how they were made.
+        self.rem_home.brain_library = self.second_brains
+        organizations = self.organizations
+        # The Second Brain shows which organization tickets read or quoted a note.
+        self.second_brains.organization_source = lambda: (
+            organizations.store.list_organizations() if organizations.enabled else []
         )
         if self.devices is not None:
             self.devices.attach_desktop(
@@ -1229,6 +1236,10 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             "run_events",
             "audit_verify",
             "run_input",
+            "knowledge_search",
+            "knowledge_read",
+            "ticket_changes",
+            "repository",
         } | READ_OPERATIONS
         if method == "GET" and action not in read_actions:
             raise ValueError("Mutations require POST")
@@ -4124,6 +4135,13 @@ def _install_shutdown_handlers(server: GoferUiServer) -> None:
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = None) -> None:
+    configure_backend_logging()
+    log.info(
+        "Starting Raticode backend (Python %s, %s %s)",
+        sys.version.split()[0],
+        sys.platform,
+        os.uname().machine if hasattr(os, "uname") else "",
+    )
     server = create_server(host=host, port=port, data_dir=data_dir)
     server.scheduler.start(paused=True)
     server.sync_schedules()
@@ -4146,7 +4164,9 @@ def serve(host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = Non
         server.watcher.shutdown(wait=False)
         server.scheduler.shutdown(wait=False)
         server.server_close()
+        log.info("Raticode backend stopped")
         print("GOFER_UI_STOPPED", file=sys.stderr, flush=True)
+        reset_backend_logging()
 
 
 if __name__ == "__main__":

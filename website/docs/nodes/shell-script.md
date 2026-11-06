@@ -67,6 +67,6 @@ For example, refer to `node.step.output.stdout` from a compatible downstream bin
 
 Bash must be on PATH and the script must be readable. The script runs with workflow permissions and can perform any effects allowed by that environment.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

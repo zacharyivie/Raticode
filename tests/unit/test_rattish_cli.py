@@ -17,11 +17,11 @@ def test_distribution_packages_rattish_assistant_resources() -> None:
     included = project["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
 
     assert included["rattish/spec"] == "gofer/rattish/assets/docs"
-    assert included["skills/gofer-flow-workflow-builder"] == "gofer/rattish/assets/assistant-skill"
-    frozen_build = (repository / "gof.spec").read_text(encoding="utf-8")
+    assert included["skills/raticode-workflow-builder"] == "gofer/rattish/assets/assistant-skill"
+    frozen_build = (repository / "raticode.spec").read_text(encoding="utf-8")
     assert '("rattish/spec", "gofer/rattish/assets/docs")' in frozen_build
     assert (
-        '("skills/gofer-flow-workflow-builder", "gofer/rattish/assets/assistant-skill")'
+        '("skills/raticode-workflow-builder", "gofer/rattish/assets/assistant-skill")'
         in frozen_build
     )
 

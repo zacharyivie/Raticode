@@ -1,0 +1,7 @@
+Rattish: 1
+Workflow:
+  name: Rem task contract
+Node example:
+  type: rem-task
+  task-id: 6f14453e-ac95-4c3c-8523-52f4e03d605c
+  instructions: Use the release notes from the previous step.

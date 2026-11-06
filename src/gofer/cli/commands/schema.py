@@ -69,7 +69,7 @@ def mutation_command_contract(command_id: str) -> dict[str, object]:
         command = commands[part]
     return {
         "id": f"mutation.{command_id}",
-        "command": "gof " + " ".join(parts),
+        "command": "Raticode " + " ".join(parts),
         "description": command.help,
         "parameters": [_parameter_contract(param, command_id) for param in command.params],
     }

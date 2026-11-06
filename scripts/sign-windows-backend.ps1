@@ -7,7 +7,7 @@ try {
     [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:CSC_LINK))
     $password = ConvertTo-SecureString $env:CSC_KEY_PASSWORD -AsPlainText -Force
     $certificate = Get-PfxCertificate -FilePath $certificatePath -Password $password
-    $signature = Set-AuthenticodeSignature -FilePath dist/gof.exe -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
+    $signature = Set-AuthenticodeSignature -FilePath dist/Raticode.exe -Certificate $certificate -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
     if ($signature.Status -ne "Valid") { throw "Backend signing failed: $($signature.Status)" }
 } finally {
     Remove-Item $certificatePath -Force -ErrorAction SilentlyContinue

@@ -4,6 +4,7 @@
 // pointer slides off it) and stops on release; Press to start and stop toggles. Neither
 // needs a Done click, and stopping goes straight on to the tidied words.
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const { app, BrowserWindow, session } = require("electron");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -53,7 +54,7 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler(() => true);
   const frontend = path.resolve(__dirname, "..");
   const { createServer } = await import("vite");
-  server = await createServer({ root: frontend, configFile: false, logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [(await import("@vitejs/plugin-react")).default(), {
+  server = await createServer({ cacheDir: testViteCacheDir(), root: frontend, configFile: false, logLevel: "error", server: { host: "127.0.0.1", port: 0 }, plugins: [(await import("@vitejs/plugin-react")).default(), {
     name: "dictation-modes-fixture", configureServer(dev) { dev.middlewares.use(async (req, res, next) => {
       if (!req.url.startsWith("/?")) return next();
       res.setHeader("Content-Type", "text/html");

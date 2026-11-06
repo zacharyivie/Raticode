@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import threading
 import time
 import tomllib
@@ -5314,7 +5315,7 @@ def _rattish_plan_payload(
                         "id": node["id"],
                         "label": node["id"],
                         "type": node["type"],
-                        "detail": _rattish_node_detail(node),
+                        "detail": _rattish_node_detail(node, data_dir),
                         "sideEffects": [effect.replace("_", " ") for effect in node["effects"]],
                         "workingDir": node["configuration"].get("working_dir"),
                         "bindings": bindings_by_node[node["id"]],
@@ -5415,8 +5416,21 @@ def _rattish_schema_type(schema: Any) -> str:
     return "any"
 
 
-def _rattish_node_detail(node: dict[str, Any]) -> str:
+def _rattish_node_detail(node: dict[str, Any], data_dir: Path) -> str:
     configuration = node["configuration"]
+    if node["type"] == "rem-task":
+        from gofer.ui.rem_workflow import live_tasks
+
+        task_id = str(configuration["task_id"])
+        try:
+            title = next((t["title"] for t in live_tasks(data_dir) if t["id"] == task_id), "")
+        except (OSError, sqlite3.Error):
+            title = ""
+        mode = "runs and waits for" if configuration.get("wait", True) else "starts"
+        return f"{mode} Rem task {title or task_id}"
+    if node["type"] == "rem-prompt":
+        mode = "may start work" if configuration.get("allow_actions") else "answer only"
+        return f"asks Rem ({mode}): {str(configuration.get('prompt') or '')[:120]}"
     for field in (
         "command",
         "script_path",

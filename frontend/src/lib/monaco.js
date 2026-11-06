@@ -108,7 +108,7 @@ function registerRattishLanguage() {
         [/\b\d+(?:\.\d+)?(?:ms|s|m|h|d)?\b/, "number"],
         [/\b(?:and|or|not|contains|matches|exists|is)\b/, "keyword.operator"],
         [/(?:==|!=|<=|>=|<|>)/, "operator"],
-        [/\b(?:agent|bash-command|python-script|prompt-file|file|folder|open-resource|http-request|notification|approval-gate|local-search|local-vectorize|common-llm-task|loop|break|workflow)\b/, "type"],
+        [/\b(?:agent|bash-command|python-script|prompt-file|file|folder|open-resource|http-request|notification|approval-gate|local-search|local-vectorize|common-llm-task|rem-prompt|rem-task|loop|break|workflow)\b/, "type"],
         [/^(\s*)([A-Za-z][A-Za-z0-9-]*)(\s*:)/, ["", "attribute.name", "delimiter"]],
         [/[{},]/, "delimiter"],
       ],

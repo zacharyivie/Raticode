@@ -29,8 +29,8 @@ A global thread needs a project selection before project file editing. Read-only
 ## A workflow will not validate
 
 ```bash
-gof rattish check WORKFLOW_PATH --format json
-gof rattish preflight WORKFLOW_PATH --format json
+Raticode rattish check WORKFLOW_PATH --format json
+Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
 Read each diagnostic's node and field. Common causes include unknown node IDs, misspelled provider IDs, underscore configuration fields instead of hyphenated fields, invalid output selectors, incompatible input types, and missing executables or files.
@@ -45,7 +45,7 @@ Review routes and `allow-fail` before adding retries. Retrying a write, network 
 
 ## Scheduling or queueing rejects Rattish
 
-The built-in scheduler, watcher, and runner queue still use legacy workflow-loading paths. Read their compatibility notes. For current Rattish source, an external trigger can invoke `gof rattish run`; validation remains a separate step.
+The built-in scheduler, watcher, and runner queue still use legacy workflow-loading paths. Read their compatibility notes. For current Rattish source, an external trigger can invoke `Raticode rattish run`; validation remains a separate step.
 
 ## Knowledge is not found or a report did not save
 

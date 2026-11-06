@@ -1,0 +1,74 @@
+{
+  "$schema": "../schemas/node-contract.schema.json",
+  "contract_version": 1,
+  "node_type": "rem-prompt",
+  "runtime_handler": "raticode.rem_prompt",
+  "configuration_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "prompt": {"type": "string", "minLength": 1, "maxLength": 100000},
+      "allow_actions": {"type": "boolean"},
+      "wait_for_tasks": {"type": "boolean"}
+    },
+    "required": ["prompt"],
+    "additionalProperties": false
+  },
+  "defaults": {
+    "allow_actions": false,
+    "wait_for_tasks": false
+  },
+  "computed_defaults": {},
+  "input_ports": {
+    "mode": "closed",
+    "ports": {
+      "prompt": {
+        "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "string"},
+        "required": false,
+        "delivery": "local_binding",
+        "encoding": "identity"
+      }
+    }
+  },
+  "success_output": {
+    "kind": "fixed",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "reply": {"type": "string"},
+        "details": {"type": "string"},
+        "request_id": {"type": "string"},
+        "message_id": {"type": "string"},
+        "actions_dropped": {"type": "boolean"},
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task_id": {"type": "string"},
+              "run_id": {"type": "string"},
+              "title": {"type": "string"},
+              "state": {"type": "string"},
+              "succeeded": {"type": "boolean"},
+              "summary": {"type": "string"},
+              "result": {"type": "string"},
+              "artifacts": {"type": "array", "items": {"type": "string"}},
+              "thread_id": {"type": "string"}
+            },
+            "required": ["task_id", "run_id", "title", "state", "succeeded", "summary", "result", "artifacts", "thread_id"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["reply", "details", "request_id", "message_id", "actions_dropped", "tasks"],
+      "additionalProperties": false
+    }
+  },
+  "error_kinds": ["cancelled", "configuration", "internal", "output_validation", "rem", "timeout"],
+  "effects": ["provider", "state_write"],
+  "preflight_checks": [
+    {"id": "rem-ready", "severity": "error", "description": "Rem's task store must be readable in this Raticode data folder."}
+  ],
+  "static_diagnostics": []
+}

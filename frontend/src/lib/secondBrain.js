@@ -5,7 +5,7 @@
 export const DOCUMENT_TYPES = [["note", "Note"], ["report", "Report"], ["text", "Text"], ["html", "Web page"], ["pdf", "PDF"], ["capture", "Web capture"]];
 export const DATE_FIELDS = [["modified", "Modified"], ["added", "Added"], ["published", "Published"], ["captured", "Captured"], ["generated", "Report generated"]];
 export const READING_STATES = [["unread", "Unread"], ["starred", "Starred"], ["reviewed", "Reviewed"], ["highlighted", "Highlighted"], ["annotated", "Has annotations"]];
-export const ORIGINS = [["authored", "User-authored"], ["imported", "Imported"], ["generated", "Generated"]];
+export const ORIGINS = [["authored", "User-authored"], ["imported", "Imported"], ["agent", "Saved by an agent"], ["generated", "Generated"]];
 export const EXTRACTION_STATES = [["ready", "Ready"], ["pending", "Pending extraction"], ["ocr", "Needs OCR"], ["failed", "Extraction failed"]];
 export const CITATION_FILTERS = [["has-source", "Has source URL or DOI"], ["cites", "Cites other documents"], ["cited", "Cited by a report"], ["needs-review", "Citations needing review"]];
 export const SEARCH_MODES = [["exact", "Exact"], ["semantic", "Related meaning"], ["hybrid", "Combined"]];

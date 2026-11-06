@@ -6,6 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const os = require('node:os');
 const { featureEnv, featureStates, readFeatureChoices, writeFeatureChoice } = require('../feature-preview.cjs');
+const { createBackendOutput } = require('../backend-log.cjs');
 
 const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
 const startupSource = source.slice(source.indexOf('function startBackend('), source.indexOf('function getBackendCommand()'));
@@ -18,7 +19,10 @@ function harness(t) {
   const stopped = [];
   const crashes = [];
   const logs = [];
+  const entries = [];
   const context = {
+    applicationLog: { write: (...args) => entries.push(args) },
+    createBackendOutput, path, Date,
     reportPdfService: { env: { RATICODE_REPORT_PDF_URL: 'http://127.0.0.1:1234/pdf', RATICODE_REPORT_PDF_TOKEN: 'pdf-test-token' } },
     backendPathGrants: { reset() {} },
     process: { env: { RATICODE_EXPERIMENTAL_ORGANIZATIONS: '1' }, stderr: { write() {} } },
@@ -42,6 +46,9 @@ function harness(t) {
       // Feature Preview choices replace the inherited environment.
       assert.equal(options.env.RATICODE_DEVICE_EXPERIMENTAL_NETWORK, '1');
       assert.equal('RATICODE_EXPERIMENTAL_ORGANIZATIONS' in options.env, false);
+      // Backend log records come back as JSON lines the desktop can file by level.
+      assert.equal(options.env.GOFER_LOG_FORMAT, 'desktop');
+      assert.equal(options.env.GOFER_LOG_LEVEL, 'debug');
       return child;
     },
     createBackendLogStream: () => null,
@@ -52,7 +59,7 @@ function harness(t) {
     showBackendCrash: error => crashes.push(error),
   };
   const start = vm.runInNewContext(`${startupSource}\nstartBackend`, context);
-  return { start, child, stopped, crashes, logs };
+  return { start, child, stopped, crashes, logs, entries };
 }
 
 function emitReady(child) {
@@ -60,7 +67,7 @@ function emitReady(child) {
 }
 
 test('slow backend stays alive and all readiness waiters resume after ten minutes', async t => {
-  const { start, child, stopped, logs } = harness(t);
+  const { start, child, stopped, logs, entries } = harness(t);
   const ready = start(43210);
   let state = 'pending';
   ready.then(() => { state = 'ready'; }, () => { state = 'failed'; });
@@ -80,6 +87,26 @@ test('slow backend stays alive and all readiness waiters resume after ten minute
   }
   assert.equal(stopped.length, 0);
   assert.doesNotMatch(logs.join(''), /test-token/);
+  assert.doesNotMatch(JSON.stringify(entries), /test-token/);
+  assert.ok(entries.some(([level, source, message]) => level === 'info' && source === 'backend' && message === 'Loading backend'));
+  assert.ok(entries.some(([level, , message]) => level === 'info' && /^Backend ready at http:\/\/127\.0\.0\.1:43210 after \d+\.\d s$/.test(message)));
+});
+
+test('backend log records keep their level and an unexpected exit is an error entry', async t => {
+  const { start, child, crashes, entries } = harness(t);
+  const ready = start();
+  emitReady(child);
+  await ready;
+  const record = JSON.stringify({ level: 'warn', logger: 'gofer.devices.service', message: 'Phone could not sign in' });
+  child.stderr.emit('data', Buffer.from(`GOFER_LOG ${record}\nTraceback (most recent call last):\nValueError: boom\n`));
+  child.emit('exit', 1, null);
+  assert.deepEqual(entries.find(entry => entry[3] === 'gofer.devices.service'), ['warn', 'devices', 'Phone could not sign in', 'gofer.devices.service']);
+  assert.deepEqual(entries.find(entry => entry[3] === 'stderr'), ['error', 'backend', 'Traceback (most recent call last):\nValueError: boom', 'stderr']);
+  assert.match(entries.at(-1)[2], /^Backend stopped unexpectedly after \d+\.\d s \(exit code 1\)$/);
+  assert.equal(entries.at(-1)[0], 'error');
+  // The crash window shows readable lines, not raw JSON.
+  assert.match(crashes[0].message, /WARN gofer\.devices\.service: Phone could not sign in/);
+  assert.doesNotMatch(crashes[0].message, /GOFER_LOG/);
 });
 
 test('backend spawn errors still reject startup', async t => {

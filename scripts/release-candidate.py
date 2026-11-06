@@ -76,7 +76,7 @@ def versions(root: Path = ROOT) -> str:
     frontend = json.loads((root / "frontend/package.json").read_text())["version"]
     lock = json.loads((root / "frontend/package-lock.json").read_text())
     python_lock = tomllib.loads((root / "uv.lock").read_text())
-    locked = [p["version"] for p in python_lock["package"] if p["name"] == "gofer-flow"]
+    locked = [p["version"] for p in python_lock["package"] if p["name"] == "raticode"]
     require(re.fullmatch(r"\d+\.\d+\.\d+", python), "Only stable x.y.z versions can be published")
     require(
         frontend == lock["version"] == lock["packages"][""]["version"] == python,
@@ -92,9 +92,9 @@ def required_files(version: str, signed: bool = False) -> dict[str, set[str]]:
             f"Raticode-{version}-x86_64.AppImage",
             f"Raticode-{version}-amd64.deb",
             f"Raticode-{version}-x86_64.rpm",
-            f"gofer-flow-cli_{version}_amd64.deb",
-            f"gofer-flow-cli-{version}-1.x86_64.rpm",
-            "gof-linux-x64",
+            f"raticode-cli_{version}_amd64.deb",
+            f"raticode-cli-{version}-1.x86_64.rpm",
+            "raticode-cli-linux-x64",
             "latest-linux.yml",
             "checksums-linux.txt",
             "package-tests-linux.json",
@@ -102,7 +102,7 @@ def required_files(version: str, signed: bool = False) -> dict[str, set[str]]:
         "windows": {
             f"Raticode-Setup-{version}.exe",
             f"Raticode-Setup-{version}.exe.blockmap",
-            "gof-windows-x64.exe",
+            "raticode-cli-windows-x64.exe",
             "latest.yml",
             "checksums-windows.txt",
             "package-tests-windows.json",
@@ -112,7 +112,7 @@ def required_files(version: str, signed: bool = False) -> dict[str, set[str]]:
             f"Raticode-{version}-arm64.dmg.blockmap",
             f"Raticode-{version}-arm64.zip",
             f"Raticode-{version}-arm64.zip.blockmap",
-            "gof-macos-arm64",
+            "raticode-cli-macos-arm64",
             "latest-mac.yml",
             "checksums-macos.txt",
             "package-tests-macos.json",
@@ -195,13 +195,13 @@ def create_manifest(
     version = versions()
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "Expected full source SHA")
     require(
-        {p.name for p in source.iterdir()} == {f"gofer-flow-{g}" for g in GROUPS},
+        {p.name for p in source.iterdir()} == {f"raticode-{g}" for g in GROUPS},
         "Expected exactly all three platform artifacts and audit evidence",
     )
-    records = [a for a in artifacts if a["name"].startswith("gofer-flow-")]
+    records = [a for a in artifacts if a["name"].startswith("raticode-")]
     require(
         len(records) == len(GROUPS)
-        and {a["name"] for a in records} == {f"gofer-flow-{g}" for g in GROUPS},
+        and {a["name"] for a in records} == {f"raticode-{g}" for g in GROUPS},
         "Run artifact inventory is incomplete or ambiguous",
     )
     require(all(not a["expired"] and a["id"] for a in records), "Candidate artifacts expired")
@@ -209,7 +209,7 @@ def create_manifest(
     require(not list(output.iterdir()), "Manifest output directory must be empty")
     files = {}
     for group in GROUPS:
-        folder = source / f"gofer-flow-{group}"
+        folder = source / f"raticode-{group}"
         verify_group(folder, group, version, signed)
         for path in sorted(folder.iterdir()):
             require(path.name not in files, f"Artifact filename collision: {path.name}")

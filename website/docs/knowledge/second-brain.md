@@ -16,9 +16,19 @@ Search Markdown, HTML, text and PDFs with words, phrases and filters. For exampl
 "exact evidence" tag:research published:2025..2026
 ```
 
-Filter by folders, collections, document type, author, tags, dates, reading state and citation status. Saved searches preserve the query, filters, search location and matching mode. Exact search works immediately after indexing. Enable **Related meaning** in Brain settings for local semantic search; the first use downloads model weights. Cloud embeddings require a configured API profile and explicit cloud permission.
+Filter by folders, collections, document type, author, tags, dates, reading state and citation status. Saved searches preserve the query, filters, search location and matching mode. Exact search works immediately after indexing. Enable **Related meaning** in Brain settings for local semantic search; the first use downloads model weights. **Combined** ranks each document by both lists with reciprocal rank fusion, so a document found by its words and its meaning moves up. Rem's search tool uses combined search when a selected brain has related meaning on. Cloud embeddings require a configured API profile and explicit cloud permission.
 
 Open results at their matching passages. Reading shows extracted text, Original preserves the file's presentation, and Details shows metadata, versions and links. HTML originals use a sandbox that blocks scripts and remote assets. Scanned PDFs need OCR; install Tesseract and Poppler with the selected language data.
+
+## Projects, connections and the map
+
+**Projects** groups reports, notes and archived Rem conversations by project. Raticode decides each document's project from, in order: your choice, the Rem task or thread that saved it, a project named in the file (front matter `project:` or `<meta name="project">` in HTML), then a `Reports/<Project>/` folder. Every row says which of these it used. Rename a project, give it other names, or merge two; the old name stays as another name, so files and folders using it still count. Documents with no project wait in **Not in a project**.
+
+Reports Rem tasks save into a brain appear in **Reports** with the task, project folder and requested model. **Brain settings > Find report history** looks up older ones from Rem's task receipts and archived conversations. Only Raticode's records change; files are never edited.
+
+The **Connections** panel under a document's Details shows who made it, written links in both directions, the reports, Rem threads and organization tickets that used it, and similar documents. Evidence such as links, citations and observed reads is drawn with solid lines; similar documents and topics are labelled **Suggested** and drawn dashed.
+
+**Map** groups documents into topics from similar content plus written links, and names each with its most distinctive words. Choose a topic to see its documents, show them on the map, or give it a name that sticks as the brain changes. Every map has a list view. With related-meaning search on, similarity uses the local embedding model; otherwise it uses the distinctive words documents share. All of this runs on your computer, and nothing inferred is written into your files.
 
 ## Collect and compare
 

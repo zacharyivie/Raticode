@@ -106,7 +106,16 @@ def validate_portable(payload: Any) -> None:
     ):
         raise ValueError("Invalid brain identity")
     validate_settings(brain.get("settings", {}))
-    known = {"documents", "collections", "savedSearches", "reports", "citations", "jobs"}
+    known = {
+        "documents",
+        "collections",
+        "savedSearches",
+        "reports",
+        "citations",
+        "jobs",
+        "projects",
+        "topics",
+    }
     if set(library) - known:
         raise ValueError("Unknown brain metadata records")
     ids: set[str] = set()
@@ -438,6 +447,14 @@ def extract(
             "author": parser.meta.get("author", ""),
             "published": parser.meta.get("article:published_time", ""),
             "url": parser.meta.get("og:url", ""),
+            # <meta name="project"> and <meta name="keywords"> let HTML reports say
+            # which project they belong to and what they cover, like front matter.
+            "project": parser.meta.get("project", "")[:200],
+            "tags": [
+                word.strip()[:60]
+                for word in parser.meta.get("keywords", "").split(",")
+                if word.strip()
+            ][:30],
         }
         links = parser.links
         if meta["url"]:
@@ -466,6 +483,7 @@ def extract(
         "author": str(meta.get("author") or ""),
         "published": str(meta.get("published") or meta.get("date") or ""),
         "project": str(meta.get("project") or ""),
+        "organization": str(meta.get("organization") or "")[:200],
         "url": str(meta.get("url") or meta.get("source") or ""),
         "doi": str(meta.get("doi") or ""),
         "links": links,

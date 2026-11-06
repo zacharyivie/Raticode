@@ -411,6 +411,14 @@ test("history reports binary files and merge changes against the first parent", 
     fs.writeFileSync(path.join(root, 'icon.bin'), Buffer.from([0, 1, 2]));
     git('add', '.'); git('commit', '-m', 'feature');
     git('checkout', 'main'); git('merge', '--no-ff', 'feature', '-m', 'merge');
+    fs.writeFileSync(path.join(root, 'base.txt'), 'changed\nadded\n');
+    git('commit', '-am', 'edit');
+    git('commit', '--allow-empty', '-m', 'empty');
+    const [empty, edit, ...rest] = (await readGitHistory(root)).commits;
+    assert.deepEqual([empty.subject, empty.insertions, empty.deletions, empty.binaryFiles], ['empty', 0, 0, 0]);
+    assert.deepEqual([edit.subject, edit.insertions, edit.deletions, edit.binaryFiles], ['edit', 2, 1, 0]);
+    assert.equal(rest.length, 3);
+    git('reset', '--hard', 'HEAD~2');
     const result = await readGitHistory(root);
     assert.equal(result.active, true);
     assert.equal(result.commits[0].subject, 'merge');
@@ -422,7 +430,7 @@ test("history reports binary files and merge changes against the first parent", 
 });
 
 test("unchanged baselines reuse results and invalidate after external edits and commits", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskurotta-baselines-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-baselines-"));
   const calls = [];
   const module = { exports: {} };
   const localRequire = name => name === "node:child_process" ? {

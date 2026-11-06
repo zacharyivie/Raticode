@@ -68,6 +68,6 @@ For example, refer to `node.step.output.path` from a compatible downstream bindi
 
 The destination must satisfy the directory and overwrite policy, and the encoding must be supported. When the node has `needs`, a missing parent directory is allowed because an upstream step may create it. Validation never creates the report.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

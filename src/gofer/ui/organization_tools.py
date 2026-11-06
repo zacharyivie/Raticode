@@ -20,6 +20,10 @@ READ_ACTIONS = {
     "run_events",
     "audit_verify",
     "run_input",
+    "knowledge_search",
+    "knowledge_read",
+    "ticket_changes",
+    "repository",
 } | READ_OPERATIONS
 
 TASK_EDIT_FIELDS = {
@@ -45,6 +49,9 @@ TASK_EDIT_FIELDS = {
     "artifacts",
     "workflowContract",
     "execution",
+    "epicId",
+    "doneWhen",
+    "knowledge",
 }
 
 # Parameters live under params; organizationId is a top-level tool argument.
@@ -58,7 +65,10 @@ ACTION_HELP = {
     ),
     "read": "Optional sinceVersion. Returns configuration, runtime and dispatch diagnostics.",
     "history": "Optional offset, limit (1..100, default 50). Configuration revisions and diffs.",
-    "events": "Optional after sequence cursor. Returns up to 500 activity entries.",
+    "events": (
+        "Optional after sequence cursor. Returns up to 500 activity entries. Or recent (1..500) "
+        "for the latest entries without run transcripts."
+    ),
     "create": "config, optional reason. Creates a paused organization; no project is required.",
     "configure": (
         "config, expectedRevision, reason. Replace the full configuration from read. "
@@ -169,6 +179,64 @@ ACTION_HELP = {
         "backup of ALL organizations. Credentials stay in the OS keyring."
     ),
     "memory": "Employee-only body. Stores the current employee's working memory.",
+    "heartbeat_resume": (
+        "employeeId. Resume a worker's heartbeats after repeated failed check-ins: cancels its "
+        "blocked check-in tickets and schedules the next one now."
+    ),
+    "plan_save": (
+        "kind=mission/project/milestone/epic, item, expectedRevision, optional reason. "
+        "Saves one plan item as a configuration revision. mission: {mission}. project: "
+        "{id?, name, description, owner, color, workspacePath, checks: [{name, command}], "
+        "autoRunChecks}. Checks are commands Raticode runs in the ticket's worktree to "
+        "verify claims, which runs the branch's code as the user, so adding them or turning "
+        "on autoRunChecks needs the user's consent. milestone: {id?, title, short, dueAt "
+        "(YYYY-MM-DD), projectId (empty for organization milestones), parentId (the "
+        "organization milestone a project milestone serves), status}. epic: {id?, title, "
+        "milestoneId (a project milestone), owner, description, status}. Tickets are tasks "
+        "with epicId."
+    ),
+    "plan_delete": (
+        "kind=project/milestone/epic, id, expectedRevision. Refused while tickets, epics or "
+        "milestones still depend on it."
+    ),
+    "knowledge_search": (
+        "Optional query, projectId, kind, limit (1..50). Shared organization knowledge."
+    ),
+    "knowledge_read": (
+        "id. Full knowledge entry. During a run, Raticode records that your ticket read it."
+    ),
+    "knowledge_save": (
+        "entry {id?, kind=decision/note/report/spec/finding, title, summary, body, topic, "
+        "projectId, links (related entry IDs)}, expectedVersion when updating. Employees "
+        "update only entries they wrote."
+    ),
+    "knowledge_import": (
+        "path (a Markdown, text or HTML note in the organization's Second Brain folder), "
+        "optional kind, topic, projectId. Adds or refreshes a Second Brain note."
+    ),
+    "knowledge_refresh": "No parameters. Reread Second Brain notes and flag changed ones.",
+    "knowledge_link": (
+        "from, to (entry IDs), quote (exact text from either entry supporting the link). "
+        "Or linkId with remove=true."
+    ),
+    "claim_add": (
+        "taskId (ID or ticket key), text (at most 120 characters), evidence: {kind: check, "
+        "command} | {kind: quote, entryId, quote} | {kind: commit, sha} | {kind: file, path}. "
+        "At most 5 per run. Raticode reruns project checks and checks quotes, commits and files."
+    ),
+    "check_run": (
+        "User-only claimId, or taskId to run every check waiting on that ticket. Runs in the "
+        "ticket's worktree in the background."
+    ),
+    "ticket_changes": (
+        "taskId. The ticket's branch, commits and changed files, plus its shared repository "
+        "changes."
+    ),
+    "repository": (
+        "No parameters. The organization's shared repository: whether it's on, its folder, "
+        "recent commits, top-level files and open ticket branches. Turn it on with plan_save "
+        "kind=repository item={enabled: true}; from Rem that needs the user's consent."
+    ),
 }
 
 

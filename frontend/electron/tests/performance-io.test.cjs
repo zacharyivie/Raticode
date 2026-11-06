@@ -97,7 +97,7 @@ test('porcelain v2 preserves special paths, renames, conflicts and submodule cha
 });
 
 test('Git headers preserve upstream counts, detached HEAD and subdirectory paths', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskurotta-v2-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-v2-'));
   const git = (...args) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
   try {
     git('init', '-b', 'main'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
@@ -114,7 +114,7 @@ test('Git headers preserve upstream counts, detached HEAD and subdirectory paths
 });
 
 test('bounded search reads preserve ordering, replacement, limits and binary filtering', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskurotta-search-pool-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-search-pool-'));
   try {
     for (let i = 0; i < 12; i++) fs.writeFileSync(path.join(root, `${i}.txt`), 'needle\r\nneedle\n');
     fs.writeFileSync(path.join(root, 'binary.txt'), Buffer.from([0, 110, 101, 101, 100, 108, 101]));
@@ -149,14 +149,14 @@ test('search clamps concurrent reads to four even for an oversized request', asy
     module, process, Buffer,
     require: name => name === 'node:fs/promises' || name === './safe-files.cjs' ? io : name === 'node:child_process' ? {
       execFile: (_command, _args, _options, callback) => callback(null, { stdout: Array.from({ length: 20 }, (_, i) => `${i}.txt`).join('\0') }),
-    } : require(name),
+    } : require(name.startsWith('./') ? path.join(__dirname, '..', name) : name),
   });
   const result = await module.exports.scanProject(root, { query: 'needle', readConcurrency: 100000 });
   assert.equal(result.count, 20); assert.equal(peak, 4); assert.equal(active, 0);
 });
 
 test('parallel search rejects links in both files and parent directories', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskurotta-search-links-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-search-links-'));
   try {
     const project = path.join(root, 'project'), outside = path.join(root, 'outside');
     fs.mkdirSync(project); fs.mkdirSync(outside);

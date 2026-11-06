@@ -10,7 +10,6 @@ if sys.argv[1:2] == ["slot"]:
 
     raise SystemExit(_slot_main(sys.argv[2:]))
 
-from importlib.metadata import version
 from pathlib import Path
 
 import typer
@@ -27,10 +26,11 @@ from gofer.cli.commands import (
     watch,
     workflow,
 )
+from gofer.utils.version import installed_version
 
 app = typer.Typer(
-    name="gof",
-    help="Raticode. For machine-readable authoring help, run: gof schema --format json",
+    name="Raticode",
+    help="Raticode. For machine-readable authoring help, run: Raticode schema --format json",
     no_args_is_help=True,
 )
 app.add_typer(workflow.app, name="workflow")
@@ -50,7 +50,7 @@ app.add_typer(ui_app, name="ui")
 
 def _show_version(value: bool) -> None:
     if value:
-        typer.echo(f"gof {version('gofer-flow')}")
+        typer.echo(f"Raticode {installed_version() or '0.0.0+source'}")
         raise typer.Exit()
 
 
@@ -74,12 +74,27 @@ def second_brain(
     report_theme: str = typer.Option("auto", "--report-theme"),
     library_data_dir: Path | None = typer.Option(None, "--library-data-dir"),
     brain_id: list[str] | None = typer.Option(None, "--brain-id"),
+    thread_id: str = typer.Option("", "--thread-id"),
+    project_root: str = typer.Option("", "--project-root"),
+    provider: str = typer.Option("", "--provider"),
+    model: str = typer.Option("", "--model"),
 ) -> None:
     """Serve the native Rem knowledge tools over MCP stdio."""
     from gofer.ui.second_brain import serve_registered_brains, serve_second_brain
 
     if library_data_dir is not None and brain_id:
-        serve_registered_brains(library_data_dir, brain_id, report_format, report_theme)
+        serve_registered_brains(
+            library_data_dir,
+            brain_id,
+            report_format,
+            report_theme,
+            {
+                "threadId": thread_id,
+                "projectRoot": project_root,
+                "provider": provider,
+                "model": model,
+            },
+        )
         return
 
     serve_second_brain(root, report_format, report_theme)

@@ -74,6 +74,6 @@ For example, refer to `node.step.output.source_path` from a compatible downstrea
 
 The source must be readable, the index destination writable, the encoding supported, and the strategy pair available. Runtime scanning and reads have resource limits.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

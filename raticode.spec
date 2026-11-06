@@ -20,7 +20,7 @@ block_cipher = None
 license_collector = runpy.run_path(str(Path(SPECPATH) / "scripts/collect-licenses.py"))
 license_collector["collect"](Path(SPECPATH) / "dist/third-party-licenses")
 datas = [("dist/third-party-licenses", "third-party-licenses")]
-datas += copy_metadata("gofer-flow")
+datas += copy_metadata("raticode")
 datas += collect_data_files("openpyxl")
 datas += collect_data_files("tzdata")
 for package in ("fastembed", "onnxruntime", "tokenizers", "huggingface_hub", "pypdf", "bibtexparser"):
@@ -34,7 +34,7 @@ datas += [
     ("rattish/providers", "gofer/rattish/assets/providers"),
     ("rattish/schemas", "gofer/rattish/assets/schemas"),
     ("rattish/spec", "gofer/rattish/assets/docs"),
-    ("skills/gofer-flow-workflow-builder", "gofer/rattish/assets/assistant-skill"),
+    ("skills/raticode-workflow-builder", "gofer/rattish/assets/assistant-skill"),
 ]
 
 hiddenimports = []
@@ -62,7 +62,7 @@ for package in ("onnxruntime", "numpy", "tokenizers"):
     binaries += collect_dynamic_libs(package)
 
 a = Analysis(
-    ["packaging/pyinstaller/gof_entry.py"],
+    ["packaging/pyinstaller/raticode_entry.py"],
     pathex=["src"],
     binaries=binaries,
     datas=datas,
@@ -95,7 +95,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="gof",
+    name="Raticode",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -334,6 +334,8 @@ def parse_package(files: dict[str, str]) -> dict[str, Any]:
         "heartbeatSeconds",
         "monthlyBudgetUsd",
         "monthlyTurnLimit",
+        "persona",
+        "responsibilities",
     }
     adapter_types = {
         "codex_local": "codex",
@@ -345,14 +347,14 @@ def parse_package(files: dict[str, str]) -> dict[str, Any]:
     if ".paperclip.yaml" in decoded:
         paperclip, _ = markdown(b"---\n" + decoded[".paperclip.yaml"] + b"\n---\n")
     for settings_file, settings_document, keys in (
-        (".raticode.yaml", extension, ("company", "agents", "routines")),
+        (".raticode.yaml", extension, ("company", "agents", "routines", "plan", "tickets")),
         (".paperclip.yaml", paperclip, ("agents",)),
     ):
         for key in keys:
             values = settings_document.get(key, {})
             if not isinstance(values, dict):
                 raise ValueError(f"Package {settings_file} {key} must be an object")
-            if key in {"agents", "routines"} and not all(
+            if key in {"agents", "routines", "tickets"} and not all(
                 isinstance(value, dict) for value in values.values()
             ):
                 raise ValueError(f"Package {settings_file} {key} entries must be objects")
@@ -413,10 +415,19 @@ def parse_package(files: dict[str, str]) -> dict[str, Any]:
         raise ValueError("Task slugs must be unique within the company package")
     for project in projects:
         project.pop("workspacePath", None)
+        # Check commands run on this machine, so they are never imported.
+        project.pop("checks", None)
     for task in tasks:
         routine = extension.get("routines", {}).get(task.get("id"), {})
         if "intervalSeconds" in routine:
             task["intervalSeconds"] = routine["intervalSeconds"]
+        ticket = extension.get("tickets", {}).get(task.get("id"), {})
+        task.update({k: v for k, v in ticket.items() if k in {"epicId", "doneWhen"}})
+    plan = {
+        key: value
+        for key, value in extension.get("plan", {}).items()
+        if key in {"mission", "milestones", "epics", "ticketPrefix"}
+    }
     company_settings = {
         key: value
         for key, value in extension.get("company", {}).items()
@@ -442,6 +453,7 @@ def parse_package(files: dict[str, str]) -> dict[str, Any]:
             "metadata": company,
             "packageFiles": files,
             **company_settings,
+            **plan,
         }
     ).model_dump()
     return {
@@ -498,7 +510,7 @@ def export_package(config: dict[str, Any], tasks: list[dict[str, Any]]) -> dict[
             meta = {
                 k: v
                 for k, v in entry.items()
-                if k not in {"body", "id", "includes", "workspacePath"}
+                if k not in {"body", "id", "includes", "workspacePath", "checks"}
             }
             meta["slug"] = entry["id"]
             write(f"{kind}/{entry['id']}/{filename}", meta, entry.get("body", ""))
@@ -551,7 +563,19 @@ def export_package(config: dict[str, Any], tasks: list[dict[str, Any]]) -> dict[
                     "monthlyTurnLimit",
                 )
             }
+            | {key: e[key] for key in ("persona", "responsibilities") if e.get(key)}
             for e in config["employees"]
+        },
+        "plan": {
+            "mission": config.get("mission", ""),
+            "ticketPrefix": config.get("ticketPrefix", ""),
+            "milestones": config.get("milestones", []),
+            "epics": config.get("epics", []),
+        },
+        "tickets": {
+            task_slugs[t["id"]]: {"epicId": t.get("epicId"), "doneWhen": t.get("doneWhen", "")}
+            for t in tasks
+            if t.get("epicId") or t.get("doneWhen")
         },
         "routines": {
             task_slugs[t["id"]]: {"intervalSeconds": t["intervalSeconds"]}

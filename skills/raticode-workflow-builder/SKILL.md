@@ -1,5 +1,5 @@
 ---
-name: gofer-flow-workflow-builder
+name: raticode-workflow-builder
 description: Create, edit, validate, and preflight Raticode workflows written in the Rattish language. Use for workflow authoring, graph changes, node configuration, routes, inputs, or execution readiness. Do not use the legacy TOML authoring commands for these tasks.
 ---
 
@@ -9,22 +9,22 @@ Author Raticode workflows as Rattish source. A registered workflow lives at
 `<project>/.raticode/<workflow-id>/workflow.rattish`. Do not create or edit workflow TOML.
 
 If the assistant prompt provides an exact Raticode CLI path, use it instead of bare
-`gof`. Run `gof rattish docs --format json` to locate the installed Rattish specification
+`Raticode`. Run `Raticode rattish docs --format json` to locate the installed Rattish specification
 and machine-readable node contracts. This command works in desktop and wheel installs and
 does not require a Raticode source checkout.
 
 ## Authoring workflow
 
-1. Inspect registered workflows with `gof rattish list --format json`.
+1. Inspect registered workflows with `Raticode rattish list --format json`.
 2. For a new workflow, run:
 
    ```bash
-   gof rattish create "Workflow name" --project <project-folder> --format json
+   Raticode rattish create "Workflow name" --project <project-folder> --format json
    ```
 
    Read `workflow.sourcePath` from the JSON response. Edit that `workflow.rattish` file.
 3. For an existing workflow, edit the `sourcePath` supplied in the assistant's workflow
-   context or returned by `gof rattish list --format json`.
+   context or returned by `Raticode rattish list --format json`.
 4. Consult only the documentation needed for the change:
    - `README.md` for the language overview and CLI.
    - `grammar.ebnf` and `lexical-spec.md` for source spelling.
@@ -35,9 +35,9 @@ does not require a Raticode source checkout.
 5. Validate every edit:
 
    ```bash
-   gof rattish format <workflow.rattish>
-   gof rattish check <workflow.rattish> --format json
-   gof rattish preflight <workflow.rattish> --format json
+   Raticode rattish format <workflow.rattish>
+   Raticode rattish check <workflow.rattish> --format json
+   Raticode rattish preflight <workflow.rattish> --format json
    ```
 
    Fix error diagnostics and re-run the failed command. Report warnings instead of hiding
@@ -83,7 +83,7 @@ generated files.
 - Preserve the user's project and requested trigger behavior.
 - Reuse project scripts and prompts when suitable.
 - Do not edit compiled JSON IR. The compiler owns IR and stores it internally.
-- Do not use `gof workflow create`, `gof workflow add-node`, or other legacy TOML mutation
+- Do not use `Raticode workflow create`, `Raticode workflow add-node`, or other legacy TOML mutation
   commands for Rattish workflows.
 - If the user requests a trigger or feature that Rattish 1 does not support, report that
   limitation. Do not create a legacy TOML workflow as a workaround unless the user asks.

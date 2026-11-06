@@ -58,6 +58,6 @@ For example, refer to `node.step.output.target` from a compatible downstream bin
 
 The target must match its resource type, and the platform opener or application must be available.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

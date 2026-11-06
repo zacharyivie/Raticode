@@ -68,6 +68,6 @@ Successful output is a string by default, or the value validated by the declared
 
 The provider must be installed/authenticated as needed, the working directory must exist, and selected prompt/profile resources must be valid. Preflight does not guarantee account allowance or that a provider will complete the task.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

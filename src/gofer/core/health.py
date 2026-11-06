@@ -314,7 +314,7 @@ def _openpyxl_diagnostic() -> HealthDiagnostic:
         return HealthDiagnostic(
             id="optional.openpyxl",
             severity="warning",
-            message="openpyxl is not installed; .xlsx inputs require gofer-flow[xlsx].",
+            message="openpyxl is not installed; .xlsx inputs require raticode[xlsx].",
         )
     return HealthDiagnostic(
         id="optional.openpyxl",
@@ -436,7 +436,7 @@ def _workflow_assistant_cli_diagnostic(data_dir: Path) -> HealthDiagnostic:
             severity="warning",
             message=(
                 "Workflow assistant CLI automation is unavailable because no authoritative "
-                "'gof' executable was found."
+                "'Raticode' executable was found."
             ),
             detail=detail,
         )
@@ -448,7 +448,7 @@ def _workflow_assistant_cli_diagnostic(data_dir: Path) -> HealthDiagnostic:
             subject=str(source),
             message=(
                 "Workflow assistant CLI automation is unavailable because the configured "
-                "'gof' executable does not exist."
+                "'Raticode' executable does not exist."
             ),
             detail=detail,
         )

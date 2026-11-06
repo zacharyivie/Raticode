@@ -139,7 +139,7 @@ the source or bundle.
 
 ## Integrated text and graph editor
 
-**Accepted.** Gofer Studio will provide graph and text views of the same Rattish source.
+**Accepted.** Raticode will provide graph and text views of the same Rattish source.
 Agent edits open the text editor and display a diff for user review.
 
 Text editing frequently produces temporarily invalid syntax. The editor therefore needs
@@ -224,12 +224,12 @@ These rules need an editor prototype before they become normative.
 
 ## Background runtime and missed schedules
 
-**Accepted product constraint.** Closing Gofer Studio must not stop active workflows. The
+**Accepted product constraint.** Closing Raticode must not stop active workflows. The
 executor and scheduler need a background service whose lifetime is independent of the UI.
 The UI connects to that service to inspect, start, stop, and edit workflows.
 
 **Accepted.** Missed scheduled occurrences are skipped. If a daily workflow misses 30
-occurrences while the computer is off, restarting Gofer launches none of those missed runs
+occurrences while the computer is off, restarting Raticode launches none of those missed runs
 and waits for the next scheduled time.
 
 A future language version may add an explicit catch-up or retry policy. Rattish 1 has no

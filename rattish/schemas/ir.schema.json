@@ -456,6 +456,7 @@
               "network",
               "output_validation",
               "provider",
+              "rem",
               "timeout"
             ]
           },

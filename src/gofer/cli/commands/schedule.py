@@ -138,7 +138,7 @@ def start(
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(str(proc.pid))
     console.print(f"[green]Scheduler started[/green] in background (PID {proc.pid})")
-    console.print("Run [bold]gof schedule stop[/bold] to stop it.")
+    console.print("Run [bold]Raticode schedule stop[/bold] to stop it.")
 
 
 @app.command("stop")

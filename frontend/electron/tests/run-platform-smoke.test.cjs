@@ -44,7 +44,7 @@ for (const platform of ["linux", "win32", "darwin"]) {
       fixtures.push(path.basename(fixture));
       assert.equal(path.dirname(fixture), __dirname);
       assert.deepEqual(launchArgs, platform === "linux"
-        ? ["-a", "-s", "-screen 0 1920x1080x24", "/fixture/electron", "--ozone-platform=x11", "--no-sandbox"]
+        ? ["-a", "-s", "-screen 0 1920x1080x24", "/fixture/electron", "--ozone-platform=x11", "--password-store=basic", "--no-sandbox"]
         : []);
       assert.equal(options.env.WAYLAND_DISPLAY, platform === "linux" ? undefined : "wayland-1");
       assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined);

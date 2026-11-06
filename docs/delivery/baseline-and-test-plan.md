@@ -6,12 +6,12 @@ Recorded 2026-09-16. The assignment worktree was clean at intake. Only this docu
 
 ## Environment and evidence
 
-Worktree: `/home/doonk/Projects/Gofer Flow Workflows/workspaces/696586fb3e414109ab4c07a8b7d7b804/da69ab7fb92940efbd72c40c0aac1198`.
+Worktree: `<workflow workspace root>/workspaces/696586fb3e414109ab4c07a8b7d7b804/da69ab7fb92940efbd72c40c0aac1198`.
 Root `AGENTS.md` applies; no nested tracked AGENTS files were found. Python baseline commands run from this worktree. Local `.venv/bin/python` is CPython 3.14.5. `gofer.__file__` resolves to this worktree's `src/gofer/__init__.py`, recorded in `/tmp/raticode-m2-baseline/imports.log`.
 
 The worktree initially had no Python or Node dependencies. `uv venv .venv` failed with read-only `/home/doonk/.cache/uv`, underlying exit not preserved; the original wrapper ended 0 because it tailed the log, so its exit is not evidence of successful setup. `UV_CACHE_DIR=/tmp/raticode-m2-uv uv venv .venv` succeeded. `UV_CACHE_DIR=/tmp/raticode-m2-uv uv pip install --python .venv/bin/python --offline -e '.[dev]'` exited 1 because the fresh cache lacked supported dependency versions. `npm ci --offline --ignore-scripts` exited 226 because `/home/doonk/.npm/_cacache` is read-only. Logs: `environment.log`, `environment-retry.log`, `npm-ci.log` under the log directory above.
 
-To proceed without network or manifest changes, copied installed dependency files from `/home/doonk/Projects/Raticode/Raticode/.venv/lib/python3.14/site-packages/` into the local venv, replaced local `_editable_impl_gofer_flow.pth` with the absolute assignment `src` path, and copied its Ruff binary to local `.venv/bin/ruff`. Copied that project's `frontend/node_modules/` into the assignment's ignored dependency directory. These are local copies, not symlinks to source code. Both copy commands exited 0. This is an installed-environment baseline, not a reproducible clean-install result. Lockfile installation remains unverified.
+To proceed without network or manifest changes, copied installed dependency files from `/home/doonk/Projects/Raticode/Raticode/.venv/lib/python3.14/site-packages/` into the local venv, replaced the local editable-install `.pth` file with the absolute assignment `src` path, and copied its Ruff binary to local `.venv/bin/ruff`. Copied that project's `frontend/node_modules/` into the assignment's ignored dependency directory. These are local copies, not symlinks to source code. Both copy commands exited 0. This is an installed-environment baseline, not a reproducible clean-install result. Lockfile installation remains unverified.
 
 Before every npm command group: `source /home/doonk/.nvm/nvm.sh && nvm use`, selecting root `.nvmrc` Node v22.23.4 and npm 10.9.9. `node-env.log` records versions. No live LLM CLI was called. Existing pytest test doubles and temporary fixture workflows are authorized test inputs, not user workflow execution.
 
@@ -126,4 +126,4 @@ SHA-256 hashes identify the preserved diagnostic artifacts. Absolute log directo
 | `ruff.log` | `9fa3a21a9669691737019388fc72f34514f8c970e6d2d725b1f44054d1d0f0f6` |
 | `swarm-execution.log` | `0aa8efcafcf126f8908177fc88c652edb3f8f57d36478c5aac354e6ff37e844f` |
 
-The installed-entrypoint failure is an environment limitation: `.venv/bin/gof` is absent in the copied dependency environment. The two executor failures assert `ExecutionResult.success` is false; their underlying cause was not established within this run. Neither is waived.
+The installed-entrypoint failure is an environment limitation: the installed CLI entry point under `.venv/bin` is absent in the copied dependency environment. The two executor failures assert `ExecutionResult.success` is false; their underlying cause was not established within this run. Neither is waived.

@@ -130,7 +130,7 @@ point into a `.rattish` file.
 | `RATTISH_PREFLIGHT_CHILD_WORKFLOW_UNAVAILABLE` | error | A compiled child dependency can no longer be loaded. |
 | `RATTISH_PREFLIGHT_CHILD_WORKFLOW_NOT_READY` | error | A referenced workflow tree failed deployment preflight. |
 | `RATTISH_WORKFLOW_EMPTY` | error | A compiled workflow has no executable nodes. Preflight and runtime reject the run, but the editor may display the workflow. |
-| `RATTISH_CLI_INPUT_INVALID` | error | A `gof rattish run --input` argument is not a unique `NAME=JSON` assignment. |
+| `RATTISH_CLI_INPUT_INVALID` | error | A `Raticode rattish run --input` argument is not a unique `NAME=JSON` assignment. |
 | `RATTISH_WORKFLOW_INPUT_INVALID` | error | Supplied workflow inputs are missing, unknown, or fail their declared schemas. |
 | `RATTISH_RUNTIME_COMMAND_FAILED` | error | A command node completed with a nonzero exit status. |
 | `RATTISH_RUNTIME_CONFIGURATION_ERROR` | error | A runtime handler rejected node configuration that could not be checked statically. |

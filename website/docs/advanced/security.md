@@ -36,7 +36,7 @@ Device identities and organization secret values have dedicated platform credent
 
 ## Stored data
 
-Project workflow source and editor metadata live under the project's `.raticode/` directory. App state uses the platform's Gofer data directory by default:
+Project workflow source and editor metadata live under the project's `.raticode/` directory. App state uses Raticode's data directory by default. The folder keeps its original `gofer` name so existing data stays in place:
 
 | Platform | Default backend data location |
 | --- | --- |

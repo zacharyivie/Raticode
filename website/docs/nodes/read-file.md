@@ -63,6 +63,6 @@ For example, refer to `node.step.output.content` from a compatible downstream bi
 
 The path must exist and be readable, and the encoding/error policy must be supported. When the node has `needs`, preflight skips the existence check because an upstream step may create the file earlier in the run; the node then reports a missing file when it runs.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

@@ -1,6 +1,6 @@
 """Raticode-wide catalog of skills and MCP servers that threads can turn on.
 
-Agents and users register entries here (through ``gof rem`` or the UI). Threads
+Agents and users register entries here (through ``Raticode rem`` or the UI). Threads
 store only their selection; library MCP definitions are resolved again at the
 start of every turn so edits reach every provider without stale copies.
 """

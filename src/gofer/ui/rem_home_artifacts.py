@@ -51,6 +51,35 @@ def validate_artifacts(run: dict[str, Any]) -> None:
             raise ValueError("The research artifact changed after saving")
 
 
+def record_artifact(home: RemHome, run: dict[str, Any], path: Path, sha256: str) -> None:
+    """Show a report saved into a Second Brain in its Reports and project pages."""
+    from gofer.ui.brain_library import BrainLibrary
+
+    shared: BrainLibrary | None = home.brain_library
+    library = shared or BrainLibrary(home.data_dir, start=False, recover=False)
+    try:
+        library.record_artifact(
+            path,
+            {
+                "savedVia": "rem_task",
+                "source": "save_report",
+                "runId": run["id"],
+                "taskId": run.get("task_id", ""),
+                "threadId": run.get("thread_id", ""),
+                "taskTitle": run["recipe"].get("title", ""),
+                "projectRoot": run["recipe"].get("project_dir", ""),
+                "provider": run["config"].get("provider", ""),
+                "model": run["config"].get("model", ""),
+                "sha256": sha256,
+            },
+        )
+    except Exception:  # noqa: BLE001 - the report itself is saved; its record can be backfilled
+        log.exception("Could not register a saved report in the Second Brain")
+    finally:
+        if shared is None:
+            library.close()
+
+
 @contextmanager
 def artifact_tools(
     home: RemHome, run: dict[str, Any], role: str
@@ -93,6 +122,7 @@ def artifact_tools(
                 home.store.event(
                     db, "artifact.saved", {"run_id": run["id"], "path": result["path"]}
                 )
+            record_artifact(home, run, Path(result["path"]), receipt["sha256"])
         except (OSError, sqlite3.Error) as exc:
             # The file exists now, so an identical retry would only report a
             # name clash. Say what happened and how to recover.

@@ -35,7 +35,7 @@ test('cold startup creates the shell while backend and terminal readiness are pe
     removeLegacyAgentBrowserConnection() {}, getGoferDataDir: () => '/data',
     app: { whenReady: () => ({ then: callback => { readyCallback = callback; } }),
       getPath: () => '/logs', getVersion: () => 'test', on() {} },
-    createAppLog: () => ({ write() {}, emergency() {} }),
+    createAppLog: () => ({ write() {}, emergency() {} }), captureMainConsole() {},
     process: { on() {}, env: {}, platform: 'win32', arch: 'x64' },
     Menu: { setApplicationMenu() {} },
     setupIpcHandlers() {}, setupAutoUpdater() {}, createBackgroundTray() {},

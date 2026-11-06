@@ -33,13 +33,23 @@ function CitationChip({ citation, store, onOpen }) {
   </span>;
 }
 
+// How a Rem-saved report was made, as Raticode recorded or recovered it.
+function ReportProvenance({ report }) {
+  const provenance = report.provenance || {};
+  if (!Object.keys(provenance).length) return <p className="sb-hint">No record of the task or thread that saved it. Brain settings › Find report history can look it up.</p>;
+  const facts = [["Saved by", provenance.savedVia === "rem_task" ? "A Rem task" : provenance.savedVia === "conversation" ? "A Rem thread (found in the conversation archive)" : "A Rem thread"],
+    ["Task", provenance.taskTitle], ["Thread", provenance.threadTitle], ["Project folder", provenance.projectRoot], ["Provider", provenance.provider], ["Requested model", provenance.model],
+    ["Saved", provenance.at ? formatTime(provenance.at) : ""], ["File since saved", provenance.hashMatches === false ? "Changed after saving" : provenance.hashMatches ? "Unchanged when recorded" : ""]].filter(([, value]) => value);
+  return <dl className="sb-facts">{facts.map(([term, value]) => <div key={term}><dt>{term}</dt><dd>{value}</dd></div>)}</dl>;
+}
+
 function ReportList({ brain, store }) {
   const reports = store.reports.filter(report => report.brainId === brain.id);
   return <div className="sb-page">
-    <div className="sb-page-head"><div><h3>Reports</h3><p>Cited reports Rem generated from this brain. Each keeps the source versions it used, so every citation can be checked later.</p></div><button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", {})}><Plus size={14} />Create cited report</button></div>
+    <div className="sb-page-head"><div><h3>Reports</h3><p>Cited reports generated from this brain, and reports Rem saved here from a task or thread. Generated reports keep the source versions they used, so every citation can be checked later.</p></div><button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", {})}><Plus size={14} />Create cited report</button></div>
     {reports.length ? <ul className="sb-report-list">{reports.map(report => { const health = reportHealth(report); const collection = store.collections.find(item => item.id === report.collectionId); return <li key={report.id}><button type="button" onClick={() => navigate("reports", { reportId: report.id })}>
       <ScrollText size={18} aria-hidden="true" />
-      <span><strong>{report.title}</strong><small>{formatTime(report.generatedAt)} · {report.provider} · {report.citations.length} citations{collection ? ` · from “${collection.name}”` : ""}</small></span>
+      <span><strong>{report.title}</strong><small>{formatTime(report.generatedAt)} · {report.provider}{report.provenance?.taskTitle || report.provenance?.threadTitle ? ` · ${report.provenance.taskTitle || report.provenance.threadTitle}` : ""} · {report.citations.length} citations{collection ? ` · from “${collection.name}”` : ""}</small></span>
       <span className="sb-report-status">{health.changed.length ? <Pill tone="warning">{health.changed.length} citation{health.changed.length === 1 ? "" : "s"} to review</Pill> : null}{report.draft ? <Pill tone="brand">Draft</Pill> : null}{health.unreviewed.length ? <Pill>{health.unreviewed.length} claims unreviewed</Pill> : null}</span>
     </button></li>; })}</ul> : <Empty icon={ScrollText} title="No reports yet" actions={<button type="button" className="sb-button sb-primary" onClick={() => openDialog("report-builder", {})}>Create cited report</button>}>Gather evidence in a collection, then ask Rem for a report. Rem cites passages; Raticode checks every citation before showing the report.</Empty>}
   </div>;
@@ -74,7 +84,7 @@ function ReportDetail({ report, store, brain }) {
       <div className="sb-actions"><button type="button" className="sb-button" onClick={() => { setPanel("claims"); setExpanded(Object.fromEntries(affected.map(claim => [claim.id, true]))); }}>Review affected claims</button><button type="button" className="sb-button" onClick={() => openDialog("report-builder", { collectionId: report.collectionId, question: report.question, revisionOf: report.id })}>Generate revised report</button></div></div></div> : null}
     <div className="sb-report-layout">
       <article className="sb-report-body" aria-label="Report">
-        {report.external ? <><p className="sb-hint">Saved from a Rem thread. Citation coverage includes only evidence explicitly supplied when saving. This artifact has no structured claim review.</p>{artifact ? <OriginalDocument doc={artifact} /> : <p role="status">The original artifact is unavailable.</p>}</> : null}
+        {report.external ? <><p className="sb-hint">Saved by Rem. Citation coverage includes only evidence explicitly supplied when saving. This artifact has no structured claim review.</p><ReportProvenance report={report} />{artifact ? <OriginalDocument doc={artifact} /> : <p role="status">The original artifact is unavailable.</p>}</> : null}
         <p className="sb-report-question"><small>Question</small>{report.question}</p>
         {sections.map(section => <section key={section}><h4>{section}</h4><p>{report.claims.filter(claim => claim.section === section).map(claim => <span key={claim.id} className="sb-claim" data-support={claim.support} data-affected={affected.includes(claim) || undefined}>
           {claim.text}{claim.citations.length ? <span className="sb-cites">{claim.citations.map(id => byId[id]).filter(Boolean).map(citation => <CitationChip key={citation.id} citation={citation} store={store} onOpen={openCitation} />)}</span> : <span className="sb-unsupported">Unsupported</span>}{" "}

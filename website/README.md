@@ -41,5 +41,5 @@ commands in a disposable folder with the documented resource fixtures. Do not ex
 examples during documentation verification. Feature availability notes distinguish the
 public desktop release from experimental and legacy integration paths.
 
-The example workflow in `components/landing/workflow.ts` passes `gof rattish check` and
-`gof rattish preflight`. Re-validate it if you edit the source.
+The example workflow in `components/landing/workflow.ts` passes `Raticode rattish check` and
+`Raticode rattish preflight`. Re-validate it if you edit the source.

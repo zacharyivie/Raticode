@@ -1,6 +1,7 @@
 /* global __dirname, console, setTimeout, clearTimeout */
 /* Isolated UI regression: mock provider responses, real IndexedDB history. */
 require("../electron/tests/background-display.cjs").runInBackgroundDisplay();
+const { testViteCacheDir } = require("../electron/tests/test-vite-cache.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -49,7 +50,7 @@ createRoot(document.getElementById("root")).render(<div style={{display:"flex",h
 async function main() {
   await app.whenReady();
   const { createServer } = await import("vite");
-  vite = await createServer({ root:path.join(__dirname,".."), server:{host:"127.0.0.1",port:0}, plugins:[{
+  vite = await createServer({ cacheDir: testViteCacheDir(), root:path.join(__dirname,".."), server:{host:"127.0.0.1",port:0}, plugins:[{
     name:"rem-actions-regression",
     resolveId(id) { if (id === "/rem-actions-entry.jsx") return id; },
     load(id) { if (id === "/rem-actions-entry.jsx") return entry; },

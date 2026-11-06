@@ -128,6 +128,7 @@ class RuntimeContext:
     )
     approval_store: ApprovalStore | None = None
     handlers: NodeHandlerRegistry | None = None
+    workflow_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +339,7 @@ async def execute_node(
         notification_adapter=notification_adapter or MultiChannelNotificationAdapter(),
         approval_store=approval_store,
         handlers=registry,
+        workflow_name=str(ir["workflow"].get("name") or ""),
     )
     bindings = ResolvedBindings(local={}, environment={}, stdin=None)
     try:
@@ -1134,6 +1136,132 @@ async def _approval_gate_handler(
     }
     # A rejected or timed-out decision is a successful gate output; routes branch on approved.
     return HandlerResult(True, output)
+
+
+def _rem_error(exc: Any) -> RuntimeErrorInfo:
+    return RuntimeErrorInfo(exc.kind, exc.code, exc.message, dict(exc.details))
+
+
+def _rem_origin(node: Mapping[str, Any], context: RuntimeContext) -> Any:
+    from gofer.ui.rem_workflow import WorkflowOrigin
+
+    return WorkflowOrigin(
+        workflow_id=context.workflow_id,
+        run_id=context.run_id,
+        node_id=str(node["id"]),
+        name=context.workflow_name,
+    )
+
+
+async def _await_rem_run(
+    store: Any, run: Mapping[str, Any], *, attached: bool, started: bool
+) -> HandlerResult:
+    """Wait for a Rem run; stop it if the node ends first and this node started it."""
+    from gofer.ui import rem_workflow
+
+    try:
+        finished = await rem_workflow.wait_for_run(store, str(run["id"]))
+    except anyio.get_cancelled_exc_class():
+        # The workflow was stopped or the node timed out: don't leave its work running.
+        if started:
+            with anyio.CancelScope(shield=True):
+                rem_workflow.cancel_run(store, str(run["id"]))
+        raise
+    except rem_workflow.RemWorkflowError as exc:
+        if started and exc.code == "RATTISH_REM_UNAVAILABLE":
+            rem_workflow.cancel_run(store, str(run["id"]))
+        return HandlerResult(False, {}, _rem_error(exc))
+    if finished["state"] != "succeeded":
+        failure = rem_workflow.run_failure(finished, attached=attached)
+        return HandlerResult(False, failure.output, _rem_error(failure))
+    return HandlerResult(True, rem_workflow.run_output(finished, attached=attached))
+
+
+async def _rem_prompt_handler(
+    node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
+) -> HandlerResult:
+    from gofer.ui import rem_workflow
+
+    configuration = node["configuration"]
+    prompt = _binding_or_configuration(bindings, configuration, "prompt")
+    if not isinstance(prompt, str):
+        prompt = json.dumps(prompt, sort_keys=True)
+    store = rem_workflow.existing_store(context.data_dir)
+    try:
+        if store is None or not rem_workflow.rem_running(store):
+            raise rem_workflow.unavailable()
+        request_id = rem_workflow.submit_prompt(
+            store,
+            _rem_origin(node, context),
+            prompt,
+            allow_actions=bool(configuration["allow_actions"]),
+        )
+    except rem_workflow.RemWorkflowError as exc:
+        return HandlerResult(False, {}, _rem_error(exc))
+    try:
+        answer = await rem_workflow.wait_for_answer(store, request_id)
+    except anyio.get_cancelled_exc_class():
+        # A prompt Rem hasn't started on is taken back; one it is answering finishes in chat.
+        with anyio.CancelScope(shield=True):
+            rem_workflow.withdraw_prompt(store, request_id)
+        raise
+    except rem_workflow.RemWorkflowError as exc:
+        rem_workflow.withdraw_prompt(store, request_id)
+        return HandlerResult(False, {}, _rem_error(exc))
+    output: dict[str, Any] = {
+        "reply": answer["reply"],
+        "details": answer["details"],
+        "request_id": answer["request_id"],
+        "message_id": answer["message_id"],
+        "actions_dropped": answer["actions_dropped"],
+        "tasks": [],
+    }
+    for work in answer["work"]:
+        try:
+            run = rem_workflow.current_run(store, work["run_id"])
+        except rem_workflow.RemWorkflowError as exc:
+            return HandlerResult(False, output, _rem_error(exc))
+        if configuration["wait_for_tasks"]:
+            # Rem started this work for the workflow, but stopping the workflow
+            # leaves it running: it is Rem's task now, as if the user had asked.
+            result = await _await_rem_run(store, run, attached=False, started=False)
+            if not result.success:
+                assert result.error is not None
+                return HandlerResult(False, output, result.error)
+            run = rem_workflow.current_run(store, work["run_id"])
+        task_output = rem_workflow.run_output(run)
+        task_output.pop("attached")
+        output["tasks"].append(task_output)
+    return HandlerResult(True, output)
+
+
+async def _rem_task_handler(
+    node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
+) -> HandlerResult:
+    from gofer.ui import rem_workflow
+
+    configuration = node["configuration"]
+    instructions = _binding_or_configuration(bindings, configuration, "instructions")
+    if not isinstance(instructions, str):
+        instructions = json.dumps(instructions, sort_keys=True)
+    store = rem_workflow.existing_store(context.data_dir)
+    try:
+        if store is None:
+            raise rem_workflow.missing_task(configuration["task_id"])
+        rem_workflow.task_record(store, configuration["task_id"])
+        if not rem_workflow.rem_running(store):
+            raise rem_workflow.unavailable()
+        run, attached = rem_workflow.start_task(
+            store,
+            configuration["task_id"],
+            _rem_origin(node, context),
+            instructions=instructions,
+        )
+    except rem_workflow.RemWorkflowError as exc:
+        return HandlerResult(False, {}, _rem_error(exc))
+    if not configuration["wait"]:
+        return HandlerResult(True, rem_workflow.run_output(run, attached=attached))
+    return await _await_rem_run(store, run, attached=attached, started=True)
 
 
 async def _common_llm_task_handler(
@@ -2493,6 +2621,8 @@ DEFAULT_NODE_HANDLERS = NodeHandlerRegistry(
         "raticode.common_llm_task": _common_llm_task_handler,
         "raticode.python_script": _python_script_handler,
         "raticode.read_file": _read_file_handler,
+        "raticode.rem_prompt": _rem_prompt_handler,
+        "raticode.rem_task": _rem_task_handler,
         "raticode.file": _file_handler,
         "raticode.folder": _folder_handler,
         "raticode.http_request": _http_request_handler,

@@ -66,6 +66,6 @@ For example, refer to `node.step.output.path` from a compatible downstream bindi
 
 A selected template file must be readable, and the output path and encoding must be valid. Rendering a prompt does not invoke a provider.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

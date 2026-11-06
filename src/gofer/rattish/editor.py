@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -182,11 +183,16 @@ class RattishEditorService:
                 if any(mutation.get("node_type") == "workflow" for mutation in mutations)
                 else ()
             )
+            rem_tasks = (
+                _rem_task_ids(data_dir)
+                if any(mutation.get("node_type") == "rem-task" for mutation in mutations)
+                else ()
+            )
             updated = source
             applied: list[dict[str, Any]] = []
             for mutation in mutations:
                 updated, mutation_edits = _apply_source_mutation(
-                    updated, ast, mutation, subflow_paths=subflow_paths
+                    updated, ast, mutation, subflow_paths=subflow_paths, rem_tasks=rem_tasks
                 )
                 applied.extend(mutation_edits)
                 recovered = parse_rattish_recovering(updated, source_id=workflow.entrypoint.name)
@@ -410,6 +416,7 @@ def _apply_source_mutation(
     mutation: Mapping[str, Any],
     *,
     subflow_paths: tuple[str, ...] = (),
+    rem_tasks: tuple[str, ...] = (),
 ) -> tuple[str, list[dict[str, Any]]]:
     kind = str(mutation.get("kind", ""))
     if kind in {"set_field", "remove_field"}:
@@ -496,7 +503,7 @@ def _apply_source_mutation(
             for field, value in fields.items()
             if value not in ("", None)
         }
-        starters = _starter_fields(ast, node_id, node_type, set(authored), subflow_paths)
+        starters = _starter_fields(ast, node_id, node_type, set(authored), subflow_paths, rem_tasks)
         lines = [f"Node {node_id}:", f"  type: {node_type}"]
         for field_name, value in {**starters, **authored}.items():
             lines.append(_render_field("  ", field_name, _render_starter_value(value)))
@@ -617,7 +624,7 @@ def _apply_source_mutation(
             if entry["kind"] == "field" and entry["name"]["canonical"] not in removable
         }
         starters = _starter_fields(
-            ast, declaration["name"]["canonical"], next_type, kept, subflow_paths
+            ast, declaration["name"]["canonical"], next_type, kept, subflow_paths, rem_tasks
         )
         indent = " " * (int(type_field["span"]["start"]["column"]) - 1)
         added = "".join(
@@ -662,6 +669,7 @@ _STARTER_FIELDS: dict[str, dict[str, Any]] = {
     "prompt-file": {"output-path": "prompt.md"},
     "python-script": {"script-path": "script.py"},
     "read-file": {"path": "input.txt"},
+    "rem-prompt": {"prompt": "What should Rem answer?"},
     "shell-script": {"script-path": "script.sh"},
     "write-file": {"path": "output.txt"},
 }
@@ -673,6 +681,7 @@ def _starter_fields(
     node_type: str,
     present: set[str],
     subflow_paths: tuple[str, ...],
+    rem_tasks: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Return placeholder values that let a new or retyped node compile."""
     starters = dict(_STARTER_FIELDS.get(node_type, {}))
@@ -695,6 +704,13 @@ def _starter_fields(
                 "its Interface version in Workflow settings first."
             )
         starters["workflow-path"] = subflow_paths[0]
+    elif node_type == "rem-task" and "task-id" not in present:
+        if not rem_tasks:
+            raise RattishEditorError(
+                "A Rem task node starts one of Rem's tasks. Ask Rem to create the task first, "
+                "then add this node."
+            )
+        starters["task-id"] = rem_tasks[0]
     return {field: value for field, value in starters.items() if field not in present}
 
 
@@ -731,6 +747,16 @@ def _upstream_loop(ast: Mapping[str, Any], node_id: str) -> str | None:
             return current
         queue.extend(parents.get(current, []))
     return None
+
+
+def _rem_task_ids(data_dir: Path) -> tuple[str, ...]:
+    """IDs of Rem's live tasks, newest first; a new Rem task node starts with the newest."""
+    from gofer.ui.rem_workflow import live_tasks
+
+    try:
+        return tuple(task["id"] for task in live_tasks(data_dir))
+    except (OSError, sqlite3.Error):
+        return ()
 
 
 def _subflow_paths(workflow: RegisteredWorkflow, data_dir: Path) -> tuple[str, ...]:

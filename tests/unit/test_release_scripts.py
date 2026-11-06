@@ -177,7 +177,7 @@ def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path)
 
     assert result.returncode == 0, result.stderr
     assert 'version = "1.2.3"' in (repo / "pyproject.toml").read_text(encoding="utf8")
-    assert 'name = "gofer-flow"\nversion = "1.2.3"' in (repo / "uv.lock").read_text(encoding="utf8")
+    assert 'name = "raticode"\nversion = "1.2.3"' in (repo / "uv.lock").read_text(encoding="utf8")
     assert _read_json(repo / "frontend" / "package.json")["version"] == "1.2.3"
     package_lock = _read_json(repo / "frontend" / "package-lock.json")
     assert package_lock["version"] == "1.2.3"
@@ -204,8 +204,8 @@ def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path)
     cli_srcinfo = (repo / "packaging" / "arch-cli" / ".SRCINFO").read_text(encoding="utf8")
     assert "pkgver = 1.2.3" in cli_srcinfo
     assert (
-        "source_x86_64 = gof-linux-x64-1.2.3::"
-        "https://github.com/zacharyivie/Raticode/releases/download/v1.2.3/gof-linux-x64"
+        "source_x86_64 = raticode-cli-linux-x64-1.2.3::"
+        "https://github.com/zacharyivie/Raticode/releases/download/v1.2.3/raticode-cli-linux-x64"
     ) in cli_srcinfo
     assert f"sha256sums_x86_64 = {cli_sha}" in cli_srcinfo
 
@@ -228,7 +228,7 @@ def test_bump_version_moves_manifests_off_the_previous_repository_address(
     assert result.returncode == 0, result.stderr
     for package, asset in (
         ("arch", "Raticode-1.2.5-x86_64.AppImage"),
-        ("arch-cli", "gof-linux-x64"),
+        ("arch-cli", "raticode-cli-linux-x64"),
     ):
         srcinfo = (repo / "packaging" / package / ".SRCINFO").read_text(encoding="utf8")
         assert (
@@ -301,7 +301,7 @@ def test_bump_version_fails_when_expected_manifest_pattern_is_missing(tmp_path: 
 def test_package_cli_linux_uses_mocked_package_builders(tmp_path: Path) -> None:
     repo = _copy_release_fixture(tmp_path)
     current_version = _project_version(repo)
-    binary = repo / "dist" / "gof"
+    binary = repo / "dist" / "Raticode"
     binary.parent.mkdir()
     binary.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf8")
     binary.chmod(0o755)
@@ -325,8 +325,8 @@ for arg in "$@"; do
   fi
 done
 cat "$deb_root/DEBIAN/control" >>"{log_path}"
-test -f "$deb_root/usr/share/doc/gofer-flow-cli/third-party-licenses/inventory.json"
-test -f "$deb_root/usr/share/doc/gofer-flow-cli/third-party-licenses/LICENSE"
+test -f "$deb_root/usr/share/doc/raticode-cli/third-party-licenses/inventory.json"
+test -f "$deb_root/usr/share/doc/raticode-cli/third-party-licenses/LICENSE"
 out="${{@: -1}}"
 mkdir -p "$(dirname "$out")"
 touch "$out"
@@ -349,7 +349,7 @@ cat "$spec_path" >>"{log_path}"
 test -f "$topdir/SOURCES/third-party-licenses/inventory.json"
 test -f "$topdir/SOURCES/third-party-licenses/LICENSE"
 mkdir -p "$topdir/RPMS/x86_64"
-touch "$topdir/RPMS/x86_64/gofer-flow-cli-{current_version}-1.mock.x86_64.rpm"
+touch "$topdir/RPMS/x86_64/raticode-cli-{current_version}-1.mock.x86_64.rpm"
 """,
     )
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
@@ -361,23 +361,29 @@ touch "$topdir/RPMS/x86_64/gofer-flow-cli-{current_version}-1.mock.x86_64.rpm"
     )
 
     assert result.returncode == 0, result.stderr
-    assert (output_dir / f"gofer-flow-cli_{current_version}_amd64.deb").exists()
-    assert (output_dir / f"gofer-flow-cli-{current_version}-1.mock.x86_64.rpm").exists()
+    assert (output_dir / f"raticode-cli_{current_version}_amd64.deb").exists()
+    assert (output_dir / f"raticode-cli-{current_version}-1.mock.x86_64.rpm").exists()
     command_log = log_path.read_text(encoding="utf8")
     assert "dpkg-deb --build --root-owner-group" in command_log
-    assert "Package: gofer-flow-cli" in command_log
+    assert "Package: raticode-cli" in command_log
     assert f"Version: {current_version}" in command_log
     assert "Architecture: amd64" in command_log
     assert "rpmbuild --define _topdir " in command_log
-    assert "Name:           gofer-flow-cli" in command_log
+    assert "Name:           raticode-cli" in command_log
     assert "BuildArch:      x86_64" in command_log
-    assert "/usr/bin/gof" in command_log
+    assert "/usr/bin/Raticode" in command_log
+    assert "Conflicts: gofer-flow-cli" in command_log
+    assert "Replaces: gofer-flow-cli" in command_log
+    assert "Obsoletes:      gofer-flow-cli < %{version}" in command_log
+    assert "/usr/bin/gof\n" not in command_log
 
 
 def test_package_cli_linux_fails_early_for_missing_binary(tmp_path: Path) -> None:
     repo = _copy_release_fixture(tmp_path)
 
-    result = _run(["bash", "scripts/package-cli-linux.sh", str(repo / "dist" / "gof")], cwd=repo)
+    result = _run(
+        ["bash", "scripts/package-cli-linux.sh", str(repo / "dist" / "Raticode")], cwd=repo
+    )
 
     assert result.returncode == 1
     assert "CLI binary is missing or not executable" in result.stderr
@@ -385,7 +391,7 @@ def test_package_cli_linux_fails_early_for_missing_binary(tmp_path: Path) -> Non
 
 def test_package_cli_linux_fails_when_package_builder_is_missing(tmp_path: Path) -> None:
     repo = _copy_release_fixture(tmp_path)
-    binary = repo / "dist" / "gof"
+    binary = repo / "dist" / "Raticode"
     binary.parent.mkdir()
     binary.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf8")
     binary.chmod(0o755)
@@ -432,8 +438,8 @@ echo "args=$*" >>"{log_path}"
     assert f"cwd={repo}" in log
     assert f"UV_CACHE_DIR={repo / '.uv-cache'}" in log
     assert (
-        "args=run --locked --extra xlsx --extra devices pyinstaller --clean --noconfirm gof.spec"
-        in log
+        "args=run --locked --extra xlsx --extra devices pyinstaller --clean --noconfirm "
+        "raticode.spec" in log
     )
 
 
@@ -460,8 +466,8 @@ echo "args=$*" >>"{log_path}"
     assert f"cwd={repo}" in log
     assert "UV_CACHE_DIR=/tmp/uv-cache" in log
     assert (
-        "args=run --locked --extra xlsx --extra devices pyinstaller --clean --noconfirm gof.spec"
-        in log
+        "args=run --locked --extra xlsx --extra devices pyinstaller --clean --noconfirm "
+        "raticode.spec" in log
     )
 
 
@@ -525,4 +531,4 @@ def test_macos_speech_dependency_and_permissions_are_packaged() -> None:
         entitlements = plistlib.loads((REPO_ROOT / "frontend" / mac[field]).read_bytes())
         assert entitlements["com.apple.security.device.audio-input"] is True
         assert entitlements["com.apple.security.cs.allow-jit"] is True
-    assert '"*.dyld"' in (REPO_ROOT / "gof.spec").read_text()
+    assert '"*.dyld"' in (REPO_ROOT / "raticode.spec").read_text()

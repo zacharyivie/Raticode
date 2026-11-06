@@ -33,8 +33,8 @@ def smoke() -> ModuleType:
 def test_version_option_matches_release_metadata(smoke: ModuleType) -> None:
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == f"gof {smoke.VERSION}"
-    assert 'copy_metadata("gofer-flow")' in (ROOT / "gof.spec").read_text()
+    assert result.output.strip() == f"Raticode {smoke.VERSION}"
+    assert 'copy_metadata("raticode")' in (ROOT / "raticode.spec").read_text()
 
 
 @pytest.mark.parametrize("args", [[], ["--help"], ["ui", "serve", "--help"]])
@@ -76,7 +76,7 @@ def test_probe_checks_archive_and_runs_outside_checkout(
     ]
     archive = Mock(toc=dict.fromkeys(entries), extract=Mock(return_value=b'[{"name":"fixture"}]'))
     monkeypatch.setattr(readers, "CArchiveReader", Mock(return_value=archive))
-    calls = Mock(return_value=f"gof {smoke.VERSION}\n")
+    calls = Mock(return_value=f"Raticode {smoke.VERSION}\n")
     monkeypatch.setattr(smoke, "run", calls)
     smoke.probe(binary)
     assert [c.args[1:] for c in calls.call_args_list] == [
@@ -85,7 +85,7 @@ def test_probe_checks_archive_and_runs_outside_checkout(
         ("ui", "serve", "--help"),
     ]
     assert all(c.kwargs["cwd"] != ROOT for c in calls.call_args_list)
-    calls.return_value = "gof 0.0.0"
+    calls.return_value = "Raticode 0.0.0"
     with pytest.raises(RuntimeError, match="Wrong packaged version"):
         smoke.probe(binary)
     schema = "gofer/devices/protocol/v2/event.schema.json"
@@ -123,12 +123,33 @@ def test_missing_backend_is_rejected(smoke: ModuleType, tmp_path: Path) -> None:
         smoke.probe_tree(tmp_path)
 
 
+def test_probe_tree_skips_the_desktop_executable_with_the_same_name(
+    smoke: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    desktop = tmp_path / "Raticode.app/Contents/MacOS/Raticode"
+    backend = tmp_path / "Raticode.app/Contents/Resources/backend/Raticode"
+    windows_desktop = tmp_path / "installed/Raticode.exe"
+    windows_backend = tmp_path / "installed/resources/backend/Raticode.exe"
+    linux_cli = tmp_path / "deb/usr/bin/Raticode"
+    for path in (desktop, backend, windows_desktop, windows_backend, linux_cli):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(mode=0o755)
+    probed = Mock()
+    monkeypatch.setattr(smoke, "probe", probed)
+
+    smoke.probe_tree(tmp_path)
+
+    assert sorted(c.args[0] for c in probed.call_args_list) == sorted(
+        [backend, windows_backend, linux_cli]
+    )
+
+
 def linux_files(version: str) -> list[str]:
     return [
         f"Raticode-{version}-amd64.deb",
-        f"gofer-flow-cli_{version}_amd64.deb",
+        f"raticode-cli_{version}_amd64.deb",
         f"Raticode-{version}-x86_64.rpm",
-        f"gofer-flow-cli-{version}-1.x86_64.rpm",
+        f"raticode-cli-{version}-1.x86_64.rpm",
     ]
 
 

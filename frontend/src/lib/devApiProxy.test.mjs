@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { createServer } from "vite";
 import { developmentApiProxy } from "../../dev/api-proxy.js";
 
@@ -12,7 +15,9 @@ test("development proxy reports an outage once, returns JSON, and recovers", asy
   const messages = [];
   const logger = { info() {}, warn: text => messages.push(text), error: text => messages.push(text), clearScreen() {}, hasErrorLogged: () => false, hasWarned: false };
   const proxy = developmentApiProxy(`http://127.0.0.1:${port}`, logger);
-  const vite = await createServer({ configFile: false, customLogger: proxy.customLogger, server: { host: "127.0.0.1", port: 0, proxy: { "/api": proxy.proxy } } });
+  // Not node_modules/.vite: in a worktree that is the running dev app's cache.
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-test-proxy-vite-"));
+  const vite = await createServer({ configFile: false, cacheDir, customLogger: proxy.customLogger, server: { host: "127.0.0.1", port: 0, proxy: { "/api": proxy.proxy } } });
   try {
     await vite.listen();
     const origin = `http://127.0.0.1:${vite.httpServer.address().port}`;
@@ -31,6 +36,7 @@ test("development proxy reports an outage once, returns JSON, and recovers", asy
     assert.equal(messages.at(-1), "unrelated error");
   } finally {
     await vite.close();
+    fs.rmSync(cacheDir, { recursive: true, force: true });
     if (backend.listening) await new Promise(resolve => backend.close(resolve));
   }
 });

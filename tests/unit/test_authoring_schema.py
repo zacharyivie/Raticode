@@ -517,7 +517,7 @@ def test_schema_cli_rejects_unsupported_requests() -> None:
 
 
 def test_installed_entrypoint_discovers_schema_without_repository_cwd(tmp_path: Path) -> None:
-    executable = os.path.dirname(sys.executable) + "/gof"
+    executable = os.path.dirname(sys.executable) + "/Raticode"
     result = subprocess.run(
         [executable, "schema", "--operation", "pass"],
         cwd=tmp_path,
@@ -553,6 +553,6 @@ def test_human_help_and_missing_skill_recovery_point_to_authoring_contract(
     # Rich styles options and wraps help at the terminal width, including in CI.
     root_text = " ".join(Text.from_ansi(root_help.output).plain.split())
     node_text = " ".join(Text.from_ansi(node_help.output).plain.split())
-    assert "gof schema --format json" in root_text
-    assert "gof schema --operation TYPE" in node_text
-    assert "gof rattish docs --format json" in _load_skill_text()
+    assert "Raticode schema --format json" in root_text
+    assert "Raticode schema --operation TYPE" in node_text
+    assert "Raticode rattish docs --format json" in _load_skill_text()

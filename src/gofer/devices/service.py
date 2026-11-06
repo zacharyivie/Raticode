@@ -15,6 +15,17 @@ from typing import Any
 
 from gofer.devices.application import DeviceApplication
 from gofer.devices.binding import SessionBinding
+from gofer.devices.diagnostics import (
+    Throttle,
+    address_kind,
+    device_label,
+    duration,
+    ending,
+    is_routine,
+    repeated,
+    route_label,
+    stage_label,
+)
 from gofer.devices.framing import (
     MAX_CHUNK,
     MAX_FRAME,
@@ -33,6 +44,9 @@ from gofer.devices.tls import DeviceTLS, DeviceTLSError
 logger = logging.getLogger(__name__)
 # A phone stuck on one refusal reconnects every few seconds; name each reason rarely.
 REFUSAL_LOG_INTERVAL = 600.0
+# A phone that cannot sign in retries every 2-30 s. Say why once, then count repeats.
+FAILED_SIGN_IN_LOG_INTERVAL = 300.0
+TURNED_AWAY_LOG_INTERVAL = 60.0
 
 
 class DeviceSession:
@@ -72,6 +86,8 @@ class DeviceSession:
         self.deadline = time.monotonic() + 30
         self.index = 0
         self.closed = False
+        # Set when a newer connection from the same phone replaces this one.
+        self.replaced = False
 
     def _authority(self) -> None:
         if self.peer is not None and self.role is not None and self.stage != "pending":
@@ -223,6 +239,10 @@ class DeviceListener:
         self.global_tokens = 32.0
         self.global_updated = time.monotonic()
         self.refusals_logged: dict[str, float] = {}
+        self.failed_sign_ins = Throttle(FAILED_SIGN_IN_LOG_INTERVAL)
+        self.turned_away = Throttle(TURNED_AWAY_LOG_INTERVAL)
+        # When each device's last signed-in connection ended, to describe reconnects.
+        self.last_ended: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
     async def start(self, host: str = "127.0.0.1", port: int = 0) -> int:
         if self.server is not None:
@@ -272,7 +292,10 @@ class DeviceListener:
 
     async def _connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         address = writer.get_extra_info("peername")
+        local = writer.get_extra_info("sockname")
+        route = route_label(str(local[0]) if local else None)
         if not address or not self._allow(str(address[0])):
+            self._note_turned_away(route, str(address[0]) if address else None)
             writer.close()
             return
         task = asyncio.current_task()
@@ -280,6 +303,10 @@ class DeviceListener:
         self.connections[writer] = task
         session: DeviceSession | None = None
         pending_read: asyncio.Task[bytes] | None = None
+        started = time.monotonic()
+        signed_in: float | None = None
+        noted_pending = False
+        failure: BaseException | None = None
         try:
             # Keep a single read task across polling ticks. Cancelling readexactly
             # on each tick could consume a partial prefix and desynchronize framing.
@@ -295,6 +322,16 @@ class DeviceListener:
                 if not superseded and session.stage in ("ack", "active"):
                     superseded = True
                     self._supersede(writer, session)
+                if signed_in is None and session.stage == "active":
+                    signed_in = time.monotonic()
+                    self._note_signed_in(session, route, signed_in - started)
+                elif not noted_pending and session.stage == "pending":
+                    noted_pending = True
+                    logger.info(
+                        "A new device started pairing over %s; confirm it in Paired devices "
+                        "on this computer",
+                        route,
+                    )
                 # One write per batch. A phone that drops mid-reply makes asyncio warn
                 # "socket.send() raised exception." for every later write, and a reply
                 # is often dozens of frames. drain() still raises, ending the session.
@@ -320,11 +357,12 @@ class DeviceListener:
             ValueError,
             TypeError,
         ) as exc:
-            # Never log peer input, invitation material, TLS exceptions or pins. Only a
-            # fixed refusal code that ended a signed-in session is named, so a phone that
-            # keeps reconnecting leaves a reason behind.
-            if isinstance(exc, PairingError) and session is not None and session.stage == "active":
-                self._note_refusal(str(exc))
+            # Never log peer input, invitation material, TLS exceptions or pins. Only
+            # fixed codes and the kind of failure are named (see diagnostics.py).
+            failure = exc
+        except asyncio.CancelledError as exc:
+            failure = exc
+            raise
         finally:
             if session is not None:
                 session.closed = True
@@ -338,6 +376,102 @@ class DeviceListener:
                 await writer.wait_closed()
             except OSError:
                 pass
+            try:
+                self._note_ended(session, route, started, signed_in, failure)
+            except Exception:  # noqa: BLE001 - diagnostics must never break the listener
+                logger.debug("Could not describe a closed device connection", exc_info=True)
+
+    def _note_turned_away(self, route: str, host: str | None) -> None:
+        allowed, skipped = self.turned_away.check(route)
+        if allowed:
+            logger.warning(
+                "Turned away a connection over %s from a %s address: too many connection "
+                "attempts or %d connections already open%s",
+                route,
+                address_kind(host),
+                len(self.connections),
+                repeated(skipped),
+            )
+
+    def _note_signed_in(self, session: DeviceSession, route: str, elapsed: float) -> None:
+        label = device_label(self.registry, session.peer, session.role)
+        how = "resumed" if session.mode == "resume" else "newly paired"
+        gap = ""
+        if session.peer is not None and session.peer in self.last_ended:
+            ended, code = self.last_ended[session.peer]
+            gap = f"; back {duration(time.monotonic() - ended)} after the last connection ended"
+            if not is_routine(code):
+                gap += f" ({code})"
+        logger.info(
+            "%s connected over %s (%s, signed in after %d ms)%s",
+            label,
+            route,
+            how,
+            int(elapsed * 1000),
+            gap,
+        )
+
+    def _note_ended(
+        self,
+        session: DeviceSession | None,
+        route: str,
+        started: float,
+        signed_in: float | None,
+        failure: BaseException | None,
+    ) -> None:
+        now = time.monotonic()
+        if session is None:
+            # Nothing usable arrived: a port probe, a stalled network or another program.
+            if isinstance(failure, asyncio.CancelledError):
+                return
+            code, reason = ending(failure)
+            if code == "idle_timeout":
+                reason = "it sent nothing within 10 s"
+            allowed, skipped = self.failed_sign_ins.check(("unknown", route, code))
+            if allowed:
+                logger.debug(
+                    "A connection over %s closed before identifying itself: %s%s",
+                    route,
+                    reason,
+                    repeated(skipped),
+                )
+            return
+        code, reason = ending(failure, replaced=session.replaced)
+        label = device_label(self.registry, session.peer, session.role)
+        if signed_in is not None and session.peer is not None:
+            self.last_ended.pop(session.peer, None)
+            self.last_ended[session.peer] = (now, code)
+            while len(self.last_ended) > 64:
+                self.last_ended.popitem(last=False)
+            if is_routine(code):
+                logger.info(
+                    "%s disconnected from %s after %s: %s",
+                    label,
+                    route,
+                    duration(now - signed_in),
+                    reason,
+                )
+            else:
+                self._note_refusal(code, label=label, route=route, reason_text=reason)
+            return
+        if session.stage == "pending" and code in ("closed_by_peer", "connection_reset"):
+            logger.info(
+                "%s stopped waiting for pairing confirmation over %s after %s",
+                label if session.peer else "A new device",
+                route,
+                duration(now - started),
+            )
+            return
+        allowed, skipped = self.failed_sign_ins.check((session.peer, route, code, session.stage))
+        if allowed:
+            logger.warning(
+                "%s could not sign in over %s while %s: %s%s",
+                label if session.peer else "A device",
+                route,
+                stage_label(session.stage),
+                reason,
+                repeated(skipped),
+            )
 
     def _supersede(self, writer: asyncio.StreamWriter, session: DeviceSession) -> None:
         """End a phone's older sessions once a newer one has signed in.
@@ -356,16 +490,30 @@ class DeviceListener:
                 continue
             task = self.connections.get(other_writer)
             if task is not None:
+                other.replaced = True
                 task.cancel()
 
-    def _note_refusal(self, reason: str) -> None:
+    def _note_refusal(
+        self,
+        reason: str,
+        *,
+        label: str = "Paired device",
+        route: str = "",
+        reason_text: str = "",
+    ) -> None:
+        """Explain a signed-in session the desktop ended, at most once per code per interval."""
         if reason in ("session_timeout", "session_closed"):
             return  # A phone that slept or closed the app; nothing to explain.
         now = time.monotonic()
         if now - self.refusals_logged.get(reason, -REFUSAL_LOG_INTERVAL) < REFUSAL_LOG_INTERVAL:
             return
         self.refusals_logged[reason] = now
-        logger.warning("Paired device session ended: %s", reason)
+        explained = reason_text
+        where = f" over {route}" if route else ""
+        if explained and explained != reason:
+            logger.warning("%s session ended%s: %s (%s)", label, where, explained, reason)
+        else:
+            logger.warning("%s session ended%s: %s", label, where, reason)
 
     async def close(self) -> None:
         for host in list(self.extra):

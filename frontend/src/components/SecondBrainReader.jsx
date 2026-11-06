@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, ChevronDown, ChevronUp, Copy, ExternalLink, Eye, EyeOff, FileClock, Highlighter, Library, ListTree, MessageSquareQuote, MoreHorizontal, PanelLeft, Plus, Quote, Search, Sparkles, Star, Trash2, X, ZoomIn, ZoomOut, Link2, CircleCheck } from "lucide-react";
 import { extractionLabel, formatCitation, formatDay, formatTime, formatBytes, originLabel, parseQuery, typeLabel } from "../lib/secondBrain.js";
-import { activateTab, closeTab, pinTab, openDocument, toggleReading, saveCitation, removeCitation, addToCollection, evidenceItem, openDialog, notify, libraryFor, documentById, navigate, isSampleLibrary } from "../lib/secondBrainStore.js";
+import { activateTab, closeTab, pinTab, openDocument, toggleReading, saveCitation, removeCitation, addToCollection, evidenceItem, openDialog, notify, libraryFor, documentById, navigate } from "../lib/secondBrainStore.js";
 import { Empty, Menu, Pill, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
+import Connections from "./SecondBrainConnections.jsx";
 
 function ranges(text, needle, kind) {
   const out = [];
@@ -46,22 +47,11 @@ export function OriginalDocument({ doc }) {
 }
 
 function DocumentDetails({ doc, store }) {
-  const [relatedIds, setRelatedIds] = useState(doc.related || []);
-  useEffect(() => {
-    if (isSampleLibrary() || !store.brains.find(brain => brain.id === doc.brainId)?.settings.semantic) return undefined;
-    let active = true;
-    import("../lib/secondBrainApi.js").then(({ brainRequest }) => brainRequest("related", { id: doc.id })).then(ids => { if (active) setRelatedIds(ids); }).catch(() => { if (active) setRelatedIds([]); });
-    return () => { active = false; };
-  }, [doc.id, doc.version, doc.brainId, store.brains]);
   const library = libraryFor(store, doc.brainId);
-  const citedBy = (library.citedBy[doc.id] || []).map(id => store.reports.find(report => report.id === id) || documentById(store, id)).filter(Boolean);
-  const cites = (doc.cites || []).map(id => documentById(store, id)).filter(Boolean);
-  const related = relatedIds.map(id => documentById(store, id)).filter(Boolean);
   const citations = library.citationsByDoc[doc.id] || [];
   const reportsUsing = store.reports.filter(report => report.sourceVersions.some(source => source.docId === doc.id));
   const versions = [{ hash: doc.version, at: doc.dates.modified, note: "Current source" }, ...doc.versions.filter(version => version.hash !== doc.version)];
-  const linkTo = item => item.citations ? <button type="button" className="sb-link" onClick={() => navigate("reports", { reportId: item.id })}>{item.title}</button> : <button type="button" className="sb-link" onClick={() => openDocument(item.id)}>{item.title}</button>;
-  const facts = [["Path", <code className="sb-mono" key="p">{doc.path}</code>], ["Type", typeLabel(doc.type)], ["Author", doc.author || "Unknown"], ["Project", doc.project || "None"], ["Tags", doc.tags.length ? doc.tags.join(", ") : "None"],
+  const facts = [["Path", <code className="sb-mono" key="p">{doc.path}</code>], ["Type", typeLabel(doc.type)], ["Author", doc.author || "Unknown"], ["Project in file or set by you", doc.project || "None"], ["Tags", doc.tags.length ? doc.tags.join(", ") : "None"],
     ["Source", doc.source?.url ? <a key="s" href={doc.source.url} onClick={event => { event.preventDefault(); window.open(doc.source.url, "_blank", "noopener"); }}>{doc.source.domain}</a> : "None"], ["DOI", doc.source?.doi || "None"],
     ["Added", formatDay(doc.dates.added)], ["Modified", formatDay(doc.dates.modified)], ["Published", doc.dates.published ? formatDay(doc.dates.published) : "Unknown"], ...(doc.dates.captured ? [["Captured", formatTime(doc.dates.captured)]] : []),
     ["Origin", originLabel(doc.origin)], ["Extraction", extractionLabel(doc.extraction)], ["Size", formatBytes(doc.size)], ["Document ID", <code className="sb-mono" key="i">{doc.id}</code>]];
@@ -78,13 +68,7 @@ function DocumentDetails({ doc, store }) {
       {citation.note ? <p>{citation.note}</p> : null}
       <div><button type="button" className="sb-mini-button" onClick={() => { navigator.clipboard?.writeText(`“${citation.quote}” (${formatCitation(doc, doc.blocks.find(block => block.id === citation.blockId))})`); notify("Citation copied."); }}><Copy size={12} />Copy</button><button type="button" className="sb-mini-button" onClick={() => removeCitation(citation.id)}><Trash2 size={12} />Remove</button></div>
     </li>)}</ul> : <p className="sb-hint">Select text in the reading view and choose Save citation.</p>}</section>
-    <section><h4>Relationships</h4>
-      <div className="sb-relations">
-        <div><h5>Cites</h5>{cites.length ? <ul>{cites.map(item => <li key={item.id}><TypeIcon type={item.type} size={13} />{linkTo(item)}</li>)}</ul> : <p className="sb-hint">No recorded citations.</p>}</div>
-        <div><h5>Cited by</h5>{citedBy.length ? <ul>{citedBy.map(item => <li key={item.id}>{item.citations ? <Quote size={13} aria-hidden="true" /> : <TypeIcon type={item.type} size={13} />}{linkTo(item)}</li>)}</ul> : <p className="sb-hint">Nothing cites this document yet.</p>}</div>
-        <div><h5>Related documents <Pill tone="brand">Suggested</Pill></h5>{related.length ? <ul>{related.map(item => <li key={item.id}><TypeIcon type={item.type} size={13} />{linkTo(item)}</li>)}</ul> : <p className="sb-hint">No suggestions yet.</p>}<p className="sb-hint">Suggestions come from similar meaning, not recorded links.</p></div>
-      </div>
-    </section>
+    <Connections doc={doc} store={store} />
   </div>;
 }
 

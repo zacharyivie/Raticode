@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "gofer-flow"
-version = "0.5.1"
+name = "raticode"
+version = "0.5.2"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
@@ -60,7 +60,7 @@ dev = [
 ]
 
 [project.scripts]
-gof = "gofer.cli.main:app"
+Raticode = "gofer.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gofer"]
@@ -70,7 +70,7 @@ packages = ["src/gofer"]
 "rattish/providers" = "gofer/rattish/assets/providers"
 "rattish/schemas" = "gofer/rattish/assets/schemas"
 "rattish/spec" = "gofer/rattish/assets/docs"
-"skills/gofer-flow-workflow-builder" = "gofer/rattish/assets/assistant-skill"
+"skills/raticode-workflow-builder" = "gofer/rattish/assets/assistant-skill"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

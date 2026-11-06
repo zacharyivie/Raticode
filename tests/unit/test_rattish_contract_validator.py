@@ -38,6 +38,8 @@ def test_representative_contracts_validate() -> None:
         "open-resource",
         "prompt-file",
         "read-file",
+        "rem-prompt",
+        "rem-task",
         "python-script",
         "shell-script",
         "write-file",

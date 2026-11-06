@@ -86,7 +86,7 @@ updateTextFile("pyproject.toml", (text) =>
 updateTextFile("uv.lock", (text) =>
   replaceOnce(
     text,
-    /^(name = "gofer-flow"\nversion = ")[^"]+("$)/m,
+    /^(name = "raticode"\nversion = ")[^"]+("$)/m,
     `$1${version}$2`,
     "uv.lock project version",
   ),
@@ -182,8 +182,8 @@ updateTextFile("packaging/arch-cli/.SRCINFO", (text) => {
 
   next = replaceOnce(
     next,
-    /source_x86_64 = gof-linux-x64-[^:]+::https:\/\/github\.com\/zacharyivie\/(?:Raticode|gofer-flow)\/releases\/download\/v[^/]+\/gof-linux-x64/,
-    `source_x86_64 = gof-linux-x64-${version}::https://github.com/zacharyivie/Raticode/releases/download/v${version}/gof-linux-x64`,
+    /source_x86_64 = raticode-cli-linux-x64-[^:]+::https:\/\/github\.com\/zacharyivie\/(?:Raticode|gofer-flow)\/releases\/download\/v[^/]+\/raticode-cli-linux-x64/,
+    `source_x86_64 = raticode-cli-linux-x64-${version}::https://github.com/zacharyivie/Raticode/releases/download/v${version}/raticode-cli-linux-x64`,
     "CLI .SRCINFO source URL",
   );
 

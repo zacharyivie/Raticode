@@ -1,6 +1,7 @@
 /* global __dirname, console, setTimeout, clearTimeout */
 // Disposable renderer fixture. No provider execution or real desktop state.
 require('../electron/tests/background-display.cjs').runInBackgroundDisplay();
+const { testViteCacheDir } = require('../electron/tests/test-vite-cache.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -18,7 +19,7 @@ const remote=()=>({thread_id:'wire',revision:1,sync_token:complete?'done':'runni
 const actions=[];
 async function main(){
  await app.whenReady(); const {createServer}=await import('vite');
- vite=await createServer({root:path.join(__dirname,'..'),server:{host:'127.0.0.1',port:0},plugins:[{
+ vite=await createServer({cacheDir:testViteCacheDir(),root:path.join(__dirname,'..'),server:{host:'127.0.0.1',port:0},plugins:[{
  name:'phone-conversation-review',resolveId(id){if(id==='/phone-entry.jsx')return id;},
  load(id){if(id==='/phone-entry.jsx')return `import React from 'react';import{createRoot}from'react-dom/client';import{ChatPane}from'/src/pages/App.jsx';import{startDeviceWorkspaceSync}from'/src/lib/deviceWorkspaceSync.js';import'/src/styles/index.css';const meta=${JSON.stringify(metadata)};localStorage.setItem('gofer-flow-chat-threads',JSON.stringify([{id:meta.id,projectRoot:meta.projectRoot,scopeIndexed:true}]));localStorage.setItem('gofer-flow-chat-thread-meta:'+meta.id,JSON.stringify(meta));window.goferDesktop={workspace:{pathGrantForApi:()=>'fixture-grant'}};createRoot(document.getElementById('root')).render(<ChatPane width="100%" activeProjectRoot="/fixture" assistantDefaults={{provider:'codex',model:'test-model'}}/>);setTimeout(()=>startDeviceWorkspaceSync({interval:250}),400);`;},
  configureServer(server){server.middlewares.use(async(req,res,next)=>{

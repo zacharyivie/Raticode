@@ -9,7 +9,7 @@ const { readGitStatus } = require('../frontend/electron/git-status.cjs');
 const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 
 (async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'taskurotta-io-bench-'));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'raticode-io-bench-'));
   const root = process.argv[2] ? fs.realpathSync(process.argv[2]) : path.join(temporary, 'project');
   try {
     if (!process.argv[2]) {

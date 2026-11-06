@@ -1,7 +1,7 @@
 import { providerPermissionDefault } from "./providerPermissions.js";
 import { apiUrl } from "./api.js";
 
-const READS = new Set(["availability", "list", "read", "history", "events", "export", "help", "tasks", "attempts", "routines", "outcomes", "rehearse", "diagnostics", "workflow_preview", "run_events", "audit_verify", "run_input"]);
+const READS = new Set(["availability", "list", "read", "history", "events", "export", "help", "tasks", "attempts", "routines", "outcomes", "rehearse", "diagnostics", "workflow_preview", "run_events", "audit_verify", "run_input", "knowledge_search", "knowledge_read", "ticket_changes", "repository"]);
 export async function organizationRequest(projectRoot = "", action = "list", organizationId, params = {}) {
   projectRoot = projectRoot || "";
   const read = READS.has(action);

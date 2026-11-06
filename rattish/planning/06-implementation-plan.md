@@ -42,8 +42,8 @@ Deliverables:
 - Semantic AST
 - Canonical formatter
 - Machine-readable diagnostic model
-- `gof rattish check`
-- `gof rattish format`
+- `Raticode rattish check`
+- `Raticode rattish format`
 
 Verification:
 
@@ -107,8 +107,8 @@ Deliverables:
 - Source and dependency fingerprinting
 - Atomic IR publication
 - Registry mapping from source to IR
-- `gof rattish compile`
-- `gof rattish inspect-ir`
+- `Raticode rattish compile`
+- `Raticode rattish inspect-ir`
 
 Verification:
 

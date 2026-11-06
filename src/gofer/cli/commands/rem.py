@@ -173,8 +173,8 @@ def list_servers(data_dir: Path | None = _DATA_DIR, output: str = _FORMAT) -> No
     "add",
     epilog=(
         "Examples:\n\n"
-        "  gof rem mcp add docs --url https://example.com/mcp\n\n"
-        "  gof rem mcp add github -- npx -y @modelcontextprotocol/server-github"
+        "  Raticode rem mcp add docs --url https://example.com/mcp\n\n"
+        "  Raticode rem mcp add github -- npx -y @modelcontextprotocol/server-github"
     ),
 )
 def add_server(

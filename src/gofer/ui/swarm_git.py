@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.ui.swarm_workspaces import git
+from gofer.utils.brand_compat import LEGACY_SWARM_BRANCH_PREFIX
 from gofer.utils.process import build_subprocess_env
 
 
@@ -53,7 +54,7 @@ def execute(workspace: dict[str, str], settings: Any, payload: dict[str, Any]) -
         raise ValueError("Remote branches and pull requests are disabled for this swarm run")
     root = Path(workspace["path"]).resolve()
     branch = workspace.get("branch", "")
-    if not (branch.startswith("taskurotta/swarm/")
+    if not (branch.startswith(LEGACY_SWARM_BRANCH_PREFIX)
             or re.fullmatch(r"raticode/swarm/[^/]+/attempt/[^/]+", branch)):
         raise ValueError("Managed Git requires an isolated swarm assignment branch")
     # Do not inherit a caller's alternate index, Git directory or config injection.

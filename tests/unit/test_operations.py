@@ -110,10 +110,10 @@ def test_agent_operation_allows_skill_without_prompt_path() -> None:
         type=OperationType.AGENT,
         agent_id="builder",
         working_dir=Path("/srv/repo"),
-        skill_name="gofer-flow-workflow-builder",
+        skill_name="raticode-workflow-builder",
     )
     assert op.prompt_path is None
-    assert op.skill_name == "gofer-flow-workflow-builder"
+    assert op.skill_name == "raticode-workflow-builder"
 
 
 def test_agent_operation_dynamic_count_string() -> None:

@@ -25,7 +25,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
       ['Commands & scripts', ['bash-command', 'shell-script', 'python-script']],
       ['Agents', ['agent', 'common-llm-task']],
       ['Files & resources', ['read-file', 'write-file', 'copy-file', 'move-file', 'delete-file', 'file', 'folder', 'open-resource', 'prompt-file']],
-      ['Control & interaction', ['loop', 'break', 'workflow', 'approval-gate', 'notification', 'http-request']],
+      ['Control & interaction', ['loop', 'break', 'workflow', 'approval-gate', 'notification', 'rem-prompt', 'rem-task', 'http-request']],
       ['Local retrieval', ['local-vectorize', 'local-search']],
     ].map(([text, names]) => ({ text: text as string, collapsed: true, items: (names as string[]).map(name => page(name, `nodes/${name}`)) }))],
   },

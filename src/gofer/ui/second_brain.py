@@ -53,8 +53,11 @@ def second_brain_rules(root: Path, report_format: str, report_theme: str = "auto
 
 
 def with_second_brain(
-    workflow: dict[str, Any] | None, cli_path: Path | None
+    workflow: dict[str, Any] | None,
+    cli_path: Path | None,
+    context: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
+    """Add the Second Brain tools. `context` names the thread and project for provenance."""
     config = (workflow or {}).get("remSecondBrain") or {}
     if config.get("enabled") is not True:
         return workflow
@@ -97,6 +100,17 @@ def with_second_brain(
                     if config.get("brainIds") and config.get("libraryDataDir")
                     else []
                 ),
+                *[
+                    part
+                    for flag, value in (
+                        ("--thread-id", (context or {}).get("threadId")),
+                        ("--project-root", (context or {}).get("projectRoot")),
+                        ("--provider", (context or {}).get("provider")),
+                        ("--model", (context or {}).get("model")),
+                    )
+                    if value and config.get("brainIds") and config.get("libraryDataDir")
+                    for part in (flag, str(value)[:500])
+                ],
             ],
         )
     )
@@ -104,13 +118,18 @@ def with_second_brain(
 
 
 def serve_registered_brains(
-    data_dir: Path, brain_ids: list[str], report_format: str, report_theme: str
+    data_dir: Path,
+    brain_ids: list[str],
+    report_format: str,
+    report_theme: str,
+    context: dict[str, str] | None = None,
 ) -> None:
     from gofer.ui.brain_documents import read_source, source_path
     from gofer.ui.brain_library import BrainLibrary
 
     library = BrainLibrary(data_dir, start=False, recover=False)
     allowed = set(brain_ids)
+    context = {key: value for key, value in (context or {}).items() if value}
 
     def selected(arguments: dict[str, Any]) -> list[dict[str, Any]]:
         chosen = [arguments["brainId"]] if arguments.get("brainId") else brain_ids
@@ -142,8 +161,14 @@ def serve_registered_brains(
         if name == "search":
             query = str(arguments.get("query", ""))
             if query.strip():
+                # Combined search when any selected brain has related-meaning search on.
+                meaning = any(brain["settings"].get("semantic") for brain in brains)
                 hits = library.search(
-                    {"brainIds": [brain["id"] for brain in brains], "query": query}
+                    {
+                        "brainIds": [brain["id"] for brain in brains],
+                        "query": query,
+                        "mode": "hybrid" if meaning else "exact",
+                    }
                 )["hits"]
                 by_id = {doc["id"]: doc for doc in documents}
                 result = []
@@ -162,6 +187,7 @@ def serve_registered_brains(
                                 "version": doc["version"],
                                 "blockId": block["id"],
                                 "snippet": block["text"],
+                                "matchedBy": hit.get("fusedFrom") or [hit["matchKind"]],
                             }
                         )
                 return result
@@ -208,6 +234,8 @@ def serve_registered_brains(
             )
             if blocks is None:
                 raise ValueError("The requested source version is unavailable")
+            # The Second Brain shows which threads read a note (an observed link).
+            library.observe(doc, "read", context)
             return {
                 "brainId": doc["brainId"],
                 "documentId": doc["id"],
@@ -251,7 +279,7 @@ def serve_registered_brains(
                 "generatedAt": now(),
                 "format": format_,
                 "provider": "Rem thread",
-                "model": "Not reported",
+                "model": context.get("model") or "Not reported",
                 "modelReported": "Not reported",
                 "theme": "Authored styling",
                 "template": "Saved artifact",
@@ -267,6 +295,14 @@ def serve_registered_brains(
                 "claims": [],
                 "external": True,
                 "draft": False,
+                "provenance": {
+                    "savedVia": "rem_thread",
+                    "basis": "observed",
+                    "source": "save_note",
+                    "at": now(),
+                    "hashMatches": True,
+                    **context,
+                },
                 "outputHash": "sha256:"
                 + __import__("hashlib").sha256(Path(saved_result["path"]).read_bytes()).hexdigest(),
             }

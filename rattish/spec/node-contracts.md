@@ -14,7 +14,7 @@ contracts freeze.
 
 ## Built-in type names
 
-Rattish 1 currently names these 22 built-in node types:
+Rattish 1 currently names these 24 built-in node types:
 
 ```text
 agent                 approval-gate         bash-command
@@ -23,8 +23,8 @@ delete-file           file                  folder
 http-request          local-search          local-vectorize
 loop                  move-file             notification
 open-resource         prompt-file           python-script
-read-file             shell-script          workflow
-write-file
+read-file             rem-prompt            rem-task
+shell-script          workflow              write-file
 ```
 
 All type names compare case-insensitively and lower to the spelling shown above.
@@ -342,6 +342,31 @@ the referenced workflow rather than remaining at each call site.
 
 See [output-contracts.md](output-contracts.md) for the public workflow interface and
 built-in output contract format.
+
+## Rem nodes
+
+| Type | Required fields | Optional fields and defaults |
+|---|---|---|
+| `rem-prompt` | `prompt: String` | `allow-actions: Boolean = false`, `wait-for-tasks: Boolean = false` |
+| `rem-task` | `task-id: String` | `instructions: String = ""`, `wait: Boolean = true` |
+
+Both nodes reach Rem through its durable store in the runtime's data directory, so the
+desktop, the CLI and schedules behave alike. The Raticode backend holding Rem's lease answers
+the prompt or starts the run and applies Rem's own project and folder authorization before
+any worker starts. Neither node runs when no backend holds the lease
+(`RATTISH_REM_UNAVAILABLE`).
+
+`rem-prompt` posts the prompt to Rem's chat, marked as sent by the workflow, and succeeds with
+Rem's reply. Unless `allow-actions` is true, the runtime discards any tasks, task controls,
+memories, memory changes or files Rem proposes for that prompt and sets
+`actions_dropped`. Stopping the node withdraws a prompt Rem has not started answering.
+
+`rem-task` queues a run of an existing, undeleted task, as Rem's Run action does.
+`instructions` apply to that run only. With `wait`, the node succeeds only when the run
+ends `succeeded`; any other final state fails the node with error kind `rem`, or
+`cancelled` when the run was stopped. Stopping or timing out the node cancels the run it
+started. A task already running for anything other than the same workflow node fails with
+`RATTISH_REM_BUSY`. Deployment preflight requires the task to exist.
 
 ## Required contract work
 

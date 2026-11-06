@@ -87,6 +87,7 @@ from gofer.ui.report_outputs import with_report_outputs
 from gofer.ui.report_themes import report_theme_rules
 from gofer.ui.second_brain import second_brain_rules, with_second_brain
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links, open_binary_input
+from gofer.utils.brand_compat import LEGACY_CLI_NAMES
 from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import (
@@ -96,6 +97,7 @@ from gofer.utils.process import (
     stream_subprocess,
 )
 from gofer.utils.protocol import ProtocolLines, ProtocolRecordLimitError, retained_text
+from gofer.utils.version import CLI_NAME
 
 ProviderName = Literal[
     "codex", "claude_code", "cursor", "copilot", "opencode", "antigravity", "grok"
@@ -1147,7 +1149,9 @@ async def run_workflow_chat(
         workflow = with_library_resources(workflow, resolved_data_dir)
     except ValueError as exc:
         raise ChatProviderError(str(exc)) from exc
-    workflow = with_second_brain(workflow, gofer_cli_path)
+    workflow = with_second_brain(
+        workflow, gofer_cli_path, _brain_context(workflow, None, provider, model)
+    )
     workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
     workflow = _with_browser(workflow, gofer_cli_path, resolved_data_dir, resolved_working_dir)
     messages, _ = await _compact_chat_messages_if_needed(
@@ -1306,7 +1310,7 @@ def _command_slot_environment(
 
 
 def _claude_allows_shell(command: list[str]) -> bool:
-    """Only unrestricted shells get the hook, since it rewrites commands to start with gof."""
+    """Only unrestricted shells get the hook, since it rewrites commands to start with Raticode."""
     if "--allowedTools" not in command:
         return False
     tools = []
@@ -1421,7 +1425,9 @@ async def stream_workflow_chat(
         workflow = with_library_resources(workflow, resolved_data_dir)
     except ValueError as exc:
         raise ChatProviderError(str(exc)) from exc
-    workflow = with_second_brain(workflow, gofer_cli_path)
+    workflow = with_second_brain(
+        workflow, gofer_cli_path, _brain_context(workflow, conversation_id, provider, model)
+    )
     workflow = with_report_outputs(workflow, gofer_cli_path, resolved_working_dir)
     workflow = _with_browser(workflow, gofer_cli_path, resolved_data_dir, resolved_working_dir)
     slot_env = _command_slot_environment(
@@ -2600,11 +2606,18 @@ def provider_payload() -> dict[str, Any]:
 
 
 def ensure_local_gofer_cli(data_dir: Path) -> Path | None:
-    """Copy the gof CLI into a trusted helper directory for assistant use."""
+    """Copy the Raticode CLI into a trusted helper directory for assistant use."""
+    helper = _prepare_local_gofer_cli(data_dir)
+    if helper is not None:
+        _remove_legacy_cli_helpers(helper)
+    return helper
+
+
+def _prepare_local_gofer_cli(data_dir: Path) -> Path | None:
     source = _gofer_cli_source_path()
     destination = local_gofer_cli_path(data_dir, source)
     if source is None:
-        log.warning("Raticode CLI helper unavailable: no authoritative gof executable found")
+        log.warning("Raticode CLI helper unavailable: no authoritative Raticode executable found")
         return None
     if not source.exists():
         log.warning(
@@ -2669,12 +2682,28 @@ def ensure_local_gofer_cli(data_dir: Path) -> Path | None:
 
 
 def local_gofer_cli_path(data_dir: Path, source_path: Path | None = None) -> Path:
-    if sys.platform == "win32":
-        source_suffix = source_path.suffix.lower() if source_path else ".exe"
-        executable_name = f"gof{source_suffix}" if source_suffix in {".bat", ".cmd"} else "gof.exe"
-    else:
-        executable_name = "gof"
-    return trusted_gofer_cli_dir(data_dir) / executable_name
+    return trusted_gofer_cli_dir(data_dir) / _cli_file_name(CLI_NAME, source_path)
+
+
+def _cli_file_name(name: str, source_path: Path | None = None) -> str:
+    if sys.platform != "win32":
+        return name
+    source_suffix = source_path.suffix.lower() if source_path else ".exe"
+    return f"{name}{source_suffix}" if source_suffix in {".bat", ".cmd"} else f"{name}.exe"
+
+
+def _remove_legacy_cli_helpers(destination: Path) -> None:
+    """Remove helper copies Raticode wrote under earlier command names."""
+    for legacy in LEGACY_CLI_NAMES:
+        for suffix in ("", ".exe", ".bat", ".cmd"):
+            stale = destination.with_name(f"{legacy}{suffix}")
+            if stale == destination:
+                continue
+            try:
+                if stale.is_file() and not stale.is_symlink():
+                    stale.unlink()
+            except OSError as exc:
+                log.warning("Could not remove the outdated CLI helper %s: %s", stale, exc)
 
 
 def trusted_gofer_cli_dir(data_dir: Path) -> Path:
@@ -2689,7 +2718,7 @@ def _gofer_cli_source_path() -> Path | None:
     if getattr(sys, "frozen", False):
         return Path(sys.executable)
 
-    resolved = shutil.which("gof")
+    resolved = shutil.which(CLI_NAME)
     return Path(resolved) if resolved else None
 
 
@@ -3105,6 +3134,20 @@ def _skill_read_paths(workflow: dict[str, Any] | None) -> list[Path]:
     resources = AgentResources.model_validate((workflow or {}).get("remResources") or {})
     folders = [skill_folder(skill.path) for skill in resources.skills if skill.enabled]
     return _unique_existing_directories([folder for folder in folders if folder.is_dir()])
+
+
+def _brain_context(
+    workflow: dict[str, Any] | None, conversation_id: str | None, provider: str, model: str
+) -> dict[str, str]:
+    """Which thread and project a Second Brain read or save belongs to."""
+    context = workflow or {}
+    root = context.get("projectRoot")
+    return {
+        "threadId": str(context.get("chatThreadId") or conversation_id or ""),
+        "projectRoot": root if isinstance(root, str) else "",
+        "provider": provider,
+        "model": "" if model == "cli-default" else model,
+    }
 
 
 def _chat_working_dir(workflow: dict[str, Any] | None, fallback: Path) -> Path:
@@ -3542,9 +3585,9 @@ Context contains reference data; the request contains the conversation with its 
 def _gofer_cli_prompt_context(gofer_cli_path: Path | None) -> str:
     if gofer_cli_path is None:
         return (
-            "Raticode CLI automation is unavailable because no verified local `gof` "
+            "Raticode CLI automation is unavailable because no verified local `Raticode` "
             "executable could be prepared. Do not run a stale helper from the Raticode data "
-            "directory. If a bare `gof` command is unavailable, explain that CLI "
+            "directory. If a bare `Raticode` command is unavailable, explain that CLI "
             "validation could not be run."
         )
 
@@ -3564,7 +3607,7 @@ def _load_skill_text() -> str:
     except (OSError, UnicodeError, RattishArtifactError):
         return (
             "The packaged Raticode workflow-builder skill is unavailable. Author only "
-            "Rattish source and run `gof rattish docs --format json` to locate the installed "
+            "Rattish source and run `Raticode rattish docs --format json` to locate the installed "
             "language specification and node contracts."
         )
 
@@ -3574,12 +3617,12 @@ def _rattish_docs_prompt_context() -> str:
         docs_root = rattish_docs_root()
     except RattishArtifactError:
         return (
-            "Rattish documentation path: unavailable. Use `gof rattish docs --format json` "
+            "Rattish documentation path: unavailable. Use `Raticode rattish docs --format json` "
             "to diagnose the installation before authoring."
         )
     return (
         f"Installed Rattish documentation: {docs_root}\n"
-        "Use `gof rattish docs --format json` for exact documentation, contract, and schema "
+        "Use `Raticode rattish docs --format json` for exact documentation, contract, and schema "
         "paths. These installed resources are authoritative and do not require a source checkout."
     )
 

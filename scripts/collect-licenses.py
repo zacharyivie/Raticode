@@ -84,7 +84,7 @@ def collect(output: Path) -> None:
     locked = {(re.sub(r"[-_.]+", "-", p["name"]).lower(), p["version"]) for p in lock_packages}
     required = set()
     pending = [
-        ("gofer-flow", frozenset({"xlsx"})),
+        ("raticode", frozenset({"xlsx"})),
         ("pyinstaller", frozenset()),
         ("pyinstaller-hooks-contrib", frozenset()),
     ]
@@ -107,7 +107,7 @@ def collect(output: Path) -> None:
     for dist in sorted(metadata.distributions(), key=lambda d: d.metadata["Name"].lower()):
         name, version = dist.metadata["Name"], dist.version
         normalized = re.sub(r"[-_.]+", "-", name).lower()
-        if normalized not in required or normalized == "gofer-flow":
+        if normalized not in required or normalized == "raticode":
             continue
         if (normalized, version) not in locked:
             raise ValueError(f"Python lock mismatch: {name} {version}")

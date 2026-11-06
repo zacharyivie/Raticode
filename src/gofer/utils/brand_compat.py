@@ -15,3 +15,13 @@ LEGACY_BUNDLE_FORMATS = {
     "murina-code.bundle.json": "murina-code-workflow",
     LEGACY_BUNDLE_MANIFEST: LEGACY_BUNDLE_FORMAT,
 }
+
+# Swarm branches created before the rename remain manageable and deletable.
+LEGACY_SWARM_BRANCH_PREFIX = f"{LEGACY_WORKSPACE_DIRECTORY[1:]}/swarm/"
+
+# Python distribution names used by earlier releases. An environment installed before
+# the rename keeps reporting its version until it is synced again.
+LEGACY_DISTRIBUTIONS = ("gofer-flow",)
+
+# Command names used by earlier releases. Raticode removes its own stale helper copies.
+LEGACY_CLI_NAMES = ("gof",)

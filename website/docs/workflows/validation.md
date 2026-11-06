@@ -12,16 +12,16 @@ Check what the workflow means, then check whether the machine can execute it.
 
 | Command | Checks | Executes nodes? |
 | --- | --- | --- |
-| `gof rattish format` | Canonical source spelling and layout | No |
-| `gof rattish check` | Grammar, contracts, types, bindings, and graph semantics | No |
-| `gof rattish preflight` | Compilation plus deployment resources and readiness | No |
+| `Raticode rattish format` | Canonical source spelling and layout | No |
+| `Raticode rattish check` | Grammar, contracts, types, bindings, and graph semantics | No |
+| `Raticode rattish preflight` | Compilation plus deployment resources and readiness | No |
 
 Run them against the actual `workflow.rattish` path:
 
 ```bash
-gof rattish format WORKFLOW_PATH
-gof rattish check WORKFLOW_PATH --format json
-gof rattish preflight WORKFLOW_PATH --format json
+Raticode rattish format WORKFLOW_PATH
+Raticode rattish check WORKFLOW_PATH --format json
+Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
 `format` changes the source. Use `format --check` in CI, or `format --stdout` to inspect canonical text without modifying the file.
@@ -42,7 +42,7 @@ A valid workflow can fail preflight on another machine. Conversely, an authentic
 
 For check and preflight, `0` means no error diagnostics, `1` means language or readiness errors, and `2` means source, artifact, or usage failure. Run also reports failed execution with `1`; invalid CLI or declared workflow input uses `2`.
 
-Use `gof rattish inspect-ir WORKFLOW_PATH` to inspect validated internal representation. Do not edit that output as the workflow source.
+Use `Raticode rattish inspect-ir WORKFLOW_PATH` to inspect validated internal representation. Do not edit that output as the workflow source.
 
 ## Validate examples for your environment
 

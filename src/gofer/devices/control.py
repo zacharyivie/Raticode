@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import errno
 import ipaddress
 import logging
 import os
@@ -23,6 +24,7 @@ from typing import Any
 
 from gofer.devices.application import DeviceApplication
 from gofer.devices.client import exchange, pair_desktop, reconnect_desktop
+from gofer.devices.diagnostics import route_label
 from gofer.devices.pairing import Invitations, parse_invitation
 from gofer.devices.registry import DeviceRegistry, PairingError
 from gofer.devices.service import DeviceListener
@@ -40,6 +42,15 @@ FLEET_REFRESH = 30
 FLEET_WAIT = 5
 
 logger = logging.getLogger(__name__)
+
+
+def _failure_name(error: BaseException) -> str:
+    """A fixed description of an error: its type and, for OS errors, the errno name."""
+    if isinstance(error, OSError) and error.errno:
+        return f"{type(error).__name__} {errno.errorcode.get(error.errno, error.errno)}"
+    if isinstance(error, PairingError):
+        return f"PairingError {error}"
+    return type(error).__name__
 
 
 def default_device_host(network_enabled: bool) -> str:
@@ -67,9 +78,15 @@ class DeviceControl:
         self.directory = directory / "devices"
         self.store = store
         self.experimental_network = os.environ.get("RATICODE_DEVICE_EXPERIMENTAL_NETWORK") == "1"
+        # A fixed address is the user's choice; a detected one can go stale when the
+        # computer joins another network, which the background loop reports.
+        self.host_detected = not os.environ.get("RATICODE_DEVICE_HOST")
         self.host = os.environ.get("RATICODE_DEVICE_HOST") or default_device_host(
             self.experimental_network
         )
+        self.host_change_noted: str | None = None
+        self.host_checked = 0.0
+        self.tailnet_logged: tuple[str, str | None, str | None] | None = None
         self.registry: DeviceRegistry | None = None
         self.invitations: Invitations | None = None
         self.listener: DeviceListener | None = None
@@ -112,16 +129,25 @@ class DeviceControl:
                 raise PairingError("device_host_must_be_local_address")
             if not address.is_loopback and not self.experimental_network:
                 raise PairingError("experimental_network_opt_in_required")
-        except ValueError:
+        except ValueError as exc:
             self.configuration_error = (
                 "Device listener disabled. Configure a local IP address and turn on Phone "
                 "and desktop pairing in Settings > Developer > Feature Preview."
             )
             self.error = self.configuration_error
+            logger.warning(
+                "Phone connections are off: the device address is not usable (%s)",
+                str(exc) if isinstance(exc, PairingError) else "not an IP address",
+            )
         if self.configuration_error is None and (self.directory / "devices.sqlite3").exists():
             try:
                 self.start(initialize=False)
-            except (ValueError, OSError, sqlite3.Error):
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                logger.error(
+                    "Paired devices are unavailable: protected device storage or the "
+                    "listener could not start (%s)",
+                    _failure_name(exc),
+                )
                 self.error = (
                     "Protected device storage could not be opened. Unlock the OS credential "
                     "store; if keys were lost, revoke this desktop on its peers "
@@ -155,7 +181,13 @@ class DeviceControl:
             try:
                 port = future.result(timeout=10)
                 registry.save_listener_port(port)
-            except BaseException:
+            except BaseException as exc:
+                logger.error(
+                    "Could not listen for paired devices on %s port %s: %s",
+                    self.host,
+                    requested_port or "any",
+                    _failure_name(exc),
+                )
                 future.cancel()
                 asyncio.run_coroutine_threadsafe(listener.close(), self.loop).result(timeout=10)
                 registry.close()
@@ -169,6 +201,13 @@ class DeviceControl:
                 else {"host": self.host, "port": port}
             )
             application.listener_endpoint = {"host": self.host, "port": port}
+            logger.info(
+                "Listening for paired devices on %s port %d (%s%s)",
+                self.host,
+                port,
+                route_label(self.host),
+                ", address detected automatically" if self.host_detected else ", fixed address",
+            )
             self._apply_services()
             self._start_chat()
             asyncio.run_coroutine_threadsafe(self._remote_loop(), self.loop)
@@ -287,7 +326,7 @@ class DeviceControl:
                     break
             await self._tailnet_apply(detection)
         except Exception as error:  # noqa: BLE001
-            logger.warning("Tailscale check failed: %s", type(error).__name__)
+            logger.warning("Tailscale check failed: %s", _failure_name(error))
             with self.tailnet_lock:
                 self.tailnet_error = "check_failed"
         finally:
@@ -316,18 +355,38 @@ class DeviceControl:
                 if wanted is not None:
                     # Same port as the LAN listener, so one access rule covers both.
                     await listener.add_host(wanted, port)
-            except OSError:
+            except OSError as exc:
                 error = "listen_failed"
+                logger.error(
+                    "Could not listen for phones on Tailscale address %s port %d: %s",
+                    wanted,
+                    port,
+                    _failure_name(exc),
+                )
             else:
                 previous = self.tailnet_host
                 with self.tailnet_lock:
                     self.tailnet_host = wanted
                 if previous is not None:
                     await listener.remove_host(previous)
+                if wanted is not None:
+                    logger.info(
+                        "Listening for phones on Tailscale address %s port %d%s",
+                        wanted,
+                        port,
+                        f" (was {previous})" if previous else "",
+                    )
+                else:
+                    logger.info(
+                        "Stopped listening on Tailscale address %s; phones connected through "
+                        "it were disconnected",
+                        previous,
+                    )
         with self.tailnet_lock:
             self.tailnet_detection = detection
             self.tailnet_error = error
             self.tailnet_checked = time.time() if detection is not None else None
+        self._note_tailnet(detection)
         if self.application is not None:
             self.application.tailnet_endpoint = (
                 {"host": self.tailnet_host, "port": port}
@@ -337,6 +396,73 @@ class DeviceControl:
             # While on but not listening, say nothing, so phones keep the address they
             # have instead of forgetting it during a short gap. Off is a definite null.
             self.application.tailnet_known = detection is None or self.tailnet_host is not None
+
+    def _note_tailnet(self, detection: Detection | None) -> None:
+        """Log what Tailscale reports when it changes, not on every recheck."""
+        seen = (
+            ("off", None, None)
+            if detection is None
+            else (detection.state, detection.host, detection.source)
+        )
+        if seen == self.tailnet_logged:
+            return
+        first = self.tailnet_logged is None
+        self.tailnet_logged = seen
+        if detection is None:
+            if not first:
+                logger.info("Tailscale for phones is off")
+            return
+        if detection.host:
+            logger.info(
+                "Tailscale is %s on this computer with address %s (found by %s)",
+                detection.state.replace("_", " "),
+                detection.host,
+                detection.source or "unknown check",
+            )
+            return
+        advice = {
+            "not_installed": "Tailscale was not found on this computer",
+            "stopped": "Tailscale is installed but not connected",
+            "needs_login": "Tailscale needs you to sign in",
+            "needs_approval": "this computer awaits approval in your Tailscale admin console",
+            "starting": "Tailscale is still starting",
+            "invalid_address": "the Tailscale address set for Raticode is not a Tailscale address",
+        }.get(detection.state, f"Tailscale reported {detection.state}")
+        logger.warning(
+            "Phones cannot use Tailscale yet: %s (checked by %s)%s",
+            advice,
+            detection.source or "unknown check",
+            f"; still listening on {self.tailnet_host}" if self.tailnet_host else "",
+        )
+
+    def _note_host_change(self) -> None:
+        """Warn when the computer's local address moved away from the listening one.
+
+        Phones save the address shown in Paired devices. After a laptop joins another
+        network the listener keeps its old address, so phones on Wi-Fi time out until
+        Raticode restarts. Report that once per new address.
+        """
+        if not (self.host_detected and self.experimental_network and self.listener):
+            return
+        now = time.monotonic()
+        if now - self.host_checked < 60:
+            return
+        self.host_checked = now
+        current = default_device_host(True)
+        if current == self.host or current == "127.0.0.1":
+            if current == self.host:
+                self.host_change_noted = None
+            return
+        if current == self.host_change_noted:
+            return
+        self.host_change_noted = current
+        logger.warning(
+            "This computer's local network address changed from %s to %s, but phones are "
+            "still offered %s. Phones on Wi-Fi cannot connect until Raticode restarts.",
+            self.host,
+            current,
+            self.host,
+        )
 
     def _tailnet_action(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -684,9 +810,10 @@ class DeviceControl:
                     ):
                         # Picks up Tailscale starting late or its address changing.
                         self._tailnet_start()
+                    await asyncio.to_thread(self._note_host_change)
             except Exception as error:  # noqa: BLE001
                 # Keep retrying and refreshing; one bad tick must not end the loop.
-                logger.warning("Paired device background work failed: %s", type(error).__name__)
+                logger.warning("Paired device background work failed: %s", _failure_name(error))
             await asyncio.sleep(5)
 
     def attach_services(

@@ -64,6 +64,6 @@ For example, refer to `node.step.output.source_path` from a compatible downstrea
 
 The source and its parent must permit moving, and the destination must satisfy the directory/overwrite policy. When the node has `needs`, preflight skips the existence check because an upstream step may create the source earlier in the run; the node then reports a missing source when it runs. Invalid containment or type combinations fail.
 
-Use `gof rattish check` and `gof rattish preflight` before choosing to run the example. The installed contract is available through `gof rattish docs --format json`.
+Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

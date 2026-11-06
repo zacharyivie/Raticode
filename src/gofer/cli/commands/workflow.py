@@ -1378,7 +1378,7 @@ def resume(
         if from_node or only_node or skip_cache or force:
             console.print(
                 "[red]Rattish runs resume where they stopped. --from-node, --only-node, "
-                f"--skip-cache and --force aren't supported; run gof workflow run {workflow} "
+                f"--skip-cache and --force aren't supported; run Raticode workflow run {workflow} "
                 "to start over.[/red]"
             )
             raise typer.Exit(1)
@@ -2758,8 +2758,8 @@ def add_node(
 ) -> None:
     """Add or replace a workflow node.
 
-    Machine-readable options and operation fields: gof schema --command
-    workflow.add-node and gof schema --operation TYPE.
+    Machine-readable options and operation fields: Raticode schema --command
+    workflow.add-node and Raticode schema --operation TYPE.
     """
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
@@ -2933,7 +2933,7 @@ def add_edge(
 ) -> None:
     """Add or replace a workflow edge.
 
-    Machine-readable options and fields: gof schema --command workflow.add-edge.
+    Machine-readable options and fields: Raticode schema --command workflow.add-edge.
     """
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)

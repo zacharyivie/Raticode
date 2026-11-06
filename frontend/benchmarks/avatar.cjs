@@ -1,3 +1,4 @@
+require('../electron/tests/background-display.cjs').runInBackgroundDisplay();
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -41,7 +42,7 @@ app.whenReady().then(async () => {
       await new Promise(resolve => setTimeout(resolve, 500));
       const result = await win.webContents.executeJavaScript(`({dpr:devicePixelRatio, sources:[...document.querySelectorAll('.rem-avatar img')].slice(0,4).map(i=>i.currentSrc)})`);
       console.log(JSON.stringify({ zoom, ...result }));
-      fs.writeFileSync(`/tmp/taskurotta-avatar-${process.env.PERF_SCALE || '1'}x-zoom-${zoom}.png`, (await win.webContents.capturePage()).toPNG());
+      fs.writeFileSync(`/tmp/raticode-avatar-${process.env.PERF_SCALE || '1'}x-zoom-${zoom}.png`, (await win.webContents.capturePage()).toPNG());
     }
   } finally { win.destroy(); server.close(); app.exit(); }
 }).catch(error => { console.error(error); app.exit(1); });

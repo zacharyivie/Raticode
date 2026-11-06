@@ -38,7 +38,7 @@ Node save:
 The `stdin` port replaces the writer's authored content. On execution, supply JSON for the input:
 
 ```bash
-gof rattish run WORKFLOW_PATH --input 'message="Hello from an input"' --format json
+Raticode rattish run WORKFLOW_PATH --input 'message="Hello from an input"' --format json
 ```
 
 Quoting matters: the value after `=` is JSON, so a string needs JSON quotes inside the shell argument. Repeat `--input` for multiple values. Invalid inputs fail before execution.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import importlib.metadata
 from pathlib import Path
 from types import UnionType
 from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin
@@ -28,6 +27,7 @@ from gofer.core.workflow import (
     WorkflowParameterConfig,
     WorkflowVariableConfig,
 )
+from gofer.utils.version import installed_version
 
 AUTHORING_SCHEMA_VERSION = "1.0.0"
 WORKFLOW_FORMAT_VERSIONS = ["1"]
@@ -452,10 +452,7 @@ REPRESENTATIVE_EXAMPLES = [
 
 
 def cli_version() -> str:
-    try:
-        return importlib.metadata.version("gofer-flow")
-    except importlib.metadata.PackageNotFoundError:
-        return "0.0.0+source"
+    return installed_version() or "0.0.0+source"
 
 
 def authoring_contract(
@@ -491,12 +488,12 @@ def authoring_contract(
         "mutation_commands": [
             {
                 "id": "mutation.workflow.add-node",
-                "command": "gof workflow add-node",
-                "operation_contract": "gof schema --operation <type>",
+                "command": "Raticode workflow add-node",
+                "operation_contract": "Raticode schema --operation <type>",
             },
             {
                 "id": "mutation.workflow.add-edge",
-                "command": "gof workflow add-edge",
+                "command": "Raticode workflow add-edge",
                 "schema_capability": "edge",
             },
         ],

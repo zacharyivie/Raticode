@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import posixpath
 import re
@@ -21,6 +22,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -51,7 +53,18 @@ from gofer.ui.brain_documents import (
 )
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
 
-KINDS = ("documents", "collections", "savedSearches", "reports", "citations", "jobs")
+log = logging.getLogger(__name__)
+
+KINDS = (
+    "documents",
+    "collections",
+    "savedSearches",
+    "reports",
+    "citations",
+    "jobs",
+    "projects",
+    "topics",
+)
 
 
 def now() -> str:
@@ -131,7 +144,7 @@ def linked_document(doc: dict[str, Any], link: str, documents: list[dict[str, An
             for item in documents
             if not item.get("missing")
             and (
-                item["path"] == relative + ".md"
+                item["path"] in {relative + ".md", vault_relative + ".md"}
                 or ("/" not in link and Path(item["path"]).stem == link)
             )
         ]
@@ -161,6 +174,14 @@ class BrainLibrary:
         self._scan_pending: set[str] = set()
         self.deferred_scans: set[str] = set()
         self.deferred_jobs: set[str] = set()
+        # Matrices rebuilt from stored vectors when a brain's index or vectors change.
+        self._vector_cache: dict[str, Any] = {}
+        self._vector_epoch: dict[str, int] = {}
+        self._topic_cache: dict[str, Any] = {}
+        self._receipts_seen: dict[str, float] = {}
+        self._embedding_checked: set[str] = set()
+        # Set by the UI server so the Second Brain can show organization tickets.
+        self.organization_source: Callable[[], list[dict[str, Any]]] | None = None
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -173,6 +194,13 @@ class BrainLibrary:
                     tokenize='unicode61 remove_diacritics 2');
                 CREATE TABLE IF NOT EXISTS vectors(brain TEXT, doc TEXT, block TEXT, version TEXT,
                     body TEXT, PRIMARY KEY(brain,doc,block));
+                CREATE TABLE IF NOT EXISTS embeddings(brain TEXT, doc TEXT, window TEXT,
+                    blocks TEXT, version TEXT, dim INTEGER, data BLOB,
+                    PRIMARY KEY(brain,doc,window));
+                CREATE TABLE IF NOT EXISTS observations(brain TEXT, doc TEXT, version TEXT,
+                    kind TEXT, actor TEXT, body TEXT, at TEXT,
+                    PRIMARY KEY(brain,doc,kind,actor));
+                CREATE TABLE IF NOT EXISTS topic_state(brain TEXT PRIMARY KEY, body TEXT);
                 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, body TEXT);
                 CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, body TEXT);
                 CREATE TABLE IF NOT EXISTS external_sources(brain TEXT, id TEXT, body TEXT,
@@ -276,6 +304,11 @@ class BrainLibrary:
         path.parent.mkdir(exist_ok=True)
         # Text snapshots are evidence, not regenerable caches. Do not export grants or secrets.
         library = {kind: self.entities(kind, brain_id) for kind in KINDS}
+        # Project names and topic names are newer records. Leave them out until used,
+        # so older Raticode builds can still open brains that don't have any.
+        for kind in ("projects", "topics"):
+            if not library[kind]:
+                del library[kind]
         for doc in library["documents"]:
             doc.pop("fileIdentity", None)
             doc.pop("fingerprint", None)
@@ -485,8 +518,10 @@ class BrainLibrary:
                         if len(paths) > MAX_ENTRIES:
                             raise ValueError("Brain exceeds the 20,000 document limit")
             missing = [doc for doc in previous if doc["path"] not in paths]
+        # Reports this workspace generated are kept out of new evidence by default.
+        # Files Rem saved are agent knowledge: labelled, but still usable as evidence.
         artifacts = {
-            path
+            path: "agent" if report.get("external") else "generated"
             for report in self.entities("reports", brain_id)
             for path in (report["artifactPath"], report["artifactPath"] + ".html")
         }
@@ -571,6 +606,8 @@ class BrainLibrary:
                 "author": metadata.get("author", extracted.get("author", "")),
                 "tags": metadata.get("tags", extracted.get("tags", [])),
                 "project": metadata.get("project", extracted.get("project", "")),
+                "fileProject": extracted.get("project", ""),
+                "organization": extracted.get("organization", ""),
                 "source": {
                     "url": url,
                     "domain": urlparse(url).hostname or "",
@@ -611,7 +648,7 @@ class BrainLibrary:
             if old and old.get("ocrVersion") == digest:
                 doc.update(blocks=old["blocks"], extraction=old["extraction"], ocrVersion=digest)
             if relative in artifacts:
-                doc.update(type="report", origin="generated")
+                doc.update(type="report", origin=artifacts[relative])
             touched.append(doc)
             if progress:
                 progress(90 * (index + 1) / max(1, len(paths)))
@@ -955,6 +992,37 @@ class BrainLibrary:
                         if doc["path"] == existing["artifactPath"]:
                             doc["inbox"] = False
                             self.put("documents", doc)
+            elif kind == "projects":
+                name = str(item.get("name") or "").strip()
+                aliases = item.get("aliases", [])
+                roots = item.get("roots", [])
+                if not 1 <= len(name) <= 120:
+                    raise ValueError("A project needs a name under 120 characters")
+                if not isinstance(aliases, list) or len(aliases) > 40:
+                    raise ValueError("A project can have up to 40 other names")
+                if not isinstance(roots, list) or len(roots) > 20:
+                    raise ValueError("A project can have up to 20 folders")
+                if any(not isinstance(root, str) or not Path(root).is_absolute() for root in roots):
+                    raise ValueError("Project folders must be absolute paths")
+                item = {
+                    "id": item_id,
+                    "brainId": brain_id,
+                    "name": name,
+                    "aliases": sorted(
+                        {str(alias).strip()[:120] for alias in aliases if str(alias).strip()}
+                        - {name}
+                    ),
+                    "roots": sorted({str(root).rstrip("/") for root in roots}),
+                    "color": str(item.get("color") or "")[:20],
+                }
+            elif kind == "topics":
+                name = str(item.get("name") or "").strip()
+                members = item.get("members", [])
+                if not 1 <= len(name) <= 80:
+                    raise ValueError("Name the topic in under 80 characters")
+                if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
+                    raise ValueError("A named topic lists its documents")
+                item = {"id": item_id, "brainId": brain_id, "name": name, "members": members}
             elif kind == "jobs":
                 from gofer.ui.brain_job_sources import source_rules
 
@@ -1155,6 +1223,10 @@ class BrainLibrary:
                 db.execute("DELETE FROM entities WHERE brain=?", (params["id"],))
                 db.execute("DELETE FROM passages WHERE brain=?", (params["id"],))
                 db.execute("DELETE FROM vectors WHERE brain=?", (params["id"],))
+                db.execute("DELETE FROM embeddings WHERE brain=?", (params["id"],))
+                db.execute("DELETE FROM observations WHERE brain=?", (params["id"],))
+                db.execute("DELETE FROM topic_state WHERE brain=?", (params["id"],))
+                self._vector_cache.pop(params["id"], None)
                 db.execute("DELETE FROM external_sources WHERE brain=?", (params["id"],))
             return {}
         if action == "task":
@@ -1250,41 +1322,434 @@ class BrainLibrary:
             return self.search(params)
         if action == "related":
             doc = self.entity("documents", str(params["id"]))
-            from gofer.ui.brain_embeddings import signature
-
-            model_signature = signature(self.brain(doc["brainId"])["settings"])
-            documents = {
-                item["id"]: item
-                for item in self.entities("documents", doc["brainId"])
-                if not item.get("excluded") and not item.get("missing")
-            }
-            vectors: dict[str, list[list[float]]] = {}
-            with self.connect() as db:
-                for row in db.execute(
-                    "SELECT doc,body,version FROM vectors WHERE brain=?", (doc["brainId"],)
-                ):
-                    current = documents.get(row[0])
-                    if current and row[2] == current["version"] + ":" + model_signature:
-                        vectors.setdefault(row[0], []).append(json.loads(row[1]))
-
-            def center(values: list[list[float]]) -> list[float]:
-                mean = [sum(column) / len(values) for column in zip(*values, strict=True)]
-                norm = sum(number * number for number in mean) ** 0.5
-                return [number / norm for number in mean] if norm else mean
-
-            if not vectors.get(doc["id"]):
-                return []
-            source = center(vectors[doc["id"]])
-            ranked = sorted(
-                (
-                    (sum(a * b for a, b in zip(source, center(values), strict=True)), doc_id)
-                    for doc_id, values in vectors.items()
-                    if doc_id != doc["id"]
-                ),
-                reverse=True,
-            )
-            return [doc_id for score, doc_id in ranked[:5] if score >= 0.65]
+            return [item["docId"] for item in self._similar(doc) if not item["revision"]][:5]
+        if action == "projects":
+            return self.projects(str(params["brainId"]))
+        if action == "connections":
+            return self.connections(str(params["id"]))
+        if action == "topics":
+            return self.topics(str(params["brainId"]))
+        if action == "topic_layout":
+            return self.topic_layout(str(params["brainId"]), str(params["topicId"]))
+        if action == "backfill_provenance":
+            return self.backfill_provenance(str(params["brainId"]), conversations=True)
         raise ValueError("Unknown Second Brain action")
+
+    # ------------------------------------------------ projects, provenance, topics
+
+    def _similar(self, doc: dict[str, Any]) -> list[dict[str, Any]]:
+        from gofer.ui.brain_graph import similar
+
+        vectors = self._doc_vectors(doc["brainId"])
+        paths = {item["id"]: item["path"] for item in self.entities("documents", doc["brainId"])}
+        found = similar(doc["id"], vectors["ids"], vectors["matrix"], paths, vectors["threshold"])
+        return [{**item, "basis": vectors["basis"]} for item in found]
+
+    def projects(self, brain_id: str) -> dict[str, Any]:
+        from gofer.ui.brain_graph import conversations, resolve_projects
+
+        brain = self.brain(brain_id)
+        self._maybe_backfill(brain_id)
+        return resolve_projects(
+            brain,
+            self.entities("documents", brain_id),
+            self.entities("reports", brain_id),
+            self.entities("projects", brain_id),
+            conversations(Path(brain["root"])),
+        )
+
+    def _organizations(self) -> list[dict[str, Any]]:
+        if self.organization_source is None:
+            return []
+        try:
+            return list(self.organization_source())
+        except Exception:  # noqa: BLE001 - organization trouble must not hide knowledge
+            log.exception("Could not read organizations for the Second Brain")
+            return []
+
+    def connections(self, doc_id: str) -> dict[str, Any]:
+        """Everything known about one document, each relationship labelled with its basis."""
+        from gofer.ui.brain_graph import organization_references
+
+        doc = self.entity("documents", doc_id)
+        brain_id = doc["brainId"]
+        brain = self.brain(brain_id)
+        documents = {item["id"]: item for item in self.entities("documents", brain_id)}
+        reports = self.entities("reports", brain_id)
+        record = next(
+            (
+                report
+                for report in reports
+                if doc["path"] in {report["artifactPath"], report["artifactPath"] + ".html"}
+            ),
+            None,
+        )
+        projects = self.projects(brain_id)
+        names = {project["id"]: project["name"] for project in projects["projects"]}
+        threads = {thread["threadId"]: thread for thread in projects["conversations"]}
+        made_by: list[dict[str, Any]] = []
+        if record is not None:
+            provenance = dict(record.get("provenance") or {})
+            if record.get("external"):
+                made_by.append(
+                    {
+                        "kind": provenance.get("savedVia") or "rem_thread",
+                        "basis": provenance.get("basis") or "observed",
+                        "reportId": record["id"],
+                        "title": provenance.get("taskTitle") or provenance.get("threadTitle", ""),
+                        "taskId": provenance.get("taskId", ""),
+                        "threadId": provenance.get("threadId", ""),
+                        "projectRoot": provenance.get("projectRoot", ""),
+                        "provider": provenance.get("provider", ""),
+                        "model": provenance.get("model", ""),
+                        "at": provenance.get("at") or record.get("generatedAt", ""),
+                        "hashMatches": provenance.get("hashMatches"),
+                    }
+                )
+            else:
+                made_by.append(
+                    {
+                        "kind": "brain_report",
+                        "basis": "observed",
+                        "reportId": record["id"],
+                        "title": record.get("question", ""),
+                        "provider": record.get("provider", ""),
+                        "model": record.get("modelReported") or record.get("model", ""),
+                        "at": record.get("generatedAt", ""),
+                    }
+                )
+        organizations = organization_references(self._organizations(), Path(brain["root"]))
+        if doc["path"] in organizations["made"]:
+            made_by.append(
+                {"kind": "organization", "basis": "observed", **organizations["made"][doc["path"]]}
+            )
+        elif doc.get("organization"):
+            made_by.append(
+                {"kind": "organization", "basis": "written", "organization": doc["organization"]}
+            )
+        used_by: list[dict[str, Any]] = []
+        for report in reports:
+            cited = [c for c in report.get("citations", []) if c.get("docId") == doc_id]
+            if cited:
+                used_by.append(
+                    {
+                        "kind": "report",
+                        "basis": "cited",
+                        "reportId": report["id"],
+                        "title": report.get("title", ""),
+                        "count": len(cited),
+                        "changed": sum(c.get("state") not in {None, "found"} for c in cited),
+                        "at": report.get("generatedAt", ""),
+                    }
+                )
+        with self.connect() as db:
+            observed = [
+                json.loads(row[0]) | {"version": row[1], "at": row[2]}
+                for row in db.execute(
+                    "SELECT body, version, at FROM observations WHERE brain=? AND doc=?"
+                    " ORDER BY at DESC LIMIT 50",
+                    (brain_id, doc_id),
+                )
+            ]
+        for item in observed:
+            thread = threads.get(item.get("threadId", ""), {})
+            used_by.append(
+                {
+                    "kind": "thread",
+                    "basis": "observed",
+                    "relation": "read",
+                    "threadId": item.get("threadId", ""),
+                    "title": thread.get("title") or "Rem thread",
+                    "projectRoot": item.get("projectRoot", ""),
+                    "at": item["at"],
+                    "olderVersion": item["version"] != doc["version"],
+                }
+            )
+        used_by.extend(organizations["used"].get(doc["path"], []))
+        similar_items = self._similar(doc)
+        assignment = projects["assignments"].get(doc_id)
+        project = (
+            {**assignment, "name": names.get(assignment["projectId"], "")} if assignment else None
+        )
+        suggested = None
+        if project is None:
+            votes = Counter(
+                projects["assignments"][item["docId"]]["projectId"]
+                for item in similar_items
+                if not item["revision"] and item["docId"] in projects["assignments"]
+            )
+            if votes:
+                pid, count = votes.most_common(1)[0]
+                if count >= 2:
+                    suggested = {
+                        "projectId": pid,
+                        "name": names.get(pid, ""),
+                        "basis": "suggested",
+                        "detail": f"{count} of the {len(similar_items)} most similar documents",
+                    }
+        topic = None
+        try:
+            topics = self.topics(brain_id)
+            topic_id = topics["topicOf"].get(doc_id)
+            topic = next(
+                (
+                    {"id": t["id"], "label": t["label"], "size": t["size"]}
+                    for t in topics["topics"]
+                    if t["id"] == topic_id
+                ),
+                None,
+            )
+        except (ValueError, ImportError):
+            topic = None
+        cited_by = sorted(
+            item["id"] for item in documents.values() if doc_id in item.get("cites", [])
+        )
+        return {
+            "docId": doc_id,
+            "madeBy": made_by,
+            "project": project,
+            "suggestedProject": suggested,
+            "links": {"cites": list(doc.get("cites", [])), "citedBy": cited_by},
+            "usedBy": used_by,
+            "similar": similar_items,
+            "topic": topic,
+        }
+
+    def topics(self, brain_id: str) -> dict[str, Any]:
+        from gofer.ui.brain_graph import compute_topics
+
+        vectors = self._doc_vectors(brain_id)
+        named = self.entities("topics", brain_id)
+        key = (vectors["key"], json.dumps(named, sort_keys=True))
+        cached = self._topic_cache.get(brain_id)
+        if cached and cached["key"] == key:
+            return dict(cached["result"])
+        documents = {doc["id"]: doc for doc in self.entities("documents", brain_id)}
+        with self.connect() as db:
+            row = db.execute("SELECT body FROM topic_state WHERE brain=?", (brain_id,)).fetchone()
+        previous = json.loads(row[0]).get("topics", []) if row else []
+        computed = compute_topics(
+            [documents[doc_id] for doc_id in vectors["ids"]],
+            vectors["ids"],
+            vectors["matrix"],
+            vectors["threshold"],
+            previous,
+            named,
+        )
+        assignments = self.projects(brain_id)["assignments"]
+        for topic in computed["topics"]:
+            tally = Counter(
+                assignments[doc_id]["projectId"]
+                for doc_id in topic["members"]
+                if doc_id in assignments
+            )
+            topic["projects"] = [
+                {"projectId": pid, "count": count} for pid, count in tally.most_common(3)
+            ]
+            pinned = next((item for item in named if item["id"] == topic["id"]), None)
+            if pinned and set(pinned.get("members", [])) != set(topic["members"]):
+                # A named topic follows its documents as the brain grows.
+                self.put("topics", {**pinned, "members": topic["members"]})
+        with self.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO topic_state VALUES(?,?)",
+                (
+                    brain_id,
+                    encode(
+                        {
+                            "topics": [
+                                {"id": t["id"], "members": t["members"]} for t in computed["topics"]
+                            ]
+                        }
+                    ),
+                ),
+            )
+        result = {**computed, "basis": vectors["basis"], "documents": len(vectors["ids"])}
+        key = (vectors["key"], json.dumps(self.entities("topics", brain_id), sort_keys=True))
+        self._topic_cache[brain_id] = {"key": key, "result": result}
+        return dict(result)
+
+    def topic_layout(self, brain_id: str, topic_id: str) -> dict[str, Any]:
+        from gofer.ui.brain_graph import topic_layout
+
+        topics = self.topics(brain_id)
+        topic = next((item for item in topics["topics"] if item["id"] == topic_id), None)
+        if topic is None:
+            raise ValueError("That topic changed. Reopen the map.")
+        vectors = self._doc_vectors(brain_id)
+        documents = {doc["id"]: doc for doc in self.entities("documents", brain_id)}
+        return {
+            "topicId": topic_id,
+            **topic_layout(topic["members"], vectors["ids"], vectors["matrix"], documents),
+        }
+
+    def _artifact_record(
+        self, brain: dict[str, Any], relative: str, title: str, provenance: dict[str, Any]
+    ) -> dict[str, Any]:
+        suffix = Path(relative).suffix.lower().lstrip(".")
+        return {
+            "id": identifier("report"),
+            "brainId": brain["id"],
+            "title": title or Path(relative).stem,
+            "question": provenance.get("taskTitle") or "Saved by a Rem task",
+            "artifactPath": relative,
+            "generatedAt": provenance.get("at") or now(),
+            "format": {"htm": "html", "markdown": "md"}.get(suffix, suffix or "html"),
+            "provider": "Rem task" if provenance.get("savedVia") == "rem_task" else "Rem thread",
+            "model": provenance.get("model") or "Not reported",
+            "modelReported": "Not reported",
+            "theme": "Authored styling",
+            "template": "Saved artifact",
+            "scope": "Task resources",
+            "coverage": "Not reported",
+            "filters": "Not reported",
+            "retrievalGeneration": brain["index"]["generation"],
+            "sourceVersions": [],
+            "citations": [],
+            "claims": [],
+            "external": True,
+            "draft": False,
+            "outputHash": "sha256:" + str(provenance.get("sha256") or ""),
+            "provenance": provenance,
+        }
+
+    def record_artifact(self, path: Path, provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """Register a report a Rem task saved into a registered brain, with how it was made."""
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            return None
+        for brain in self.brains():
+            try:
+                relative = resolved.relative_to(Path(brain["root"]).resolve()).as_posix()
+            except (OSError, ValueError):
+                continue
+            with self.lock:
+                existing = next(
+                    (
+                        report
+                        for report in self.entities("reports", brain["id"])
+                        if report["artifactPath"] == relative
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    return existing
+                try:
+                    data = read_source(Path(brain["root"]), relative)
+                    title = str(extract(data, resolved.suffix.lower()).get("title") or "")
+                except (OSError, ValueError):
+                    title = ""
+                record = self._artifact_record(
+                    brain,
+                    relative,
+                    title,
+                    {"basis": "observed", "hashMatches": True, "at": now(), **provenance},
+                )
+                self.put("reports", record)
+                self._portable(brain["id"])
+            return record
+        return None
+
+    def observe(self, doc: dict[str, Any], kind: str, actor: dict[str, Any]) -> None:
+        """Remember that a Rem thread read a document (one row per thread and document)."""
+        key = str(actor.get("threadId") or "")
+        if not key:
+            return
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO observations VALUES(?,?,?,?,?,?,?) ON CONFLICT(brain,doc,kind,actor)"
+                " DO UPDATE SET version=excluded.version, body=excluded.body, at=excluded.at",
+                (doc["brainId"], doc["id"], doc["version"], kind, key, encode(actor), now()),
+            )
+
+    def _maybe_backfill(self, brain_id: str) -> None:
+        database = self.folder.parent / "rem-home.sqlite3"
+        try:
+            stamp = database.stat().st_mtime
+        except OSError:
+            stamp = 0.0
+        first = brain_id not in self._receipts_seen
+        if not first and self._receipts_seen[brain_id] == stamp:
+            return
+        self._receipts_seen[brain_id] = stamp
+        try:
+            self.backfill_provenance(brain_id, conversations=first)
+        except (OSError, ValueError, sqlite3.Error):
+            log.exception("Second Brain provenance backfill failed")
+
+    def backfill_provenance(self, brain_id: str, *, conversations: bool) -> dict[str, int]:
+        """Attach provenance to existing reports. Never edits files or replaces known facts.
+
+        Rem task receipts create a report record when none exists. Reports saved from a
+        Rem thread without provenance get the thread whose archived conversation links
+        them, when there is exactly one such link.
+        """
+        from gofer.ui.brain_graph import conversation_mentions, receipts
+
+        brain = self.brain(brain_id)
+        root = Path(brain["root"]).resolve()
+        created = updated = skipped = 0
+        with self.lock:
+            documents = {
+                doc["path"]: doc
+                for doc in self.entities("documents", brain_id)
+                if not doc.get("missing")
+            }
+            reports = {
+                report["artifactPath"]: report for report in self.entities("reports", brain_id)
+            }
+            touched_docs = []
+            for receipt in receipts(self.folder.parent):
+                try:
+                    relative = Path(receipt["path"]).resolve().relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    continue
+                doc = documents.get(relative)
+                if doc is None:
+                    skipped += 1
+                    continue
+                known = {doc["version"], *(v["hash"] for v in doc.get("versions", []))}
+                provenance = {
+                    "savedVia": "rem_task",
+                    "basis": "observed",
+                    "source": "receipt",
+                    "hashMatches": receipt["sha256"] in known,
+                    **{k: v for k, v in receipt.items() if k != "path" and v},
+                }
+                existing = reports.get(relative)
+                if existing is None:
+                    record = self._artifact_record(brain, relative, doc["title"], provenance)
+                    self.put("reports", record)
+                    reports[relative] = record
+                    created += 1
+                    touched_docs.append(doc)
+                elif not existing.get("provenance"):
+                    existing["provenance"] = provenance
+                    self.put("reports", existing)
+                    updated += 1
+            if conversations:
+                missing = [
+                    path
+                    for path, report in reports.items()
+                    if report.get("external") and not report.get("provenance")
+                ]
+                for path, found in conversation_mentions(root, missing).items():
+                    report = reports[path]
+                    report["provenance"] = {
+                        "savedVia": "conversation",
+                        "basis": "conversation",
+                        "source": "conversation archive",
+                        **{k: v for k, v in found.items() if v},
+                    }
+                    self.put("reports", report)
+                    updated += 1
+            for doc in touched_docs:
+                doc.update(type="report", origin="agent")
+                self.put("documents", doc)
+            if created or updated:
+                self._portable(brain_id)
+        return {"created": created, "updated": updated, "skipped": skipped}
 
     def task(self, task_id: str) -> dict[str, Any]:
         with self.connect() as db:
@@ -1605,7 +2070,9 @@ class BrainLibrary:
                     pass
 
     def embed(self, brain_id: str, cancel: threading.Event) -> None:
+        """Embed changed documents in windows of a few hundred words, stored as float32."""
         from gofer.ui.brain_embeddings import signature
+        from gofer.ui.brain_graph import pack, windows
 
         brain = self.brain(brain_id)
         model_signature = signature(brain["settings"])
@@ -1613,34 +2080,74 @@ class BrainLibrary:
             documents = self.entities("documents", brain_id)
             with self.connect() as db:
                 existing = {
-                    (row[0], row[1]): row[2]
+                    row[0]: row[1]
                     for row in db.execute(
-                        "SELECT doc,block,version FROM vectors WHERE brain=?", (brain_id,)
+                        "SELECT doc, version FROM embeddings WHERE brain=?", (brain_id,)
                     )
                 }
+                # Vectors stored as JSON text before windowed float32 storage; rebuilt below.
+                db.execute("DELETE FROM vectors WHERE brain=?", (brain_id,))
             valid = set()
             for doc in documents:
-                if doc["extraction"] != "ready" or doc.get("excluded"):
+                if doc["extraction"] != "ready" or doc.get("excluded") or doc.get("missing"):
                     continue
-                for block in doc["blocks"]:
-                    if cancel.is_set():
-                        raise InterruptedError("Embedding cancelled")
-                    key = (doc["id"], block["id"])
-                    valid.add(key)
-                    vector_version = doc["version"] + ":" + model_signature
-                    if existing.get(key) == vector_version:
-                        continue
-                    vector = self._embedding(f"{doc['title']}\n{block['text']}", brain, cancel)
-                    with self.connect() as db:
+                valid.add(doc["id"])
+                vector_version = doc["version"] + ":" + model_signature
+                if existing.get(doc["id"]) == vector_version:
+                    continue
+                if cancel.is_set():
+                    raise InterruptedError("Embedding cancelled")
+                parts = windows(doc)
+                vectors = (
+                    self._embed_many([text for _, _, text in parts], brain, cancel) if parts else []
+                )
+                with self.connect() as db:
+                    db.execute(
+                        "DELETE FROM embeddings WHERE brain=? AND doc=?", (brain_id, doc["id"])
+                    )
+                    for (window, blocks, _), vector in zip(parts, vectors, strict=True):
+                        data = pack(vector)
                         db.execute(
-                            "INSERT OR REPLACE INTO vectors VALUES(?,?,?,?,?)",
-                            (brain_id, *key, vector_version, encode(vector)),
+                            "INSERT INTO embeddings VALUES(?,?,?,?,?,?,?)",
+                            (
+                                brain_id,
+                                doc["id"],
+                                window,
+                                encode(blocks),
+                                vector_version,
+                                len(data) // 4,
+                                data,
+                            ),
                         )
             with self.connect() as db:
-                for key in set(existing) - valid:
-                    db.execute(
-                        "DELETE FROM vectors WHERE brain=? AND doc=? AND block=?", (brain_id, *key)
-                    )
+                for doc_id in set(existing) - valid:
+                    db.execute("DELETE FROM embeddings WHERE brain=? AND doc=?", (brain_id, doc_id))
+
+    def _local_model(self) -> Any:
+        if self.model is None:
+            TextEmbedding = importlib.import_module("fastembed").TextEmbedding
+            self.model = TextEmbedding(
+                model_name="BAAI/bge-small-en-v1.5",
+                cache_dir=str(self.folder / "models"),
+                threads=2,
+            )
+        return self.model
+
+    def _embed_many(
+        self, texts: list[str], brain: dict[str, Any], cancel: threading.Event
+    ) -> list[list[float]]:
+        current = self.brain(brain["id"])
+        if current["settings"].get("embeddings") == "cloud":
+            return [self._embedding(text, current, cancel) for text in texts]
+        model = self._local_model()
+        result: list[list[float]] = []
+        for start in range(0, len(texts), 16):
+            if cancel.is_set():
+                raise InterruptedError("Embedding cancelled")
+            result.extend(
+                [float(x) for x in vector] for vector in model.embed(texts[start : start + 16])
+            )
+        return result
 
     def _embedding(
         self, text: str, brain: dict[str, Any], cancel: threading.Event, *, query: bool = False
@@ -1651,17 +2158,107 @@ class BrainLibrary:
             from gofer.ui.brain_embeddings import cloud_embedding
 
             return cloud_embedding(text, current["settings"], self.folder.parent, cancel)
-        if self.model is None:
-            TextEmbedding = importlib.import_module("fastembed").TextEmbedding
-            self.model = TextEmbedding(
-                model_name="BAAI/bge-small-en-v1.5",
-                cache_dir=str(self.folder / "models"),
-                threads=2,
-            )
-        method = self.model.query_embed if query else self.model.embed
+        model = self._local_model()
+        method = model.query_embed if query else model.embed
         return list(next(iter(method([text]))).tolist())
 
+    def _vectors(self, brain_id: str) -> dict[str, Any]:
+        """Stored window vectors for current document versions, as one float32 matrix."""
+        import numpy as np
+
+        from gofer.ui.brain_embeddings import signature
+
+        brain = self.brain(brain_id)
+        model_signature = signature(brain["settings"])
+        with self.connect() as db:
+            count, top, low, high = db.execute(
+                "SELECT COUNT(*), MAX(rowid), MIN(version), MAX(version) FROM embeddings"
+                " WHERE brain=?",
+                (brain_id,),
+            ).fetchone()
+        key = (model_signature, brain["index"]["generation"], count, top, low, high)
+        cached = self._vector_cache.get(brain_id)
+        if cached and cached["key"] == key:
+            return dict(cached)
+        documents = {
+            doc["id"]: doc
+            for doc in self.entities("documents", brain_id)
+            if doc["extraction"] == "ready" and not doc.get("excluded") and not doc.get("missing")
+        }
+        rows: list[tuple[str, list[str], bytes]] = []
+        dims: Counter[int] = Counter()
+        with self.connect() as db:
+            for doc_id, blocks, version, dim, data in db.execute(
+                "SELECT doc, blocks, version, dim, data FROM embeddings WHERE brain=?"
+                " ORDER BY doc, rowid",
+                (brain_id,),
+            ):
+                doc = documents.get(doc_id)
+                if doc and version == doc["version"] + ":" + model_signature:
+                    rows.append((doc_id, json.loads(blocks), bytes(data)))
+                    dims[int(dim)] += 1
+        result: dict[str, Any] = {"key": key, "rowDocs": [], "rowBlocks": [], "docIds": []}
+        if rows:
+            dim = dims.most_common(1)[0][0]
+            rows = [row for row in rows if len(row[2]) == dim * 4]
+            matrix = np.frombuffer(b"".join(row[2] for row in rows), dtype=np.float32).reshape(
+                len(rows), dim
+            )
+            row_docs = [row[0] for row in rows]
+            doc_ids = list(dict.fromkeys(row_docs))
+            positions = {doc_id: index for index, doc_id in enumerate(doc_ids)}
+            centroids = np.zeros((len(doc_ids), dim), dtype=np.float32)
+            np.add.at(centroids, [positions[doc_id] for doc_id in row_docs], matrix)
+            norms = np.linalg.norm(centroids, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            result.update(
+                matrix=matrix,
+                rowDocs=row_docs,
+                rowBlocks=[row[1] for row in rows],
+                docIds=doc_ids,
+                docMatrix=centroids / norms,
+            )
+        self._vector_cache[brain_id] = result
+        return dict(result)
+
+    def _doc_vectors(self, brain_id: str) -> dict[str, Any]:
+        """Document vectors for similarity: local meaning when on, otherwise shared words."""
+        from gofer.ui.brain_graph import MEANING_THRESHOLD, WORDS_THRESHOLD, word_vectors
+
+        brain = self.brain(brain_id)
+        if brain["settings"].get("semantic"):
+            vectors = self._vectors(brain_id)
+            if vectors["docIds"]:
+                return {
+                    "ids": vectors["docIds"],
+                    "matrix": vectors["docMatrix"],
+                    "basis": "meaning",
+                    "threshold": MEANING_THRESHOLD,
+                    "key": ("meaning", *vectors["key"]),
+                }
+        key = ("words", brain["index"]["generation"])
+        cached = self._vector_cache.get(brain_id + ":words")
+        if cached and cached["key"] == key:
+            return dict(cached)
+        documents = [
+            doc
+            for doc in self.entities("documents", brain_id)
+            if doc["extraction"] == "ready" and not doc.get("excluded") and not doc.get("missing")
+        ]
+        ids, matrix = word_vectors(documents, 1024 if len(documents) <= 6000 else 512)
+        result = {
+            "ids": ids,
+            "matrix": matrix,
+            "basis": "words",
+            "threshold": WORDS_THRESHOLD,
+            "key": key,
+        }
+        self._vector_cache[brain_id + ":words"] = result
+        return dict(result)
+
     def search(self, params: dict[str, Any]) -> dict[str, Any]:
+        import numpy as np
+
         brains = params.get("brainIds") or [params["brainId"]]
         for brain_id in brains:
             self.brain(brain_id)
@@ -1687,46 +2284,54 @@ class BrainLibrary:
                         "score": -row[2],
                         "matchKind": "content",
                     }
+        meaning_order: list[str] = []
         if words and mode != "exact":
             enabled = [
                 brain_id for brain_id in brains if self.brain(brain_id)["settings"].get("semantic")
             ]
-            from gofer.ui.brain_embeddings import signature
-
+            lowered = {word.casefold() for word in words}
             for brain_id in enabled:
                 brain = self.brain(brain_id)
-                documents = {
-                    doc["id"]: doc
-                    for doc in self.entities("documents", brain_id)
-                    if doc["extraction"] == "ready"
-                    and not doc.get("excluded")
-                    and not doc.get("missing")
-                }
+                vectors = self._vectors(brain_id)
+                if not vectors["rowDocs"]:
+                    continue
                 with self.model_lock:
-                    vector = self._embedding(query, brain, threading.Event(), query=True)
-                    with self.connect() as db:
-                        rows = list(
-                            db.execute(
-                                "SELECT doc,block,body,version FROM vectors WHERE brain=?",
-                                (brain_id,),
-                            )
-                        )
-                ranked = []
-                for row in rows:
-                    doc = documents.get(row[0])
-                    if not doc or row[3] != doc["version"] + ":" + signature(brain["settings"]):
+                    query_vector = np.asarray(
+                        self._embedding(query, brain, threading.Event(), query=True),
+                        dtype=np.float32,
+                    )
+                matrix = vectors["matrix"]
+                if query_vector.shape[0] != matrix.shape[1]:
+                    continue
+                norm = float(np.linalg.norm(query_vector)) or 1.0
+                scores = matrix @ (query_vector / norm)
+                documents = {doc["id"]: doc for doc in self.entities("documents", brain_id)}
+                for row in np.argsort(-scores)[:200]:
+                    score = float(scores[int(row)])
+                    if score < 0.45:
+                        break
+                    doc_id = vectors["rowDocs"][int(row)]
+                    blocks = {
+                        block["id"]: block["text"]
+                        for block in documents.get(doc_id, {}).get("blocks", [])
+                    }
+                    candidates = [b for b in vectors["rowBlocks"][int(row)] if b in blocks]
+                    if not candidates:
                         continue
-                    stored = json.loads(row[2])
-                    if len(stored) != len(vector):
-                        continue
-                    score = sum(a * b for a, b in zip(vector, stored, strict=True))
-                    ranked.append((score, row))
-                ranked.sort(key=lambda item: -item[0])
-                for score, row in ranked[:200]:
-                    if score >= 0.45 and (row[0], row[1]) not in hits:
-                        hits[(row[0], row[1])] = {
-                            "docId": row[0],
-                            "blockId": row[1],
+                    # Show the window's passage that shares most words with the question.
+                    block_id = max(
+                        candidates,
+                        key=lambda b: (
+                            len(lowered & set(re.findall(r"\w+", blocks[b].casefold()))),
+                            len(blocks[b]),
+                        ),
+                    )
+                    meaning_order.append(doc_id)
+                    if (doc_id, block_id) not in hits:
+                        hits[(doc_id, block_id)] = {
+                            "docId": doc_id,
+                            "blockId": block_id,
+                            "blockIds": candidates,
                             "score": score,
                             "matchKind": "meaning",
                         }
@@ -1738,17 +2343,47 @@ class BrainLibrary:
             (item for item in hits.values() if item["matchKind"] == "meaning"),
             key=lambda item: -item["score"],
         )
+        ordered = exact + related
         if mode == "hybrid":
-            # Reciprocal rank avoids comparing BM25 and cosine scales directly.
-            for list_ in (exact, related):
-                for rank, item in enumerate(list_):
-                    item["score"] = 1 / (60 + rank + 1)
+            # Reciprocal rank fusion of documents (k = 60), so BM25 and cosine scales are
+            # never compared directly. A document's passages stay together in rank order.
+            fused: dict[str, float] = {}
+            sources: dict[str, set[str]] = {}
+            # A passage found both ways is listed once, but its document counts in both
+            # rankings, so meaning order comes from every semantic match.
+            rankings = (
+                ("content", [item["docId"] for item in exact]),
+                ("meaning", meaning_order),
+            )
+            for kind, ranking in rankings:
+                for rank, doc_id in enumerate(dict.fromkeys(ranking), start=1):
+                    fused[doc_id] = fused.get(doc_id, 0.0) + 1 / (60 + rank)
+                    sources.setdefault(doc_id, set()).add(kind)
+            position = {id(item): index for index, item in enumerate(ordered)}
+            ordered.sort(key=lambda item: (-fused[item["docId"]], position[id(item)]))
+            for item in ordered:
+                item["score"] = fused[item["docId"]]
+                item["fusedFrom"] = sorted(sources[item["docId"]])
         return {
-            "hits": exact + related,
+            "hits": ordered,
             "generation": {
                 brain_id: self.brain(brain_id)["index"]["generation"] for brain_id in brains
             },
         }
+
+    def _needs_embedding(self, brain: dict[str, Any]) -> bool:
+        """Once per run: a brain with related meaning on but no stored vectors re-embeds.
+
+        Brains embedded before windowed float32 storage have none until they rescan.
+        """
+        if brain["id"] in self._embedding_checked or not brain["settings"].get("semantic"):
+            return False
+        self._embedding_checked.add(brain["id"])
+        with self.connect() as db:
+            stored = db.execute(
+                "SELECT 1 FROM embeddings WHERE brain=? LIMIT 1", (brain["id"],)
+            ).fetchone()
+        return stored is None and brain["index"].get("documents", 0) > 0
 
     def needs_scan(self, brain_id: str) -> bool:
         brain = self.brain(brain_id)
@@ -1785,7 +2420,7 @@ class BrainLibrary:
                     if (
                         Path(brain["root"]).is_dir()
                         and brain["id"] not in self._scan_pending
-                        and self.needs_scan(brain["id"])
+                        and (self.needs_scan(brain["id"]) or self._needs_embedding(brain))
                     ):
                         self.start_task(
                             "index", {"brainId": brain["id"]}, label=f"Refreshing {brain['name']}"
@@ -1874,9 +2509,15 @@ class BrainLibrary:
             library["citations"] = [c for c in library["citations"] if c["docId"] in ids]
             library["savedSearches"] = []
             library["jobs"] = []
+            library["projects"] = []
+            library["topics"] = []
         for job in library["jobs"]:
             job.pop("provider", None)
             job["enabled"] = False
+        for kind in ("projects", "topics"):
+            if not library[kind]:
+                # Packages without these newer records still import into older builds.
+                del library[kind]
         referenced_ids = {ref["docId"] for ref in evidence_references(library)}
         included_ids = {doc["id"] for doc in library["documents"]}
         with self.connect() as db:

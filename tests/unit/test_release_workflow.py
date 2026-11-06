@@ -179,7 +179,7 @@ def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
         "frontend/release/*.deb",
         "frontend/release/*.rpm",
         "frontend/release/latest-linux.yml",
-        "frontend/release/gof-linux-x64",
+        "frontend/release/raticode-cli-linux-x64",
         "frontend/release/checksums-linux.txt",
         "frontend/release/package-tests-linux.json",
     ]
@@ -197,7 +197,7 @@ def test_release_workflow_uploads_expected_artifacts_and_checksums() -> None:
         "frontend/release/*.zip",
         "frontend/release/*.zip.blockmap",
         "frontend/release/latest-mac.yml",
-        "frontend/release/gof-macos-*",
+        "frontend/release/raticode-cli-macos-*",
         "frontend/release/checksums-macos.txt",
         "frontend/release/package-tests-macos.json",
         "frontend/release/notarization-macos-*.json",
@@ -295,7 +295,7 @@ def test_release_security_gates_are_mandatory_and_publish_provenance() -> None:
     assert "continue-on-error" not in npm_audit
     evidence = validation["Save dependency audit evidence"]
     assert evidence["if"] == "always() && hashFiles('audit-evidence/*') != ''"
-    assert evidence["with"]["name"] == "gofer-flow-audit-evidence"
+    assert evidence["with"]["name"] == "raticode-audit-evidence"
     assert evidence["with"]["path"] == "audit-evidence/*"
     assert evidence["with"]["if-no-files-found"] == "error"
     build = _steps_by_name(_build_job(workflow))

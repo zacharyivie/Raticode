@@ -17,7 +17,7 @@ frame latency. The log delay sample is a rough process-level check, not a deskto
 interaction benchmark.
 
 Search remains serial by default. For a native Windows experiment, launch the app
-with `TASKUROTTA_SEARCH_READ_CONCURRENCY=2` or `4`. Values are capped at four.
+with `RATICODE_SEARCH_READ_CONCURRENCY=2` or `4`. Values are capped at four.
 Use an idle local NTFS project and compare both clean and heavily modified trees.
 Test x64 and ARM64 processes separately. Also run the fixture on macOS and Linux
 before changing the default. Preserve the result equivalence check. Stop if the

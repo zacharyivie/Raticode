@@ -30,8 +30,10 @@ import {
   Globe2,
   LocateFixed,
   Layers,
+  ListChecks,
   Loader2,
   Maximize2,
+  MessageCircleQuestion,
   Minimize2,
   MoreHorizontal,
   MoveRight,
@@ -214,6 +216,18 @@ const nodeStyles = {
     accent: "bg-cyan-700",
     border: "border-cyan-200",
     chip: "bg-cyan-50 text-cyan-700 border-cyan-100",
+  },
+  rem_prompt: {
+    icon: MessageCircleQuestion,
+    accent: "bg-violet-700",
+    border: "border-violet-200",
+    chip: "bg-violet-50 text-violet-700 border-violet-100",
+  },
+  rem_task: {
+    icon: ListChecks,
+    accent: "bg-violet-700",
+    border: "border-violet-200",
+    chip: "bg-violet-50 text-violet-700 border-violet-100",
   },
 };
 
@@ -572,6 +586,10 @@ function nodeMetaFromOperation(operation = {}, pathBasePath = "") {
         : "approval required";
     case "notification":
       return `${operation.channel || "desktop"} · ${operation.title || "notification"}`;
+    case "rem_prompt":
+      return `ask Rem · ${operation.prompt || "prompt"}`;
+    case "rem_task":
+      return operation.wait === false ? "start Rem task" : "run Rem task and wait";
     case "agent":
       if (operation.skill_name) return `${operation.agent_id || "agent"} · /${operation.skill_name}`;
       return operation.prompt_path
@@ -5254,7 +5272,14 @@ function RattishInspector({
 
               {nodeTab === "action" ? (
                 <InspectorSection title={humanizeRattishField(graphNode?.type || "Action")}>
-                  {Object.entries(schemaProperties).map(([field, fieldSchema]) => (
+                  {Object.entries(schemaProperties).map(([field, fieldSchema]) =>
+                    graphNode?.type === "rem-task" && field === "task_id" ? (
+                      <RemTaskField
+                        key={field}
+                        value={graphNode?.configuration?.[field]}
+                        onChange={(value) => setNodeField("task-id", value)}
+                      />
+                    ) : (
                     <RattishContractField
                       key={field}
                       authored={Boolean(graphNode?.authoredFields?.[field.replaceAll("_", "-")])}
@@ -5266,7 +5291,11 @@ function RattishInspector({
                       }
                       onReset={() => removeNodeField(field.replaceAll("_", "-"))}
                     />
-                  ))}
+                    ),
+                  )}
+                  {rattishNodeHelp[graphNode?.type] ? (
+                    <p className="text-xs leading-5 text-muted">{rattishNodeHelp[graphNode.type]}</p>
+                  ) : null}
                   {!Object.keys(schemaProperties).length ? (
                     <p className="text-xs leading-5 text-muted">
                       This node contract has no action fields.
@@ -5576,6 +5605,60 @@ function RattishContractField({ authored, field, onChange, onReset, schema, valu
         <TextField commitOnBlur label={label} value={value ?? ""} onChange={onChange} />
       )}
       {reset}
+    </div>
+  );
+}
+
+// How a node behaves where its contract fields alone don't say.
+const rattishNodeHelp = {
+  "rem-prompt":
+    "Sends the prompt to Rem's chat and passes Rem's reply to the next steps. Unless Allow actions is on, Rem only answers: it won't start, change, remember or send anything for this workflow. Wait for tasks waits for any work Rem starts.",
+  "rem-task":
+    "Runs the task as its Run button in Rem does, so Rem checks its project access first. With Wait on, the next steps get the task's result, and a task that fails or is stopped fails this node. Stopping the workflow stops the run it started. Instructions apply to this run only.",
+};
+
+// Lists Rem's tasks by title so a Rem task node never needs a typed ID.
+function RemTaskField({ onChange, value }) {
+  const [tasks, setTasks] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    fetch(apiUrl("/rem/tasks"))
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error())))
+      .then((payload) => {
+        if (live) setTasks((payload.tasks ?? []).filter((task) => !task.deleted_at));
+      })
+      .catch(() => {
+        if (!live) return;
+        setTasks([]);
+        setError("Rem's tasks couldn't be loaded. Open Rem and try again.");
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const known = (tasks ?? []).some((task) => task.id === value);
+  const options = [
+    ...(value && !known
+      ? [[value, tasks === null ? "Loading Rem's tasks…" : "Task not found in Rem"]]
+      : []),
+    ...(tasks ?? []).map((task) => [
+      task.id,
+      `${task.title}${task.type ? ` · ${task.type}` : ""}`,
+    ]),
+  ];
+  return (
+    <div className="space-y-1.5">
+      <SelectField label="Rem task" value={value ?? ""} options={options} onChange={onChange} />
+      {tasks !== null && value && !known && !error ? (
+        <p className="text-xs leading-5 text-red-700">
+          This task was deleted or isn&apos;t in Rem. Choose another task.
+        </p>
+      ) : null}
+      {error ? <p className="text-xs leading-5 text-muted">{error}</p> : null}
+      {tasks !== null && !tasks.length && !error ? (
+        <p className="text-xs leading-5 text-muted">Rem has no tasks yet. Ask Rem to create one.</p>
+      ) : null}
     </div>
   );
 }
@@ -7737,7 +7820,7 @@ function Inspector({
                   label="Skill name"
                   value={operation.skill_name ?? ""}
                   onChange={(value) => onOperationChange({ skill_name: value })}
-                  placeholder="gofer-flow-workflow-builder"
+                  placeholder="raticode-workflow-builder"
                 />
                 <TextField
                   diagnostics={nodeFieldDiagnostics("operation.working_dir")}
