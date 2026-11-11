@@ -113,7 +113,10 @@ function createIpcSecurity({
       const handle = grantPath(root);
       offlineTrustedRoots.delete(root);
       return handle;
-    } catch {
+    } catch (error) {
+      // A removed or unmounted folder is routine; other failures deserve a reason.
+      const code = error?.code || error?.cause?.code;
+      if (!["ENOENT", "ENOTDIR"].includes(code)) console.warn(`Could not restore access to trusted folder ${root} (${code || error?.message}); it stays offline until it can be opened.`);
       offlineTrustedRoots.add(root);
       return null;
     }

@@ -1,16 +1,22 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Brain, MessageSquare, MoreHorizontal, Paperclip, ShieldCheck, Settings, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, MessageSquare, MoreHorizontal, Paperclip, Search, ShieldCheck, Settings, Sparkles, Trash2, X } from "lucide-react";
 import ChatComposer, { MessageAttachments } from "./ChatComposer.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import RatFaceIcon from "./RatFaceIcon.jsx";
 import RemAvatar from "./RemAvatar.jsx";
 import RemMemoryPanel, { MemoryNote } from "./RemMemoryPanel.jsx";
+import RemChatSearch from "./RemChatSearch.jsx";
 // Files on a reply; a paired phone that asked receives them too.
 import { ReplyFiles } from "./RemMedia.jsx";
 import { OutcomeGlyph, RemMenu, typeLabel } from "./RemHomeParts.jsx";
-import { FoldPinContext, FoldableText, FollowUps, MessageActions, MessageDetails, NewMessagesPill, ProgressSteps, ReplyQuote, ResultActions, ResultCard } from "./RemRichParts.jsx";
+import { FoldPinContext, FoldableText, revealFold, FollowUps, MessageActions, MessageDetails, NewMessagesPill, ProgressSteps, ReplyQuote, ResultActions, ResultCard } from "./RemRichParts.jsx";
 import { bodyWithoutCardLinks, latestRemMessageId, latestSuggestionMessageId, remPresence } from "../lib/remRich.js";
-import { criteriaSummary, conversationMessages, messageStamp, messagesByDay, statusLine, latestWorkMessageIds, workStatus } from "../lib/remHome.js";
+import { chatRows, criteriaSummary, conversationMessages, messageStamp, messagesByDay, selfWorkBatchLine, statusLine, latestWorkMessageIds, workStatus } from "../lib/remHome.js";
+import { cardTickets } from "../lib/ticketMentions.js";
+import { TicketPills } from "./TicketPill.jsx";
+import AwayReport from "./RemAwayReport.jsx";
+import { followsAfterScroll, gapToEnd, wheelLeavesEnd } from "../lib/remScroll.js";
+import { searchWords } from "../lib/remSearch.js";
 import { clearRemHistory, connectRemHome, dismissNotice, editRemMessage, loadRemHomeFixture, openRemThread, openTaskSheet, resetRemHomeStore, retryRemMessage, sendRemMessage, suggestMessage, useRemHome } from "../lib/remHomeStore.js";
 import { applyRemComposerRequest, attachToRemComposer, updateRemComposer, useRemComposerState } from "../lib/remComposer.js";
 import { clipboardAttachmentFiles, largePasteFile, transferContainsFiles } from "../lib/chatAttachments.js";
@@ -54,6 +60,13 @@ export default function RemHomeWorkspace({ avatar = {}, onOpenLink, onOpenSettin
   const [showMemories, setShowMemories] = useState(false);
   const [messageFocus, setMessageFocus] = useState(null);
   const showMessage = useCallback(id => setMessageFocus({ id }), []);
+  const [searching, setSearching] = useState(false);
+  const searchButton = useRef(null);
+  const canSearch = store.status === "ready" && !store.fixture;
+  // Closing search hands focus back to its button; the chat stays where it was.
+  const closeSearch = useCallback(() => { setSearching(false); window.setTimeout(() => searchButton.current?.focus?.(), 0); }, []);
+  // A result jumps to its message, opens it if it is folded and marks it for a moment.
+  const jumpToResult = useCallback((id, query = "") => { setSearching(false); revealFold(id); setMessageFocus({ id, found: true, words: searchWords(query) }); }, []);
   // "View in conversation" in an opened task (in the Rem sidebar) lands here.
   useEffect(() => { if (store.messageRequest) setMessageFocus({ id: store.messageRequest.id }); }, [store.messageRequest]);
   useEffect(() => connectRemHome(), []);
@@ -61,10 +74,19 @@ export default function RemHomeWorkspace({ avatar = {}, onOpenLink, onOpenSettin
   const replying = store.conversation?.turn_state === "replying";
   const presence = remPresence({ offline: store.status === "offline", replying, turnLabel: store.conversation?.turn_label, tasks: store.tasks, status: statusLine(store.tasks, now) });
   const status = presence.label;
-  return <section className="rem-home" aria-label="Rem">
+  return <section className="rem-home" aria-label="Rem" onKeyDown={event => {
+    // Ctrl+F (Cmd+F on a Mac) inside Rem's chat searches it.
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f" && canSearch) {
+      event.preventDefault();
+      event.stopPropagation();
+      setSearching(true);
+    }
+  }}>
     <header className="rem-home-header">
       <span className="rem-face" data-size="lg" data-presence={presence.state}><RatFaceIcon size={22} /></span>
       <div className="rem-home-title"><h2>Rem</h2><p role="status">{status}</p></div>
+      <button ref={searchButton} type="button" className="rem-home-search" aria-label="Search chat" title="Search chat (Ctrl+F)" aria-expanded={searching}
+        disabled={!canSearch} onClick={() => setSearching(current => !current)}><Search size={17} aria-hidden="true" /></button>
       {store.fixture ? <span className="rem-preview-pill">Preview<button type="button" onClick={() => { resetRemHomeStore(); connectRemHome(); }}>Exit</button></span> : null}
       <RemMenu label="Rem options" className="rem-home-options" trigger={<MoreHorizontal size={18} />} items={[
         { label: "Provider, model and effort…", icon: Settings, onSelect: onOpenSettings },
@@ -83,6 +105,7 @@ export default function RemHomeWorkspace({ avatar = {}, onOpenLink, onOpenSettin
     {store.contextIssue ? <div role="status" className="rem-home-notice" data-tone="attention"><span>{store.contextIssue}</span></div> : null}
     {/* An opened task shows in the Rem sidebar, so the conversation keeps its width. */}
     <div className="rem-home-main">
+      {searching ? <RemChatSearch now={now} onJump={jumpToResult} onClose={closeSearch} /> : null}
       <Conversation key={store.conversation?.id || "loading"} store={store} now={now} replying={replying} avatar={avatar} onOpenLink={openLink} messageFocus={messageFocus} onShowMessage={showMessage} />
     </div>
   </section>;
@@ -97,9 +120,13 @@ function useNow() {
 function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, onShowMessage }) {
   const scrollRef = useRef(null);
   const pinnedRef = useRef(true);
+  // Where the last scroll left the chat, so a move up is told apart from a resize.
+  const lastScroll = useRef(null);
   const days = useMemo(() => messagesByDay(conversationMessages(store.messages), now), [store.messages, now]);
   const liveWork = useMemo(() => latestWorkMessageIds(store.messages), [store.messages]);
   const taskLists = useTaskLists(store.tasks);
+  // Board tickets named in chat and on task cards, as the board has them now.
+  const tickets = useMemo(() => ({ ...store.taskTickets, ...store.chatTickets }), [store.taskTickets, store.chatTickets]);
   const followUpsFor = latestSuggestionMessageId(store.messages);
   const newestRem = latestRemMessageId(store.messages);
   // A reply's quote scrolls to the message it refers to when that message is in the chat.
@@ -141,25 +168,45 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
     if (!messageFocus) return;
     const message = [...(scrollRef.current?.querySelectorAll?.("[data-message-id]") || [])]
       .find(element => element.dataset.messageId === messageFocus.id);
-    if (!message) return;
+    if (!message) return undefined;
     pinnedRef.current = false;
     message.focus({ preventScroll: true });
-    message.scrollIntoView({ block: "center" });
+    message.scrollIntoView({ block: messageFocus.found ? "start" : "center" });
+    if (!messageFocus.found) return undefined;
+    // A search result's message is marked for a moment so the eye finds it, and in a message
+    // taller than the chat the matched words are brought into view and highlighted.
+    message.dataset.found = "true";
+    let frame = window.requestAnimationFrame?.(() => {
+      frame = window.requestAnimationFrame?.(() => { frame = null; showMatch(scrollRef.current, message, messageFocus.words); });
+    });
+    const timer = window.setTimeout(() => { delete message.dataset.found; clearMatch(); }, 2400);
+    return () => { if (frame) window.cancelAnimationFrame?.(frame); window.clearTimeout(timer); delete message.dataset.found; clearMatch(); };
   }, [messageFocus]);
   const disabled = offline || store.status === "loading" || store.resetting;
   const drop = useRemDropZone();
   return <div className="rem-convo" {...drop.handlers}>
     {drop.dragging ? <div className="rem-drop" role="status" aria-live="polite"><Paperclip aria-hidden="true" size={20} /><span>Drop files to attach</span></div> : null}
-    <div ref={scrollRef} className="rem-stream" onScroll={event => {
+    <div ref={scrollRef} className="rem-stream" onWheel={event => {
+      if (wheelLeavesEnd(event, scrollRef.current)) pinnedRef.current = false;
+    }} onScroll={event => {
       const element = event.currentTarget;
-      pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+      const position = { top: element.scrollTop, gap: gapToEnd(element) };
+      pinnedRef.current = followsAfterScroll(pinnedRef.current, position, lastScroll.current);
+      lastScroll.current = position;
       if (pinnedRef.current && unseen) { seenCount.current = store.messages.length; setUnseen(0); }
     }}>
       <div className="rem-stream-inner" role="log" aria-label="Conversation with Rem" aria-live="polite">
+        <AwayReport />
         <FoldPinContext.Provider value={keepPinned}>
           {store.messages.length ? days.map(day => <div key={day.key} className="rem-day">
             <div className="rem-day-label" role="separator"><span>{day.label}</span></div>
-            {day.messages.map((message, index) => <Message key={message.id} message={message} first={day.messages[index - 1]?.role !== message.role} now={now} tasks={message.work ? taskLists.get(message.work.task_id) || NO_TASKS : NO_TASKS} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} newest={message.id === newestRem} onShowMessage={message.refers_to && shown.has(message.refers_to) ? onShowMessage : null} />)}
+            {chatRows(day.messages).map((row, index, rows) => {
+              const before = rows[index - 1];
+              const first = (before ? before.message?.role || "rem" : "") !== (row.message?.role || "rem");
+              if (row.batch) return <SelfWorkBatch key={row.key} messages={row.messages} first={first} now={now} taskLists={taskLists} liveWork={liveWork} tickets={tickets} />;
+              const message = row.message;
+              return <Message key={message.id} message={message} first={first} now={now} tasks={message.work ? taskLists.get(message.work.task_id) || NO_TASKS : NO_TASKS} tickets={tickets} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} newest={message.id === newestRem} onShowMessage={message.refers_to && shown.has(message.refers_to) ? onShowMessage : null} />;
+            })}
           </div>) : <Welcome offline={offline} loading={store.status === "loading"} avatar={avatar} />}
         </FoldPinContext.Provider>
         {replying ? <div className="rem-msg" data-role="rem"><span className="rem-face"><RatFaceIcon size={18} /></span><div className="rem-msg-body">
@@ -176,6 +223,31 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
     <Composer disabled={disabled} replying={replying} request={store.composerRequest} offline={offline} onShowMessage={onShowMessage} shown={shown} />
   </div>;
 }
+
+// Where a search's words are in a message the chat jumped to. The first one is scrolled into
+// view when the message is taller than the chat, and all are highlighted where the browser
+// supports highlighting text without changing the page (CSS custom highlights).
+function showMatch(stream, message, words = []) {
+  if (!stream || !message || !words.length || typeof document.createTreeWalker !== "function") return;
+  const pattern = new RegExp(words.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "gi");
+  const ranges = [];
+  const walker = document.createTreeWalker(message, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode() && ranges.length < 50) {
+    const node = walker.currentNode;
+    for (const found of node.textContent.matchAll(pattern)) {
+      const range = document.createRange();
+      range.setStart(node, found.index);
+      range.setEnd(node, found.index + found[0].length);
+      ranges.push(range);
+    }
+  }
+  if (!ranges.length) return;
+  const view = stream.getBoundingClientRect();
+  const first = ranges[0].getBoundingClientRect();
+  if (first.top < view.top || first.bottom > view.bottom) stream.scrollTop += first.top - view.top - view.height / 3;
+  if (globalThis.CSS?.highlights && typeof Highlight === "function") CSS.highlights.set("rem-found", new Highlight(...ranges));
+}
+function clearMatch() { globalThis.CSS?.highlights?.delete("rem-found"); }
 
 // Rem's animated sprite greets you here; the rat face stands in when the sprite is turned off.
 function Welcome({ offline, loading, avatar }) {
@@ -202,9 +274,15 @@ function WorkflowSource({ workflow }) {
   return <span className="rem-msg-source" title={workflow?.allow_actions ? "This workflow may start and change tasks." : "This workflow may only ask; Rem won't start or change anything for it."}>From workflow {name}</span>;
 }
 
+// A request the user queued behind other tasks, sent to Rem once they succeeded.
+function QueuedSource({ after }) {
+  const titles = (after || []).map(item => `“${item?.title || "a task"}”`);
+  return <span className="rem-msg-source" title="You asked for this earlier. Rem kept it until these tasks finished.">Queued until {titles.join(", ") || "earlier tasks"} finished</span>;
+}
+
 // Rows re-render only when their own props change, not on every keystroke or poll.
 // [newest] opens a long reply in full when it first shows; older long messages start folded.
-const Message = memo(function Message({ message, first, now, tasks, onOpenLink, live = true, followUps = false, newest = false, onShowMessage = null }) {
+const Message = memo(function Message({ message, first, now, tasks, tickets = null, onOpenLink, live = true, followUps = false, newest = false, onShowMessage = null }) {
   const stamp = <MessageStamp iso={message.created_at} now={now} />;
   const quote = message.referenced ? <ReplyQuote reference={message.referenced} onShow={onShowMessage ? () => onShowMessage(message.refers_to) : null} /> : null;
   if (message.role === "user") {
@@ -216,7 +294,7 @@ const Message = memo(function Message({ message, first, now, tasks, onOpenLink, 
       </div>
       {message.failed ? <p className="rem-msg-failed">Didn’t send. <button type="button" onClick={() => retryRemMessage(message.id)}>Try again</button> <button type="button" onClick={() => editRemMessage(message.id)}>Edit</button></p>
         : message.pending && message.waiting ? <p className="rem-msg-waiting" role="status">Sends when Rem finishes replying</p>
-        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{message.source === "workflow" ? <WorkflowSource workflow={message.workflow} /> : null}{stamp}</div>}
+        : <div className="rem-msg-foot">{message.pending ? null : <MessageActions message={message} />}{message.source === "workflow" ? <WorkflowSource workflow={message.workflow} /> : null}{message.source === "after" ? <QueuedSource after={message.queued_after} /> : null}{stamp}</div>}
     </div>;
   }
   // A Rem message right after another Rem message gets a faint rule above it (data-follows).
@@ -225,17 +303,34 @@ const Message = memo(function Message({ message, first, now, tasks, onOpenLink, 
     <div className="rem-msg-body">
       {quote}
       <FoldableText id={message.id} startOpen={newest}>
-        <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={message.file_mentions} value={message.result ? bodyWithoutCardLinks(message.body, message.result) : message.body} />
+        <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={message.file_mentions} tickets={tickets} value={message.result ? bodyWithoutCardLinks(message.body, message.result) : message.body} />
       </FoldableText>
-      <MessageDetails details={message.details} fileMentions={message.file_mentions} onOpenLink={onOpenLink} />
+      <MessageDetails details={message.details} fileMentions={message.file_mentions} tickets={tickets} onOpenLink={onOpenLink} />
       <ResultCard result={message.result} body={message.body} onOpenLink={onOpenLink} />
       {message.files?.length ? <ReplyFiles files={message.files} onOpenLink={onOpenLink} /> : null}
-      {message.work ? <WorkCard work={message.work} tasks={tasks} live={live} /> : null}
+      {message.work ? <WorkCard work={message.work} tasks={tasks} live={live} tickets={tickets} /> : null}
       <ResultActions message={message} tasks={tasks} live={live} onOpenLink={onOpenLink} />
       <MemoryNote messageId={message.id} memory={message.memory} />
       {followUps ? <FollowUps suggestions={message.suggestions} /> : null}
       {/* The time and the message's actions (Reply, Copy, model and time) share one line. */}
       <div className="rem-msg-foot">{stamp}<MessageActions message={message} /></div>
+    </div>
+  </div>;
+});
+
+// Cards one self-work pass started at once, as one Rem message: a line saying what
+// started, then each task's card with the tickets it works on.
+const SelfWorkBatch = memo(function SelfWorkBatch({ messages, first, now, taskLists, liveWork, tickets }) {
+  return <div className="rem-msg" data-role="rem" data-first={first || undefined} data-follows={first ? undefined : true} data-batch="self-work">
+    {first ? <span className="rem-face"><RatFaceIcon size={18} /></span> : <span className="rem-face-space" aria-hidden="true" />}
+    <div className="rem-msg-body">
+      <p className="rem-batch-line">{selfWorkBatchLine(messages)}</p>
+      <ul className="rem-batch" aria-label="Work Rem started on its own">
+        {messages.map(message => <li key={message.id} data-message-id={message.id} tabIndex={-1} title={message.body}>
+          <WorkCard work={message.work} tasks={taskLists.get(message.work.task_id) || NO_TASKS} live={liveWork.has(message.id)} tickets={tickets} />
+        </li>)}
+      </ul>
+      <div className="rem-msg-foot"><MessageStamp iso={messages[0].created_at} now={now} /></div>
     </div>
   </div>;
 });
@@ -251,8 +346,9 @@ function MessageStamp({ iso, now }) {
 
 // Live view of the thread Rem started for a request. The thread link is always shown.
 // Earlier cards for the same run point to the newest one instead of repeating its state.
-function WorkCard({ work, tasks, live = true }) {
+function WorkCard({ work, tasks, live = true, tickets = null }) {
   const current = workStatus(work, tasks);
+  const refs = cardTickets(work, current.run);
   const status = live ? current : { ...current, tone: "neutral", spinning: false, state: "earlier", label: "Latest update below", verificationThreadId: null };
   const checks = !live || status.state === "succeeded" ? "" : criteriaSummary(status.criteria);
   return <div className="rem-work" data-tone={status.tone} data-spinning={status.spinning || undefined} data-earlier={live ? undefined : true}>
@@ -263,9 +359,10 @@ function WorkCard({ work, tasks, live = true }) {
     </button>
     {live ? <ProgressSteps status={status} now={new Date()} /> : null}
     <div className="rem-work-links">
-      {status.threadId ? <button type="button" onClick={() => openRemThread(status.threadId)}><MessageSquare size={13} aria-hidden="true" />Open thread</button> : <span className="rem-work-pending">Thread starting…</span>}
+      {status.threadId ? <button type="button" onClick={() => openRemThread(status.threadId)}><MessageSquare size={13} aria-hidden="true" />Open thread</button> : status.state === "held" || status.state === "waiting" ? null : <span className="rem-work-pending">Thread starting…</span>}
       {status.verificationThreadId && status.verificationThreadId !== status.threadId && status.state !== "succeeded" ? <button type="button" onClick={() => openRemThread(status.verificationThreadId)} aria-label="Open review thread" title="Open review thread"><ShieldCheck size={13} aria-hidden="true" /><span>Review</span></button> : null}
     </div>
+    {refs.length ? <div className="rem-work-tickets"><TicketPills refs={refs} index={tickets} label={`Tickets for ${status.title}`} /></div> : null}
   </div>;
 }
 

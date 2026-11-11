@@ -7,6 +7,8 @@ import {
   entryAsText,
   entryKey,
   firstLine,
+  formatLogTime,
+  groupRepeats,
   keyRange,
   levelName,
   logTimeParts,
@@ -15,6 +17,7 @@ import {
   selectionAsText,
   sourceName,
   sourcesOf,
+  uniqueEntries,
   withHistoryKeys,
 } from "../lib/appLog.js";
 import { askRemAboutText } from "../lib/fileAttachments.js";
@@ -40,19 +43,26 @@ function ownsPointer(target) {
 
 // One log entry. Long single lines wrap. Entries with more lines, such as a
 // traceback, open to show the rest. The source's tooltip names the code that logged it.
-function LogRow({ entry, rowId, selected, active, expanded, onToggle }) {
+// A repeated message shows its newest entry with the count, which opens the group
+// to show each entry with its own time and details.
+function LogRow({ entry, rowKey, rowId, selected, active, expanded, onToggle, repeats = 0, oldest = null, member = false }) {
   const summary = firstLine(entry.message);
   const rest = entry.message.slice(summary.length).replace(/^\n/, "");
   const lineCount = rest ? rest.split("\n").length : 0;
-  const expandable = Boolean(rest);
+  // A group's own toggle opens its entries; each entry then opens its own lines.
+  const expandable = Boolean(rest) && !repeats;
   const { day, time } = logTimeParts(entry.time);
-  return <div id={rowId} role="option" aria-selected={selected} data-log-key={entryKey(entry)}
-    className={`app-log-row app-log-row-${entry.level}${selected ? " app-log-row-selected" : ""}${active ? " app-log-row-active" : ""}`}>
+  const span = repeats ? `${repeats} times, ${formatLogTime(oldest.time)} to ${formatLogTime(entry.time)}` : "";
+  return <div id={rowId} role="option" aria-selected={selected} data-log-key={rowKey} aria-expanded={repeats ? expanded : undefined}
+    className={`app-log-row app-log-row-${entry.level}${selected ? " app-log-row-selected" : ""}${active ? " app-log-row-active" : ""}${member ? " app-log-row-member" : ""}`}>
     <div className="app-log-line">
-      <time className="app-log-time" dateTime={entry.time} title={entry.time}>{day ? <span className="app-log-day">{day}</span> : null}<span>{time}</span></time>
+      <time className="app-log-time" dateTime={entry.time} title={repeats ? `Newest of ${span}` : entry.time}>{day ? <span className="app-log-day">{day}</span> : null}<span>{time}</span></time>
       <span className={`app-log-level app-log-level-${entry.level}`}>{levelName(entry.level)}</span>
       <span className="app-log-source" title={entry.component ? `Logged by ${entry.component}` : undefined}>{sourceName(entry.source)}</span>
-      <span className="app-log-message">{summary}{expandable ? <button type="button" tabIndex={-1} className="app-log-more" aria-expanded={expanded} data-log-toggle="true" onClick={onToggle}>
+      <span className="app-log-message">{repeats ? <button type="button" tabIndex={-1} className="app-log-repeat" aria-expanded={expanded} data-log-toggle="true" onClick={onToggle}
+        title={`${span}. ${expanded ? "Hide" : "Show"} each entry.`} aria-label={`Repeated ${span}. ${expanded ? "Hide" : "Show"} each entry`}>
+        <span aria-hidden="true" className="app-log-repeat-caret">{expanded ? "▾" : "▸"}</span>{repeats}
+      </button> : null}{summary}{expandable ? <button type="button" tabIndex={-1} className="app-log-more" aria-expanded={expanded} data-log-toggle="true" onClick={onToggle}>
         {expanded ? "Hide lines" : `+${lineCount} ${lineCount === 1 ? "line" : "lines"}`}
       </button> : null}</span>
     </div>
@@ -128,14 +138,24 @@ export default function AppLogViewer({ bridge, logFile, version = "", platform =
   const counts = useMemo(() => countLevels(visibleLive, earlier), [visibleLive, earlier]);
   const sources = useMemo(() => sourcesOf(live, history?.entries), [live, history]);
   const total = matchingLive.length + matchingHistory.length;
-  const liveRows = matchingLive.slice(0, shown);
-  const historyRows = matchingHistory.slice(0, Math.max(0, shown - liveRows.length));
-  // Rows in display order, newest first; selection ranges follow this order.
-  const rows = [...liveRows, ...historyRows];
-  const order = rows.map(entryKey);
-  const byKey = new Map(rows.map((entry) => [entryKey(entry), entry]));
-  // Actions use selected rows that are still shown.
-  const chosen = rows.filter((entry) => selected.has(entryKey(entry)));
+  // Repeats of one message in a row share a row; pages count rows, not entries.
+  const liveGroups = useMemo(() => groupRepeats(matchingLive), [matchingLive]);
+  const historyGroups = useMemo(() => groupRepeats(matchingHistory), [matchingHistory]);
+  const liveShown = liveGroups.slice(0, shown);
+  const historyShown = historyGroups.slice(0, Math.max(0, shown - liveShown.length));
+  const shownEntries = [...liveShown, ...historyShown].reduce((sum, group) => sum + group.entries.length, 0);
+  const more = liveGroups.length + historyGroups.length > liveShown.length + historyShown.length;
+  // Rows in display order, newest first: each group, then its entries while it is
+  // open. Selection ranges follow this order; a selected group stands for all its entries.
+  const rows = [];
+  for (const group of [...liveShown, ...historyShown]) {
+    rows.push(group);
+    if (group.entries.length > 1 && expanded.has(group.key)) for (const entry of group.entries) rows.push({ key: entryKey(entry), entry, entries: [entry] });
+  }
+  const order = rows.map((row) => row.key);
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  // Actions use selected rows that are still shown, each entry once.
+  const chosen = uniqueEntries(rows.filter((row) => selected.has(row.key)).flatMap((row) => row.entries));
   const rowId = (key) => `app-log-row-${key}`;
 
   const flash = (text) => { setNotice(text); window.setTimeout(() => setNotice(""), 2500); };
@@ -241,7 +261,7 @@ export default function AppLogViewer({ bridge, logFile, version = "", platform =
   }
 
   function openMenuForKeyboard() {
-    const key = activeKey && byKey.has(activeKey) ? activeKey : chosen[0] ? entryKey(chosen[0]) : order[0];
+    const key = activeKey && byKey.has(activeKey) ? activeKey : order.find((row) => selected.has(row)) || order[0];
     if (!key) return;
     if (!selected.has(key)) select([key], { from: key, active: key });
     const box = document.getElementById(rowId(key))?.getBoundingClientRect?.() || listRef.current?.getBoundingClientRect?.() || { left: 0, top: 0 };
@@ -282,6 +302,22 @@ export default function AppLogViewer({ bridge, logFile, version = "", platform =
 
   function resetView() { setShown(PAGE); }
 
+  function renderRow({ key, entry }, { repeats = 0, oldest = null, member = false } = {}) {
+    return <LogRow key={key} rowKey={key} entry={entry} rowId={rowId(key)} selected={selected.has(key)} active={activeKey === key}
+      expanded={expanded.has(key)} onToggle={() => toggleExpanded(key)} repeats={repeats} oldest={oldest} member={member} />;
+  }
+
+  function renderGroup(group) {
+    if (group.entries.length === 1) return renderRow(group);
+    const open = expanded.has(group.key);
+    return <div key={group.key} className="app-log-repeats">
+      {renderRow(group, { repeats: group.entries.length, oldest: group.entries.at(-1) })}
+      {open ? <div role="group" aria-label={`Each of the ${group.entries.length} entries`}>
+        {group.entries.map((entry) => renderRow({ key: entryKey(entry), entry }, { member: true }))}
+      </div> : null}
+    </div>;
+  }
+
   if (!bridge?.entries) return null;
   const n = chosen.length;
   return <section aria-labelledby="app-log-heading" className="app-log space-y-2">
@@ -293,7 +329,7 @@ export default function AppLogViewer({ bridge, logFile, version = "", platform =
       </button>
       <button type="button" className="app-log-button" disabled={!total} onClick={() => void copy([...matchingLive, ...matchingHistory], "shown")}>Copy shown</button>
     </div>
-    <p className="text-[11px] text-muted">Messages from the desktop app, its backend and phone connections as they happen, newest first. Drag across rows to select them, then right-click to copy them or ask Rem.</p>
+    <p className="text-[11px] text-muted">Messages from the desktop app, its backend and phone connections as they happen, newest first. The same message repeated in a row shows once with a count; click the count to see each entry. Drag across rows to select them, then right-click to copy them or ask Rem.</p>
     <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Levels to show">
       {LOG_LEVELS.map(({ id, label }) => <button key={id} type="button" title={`Show ${label.toLowerCase()}`} aria-pressed={levels[id]} className={`app-log-chip app-log-chip-${id}`} onClick={() => { setLevels({ ...levels, [id]: !levels[id] }); resetView(); }}>
         {label}<span className="app-log-count">{counts[id]}</span>
@@ -324,23 +360,17 @@ export default function AppLogViewer({ bridge, logFile, version = "", platform =
       onMouseDown={onMouseDown} onMouseMove={onMouseMove} onContextMenu={openMenu} onKeyDown={onKeyDown}
       onDoubleClick={(event) => { const key = rowKeyFrom(event.target); if (key && !ownsPointer(event.target)) toggleExpanded(key); }}>
       {total === 0 ? <p className="app-log-empty">{live.length || earlier.length ? "No entries match these filters." : "No log entries yet."}</p> : null}
-      {liveRows.length ? <div role="group" aria-label="This session">{liveRows.map((entry) => {
-        const key = entryKey(entry);
-        return <LogRow key={key} entry={entry} rowId={rowId(key)} selected={selected.has(key)} active={activeKey === key} expanded={expanded.has(key)} onToggle={() => toggleExpanded(key)} />;
-      })}</div> : null}
-      {historyRows.length ? <div role="group" aria-labelledby="app-log-earlier">
+      {liveShown.length ? <div role="group" aria-label="This session">{liveShown.map(renderGroup)}</div> : null}
+      {historyShown.length ? <div role="group" aria-labelledby="app-log-earlier">
         <p id="app-log-earlier" className="app-log-divider">Before this launch{history?.truncated ? " (most recent part of the log file)" : ""}</p>
-        {historyRows.map((entry) => {
-          const key = entryKey(entry);
-          return <LogRow key={key} entry={entry} rowId={rowId(key)} selected={selected.has(key)} active={activeKey === key} expanded={expanded.has(key)} onToggle={() => toggleExpanded(key)} />;
-        })}
+        {historyShown.map(renderGroup)}
       </div> : null}
     </div>
     {menu ? <WorktreeContextMenu source="log entries" label={`Actions for ${count(n || 1)}`} layer="z-[130]" x={menu.x} y={menu.y} trigger={listRef.current} onClose={() => setMenu(null)} onSelect={menuAction}
       operations={[["copy", n > 1 ? `Copy ${count(n)}` : "Copy entry"], ["ask", n > 1 ? `Ask Rem about ${count(n)}` : "Ask Rem about this entry"], ["all", "Select all shown", !order.length], ["clear", "Clear selection", !n]]} /> : null}
     <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
-      <span className="mr-auto">{total > liveRows.length + historyRows.length ? `Showing the newest ${liveRows.length + historyRows.length} of ${total} matching entries.` : `${total} matching ${total === 1 ? "entry" : "entries"}.`}</span>
-      {total > liveRows.length + historyRows.length ? <button type="button" className="app-log-button" onClick={() => setShown(shown + PAGE)}>Show {PAGE} more</button> : null}
+      <span className="mr-auto">{more ? `Showing the newest ${shownEntries} of ${total} matching entries.` : `${total} matching ${total === 1 ? "entry" : "entries"}.`}</span>
+      {more ? <button type="button" className="app-log-button" onClick={() => setShown(shown + PAGE)}>Show {PAGE} more</button> : null}
       <label className="flex items-center gap-1.5"><input type="checkbox" checked={showHistory} onChange={(event) => setShowHistory(event.target.checked)} />Include earlier launches</label>
     </div>
     <details className="app-log-about text-[11px] text-muted">
@@ -349,7 +379,7 @@ export default function AppLogViewer({ bridge, logFile, version = "", platform =
         <li>Included: desktop app warnings and errors, backend messages at every level, phone and paired-desktop connections, window errors and crashes, and built-in browser problems.</li>
         <li>Debug is hidden by default. It adds detail such as connections that closed before identifying themselves.</li>
         <li>Left out on purpose: message and conversation content, pairing codes, keys and phone addresses. Tokens, passwords and other credentials are replaced with [redacted]. An error&apos;s details can still quote a file path or a value from the step that failed, so read entries before sharing them.</li>
-        <li>Ask Rem attaches the selected entries to Rem&apos;s message box and puts the cursor there for your question; nothing is sent until you send it. Copy puts the same text on the clipboard.</li>
+        <li>Ask Rem attaches the selected entries to Rem&apos;s message box and puts the cursor there for your question; nothing is sent until you send it. Copy puts the same text on the clipboard. Selecting a repeated message takes in every entry it counts, each with its own time.</li>
         <li>Not included: Electron and Chromium&apos;s own native messages, such as GPU or graphics warnings. They only reach a terminal. On a Mac, quit Raticode and start it from Terminal with <code>/Applications/Raticode.app/Contents/MacOS/Raticode</code> to see them.</li>
         <li>Phone problems that never reach this computer, such as a wrong Wi-Fi network or a firewall that blocks the connection, appear only on the phone. If the phone times out and nothing appears here, check the computer&apos;s firewall (on a Mac: System Settings › Network › Firewall).</li>
         <li>Kept: the newest 5,000 entries of this session in memory, and up to four 5 MB files on disk{logFile ? <> at <span className="select-text break-all">{logFile}</span></> : null}.</li>

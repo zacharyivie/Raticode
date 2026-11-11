@@ -28,6 +28,7 @@ export function browserChromeShortcutAction(event, platform = "", { scoped = fal
   if (primary && !event.altKey && !event.shiftKey && key === "d") return "bookmark";
   if ((!mac && event.ctrlKey && !event.altKey && !event.shiftKey && key === "h") || (mac && event.metaKey && !event.shiftKey && key === "y")) return "history";
   if (primary && event.shiftKey && key === "t") return "reopen-closed-tab";
+  if (primary && event.shiftKey && key === "n") return "new-private-tab";
   if (primary && !event.altKey && (key === "=" || key === "+")) return "zoom-in";
   if (primary && !event.altKey && key === "-") return "zoom-out";
   if (primary && !event.altKey && key === "0") return "zoom-reset";

@@ -1382,6 +1382,7 @@ def test_workflow_approval_cli_lists_and_decides(tmp_path: Path) -> None:
             run_id="run.log",
             node_id="approve",
             message="Approve deploy?",
+            approvers=["alice"],
         )
     )
 
@@ -1545,6 +1546,7 @@ def test_workflow_reject_cli_records_decision(tmp_path: Path) -> None:
             run_id="run.log",
             node_id="approve",
             message="Approve deploy?",
+            approvers=["alice", "bob"],
         )
     )
 

@@ -10,7 +10,7 @@ Use code to state exact behavior and the graph to understand how the steps conne
 
 ## Work with project files
 
-Open Files in the project sidebar and select a file. The code workspace supports tabs, file search, find in the current file, and split editing. Save with your platform's standard Save shortcut. Unsaved text belongs to the editor until it is written to disk; external tools operate on the disk version.
+Open **File explorer** in the project sidebar and select a file. The code workspace supports tabs, project-wide search and replace (the **Search** plugin), find in the current file, and split editing. Save with your platform's standard Save shortcut. Unsaved text belongs to the editor until it is written to disk; external tools operate on the disk version.
 
 In **Settings > Editor**, choose font size, line height, indentation, wrapping, minimap visibility, and autosave delay. **Settings > General > Autosave files** controls automatic saves.
 

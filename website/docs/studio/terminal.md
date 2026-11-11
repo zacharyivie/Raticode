@@ -10,7 +10,7 @@ Keep a real shell alongside the editor for dependency installation, tests, and c
 
 ## Open a session
 
-Open the bottom panel and select Terminal. Create a new session when you need a separate process. Check the current directory before running commands, especially after switching projects or opening a worktree.
+Open the bottom panel and select Terminal, or, if **Settings > Layout > Terminal location** is **Editor tab**, use its own editor tab. Create a new session when you need a separate process. Sessions are grouped by project; rename a session or group, and drag sessions between groups. When Git opens an editor from the terminal, such as for a commit message, it opens in a Raticode editor tab. Check the current directory before running commands, especially after switching projects or opening a worktree.
 
 The terminal is independent of Rem's command-execution toggle. Disabling shell tools for a provider does not prevent you from typing a command in your own terminal.
 

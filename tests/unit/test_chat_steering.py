@@ -567,7 +567,7 @@ def test_steering_uses_turn_data_directory_and_checks_image_support(tmp_path, pr
     turn = coordinator.begin(
         "conversation-1", "turn-1", "antigravity", "model", data_dir=attachment_dir
     )
-    with pytest.raises(ValueError, match="image attachments are not supported"):
+    with pytest.raises(ValueError, match="only accepts text.*can.t see attached images"):
         coordinator.steer({**request(), "attachments": attachments})
     assert not turn.cancel.is_set()
     codex = ChatSteering(tmp_path / "other-server")

@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -104,11 +104,10 @@ def main() -> int:
     for schema in (ROOT / "rattish/schemas").glob("*.schema.json"):
         if not json.loads(schema.read_text())["$id"].startswith("urn:raticode:rattish:schema:"):
             failures.append(f"Inconsistent schema identifier: {schema.name}")
-    for name in ("raticode-desktop", "raticode-desktop.desktop", "raticode.svg"):
-        digest = hashlib.sha256((ROOT / "packaging/arch" / name).read_bytes()).hexdigest()
-        for metadata in ("PKGBUILD", ".SRCINFO"):
-            if digest not in (ROOT / "packaging/arch" / metadata).read_text():
-                failures.append(f"Stale Arch checksum: {metadata}: {name}")
+    aur_packages = runpy.run_path(str(ROOT / "scripts/aur-packages.py"))
+    for name in aur_packages["PACKAGES"]:
+        for problem in aur_packages["check"](ROOT / "packaging/aur" / name, None):
+            failures.append(f"AUR package: {problem}")
     if "--docs-only" in sys.argv[1:]:
         print(json.dumps({
             "ok": not docs,

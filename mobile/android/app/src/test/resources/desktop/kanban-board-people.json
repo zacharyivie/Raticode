@@ -1,0 +1,163 @@
+{
+ "counts": {
+  "todo": 3
+ },
+ "digest": "2f71761676b44f045054748353a420ea",
+ "earlier": 0,
+ "organizations": [
+  {
+   "employees": [
+    {
+     "employee_id": "lead",
+     "name": "Lead",
+     "title": "CTO"
+    }
+   ],
+   "name": "Eng",
+   "organization_id": "8898e73c-608c-4714-9d09-ec5b0b61b69e",
+   "state": "paused"
+  }
+ ],
+ "participants": [
+  {
+   "assignable": [
+    "p-org",
+    "dff9c3f0-548a-5fa4-81af-f262c6a1eb0e"
+   ],
+   "employee_id": "",
+   "hidden_projects": 0,
+   "kind": "rem",
+   "name": "Rem",
+   "organization_id": "",
+   "organization_name": "",
+   "participant_id": "rem",
+   "paused": false,
+   "projects": [
+    "p-org"
+   ],
+   "revision": 2,
+   "title": "Coordinator",
+   "unavailable": []
+  },
+  {
+   "assignable": [
+    "p-org"
+   ],
+   "employee_id": "lead",
+   "hidden_projects": 0,
+   "kind": "agent",
+   "name": "Lead",
+   "organization_id": "8898e73c-608c-4714-9d09-ec5b0b61b69e",
+   "organization_name": "Eng",
+   "participant_id": "agent:8898e73c-608c-4714-9d09-ec5b0b61b69e:lead",
+   "paused": false,
+   "projects": [],
+   "revision": 0,
+   "title": "CTO",
+   "unavailable": []
+  }
+ ],
+ "projects": [
+  {
+   "available": true,
+   "name": "project",
+   "organization_name": "Eng",
+   "project_id": "p-org"
+  },
+  {
+   "available": true,
+   "name": "notes",
+   "organization_name": "",
+   "project_id": "dff9c3f0-548a-5fa4-81af-f262c6a1eb0e"
+  }
+ ],
+ "tickets": [
+  {
+   "assignee": "Rem",
+   "assignee_id": "rem",
+   "block_reason": "",
+   "created_at": "2026-11-09T13:17:46.036738+00:00",
+   "created_by": "user",
+   "description": "",
+   "duplicate_of": "",
+   "key": "REM-3",
+   "organization_id": "",
+   "organization_name": "",
+   "priority": "medium",
+   "project": "",
+   "project_id": "",
+   "proposal_reason": "",
+   "proposed": false,
+   "revision": 1,
+   "run_id": "",
+   "running": false,
+   "scope": "rem",
+   "self_work_scope": "no_project",
+   "status": "todo",
+   "summary": "",
+   "thread_id": "",
+   "ticket_id": "11b66946-2903-45a1-a14c-014c8463ad13",
+   "title": "No project",
+   "type": "develop",
+   "updated_at": "2026-11-09T13:17:46.036745+00:00"
+  },
+  {
+   "assignee": "Rem",
+   "assignee_id": "rem",
+   "block_reason": "",
+   "created_at": "2026-11-09T13:17:46.036413+00:00",
+   "created_by": "user",
+   "description": "",
+   "duplicate_of": "",
+   "key": "REM-2",
+   "organization_id": "",
+   "organization_name": "",
+   "priority": "medium",
+   "project": "notes",
+   "project_id": "dff9c3f0-548a-5fa4-81af-f262c6a1eb0e",
+   "proposal_reason": "",
+   "proposed": false,
+   "revision": 1,
+   "run_id": "",
+   "running": false,
+   "scope": "rem",
+   "self_work_scope": "unassigned",
+   "status": "todo",
+   "summary": "",
+   "thread_id": "",
+   "ticket_id": "d0932d2b-b0a8-463f-9963-b8a9bc04069c",
+   "title": "Outside",
+   "type": "develop",
+   "updated_at": "2026-11-09T13:17:46.036421+00:00"
+  },
+  {
+   "assignee": "Rem",
+   "assignee_id": "rem",
+   "block_reason": "",
+   "created_at": "2026-11-09T13:17:46.036073+00:00",
+   "created_by": "user",
+   "description": "",
+   "duplicate_of": "",
+   "key": "REM-1",
+   "organization_id": "",
+   "organization_name": "",
+   "priority": "medium",
+   "project": "project",
+   "project_id": "p-org",
+   "proposal_reason": "",
+   "proposed": false,
+   "revision": 1,
+   "run_id": "",
+   "running": false,
+   "scope": "rem",
+   "self_work_scope": "assigned",
+   "status": "todo",
+   "summary": "",
+   "thread_id": "",
+   "ticket_id": "c2c5556b-38b4-4a24-890b-65dd315f5064",
+   "title": "Inside",
+   "type": "develop",
+   "updated_at": "2026-11-09T13:17:46.036083+00:00"
+  }
+ ]
+}

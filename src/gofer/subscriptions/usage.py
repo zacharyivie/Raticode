@@ -373,9 +373,9 @@ def track_invocation(
                         metadata=normalize_usage(provider, result.usage_metadata) if result else {},
                         status=status,
                     )
-                except Exception:
+                except Exception as exc:
                     # Accounting must not turn a successful provider call into a
                     # failed call. Avoid logging prompts, keys, or response bodies.
-                    logger.warning("Unable to persist provider usage", exc_info=False)
+                    logger.warning("Unable to persist provider usage (%s)", type(exc).__name__)
 
     return tracked

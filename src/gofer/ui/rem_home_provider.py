@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
 import json
 import os
@@ -10,13 +11,18 @@ import re
 import subprocess
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from gofer.core.agent import Agent, AgentConfig
 from gofer.core.prompt_envelope import AgentResources, resource_cli_args
-from gofer.core.provider_capabilities import CLI_PROVIDERS, resolve_provider_executable
+from gofer.core.provider_capabilities import (
+    CLI_PROVIDERS,
+    NO_IMAGE_ATTACHMENTS,
+    resolve_provider_executable,
+)
 from gofer.core.provider_profiles import resolve_provider_settings
 from gofer.subscriptions.antigravity import AntigravitySubscription
 from gofer.subscriptions.base import Subscription
@@ -26,6 +32,60 @@ from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.grok_headless import GrokConversationSubscription
 
 REPLY_KEY = re.compile(r'"reply"\s*:\s*"')
+
+# Image formats that every image-capable chat model reads, recognised by their first
+# bytes rather than by the type or name the upload claimed.
+IMAGE_SIGNATURES: tuple[tuple[bytes, str, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
+    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
+    (b"GIF87a", "image/gif", ".gif"),
+    (b"GIF89a", "image/gif", ".gif"),
+)
+# Claude's limit for one image; the other CLIs accept at least this much.
+CHAT_IMAGE_LIMIT = 5 * 1024 * 1024
+CHAT_IMAGE_BUDGET = 20 * 1024 * 1024
+# How each provider's tool-free chat call receives images. Claude Code takes image
+# blocks on stdin; the others attach image files with a command-line option.
+IMAGE_OPTIONS = {"codex": "--image", "cursor": "--image", "copilot": "--attachment"}
+CHAT_IMAGE_PROVIDERS = frozenset({"claude_code", *IMAGE_OPTIONS, "opencode"})
+# Why a provider's chat call can't take images. Checked against the installed CLIs:
+# agy 1.5.4 answers 'stream input content block type "image" is not supported (only
+# "text")', and grok 1.0.77 takes images only through --prompt-json, a command-line
+# argument that also has to hold the whole prompt and can't be used with --prompt-file.
+NO_CHAT_IMAGES = {
+    "antigravity": NO_IMAGE_ATTACHMENTS["antigravity"],
+    "grok": "Grok can only receive images inside one command-line argument, which is "
+    "too small for Rem's request",
+}
+
+
+@dataclass(frozen=True)
+class ChatImage:
+    """An image to show the chat model, read from a checked chat attachment."""
+
+    name: str
+    media_type: str
+    suffix: str
+    data: bytes
+
+
+def image_kind(data: bytes) -> tuple[str, str] | None:
+    """The media type and file suffix of a supported image, from its first bytes."""
+    for signature, media_type, suffix in IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return media_type, suffix
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    return None
+
+
+def chat_image_refusal(provider: str) -> str | None:
+    """Why this provider's chat replies can't see images, or None when they can."""
+    if provider in CHAT_IMAGE_PROVIDERS:
+        return None
+    return NO_CHAT_IMAGES.get(provider, f"{provider} can't receive images in Raticode")
+
+
 _ESCAPES = {"n": "\n", "t": "\t", "r": "", "b": "", "f": "", '"': '"', "\\": "\\", "/": "/"}
 
 
@@ -108,14 +168,50 @@ def no_saved_session(provider: str) -> list[str]:
     return [option] if _lists_option(executable, modified, subcommand, option) else []
 
 
-class _StreamingClaude(ClaudeCodeSubscription):
-    """Claude Code that also reports answer text as it is written."""
+def claude_user_message(prompt: str, images: Sequence[ChatImage]) -> bytes:
+    """One stream-json user message: each image with its label, then the prompt.
 
-    def __init__(self, on_text: Callable[[str], None]) -> None:
+    Claude Code's --input-format stream-json reads this from stdin and gives the
+    model the images as image content, the way a pasted screenshot arrives.
+    """
+    content: list[dict[str, Any]] = []
+    for number, image in enumerate(images, start=1):
+        content.append({"type": "text", "text": f"Image {number}: {image.name}"})
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image.media_type,
+                    "data": base64.b64encode(image.data).decode("ascii"),
+                },
+            }
+        )
+    content.append({"type": "text", "text": prompt})
+    message = {"type": "user", "message": {"role": "user", "content": content}}
+    return (json.dumps(message) + "\n").encode("utf-8")
+
+
+class _RemClaude(ClaudeCodeSubscription):
+    """Claude Code that can report answer text as it is written and receive images."""
+
+    def __init__(
+        self,
+        on_text: Callable[[str], None] | None = None,
+        images: Sequence[ChatImage] = (),
+    ) -> None:
         super().__init__()
         self._on_text = on_text
+        self._images = tuple(images)
+
+    def _stdin_bytes(self, prompt: str) -> bytes:
+        if not self._images:
+            return super()._stdin_bytes(prompt)
+        return claude_user_message(prompt, self._images)
 
     def _parse_provider_output(self, stdout: str, stderr: str) -> tuple[str, dict[str, object]]:
+        if self._on_text is None:
+            return super()._parse_provider_output(stdout, stderr)
         try:
             payload = json.loads(stdout)
         except ValueError:
@@ -138,12 +234,13 @@ def generate_decision(
     cancel: threading.Event,
     data_dir: Path,
     on_reply: Callable[[str], None] | None = None,
+    images: Sequence[ChatImage] = (),
 ) -> dict[str, Any]:
     """Ask the chat model for a decision. on_reply sees the reply text as it grows.
 
     Only Claude Code reports partial text; other providers answer all at once.
     """
-    return parse_decision(generate_text(prompt, config, cancel, data_dir, on_reply))
+    return parse_decision(generate_text(prompt, config, cancel, data_dir, on_reply, images=images))
 
 
 def generate_text(
@@ -155,15 +252,19 @@ def generate_text(
     *,
     system_prompt: str = "",
     timeout: float = 180,
+    images: Sequence[ChatImage] = (),
 ) -> str:
     """Run one tool-free, sessionless turn in an empty folder and return its text.
 
     Claude Code takes system_prompt in place of its own instructions, which keeps
-    short calls short. Other providers read it at the top of the prompt.
+    short calls short. Other providers read it at the top of the prompt. images are
+    shown to the model; callers check chat_image_refusal first.
     """
     name = config.get("provider", "codex")
     if name not in CLI_PROVIDERS:
         raise ValueError(f"Unknown provider '{name}'")
+    if images and (refusal := chat_image_refusal(name)):
+        raise ValueError(refusal)
     settings = resolve_provider_settings(
         agent_subscription=name,
         agent_model=config.get("model") if config.get("model") != "cli-default" else None,
@@ -175,10 +276,21 @@ def generate_text(
         prompt = f"{system_prompt}\n\n{prompt}"
     with tempfile.TemporaryDirectory(prefix="raticode-rem-conversation-") as directory:
         root = Path(directory)
+        # The CLIs that attach image files read these private copies in the empty
+        # folder, never the user's own files, so no tool or folder grant is needed.
+        image_paths: list[Path] = []
+        if name != "claude_code":
+            for number, image in enumerate(images, start=1):
+                path = root / f"image-{number}{image.suffix}"
+                path.write_bytes(image.data)
+                image_paths.append(path)
         extra: list[str] = []
         subscription: Subscription
         if name == "codex":
-            extra = resource_cli_args(name, AgentResources.none(), root)
+            # Image options come first: --image takes several values, so an option
+            # must follow it before the prompt argument.
+            extra = [f"--image={path}" for path in image_paths]
+            extra += resource_cli_args(name, AgentResources.none(), root)
             extra += [
                 "-c",
                 'approval_policy="never"',
@@ -208,6 +320,9 @@ def generate_text(
             ]
             if system_prompt:
                 extra += ["--system-prompt", system_prompt]
+            if images:
+                extra += ["--input-format", "stream-json"]
+            grow: Callable[[str], None] | None = None
             if on_reply is not None:
                 written: list[str] = []
                 shown = [""]
@@ -220,9 +335,9 @@ def generate_text(
                         on_reply(draft)
 
                 extra.append("--include-partial-messages")
-                subscription = _StreamingClaude(grow)
-            else:
-                subscription = ClaudeCodeSubscription()
+            subscription = (
+                _RemClaude(grow, images) if grow is not None or images else ClaudeCodeSubscription()
+            )
             subscription.prompt_via_stdin = True
         elif name == "antigravity":
             subscription = AntigravitySubscription(tool_free=True)
@@ -234,6 +349,7 @@ def generate_text(
                 resources=AgentResources.none(),
                 read_only=True,
                 tool_free=True,
+                image_paths=image_paths,
             )
         settings = settings.model_copy(
             update={

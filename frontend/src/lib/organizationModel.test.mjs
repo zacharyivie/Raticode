@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   activityFeed, buildModel, describeHours, hoursStatus, claimSummary, columnOf, epicProgress, epicState, knowledgeEdges, layoutGraph, milestoneProgress,
-  moveRule, needsYou, orgMilestoneProgress, projectProgress, reviewCaution, runSteps, searchEntities, startHint, suggestedLinks, workerStatus,
+  moveRule, needsYou, orgMilestoneProgress, removeWorker, projectProgress, reviewCaution, runSteps, searchEntities, startHint, suggestedLinks, workerStatus,
 } from "./organizationModel.js";
 
 const task = (id, status, more = {}) => ({ id, title: `Task ${id}`, status, number: Number(id.slice(1)), key: `STU-${id.slice(1)}`, revision: 1, comments: [], knowledge: [], ...more });
@@ -85,6 +85,9 @@ test("board moves pull work into In progress and keep Done for reviewed work", (
   assert.equal(moveRule({ column: "todo", status: "blocked" }, "running").ok, false);
   assert.equal(moveRule(ticket("review"), "running").ok, false);
   assert.equal(moveRule(ticket("done"), "running").ok, false);
+  // Work in Review goes back through Request changes, which records the review.
+  assert.equal(moveRule(ticket("review"), "todo").ok, false);
+  assert.equal(moveRule(ticket("review"), "backlog").ok, false);
   assert.equal(moveRule(ticket("todo"), "done").ok, false);
   assert.equal(moveRule(ticket("todo"), "review").ok, false);
   assert.equal(moveRule(ticket("running"), "backlog").ok, false);
@@ -185,12 +188,12 @@ test("working hours read plainly, and the header says when they open or close", 
   const at = hours => buildModel({ ...base, diagnostics: { taskReasons: { t5: "Off hours until 2026-11-16T14:00:00+00:00" }, hours } });
   assert.equal(hoursStatus(at({ mode: "always", open: true })), null);
   const closed = at({ mode: "scheduled", timezone: "America/New_York", open: false, opensAt: "2026-11-16T14:00:00+00:00" });
-  assert.deepEqual(hoursStatus(closed), { open: false, text: "Off hours until Mon 09:00" });
+  assert.deepEqual(hoursStatus(closed), { open: false, text: "Off hours until Mon, 09:00 EST" });
   const open = at({ mode: "scheduled", timezone: "UTC", open: true, closesAt: "2026-11-16T17:00:00+00:00" });
-  assert.deepEqual(hoursStatus(open), { open: true, text: "Working hours until Mon 17:00" });
+  assert.deepEqual(hoursStatus(open), { open: true, text: "Working hours until Mon, 17:00 UTC" });
   const todo = { ...base, runtime: { ...base.runtime, tasks: [...base.runtime.tasks, task("t6", "todo", { assignee: "mira" })] } };
   const model = buildModel({ ...todo, diagnostics: { taskReasons: { t6: "Off hours until 2026-11-16T14:00:00+00:00" }, hours: { mode: "scheduled", timezone: "America/New_York" } } });
-  assert.deepEqual(startHint(model, model.tickets.t6), { tone: "wait", text: "Outside working hours. It starts when they resume, Mon 09:00." });
+  assert.deepEqual(startHint(model, model.tickets.t6), { tone: "wait", text: "Outside working hours. It starts when they resume, Mon, 09:00 EST." });
 });
 
 test("stalled check-ins wait on you with the reason", () => {
@@ -198,4 +201,20 @@ test("stalled check-ins wait on you with the reason", () => {
   const model = buildModel({ ...base, diagnostics: { heartbeats: { mira: { stalled: { taskId: "t3", reason: "The last run failed" } }, ghost: { stalled: { reason: "x" } } } } });
   const stalls = needsYou(model).filter(item => item.type === "heartbeat");
   assert.deepEqual(stalls, [{ type: "heartbeat", worker: "mira", stall: { taskId: "t3", reason: "The last run failed" } }]);
+});
+
+test("removing a worker leaves a configuration that still saves", () => {
+  const config = {
+    employees: [{ id: "lead" }, { id: "mira", reportsTo: "lead" }, { id: "sam", reportsTo: "mira" }],
+    projects: [{ id: "p", owner: "mira" }], teams: [{ id: "t", manager: "mira" }],
+    epics: [{ id: "E1", owner: "mira" }], goalRecords: [{ id: "g", owner: "mira" }],
+    executionTargets: [{ id: "x", employees: ["mira"] }, { id: "y", employees: ["mira", "lead"] }],
+  };
+  const next = removeWorker(config, "mira");
+  assert.deepEqual(next.employees, [{ id: "lead" }, { id: "sam", reportsTo: "lead" }]);
+  assert.deepEqual(next.projects, [{ id: "p" }]);
+  assert.deepEqual(next.teams, [{ id: "t" }]);
+  assert.equal(next.epics[0].owner, null);
+  assert.equal(next.goalRecords[0].owner, null);
+  assert.deepEqual(next.executionTargets, [{ id: "y", employees: ["lead"] }]);
 });

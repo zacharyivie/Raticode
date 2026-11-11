@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000201",
+  "id": "10000000-0000-4000-8000-000000000201",
+  "sequence": 201,
+  "type": "desktop.read",
+  "payload": {
+    "op": "kanban.timeline",
+    "params": {
+      "ticket_id": "7b0c7d2e-0f7e-4a77-9a77-6a0a0c3f5e21",
+      "scope": "rem",
+      "organization_id": ""
+    }
+  }
+}

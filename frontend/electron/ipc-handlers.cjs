@@ -57,6 +57,7 @@ const desktopIpcHandlers = [
   ["gofer:browser-owner-zoom", "browserOwnerZoom"],
   ["gofer:browser-library", "browserLibrary"],
   ["gofer:browser-policy", "browserPolicy"],
+  ["gofer:gecko", "gecko"],
   ["gofer:terminal-create", "createTerminal"],
   ["gofer:terminal-write", "writeTerminal"],
   ["gofer:terminal-resize", "resizeTerminal"],

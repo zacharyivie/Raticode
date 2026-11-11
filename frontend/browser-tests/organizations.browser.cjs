@@ -62,9 +62,9 @@ async function main() {
   await field("Maximum runs per task", "25"); await evaluate("document.activeElement.blur()");
   await click("Create organization"); await wait("document.querySelector('.org-toolbar h2')?.textContent === 'Launch studio'");
   await click("Employee"); await field("Employee name", "Mira"); await field("Title", "Release engineer"); await field("Employee instructions", "Implement assigned releases and attach test evidence.");
-  await field("Heartbeat interval in seconds, 0 disables", "");
-  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Heartbeat interval')).querySelector('input').value"), "");
-  await field("Heartbeat interval in seconds, 0 disables", "0"); await evaluate("document.activeElement.blur()");
+  await field("Check-in interval in seconds, 0 is automatic", "");
+  assert.equal(await evaluate("[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Check-in interval')).querySelector('input').value"), "");
+  await field("Check-in interval in seconds, 0 is automatic", "0"); await evaluate("document.activeElement.blur()");
   await click("Save employee"); await wait("document.querySelector('.org-person strong')?.textContent === 'Mira'");
   await field("Assignment for Mira", "Verify the release checks"); await click("Assign work");
   // Start asks for confirmation and summarizes what will run.

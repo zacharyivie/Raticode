@@ -1,3 +1,4 @@
+require("./test-tmp.cjs");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -90,4 +91,21 @@ test("history keys strip fragments and reject other schemes", () => {
   assert.equal(historyKey("https://a.test/x#y"), "https://a.test/x");
   assert.equal(historyKey("about:blank"), "");
   assert.equal(historyKey("not a url"), "");
+});
+
+test("damaged browser data is kept aside, reported, and not overwritten by the next save", async (t) => {
+  const os = require("node:os");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-browser-store-corrupt-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "bookmarks.json"), '[{"url":"https://example.test","title":"Kept"');
+  const warnings = [];
+  t.mock.method(console, "warn", (message) => warnings.push(String(message)));
+  const store = createBrowserStore(root, { writeDelayMs: 0 });
+  store.flush?.();
+  const kept = fs.readdirSync(root).filter((name) => name.startsWith("bookmarks.json.corrupt-"));
+  assert.equal(kept.length, 1);
+  assert.match(fs.readFileSync(path.join(root, kept[0]), "utf8"), /Kept/);
+  assert.ok(warnings.some((message) => /bookmarks\.json was damaged; kept it as bookmarks\.json\.corrupt-/.test(message)));
+  // A missing file is normal on first start and stays quiet.
+  assert.ok(!warnings.some((message) => /history\.json/.test(message)));
 });

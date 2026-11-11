@@ -10,6 +10,7 @@ export { resolveMarkdownLinkPath, markdownFileLinkTarget, filePathFromMarkdownUr
 import { reconcileEditorLifetimes, closeEditorLifetimes, acceptsEditorState, retainOpenEditorStates } from "../lib/editorStateLifetime.js";
 import { startPolling, shareInFlight } from "../lib/refresh.js";
 import { parseCommitDiffPath } from "../lib/commitDiff.js";
+import { viewedEditorPaths } from "../lib/browserMedia.js";
 import { OPEN_TERMINAL_TAB_EVENT, TERMINAL_TAB_PATH, isTerminalTabPath, terminalInEditor } from "../lib/workspaceLayout.js";
 import CommitDiff from "./CommitDiff.jsx";
 import { installRemActions } from "../lib/editorRem.js";
@@ -61,7 +62,10 @@ import raticodeIcon from "../assets/roundel.png";
 import { Dialog } from "./Dialog.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
+import GeckoBrowser from "./GeckoBrowser.jsx";
+import { BrowserEngineBadge, NewBrowserTabButton } from "./BrowserTabControls.jsx";
 import { pendingRemApprovals } from "../lib/browserUi.js";
+import { WEB_BROWSER_OPTIONS, webBrowserEngine } from "../lib/browserEngines.js";
 
 import { textEditorSessions, discardedSessionPaths, codeCloseProtection } from "../lib/codeEditorSessions.js";
 export { FILE_AUTOSAVE_DELAY_MS, codeCloseProtection, hasUnsavedCodeChanges, applyCodeFilesystemChange } from "../lib/codeEditorSessions.js";
@@ -90,6 +94,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   onClosePath,
   onClosePaths,
   onBrowserStateChange,
+  onViewedPathsChange,
   onAskRemAboutPage,
   onShareBrowserTab,
   canShareBrowserTab = false,
@@ -120,7 +125,16 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   rattishDocuments = {},
   onSaveRattishDocument,
   terminalProjectRoot = "",
+  // "browser" is the Browser plugin's tab area: web tabs from every browser in
+  // one tab bar, no file tabs, terminal or file drops.
+  variant = "editor",
+  defaultBrowserEngine = "raticode",
+  onGeckoPendingOpened,
+  // Reports a Rem approval waiting in a tab that isn't on screen, so the app
+  // can show it while this area is hidden.
+  onHiddenApprovalChange,
 }, ref) {
+  const browserVariant = variant === "browser";
   const textEditorRefs = useRef(new Map());
   const workspaceRef = useRef(null);
   const tabMenuRef = useRef(null);
@@ -219,6 +233,15 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   useLayoutEffect(() => {
     documentPathOrderRef.current = documentPaths;
   }, [documentPaths]);
+
+  // The tabs on screen, for the media bar: a tab in view already shows its player.
+  const viewedPathsKey = viewedEditorPaths(active, [primaryPath, splitPath]).join("\n");
+  const onViewedPathsChangeRef = useRef(onViewedPathsChange);
+  onViewedPathsChangeRef.current = onViewedPathsChange;
+  useEffect(() => {
+    onViewedPathsChangeRef.current?.(viewedPathsKey ? viewedPathsKey.split("\n") : []);
+  }, [viewedPathsKey]);
+  useEffect(() => () => onViewedPathsChangeRef.current?.([]), []);
 
   function beginTabDrag(event, path) {
     draggedPathRef.current = path;
@@ -454,6 +477,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     if (!background) onActivePathChange?.(TERMINAL_TAB_PATH);
   };
   useEffect(() => {
+    if (browserVariant) return undefined;
     const openTerminal = (event) => terminalTabRef.current(event.detail ?? {});
     window.addEventListener(OPEN_TERMINAL_TAB_EVENT, openTerminal);
     if (settings.layout?.bottomPanelAtStartup === "terminal" && editorTerminal) terminalTabRef.current({ background: true });
@@ -516,6 +540,8 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       settings,
     });
     if (!action || (["find", "suppress-find"].includes(action) && !textEditorRefs.current.get(currentPath))) return;
+    // The Browser plugin has no files to create, save or wrap.
+    if (browserVariant && ["new", "save", "toggle-word-wrap"].includes(action)) return;
     event.preventDefault();
     event.stopPropagation();
     if (action === "new") {
@@ -582,7 +608,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
         style={{ gridColumn: column, gridRow: 1 }}
       >
       <div
-        aria-label={isSplit ? "Split editor tabs" : "Editor tabs"}
+        aria-label={browserVariant ? (isSplit ? "Split browser tabs" : "Browser tabs") : isSplit ? "Split editor tabs" : "Editor tabs"}
         className="tab-strip-scrollbar flex h-9 min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden"
         role="tablist"
         onDragOver={(event) => {
@@ -610,7 +636,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           const dirty = workflowTab ? workflowTab.dirty : rattishDocuments[path] ? (rattishDocuments[path].dirty ?? rattishDocuments[path].document?.dirty) : isRattish ? rattishDirty : fileStates[path]?.dirty;
           const preview = !browserTab && !workflowTab && path === previewPath;
           const folderLabel = commitDiff ? fileName(commitDiff.projectRoot) : workflowTab ? workflowTab.contextLabel || fileName(workflowTab.projectRoot || "") : browserTab || isTerminalTabPath(path) ? "" : duplicateTabFolder(path, localOpenPaths);
-          const label = workflowTab?.name || codeTabLabel(path, tabMetadata);
+          const label = workflowTab?.name || `${browserTab?.private ? "Private · " : ""}${codeTabLabel(path, tabMetadata)}`;
           const title = commitDiff ? `${label}\n${commitDiff.projectRoot}\n${commitDiff.hash}` : workflowTab ? [label, workflowTab.sourcePath, workflowTab.statusLabel].filter(Boolean).join("\n") : tabMetadata
             ? [label, tabMetadata.url].filter(Boolean).join("\n")
             : isTerminalTabPath(path) ? label : path;
@@ -655,7 +681,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                 onDragStart={(event) => beginTabDrag(event, path)}
               >
                 {workflowTab ? <Workflow aria-hidden="true" className="shrink-0 text-brand" size={14} /> : <FileTypeIcon browserTab={tabMetadata} path={path} />}
-                <span className={`flex min-w-0 flex-col justify-center ${preview ? "italic" : ""}`}>
+                <span className={`flex min-w-0 flex-col justify-center ${browserTab ? "flex-1" : ""} ${preview ? "italic" : ""}`}>
                   {folderLabel ? (
                     <span className="max-w-full truncate text-[9px] font-normal leading-[11px] text-muted">
                       {folderLabel}
@@ -663,6 +689,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                   ) : null}
                   <span className="max-w-full truncate leading-[14px]">{label}</span>
                 </span>
+                {browserTab ? <BrowserEngineBadge engine={browserTab.engine} /> : null}
                 {dirty ? <span aria-label="Unsaved changes" className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" /> : null}
                 {tabMetadata?.prompts?.some((prompt) => prompt?.kind === "rem-confirm") ? <Bot aria-label="Rem needs your approval" className="shrink-0 animate-pulse text-amber-700" size={12} /> : null}
               </button>
@@ -695,9 +722,10 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           );
         })}
       </div>
+      {browserVariant && !isSplit ? <NewBrowserTabButton defaultEngine={defaultBrowserEngine} onNewTab={(options) => onOpenBrowser?.({ newTab: true, ...options })} /> : null}
       <EditorTabsMenu
         activePath={activeForGroup}
-        label={isSplit ? "All split editor tabs" : "All editor tabs"}
+        label={browserVariant ? (isSplit ? "All split browser tabs" : "All browser tabs") : isSplit ? "All split editor tabs" : "All editor tabs"}
         entries={paths.map((path) => {
           const tab = workflowTabs[path];
           const browser = browserTabs[path];
@@ -757,18 +785,29 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                 theme={theme}
               />
             </Suspense>
+          ) : browserTab && !browserTab.agentSessionId && !browserTab.private && browserTab.engine === "gecko" ? (
+            <GeckoBrowser
+              active={active && selected}
+              tabId={path}
+              initialUrl={browserTab.url}
+              pendingUrls={browserTab.pendingUrls || []}
+              onPendingOpened={(urls) => onGeckoPendingOpened?.(path, urls)}
+              onStateChange={(nextState) => onBrowserStateChange?.(path, nextState)}
+            />
           ) : commitDiff ? <CommitDiff {...commitDiff} theme={theme} editorSettings={settings.editor} /> : workflowTab ? renderWorkflowTab?.(workflowTab, { path, visible: active && selected, active: active && currentPath === path, pane: inSplitGroup ? "split" : "primary" }) : diffOnOpenPaths.has(path) && (image || pdf) ? <BinaryGitComparison path={path} group={gitGroups[path]} onClose={() => setDiffOnOpenPaths((current) => withoutSetValue(current, path))} /> : browserTab || pdf || (html && mode === "preview") ? (
             <PreviewBrowser
               active={active && currentPath === path}
+              agentEngine={browserTab?.agentEngine || ""}
               agentLabel={browserTab?.agentLabel || ""}
               agentPartition={browserTab?.agentPartition || ""}
               agentSessionId={browserTab?.agentSessionId || ""}
-              canShareWithRem={canShareBrowserTab}
-              discardAfterMs={browserTab && !browserTab.agentSessionId ? discardAfterMs : 0}
+              canShareWithRem={canShareBrowserTab && !browserTab?.private}
+              discardAfterMs={browserTab && !browserTab.agentSessionId && !browserTab.private ? discardAfterMs : 0}
+              engine={browserTab && !browserTab.agentSessionId ? browserTab.engine || "" : ""}
               openTabs={browserTab ? openBrowserTabList : []}
               savedHistory={browserTab?.history || null}
               onActivateTab={onActivePathChange}
-              onAskRem={onAskRemAboutPage}
+              onAskRem={browserTab?.private ? undefined : onAskRemAboutPage}
               onOpenFile={onOpenPath ? (filePath) => onOpenPath(filePath) : undefined}
               onReopenClosedTab={onReopenClosedBrowserTab}
               onShareWithRem={onShareBrowserTab}
@@ -787,7 +826,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
                 const nextPath = adjacentCodeTab(groupPaths, path, direction);
                 if (nextPath) onActivePathChange?.(nextPath);
               }}
-              onNewTab={() => onOpenBrowser?.({ newTab: true })}
+              onNewTab={() => onOpenBrowser?.({ newTab: true, ...(browserTab && !browserTab.agentSessionId && !browserTab.private && browserTab.engine ? { engine: browserTab.engine } : {}) })}
+              onNewPrivateTab={browserTab ? () => onOpenBrowser?.({ newTab: true, private: true }) : undefined}
+              privateTab={browserTab?.private === true}
               onModeChange={(nextMode) => {
                 setDocumentModes((current) => ({ ...current, [path]: nextMode }));
                 if (nextMode === "preview") {
@@ -896,15 +937,22 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   // Rem's approval requests in tabs the user is not looking at.
   const hiddenApproval = pendingRemApprovals(browserViewStates)
     .find((item) => openPaths.includes(item.path) && !(active && [primaryPath, splitPath].includes(item.path))) || null;
+  const hiddenApprovalKey = hiddenApproval ? JSON.stringify({ path: hiddenApproval.path, agentLabel: hiddenApproval.agentLabel, label: hiddenApproval.label || "", title: codeTabLabel(hiddenApproval.path, browserViewTabMetadata(browserTabs[hiddenApproval.path], browserViewStates[hiddenApproval.path])) }) : "";
+  const onHiddenApprovalChangeRef = useRef(onHiddenApprovalChange);
+  onHiddenApprovalChangeRef.current = onHiddenApprovalChange;
+  useEffect(() => {
+    onHiddenApprovalChangeRef.current?.(hiddenApprovalKey ? JSON.parse(hiddenApprovalKey) : null);
+  }, [hiddenApprovalKey]);
   return (
     <section
       ref={workspaceRef}
       className="code-workspace relative flex min-h-0 flex-1 flex-col bg-white"
-      aria-label="Code workspace"
-      onDragEnterCapture={event => { if (containsFileTransfer(event.dataTransfer)) { event.preventDefault(); setFileDropActive(true); } }}
-      onDragOverCapture={event => { if (containsFileTransfer(event.dataTransfer)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "copy"; } }}
-      onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFileDropActive(false); }}
-      onDropCapture={openDroppedFiles}
+      aria-label={browserVariant ? "Browser workspace" : "Code workspace"}
+      id={browserVariant ? "main-panel-browser" : undefined}
+      onDragEnterCapture={browserVariant ? undefined : event => { if (containsFileTransfer(event.dataTransfer)) { event.preventDefault(); setFileDropActive(true); } }}
+      onDragOverCapture={browserVariant ? undefined : event => { if (containsFileTransfer(event.dataTransfer)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "copy"; } }}
+      onDragLeave={browserVariant ? undefined : event => { if (!event.currentTarget.contains(event.relatedTarget)) setFileDropActive(false); }}
+      onDropCapture={browserVariant ? undefined : openDroppedFiles}
     >
       {fileDropActive ? <div aria-label="Open dropped files" className="absolute inset-0 z-50 grid place-items-center border-2 border-brand bg-canvas/90 text-sm text-ink">Drop files to open new tabs</div> : null}
       {fileDropError ? <div role="alert" className="flex items-center gap-2 border-b border-line px-3 py-2 text-xs text-red-700"><span className="flex-1">{fileDropError}</span><button type="button" aria-label="Dismiss file drop error" onClick={() => setFileDropError("")}><X size={13} /></button></div> : null}
@@ -943,7 +991,22 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           splitGroup.side === "left" ? 1 : 2,
         ) : null}
         {renderDocuments(documentPaths)}
-        {!currentPath ? emptyContent || (
+        {!currentPath && browserVariant ? (
+          <div className="grid min-h-0 place-items-center overflow-y-auto px-8 py-10" style={{ gridColumn: 1, gridRow: 1 }} data-testid="browser-empty">
+            <div className="w-full max-w-sm text-center">
+              <Globe aria-hidden="true" className="mx-auto text-muted" size={28} />
+              <p className="mt-3 text-sm font-semibold text-ink">No web tabs open</p>
+              <p className="mt-1 text-xs leading-5 text-muted">Tabs from every browser share this tab bar. Pick one to start.</p>
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                {WEB_BROWSER_OPTIONS.map(([value, label]) => (
+                  <button key={value} type="button" className="flex items-center gap-1.5 rounded-md border border-line bg-white px-2.5 py-1.5 text-xs text-ink hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={() => onOpenBrowser?.({ newTab: true, engine: value })}>
+                    <BrowserEngineBadge engine={value} />{label}{value === webBrowserEngine(defaultBrowserEngine) ? <span className="text-[10px] text-muted">(default)</span> : null}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : !currentPath ? emptyContent || (
           <div className="min-h-0 overflow-y-auto px-8 pb-10 pt-12" style={{ gridColumn: 1, gridRow: 1 }}>
             <div className="mx-auto w-full max-w-2xl">
               <div className="mx-auto max-w-sm">

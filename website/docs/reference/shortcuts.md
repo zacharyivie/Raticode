@@ -17,7 +17,8 @@ These are the default bindings. **Settings > Keybindings** shows your current as
 | Open settings | Mod+, |
 | Open file | Mod+O |
 | Open project folder | Mod+K, Mod+O |
-| Open browser | Ctrl+J |
+| Open a new tab in the Browser plugin, in the default browser | Ctrl+J |
+| Reopen closed browser tab | Mod+Shift+T |
 | Show graph editor | Mod+1 |
 | Show code editor | Mod+2 |
 | Toggle project pane | Ctrl+B |
@@ -25,7 +26,8 @@ These are the default bindings. **Settings > Keybindings** shows your current as
 | Run workflow | Mod+Enter |
 | Toggle bottom panel | Mod+` |
 | New terminal | Ctrl+T |
-| Close focused terminal | Ctrl+W |
+| Close terminal | Ctrl+W |
+| Dictate a message | Mod+Alt+V (press again to finish) |
 
 Run starts executable work. Check which workflow is active before using its shortcut. Shortcuts yield to focused controls when their input handling takes precedence.
 
@@ -39,17 +41,48 @@ Run starts executable work. Check which workflow is active before using its shor
 | Find in file | Mod+F |
 | Toggle word wrap | Alt+Z |
 
-Editor-only commands require a relevant editor to be focused. Standard text-editing actions are also available through the editor and application menus.
+Editor-only commands require a relevant editor to be focused. The in-app **File**, **Edit**, **Selection**, **View**, **Terminal** and **Help** menus list further editor shortcuts, such as Ctrl+H to replace, Ctrl+/ to toggle a comment and Shift+Alt+F to format.
 
 ## Graph editor
 
 | Action | Default, with graph focused |
 | --- | --- |
 | Select all nodes | Mod+A |
-| Delete selected nodes | Delete |
+| Delete selection | Delete |
 | Zoom in | = |
 | Zoom out | - |
 | Fit workflow | F |
+
+## Integrated browser
+
+Inside the Browser plugin, `Ctrl+Tab` and `Ctrl+Shift+Tab` move between tabs of every browser, and the file close shortcut closes the selected web tab. `Ctrl+T` inside a tab opens a new tab in the same browser.
+
+These always work in a browser tab:
+
+| Action | Default |
+| --- | --- |
+| Focus the address bar | Alt+D |
+| Find in page | Mod+F |
+| Reload | Mod+R |
+| Back / Forward | Alt+Left / Alt+Right |
+
+These work only while the browser has focus, so they don't clash with app shortcuts:
+
+| Action | Default |
+| --- | --- |
+| Focus the address bar | Mod+L |
+| Reload / hard reload | F5 / Mod+Shift+R |
+| Developer tools | F12 |
+| Print | Mod+P |
+| Bookmark the page | Mod+D |
+| History | Ctrl+H (Cmd+Y on macOS) |
+| Reopen closed tab | Mod+Shift+T |
+| New private tab | Mod+Shift+N |
+| Zoom in / out / reset | Mod+= / Mod+- / Mod+0 |
+
+## Source control
+
+Ctrl+Enter (Cmd+Enter on macOS) in the commit message box commits the staged changes.
 
 ## Rem composer
 

@@ -22,13 +22,13 @@ The [installation guide](./installation.md) has platform commands, CLI-only setu
 
 Install and sign in to one supported coding CLI using its own setup instructions. Raticode discovers local providers; it does not create a provider account for you.
 
-Open **Settings > Providers**. Enable the provider you want to use and check its executable and model catalog. If it is not found, select its executable path and refresh discovery. Then open **Settings > Rem** to choose the provider used by new conversations.
+Open **Settings > Providers**. Enable the provider you want to use and check its executable and model catalog. If it is not found, set its **Executable override** and choose **Refresh providers**. Then open **Settings > Rem** to choose the **Default provider** for new tasks and threads, and optionally a separate **Rem chat provider** for Rem's own replies.
 
 Start with the provider you already use. See [Provider setup](./setup.md) for the CLI names and authentication checks. You can skip this step while learning command and file nodes.
 
 ## 3. Open a project
 
-Use **Open project folder** and select a real project directory. The folder becomes the working context for files, source control, terminal sessions, and project-scoped Rem threads. Selecting a folder also gives the desktop permission to access it.
+Choose **Open Project** (**File > Open Project...**, or **Open project...** in the project dropdown) and select a real project directory. The folder becomes the working context for files, source control, terminal sessions, and project-scoped Rem threads. Selecting a folder also gives the desktop permission to access it.
 
 Check the project name before asking Rem to edit anything. A conversation keeps its own scope when you switch the editor to another project. See [Projects and workspaces](./studio/projects.md).
 

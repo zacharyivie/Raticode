@@ -127,6 +127,10 @@ async function main() {
   await wait("document.querySelector('.oh-toasts').innerText.includes('It starts when you start the organization')", "start hint in toast");
   await drag("Write the Organizations guide", "done");
   await wait("document.querySelector('.oh-toasts').innerText.includes('Only reviewed work moves to Done')");
+  // Done work dragged to Backlog reopens straight into Backlog, never passing through To do.
+  await drag("Drag cards between columns", "backlog");
+  await wait("document.querySelector('.oh-toasts').innerText.includes('STU-2 reopened in Backlog')", "reopen toast");
+  assert.equal((await task("Drag cards between columns")).status, "backlog");
   // In progress means "next": the ticket goes first in its worker's queue and runs when they're free.
   await drag("Write the Organizations guide", "running");
   await wait("document.querySelector('.oh-toasts').innerText.includes('STU-5 is next for Sage Kim')", "pull toast");
@@ -284,6 +288,36 @@ async function main() {
   await wait("!document.querySelector('.oh-hours-pill') && document.querySelector('.oh-hours')?.innerText.includes('24/7')", "back to 24/7");
   saved = await api("read");
   assert.equal(saved.config.operatingHours.mode, "always");
+
+  // Work schedule: nothing is set until the user starts from the suggestion and saves it.
+  await wait("document.querySelector('.oh-schedule')?.innerText.includes('Not set')", "schedule not set");
+  await click("Start from the suggested schedule", "document.querySelector('.oh-schedule')");
+  await wait("document.querySelector('.oh-detail h2')?.textContent === 'Work schedule'");
+  assert.equal(await evaluate("document.querySelectorAll('.oh-block-row').length"), 7);
+  const rows = await evaluate("[...document.querySelectorAll('.oh-block-toggle')].map(b => b.innerText.replace(/\\s+/g, ' ').trim())");
+  assert.ok(rows.includes("Weekly release Fridays 13:00–17:00"), rows.join(" | "));
+  assert.ok(rows.includes("Dependency updates and audit Monthly, 1st Monday, 09:00–12:00"), rows.join(" | "));
+  await fill("[...document.querySelectorAll('.oh-detail label')].find(l => l.textContent.startsWith('Time zone')).querySelector('input')", "Asia/Tokyo");
+  // Two daily blocks of the same length that overlap can't be saved.
+  await click("Add block");
+  await wait("document.querySelector('[aria-label=\"Start of block 8\"]')");
+  await fill("document.querySelector('[aria-label=\"Start of block 8\"]')", "09:00");
+  await fill("document.querySelector('[aria-label=\"End of block 8\"]')", "18:00");
+  await wait("document.querySelector('.oh-schedule-form [role=alert]')?.textContent.includes('neither takes precedence')", "overlap refused");
+  await click("Remove New block");
+  await wait("!document.querySelector('.oh-schedule-form [role=alert]')", "overlap gone");
+  await click("Save schedule");
+  await wait("document.querySelector('.oh-schedule .oh-now b') && document.querySelector('.oh-block-pill')", "current block shown");
+  saved = await api("read");
+  assert.equal(saved.config.workSchedule.blocks.length, 7);
+  assert.equal(saved.config.operatingHours.timezone, "Asia/Tokyo");
+  assert.equal(saved.config.operatingHours.mode, "always");
+  assert.equal(saved.diagnostics.schedule.timezone, "Asia/Tokyo");
+  assert.equal(await evaluate("document.querySelector('.oh-schedule .oh-now b').textContent"), saved.diagnostics.schedule.current.label);
+  assert.equal(await evaluate("document.querySelector('.oh-block-pill').textContent"), saved.diagnostics.schedule.current.label);
+  assert.ok(await evaluate("document.querySelectorAll('.oh-day > span').length >= 4"));
+  assert.equal(await evaluate("document.querySelectorAll('.oh-occasional li').length"), 3);
+  assert.equal((await api("history"))[0].reason, "Changed working hours and the work schedule");
 
   // Settings keeps the full configuration, history and operations console.
   await click("Settings, history and operations");

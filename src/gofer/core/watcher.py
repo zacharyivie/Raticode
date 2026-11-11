@@ -406,16 +406,15 @@ class WorkflowWatcher:
                     )
                     .run()
                 )
-                log.info(
-                    "Watched workflow %s finished: success=%s",
-                    watched.workflow_id,
-                    result.success,
-                )
+                if result.success:
+                    log.info("Watched workflow %s finished", watched.workflow_id)
+                else:
+                    log.warning("Watched workflow %s failed; see its run log", watched.workflow_id)
                 write_run_node_outputs_payload(result, workflow.config.resource_limits)
 
             asyncio.run(execute())
-        except Exception as exc:  # noqa: BLE001
-            log.exception("Watched workflow '%s' failed: %s", watched.workflow_id, exc)
+        except Exception:  # noqa: BLE001
+            log.exception("Watched workflow '%s' failed", watched.workflow_id)
         finally:
             with self._lock:
                 current = self._workflows.get(watched.workflow_id)

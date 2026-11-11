@@ -46,15 +46,51 @@ test('real browser tab identities and legacy browser tabs restore as browser doc
   const storage = memory();
   const actualPath = 'raticode-browser:1726178220-1';
   const legacyPath = 'browser:docs';
-  saveEditorSession({ paths: [actualPath, legacyPath, '/project/readme.md'], activePath: actualPath, browserTabs: {
-    [actualPath]: { url: 'https://example.test/current', title: 'Current browser' },
+  saveEditorSession({ paths: ['/project/readme.md'], activePath: '/project/readme.md', browserPaths: [actualPath, legacyPath], browserActivePath: actualPath, browserTabs: {
+    [actualPath]: { url: 'https://example.test/current', title: 'Current browser', engine: 'edge' },
     [legacyPath]: { url: 'https://example.test/legacy', title: 'Legacy browser' },
   } }, storage);
   const restored = loadEditorSession(storage);
-  assert.equal(restored.activePath, actualPath);
+  assert.equal(restored.browserActivePath, actualPath);
   assert.equal(restored.browserTabs[actualPath].url, 'https://example.test/current');
+  assert.equal(restored.browserTabs[actualPath].engine, 'edge');
   assert.equal(restored.browserTabs[legacyPath].title, 'Legacy browser');
-  assert.deepEqual(restored.paths, [actualPath, legacyPath, '/project/readme.md']);
+  assert.deepEqual(restored.browserPaths, [actualPath, legacyPath]);
+  assert.deepEqual(restored.paths, ['/project/readme.md']);
+  assert.equal(restored.activePath, '/project/readme.md');
+  // Older Raticode versions read `paths` only, so web tabs are listed there too.
+  assert.deepEqual(JSON.parse(storage.getItem(EDITOR_SESSION_KEY)).paths, ['/project/readme.md', actualPath, legacyPath]);
+});
+
+test('sessions from before the Browser plugin move web tabs out of the file tabs without losing any', () => {
+  const storage = memory();
+  const web = 'raticode-browser:a';
+  const music = 'raticode-browser:b';
+  storage.setItem(EDITOR_SESSION_KEY, JSON.stringify({ version: 2, paths: ['/p/a.py', web, '/p/b.md', music], activePath: music, activity: 'files', mainContent: 'editor', browserTabs: {
+    [web]: { url: 'https://docs.test/', title: 'Docs', history: { index: 0, entries: [{ url: 'https://docs.test/' }] } },
+    [music]: { url: 'https://music.test/', title: 'Music' },
+  } }));
+  const restored = loadEditorSession(storage);
+  assert.deepEqual(restored.paths, ['/p/a.py', '/p/b.md']);
+  assert.equal(restored.activePath, '/p/a.py');
+  assert.deepEqual(restored.browserPaths, [web, music]);
+  assert.equal(restored.browserActivePath, music);
+  assert.equal(restored.browserTabs[web].history.entries[0].url, 'https://docs.test/');
+  // A web tab was in front, so the Browser plugin is.
+  assert.equal(restored.mainContent, 'browser');
+  assert.equal(restored.activity, 'browser');
+  // With a file tab in front, the File explorer stays in front.
+  storage.setItem(EDITOR_SESSION_KEY, JSON.stringify({ version: 2, paths: ['/p/a.py', web], activePath: '/p/a.py', activity: 'files', mainContent: 'editor', browserTabs: { [web]: { url: 'https://docs.test/' } } }));
+  const files = loadEditorSession(storage);
+  assert.equal(files.mainContent, 'editor');
+  assert.equal(files.activity, 'files');
+  assert.equal(files.browserActivePath, web);
+  // Saved with the Browser plugin, the choice of area is kept as saved.
+  saveEditorSession({ paths: ['/p/a.py'], activePath: '/p/a.py', browserPaths: [web], browserActivePath: web, browserTabs: { [web]: { url: 'https://docs.test/' } }, activity: 'source-control', mainContent: 'editor' }, storage);
+  assert.equal(loadEditorSession(storage).mainContent, 'editor');
+  saveEditorSession({ paths: [], browserPaths: [web], browserActivePath: web, browserTabs: { [web]: { url: 'https://docs.test/' } }, activity: 'browser', mainContent: 'browser' }, storage);
+  assert.equal(loadEditorSession(storage).mainContent, 'browser');
+  assert.equal(loadEditorSession(storage).activity, 'browser');
 });
 
 test('orphan browser paths never restore as filesystem editors', () => {
@@ -62,6 +98,7 @@ test('orphan browser paths never restore as filesystem editors', () => {
   saveEditorSession({ paths: ['raticode-browser:missing', 'browser:missing', '/file'], activePath: 'raticode-browser:missing', browserTabs: {} }, storage);
   assert.deepEqual(loadEditorSession(storage).paths, ['/file']);
   assert.equal(loadEditorSession(storage).activePath, '/file');
+  assert.deepEqual(loadEditorSession(storage).browserPaths, []);
 });
 
 test('recovery reports quota failures without throwing or changing the live draft', () => {

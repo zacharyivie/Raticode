@@ -3,8 +3,8 @@
 > **October 26, 2026:** The ntfy relay was removed. Phones and desktops connect
 > only over the local network. Relay, topic and quota material below is historical.
 > Invitation `relay` and topic fields remain only for wire compatibility and name the
-> unresolvable `https://relay.invalid`. See the mobile repository's
-> `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
+> unresolvable `https://relay.invalid`. See the Wi-Fi-only amendment in
+> `mobile/android/docs/mobile-desktop-v2.md`.
 
 The paired-device backend now accepts application records after a mutually
 pinned TLS 1.3 session, exact binding echo and durable ready acknowledgment.
@@ -182,7 +182,7 @@ The renderer can stop or steer an active phone turn using the same existing loca
 
 ## Background parity, October 27, 2026
 
-Phone polling requests use a bounded recent replay window instead of the lifetime inbox, so long background sync cannot exhaust the 100,000-event quota. `src/gofer/devices/remote_control.py` answers phone approval and swarm events only after the per-phone **Allow approvals and swarm controls** opt-in, which is off by default and stored in `device_remote_control`. Workflow decisions reuse `decide_workflow_approval_payload` with `decided_by="phone"`; swarm actions reuse the swarm manager's `control`, `message` and `human_response` paths. Every approval decision must match the current action digest. Thread resource changes only toggle existing resources and need an explicit `set_resources` flag. The provider catalog is read on a worker thread, never on the device event loop. Electron reloads a crashed hidden renderer up to three times an hour and restores a hidden main window if a page-initiated close destroys it, so tray mode keeps phone sync running. See the mobile repository's `docs/mobile-desktop-v2.md` background parity extension.
+Phone polling requests use a bounded recent replay window instead of the lifetime inbox, so long background sync cannot exhaust the 100,000-event quota. `src/gofer/devices/remote_control.py` answers phone approval and swarm events only after the per-phone **Allow approvals and swarm controls** opt-in, which is off by default and stored in `device_remote_control`. Workflow decisions reuse `decide_workflow_approval_payload` with `decided_by="phone"`; swarm actions reuse the swarm manager's `control`, `message` and `human_response` paths. Every approval decision must match the current action digest. Thread resource changes only toggle existing resources and need an explicit `set_resources` flag. The provider catalog is read on a worker thread, never on the device event loop. Electron reloads a crashed hidden renderer up to three times an hour and restores a hidden main window if a page-initiated close destroys it, so tray mode keeps phone sync running. See `mobile/android/docs/mobile-desktop-v2.md` background parity extension.
 
 ## Fleet mesh, October 29, 2026
 
@@ -257,4 +257,16 @@ Limits: messages are capped at the protocol's 4000 characters, attachments are
 not sent, Rem cannot start child threads from a remote thread, and the receiving
 desktop's window does not list these threads; they run in its backend.
 
+## Wake the computer, November 9, 2026
 
+**Let this phone wake this computer** is a per-phone opt-in under Paired devices. It is off by default and has no effect unless **Use Raticode from this phone** is on. While it is on, `overview` adds `wake_mac`, this computer's network card hardware address, inside the pinned TLS session. The phone uses the address to send a Wake-on-LAN packet when the desktop is asleep. This computer never sends one. The selection rules are in `src/gofer/devices/wake.py`, and the phone's half is "Wake the computer" in `mobile/android/docs/architecture.md`.
+
+**Security review note.** The Wake-on-LAN packet is unencrypted by design: network card firmware defines the format and can't do TLS. It is the only desktop-related traffic outside end-to-end TLS, and it carries the fixed header and the hardware address and nothing else. For the independent reviewer:
+
+- Anyone on the same subnet can read the hardware address and send the same packet. A hardware address isn't a secret, and the computer already shows it on the local network whenever it talks. The most an attacker gains is waking a computer that has Wake-on-LAN turned on.
+- A different network using the same subnet numbers, such as another `192.168.1.0/24`, passes the phone's check, so a deliberate tap there broadcasts the address on that network.
+- The desktop can't direct the packet anywhere. The phone works out the destination from its own Wi-Fi prefix.
+- It grants no new authority. A woken computer still goes through the paired, pinned TLS session and desktop policy.
+- The address is left out unless this computer's phone-facing address is a private IPv4 address held by exactly one physical network card. It never appears in logs, audit entries, diagnostics, `status()` or error text, and no setting stores it.
+- It isn't stored as a setting or cached. It does pass through `device_outbox`, encrypted with the device store's key like every event for a phone, because that is how answers reach the phone. `device_wake_answers` records the positions of those rows, not the address, and they are deleted as soon as the phone acknowledges them, ahead of the usual 400-event retention. Unpairing deletes them too.
+- Reading the address is Linux only. On macOS and Windows the field is left out and the switch shows as unavailable until there is a reviewed way to read it.

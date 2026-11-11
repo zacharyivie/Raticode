@@ -21,9 +21,11 @@ REM_MANAGED = {"rem_artifacts"}
 
 
 @pytest.fixture
-def rem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def rem(tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
     """test_rem_home's RemHome with a fake provider."""
-    yield from test_rem_home.home.__wrapped__(tmp_path, monkeypatch)  # type: ignore[attr-defined]
+    yield from test_rem_home.home.__wrapped__(  # type: ignore[attr-defined]
+        tmp_path, tmp_path_factory, monkeypatch
+    )
 
 
 def skill(root: Path, name: str, description: str) -> dict[str, Any]:
@@ -41,7 +43,12 @@ def thread_defaults(tmp_path: Path) -> dict[str, Any]:
         "agents": True,
         "browser": False,
         "skills": [
-            skill(tmp_path, "worktree-dev-flow", "Creates a git worktree off dev for each change."),
+            skill(
+                tmp_path,
+                "worktree-dev-flow",
+                "Creates a git worktree off dev for each change, then rebases onto dev and "
+                "fast-forwards dev.",
+            ),
             skill(tmp_path, "unslop", "Cut AI tells from any writing."),
             {**skill(tmp_path, "off-skill", "Turned off."), "enabled": False},
         ],
@@ -200,6 +207,9 @@ def test_a_worktree_skill_replaces_rems_temporary_worktree(
         assert "temporary git worktree" not in instructions
         assert "The enabled worktree-dev-flow skill" in instructions
         assert "keep working in the worktree by absolute path" in instructions
+        # Landing on dev is part of finishing, even where dev is the checkout's branch.
+        assert "with one exception: landing" in instructions
+        assert "isn't finished until its branch has landed" in instructions
     assert "rem/" not in git(project, "branch")
     assert git(project, "worktree", "list").count("\n") == 0
 
@@ -212,6 +222,7 @@ def test_rem_omits_worktree_guidance_without_a_worktree_skill(rem: RemHome, tmp_
     task = rem.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
     wait_run(rem, task["id"], {"succeeded", "blocked"})
     assert "skill sets how changes" not in observed[0]["agent_instructions"]
+    assert "isn't finished until its branch has landed" not in observed[0]["agent_instructions"]
 
 
 def test_rem_task_source_adds_read_only_fleet_status():

@@ -35,15 +35,15 @@ def _copy_release_fixture(tmp_path: Path) -> Path:
         REPO_ROOT / "frontend" / "package-lock.json",
         repo / "frontend" / "package-lock.json",
     )
-    for package_dir in ("arch", "arch-cli"):
-        target = repo / "packaging" / package_dir
-        target.mkdir()
-        for manifest in ("PKGBUILD", ".SRCINFO"):
-            shutil.copy2(
-                REPO_ROOT / "packaging" / package_dir / manifest,
-                target / manifest,
-            )
+    shutil.copytree(REPO_ROOT / "packaging" / "aur", repo / "packaging" / "aur")
     return repo
+
+
+def _aur_snapshot(repo: Path) -> dict[str, bytes]:
+    root = repo / "packaging" / "aur"
+    return {
+        str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
 
 
 def _run(
@@ -77,28 +77,6 @@ def _project_version(repo: Path) -> str:
     return cast(str, document["project"]["version"])
 
 
-def test_bump_version_refreshes_checksums_for_existing_version(tmp_path: Path) -> None:
-    repo = _copy_release_fixture(tmp_path)
-    version = _project_version(repo)
-    appimage_sha = "a" * 64
-    cli_sha = "b" * 64
-    args = [
-        "node",
-        "scripts/bump-version.cjs",
-        version,
-        "--appimage-sha256",
-        appimage_sha,
-        "--cli-sha256",
-        cli_sha,
-    ]
-    for _ in range(2):
-        result = _run(args, cwd=repo)
-        assert result.returncode == 0, result.stderr
-        for package, checksum in (("arch", appimage_sha), ("arch-cli", cli_sha)):
-            for manifest in ("PKGBUILD", ".SRCINFO"):
-                assert checksum in (repo / "packaging" / package / manifest).read_text()
-
-
 def test_release_metadata_uses_agpl_3_only() -> None:
     license_id = "AGPL-3.0-only"
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf8")
@@ -106,12 +84,9 @@ def test_release_metadata_uses_agpl_3_only() -> None:
     assert _read_json(REPO_ROOT / "frontend" / "package.json")["license"] == license_id
     package_lock = _read_json(REPO_ROOT / "frontend" / "package-lock.json")
     assert package_lock["packages"][""]["license"] == license_id
-    assert f'license=("{license_id}")' in (REPO_ROOT / "packaging" / "arch" / "PKGBUILD").read_text(
-        encoding="utf8"
-    )
-    assert f'license=("{license_id}")' in (
-        REPO_ROOT / "packaging" / "arch-cli" / "PKGBUILD"
-    ).read_text(encoding="utf8")
+    for package in ("raticode-bin", "raticode-cli-bin"):
+        pkgbuild = REPO_ROOT / "packaging" / "aur" / package / "PKGBUILD"
+        assert f"license=('{license_id}')" in pkgbuild.read_text(encoding="utf8")
     assert f"License:        {license_id}" in (
         REPO_ROOT / "scripts" / "package-cli-linux.sh"
     ).read_text(encoding="utf8")
@@ -138,10 +113,12 @@ def test_release_metadata_uses_canonical_repository() -> None:
         "frontend/electron/main.js",
         "scripts/bump-version.cjs",
         "scripts/package-cli-linux.sh",
-        "packaging/arch/PKGBUILD",
-        "packaging/arch/.SRCINFO",
-        "packaging/arch-cli/PKGBUILD",
-        "packaging/arch-cli/.SRCINFO",
+        "packaging/aur/raticode-bin/PKGBUILD",
+        "packaging/aur/raticode-bin/.SRCINFO",
+        "packaging/aur/raticode-cli-bin/PKGBUILD",
+        "packaging/aur/raticode-cli-bin/.SRCINFO",
+        "scripts/aur-packages.py",
+        ".github/workflows/aur.yml",
         "packaging/licenses/README.md",
         "docs/releasing.md",
         "docs/security/release-verification.md",
@@ -157,23 +134,11 @@ def test_release_metadata_uses_canonical_repository() -> None:
         assert "--repo zacharyivie/" not in text or "--repo zacharyivie/Raticode" in text, name
 
 
-def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path) -> None:
+def test_bump_version_updates_manifests_and_leaves_aur_packages_alone(tmp_path: Path) -> None:
     repo = _copy_release_fixture(tmp_path)
-    appimage_sha = "A" * 64
-    cli_sha = "b" * 64
+    aur_before = _aur_snapshot(repo)
 
-    result = _run(
-        [
-            "node",
-            "scripts/bump-version.cjs",
-            "1.2.3",
-            "--appimage-sha256",
-            appimage_sha,
-            "--cli-sha256",
-            cli_sha,
-        ],
-        cwd=repo,
-    )
+    result = _run(["node", "scripts/bump-version.cjs", "1.2.3"], cwd=repo)
 
     assert result.returncode == 0, result.stderr
     assert 'version = "1.2.3"' in (repo / "pyproject.toml").read_text(encoding="utf8")
@@ -182,84 +147,21 @@ def test_bump_version_updates_manifests_and_checksums_in_fixture(tmp_path: Path)
     package_lock = _read_json(repo / "frontend" / "package-lock.json")
     assert package_lock["version"] == "1.2.3"
     assert package_lock["packages"][""]["version"] == "1.2.3"
-
-    arch_pkgbuild = (repo / "packaging" / "arch" / "PKGBUILD").read_text(encoding="utf8")
-    assert "pkgver=1.2.3" in arch_pkgbuild
-    assert "Raticode-${pkgver}-x86_64.AppImage" in arch_pkgbuild
-    assert appimage_sha.lower() in arch_pkgbuild
-
-    arch_srcinfo = (repo / "packaging" / "arch" / ".SRCINFO").read_text(encoding="utf8")
-    assert "pkgver = 1.2.3" in arch_srcinfo
-    assert (
-        "source_x86_64 = Raticode-1.2.3-x86_64.AppImage::"
-        "https://github.com/zacharyivie/Raticode/releases/download/v1.2.3/"
-        "Raticode-1.2.3-x86_64.AppImage"
-    ) in arch_srcinfo
-    assert f"sha256sums_x86_64 = {appimage_sha.lower()}" in arch_srcinfo
-
-    cli_pkgbuild = (repo / "packaging" / "arch-cli" / "PKGBUILD").read_text(encoding="utf8")
-    assert "pkgver=1.2.3" in cli_pkgbuild
-    assert cli_sha in cli_pkgbuild
-
-    cli_srcinfo = (repo / "packaging" / "arch-cli" / ".SRCINFO").read_text(encoding="utf8")
-    assert "pkgver = 1.2.3" in cli_srcinfo
-    assert (
-        "source_x86_64 = raticode-cli-linux-x64-1.2.3::"
-        "https://github.com/zacharyivie/Raticode/releases/download/v1.2.3/raticode-cli-linux-x64"
-    ) in cli_srcinfo
-    assert f"sha256sums_x86_64 = {cli_sha}" in cli_srcinfo
+    # The AUR packages describe the last published release until its checksum file exists.
+    assert _aur_snapshot(repo) == aur_before
+    assert "still describe the last published release" in result.stdout
 
 
-def test_bump_version_moves_manifests_off_the_previous_repository_address(
-    tmp_path: Path,
-) -> None:
+def test_bump_version_refuses_typed_in_checksums(tmp_path: Path) -> None:
     repo = _copy_release_fixture(tmp_path)
-    for package in ("arch", "arch-cli"):
-        manifest = repo / "packaging" / package / ".SRCINFO"
-        manifest.write_text(
-            manifest.read_text(encoding="utf8").replace(
-                "zacharyivie/Raticode", "zacharyivie/gofer-flow"
-            ),
-            encoding="utf8",
-        )
+    original_pyproject = (repo / "pyproject.toml").read_text(encoding="utf8")
+    for flag in ("--appimage-sha256", "--cli-sha256"):
+        result = _run(["node", "scripts/bump-version.cjs", "1.2.3", flag, "a" * 64], cwd=repo)
 
-    result = _run(["node", "scripts/bump-version.cjs", "1.2.5"], cwd=repo)
-
-    assert result.returncode == 0, result.stderr
-    for package, asset in (
-        ("arch", "Raticode-1.2.5-x86_64.AppImage"),
-        ("arch-cli", "raticode-cli-linux-x64"),
-    ):
-        srcinfo = (repo / "packaging" / package / ".SRCINFO").read_text(encoding="utf8")
-        assert (
-            f"https://github.com/zacharyivie/Raticode/releases/download/v1.2.5/{asset}" in srcinfo
-        )
-
-
-def test_bump_version_without_checksums_keeps_existing_checksum_values(tmp_path: Path) -> None:
-    repo = _copy_release_fixture(tmp_path)
-    arch_pkgbuild_path = repo / "packaging" / "arch" / "PKGBUILD"
-    cli_srcinfo_path = repo / "packaging" / "arch-cli" / ".SRCINFO"
-    original_arch_pkgbuild = arch_pkgbuild_path.read_text(encoding="utf8")
-    original_cli_srcinfo = cli_srcinfo_path.read_text(encoding="utf8")
-
-    result = _run(["node", "scripts/bump-version.cjs", "1.2.4"], cwd=repo)
-
-    assert result.returncode == 0, result.stderr
-    assert "Note: Arch AppImage checksum was not changed" in result.stdout
-    assert "Note: Arch CLI checksum was not changed" in result.stdout
-    assert "pkgver=1.2.4" in arch_pkgbuild_path.read_text(encoding="utf8")
-    assert "sha256sums_x86_64 = SKIP" in cli_srcinfo_path.read_text(encoding="utf8")
-    assert _extract_sha_lines(original_arch_pkgbuild) == _extract_sha_lines(
-        arch_pkgbuild_path.read_text(encoding="utf8"),
-    )
-    assert _extract_sha_lines(original_cli_srcinfo) == _extract_sha_lines(
-        cli_srcinfo_path.read_text(encoding="utf8"),
-    )
-
-
-def _extract_sha_lines(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines() if "sha256sums_x86_64" in line]
+        assert result.returncode == 1
+        assert f"{flag} is no longer accepted" in result.stderr
+        assert "scripts/aur-packages.py update" in result.stderr
+        assert (repo / "pyproject.toml").read_text(encoding="utf8") == original_pyproject
 
 
 def test_bump_version_rejects_invalid_arguments_before_mutating_fixture(tmp_path: Path) -> None:
@@ -268,8 +170,7 @@ def test_bump_version_rejects_invalid_arguments_before_mutating_fixture(tmp_path
     cases = [
         ["node", "scripts/bump-version.cjs", "1"],
         ["node", "scripts/bump-version.cjs", "1.2.3", "--appimage-sha256"],
-        ["node", "scripts/bump-version.cjs", "1.2.3", "--appimage-sha256", "abc"],
-        ["node", "scripts/bump-version.cjs", "1.2.3", "--cli-sha256", "0" * 63],
+        ["node", "scripts/bump-version.cjs", "1.2.3", "--cli-sha256", "0" * 64],
         ["node", "scripts/bump-version.cjs", "1.2.3", "--surprise"],
     ]
 

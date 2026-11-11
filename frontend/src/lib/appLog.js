@@ -104,6 +104,29 @@ export function withHistoryKeys(entries = []) {
   return entries.map((entry, index) => ({ ...entry, key: `h${index}` }));
 }
 
+export function sameMessage(a, b) {
+  return a.level === b.level && a.source === b.source && (a.component || "") === (b.component || "") && a.message === b.message;
+}
+
+// Runs of the same message in a row become one group, as a browser console shows
+// them: the newest entry with a count, which opens to show each entry. A group is
+// named after its oldest entry, which stays put while newer repeats join it.
+export function groupRepeats(entries = []) {
+  const runs = [];
+  for (const entry of entries) {
+    const last = runs.at(-1);
+    if (last && sameMessage(last[0], entry)) last.push(entry);
+    else runs.push([entry]);
+  }
+  return runs.map((run) => ({ key: run.length > 1 ? `g${entryKey(run.at(-1))}` : entryKey(run[0]), entry: run[0], entries: run }));
+}
+
+// Each entry once, in the order given.
+export function uniqueEntries(entries) {
+  const seen = new Set();
+  return entries.filter((entry) => { const key = entryKey(entry); if (seen.has(key)) return false; seen.add(key); return true; });
+}
+
 // Rows from `from` to `to` (inclusive) in display order.
 export function keyRange(order, from, to) {
   const start = order.indexOf(from);

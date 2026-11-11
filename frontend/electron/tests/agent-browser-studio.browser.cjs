@@ -113,6 +113,40 @@ async function run() {
   assert.equal(Object.values(saved.browserTabs || {}).some((tab) => tab.agentSessionId), false);
   assert.equal(saved.paths.some((item) => item.startsWith("raticode-browser:")), false);
 
+  // The Browser plugin brings the web tabs back over Rem's chat, on a repeat
+  // click too, with the same browser views and page state. It has no side pane.
+  // File explorer shows only file tabs; the web tabs keep running behind it.
+  const browserTabs = () => page(`(() => { const strip = document.querySelector('[aria-label="Browser tabs"]'); return strip?.offsetParent ? [...strip.querySelectorAll('[role=tab]')].map((tab) => tab.textContent) : null; })()`);
+  // Rem's tabs opened in the background; the user's view didn't move to them.
+  assert.equal(await browserTabs(), null, "Rem's tabs opened without taking the user's view");
+  await page("document.querySelector('.studio-sidebar #sidebar-tab-browser').click()");
+  const openTabs = await waitFor(async () => { const shown = await browserTabs(); return shown?.length === 2 && shown; }, "Rem's tabs did not appear in the Browser plugin");
+  const tabStripShown = async () => JSON.stringify(await browserTabs()) === JSON.stringify(openTabs);
+  const remChatInMain = () => page("Boolean(document.querySelector('.studio-panes > section .rem-home')?.offsetParent)");
+  const sidebarWidth = () => page("Math.round(document.querySelector('.studio-sidebar').getBoundingClientRect().width)");
+  await page("void (window.__browserViews = [...document.querySelectorAll('webview')])");
+  await page("document.querySelector('.studio-sidebar #sidebar-tab-rem').click()");
+  await waitFor(remChatInMain, "Rem's chat did not open");
+  assert.equal(await tabStripShown(), false, "Rem's chat covers the tabs");
+  await page("document.querySelector('.studio-sidebar #sidebar-tab-browser').click()");
+  await waitFor(tabStripShown, "The Browser plugin did not bring the tabs back");
+  assert.equal(await remChatInMain(), false);
+  assert.ok(await sidebarWidth() <= 42, "Browser shows no side pane, only the plugin rail");
+  await page("window.dispatchEvent(new CustomEvent('gofer:rem-show-message', { detail: { id: 'none' } }))");
+  await waitFor(remChatInMain, "Rem's chat did not come back");
+  assert.equal(await page("document.querySelector('#sidebar-tab-browser').getAttribute('aria-selected')"), "true");
+  await page("document.querySelector('.studio-sidebar #sidebar-tab-browser').click()");
+  await waitFor(tabStripShown, "A repeat Browser click did not bring the tabs back");
+  await page("document.querySelector('.studio-sidebar #sidebar-tab-files').click()");
+  await waitFor(async () => (await browserTabs()) === null, "File explorer still showed the web tabs");
+  assert.ok(await sidebarWidth() > 42, "File explorer has its side pane");
+  assert.equal(await page("[...document.querySelectorAll('[aria-label=\"Editor tabs\"] [role=tab]')].some((tab) => tab.textContent.includes('Agent page'))"), false, "Web tabs are not file tabs");
+  await page("document.querySelector('.studio-sidebar #sidebar-tab-browser').click()");
+  await waitFor(tabStripShown, "The Browser plugin did not come back after File explorer");
+  assert.equal(await page("window.__browserViews.length > 0 && window.__browserViews.every((view) => view.isConnected)"), true, "Browser views were kept, not rebuilt");
+  assert.equal((await call("agent-thread-one-0001", "tabs")).tabs[0].title, "done:hello", "The page kept its state");
+  console.log("The Browser plugin brought the web tabs back over Rem's chat and File explorer, with their state and no side pane.");
+
   // Closing from Rem removes the studio tab; closing in the studio ends Rem's access.
   await call("agent-thread-one-0001", "close");
   await waitFor(async () => (await page(`[...document.querySelectorAll('[role=tab]')].filter((tab) => tab.textContent.includes("Agent page")).length`)) === 1, "Agent close did not remove the tab");

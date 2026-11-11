@@ -315,6 +315,7 @@ http.server_close()
     backendReady: Promise.resolve(),
     Date, fetch, AbortSignal, activeApiBaseUrl: `http://127.0.0.1:${ready.port}`,
     activeUiApiToken: "fixture-token", desktopGrantSecret: "fixture-secret", writeBackendLog: () => {},
+    loggedPathGrants: new Set(),
   };
   let grantTime = 0;
   registrationContext.backendPathGrants = require("../path-grant-queue.cjs").createPathGrantQueue({ now: () => grantTime });

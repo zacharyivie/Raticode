@@ -29,7 +29,8 @@ async function renderPdf(html, { BrowserWindow, session }) {
   } finally {
     clearTimeout(timer);
     win.destroy();
-    await isolated.clearStorageData();
+    // A cleanup failure must not replace the rendering error the caller needs.
+    await isolated.clearStorageData().catch(error => console.warn(`Could not clear the PDF renderer's storage: ${error.message}`));
   }
 }
 
@@ -51,7 +52,13 @@ async function startReportPdfService(electron) {
       }
       const html = Buffer.concat(chunks).toString("utf8");
       if (!/<html[\s>]/i.test(html)) throw new Error("Supply a complete HTML document.");
-      const pdf = await renderPdf(html, electron);
+      let pdf;
+      try { pdf = await renderPdf(html, electron); }
+      catch (error) {
+        // The request was fine; rendering failed or timed out.
+        console.warn(`Report PDF rendering failed: ${error.message}`);
+        response.writeHead(500); response.end(error.message); return;
+      }
       response.writeHead(200, { "Content-Type": "application/pdf" }); response.end(pdf);
     } catch (error) {
       response.writeHead(400); response.end(error.message);

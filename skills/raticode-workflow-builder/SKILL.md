@@ -85,6 +85,9 @@ generated files.
 - Do not edit compiled JSON IR. The compiler owns IR and stores it internally.
 - Do not use `Raticode workflow create`, `Raticode workflow add-node`, or other legacy TOML mutation
   commands for Rattish workflows.
+- Schedules, file watches and local webhooks are not Rattish syntax. Set them with
+  `Raticode rattish triggers add cron|file|webhook` after the workflow validates, and tell the
+  user they fire only while Raticode or its background scheduler is running.
 - If the user requests a trigger or feature that Rattish 1 does not support, report that
   limitation. Do not create a legacy TOML workflow as a workaround unless the user asks.
 - If the CLI or filesystem is unavailable, provide a Rattish patch and say which validation

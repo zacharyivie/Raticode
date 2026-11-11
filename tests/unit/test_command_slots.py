@@ -809,3 +809,42 @@ def test_memory_is_critical_on_low_free_memory_or_nearly_full_swap() -> None:
     assert command_slots.memory_critical(available=16 * 1024**3, total=total, swap=0.95) == (
         "swap is 95% full"
     )
+
+
+def test_a_reclaim_is_a_readable_warning_in_the_backend_log(tmp_path: Path, caplog) -> None:
+    import logging as std_logging
+
+    cgroup, proc = tmp_path / "slice", tmp_path / "proc"
+    cgroup.mkdir()
+    proc.mkdir()
+    _process(proc, 876, 1, "systemd")
+    _process(proc, 20, 876, "java")  # A leftover whose turn ended.
+    _scope(cgroup, "run-p19-i2.scope", [20], 2 * 1024**3)
+    caplog.set_level(std_logging.DEBUG, logger="gofer")
+    name = command_slots.reclaim_leftovers(
+        cgroup, reason="swap is 92% full", proc_root=proc, stop=lambda unit: True
+    )
+    assert name == "run-p19-i2.scope"
+    [record] = [r for r in caplog.records if r.name == "gofer.core.command_slots"]
+    assert record.levelno == std_logging.WARNING
+    assert record.getMessage() == (
+        "Memory is running out (swap is 92% full): stopped leftover run-p19-i2.scope, "
+        "which used 2048 MB"
+    )
+
+
+def test_unreadable_resource_limits_warn_once_and_a_missing_file_is_quiet(
+    tmp_path: Path, caplog
+) -> None:
+    import logging as std_logging
+
+    from gofer.core.command_slots import SlotSettings, read_settings
+
+    caplog.set_level(std_logging.DEBUG, logger="gofer")
+    assert read_settings(tmp_path) == SlotSettings()
+    (tmp_path / "config.json").write_text("{not json", encoding="utf-8")
+    for _ in range(3):
+        assert read_settings(tmp_path) == SlotSettings()
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == std_logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Ignoring unreadable resource limits in")

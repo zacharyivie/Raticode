@@ -146,7 +146,7 @@ def test_rem_delivers_images_using_native_provider_flags(provider, flag, tmp_pat
 
 
 def test_rem_rejects_images_for_text_only_headless_provider(tmp_path):
-    with pytest.raises(ChatProviderError, match="image attachments are not supported"):
+    with pytest.raises(ChatProviderError, match="only accepts text.*can.t see attached images"):
         _build_chat_command(
             "antigravity", "cli-default", "prompt", image_paths=[tmp_path / "img.png"]
         )

@@ -17,6 +17,7 @@ from gofer.core.commit_message_format import (
 )
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_capabilities import (
+    model_is_blocked_async,
     resolve_provider_executable,
     validate_provider_selection_async,
 )
@@ -289,7 +290,7 @@ async def generate_commit_message(
     preference = provider_preference(provider)
     if preference.get("enabled") is False:
         raise ValueError("The commit provider is disabled. Choose one in Provider settings.")
-    if model in preference.get("deniedModels", []):
+    if await model_is_blocked_async(provider, model):
         raise ValueError(
             "The commit model is denied. Choose an allowed model in Provider settings."
         )

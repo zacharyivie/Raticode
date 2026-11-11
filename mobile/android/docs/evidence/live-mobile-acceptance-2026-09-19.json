@@ -1,0 +1,72 @@
+{
+  "date": "2026-09-19",
+  "mobile_code_revision": "45bf544faa33487dc4e8f1709b96ee2c8cfd24bd",
+  "checks": {
+    "full_command": "RATICODE_DESKTOP_PROBE_ROOT=<desktop-source> ./gradlew assembleDebug testDebugUnitTest lintDebug connectedDebugAndroidTest --rerun-tasks -Pandroid.testInstrumentationRunnerArguments.interop=true --console=plain",
+    "exit_code": 0,
+    "jvm": {
+      "tests": 46,
+      "passed": 46,
+      "skipped": 0,
+      "failed": 0,
+      "python_subprocess_probes": 9
+    },
+    "android": {
+      "tests": 45,
+      "passed": 43,
+      "skipped": 2,
+      "failed": 0,
+      "python_android_probes": 4,
+      "skipped_tests": [
+        "LiveDeviceTest.keystorePairResumeSyncAndChat",
+        "LiveRouteTest.refusedLanBeforeBindingRetainsPairModeForFallback"
+      ]
+    },
+    "contract": {
+      "v1_fixtures": 15,
+      "v1_negative": 5,
+      "v2_fixtures": 30,
+      "v2_negative": 14
+    }
+  },
+  "separate_runs": [
+    {
+      "name": "LAN Keystore enrollment, durable trust, resume, authorized chat and 20 KiB upload/download",
+      "result": "passed"
+    },
+    {
+      "name": "Lost-ready confirmation recovery plus chat/files",
+      "result": "passed"
+    },
+    {
+      "name": "Production connectNow refused LAN before bind keeps pair mode",
+      "result": "passed"
+    },
+    {
+      "name": "Production connectNow unclaimed pending resume then original invitation recovery",
+      "result": "passed"
+    },
+    {
+      "name": "Public ntfy.sh actual API36 Android pinned TLS to Python RelayService: pair, resume, sync, accepted chat and canned response",
+      "result": "passed",
+      "paid_provider_calls": 0,
+      "files_sent": false,
+      "desktop_publish_budget": 20,
+      "note": "One disposable public run, random ephemeral identities/topics; not an availability or quota endurance test."
+    }
+  ],
+  "artifact_directory": "artifacts/live-mobile-2026-09-19",
+  "apk_sha256": "a758f9cc4b14ae57957cffa5ea4d8e5e2b685a22b4a4d025ee63215d2d86c406",
+  "limits": [
+    "Independent cryptographic review outstanding",
+    "Physical phone and two-host LAN acceptance outstanding",
+    "Real paid/provider execution deliberately not tested",
+    "Background battery/time-limit behavior on physical Android outstanding",
+    "Relay-only unclaimed pending recovery has code review and shared-path tests; no second public relay run after that final branch repair"
+  ],
+  "notes": [
+    "Counts are JUnit XML counts; Gradle instrumentation progress double-counts skipped assumptions.",
+    "An initial local-demo lazy list assertion failed; the UI test now explicitly scrolls to the expected message, and final full suite passes.",
+    "Public relay and focused tests were executed separately from the final full suite; they are not counted as non-skipped full-suite tests."
+  ]
+}

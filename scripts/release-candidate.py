@@ -30,6 +30,11 @@ MAX_AGE = timedelta(days=7)
 READY = "<!-- raticode-candidate-ready:"
 # Pushes to this branch prepare candidates. Main receives them by squash merge.
 CANDIDATE_BRANCH = "stage"
+SCHEMA = 2
+# Mac packages of this repository's releases must be Developer ID signed, notarized and
+# stapled. A fork may stage an unsigned candidate for testing, but nothing publishes one.
+CANONICAL_REPOSITORY = "zacharyivie/Raticode"
+MAC_SIGNING_MODES = {True: "developer-id", False: "unsigned"}
 
 
 def require(condition: Any, message: str) -> None:
@@ -86,7 +91,9 @@ def versions(root: Path = ROOT) -> str:
     return python
 
 
-def required_files(version: str, signed: bool = False) -> dict[str, set[str]]:
+def required_files(
+    version: str, windows_signed: bool = False, macos_signed: bool = False
+) -> dict[str, set[str]]:
     files = {
         "linux": {
             f"Raticode-{version}-x86_64.AppImage",
@@ -125,14 +132,21 @@ def required_files(version: str, signed: bool = False) -> dict[str, set[str]]:
         },
     }
 
-    if signed:
+    if windows_signed:
         files["windows"].add("signatures-windows.json")
+    if macos_signed:
         files["macos"].update({"notarization-macos-dmg.json", "notarization-macos-cli.json"})
     return files
 
 
-def verify_group(folder: Path, group: str, version: str, signed: bool = False) -> None:
-    expected = required_files(version, signed)[group]
+def verify_group(
+    folder: Path,
+    group: str,
+    version: str,
+    windows_signed: bool = False,
+    macos_signed: bool = False,
+) -> None:
+    expected = required_files(version, windows_signed, macos_signed)[group]
     actual = {p.name for p in folder.iterdir()}
     # AppImage blockmaps can be embedded instead of separate, depending on builder.
     optional = {f"Raticode-{version}-x86_64.AppImage.blockmap"} if group == "linux" else set()
@@ -167,7 +181,18 @@ def verify_group(folder: Path, group: str, version: str, signed: bool = False) -
         smoke.get("status") == "passed" and smoke.get("version") == version,
         f"{group}: missing successful distribution tests",
     )
-    if signed and group == "windows":
+    if group == "macos":
+        # The package check records how it found the Mac apps signed.
+        require(
+            smoke.get("signing") == MAC_SIGNING_MODES[macos_signed],
+            f"macos: distribution tests did not confirm {MAC_SIGNING_MODES[macos_signed]} signing",
+        )
+        if macos_signed:
+            require(
+                re.fullmatch(r"[A-Z0-9]{10}", str(smoke.get("team_id", ""))),
+                "macos: distribution tests did not record the signing team",
+            )
+    if windows_signed and group == "windows":
         signatures = json.loads(
             (folder / "signatures-windows.json").read_text(encoding="utf-8-sig")
         )
@@ -176,7 +201,7 @@ def verify_group(folder: Path, group: str, version: str, signed: bool = False) -
             "Signature evidence must cover every Windows executable",
         )
         require(all(item["status"] == "Valid" for item in signatures), "Invalid Windows signature")
-    if signed and group == "macos":
+    if macos_signed and group == "macos":
         for kind in ("dmg", "cli"):
             receipt = json.loads((folder / f"notarization-macos-{kind}.json").read_text())
             require(receipt.get("status") == "Accepted", f"macOS {kind} notarization not accepted")
@@ -190,9 +215,14 @@ def create_manifest(
     run_id: int,
     attempt: int,
     artifacts: list[dict[str, Any]],
-    signed: bool = False,
+    windows_signed: bool = False,
+    macos_signed: bool = False,
 ) -> dict[str, Any]:
     version = versions()
+    require(
+        macos_signed or repo.lower() != CANONICAL_REPOSITORY.lower(),
+        "Raticode's Mac packages must be Developer ID signed and notarized",
+    )
     require(re.fullmatch(r"[0-9a-f]{40}", sha), "Expected full source SHA")
     require(
         {p.name for p in source.iterdir()} == {f"raticode-{g}" for g in GROUPS},
@@ -210,13 +240,13 @@ def create_manifest(
     files = {}
     for group in GROUPS:
         folder = source / f"raticode-{group}"
-        verify_group(folder, group, version, signed)
+        verify_group(folder, group, version, windows_signed, macos_signed)
         for path in sorted(folder.iterdir()):
             require(path.name not in files, f"Artifact filename collision: {path.name}")
             files[path.name] = {"sha256": digest(path), "size": path.stat().st_size, "group": group}
             shutil.copyfile(path, output / path.name)
     manifest = {
-        "schema": 1,
+        "schema": SCHEMA,
         "repository": repo,
         "commit": sha,
         "version": version,
@@ -224,7 +254,8 @@ def create_manifest(
         "run_id": run_id,
         "run_attempt": attempt,
         "created_at": datetime.now(UTC).isoformat(),
-        "signed": signed,
+        "windows_signed": windows_signed,
+        "macos_signed": macos_signed,
         "artifacts": [{k: a[k] for k in ("id", "name", "digest")} for a in records],
         "checks": [
             "source-validation",
@@ -232,7 +263,8 @@ def create_manifest(
             "distribution-backends",
             "updater-hashes",
         ]
-        + (["signatures-notarization"] if signed else []),
+        + (["windows-signatures"] if windows_signed else [])
+        + (["macos-notarization"] if macos_signed else []),
         "files": files,
     }
     (output / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -241,8 +273,10 @@ def create_manifest(
 
 def validate_manifest(manifest: dict[str, Any], repo: str, sha: str, version: str) -> None:
     require(
-        manifest.get("schema") == 1 and type(manifest.get("signed")) is bool,
-        "Candidate must declare a boolean signing policy in schema 1",
+        manifest.get("schema") == SCHEMA
+        and type(manifest.get("windows_signed")) is bool
+        and type(manifest.get("macos_signed")) is bool,
+        f"Candidate must declare boolean Windows and macOS signing policies in schema {SCHEMA}",
     )
     for key, expected_value in (
         ("repository", repo),
@@ -251,12 +285,14 @@ def validate_manifest(manifest: dict[str, Any], repo: str, sha: str, version: st
         ("workflow", WORKFLOW),
     ):
         require(manifest.get(key) == expected_value, f"Candidate {key} mismatch")
+    checks = manifest.get("checks", [])
     require(
-        ("signatures-notarization" in manifest.get("checks", [])) == manifest["signed"],
+        ("windows-signatures" in checks) == manifest["windows_signed"]
+        and ("macos-notarization" in checks) == manifest["macos_signed"],
         "Candidate signing checks disagree with its signing policy",
     )
     files = manifest["files"]
-    expected_groups = required_files(version, manifest["signed"])
+    expected_groups = required_files(version, manifest["windows_signed"], manifest["macos_signed"])
     for group, expected in expected_groups.items():
         actual = {name for name, info in files.items() if info["group"] == group}
         optional = (
@@ -333,16 +369,35 @@ def verify_remote(
             require(target.stat().st_size == info["size"], f"Remote size mismatch: {entry['name']}")
 
 
+def desktop_entries(repo: str, sha: str) -> list[tuple[str, str]]:
+    """The commit's top-level files and folders, apart from the phone app's."""
+    tree = api(f"repos/{repo}/git/commits/{sha}")["tree"]["sha"]
+    entries = api(f"repos/{repo}/git/trees/{tree}")["tree"]
+    return sorted((e["path"], e["sha"]) for e in entries if e["path"] != "mobile")
+
+
 def same_source(repo: str, candidate: str, released: str) -> bool:
     """Whether the released commit has exactly the candidate's files.
 
-    A squash merge of stage into main makes a new commit; its tree is identical to
-    the staged commit's when main held nothing stage didn't already contain.
+    A squash merge of stage into main makes a new commit; its files are identical to
+    the staged commit's when main held nothing stage didn't already contain. The
+    mobile folder is left out because the phone app has its own releases.
     """
     if candidate == released:
         return True
-    trees = [api(f"repos/{repo}/git/commits/{sha}")["tree"]["sha"] for sha in (candidate, released)]
-    return trees[0] == trees[1]
+    return desktop_entries(repo, candidate) == desktop_entries(repo, released)
+
+
+def previous_tag(repo: str, tag: str) -> str | None:
+    """The most recently published desktop tag, where its release notes should start."""
+    published = [
+        r
+        for r in pages(f"repos/{repo}/releases")
+        if not r["draft"] and r["tag_name"].startswith("v") and r["tag_name"] != tag
+    ]
+    if not published:
+        return None
+    return max(published, key=lambda r: r.get("published_at") or "")["tag_name"]
 
 
 def candidate_tag(manifest: dict[str, Any]) -> str:
@@ -389,22 +444,18 @@ def stage(repo: str, directory: Path) -> None:
             else:
                 gh("release", "upload", tag, str(directory / name), "--repo", repo)
         verify_remote(repo, release, remote, manifest, digest(manifest_path))
+    release_tag = f"v{manifest['version']}"
+    previous = previous_tag(repo, release_tag)
     notes = api(
         f"repos/{repo}/releases/generate-notes",
         {
-            "tag_name": f"v{manifest['version']}",
+            "tag_name": release_tag,
             "target_commitish": manifest["commit"],
+            **({"previous_tag_name": previous} if previous else {}),
         },
         "POST",
     )
-    signing_note = (
-        "Windows packages are signed; macOS packages are Developer ID signed and notarized."
-        if manifest["signed"]
-        else "These builds have no verified publisher signature or Apple notarization. "
-        "Windows may show Unknown publisher or SmartScreen prompts. "
-        "macOS may require approval in System Settings > Privacy & Security. "
-        "macOS updates use manual downloads from this release page."
-    )
+    signing_note = release_signing_note(manifest)
     body = (
         notes["body"] + "\n\n" + signing_note + "\n\n"
         f"Source: `{manifest['commit']}`\n\n"
@@ -423,6 +474,26 @@ def stage(repo: str, directory: Path) -> None:
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
             stream.write(summary)
+
+
+def release_signing_note(manifest: dict[str, Any]) -> str:
+    mac = (
+        "macOS packages are Developer ID signed, notarized by Apple and stapled. "
+        "A copy installed from an unsigned release (0.5.2 or earlier) can't update "
+        "itself: download the DMG once and replace the app in Applications. Signed copies "
+        "install later updates themselves."
+        if manifest["macos_signed"]
+        else "macOS packages have no Developer ID signature or Apple notarization. "
+        "macOS may require approval in System Settings > Privacy & Security. "
+        "macOS updates use manual downloads from this release page."
+    )
+    windows = (
+        "Windows packages are signed."
+        if manifest["windows_signed"]
+        else "Windows packages have no verified publisher signature, so Windows may show "
+        "Unknown publisher or SmartScreen prompts."
+    )
+    return mac + "\n\n" + windows
 
 
 def verify_provenance(repo: str, path: Path, sha: str) -> None:
@@ -462,6 +533,11 @@ def read_candidate(
     # The attestation binds the manifest to the staged commit it was built from.
     verify_provenance(repo, path, source)
     validate_manifest(manifest, repo, source, version)
+    require(
+        manifest["macos_signed"],
+        "The candidate's Mac packages are not Developer ID signed, notarized and stapled. "
+        "Prepare a signed candidate on stage.",
+    )
     run = api(f"repos/{repo}/actions/runs/{manifest['run_id']}/attempts/{manifest['run_attempt']}")
     validate_run(run, source, repo)
     return manifest
@@ -536,7 +612,7 @@ def publish(repo: str) -> None:
                     "body": release["body"],
                     "draft": False,
                     "prerelease": False,
-                    "make_latest": "legacy",
+                    "make_latest": "true",
                 },
                 "PATCH",
             )
@@ -546,9 +622,9 @@ def publish(repo: str) -> None:
         print(f"Published and verified {result['html_url']}. No files were rebuilt or replaced.")
 
 
-def signing_policy() -> bool:
-    value = os.environ.get("SIGNED_RELEASE", "false")
-    require(value in {"true", "false"}, "SIGNED_RELEASE must be true or false")
+def signing_policy(name: str) -> bool:
+    value = os.environ.get(name, "false")
+    require(value in {"true", "false"}, f"{name} must be true or false")
     return value == "true"
 
 
@@ -576,7 +652,8 @@ def main() -> None:
             run_id,
             int(os.environ["GITHUB_RUN_ATTEMPT"]),
             pages(f"repos/{repo}/actions/runs/{run_id}/artifacts", "artifacts"),
-            signed=signing_policy(),
+            windows_signed=signing_policy("WINDOWS_SIGNED"),
+            macos_signed=signing_policy("MACOS_SIGNED"),
         )
     elif command == "stage":
         stage(repo, Path("release-artifacts"))

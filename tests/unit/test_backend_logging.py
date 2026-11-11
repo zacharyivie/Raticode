@@ -166,3 +166,26 @@ def test_an_uncaught_main_thread_error_is_logged_as_an_error(stderr):
     [entry] = [e for e in _lines(stderr) if e["logger"] == "gofer.crash"]
     assert entry["level"] == "error"
     assert "KeyError: 'lost'" in entry["message"]
+
+
+def test_a_repeating_failure_is_logged_once_and_its_recovery_once(caplog):
+    from gofer.utils.logging import RepeatingFailure
+
+    logger = logging.getLogger("gofer.test.loop")
+    caplog.set_level(logging.DEBUG, logger="gofer")
+    failure = RepeatingFailure(logger, "Background check")
+    for _ in range(3):
+        failure.failed(OSError("disk is locked"))
+    failure.failed(ValueError("bad row"))
+    failure.succeeded()
+    failure.succeeded()
+    failure.failed(OSError("disk is locked"))
+    records = [(r.levelno, r.getMessage(), bool(r.exc_info)) for r in caplog.records]
+    assert records == [
+        (logging.ERROR, "Background check failed", True),
+        (logging.DEBUG, "Background check still failing (OSError)", False),
+        (logging.DEBUG, "Background check still failing (OSError)", False),
+        (logging.ERROR, "Background check failed", True),
+        (logging.INFO, "Background check recovered", False),
+        (logging.ERROR, "Background check failed", True),
+    ]

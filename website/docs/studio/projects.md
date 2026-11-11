@@ -10,7 +10,7 @@ A project is a folder on your machine. It gives Raticode a place to read files, 
 
 ## Open a folder
 
-Choose **Open project folder** and use the native folder picker. Recent projects make it easy to return to folders you have already opened. The active project appears in the workspace controls; check it before running a workflow or terminal command.
+Choose **Open Project** (**File > Open Project...**, or **Open project...** in the project dropdown) and use the native folder picker. Recent projects make it easy to return to folders you have already opened. The active project appears in the workspace controls; check it before running a workflow or terminal command.
 
 Raticode can keep editor files and workflow tabs open while you move between projects. An open tab is a reference to a file, not a request for Rem to inspect it.
 

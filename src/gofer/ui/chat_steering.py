@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.core.prompt_envelope import AgentResources
-from gofer.core.provider_capabilities import IMAGE_ATTACHMENT_PROVIDERS
+from gofer.core.provider_capabilities import IMAGE_ATTACHMENT_PROVIDERS, image_attachment_refusal
 from gofer.ui.chat_media import CHAT_ATTACHMENT_MAX_COUNT, resolve_chat_attachment
 
 
@@ -181,9 +181,7 @@ class ChatSteering:
                     str(attachment.get("type", "")).startswith("image/")
                     and turn.provider not in IMAGE_ATTACHMENT_PROVIDERS
                 ):
-                    raise ValueError(
-                        f"{turn.provider} image attachments are not supported by this adapter"
-                    )
+                    raise ValueError(image_attachment_refusal(turn.provider))
             receipt = {
                 "conversationId": conversation_id,
                 "turnId": turn_id,

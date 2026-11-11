@@ -1226,6 +1226,19 @@ text column is still too narrow, the ID and its counts move below together, neve
 .app-log-more { margin-left: 6px; border-radius: 4px; padding: 0 3px; color: rgb(var(--color-muted)); white-space: nowrap; font: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
 .app-log-more:hover { color: rgb(var(--color-ink)); background: rgb(var(--color-ink) / .06); }
 .app-log-row-debug .app-log-message { color: rgb(var(--color-muted)); }
+/* A repeated message: its count, like a browser console's, opens each entry below it. */
+.app-log-repeat {
+  display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; border-radius: 9999px; padding: 0 6px 0 4px;
+  background: rgb(var(--color-ink) / .1); color: rgb(var(--color-ink)); font: inherit; font-weight: 700;
+  font-variant-numeric: tabular-nums; line-height: 1.5; vertical-align: 1px;
+}
+.app-log-repeat:hover { background: rgb(var(--color-ink) / .18); }
+.app-log-repeat:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: 1px; }
+.app-log-repeat-caret { font-size: 9px; color: rgb(var(--color-muted)); }
+.app-log-row-error .app-log-repeat { background: rgb(var(--color-danger) / .18); }
+.app-log-row-warn .app-log-repeat { background: rgb(var(--color-warning) / .2); }
+.app-log-row-member > .app-log-line { padding-left: 20px; }
+.app-log-row-member:not(.app-log-row-selected):not(.app-log-row-error) { background: rgb(var(--color-ink) / .025); }
 .app-log-detail { padding: 2px 8px 8px calc(9.6em + 5.2em + 7.5em + 24px + 8px); }
 .app-log-detail pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font: inherit; }
 .app-log-component { margin: 0 0 2px; color: rgb(var(--color-muted)); }

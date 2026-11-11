@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.output import wants_json
 from gofer.core import rem_library
 from gofer.utils.paths import get_data_dir
 
@@ -24,18 +25,19 @@ mcp_app = typer.Typer(help="Manage Rem MCP servers", no_args_is_help=True)
 app.add_typer(skill_app, name="skill")
 app.add_typer(mcp_app, name="mcp")
 console = Console()
+err_console = Console(stderr=True)
 
 _DATA_DIR = typer.Option(None, "--data-dir", hidden=True)
-_FORMAT = typer.Option("table", "--format", help="Output format: table or json")
+_FORMAT = typer.Option("table", "--format", help="Output format: table (or text) or json")
 
 
 def _fail(exc: Exception) -> NoReturn:
     if isinstance(exc, ValidationError):
         errors = exc.errors()
         message = str(errors[0].get("msg", exc)) if errors else str(exc)
-        console.print(f"[red]Error:[/red] {message.removeprefix('Value error, ')}")
+        err_console.print(f"[red]Error:[/red] {message.removeprefix('Value error, ')}")
     else:
-        console.print(f"[red]Error:[/red] {exc}")
+        err_console.print(f"[red]Error:[/red] {exc}")
     raise typer.Exit(1)
 
 
@@ -50,7 +52,7 @@ def resources(data_dir: Path | None = _DATA_DIR, output: str = _FORMAT) -> None:
         snapshot = rem_library.snapshot(data_dir or get_data_dir())
     except ValueError as exc:
         _fail(exc)
-    if output == "json":
+    if wants_json(output, aliases=("table",)):
         _print_json(snapshot)
         return
     _skills_table(snapshot["skills"])
@@ -88,7 +90,7 @@ def list_skills(data_dir: Path | None = _DATA_DIR, output: str = _FORMAT) -> Non
         skills = rem_library.discover_skills(data_dir or get_data_dir())
     except ValueError as exc:
         _fail(exc)
-    if output == "json":
+    if wants_json(output, aliases=("table",)):
         _print_json(skills)
     else:
         _skills_table(skills)
@@ -163,7 +165,7 @@ def list_servers(data_dir: Path | None = _DATA_DIR, output: str = _FORMAT) -> No
         servers = rem_library.snapshot(data_dir or get_data_dir())["mcpServers"]
     except ValueError as exc:
         _fail(exc)
-    if output == "json":
+    if wants_json(output, aliases=("table",)):
         _print_json(servers)
     else:
         _servers_table(servers)

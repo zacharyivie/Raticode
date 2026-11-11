@@ -9,6 +9,8 @@ const PARTITIONS = Object.freeze({
   user: "persist:raticode-browser",
   rem: "persist:raticode-rem",
   preview: "raticode-preview",
+  // Held in memory and emptied when the last private tab closes.
+  private: "raticode-private",
 });
 const BROWSER_PARTITIONS = new Set(Object.values(PARTITIONS));
 
@@ -305,6 +307,7 @@ function userAgentWithoutEmbedderTokens(userAgent, { keepElectron = false } = {}
 }
 
 const DEFAULT_BROWSER_POLICY = Object.freeze({
+  engine: "raticode",
   searchUrl: "https://www.google.com/search?q={query}",
   homepage: "raticode://home",
   remSignInSites: [],
@@ -322,6 +325,8 @@ function sanitizeBrowserPolicy(value = {}) {
     ? input.searchUrl.slice(0, 2048)
     : DEFAULT_BROWSER_POLICY.searchUrl;
   return {
+    // The web browser: Raticode's own engine, or a headless Firefox, Chrome or Edge.
+    engine: ["firefox", "chrome", "edge"].includes(input.engine) ? input.engine : "raticode",
     searchUrl,
     homepage: typeof input.homepage === "string" ? input.homepage.slice(0, 2048) : DEFAULT_BROWSER_POLICY.homepage,
     remSignInSites: normalizeSiteList(input.remSignInSites),

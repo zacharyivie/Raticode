@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.output import emit_json, format_option, wants_json
 from gofer.core.provider_profiles import (
     ProviderProfile,
     load_provider_profiles,
@@ -20,6 +21,7 @@ app = typer.Typer(help="Manage provider settings", no_args_is_help=True)
 profile_app = typer.Typer(help="Manage named provider profiles", no_args_is_help=True)
 app.add_typer(profile_app, name="profile")
 console = Console()
+err_console = Console(stderr=True)
 
 _SUBSCRIPTIONS = [
     "codex",
@@ -33,8 +35,31 @@ _SUBSCRIPTIONS = [
 
 
 @profile_app.command("list")
-def list_profiles(data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True)) -> None:
+def list_profiles(
+    output_format: str = format_option(),
+    data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
+) -> None:
+    """List provider profiles. JSON names secrets and env variables, never their values."""
+    as_json = wants_json(output_format)
     profiles = load_provider_profiles(data_dir or get_data_dir())
+    if as_json:
+        emit_json(
+            [
+                {
+                    "name": profile.name,
+                    "subscription": profile.subscription,
+                    "model": profile.model,
+                    "effort": profile.effort,
+                    "timeout": profile.timeout,
+                    "apiKeySecret": profile.api_key_secret,
+                    "apiKeyEnv": profile.api_key_env,
+                    "apiBaseUrl": profile.api_base_url,
+                    "envNames": sorted(profile.env),
+                }
+                for profile in profiles.values()
+            ]
+        )
+        return
     if not profiles:
         console.print("No provider profiles found.")
         return
@@ -51,7 +76,10 @@ def list_profiles(data_dir: Path | None = typer.Option(None, "--data-dir", hidde
     console.print(table)
 
 
-@profile_app.command("create")
+@profile_app.command(
+    "create",
+    help="Create a provider profile in the data folder.",
+)
 def create_profile(
     name: str = typer.Argument(..., help="Profile name"),
     subscription: str = typer.Option(
@@ -106,11 +134,11 @@ def create_profile(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     if subscription not in _SUBSCRIPTIONS:
-        console.print(f"[red]Invalid subscription '{subscription}'[/red]")
+        err_console.print(f"[red]Invalid subscription '{subscription}'[/red]")
         raise typer.Exit(1)
     profiles = load_provider_profiles(data_dir or get_data_dir())
     if name in profiles:
-        console.print(f"[red]Provider profile '{name}' already exists[/red]")
+        err_console.print(f"[red]Provider profile '{name}' already exists[/red]")
         raise typer.Exit(1)
     profile = _profile_from_options(
         name=name,
@@ -136,7 +164,10 @@ def create_profile(
     console.print(f"[green]Created provider profile[/green] [bold]{name}[/bold]")
 
 
-@profile_app.command("edit")
+@profile_app.command(
+    "edit",
+    help="Change a provider profile. Options you give replace the stored values.",
+)
 def edit_profile(
     name: str = typer.Argument(..., help="Profile name"),
     model: str | None = typer.Option(None, "--model", help="Provider model"),
@@ -180,7 +211,7 @@ def edit_profile(
     profiles = load_provider_profiles(data_dir or get_data_dir())
     profile = profiles.get(name)
     if profile is None:
-        console.print(f"[red]Provider profile '{name}' not found[/red]")
+        err_console.print(f"[red]Provider profile '{name}' not found[/red]")
         raise typer.Exit(1)
     updates: dict[str, object] = {
         key: value
@@ -217,7 +248,7 @@ def edit_profile(
             base_env = cast(dict[str, str], updates.get("env", profile.env))
             updates["env"] = {**base_env, **parsed_unsafe_env}
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
     if secret_ref is not None:
         parsed_secret_refs = _parse_key_value_options(
@@ -235,14 +266,17 @@ def edit_profile(
     try:
         validate_provider_profile(updated_profile)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
     profiles[name] = updated_profile
     save_provider_profiles(profiles, data_dir or get_data_dir())
     console.print(f"[green]Updated provider profile[/green] [bold]{name}[/bold]")
 
 
-@profile_app.command("rm")
+@profile_app.command(
+    "rm",
+    help="Remove a provider profile. Asks first unless --yes is given.",
+)
 def rm_profile(
     name: str = typer.Argument(..., help="Profile name"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
@@ -250,7 +284,7 @@ def rm_profile(
 ) -> None:
     profiles = load_provider_profiles(data_dir or get_data_dir())
     if name not in profiles:
-        console.print(f"[red]Provider profile '{name}' not found[/red]")
+        err_console.print(f"[red]Provider profile '{name}' not found[/red]")
         raise typer.Exit(1)
     if not yes:
         typer.confirm(f"Remove provider profile '{name}'?", abort=True)
@@ -312,7 +346,7 @@ def _profile_from_options(
         validate_provider_profile(profile)
         return profile
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
 
@@ -326,11 +360,15 @@ def _parse_key_value_options(
         if pair == "":
             continue
         if "=" not in pair:
-            console.print(f"[red]Invalid {option_name} value '{pair}': expected {expected}[/red]")
+            err_console.print(
+                f"[red]Invalid {option_name} value '{pair}': expected {expected}[/red]"
+            )
             raise typer.Exit(1)
         key, _, value = pair.partition("=")
         if not key:
-            console.print(f"[red]Invalid {option_name} value '{pair}': expected {expected}[/red]")
+            err_console.print(
+                f"[red]Invalid {option_name} value '{pair}': expected {expected}[/red]"
+            )
             raise typer.Exit(1)
         parsed[key] = value
     return parsed

@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import shutil
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.client import CliError, ExitCode, in_agent_session, read_secret_file
 from gofer.cli.commands import rattish as rattish_commands
+from gofer.cli.commands._legacy import refuse_rattish, resolve_rattish_source
+from gofer.cli.output import emit_json, format_option, json_alias_option, wants_json
 from gofer.core.agent import AgentConfig
 from gofer.core.approvals import ApprovalRequest, ApprovalStore
 from gofer.core.bundles import (
@@ -93,11 +99,15 @@ from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
 from gofer.ui.api import (
     WorkflowAlreadyExistsError,
+    WorkflowBundleError,
     WorkflowCreateError,
     WorkflowLogError,
     WorkflowTriggerError,
     WorkflowUpdateError,
+    delete_workflow_payload,
     duplicate_workflow_payload,
+    export_rattish_bundle_payload,
+    import_rattish_bundle_payload,
     import_workflow_payload,
     latest_workflow_log_payload,
     list_workflow_payloads,
@@ -114,12 +124,20 @@ from gofer.utils.paths import get_data_dir
 from gofer.utils.registry import find_workflow
 from gofer.utils.run_state import clear_workflow_stop, request_workflow_stop, workflow_stop_path
 
-app = typer.Typer(help="Manage and run workflows", no_args_is_help=True)
-recipe_app = typer.Typer(help="Create common workflow patterns", no_args_is_help=True)
+app = typer.Typer(
+    help=(
+        "Run and inspect workflows. run, resume, list, plan, validate, logs, usage, export, "
+        "import, rm, rename and duplicate accept Rattish workflows; commands marked "
+        "[Legacy TOML] work only with TOML workflows. Author Rattish with Raticode rattish."
+    ),
+    no_args_is_help=True,
+)
+recipe_app = typer.Typer(help="[Legacy TOML] Create common workflow patterns", no_args_is_help=True)
 app.add_typer(recipe_app, name="recipe")
 logs_app = typer.Typer(help="Inspect workflow run logs", no_args_is_help=True)
 app.add_typer(logs_app, name="logs")
 console = Console()
+err_console = Console(stderr=True)
 
 _SUBSCRIPTIONS = {
     "claude_code": ClaudeCodeSubscription(),
@@ -144,30 +162,96 @@ def _resolve_workflow(name: str, data_dir: Path | None) -> AgenticWorkflow:
     path = Path(name)
     if path.suffix == ".toml" and path.exists():
         return AgenticWorkflow.from_file(path)
+    _refuse_rattish(name, data_dir)
     return find_workflow(name, data_dir)
 
 
 def _resolve_rattish_source(name: str, data_dir: Path | None) -> Path | None:
     """Return the Rattish entrypoint for a .rattish path, workflow folder, or registered ID."""
-    path = Path(name).expanduser()
-    if path.suffix == ".rattish" and path.is_file():
-        return path
-    if path.is_dir() and (path / "workflow.rattish").is_file():
-        return path / "workflow.rattish"
-    if path.suffix in {".toml", ".rattish"}:
+    return resolve_rattish_source(name, data_dir)
+
+
+_EDIT_RATTISH = "edit {source}, then check it with: Raticode rattish check {source}"
+
+# What to run instead when a TOML-only command is given a Rattish workflow.
+_RATTISH_EQUIVALENTS: dict[str, str] = {
+    "show": "Raticode rattish inspect-ir {source} --pretty",
+    "edit": _EDIT_RATTISH,
+    "set-info": _EDIT_RATTISH,
+    "add-agent": _EDIT_RATTISH,
+    "add-node": _EDIT_RATTISH,
+    "rm-node": _EDIT_RATTISH,
+    "add-edge": _EDIT_RATTISH,
+    "rm-edge": _EDIT_RATTISH,
+    "set-schedule": "Raticode rattish triggers add cron {source} --help",
+    "clear-schedule": "Raticode rattish triggers list, then Raticode rattish triggers remove",
+    "set-watch": "Raticode rattish triggers add file {source} --help",
+    "clear-watch": "Raticode rattish triggers list, then Raticode rattish triggers remove",
+    "trigger": (
+        "Raticode rattish triggers add webhook {source} --help, or Raticode rattish run {source}"
+    ),
+    "secrets": "Raticode rattish preflight {source}",
+    "stop": (
+        "stop the run in the app's Runs view, or stop the process that is running "
+        "Raticode rattish run {source}"
+    ),
+    "history": "the workflow's History in the app, or version its folder with git",
+    "diff": "the workflow's History in the app, or version its folder with git",
+    "restore": "the workflow's History in the app, or version its folder with git",
+}
+
+
+_INVOKED_COMMAND: ContextVar[str] = ContextVar("workflow_command", default="")
+
+
+@app.callback()
+def _workflow_group(ctx: typer.Context) -> None:
+    _INVOKED_COMMAND.set(ctx.invoked_subcommand or "")
+
+
+@logs_app.callback()
+def _logs_group(ctx: typer.Context) -> None:
+    _INVOKED_COMMAND.set(f"logs {ctx.invoked_subcommand or ''}".strip())
+
+
+def _command_name() -> str:
+    """This command's name below ``Raticode workflow``, such as ``show`` or ``logs list``."""
+    return _INVOKED_COMMAND.get() or "this command"
+
+
+def _refuse_rattish(name: str, data_dir: Path | None) -> None:
+    """Exit 2 with the Rattish alternative when a TOML-only command gets a Rattish workflow."""
+    command = _command_name()
+    hint = _RATTISH_EQUIVALENTS.get(command, "Raticode rattish --help")
+    refuse_rattish(name, data_dir, f"workflow {command}", hint)
+
+
+def _rattish_workflow_id(name: str, data_dir: Path | None) -> str | None:
+    """The registered ID of a Rattish workflow named by ID, folder or source path."""
+    source = _resolve_rattish_source(name, data_dir)
+    if source is None:
         return None
     try:
         registered = list_registered_workflows(registry_dir=data_dir)
     except (OSError, ValueError):
-        return None
-    return next(
-        (item.entrypoint for item in registered if item.workflow_id == name),
-        None,
+        registered = ()
+    resolved = source.resolve()
+    match = next(
+        (item.workflow_id for item in registered if item.entrypoint.resolve() == resolved), None
     )
+    if match is None:
+        typer.echo(
+            f"{source} isn't registered, so Raticode keeps no run history for it. "
+            "Register it with Raticode rattish create, or run it with Raticode rattish run.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    return match
 
 
 def _resolve_workflow_with_path(name: str, data_dir: Path | None) -> tuple[AgenticWorkflow, Path]:
     """Resolve a workflow and the TOML path that should be updated."""
+    _refuse_rattish(name, data_dir)
     path = Path(name)
     if path.suffix == ".toml":
         if not path.exists():
@@ -188,6 +272,48 @@ def _resolve_workflow_with_path(name: str, data_dir: Path | None) -> tuple[Agent
             return wf, candidate
 
     raise KeyError(f"Workflow '{name}' not found in {base}")
+
+
+_NO_BACKEND = object()
+
+
+def _through_backend(
+    data_dir: Path | None,
+    method: str,
+    path: str,
+    body: Any = None,
+    query: dict[str, str] | None = None,
+) -> Any:
+    """Send a workflow change to the running backend that published itself for this data
+    folder, so the backend stays the only writer and re-syncs schedules and continuous
+    runs straight away, as it does for the app.
+
+    Returns ``_NO_BACKEND`` when none is published or it no longer answers; the caller
+    then changes the files itself. The desktop window's backend publishes no address, so
+    with only the app open the change is still made offline.
+    """
+    from gofer.cli.client import ApiClient, ExitCode, _pid_alive, discover_endpoint
+
+    try:
+        endpoint = discover_endpoint(data_dir=data_dir)
+    except CliError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(int(exc.exit_code)) from exc
+    if endpoint.source == "default":
+        return _NO_BACKEND
+    if endpoint.pid is not None and not _pid_alive(endpoint.pid):
+        return _NO_BACKEND
+    try:
+        return ApiClient(endpoint).request(method, path, body=body, query=query).data
+    except CliError as exc:
+        if exc.exit_code == ExitCode.UNREACHABLE:
+            typer.echo(
+                f"The backend at {endpoint.url} didn't answer, so the files were changed directly.",
+                err=True,
+            )
+            return _NO_BACKEND
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(int(exc.exit_code)) from exc
 
 
 def _log_base_dir(data_dir: Path | None) -> Path:
@@ -212,9 +338,9 @@ def _print_agent_access_summary(
     warnings = _agent_access_warnings(wf, path_base)
     if not warnings:
         return
-    console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
+    err_console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
     for warning in warnings:
-        console.print(f"[yellow]- {warning}[/yellow]")
+        err_console.print(f"[yellow]- {warning}[/yellow]")
 
 
 def _print_local_vector_index_stats(data: dict[str, Any]) -> None:
@@ -624,6 +750,10 @@ def _format_fan_out_count(fan_out: dict[str, Any]) -> str:
 
 
 def _workflow_log_context(workflow: str, data_dir: Path | None) -> tuple[str, Path]:
+    # Rattish run history lives in the data folder under the registered workflow ID.
+    rattish_id = _rattish_workflow_id(workflow, data_dir)
+    if rattish_id is not None:
+        return rattish_id, data_dir or get_data_dir()
     wf, path = _resolve_workflow_with_path(workflow, data_dir)
     return wf.config.id, data_dir or path.parent
 
@@ -692,7 +822,7 @@ def _save_workflow(wf: AgenticWorkflow, path: Path) -> None:
     try:
         wf.validate(path)
     except Exception as exc:
-        console.print(f"[red]Invalid workflow: {exc}[/red]")
+        err_console.print(f"[red]Invalid workflow: {exc}[/red]")
         raise typer.Exit(1)
     path.parent.mkdir(parents=True, exist_ok=True)
     wf.to_file(path)
@@ -1173,7 +1303,7 @@ def run(
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     profile_data_dir = data_dir or get_data_dir()
@@ -1200,7 +1330,7 @@ def run(
             ),
         )
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     base = data_dir or workflow_path.parent
     if dry_run:
@@ -1218,7 +1348,7 @@ def run(
     if wf.config.run_continuously:
         runs = list_workflow_run_logs_payload(wf.config.id, base).get("runs") or []
         if any(run_log.get("status") == "running" for run_log in runs):
-            console.print(
+            err_console.print(
                 f"[yellow]Workflow '{wf.config.id}' is configured to run continuously "
                 "and already has an active run.[/yellow]"
             )
@@ -1269,8 +1399,37 @@ def run(
             f"in {result.duration_seconds:.2f}s"
         )
     else:
-        console.print(f"[red]✗[/red] Workflow '{result.workflow_id}' failed")
+        err_console.print(f"[red]✗[/red] Workflow '{result.workflow_id}' failed")
         raise typer.Exit(1)
+
+
+WEBHOOK_TOKEN_ENV = "RATICODE_WEBHOOK_TOKEN"
+
+
+def _warn_literal_secret(value: str | None, option: str) -> None:
+    """Warn when an option meant for a secret reference was given the secret itself."""
+    from gofer.core.secrets import SECRET_TOKEN_PATTERN
+
+    if value and not SECRET_TOKEN_PATTERN.search(value):
+        typer.echo(
+            f"Warning: {option} looks like a literal secret. Other accounts can read command "
+            "lines and it would be stored in the workflow; use {{secret.NAME}} instead.",
+            err=True,
+        )
+
+
+def _webhook_token(token_file: Path | None, token: str | None) -> str | None:
+    """The webhook token from --token-file, the deprecated --token, or the environment."""
+    if token_file is not None:
+        return read_secret_file(token_file, what="webhook token file")
+    if token is not None:
+        typer.echo(
+            "Warning: --token is deprecated because other accounts can read command lines. "
+            f"Use --token-file or {WEBHOOK_TOKEN_ENV}.",
+            err=True,
+        )
+        return token
+    return os.environ.get(WEBHOOK_TOKEN_ENV, "").strip() or None
 
 
 @app.command("trigger")
@@ -1294,10 +1453,18 @@ def trigger(
         help="Trigger header as 'Name: value'; may be repeated",
     ),
     source: str = typer.Option("cli", "--source", help="Trigger source metadata"),
+    token_file: Path | None = typer.Option(
+        None,
+        "--token-file",
+        help="File holding the webhook token (mode 600), for workflows that require one. "
+        "Without it, RATICODE_WEBHOOK_TOKEN is used.",
+    ),
     token: str | None = typer.Option(
         None,
         "--token",
-        help="Webhook token for workflows that require one",
+        hidden=True,
+        help="Deprecated: other accounts can read command lines. Use --token-file or "
+        "RATICODE_WEBHOOK_TOKEN.",
     ),
     replay_run_id: str | None = typer.Option(
         None,
@@ -1307,7 +1474,9 @@ def trigger(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Trigger a workflow through its configured webhook/API trigger."""
+    _refuse_rattish(workflow, data_dir)
     try:
+        token = _webhook_token(token_file, token)
         if replay_run_id:
             payload = asyncio.run(
                 replay_workflow_trigger_payload(
@@ -1329,8 +1498,8 @@ def trigger(
                     token=token,
                 )
             )
-    except (WorkflowTriggerError, typer.BadParameter) as exc:
-        console.print(f"[red]{exc}[/red]")
+    except (WorkflowTriggerError, typer.BadParameter, CliError) as exc:
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     run_payload = payload.get("run") or {}
@@ -1376,7 +1545,7 @@ def resume(
     rattish_source = _resolve_rattish_source(workflow, data_dir)
     if rattish_source is not None:
         if from_node or only_node or skip_cache or force:
-            console.print(
+            err_console.print(
                 "[red]Rattish runs resume where they stopped. --from-node, --only-node, "
                 f"--skip-cache and --force aren't supported; run Raticode workflow run {workflow} "
                 "to start over.[/red]"
@@ -1387,12 +1556,12 @@ def resume(
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     for node_id in (from_node, only_node):
         if node_id and node_id not in wf.graph._nodes:
-            console.print(f"[red]Node '{node_id}' not found in workflow '{wf.config.id}'[/red]")
+            err_console.print(f"[red]Node '{node_id}' not found in workflow '{wf.config.id}'[/red]")
             raise typer.Exit(1)
 
     profile_data_dir = data_dir or get_data_dir()
@@ -1436,7 +1605,7 @@ def resume(
             f"in {result.duration_seconds:.2f}s"
         )
     else:
-        console.print(f"[red]✗[/red] Workflow '{result.workflow_id}' resume failed")
+        err_console.print(f"[red]✗[/red] Workflow '{result.workflow_id}' resume failed")
         raise typer.Exit(1)
 
 
@@ -1456,7 +1625,8 @@ def _print_usage_summary(summary: dict[str, object]) -> None:
 @app.command("plan")
 def plan(
     workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
-    json_output: bool = typer.Option(False, "--json", help="Print the plan as JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     trigger_json: str | None = typer.Option(
         None,
         "--trigger-json",
@@ -1481,6 +1651,19 @@ def plan(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Preview execution order, fan-out, provider calls, and side effects."""
+    json_output = wants_json(output_format, json_output)
+    rattish_source = _resolve_rattish_source(workflow, data_dir)
+    if rattish_source is not None:
+        # A Rattish plan is its preflight: compile, then check this computer can run it.
+        if param or params_json or input_ or inputs_json or trigger_json:
+            typer.echo(
+                "Rattish preflight doesn't take inputs; they are checked when the run starts.",
+                err=True,
+            )
+        rattish_commands.preflight(
+            rattish_source, output_format="json" if json_output else "text", data_dir=data_dir
+        )
+        return
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
         profile_data_dir = data_dir or get_data_dir()
@@ -1507,7 +1690,7 @@ def plan(
         plan_payload["inputs"] = masked_workflow_parameters(wf.config, run_parameters)
         plan_payload["parameters"] = plan_payload["inputs"]
     except Exception as exc:
-        console.print(f"[red]Plan failed: {exc}[/red]")
+        err_console.print(f"[red]Plan failed: {exc}[/red]")
         raise typer.Exit(1)
 
     if json_output:
@@ -1520,16 +1703,18 @@ def plan(
 @app.command("usage")
 def usage(
     workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
-    json_output: bool = typer.Option(False, "--json", help="Print usage as JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     limit: int = typer.Option(10, "--limit", min=1, help="Number of recent runs to inspect"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Show LLM usage summaries for recent workflow runs."""
+    json_output = wants_json(output_format, json_output)
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
         runs_payload = list_workflow_run_logs_payload(workflow_id, base)
     except (KeyError, WorkflowLogError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     run_summaries = []
@@ -1609,10 +1794,13 @@ def usage(
 @app.command("secrets")
 def secrets(
     workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
-    json_output: bool = typer.Option(False, "--json", help="Print readiness as JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Show required workflow secrets and whether they are available locally."""
+    _refuse_rattish(workflow, data_dir)
+    json_output = wants_json(output_format, json_output)
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
         profile_data_dir = data_dir or get_data_dir()
@@ -1625,7 +1813,7 @@ def secrets(
             )
         ]
     except Exception as exc:
-        console.print(f"[red]Secret readiness failed: {exc}[/red]")
+        err_console.print(f"[red]Secret readiness failed: {exc}[/red]")
         raise typer.Exit(1)
 
     payload = {
@@ -1657,11 +1845,12 @@ def stop(
     workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Request that a running workflow stop."""
+    """Request that a running legacy TOML workflow stop."""
+    _refuse_rattish(workflow, data_dir)
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     base = data_dir or path.parent
@@ -1734,7 +1923,7 @@ def _resume_decided_approval(
             ).resume_from_approval(request)
         )
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[yellow]Approval recorded, but resume failed: {exc}[/yellow]")
+        err_console.print(f"[yellow]Approval recorded, but resume failed: {exc}[/yellow]")
         return
     if result is not None:
         base = data_dir or workflow_path.parent
@@ -1773,17 +1962,27 @@ def approvals(
         "--all",
         help="Show pending and completed approval decisions",
     ),
+    output_format: str = format_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List approval gates."""
+    as_json = wants_json(output_format)
     store = ApprovalStore(data_dir)
     all_loaded_requests = store.list_requests(workflow)
-    _resume_expired_approvals(store, all_loaded_requests, data_dir)
+    if as_json:
+        # Resuming a timed-out gate reports progress; keep stdout one JSON document.
+        with contextlib.redirect_stdout(sys.stderr):
+            _resume_expired_approvals(store, all_loaded_requests, data_dir)
+    else:
+        _resume_expired_approvals(store, all_loaded_requests, data_dir)
     requests = (
         all_loaded_requests
         if all_requests
         else [request for request in all_loaded_requests if request.status == "pending"]
     )
+    if as_json:
+        emit_json([request.to_dict() for request in requests])
+        return
     if not requests:
         console.print("No approvals" if all_requests else "No pending approvals")
         return
@@ -1823,6 +2022,76 @@ def approvals(
     console.print(table)
 
 
+def _decide_legacy_approval(
+    decision: str,
+    run_id: str,
+    node_id: str,
+    workflow: str | None,
+    by: str | None,
+    notes: str,
+    data_dir: Path | None,
+) -> None:
+    verb = "approve" if decision == "approved" else "reject"
+    if in_agent_session():
+        # A workflow, provider or Rem worker must not decide its own gate. The same
+        # refusal as `Raticode rattish approve` (exit 5, user_only).
+        err_console.print(
+            f"[red]Only you can {verb} a workflow approval. This command is running inside "
+            "a Raticode agent turn; run it from your own terminal or use the app.[/red]"
+        )
+        raise typer.Exit(int(ExitCode.AUTH))
+    store = ApprovalStore(data_dir)
+    try:
+        request = _find_approval_request(store, run_id, node_id, workflow)
+        # --by picks which of the gate's named approvers you are deciding as. It is not
+        # free text: a name the gate doesn't list (such as "user" or Raticode's own
+        # "gofer") would misstate who decided.
+        if by is not None and request.status == "pending" and by not in request.approvers:
+            allowed = ", ".join(request.approvers)
+            raise ValueError(
+                f"Approver {by!r} is not allowed; --by must name one of this gate's "
+                f"approvers: {allowed}."
+                if allowed
+                else "This gate names no approvers, so --by isn't used; leave it out."
+            )
+        decided = store.decide(
+            request.workflow_id,
+            run_id,
+            node_id,
+            "approved" if decision == "approved" else "rejected",
+            decided_by=by or "cli",
+            notes=notes,
+        )
+    except ValueError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    label = "Approved" if decision == "approved" else "Rejected"
+    console.print(f"[green]{label}[/green] {request.workflow_id} {run_id} {node_id}")
+    if _is_rattish_approval(decided, data_dir):
+        # The Rattish run waiting at this gate reads the decision from the same store;
+        # there is no TOML workflow to resume here.
+        if not _approval_waiter_is_live(decided):
+            err_console.print(
+                "No run is waiting at this gate any more. Resume it with "
+                f"Raticode rattish resume {decided.workflow_id} {run_id}",
+                soft_wrap=True,
+            )
+        return
+    _resume_decided_approval(store, decided, data_dir)
+
+
+def _is_rattish_approval(request: ApprovalRequest, data_dir: Path | None) -> bool:
+    if request.workflow_path:
+        return Path(request.workflow_path).suffix != ".toml"
+    return _resolve_rattish_source(request.workflow_id, data_dir) is not None
+
+
+_APPROVER_HELP = (
+    "Decide as this approver when the gate names approvers. Must be one of the names "
+    "the gate lists; it records which approver role decided, not who you are."
+)
+
+
 @app.command("approve")
 def approve(
     run_id: str = typer.Argument(..., help="Run ID from the pending approval"),
@@ -1833,27 +2102,12 @@ def approve(
         "-w",
         help="Workflow ID when run/node IDs are not unique",
     ),
-    by: str = typer.Option("cli", "--by", help="Approver identity/source"),
+    by: str | None = typer.Option(None, "--by", help=_APPROVER_HELP),
     notes: str = typer.Option("", "--notes", help="Decision notes"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Approve a pending approval gate."""
-    store = ApprovalStore(data_dir)
-    try:
-        request = _find_approval_request(store, run_id, node_id, workflow)
-        decided = store.decide(
-            request.workflow_id,
-            run_id,
-            node_id,
-            "approved",
-            decided_by=by,
-            notes=notes,
-        )
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-    console.print(f"[green]Approved[/green] {request.workflow_id} {run_id} {node_id}")
-    _resume_decided_approval(store, decided, data_dir)
+    """Approve a pending approval gate. Refused inside Rem and worker turns (exit 5)."""
+    _decide_legacy_approval("approved", run_id, node_id, workflow, by, notes, data_dir)
 
 
 @app.command("reject")
@@ -1866,37 +2120,19 @@ def reject(
         "-w",
         help="Workflow ID when run/node IDs are not unique",
     ),
-    by: str = typer.Option("cli", "--by", help="Approver identity/source"),
+    by: str | None = typer.Option(None, "--by", help=_APPROVER_HELP),
     notes: str = typer.Option("", "--notes", help="Decision notes"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Reject a pending approval gate."""
-    store = ApprovalStore(data_dir)
-    try:
-        request = _find_approval_request(store, run_id, node_id, workflow)
-        decided = store.decide(
-            request.workflow_id,
-            run_id,
-            node_id,
-            "rejected",
-            decided_by=by,
-            notes=notes,
-        )
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-    console.print(f"[green]Rejected[/green] {request.workflow_id} {run_id} {node_id}")
-    _resume_decided_approval(store, decided, data_dir)
+    """Reject a pending approval gate. Refused inside Rem and worker turns (exit 5)."""
+    _decide_legacy_approval("rejected", run_id, node_id, workflow, by, notes, data_dir)
 
 
 @app.command("validate")
 def validate(
     workflow: str = typer.Argument(..., help="Workflow ID or path to TOML file"),
-    json_output: bool = typer.Option(
-        False,
-        "--json",
-        help="Emit machine-readable JSON diagnostics",
-    ),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     explain_bindings: bool = typer.Option(
         False,
         "--explain-bindings",
@@ -1905,6 +2141,15 @@ def validate(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Validate a workflow by name or file path."""
+    json_output = wants_json(output_format, json_output)
+    rattish_source = _resolve_rattish_source(workflow, data_dir)
+    if rattish_source is not None:
+        if explain_bindings:
+            typer.echo("--explain-bindings applies only to legacy TOML workflows.", err=True)
+        rattish_commands.check(
+            rattish_source, output_format="json" if json_output else "text", data_dir=data_dir
+        )
+        return
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
         profile_data_dir = data_dir or get_data_dir()
@@ -1917,7 +2162,7 @@ def validate(
             return
         if not report.ok:
             for diagnostic in report.errors:
-                console.print(f"[red]✗[/red] {diagnostic.message}")
+                err_console.print(f"[red]✗[/red] {diagnostic.message}")
             for diagnostic in report.warnings:
                 console.print(f"[yellow]![/yellow] {diagnostic.message}")
             if explain_bindings:
@@ -1962,13 +2207,18 @@ def validate(
             )
             sys.stdout.write("\n")
             raise typer.Exit(1)
-        console.print(f"[red]✗[/red] Validation failed: {exc}")
+        err_console.print(f"[red]✗[/red] Validation failed: {exc}")
         raise typer.Exit(1)
 
 
 @app.command("import")
 def import_workflow(
-    source: Path = typer.Argument(..., help="Workflow TOML file or workflow bundle to import"),
+    source: Path = typer.Argument(
+        ..., help="Workflow TOML file, legacy workflow bundle, or Rattish .raticode archive"
+    ),
+    project: Path | None = typer.Option(
+        None, "--project", help="Project folder that receives a .raticode archive"
+    ),
     replace: bool = typer.Option(False, "--replace", help="Replace an existing workflow"),
     dry_run: bool = typer.Option(
         False,
@@ -1977,11 +2227,29 @@ def import_workflow(
     ),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Import a workflow TOML file or portable workflow bundle."""
+    """Import a workflow TOML file, a legacy bundle, or a Rattish .raticode archive."""
     base = data_dir or get_data_dir()
     if not source.exists():
-        console.print(f"[red]{source} not found[/red]")
+        err_console.print(f"[red]{source} not found[/red]")
         raise typer.Exit(1)
+
+    if source.suffix.lower() == ".raticode":
+        if project is None or dry_run:
+            typer.echo(
+                "A .raticode archive installs a Rattish workflow into a project folder. "
+                "Pass --project PATH (--dry-run isn't supported for .raticode archives).",
+                err=True,
+            )
+            raise typer.Exit(2)
+        try:
+            imported = import_rattish_bundle_payload(source, project, base)
+        except WorkflowBundleError as exc:
+            err_console.print(f"[red]Import failed: {exc}[/red]")
+            raise typer.Exit(1)
+        console.print(
+            f"[green]Imported[/green] {imported['id']} → {imported.get('sourcePath') or project}"
+        )
+        return
 
     if source.suffix != ".toml":
         try:
@@ -1992,7 +2260,7 @@ def import_workflow(
                 dry_run=dry_run,
             )
         except BundleError as exc:
-            console.print(f"[red]Import failed: {exc}[/red]")
+            err_console.print(f"[red]Import failed: {exc}[/red]")
             raise typer.Exit(1)
         if not dry_run and plan.workflow_path.exists():
             capture_workflow_revision(plan.workflow_path, base, source="import", author="cli")
@@ -2001,7 +2269,7 @@ def import_workflow(
 
     try:
         if dry_run:
-            console.print("[red]--dry-run is only supported for workflow bundles[/red]")
+            err_console.print("[red]--dry-run is only supported for workflow bundles[/red]")
             raise typer.Exit(1)
         if replace:
             workflow = AgenticWorkflow.from_file(source)
@@ -2015,10 +2283,10 @@ def import_workflow(
 
         payload = import_workflow_payload(source.read_text(encoding="utf-8"), base)
     except WorkflowAlreadyExistsError as exc:
-        console.print(f"[red]{exc}. Use --replace to overwrite.[/red]")
+        err_console.print(f"[red]{exc}. Use --replace to overwrite.[/red]")
         raise typer.Exit(1)
     except (WorkflowCreateError, OSError, Exception) as exc:
-        console.print(f"[red]Import failed: {exc}[/red]")
+        err_console.print(f"[red]Import failed: {exc}[/red]")
         raise typer.Exit(1)
 
     workflow_id = str(payload["id"])
@@ -2033,10 +2301,21 @@ def export_workflow(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Export a workflow and related local files into a portable bundle."""
+    rattish_id = _rattish_workflow_id(workflow, data_dir)
+    if rattish_id is not None:
+        if notes:
+            typer.echo("--notes applies only to legacy TOML bundles.", err=True)
+        try:
+            exported = export_rattish_bundle_payload(rattish_id, output, data_dir)
+        except WorkflowBundleError as exc:
+            err_console.print(f"[red]Export failed: {exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]Exported[/green] {rattish_id} → {exported['bundlePath']}")
+        return
     try:
         manifest = export_workflow_bundle(workflow, output, data_dir=data_dir, notes=notes)
     except BundleError as exc:
-        console.print(f"[red]Export failed: {exc}[/red]")
+        err_console.print(f"[red]Export failed: {exc}[/red]")
         raise typer.Exit(1)
 
     console.print(
@@ -2055,7 +2334,7 @@ def preview_import_workflow(
     try:
         plan = preview_workflow_bundle(source, data_dir=data_dir)
     except BundleError as exc:
-        console.print(f"[red]Preview failed: {exc}[/red]")
+        err_console.print(f"[red]Preview failed: {exc}[/red]")
         raise typer.Exit(1)
     _print_bundle_import_plan(plan.to_dict(), dry_run=True)
 
@@ -2064,18 +2343,21 @@ def preview_import_workflow(
 def history(
     workflow: str = typer.Argument(..., help="Workflow ID"),
     limit: int | None = typer.Option(None, "--limit", min=1, help="Maximum revisions to show"),
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List workflow revisions."""
+    _refuse_rattish(workflow, data_dir)
+    json_output = wants_json(output_format, json_output)
     base = data_dir or get_data_dir()
     try:
         revisions = list_workflow_revisions(workflow, base, limit=limit)
     except WorkflowRevisionError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     if json_output:
-        console.print(json.dumps([item.to_dict() for item in revisions], indent=2))
+        typer.echo(json.dumps([item.to_dict() for item in revisions], indent=2))
         return
     if not revisions:
         console.print(f"No revisions found for [bold]{workflow}[/bold].")
@@ -2096,18 +2378,21 @@ def history(
 def diff(
     workflow: str = typer.Argument(..., help="Workflow ID"),
     revision_id: str = typer.Argument(..., help="Revision ID to compare with current"),
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Show a revision diff against the current workflow."""
+    _refuse_rattish(workflow, data_dir)
+    json_output = wants_json(output_format, json_output)
     base = data_dir or get_data_dir()
     try:
         payload = diff_workflow_revision(workflow, revision_id, base)
     except WorkflowRevisionError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     if json_output:
-        console.print(json.dumps(payload, indent=2))
+        typer.echo(json.dumps(payload, indent=2))
         return
     for item in payload["summary"]:
         console.print(f"• {item}")
@@ -2124,6 +2409,7 @@ def restore(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Restore a workflow revision, validating before replacement."""
+    _refuse_rattish(workflow, data_dir)
     base = data_dir or get_data_dir()
     try:
         payload = restore_workflow_revision(
@@ -2135,7 +2421,7 @@ def restore(
             author="cli",
         )
     except (WorkflowRevisionError, ValueError) as exc:
-        console.print(f"[red]Restore failed: {exc}[/red]")
+        err_console.print(f"[red]Restore failed: {exc}[/red]")
         raise typer.Exit(1)
     action = "Restored copy" if as_copy else "Restored"
     console.print(f"[green]{action}[/green] {payload['workflowId']} → {payload['path']}")
@@ -2152,7 +2438,7 @@ def logs_latest(
         workflow_id, base = _workflow_log_context(workflow, data_dir)
         payload = latest_workflow_log_payload(workflow_id, base)
     except (KeyError, WorkflowLogError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     log_path = payload.get("logPath")
@@ -2173,10 +2459,12 @@ def logs_list(
     status: str | None = typer.Option(None, "--status", help="Filter by status"),
     trigger: str | None = typer.Option(None, "--trigger", help="Filter by trigger type"),
     search: str | None = typer.Option(None, "--search", help="Search run metadata and log text"),
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List run logs for a workflow."""
+    json_output = wants_json(output_format, json_output)
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
         payload = list_workflow_run_logs_payload(
@@ -2189,7 +2477,7 @@ def logs_list(
             search=search,
         )
     except (KeyError, WorkflowLogError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     if json_output:
@@ -2202,7 +2490,7 @@ def logs_list(
         console.print(f"No run logs found for [bold]{workflow_id}[/bold].")
         pagination = payload.get("pagination") if isinstance(payload, dict) else {}
         if isinstance(pagination, dict) and pagination.get("searchTruncated"):
-            console.print(
+            err_console.print(
                 "[yellow]Search stopped at the configured log scan byte limit; "
                 "results may be incomplete.[/yellow]"
             )
@@ -2217,13 +2505,13 @@ def logs_list(
                     str(run_log.get("status") or "unknown"),
                     str(run_log.get("triggerType") or "unknown"),
                     str(run_log.get("logSizeBytes") or 0),
-                    str(base / "logs" / workflow_id / str(run_log["id"])),
+                    str(run_log.get("logPath") or base / "logs" / workflow_id / str(run_log["id"])),
                 )
             )
         )
     pagination = payload.get("pagination") if isinstance(payload, dict) else {}
     if isinstance(pagination, dict) and pagination.get("searchTruncated"):
-        console.print(
+        err_console.print(
             "[yellow]Search stopped at the configured log scan byte limit; "
             "results may be incomplete.[/yellow]"
         )
@@ -2251,7 +2539,7 @@ def logs_show(
             include_details=False,
         )
     except (KeyError, WorkflowLogError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     console.print(payload.get("logText") or "")
@@ -2279,10 +2567,12 @@ def logs_prune(
         help="Keep failed runs newer than N days",
     ),
     apply: bool = typer.Option(False, "--apply", help="Delete matching runs instead of previewing"),
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Preview or prune old workflow run logs and sidecar files."""
+    json_output = wants_json(output_format, json_output)
     try:
         workflow_id, base = _workflow_log_context(workflow, data_dir)
         payload = prune_workflow_run_logs_payload(
@@ -2294,7 +2584,7 @@ def logs_prune(
             dry_run=not apply,
         )
     except (KeyError, WorkflowLogError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     if json_output:
@@ -2329,7 +2619,7 @@ def show(
     try:
         wf = _resolve_workflow(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     render_workflow(wf, console)
 
@@ -2355,7 +2645,7 @@ def set_info(
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     wf.config = WorkflowConfig(
@@ -2386,7 +2676,7 @@ def set_schedule(
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     wf.config.schedule = ScheduleConfig(cron_expression=cron, timezone=timezone)
@@ -2402,7 +2692,7 @@ def clear_schedule(
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     wf.config.schedule = None
@@ -2425,10 +2715,11 @@ def set_watch(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Add or replace workflow file/folder watcher settings."""
+    _refuse_rattish(workflow, data_dir)
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -2441,7 +2732,7 @@ def set_watch(
             max_concurrency=max_concurrency,
         )
     except Exception as exc:
-        console.print(f"[red]Invalid watch config: {exc}[/red]")
+        err_console.print(f"[red]Invalid watch config: {exc}[/red]")
         raise typer.Exit(1)
     _save_workflow(wf, workflow_path)
 
@@ -2455,7 +2746,7 @@ def clear_watch(
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     wf.config.watch = None
@@ -2484,10 +2775,11 @@ def add_agent(
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Add or replace an agent config in a workflow."""
+    _refuse_rattish(workflow, data_dir)
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -2504,7 +2796,7 @@ def add_agent(
             )
         )
     except Exception as exc:
-        console.print(f"[red]Invalid agent config: {exc}[/red]")
+        err_console.print(f"[red]Invalid agent config: {exc}[/red]")
         raise typer.Exit(1)
     _save_workflow(wf, path)
 
@@ -2731,7 +3023,10 @@ def add_node(
         None, "--notification-smtp-username", help="SMTP username or secret ref"
     ),
     notification_smtp_password: str | None = typer.Option(
-        None, "--notification-smtp-password", help="SMTP password secret ref"
+        None,
+        "--notification-smtp-password",
+        help="SMTP password as a secret reference such as {{secret.SMTP_PASSWORD}}, "
+        "never the password itself",
     ),
     notification_smtp_starttls: bool = typer.Option(
         True, "--notification-smtp-starttls/--no-notification-smtp-starttls"
@@ -2761,10 +3056,12 @@ def add_node(
     Machine-readable options and operation fields: Raticode schema --command
     workflow.add-node and Raticode schema --operation TYPE.
     """
+    _refuse_rattish(workflow, data_dir)
+    _warn_literal_secret(notification_smtp_password, "--notification-smtp-password")
     try:
         wf, workflow_path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     mapping = _parse_key_values(input_map, "--input-map")
@@ -2885,7 +3182,7 @@ def add_node(
             )
         )
     except Exception as exc:
-        console.print(f"[red]Invalid node config: {exc}[/red]")
+        err_console.print(f"[red]Invalid node config: {exc}[/red]")
         raise typer.Exit(1)
     _save_workflow(wf, workflow_path)
 
@@ -2900,10 +3197,10 @@ def rm_node(
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     if node_id not in wf.graph._nodes:
-        console.print(f"[red]Node '{node_id}' not found[/red]")
+        err_console.print(f"[red]Node '{node_id}' not found[/red]")
         raise typer.Exit(1)
     wf.graph._graph.remove_node(node_id)
     wf.graph._nodes.pop(node_id, None)
@@ -2935,6 +3232,7 @@ def add_edge(
 
     Machine-readable options and fields: Raticode schema --command workflow.add-edge.
     """
+    _refuse_rattish(workflow, data_dir)
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
         edge_condition = EdgeConditionType(condition)
@@ -2952,7 +3250,7 @@ def add_edge(
             ),
         )
     except Exception as exc:
-        console.print(f"[red]Invalid edge config: {exc}[/red]")
+        err_console.print(f"[red]Invalid edge config: {exc}[/red]")
         raise typer.Exit(1)
     _save_workflow(wf, path)
 
@@ -2968,10 +3266,10 @@ def rm_edge(
     try:
         wf, path = _resolve_workflow_with_path(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     if not wf.graph._graph.has_edge(from_node, to_node):
-        console.print(f"[red]Edge '{from_node}' -> '{to_node}' not found[/red]")
+        err_console.print(f"[red]Edge '{from_node}' -> '{to_node}' not found[/red]")
         raise typer.Exit(1)
     wf.graph._graph.remove_edge(from_node, to_node)
     wf.graph._edges.pop((from_node, to_node), None)
@@ -2980,10 +3278,12 @@ def rm_edge(
 
 @app.command("list")
 def list_workflows(
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List all workflows in the data directory."""
+    json_output = wants_json(output_format, json_output)
     base = data_dir or get_data_dir()
     payload = list_workflow_payloads(base)
     workflows = payload.get("workflows") or []
@@ -3037,7 +3337,7 @@ def edit(
     try:
         wf = _resolve_workflow(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     base = data_dir or get_data_dir()
@@ -3049,7 +3349,7 @@ def edit(
         try:
             wf.validate(path, base)
         except Exception as exc:
-            console.print(f"[red]Validation failed: {exc}[/red]")
+            err_console.print(f"[red]Validation failed: {exc}[/red]")
             raise typer.Exit(1)
         wf.to_file(path)
         console.print(f"[green]Saved[/green] {path}")
@@ -3063,11 +3363,34 @@ def rm(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Delete a workflow TOML file."""
+    """Delete a workflow. A Rattish workflow is unregistered and its folder removed.
+
+    When a headless backend is running for this data folder, the backend deletes it.
+    """
+    rattish_id = _rattish_workflow_id(workflow, data_dir)
+    if rattish_id is not None:
+        if not yes:
+            typer.confirm(f"Delete Rattish workflow '{rattish_id}' and its folder?", abort=True)
+        sent = _through_backend(
+            data_dir,
+            "DELETE",
+            f"/workflows/{quote(rattish_id, safe='')}",
+            query={"sourceFormat": "rattish"},
+        )
+        if sent is not _NO_BACKEND:
+            console.print(f"[green]Deleted[/green] {rattish_id}")
+            return
+        try:
+            delete_workflow_payload(rattish_id, data_dir, source_format="rattish")
+        except WorkflowUpdateError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]Deleted[/green] {rattish_id}")
+        return
     try:
         wf = _resolve_workflow(workflow, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     base = data_dir or get_data_dir()
@@ -3082,6 +3405,11 @@ def rm(
     if not yes:
         typer.confirm(f"Delete workflow '{wf.config.id}' ({path})?", abort=True)
 
+    if resolved_path.suffix != ".toml":
+        sent = _through_backend(data_dir, "DELETE", f"/workflows/{quote(wf.config.id, safe='')}")
+        if sent is not _NO_BACKEND:
+            console.print(f"[green]Deleted[/green] {path}")
+            return
     path.unlink()
     shutil.rmtree(cleanup_base / "logs" / wf.config.id, ignore_errors=True)
     shutil.rmtree(cleanup_base / "agent-memory" / wf.config.id, ignore_errors=True)
@@ -3096,11 +3424,21 @@ def rename(
     name: str = typer.Option(..., "--name", help="New workflow name"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Rename a workflow and update its ID to match the new name."""
+    """Rename a workflow and update its ID to match the new name.
+
+    When a headless backend is running for this data folder, the backend renames it.
+    """
+    sent = _through_backend(
+        data_dir, "POST", f"/workflows/{quote(workflow, safe='')}/rename", {"name": name}
+    )
+    if sent is not _NO_BACKEND:
+        saved = sent["workflow"]
+        console.print(f"[green]Renamed[/green] workflow to {saved['name']} ({saved['id']})")
+        return
     try:
         saved = rename_workflow_payload(workflow, name, data_dir)
     except (WorkflowAlreadyExistsError, WorkflowUpdateError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     console.print(f"[green]Renamed[/green] workflow to {saved['name']} ({saved['id']})")
@@ -3112,11 +3450,21 @@ def duplicate(
     name: str | None = typer.Option(None, "--name", help="Name for duplicate"),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Duplicate a workflow TOML file with a new ID/name."""
+    """Duplicate a workflow with a new ID and name.
+
+    When a headless backend is running for this data folder, the backend makes the copy.
+    """
+    sent = _through_backend(
+        data_dir, "POST", f"/workflows/{quote(workflow, safe='')}/duplicate", {"name": name}
+    )
+    if sent is not _NO_BACKEND:
+        saved = sent["workflow"]
+        console.print(f"[green]Duplicated[/green] workflow to {saved['name']} ({saved['id']})")
+        return
     try:
         saved = duplicate_workflow_payload(workflow, name, data_dir)
     except (WorkflowAlreadyExistsError, WorkflowCreateError, WorkflowUpdateError) as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     console.print(f"[green]Duplicated[/green] workflow to {saved['name']} ({saved['id']})")
@@ -3204,7 +3552,7 @@ def create(
                 workflow_name=name,
             )
         except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
+            err_console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1)
         capture_workflow_revision(result.path, dest, source="template", author="cli")
         console.print(f"Created [bold]{result.path}[/bold] from template {result.template.name}")
@@ -3213,7 +3561,9 @@ def create(
         return
 
     if not name:
-        console.print("[red]--name is required unless --template or --list-templates is used[/red]")
+        err_console.print(
+            "[red]--name is required unless --template or --list-templates is used[/red]"
+        )
         raise typer.Exit(1)
 
     wf_id = re.sub(r"[^a-z0-9-]", "-", name.lower())
@@ -3291,10 +3641,14 @@ def recipe_watch_folder_summarize(
     prompt_file = prompt_path or base / "prompts" / f"{workflow_id}-summarizer.md"
 
     if workflow_path.exists() and not overwrite:
-        console.print(f"[red]{workflow_path} already exists. Use --overwrite to replace it.[/red]")
+        err_console.print(
+            f"[red]{workflow_path} already exists. Use --overwrite to replace it.[/red]"
+        )
         raise typer.Exit(1)
     if prompt_file.exists() and not overwrite:
-        console.print(f"[red]{prompt_file} already exists. Use --overwrite to replace it.[/red]")
+        err_console.print(
+            f"[red]{prompt_file} already exists. Use --overwrite to replace it.[/red]"
+        )
         raise typer.Exit(1)
 
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
@@ -3370,3 +3724,43 @@ Return a concise summary with:
     wf.then("changed-files", "summarize-added-files")
     _save_workflow(wf, workflow_path)
     console.print("[green]Created folder watcher summarizer workflow[/green]")
+
+
+# Commands that read or write only TOML workflows. Their help says so, and given a
+# Rattish workflow they exit 2 naming the Rattish command to use instead.
+LEGACY_TOML_COMMANDS = frozenset(
+    {
+        "add-agent",
+        "add-edge",
+        "add-node",
+        "build",
+        "clear-schedule",
+        "clear-watch",
+        "create",
+        "diff",
+        "edit",
+        "history",
+        "preview-import",
+        "restore",
+        "rm-edge",
+        "rm-node",
+        "secrets",
+        "set-info",
+        "set-schedule",
+        "set-watch",
+        "show",
+        "stop",
+        "trigger",
+    }
+)
+
+
+def _label_legacy_commands() -> None:
+    for info in app.registered_commands:
+        if info.name not in LEGACY_TOML_COMMANDS or info.callback is None:
+            continue
+        summary = (info.help or info.callback.__doc__ or "").strip()
+        info.help = f"[Legacy TOML] {summary}"
+
+
+_label_legacy_commands()

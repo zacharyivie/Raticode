@@ -1,5 +1,7 @@
 # Rem
 
+> User documentation for this feature is on the website: [Chat and threads](../website/docs/rem/chat.md). The website is the single source of truth for how Raticode works; this file is developer and design detail.
+
 Rem is Raticode's coding agent. Thread identity, conversation history, project scope,
 and resource selections belong to Raticode rather than to a provider session. Changing
 provider or model preserves them. Authentication and provider-native settings still belong
@@ -266,6 +268,11 @@ React boundary failures and paired-device connection events share this log. Nati
 Chromium output goes only to a terminal. Rotation retains the current file and three backups of up to 5 MB each.
 Common credential fields are redacted. Conversation bodies are archived separately;
 logs are not a transcript. Existing logs from older installations are left in place.
+
+A paired phone with **Use Raticode from this phone** can follow the same log (its Developer log). The window passes
+the log file's path to the backend in `GOFER_APP_LOG`; the backend reads new lines from that file for the phone,
+redacts them again with the same rules and sends them over the paired connection. A backend started without the
+window has no app log, and the phone says so.
 
 ## Conversation archive
 

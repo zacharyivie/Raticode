@@ -30,8 +30,11 @@ app.commandLine.appendSwitch('disable-dev-shm-usage');
 const yesterday = new Date();
 yesterday.setDate(yesterday.getDate() - 1);
 yesterday.setHours(17, 14, 5, 157);
-const seeded = [['info', 'backend', 'Backend ready at http://127.0.0.1:41000 after 2.1 s'], ['warn', 'renderer', 'The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead.'], ['error', 'backend', 'Backend stopped unexpectedly (exit code 1)']]
-  .map(([level, source, message], index) => JSON.stringify({ time: new Date(yesterday.getTime() + index * 1000).toISOString(), level, source, message })).join('\n') + '\n';
+// Four refusals in a row, as a full phone used to cause, show as one row with a count.
+const REFUSED = 'Device action workspace_exchange refused: workspace_history_quota';
+const seeded = [['info', 'backend', 'Backend ready at http://127.0.0.1:41000 after 2.1 s'], ...Array(4).fill(['info', 'backend', REFUSED, 'gofer.ui.server']),
+  ['warn', 'renderer', 'The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead.'], ['error', 'backend', 'Backend stopped unexpectedly (exit code 1)']]
+  .map(([level, source, message, component], index) => JSON.stringify({ time: new Date(yesterday.getTime() + index * 1000).toISOString(), level, source, message, ...(component ? { component } : {}) })).join('\n') + '\n';
 fs.writeFileSync(path.join(profile, 'logs', 'app.jsonl'), seeded, { mode: 0o600 });
 const pad = (value) => String(value).padStart(2, '0');
 const yesterdayLabel = `${yesterday.getFullYear()}-${pad(yesterday.getMonth() + 1)}-${pad(yesterday.getDate())}`;
@@ -110,9 +113,41 @@ async function run() {
     const image = await window.webContents.capturePage();
     fs.writeFileSync(process.env.RATICODE_APP_LOG_SCREENSHOT, image.toPNG());
   }
-  // Real mouse input: press on the newest row, drag down two rows, release.
+  // Real mouse input from here on.
   window.webContents.focus();
   const send = (event) => window.webContents.sendInputEvent(event);
+
+  // The repeated refusals share one row with their count; clicking the count shows each one.
+  const repeat = `(() => { const node = [...document.querySelectorAll('.app-log-repeat')].find(button => button.closest('[role="option"]').textContent.includes(${JSON.stringify(REFUSED)})); if (!node) return null;
+    node.closest('[role="option"]').scrollIntoView({ block: 'center' }); const box = node.getBoundingClientRect();
+    return { count: node.textContent.replace(/\\D/g, ''), expanded: node.getAttribute('aria-expanded'), point: [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)],
+      rows: [...document.querySelectorAll('[role="option"]')].filter(row => row.textContent.includes(${JSON.stringify(REFUSED)})).length,
+      times: [...document.querySelectorAll('.app-log-row-member time')].map(time => time.dateTime) }; })()`;
+  const grouped = await until(() => page(repeat), Boolean, 'the repeated refusals');
+  assert.deepEqual([grouped.count, grouped.expanded, grouped.rows], ['4', 'false', 1], 'four refusals show as one row with a count');
+  await wait(200);
+  const point = (await page(repeat)).point;
+  send({ type: 'mouseDown', x: point[0], y: point[1], button: 'left', clickCount: 1 }); await wait(60);
+  send({ type: 'mouseUp', x: point[0], y: point[1], button: 'left', clickCount: 1 });
+  const opened = await until(() => page(repeat), (state) => state.expanded === 'true', 'the group to open');
+  assert.equal(opened.rows, 5, 'the group and each of its four entries');
+  assert.equal(new Set(opened.times).size, 4, 'each entry keeps its own time');
+  assert.equal(await page('document.querySelectorAll(\'[role="option"][aria-selected="true"]\').length'), 0, 'opening a group does not select it');
+  const memberLayout = await page(`[...document.querySelectorAll('.app-log-row-member .app-log-line, .app-log-repeats > [role="option"] > .app-log-line')].map(line => {
+    const time = line.querySelector('.app-log-time'); const level = line.querySelector('.app-log-level');
+    const range = document.createRange(); range.selectNodeContents(time);
+    return Math.round(Math.max(...[...range.getClientRects()].map(rect => rect.right)) - level.getBoundingClientRect().left); })`);
+  assert.ok(memberLayout.length === 5 && memberLayout.every(overlap => overlap <= 0), `group rows overlap: ${memberLayout}`);
+  if (process.env.RATICODE_APP_LOG_SCREENSHOT) {
+    await wait(400);
+    const image = await window.webContents.capturePage();
+    fs.writeFileSync(process.env.RATICODE_APP_LOG_SCREENSHOT.replace(/\.png$/, '-repeats.png'), image.toPNG());
+  }
+  console.log('Four repeated refusals showed as one row counting 4, and opened to four entries with their own times.');
+  await page('document.querySelector(".app-log-list").scrollTop = 0');
+  await wait(200);
+
+  // Press on the newest row, drag down two rows, release.
   const rowPoints = () => page(`[...document.querySelectorAll('[role="option"]')].slice(0, 4).map(row => { const box = row.querySelector('.app-log-time').getBoundingClientRect(); return [Math.round(box.left + 20), Math.round(box.top + box.height / 2)]; })`);
   const selectedCount = () => page('document.querySelectorAll(\'[role="option"][aria-selected="true"]\').length');
   const pointer = async (type, [x, y], extra = {}) => { send({ type, x, y, button: 'left', clickCount: 1, ...extra }); await wait(60); };

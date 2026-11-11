@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { loadVoiceTidy, saveVoiceTidy } from "../lib/voiceTidy.js";
+import { menuModels } from "../lib/providerModels.js";
 
 // The model list for a provider, plus a full model ID the provider lists only by alias.
 function modelOptions(provider, selection) {
-  const models = (provider?.models ?? []).map((model) => [model.id, model.displayName || model.id]);
+  const models = menuModels(provider, selection?.model).map((model) => [model.id, model.displayName || model.id]);
   if (selection?.provider === provider?.id && selection?.model && !models.some(([id]) => id === selection.model)) {
     models.unshift([selection.model, selection.label || selection.model]);
   }

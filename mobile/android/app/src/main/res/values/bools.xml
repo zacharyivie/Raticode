@@ -1,0 +1,6 @@
+<resources>
+  <!-- Voice mode needs on-device speech recognition (Android 12). values-v31 turns it on. -->
+  <bool name="voice_mode">false</bool>
+  <!-- Share to Rem needs the live connection (Android 10). values-v29 turns it on. -->
+  <bool name="share_to_rem">false</bool>
+</resources>

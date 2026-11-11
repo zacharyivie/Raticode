@@ -11,6 +11,13 @@ import "./RemRich.css";
 
 // Messages you opened or folded stay that way while this window is open.
 const foldChoices = new Map();
+// Folded messages on screen, by message ID, so a search result can open its message.
+const foldOpeners = new Map();
+// Opens a long message's text, such as when a search result jumps to a match in its folded part.
+export function revealFold(id) {
+  foldChoices.set(id, true);
+  foldOpeners.get(id)?.();
+}
 // The conversation passes a function that keeps it at the newest message, when you are
 // there, after a message finds it is long and gains its Show more or Show less.
 export const FoldPinContext = createContext(null);
@@ -28,6 +35,12 @@ export function FoldableText({ id, startOpen = false, children }) {
   const [long, setLong] = useState(false);
   const [open, setOpen] = useState(() => foldChoices.get(id) ?? startOpen);
   const keepPinned = useContext(FoldPinContext);
+  useEffect(() => {
+    if (!id) return undefined;
+    const reveal = () => setOpen(true);
+    foldOpeners.set(id, reveal);
+    return () => { if (foldOpeners.get(id) === reveal) foldOpeners.delete(id); };
+  }, [id]);
   // Measured before paint, so a long message never shows unfolded first.
   useLayoutEffect(() => {
     const content = contentRef.current;
@@ -73,11 +86,11 @@ export function FoldableText({ id, startOpen = false, children }) {
 }
 
 // Extra depth under a short reply. Closed by default so the reply stays the lead.
-export function MessageDetails({ details, fileMentions = null, onOpenLink }) {
+export function MessageDetails({ details, fileMentions = null, tickets = null, onOpenLink }) {
   if (!details) return null;
   return <details className="rem-details">
     <summary>Details</summary>
-    <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={fileMentions} value={details} />
+    <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={fileMentions} tickets={tickets} value={details} />
   </details>;
 }
 
@@ -178,7 +191,7 @@ export function ReplyQuote({ reference, onShow, onCancel, composing = false }) {
 // Plan · Work · Check · Report for a task card, with how long it has run.
 export function ProgressSteps({ status, now }) {
   const run = status?.run;
-  const steps = runSteps(status?.state, { reachedCheck: Boolean(run?.verification_thread_id) });
+  const steps = runSteps(status?.state, { reachedCheck: Boolean(run?.verification_thread_id), step: status?.step });
   if (!steps.length) return null;
   const elapsed = elapsedLabel(run?.created_at, run?.finished_at || now);
   return <div className="rem-progress">

@@ -1,0 +1,65 @@
+{
+ "digest": "54c63ac96fe118c4bc298102676e4952",
+ "limits": {
+  "max_threads_max": 16,
+  "max_threads_min": 1
+ },
+ "report": {
+  "duplicates_merged": [],
+  "notes": [
+   {
+    "at": "2026-11-09T04:05:07.540442+00:00",
+    "text": "Research stopped for now"
+   }
+  ],
+  "since": "2026-11-09T04:05:07.536156+00:00",
+  "summary": "Proposed 2 for your approval, finished 1 ticket.",
+  "tickets_added": [
+   {
+    "at": "2026-11-09T04:05:07.540363+00:00",
+    "organization_name": "",
+    "proposed": true,
+    "scope": "rem",
+    "ticket_id": "bbead535-12b0-410f-a5ef-d1d512cce3ca",
+    "title": "Proposed idea"
+   },
+   {
+    "at": "2026-11-09T04:05:07.540428+00:00",
+    "organization_name": "",
+    "proposed": true,
+    "scope": "rem",
+    "ticket_id": "39928c8b-300b-4d7c-b212-46d5e46eb935",
+    "title": "Second idea"
+   }
+  ],
+  "unseen": true,
+  "updated_at": "2026-11-09T04:05:07.540442+00:00",
+  "work_done": [
+   {
+    "at": "2026-11-09T04:05:07.536156+00:00",
+    "state": "done",
+    "summary": "Finished the ticket.",
+    "thread_id": "c70eae5a-624c-4a50-ac37-f4237c3b0da3",
+    "ticket_id": "0f7c991a-9571-4688-a300-eff285cee704",
+    "title": "Done work"
+   }
+  ]
+ },
+ "settings": {
+  "auto_pull_backlog": false,
+  "enabled": true,
+  "idle_minutes": 15,
+  "max_threads": 2,
+  "revision": 0
+ },
+ "state": {
+  "active_threads": 1,
+  "detail": "1 thread working. 1 to-do left.",
+  "last_prompt_at": "",
+  "mode": "working",
+  "proposals_waiting": 2,
+  "starts_at": "",
+  "thread_limit": 2,
+  "todo_remaining": 1
+ }
+}

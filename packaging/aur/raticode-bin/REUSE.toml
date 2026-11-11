@@ -1,0 +1,8 @@
+version = 1
+
+# Package sources are licensed 0BSD, as the AUR submission guidelines encourage.
+# The packaged software itself is AGPL-3.0-only (see license= in PKGBUILD).
+[[annotations]]
+path = [".gitignore", ".SRCINFO", "PKGBUILD", "REUSE.toml", "raticode", "raticode.desktop"]
+SPDX-FileCopyrightText = "Raticode contributors"
+SPDX-License-Identifier = "0BSD"

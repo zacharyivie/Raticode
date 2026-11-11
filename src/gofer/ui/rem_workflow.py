@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -159,8 +159,13 @@ def submit_prompt(
     *,
     allow_actions: bool,
     request_id: str | None = None,
+    outside_input: Sequence[str] = (),
 ) -> str:
-    """Queue ``body`` in Rem's chat as the user's workflow asking; returns its message ID."""
+    """Queue ``body`` in Rem's chat as the user's workflow asking; returns its message ID.
+
+    ``outside_input`` names the triggers (``webhook``, ``file``) that started the run,
+    whose content someone other than the user may have written.
+    """
     text = body.strip()
     if not text or len(text) > 100000:
         raise RemWorkflowError(
@@ -169,7 +174,9 @@ def submit_prompt(
             "A Rem prompt needs between 1 and 100,000 characters.",
         )
     identity = request_id or f"workflow-{uuid4().hex}"
-    workflow = {**origin.document(), "allow_actions": allow_actions}
+    workflow: dict[str, Any] = {**origin.document(), "allow_actions": allow_actions}
+    if outside_input:
+        workflow["outside_input"] = [str(kind) for kind in outside_input]
     entry = {
         "id": identity,
         "body": text,

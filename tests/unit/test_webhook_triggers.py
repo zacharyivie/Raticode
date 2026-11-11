@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -611,3 +612,57 @@ def test_workflow_trigger_cli_runs_webhook(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Triggered hooked:github" in result.output
+    assert "--token is deprecated" in result.stderr
+
+
+def _trigger_args(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "workflow",
+        "trigger",
+        "hooked",
+        "--trigger-id",
+        "github",
+        "--payload-json",
+        '{"issue":{"number":5},"items":[]}',
+        "--data-dir",
+        str(tmp_path),
+        *extra,
+    ]
+
+
+def test_workflow_trigger_reads_the_token_from_a_private_file(tmp_path: Path) -> None:
+    _write_webhook_workflow(tmp_path / "hooked.toml")
+    token_file = tmp_path / "webhook-token"
+    token_file.write_text("secret-token\n", encoding="utf-8")
+    token_file.chmod(0o600)
+
+    result = runner.invoke(app, _trigger_args(tmp_path, "--token-file", str(token_file)))
+
+    assert result.exit_code == 0, result.output
+    assert "Triggered hooked:github" in result.stdout
+    assert "deprecated" not in result.stderr
+
+
+def test_workflow_trigger_reads_the_token_from_the_environment(tmp_path: Path) -> None:
+    _write_webhook_workflow(tmp_path / "hooked.toml")
+
+    result = runner.invoke(
+        app, _trigger_args(tmp_path), env={"RATICODE_WEBHOOK_TOKEN": "secret-token"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Triggered hooked:github" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_workflow_trigger_refuses_a_token_file_others_can_read(tmp_path: Path) -> None:
+    _write_webhook_workflow(tmp_path / "hooked.toml")
+    token_file = tmp_path / "webhook-token"
+    token_file.write_text("secret-token\n", encoding="utf-8")
+    token_file.chmod(0o644)
+
+    result = runner.invoke(app, _trigger_args(tmp_path, "--token-file", str(token_file)))
+
+    assert result.exit_code == 1
+    assert "readable by other users" in result.output
+    assert "Triggered" not in result.output

@@ -1,0 +1,21 @@
+{
+ "note_id": "ka7f17196db",
+ "kind": "decision",
+ "title": "Keep the link alive",
+ "summary": "Reconnect on unlock.",
+ "topic": "General",
+ "project_id": "",
+ "body": "Reconnect on unlock.",
+ "truncated": false,
+ "links": [
+  "kb45e838fde"
+ ],
+ "author": "You",
+ "created_at": "2026-11-06T14:43:08.212099+00:00",
+ "updated_at": "2026-11-06T14:43:08.212099+00:00",
+ "version": 1,
+ "second_brain": false,
+ "source_missing": false,
+ "connections": [],
+ "digest": "1b914bd499c54adbdd09113820e92594"
+}

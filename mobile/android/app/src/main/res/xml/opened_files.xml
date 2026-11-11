@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only copies the user chose to open are shareable, and only through a per-intent read grant. -->
+<paths>
+    <cache-path name="opened" path="opened/" />
+    <!-- A photo the user is taking for Rem's chat. Only the camera app gets a one-intent write grant; it is deleted once read. -->
+    <cache-path name="camera" path="camera/" />
+    <!-- Text handed to Rem's message box, such as Developer log entries. Never granted to another app; deleted once read. -->
+    <cache-path name="handoff" path="handoff/" />
+</paths>

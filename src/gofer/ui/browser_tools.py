@@ -1,4 +1,4 @@
-"""Rem's tools for Raticode's own browser tabs, served over MCP stdio.
+"""Rem's tools for tabs in Raticode's Browser plugin, served over MCP stdio.
 
 The desktop app drives the tabs. Access is granted per Rem turn: the backend
 asks the desktop for a capability bound to one thread while that thread's
@@ -43,7 +43,9 @@ UNAVAILABLE = (
     "external browser in Settings > Browser."
 )
 INSTRUCTIONS = (
-    "These tools control tabs in Raticode's built-in browser. browser_open adds a background "
+    "These tools control tabs in Raticode's Browser plugin. Your tabs run in the user's "
+    "default browser: Raticode (chromium), or a windowless Firefox, Chrome or Edge, never "
+    "Raticode (gecko). browser_open adds a background "
     "tab that the user can watch without losing their place. Call browser_snapshot to read a "
     "page and get element refs, then pass a ref to browser_click, browser_type, browser_hover, "
     "browser_select_option or browser_file_upload. Refs expire when the page navigates; take a "
@@ -92,7 +94,7 @@ TOOLS = [
     _tool(
         "browser_open",
         "open",
-        "Open a new background tab in Raticode's browser, optionally at a URL.",
+        "Open a new background tab in Raticode's Browser plugin, optionally at a URL.",
         {"url": {"type": "string"}},
     ),
     _tool("browser_tabs", "tabs", "List this task's open tabs.", read_only=True),

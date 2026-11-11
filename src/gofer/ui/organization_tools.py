@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from gofer.ui.organization_operations import READ_OPERATIONS, Routine
-from gofer.ui.organization_store import OrganizationConfig, Task
+from gofer.ui.organization_store import TASK_EDIT_FIELDS, OrganizationConfig, Task
 
 READ_ACTIONS = {
     "help",
@@ -26,33 +26,6 @@ READ_ACTIONS = {
     "repository",
 } | READ_OPERATIONS
 
-TASK_EDIT_FIELDS = {
-    "title",
-    "description",
-    "assignee",
-    "project",
-    "parentId",
-    "goal",
-    "priority",
-    "status",
-    "evidence",
-    "dueAt",
-    "recurring",
-    "intervalSeconds",
-    "approvalRequired",
-    "workspacePath",
-    "dependsOn",
-    "blockReason",
-    "reviewRequired",
-    "reviewer",
-    "goalId",
-    "artifacts",
-    "workflowContract",
-    "execution",
-    "epicId",
-    "doneWhen",
-    "knowledge",
-}
 
 # Parameters live under params; organizationId is a top-level tool argument.
 ACTION_HELP = {
@@ -125,7 +98,8 @@ ACTION_HELP = {
     ),
     "task_update": (
         "taskId, expectedRevision, changes using taskSchema fields. "
-        "status=cancelled stops a task. Changed plans invalidate approval. "
+        "status=cancelled stops a task. status=in_progress on a waiting ticket queues it "
+        "next for its worker; Raticode starts the run. Changed plans invalidate approval. "
         "Pause and wait before editing a running plan; use reopen to retry terminal work."
     ),
     "comment": "taskId, body, optional idempotencyKey, unblock. Adds an attributed comment.",

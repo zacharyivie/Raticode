@@ -29,6 +29,7 @@ Node repeat:
 
 Node step:
   type: break
+  needs: repeat
   loop: repeat
   message: Enough work has been done.
 ```

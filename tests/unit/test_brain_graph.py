@@ -142,6 +142,9 @@ def test_project_names_roots_and_report_folders():
     assert project_root(f"{REPO}/.worktrees/connected-second-brain") == REPO
     assert root_name(REPO) == "Raticode"
     assert root_name("/p/Raticode Mobile/raticode-mobile") == "Raticode Mobile"
+    assert root_name(f"{REPO}/mobile/android") == "Raticode Mobile"
+    assert root_name(f"{REPO}/.worktrees/move/mobile/android") == "Raticode Mobile"
+    assert root_name(f"{REPO}/.worktrees/move/docs") == "Raticode"
     assert root_name("/p/agent-evolution-trading") == "agent-evolution-trading"
     assert folder_project("Reports/Raticode/x.html") == "Raticode"
     assert folder_project("reports/rem/Reports/Raticode/x.html") == "Raticode"

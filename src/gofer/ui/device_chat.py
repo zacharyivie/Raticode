@@ -18,6 +18,9 @@ from gofer.ui.chat_jobs import ChatJobs
 from gofer.ui.chat_media import store_chat_attachments
 from gofer.ui.chat_steering import ChatSteering
 from gofer.ui.device_tools import FleetControl, stream_with_fleet_tools
+from gofer.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 
 def validate_context(context: dict[str, Any]) -> dict[str, Any]:
@@ -139,8 +142,16 @@ class DeviceChatBridge:
         while not self._closed.is_set():
             try:
                 claimed = self._tick()
+                if self.error is not None:
+                    log.info("Phone requests to Rem are being answered again")
                 self.error = None
             except (ValueError, OSError, sqlite3.Error):
+                # Retried every second; report the change, not every attempt.
+                if self.error is None:
+                    log.warning(
+                        "Phone requests to Rem are paused: their storage is unavailable",
+                        exc_info=True,
+                    )
                 self.error = "device_dispatch_storage_unavailable"
                 await asyncio.sleep(1)
                 continue
@@ -175,10 +186,17 @@ class DeviceChatBridge:
                 error=error,
                 **({"usage": request["usage"]} if "usage" in request else {}),
             )
-        except (ValueError, OSError, sqlite3.Error):
+        except (ValueError, OSError, sqlite3.Error) as exc:
             # Revoked peers may no longer receive a result. The persisted running
             # boundary remains ambiguous if completion could not be committed.
-            pass
+            if isinstance(exc, PairingError):
+                log.info("Phone request result not delivered: %s", exc)
+            else:
+                log.warning(
+                    "Could not record the result of a phone request (%s)",
+                    type(exc).__name__,
+                    exc_info=True,
+                )
 
     def dispatch(self, request: dict[str, Any]) -> None:
         event = request["event"]
@@ -393,6 +411,8 @@ class DeviceChatBridge:
             try:
                 asyncio.run(consume())
             except Exception:
+                # The phone is told to look at the desktop, so the desktop must say why.
+                log.exception("Rem turn %s for a phone request failed", turn)
                 self._complete(request, "", "dispatch_failed")
                 emit({"type": "error", "error": "Remote Rem dispatch failed; inspect desktop"})
             finally:

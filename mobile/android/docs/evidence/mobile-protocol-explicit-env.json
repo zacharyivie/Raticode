@@ -1,0 +1,122 @@
+{
+  "source_revision": "a8b9531b07b01a04b9e0fca18a0dec43b9afc978",
+  "source_worktree": "/home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1/77989ae333c1431a993f10f6c501cc37",
+  "preserved_edits": [
+    "README.md",
+    "docs/protocol-probes.md",
+    "docs/evidence/mobile-protocol-recovery.json",
+    "gradle.properties"
+  ],
+  "copied_artifacts": {
+    "artifacts/protocol/full-device-initial-failure.log": "ef83c4abfa0960fb500b6092c0aaa837cc1009d7660e0f7cf6dfec6d51fd8ebf",
+    "artifacts/protocol/full-device-initial-failure.xml": "94e0324b0bfbcfb3695dc2fd3311e3378363012ef94bc2981bd65119b9fd056f",
+    "artifacts/protocol/landscape-rerun.log": "36fa426a4ebda4231816a31e6f4fa75f69295e55fd7eb01d770830156b9e9b4a",
+    "artifacts/protocol/landscape-rerun.xml": "c5cd331455a61039f5869e44013da377f40640a7fadb91574909dada8b0be773",
+    "artifacts/protocol/build-unit-lint.log": "982fa16f1098b4ee97b8ba5fa184ff0d27d2c8f2f5a81a838a3bc9243c8d5307",
+    "artifacts/protocol/protocol-device.log": "4dfee1d5936fa33ca3a83d31ccbce9cbdc62ae1abf321ec279793e3adda56584",
+    "artifacts/protocol/schema.log": "ec1c953e73575e86dbad78861abc3e45ae94f1922c8f5a4e8178602194a317f0",
+    "artifacts/protocol/protocol-device.xml": "926f865f6423df0364eea48274d795a1e7fd8afbcc0067c8d8c02f8f994d3223",
+    "artifacts/recovery/build-unit-lint.log": "4b31f095820321fd50c21bfa036c366328ec9b0b16b1494d343369a511c8670c",
+    "artifacts/recovery/schema.log": "ec1c953e73575e86dbad78861abc3e45ae94f1922c8f5a4e8178602194a317f0",
+    "artifacts/recovery/system-launcher-build.log": "43211103bd983efef7471a0e5019d7f631410d4e89c7c9afea4cf6e860ba05d3",
+    "artifacts/recovery/managed-jdk-failure.log": "7f7816b5c1f2941f01fdb1605c64868a46d8024931059e98e9ecc00a890970a6",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.WorkspaceTest.xml": "f9fbc1a07527beff0815537a82e6c81f5cdfafb9476fe1a79e59528bae6da2cd",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml": "8e6de5cdccee944b95daf063ebd96d2ae0fb65d9de4af856f7076392e7c4691b",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.ProtocolTest.xml": "ee4f67481630b75839148db92e7180a994f3f677ad7c34b17b9c5d581a3c3536",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml": "d28f8ff8283b81bf681dd7a5ea59775ee6d01331532602a1d09a293763ff3613",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml": "31509365d66038738ced65fb0d34fe16095c0f72c494c22e35ce430ba7f5a90a",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml": "cf8838733fbc3961dca3b334395431bb49e97aa27c8ad472e50b7e95ab54aedd",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml": "d80992c554f028d46c0fd9e11212ef6a9b9efbbbfc1ad65951bf7c9f5d0e9d78",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml": "cb0805f460a868fc80d8f4ffa357ab49ce43a2f679c1c06d67384c5e4745cf74",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.WorkspaceTest.xml": "104187d5fdf0887d3f31760f266a70a39b3faf121cec4be3376ca9278a866bac",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml": "9f7471f52234be0c84fc534ca009d0d3a2696adc41f91181bf3f67e6e4ebf809",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.ProtocolTest.xml": "33bffe1ccca3a54b9a0b4beb7ebf694aeda98cf116ddcd4576c166efcf58b065",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml": "741b1903fe616a3e47166fab840bfe678376be3972366c1dc2c32a4bf5559f0f",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml": "59d75bd3a3aa7e6f743bd1e049604598df3caabea475c0a9fdd8c4784d9c127d",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml": "d82a06c0e46d7b2140340d216aa80d44fcd7e2a43badbbcd60af1d54d89d03e0",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml": "69af493def547d9cde12e8d3aa26bfed5ec8d3685d667eb6a487eca5c0518383",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml": "9cd1a9539006aae17566be0eea2c38cdcc85a12f10328a3480bdc0681f63c175"
+  },
+  "recorded_at": "2026-09-19T18:33:52.769062+00:00",
+  "desktop_revision": "2c5f89392942207080330d46bb0736d5bba33899",
+  "fixture_manifest_sha256": "f3faf4bb173b6fe4238530cf271c9fbe647025ce7587195cb1e7401ac9ba8e60",
+  "checks": {
+    "build_unit_lint": {
+      "exit_code": 0,
+      "command": "env JAVA_HOME=/home/doonk/.local/opt/jdk-21 ANDROID_HOME=/home/doonk/Android/Sdk ANDROID_SDK_ROOT=/home/doonk/Android/Sdk RATICODE_DESKTOP_PROBE_ROOT=<desktop recovery worktree at 2c5f893> ./gradlew assembleDebug testDebugUnitTest lintDebug --console=plain"
+    },
+    "schema": {
+      "exit_code": 0,
+      "command": ".venv-contract/bin/python scripts/check-contract.py"
+    }
+  },
+  "unit_suites": {
+    "dev.raticode.mobile.WorkspaceTest": {
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "dev.raticode.mobile.protocol.v2.SessionBindingTest": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "dev.raticode.mobile.ProtocolTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest": {
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "dev.raticode.mobile.protocol.v2.PythonTlsInteropTest": {
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "dev.raticode.mobile.protocol.v2.StreamingInteropTest": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "unit_totals": {
+    "tests": 44,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "fresh_artifacts": {
+    "artifacts/explicit-env/build-unit-lint.log": "11bc69e36e4887b72af84d1d5760758614ac5d38b67457da6a778e2e78834243",
+    "artifacts/explicit-env/schema.log": "ec1c953e73575e86dbad78861abc3e45ae94f1922c8f5a4e8178602194a317f0",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.WorkspaceTest.xml": "424c4b2eef8851088a8d93fd29b3a40510b290d1933cceda1fad1958a6b12c4f",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml": "f7292b6844b6f22b1f97720238b5b509f9239b2c7bfe0a8b77d988797210ae0b",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.ProtocolTest.xml": "21574b7b4cf30c085a23dda2a80039731d643784865d83a323faba464cd49879",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml": "8e93cf16b55012f5b72ca5bf59a4988800135c91c5e4117b8014e34a120d618b",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml": "2e6ff3889c6229d6f457abfee0eed70a6aa7390dc8974e9fa35bf8eb8f009157",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml": "736bc0393b818e5856ca1c0df13c3ce9f4c952f5a17e03e9e707d690fdafb48b",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml": "929bd8affdab64b250a8112fb502db9029aced3bb1f2620b29f66134262cf60d",
+    "artifacts/explicit-env/unit/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml": "b808adfe38e2938885826e10d2794bf05e8e9d7cd8409a76530dd64903b81e35"
+  },
+  "limits": "No device rerun in this recovery. Historical 13 scoped device passes and full-suite Back/IME failure retained unchanged; repair belongs to m-security. No live networking readiness or external cryptographic certification claimed."
+}

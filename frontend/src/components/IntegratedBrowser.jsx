@@ -13,20 +13,24 @@ import {
   GitCompareArrows,
   History,
   Loader2,
+  LogIn,
   MessageSquare,
   Minus,
   Plus,
   Printer,
+  Puzzle,
   RefreshCw,
   RotateCw,
   Save,
   Search,
+  Settings2,
   Share2,
   Star,
   Undo2,
   Volume2,
   VolumeX,
   X,
+  EyeOff,
 } from "lucide-react";
 import {
   AddressSuggestions,
@@ -42,6 +46,8 @@ import {
 } from "./BrowserPanels.jsx";
 import { askRemPageText } from "../lib/browserAskRem.js";
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
+import { attachFirefoxView } from "../lib/firefoxStreamView.js";
+import { engineLabel, isStreamedEngine, withArticle } from "../lib/browserEngines.js";
 import {
   addressWithCompletion,
   formatZoom,
@@ -55,6 +61,7 @@ const HISTORY_SAVE_DELAY_MS = 800;
 
 export default function IntegratedBrowser({
   active,
+  agentEngine = "",
   agentLabel = "",
   agentPartition = "",
   agentSessionId = "",
@@ -64,6 +71,7 @@ export default function IntegratedBrowser({
   discardAfterMs = 0,
   dragActive = false,
   editing = false,
+  engine = "",
   focusLocationOnCreate = false,
   initialUrl = "about:blank",
   localPath = "",
@@ -72,6 +80,7 @@ export default function IntegratedBrowser({
   onClose,
   onCycleTab,
   onNewTab,
+  onNewPrivateTab,
   onOpenFile,
   onReopenClosedTab,
   onShareWithRem,
@@ -80,6 +89,7 @@ export default function IntegratedBrowser({
   onStateChange,
   openBrowserBinding = "Mod+Alt+Slash",
   openTabs = [],
+  privateTab = false,
   savedHistory = null,
   searchUrl = "https://www.google.com/search?q={query}",
   showDiffButton = false,
@@ -97,11 +107,15 @@ export default function IntegratedBrowser({
   const savedHistoryRef = useRef(savedHistory);
   const initialApplicationKeybindingsRef = useRef(applicationKeybindings);
   const initialOpenBrowserBindingRef = useRef(openBrowserBinding);
+  // The browser a tab runs in is fixed when it opens.
+  const engineRef = useRef(engine);
   const onCloseRef = useRef(onClose);
   const onCycleTabRef = useRef(onCycleTab);
   const onNewTabRef = useRef(onNewTab);
   const onStateChangeRef = useRef(onStateChange);
   const onReopenClosedTabRef = useRef(onReopenClosedTab);
+  const onNewPrivateTabRef = useRef(onNewPrivateTab);
+  onNewPrivateTabRef.current = onNewPrivateTab;
   const askRemRef = useRef(null);
   const containerRef = useRef(null);
   const sessionIdRef = useRef("");
@@ -172,11 +186,16 @@ export default function IntegratedBrowser({
       // Raticode created this session for Rem. Closing the tab destroys the
       // view, which ends the session; a remount only attaches a new view.
       sessionIdRef.current = agentSessionId;
-      attachBrowserWebview(bridge, agentSessionId, containerRef.current, webviewRef, "about:blank", agentPartition || "persist:raticode-rem", (partialState) => {
+      const onAgentUpdate = (partialState) => {
         if (disposed || sessionIdRef.current !== agentSessionId) return;
         setState((current) => ({ ...current, ...partialState }));
         onStateChangeRef.current?.(partialState);
-      }, clientId, setFullscreen);
+      };
+      if (isStreamedEngine(agentEngine)) {
+        attachFirefoxView(bridge, agentSessionId, containerRef.current, webviewRef, { clientId, onUpdate: onAgentUpdate, engine: agentEngine, label: engineLabel(agentEngine) });
+      } else {
+        attachBrowserWebview(bridge, agentSessionId, containerRef.current, webviewRef, "about:blank", agentPartition || "persist:raticode-rem", onAgentUpdate, clientId, setFullscreen);
+      }
       setState((current) => ({ ...current, id: agentSessionId }));
       return () => {
         disposed = true;
@@ -193,6 +212,8 @@ export default function IntegratedBrowser({
       clientId,
       openBrowserBinding: initialOpenBrowserBindingRef.current,
       path: localPath,
+      ...(privateTab ? { private: true } : {}),
+      ...(!localPath && engineRef.current ? { engine: engineRef.current } : {}),
       url: localPath ? "" : initialUrlRef.current,
       ...(!localPath && restoreHistory?.entries?.length ? { history: restoreHistory } : {}),
     })
@@ -203,11 +224,14 @@ export default function IntegratedBrowser({
         }
         createdId = nextState?.id ?? "";
         sessionIdRef.current = createdId;
-        attachBrowserWebview(bridge, createdId, containerRef.current, webviewRef, nextState?.src, nextState?.partition || USER_PARTITION, (partialState) => {
+        const onUpdate = (partialState) => {
           if (disposed || sessionIdRef.current !== createdId) return;
           setState((current) => ({ ...current, ...partialState }));
           onStateChangeRef.current?.(partialState);
-        }, "", setFullscreen);
+        };
+        // A Firefox, Chrome or Edge tab streams its page from that browser.
+        if (isStreamedEngine(nextState?.engine)) attachFirefoxView(bridge, createdId, containerRef.current, webviewRef, { onUpdate, engine: nextState.engine, label: engineLabel(nextState.engine) });
+        else attachBrowserWebview(bridge, createdId, containerRef.current, webviewRef, nextState?.src, nextState?.partition || USER_PARTITION, onUpdate, "", setFullscreen);
         const cleanState = { ...(nextState ?? {}) };
         delete cleanState.src;
         delete cleanState.partition;
@@ -234,7 +258,7 @@ export default function IntegratedBrowser({
     };
     // runCommand reads refs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentPartition, agentSessionId, bridge, clientId, localPath, discarded]);
+  }, [agentEngine, agentPartition, agentSessionId, bridge, clientId, localPath, discarded]);
 
   function openFind() {
     setFindOpen(true);
@@ -259,6 +283,7 @@ export default function IntegratedBrowser({
       case "previous-tab": onCycleTabRef.current?.(-1); break;
       case "new-tab": onNewTabRef.current?.(); break;
       case "reopen-closed-tab": onReopenClosedTabRef.current?.(); break;
+      case "new-private-tab": onNewPrivateTabRef.current?.(); break;
       case "history": setLibraryView("history"); break;
       case "bookmark": if (id) void bridge?.bookmark?.(id).catch(() => {}); break;
       case "ask-rem": askRemRef.current?.(command.selection || "", command.element || null); break;
@@ -356,6 +381,7 @@ export default function IntegratedBrowser({
         case "find": openFind(); return;
         case "history": setLibraryView("history"); return;
         case "reopen-closed-tab": onReopenClosedTabRef.current?.(); return;
+        case "new-private-tab": onNewPrivateTabRef.current?.(); return;
         default: break;
       }
       if (!id || !state.ready) return;
@@ -404,6 +430,11 @@ export default function IntegratedBrowser({
         return;
       }
       if (!state.ready) return;
+      // A Firefox or Chrome view takes keyboard focus itself; there is no guest to focus.
+      if (isStreamedEngine(webview?.dataset?.engine)) {
+        webview.focus();
+        return;
+      }
       if (!id || !bridge?.focus) {
         webview?.focus?.();
         return;
@@ -591,25 +622,34 @@ export default function IntegratedBrowser({
   }
 
   const prompt = state.prompts?.[0] || null;
+  const isFirefox = state.engine === "firefox";
+  // Firefox and Chrome tabs stream from a browser Raticode runs without a window.
+  const isStreamed = isStreamedEngine(state.engine);
+  const engineName = engineLabel(state.engine);
   const agent = state.agent || (agentSessionId ? { label: agentLabel || "Rem", shared: false, log: [] } : null);
   const canUseWebFeatures = state.ready && !isPreview && /^https?:/i.test(String(state.url || ""));
   const rows = useMemo(() => (addressFocused ? suggestions : []), [addressFocused, suggestions]);
   const menuItems = [
+    ...(!isRemTab && !isPreview && onNewPrivateTab ? [{ label: "New private tab", icon: EyeOff, shortcut: "Ctrl+Shift+N", run: () => onNewPrivateTab() }] : []),
     ...(!isRemTab && onReopenClosedTab ? [{ label: "Reopen closed tab", icon: Undo2, shortcut: "Ctrl+Shift+T", run: () => onReopenClosedTab() }] : []),
     { label: "History", icon: History, run: () => setLibraryView("history") },
     { label: "Bookmarks", icon: Bookmark, run: () => setLibraryView("bookmarks") },
     { label: "Downloads", icon: Download, run: () => setLibraryView("downloads") },
     { label: "Site data and clearing", icon: Cookie, run: () => setLibraryView("data") },
+    ...(isFirefox ? [{ label: "Firefox settings and extensions…", icon: Settings2, run: () => window.dispatchEvent(new CustomEvent("raticode:open-browser-settings", { detail: { engine: "firefox" } })) }] : []),
+    ...(isStreamed && !isFirefox ? [{ label: `${engineName} settings…`, icon: Settings2, run: () => window.dispatchEvent(new CustomEvent("raticode:open-browser-settings", { detail: { engine: state.engine } })) }] : []),
+    ...(isStreamed && !isRemTab ? [{ label: `Sign in in ${withArticle(engineName)} window…`, icon: LogIn, run: () => run("firefoxSignIn"), disabled: !state.ready }] : []),
     { separator: true },
     { label: "Zoom out", icon: Minus, run: () => run("zoom", -1), disabled: !state.ready },
     { label: `Reset zoom (${formatZoom(state.zoom)})`, icon: Search, run: () => run("zoom", 0), disabled: !state.ready || !state.zoom || state.zoom === 1 },
     { label: "Zoom in", icon: Plus, run: () => run("zoom", 1), disabled: !state.ready },
     { separator: true },
-    { label: "Print…", icon: Printer, run: () => run("print"), disabled: !state.ready },
+    { label: isStreamed ? "Print to PDF…" : "Print…", icon: Printer, run: () => run("print"), disabled: !state.ready },
     { label: "Save as PDF…", icon: FileDown, run: () => run("savePdf"), disabled: !state.ready },
-    { label: "Save page as…", icon: Save, run: () => run("savePage"), disabled: !state.ready },
+    // Chrome and Edge save the page as one file; Firefox tabs can't save it.
+    { label: "Save page as…", icon: Save, run: () => run("savePage"), disabled: !state.ready || isFirefox },
     { label: "Hard reload", icon: RotateCw, run: () => run("reloadHard"), disabled: !state.ready },
-    { label: "Developer tools", icon: Code, run: () => run("toggleDevTools"), disabled: !state.ready },
+    { label: "Developer tools", icon: Code, run: () => run("toggleDevTools"), disabled: !state.ready || isStreamed },
     { separator: true },
     { label: state.muted ? "Unmute tab" : "Mute tab", icon: state.muted ? Volume2 : VolumeX, run: () => run("mute", !state.muted), disabled: !state.ready },
     ...(onAskRem && (!isPreview || /^file:/i.test(String(state.url || ""))) ? [{ label: "Ask Rem about this page", icon: MessageSquare, run: () => void askRem(""), disabled: !state.ready }] : []),
@@ -624,6 +664,7 @@ export default function IntegratedBrowser({
       aria-label="Integrated browser"
     >
       <div className={`${fullscreen ? "hidden" : "flex"} h-10 shrink-0 items-center gap-1 border-b border-line bg-slate-50 px-2`}>
+        {privateTab ? <span data-testid="browser-private-mark" className="flex shrink-0 items-center gap-1 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-ink"><EyeOff size={11} aria-hidden="true" />Private</span> : null}
         <span {...longPress(-1)} className="contents">
           <BrowserButton disabled={!state.canGoBack} label="Back" onClick={() => run("back")}><ArrowLeft size={14} /></BrowserButton>
         </span>
@@ -679,6 +720,12 @@ export default function IntegratedBrowser({
             <AddressSuggestions id={suggestionsId} rows={rows} activeIndex={activeSuggestion} onHover={setActiveSuggestion} onPick={pickSuggestion} />
           </div>
         </form>
+        {isStreamed ? (
+          <span
+            className="shrink-0 rounded border border-line bg-white px-1.5 py-0.5 text-[10px] font-semibold text-muted"
+            title={`This tab runs in ${engineName}, which Raticode starts without a window in its own ${engineName} profile. Choose the browser for each new tab from the arrow beside New tab.`}
+          >{engineName}</span>
+        ) : null}
         {agent ? (
           <RemChip
             agent={agent}
@@ -739,7 +786,10 @@ export default function IntegratedBrowser({
           onViewChange={setLibraryView}
         />
       ) : null}
+      {!fullscreen && privateTab && (!state.url || state.url === "about:blank") ? <p role="note" data-testid="browser-private-note" className="shrink-0 border-b border-line bg-slate-50 px-3 py-1.5 text-xs text-muted">Raticode doesn&apos;t keep this tab or its history, and its cookies and site data go when you close your last private tab. Downloads and bookmarks stay. Websites and your network can still see what you do.</p> : null}
       {!fullscreen ? <PromptBar prompt={prompt} onRespond={(response) => respondToPrompt(prompt, response)} /> : null}
+      {!fullscreen && isFirefox && state.firefoxAddon ? <FirefoxAddonBar bridge={bridge} slug={state.firefoxAddon} /> : null}
+      {!fullscreen && isStreamed && (state.signInBlocked || state.firefoxSignInBlocked) ? <FirefoxSignInBar name={engineName} onSignIn={() => bridge.firefoxSignIn(sessionIdRef.current)} /> : null}
       {!fullscreen ? (
         <BlockedPopupsBar
           popups={state.blockedPopups}
@@ -783,6 +833,53 @@ export default function IntegratedBrowser({
         )}
       </div>
     </section>
+  );
+}
+
+// On a Firefox Add-ons page, Firefox's own install prompt can't appear in a
+// windowless Firefox; Raticode installs the extension with its own prompt.
+// Google refuses to sign in while Raticode controls Firefox or Chrome; a
+// normal window on the same profile can sign in, and the tabs here come back
+// signed in.
+export function FirefoxSignInBar({ onSignIn, name = "Firefox" }) {
+  const [status, setStatus] = useState("");
+  const opening = `Opening ${withArticle(name)} window…`;
+  async function open() {
+    setStatus(opening);
+    try {
+      await onSignIn();
+      setStatus(`Sign in in the ${name} window, then close it. Your ${name} tabs here come back signed in.`);
+    } catch (error) {
+      setStatus(String(error?.message || error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
+    }
+  }
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-line bg-amber-50 px-3 py-1.5 text-xs text-ink" role="region" aria-label={`Sign in in ${withArticle(name)} window`}>
+      <LogIn aria-hidden="true" className="shrink-0 text-amber-800" size={13} />
+      <span className="min-w-0 flex-1">{status || `Google won’t sign in while Raticode controls ${name}. Sign in in a regular ${name} window that uses this same ${name}; your tabs here come back signed in when you close it.`}</span>
+      <button className="h-6 shrink-0 rounded-md bg-brand px-2 text-[11px] font-semibold text-white disabled:opacity-50" disabled={status === opening} type="button" onClick={() => void open()}>{`Sign in in ${withArticle(name)} window`}</button>
+    </div>
+  );
+}
+
+function FirefoxAddonBar({ bridge, slug }) {
+  const [status, setStatus] = useState("");
+  useEffect(() => setStatus(""), [slug]);
+  async function add() {
+    setStatus("Adding…");
+    try {
+      const result = await bridge.library("firefox-addon-install", { key: slug });
+      setStatus(result?.cancelled ? "" : `Added ${result?.installed?.name || "the extension"} to Raticode's Firefox.`);
+    } catch (error) {
+      setStatus(String(error?.message || error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
+    }
+  }
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-line bg-slate-50 px-3 py-1.5 text-xs text-ink" role="region" aria-label="Add this extension">
+      <Puzzle aria-hidden="true" className="shrink-0 text-muted" size={13} />
+      <span className="min-w-0 flex-1">{status || "Firefox's Add to Firefox button can't open its prompt here. Add this extension with Raticode instead."}</span>
+      <button className="h-6 shrink-0 rounded-md bg-brand px-2 text-[11px] font-semibold text-white disabled:opacity-50" disabled={status === "Adding…"} type="button" onClick={() => void add()}>Add to Raticode’s Firefox</button>
+    </div>
   );
 }
 

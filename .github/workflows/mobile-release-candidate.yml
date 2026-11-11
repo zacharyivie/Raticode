@@ -1,0 +1,276 @@
+name: Prepare mobile release candidate
+
+# Release checks and candidates run on stage, as on the desktop. Main receives a
+# reviewed candidate by squash merge, then a mobile-v* tag publishes it
+# (see mobile/android/docs/releasing.md).
+on:
+  push:
+    branches:
+      - stage
+    paths:
+      - 'mobile/android/**'
+      - 'src/gofer/devices/protocol/**'
+      - 'scripts/device_tls_probe.py'
+      - '.github/workflows/mobile-*.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-candidate-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate source
+    if: github.ref == 'refs/heads/stage'
+    uses: ./.github/workflows/mobile-android-ci.yml
+
+  credentials:
+    name: Check signing configuration
+    if: github.ref == 'refs/heads/stage'
+    runs-on: ubuntu-24.04
+    environment: ${{ vars.ANDROID_RELEASE_SIGNING == 'true' && 'android-release-signing' || 'android-release-unsigned' }}
+    outputs:
+      signed_release: ${{ steps.policy.outputs.signed_release }}
+    steps:
+      - name: Record signing policy
+        id: policy
+        env:
+          SIGNED_RELEASE: ${{ vars.ANDROID_RELEASE_SIGNING == 'true' }}
+        run: echo "signed_release=$SIGNED_RELEASE" >> "$GITHUB_OUTPUT"
+      - name: Check all required settings without printing values
+        if: vars.ANDROID_RELEASE_SIGNING == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          python3 - <<'PYCODE'
+          import os
+          names = ('ANDROID_KEYSTORE_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_PASSWORD',
+                   'ANDROID_KEY_ALIAS', 'ANDROID_SIGNING_CERT_SHA256')
+          missing = [name for name in names if not os.environ.get(name, '').strip()]
+          if missing:
+              raise SystemExit('Missing release-signing settings: ' + ', '.join(missing))
+          print('All five signing settings are present. The build verifies them.')
+          PYCODE
+
+  build:
+    name: Build and test Android candidate
+    needs: [validate, credentials]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: ${{ needs.credentials.outputs.signed_release == 'true' && 'android-release-signing' || 'android-release-unsigned' }}
+    outputs:
+      instrumented_passed: ${{ steps.emulator-report.outputs.instrumented_passed }}
+      instrumented_result: ${{ steps.emulator-report.outputs.instrumented_result }}
+    defaults:
+      run:
+        working-directory: mobile/android
+    env:
+      SIGNED_RELEASE: ${{ needs.credentials.outputs.signed_release }}
+      ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: platform-tools platforms;android-37.0 build-tools;36.0.0
+
+      # Also validates the committed Gradle wrapper checksum. Release builds don't
+      # reuse a cache written by another branch.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-read-only: true
+
+      - name: Build the release APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ needs.credentials.outputs.signed_release == 'true' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ needs.credentials.outputs.signed_release == 'true' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+          ANDROID_KEY_PASSWORD: ${{ needs.credentials.outputs.signed_release == 'true' && secrets.ANDROID_KEY_PASSWORD || '' }}
+          ANDROID_KEY_ALIAS: ${{ needs.credentials.outputs.signed_release == 'true' && vars.ANDROID_KEY_ALIAS || '' }}
+        run: |
+          # Gradle treats any RATICODE_RELEASE_* variable, even an empty one, as a signing
+          # request, so they exist only in signed mode. It never falls back to the debug key.
+          if [ "$SIGNED_RELEASE" = "true" ]; then
+            keystore="$RUNNER_TEMP/raticode-release.jks"
+            (umask 077 && printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore")
+            export RATICODE_RELEASE_STORE_FILE="$keystore"
+            export RATICODE_RELEASE_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+            export RATICODE_RELEASE_KEY_ALIAS="$ANDROID_KEY_ALIAS"
+            export RATICODE_RELEASE_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
+          fi
+          unset ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS
+          status=0
+          ./gradlew assembleRelease lintRelease --console=plain || status=$?
+          rm -f "$RUNNER_TEMP/raticode-release.jks"
+          exit "$status"
+
+      - name: Check the release APK against the release policy
+        run: python3 scripts/release-candidate.py collect --output candidate
+
+      - name: Audit release dependencies
+        run: |
+          ./gradlew -I scripts/dependency-inventory.init.gradle dependencyInventory --console=plain
+          python3 scripts/release-candidate.py audit --output candidate/audit-evidence
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Instrumented tests use the debug build. The launch test then installs the
+      # release APK (or, unsigned, a copy signed with a throwaway key) on the same
+      # emulator. Tests that need the desktop fixture skip themselves here.
+      # Failed instrumented tests don't stop the candidate: Gradle's exit code goes to
+      # device-test, which records it. device-test still fails this step when no tests
+      # ran (for example the test APK didn't build) or the release APK doesn't launch.
+      - name: Run instrumented tests and launch the release APK
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          # The UI tests are written against a Pixel 8 screen (1080x2400, 420 dpi).
+          # The runner's avdmanager has no pixel_8, so use pixel_6, which has the
+          # same screen. The default AVD's small screen and memory hide controls,
+          # break swipes and crash the run.
+          profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          disable-animations: true
+          working-directory: ./mobile/android
+          # One line: the action runs each line in its own shell.
+          script: ./gradlew connectedDebugAndroidTest --console=plain; python3 scripts/release-candidate.py device-test --candidate candidate/android --results app/build/outputs/androidTest-results/connected --instrumented-exit $?
+
+      - name: Report emulator tests (non-blocking)
+        id: emulator-report
+        run: python3 scripts/release-candidate.py report-instrumented --candidate candidate/android
+
+      - name: Show disk space left after the build and emulator
+        if: always()
+        run: df -h .
+
+      - name: Generate checksums
+        run: python3 scripts/release-candidate.py seal candidate/android
+
+      - name: Upload Android candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: raticode-mobile-android
+          path: mobile/android/candidate/android/
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload dependency audit
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: raticode-mobile-audit-evidence
+          path: mobile/android/candidate/audit-evidence/
+          if-no-files-found: error
+          overwrite: true
+
+      # Kept out of the public release. Download and store it with the release for
+      # crash reports; apk-checks.json records its hash.
+      - name: Upload R8 mapping
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: r8-mapping
+          path: mobile/android/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+      - name: Upload test and lint reports
+        if: failure() || steps.emulator-report.outputs.instrumented_passed == 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-reports
+          path: |
+            mobile/android/app/build/reports/
+            mobile/android/app/build/outputs/androidTest-results/
+          retention-days: 14
+
+  # A separate job so the emulator result has its own visible status. It fails when
+  # the instrumented tests failed, but continue-on-error keeps that from failing the
+  # run or stopping the APK from being staged.
+  emulator-tests:
+    name: Emulator tests (non-blocking)
+    needs: build
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - name: Emulator test result
+        env:
+          PASSED: ${{ needs.build.outputs.instrumented_passed }}
+          RESULT: ${{ needs.build.outputs.instrumented_result }}
+        run: |
+          if [ "$PASSED" = "true" ]; then
+            echo "Emulator tests passed: $RESULT"
+          else
+            echo "::error title=Emulator tests failed (non-blocking)::$RESULT. The APK was still built, checked and staged; see the build job's summary and the candidate-reports artifact."
+            exit 1
+          fi
+
+  stage:
+    name: Stage exact files
+    needs: [credentials, build]
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: mobile/android
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Download this run's candidate and evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: raticode-mobile-*
+          path: mobile/android/candidate-input
+      - name: Create candidate manifest and verify completeness
+        env:
+          SIGNED_RELEASE: ${{ needs.credentials.outputs.signed_release }}
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release-candidate.py manifest
+      - name: Attest the APK, evidence and manifest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: mobile/android/release-artifacts/*
+      - name: Upload draft and verify every remote asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release-candidate.py stage

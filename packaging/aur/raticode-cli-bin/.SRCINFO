@@ -1,0 +1,17 @@
+pkgbase = raticode-cli-bin
+	pkgdesc = Raticode command line tool for running Rattish workflows (prebuilt)
+	pkgver = 0.5.2
+	pkgrel = 1
+	url = https://github.com/zacharyivie/Raticode
+	arch = x86_64
+	license = AGPL-3.0-only
+	depends = glibc
+	depends = zlib
+	provides = raticode-cli
+	conflicts = raticode-cli
+	options = !strip
+	options = !debug
+	source = raticode-cli-0.5.2::https://github.com/zacharyivie/Raticode/releases/download/v0.5.2/raticode-cli-linux-x64
+	sha256sums = 87401d69a74f830f6c7913bb534c95b040f733b527aac940e35b2be5c9848396
+
+pkgname = raticode-cli-bin

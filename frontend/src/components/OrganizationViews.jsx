@@ -6,6 +6,7 @@ import {
   orgMilestoneProgress, projectProgress, startHint, zoneTime, ticketsOfEpic, ago, timeAgo, workerStatus,
 } from "../lib/organizationModel.js";
 import { monthUsage, organizationRequest, plural } from "../lib/organizations.js";
+import { clockText, daySegments, describeBlock, zoneClock } from "../lib/organizationSchedule.js";
 
 const pct = value => Math.round(value * 100);
 
@@ -171,7 +172,7 @@ function NeedsYou({ model, busy, onOpen, onAct, onBoard }) {
       if (item.type === "heartbeat") {
         const worker = model.workers[item.worker];
         return <div className="oh-need" key={`heartbeat:${item.worker}`}><span className="oh-icon-badge st-blocked"><HeartPulse size={15} /></span>
-          <span className="what"><b>{worker.name}&apos;s check-ins stopped</b><small>The last three failed. {item.stall.reason}</small></span>
+          <span className="what"><b>{worker.name}&apos;s check-ins stopped</b><small>Several check-ins in a row failed, so they stopped. Last: {item.stall.reason}. Resuming starts one as soon as the organization runs within working hours.</small></span>
           <span className="acts">{model.tickets[item.stall.taskId] && <button className="oh-btn small" type="button" onClick={() => onOpen(`ticket:${item.stall.taskId}`)}>Open</button>}
             <button className="oh-btn small primary" type="button" disabled={busy} onClick={() => onAct("heartbeat_resume", { employeeId: item.worker }, `${worker.name}'s check-ins resume now.`)}>Resume check-ins</button></span></div>;
       }
@@ -234,6 +235,7 @@ export function OverviewView({ model, events, busy, onOpen, onAct, go }) {
       </button>)}
       <button className="oh-panel oh-proj-card oh-new-card" type="button" onClick={() => onOpen("new:project")}><Plus size={16} /><b>New project</b><span className="meta"><span>Group milestones, epics and tickets</span></span></button>
     </div>
+    <WorkSchedule model={model} onOpen={onOpen} />
     <WorkingHours model={model} onOpen={onOpen} />
     <SharedRepository model={model} busy={busy} onAct={onAct} />
   </>;
@@ -252,6 +254,50 @@ export function WorkingHours({ model, onOpen }) {
       <button className="oh-btn small ghost" type="button" onClick={() => onOpen("new:hours")}><Clock size={14} />Change</button></div>
     <p className="oh-muted">{now}</p>
     <small className="oh-faint">{model.config.resumeAfterRestart ? "Keeps running after Raticode restarts." : "Pauses when Raticode restarts; you start it again."}</small>
+  </section>;
+}
+
+// What workers focus on when: the block on now, the next one, today at a glance, the blocks
+// that come round weekly, monthly or quarterly, and who is working under which block.
+export function WorkSchedule({ model, onOpen }) {
+  const state = model.organization.diagnostics?.schedule;
+  if (!state) return null;
+  const blocks = model.config.workSchedule?.blocks || [];
+  const zone = state.timezone || "UTC";
+  const clock = zoneClock(zone);
+  const today = state.configured ? daySegments(blocks, clock.weekday) : [];
+  const color = block => `oh-b${Math.max(0, blocks.indexOf(block)) % 6}`;
+  const occasional = blocks.filter(b => b.cadence !== "daily");
+  const current = state.current, next = state.next;
+  return <section className="oh-panel oh-schedule" aria-labelledby="oh-schedule-h">
+    <div className="oh-section-head"><h2 id="oh-schedule-h">Work schedule</h2><span className="oh-muted">{state.configured ? `${plural(blocks.length, "block")} · ${zone}` : "Not set"}</span><span className="grow" />
+      <button className="oh-btn small ghost" type="button" onClick={() => onOpen("new:schedule")}><Clock size={14} />{state.configured ? "Edit" : "Set up"}</button></div>
+    {!state.configured ? <div className="oh-schedule-empty">
+      <p className="oh-muted">Workers follow their usual priorities at any hour. A schedule shifts what they favor through the day, week, month and quarter.</p>
+      <button className="oh-btn small" type="button" onClick={() => onOpen("new:schedule:suggested")}>Start from the suggested schedule</button>
+    </div> : <>
+      <div className="oh-now-next">
+        <div className={`oh-now ${current ? color(blocks.find(b => b.id === current.id)) : ""}`}>
+          <span className="oh-kicker">Now</span>
+          {current ? <><b>{current.label}</b><span className="oh-muted">until {zoneTime(current.endsAt, zone)}</span>{current.focus && <p>{current.focus}</p>}</>
+            : <><b>No block</b><p>Workers use their usual priorities.</p></>}
+        </div>
+        <div className="oh-next">
+          <span className="oh-kicker">Next</span>
+          {state.changesAt ? <><b>{next ? next.label : "No block"}</b><span className="oh-muted">{zoneTime(state.changesAt, zone)}</span></> : <span className="oh-muted">No change coming up</span>}
+        </div>
+      </div>
+      <div className="oh-day" role="img" aria-label={`Today in ${zone}: ${today.map(s => `${clockText(s.start)} to ${clockText(s.end)} ${s.block ? s.block.label : "no block"}`).join("; ")}`}>
+        {today.map(s => <span key={s.start} className={s.block ? color(s.block) : "none"} style={{ flexGrow: s.end - s.start }} title={`${clockText(s.start)}–${clockText(s.end)} ${s.block ? s.block.label : "No block"}`}>{s.end - s.start >= 150 ? s.block?.label : ""}</span>)}
+        <i className="oh-day-now" style={{ left: `${(clock.minute / 1440) * 100}%` }} aria-hidden="true" />
+      </div>
+      <div className="oh-day-scale" aria-hidden="true"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+      {occasional.length > 0 && <ul className="oh-occasional" aria-label="Weekly, monthly and quarterly blocks">{occasional.map(b => <li key={b.id}><i className={color(b)} /><b>{b.label}</b><span className="oh-muted">{describeBlock(b)}</span></li>)}</ul>}
+      {(state.underway || []).length > 0 && <ul className="oh-underway" aria-label="Working now">{state.underway.map(u => <li key={u.taskId}>
+        <b>{model.workers[u.employeeId]?.name || "A worker"}</b><span>{u.checkIn ? "is checking in" : <>is on <button className="oh-link" type="button" onClick={() => onOpen(`ticket:${u.taskId}`)}>{model.tickets[u.taskId]?.key || u.title}</button></>}</span>
+        <span className="oh-muted">{u.block ? `started under ${u.block.label}` : "started outside any block"}</span></li>)}</ul>}
+      {(state.issues || []).map(issue => <p className="oh-warn-line" key={issue.text}><AlertTriangle size={14} />{issue.text}</p>)}
+    </>}
   </section>;
 }
 

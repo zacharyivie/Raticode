@@ -39,7 +39,8 @@ an explicit `--user-data-dir` takes precedence. Embedded browser tabs use a new
 partition, so websites may require signing in again.
 
 The command line tool is `Raticode`, and the Python distribution, Linux CLI
-packages and Arch packages use `raticode`, `raticode-cli` and `raticode-desktop`.
+packages and AUR packages use `raticode`, `raticode-cli`, `raticode-bin` and
+`raticode-cli-bin`.
 Releases up to 0.5.1 installed the command as `gof`. The Linux CLI packages
 replace the earlier package on upgrade, and the desktop app removes its old
 helper copy of the CLI from the trusted helper folder. Version lookups also

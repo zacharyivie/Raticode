@@ -16,12 +16,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from gofer.core.provider_capabilities import PROVIDER_BINARIES
+from gofer.core.provider_capabilities import PROVIDER_BINARIES, model_block_applies
 from gofer.core.provider_preferences import provider_preference, voice_tidy_preference
 
 # Fast models by provider, best first. Each entry is matched against the
-# provider's model list; Claude Code lists only aliases, so its full model ID
-# is used directly.
+# provider's model list. Claude Code's fallback list has only aliases, so its
+# full model ID is used directly.
 FAST_MODELS: dict[str, tuple[str, ...]] = {
     "claude_code": ("claude-haiku-5-5",),
     "codex": (r"luna",),
@@ -31,7 +31,7 @@ FAST_MODELS: dict[str, tuple[str, ...]] = {
     "antigravity": (r"flash",),
     "grok": (r"fast", r"mini"),
 }
-# Models whose provider lists them by alias only, so they can't be found in the catalog.
+# Models that may be listed by alias only, so they can't always be found in the catalog.
 UNLISTED = {"claude_code": {"claude-haiku-5-5"}}
 # Claude Code resolves Haiku 5.5 correctly from this version on.
 MINIMUM_CLI = {("claude_code", "claude-haiku-5-5"): (2, 1, 293)}
@@ -163,9 +163,13 @@ def selection(
     if payload is None or not payload.get("available") or payload.get("enabled") is False:
         result["reason"] = f"{result['providerName']} isn't available on this computer."
         return result
-    if model in (
-        payload.get("deniedModels") or provider_preference(provider).get("deniedModels", [])
-    ):
+    aliases = {
+        str(entry.get("id")): str(entry.get("aliasOf"))
+        for entry in payload.get("discoveredModels") or payload.get("models") or []
+        if entry.get("aliasOf")
+    }
+    denied = payload.get("deniedModels") or provider_preference(provider).get("deniedModels", [])
+    if model_block_applies(provider, model, denied, aliases):
         result["reason"] = f"{model_label(model)} is blocked in provider settings."
         return result
     listed = {m.get("id") for m in payload.get("models") or []}

@@ -1,5 +1,6 @@
 const { spawn } = require("node:child_process");
 const path = require("node:path");
+const geckoDisplay = require("./gecko-display.cjs");
 const os = require("node:os");
 const fs = require("node:fs");
 const electronPath = require("electron");
@@ -46,6 +47,7 @@ function runningProfileOwner(directory) {
 // running window, which then jumps to the front and takes keyboard focus. Refuse
 // before starting Electron, so the running window is never contacted.
 const userDataDir = profileDir(electronArgs);
+if (geckoDisplay.relaunchNeeded({ userData: userDataDir, argv: electronArgs, env })) electronArgs.push(geckoDisplay.X11_SWITCH);
 const owner = userDataDir ? runningProfileOwner(userDataDir) : 0;
 if (owner) {
   process.stderr.write(

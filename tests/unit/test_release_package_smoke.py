@@ -163,13 +163,38 @@ def test_platform_extraction_and_evidence(
         (tmp_path / name).touch()
     run = Mock(return_value="")
     probe = Mock()
+    headless = Mock(return_value={"checks": ["fixture"]})
     trees = Mock()
+    speech = Mock()
     monkeypatch.setattr(smoke, "run", run)
     monkeypatch.setattr(smoke, "probe", probe)
+    monkeypatch.setattr(smoke, "probe_headless", headless)
     monkeypatch.setattr(smoke, "probe_tree", trees)
+    monkeypatch.setattr(smoke, "probe_speech_helper", speech)
+    app_signing, dmg_signing, signing = Mock(), Mock(), Mock()
+    monkeypatch.setattr(smoke, "check_mac_app_signing", app_signing)
+    monkeypatch.setattr(smoke, "check_mac_dmg_signing", dmg_signing)
+    monkeypatch.setattr(smoke, "mac_signing", Mock(return_value=signing))
+    monkeypatch.setenv("RATICODE_MACOS_SIGNING", "developer-id")
+    monkeypatch.setenv("RATICODE_MACOS_TEAM_ID", "ABCDE12345")
     smoke.main()
     assert probe.call_count == 1
+    # The standalone CLI also runs as a headless backend and as its own client.
+    assert headless.call_args_list == [((probe.call_args.args[0],),)]
     assert trees.call_count == {"linux": 5, "darwin": 2, "win32": 1}[platform]
+    # Both the zip and the dmg copy of Raticode.app must carry the dictation helper.
+    assert speech.call_count == (2 if platform == "darwin" else 0)
+    # Both copies, and the DMG and CLI, are checked against the build's signing policy.
+    checked_apps = [c.args[0] for c in app_signing.call_args_list]
+    if platform == "darwin":
+        assert [p.parent.name for p in checked_apps] == ["zip", "dmg-app"]
+        assert all(
+            c.args[1:3] == ("developer-id", "ABCDE12345") for c in app_signing.call_args_list
+        )
+        assert dmg_signing.call_args.args[0].name.endswith("-arm64.dmg")
+        signing.require_developer_id.assert_called_once()
+    else:
+        assert checked_apps == [] and not dmg_signing.called
     commands = [c.args for c in run.call_args_list]
     if platform == "darwin":
         assert commands[-1][:2] == ("hdiutil", "detach")
@@ -180,7 +205,14 @@ def test_platform_extraction_and_evidence(
         assert sum(c[0] == "dpkg-deb" for c in commands) == 2
         assert sum(c[0] == "bsdtar" for c in commands) == 2
     evidence = next(tmp_path.glob("package-tests-*.json"))
-    assert json.loads(evidence.read_text())["status"] == "passed"
+    recorded = json.loads(evidence.read_text())
+    assert recorded["status"] == "passed"
+    assert recorded["headless"] == {"checks": ["fixture"]}
+    assert "headless backend and client mode" in recorded["scope"]
+    if platform == "darwin":
+        assert (recorded["signing"], recorded["team_id"]) == ("developer-id", "ABCDE12345")
+    else:
+        assert "signing" not in recorded
     probe.side_effect = RuntimeError("broken backend")
     with pytest.raises(RuntimeError, match="broken backend"):
         smoke.main()
@@ -193,7 +225,13 @@ def test_macos_unmounts_after_probe_failure(
     monkeypatch.setattr(smoke, "RELEASE", tmp_path)
     monkeypatch.setattr(smoke.sys, "platform", "darwin")
     monkeypatch.setattr(smoke, "probe", Mock())
+    monkeypatch.setattr(smoke, "probe_headless", Mock(return_value={}))
     monkeypatch.setattr(smoke, "probe_tree", Mock(side_effect=[None, RuntimeError("bad dmg")]))
+    monkeypatch.setattr(smoke, "probe_speech_helper", Mock())
+    monkeypatch.setattr(smoke, "check_mac_app_signing", Mock())
+    monkeypatch.setattr(smoke, "check_mac_dmg_signing", Mock())
+    monkeypatch.setattr(smoke, "mac_signing", Mock())
+    monkeypatch.setenv("RATICODE_MACOS_SIGNING", "unsigned")
     run = Mock()
     monkeypatch.setattr(smoke, "run", run)
     with pytest.raises(RuntimeError, match="bad dmg"):
@@ -225,3 +263,116 @@ def test_child_process_resets_inherited_pyinstaller_environment(
         "import os; print(os.environ['PYINSTALLER_RESET_ENVIRONMENT'])",
     )
     assert output.strip() == "1"
+
+
+def _fake_app(root: Path, script: str) -> Path:
+    helper = root / "Raticode.app/Contents/Resources/speech/raticode-speech"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(f"#!{sys.executable}\n{script}\n")
+    helper.chmod(0o755)
+    return helper
+
+
+def test_the_mac_speech_helper_probe_needs_a_running_bundled_helper(
+    smoke: ModuleType, tmp_path: Path
+) -> None:
+    with pytest.raises(RuntimeError, match="missing its macOS speech helper"):
+        smoke.probe_speech_helper(tmp_path)
+    helper = _fake_app(
+        tmp_path / "good",
+        'import json; print(json.dumps({"type": "status", "available": False}))',
+    )
+    smoke.probe_speech_helper(tmp_path / "good")
+    helper.chmod(0o644)
+    with pytest.raises(RuntimeError, match="not executable"):
+        smoke.probe_speech_helper(tmp_path / "good")
+    _fake_app(tmp_path / "silent", "print('hello')")
+    with pytest.raises(RuntimeError, match="gave no status"):
+        smoke.probe_speech_helper(tmp_path / "silent")
+    _fake_app(tmp_path / "crash", "import os; os.abort()")
+    with pytest.raises(RuntimeError, match="exited with status"):
+        smoke.probe_speech_helper(tmp_path / "crash")
+
+
+def _source_cli(root: Path) -> Path:
+    """An executable that runs this checkout's CLI, standing in for the frozen binary."""
+    cli = root / "bin" / "Raticode"
+    cli.parent.mkdir(parents=True)
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'src')!r})\n"
+        "from gofer.cli.main import app\n"
+        "app(prog_name='Raticode')\n"
+    )
+    cli.chmod(0o755)
+    return cli
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the source stand-in is a shebang script")
+def test_headless_probe_runs_a_real_backend_and_client(smoke: ModuleType, tmp_path: Path) -> None:
+    cli = _source_cli(tmp_path)
+    scratch = tmp_path / "probe"
+    scratch.mkdir()
+    result = smoke.probe_headless(cli, scratch)
+    assert result["exit_status"] == 0
+    assert result["endpoint"]["host"] == "127.0.0.1"
+    assert int(result["endpoint"]["port"]) > 0
+    assert len(result["checks"]) == 7
+    # Everything the backend wrote stayed in the scratch folder.
+    assert (scratch / "data" / "headless").is_dir()
+    assert not (scratch / "data" / "headless" / "endpoint.json").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-ins are shebang scripts")
+def test_headless_probe_reports_a_backend_that_cannot_start(
+    smoke: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = tmp_path / "Raticode"
+    broken.write_text(f"#!{sys.executable}\nimport sys\nprint('boom: no backend')\nsys.exit(3)\n")
+    broken.chmod(0o755)
+    with pytest.raises(RuntimeError, match="exited with status 3(.|\\n)*boom: no backend"):
+        smoke.probe_headless(broken, tmp_path / "a")
+    silent = tmp_path / "Silent"
+    silent.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+    silent.chmod(0o755)
+    monkeypatch.setattr(smoke, "HEADLESS_START_SECONDS", 1)
+    with pytest.raises(RuntimeError, match="published no endpoint"):
+        smoke.probe_headless(silent, tmp_path / "b")
+
+
+def test_isolated_env_hides_the_callers_raticode_settings(
+    smoke: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RATICODE_TOKEN", "owner-secret")
+    monkeypatch.setenv("RATICODE_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("RATICODE_AGENT_SESSION", "1")
+    env = smoke.isolated_env(tmp_path)
+    assert not {key for key in env if key.startswith(("RATICODE_", "GOFER_UI"))}
+    assert env["GOFER_DATA_DIR"] == str(tmp_path / "data")
+    assert env["HOME"] == str(tmp_path / "home")
+
+
+def test_stopping_the_headless_backend_ends_its_whole_process_tree_on_windows(
+    smoke: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A one-file Windows CLI's backend runs as a child of its launcher."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(smoke.os, "name", "nt")
+
+    def fake_run(command: list[str], **_: object) -> Mock:
+        calls.append(command)
+        return Mock()
+
+    monkeypatch.setattr(smoke.subprocess, "run", fake_run)
+    process = Mock(pid=4321)
+    process.poll.return_value = None
+    process.wait.return_value = 1
+    assert smoke._stop(process) == 1
+    assert calls == [["taskkill", "/PID", "4321", "/T", "/F"]]
+    process.terminate.assert_called_once()
+
+    calls.clear()
+    monkeypatch.setattr(smoke.os, "name", "posix")
+    assert smoke._stop(process) == 1
+    assert calls == []

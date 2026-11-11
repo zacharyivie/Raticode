@@ -64,6 +64,7 @@ function browserShortcutAction(input = {}, platform = process.platform, openBrow
   if ((primary && key === "r") || (plain && key === "f5")) return "reload";
   if (primary && key === "w") return "close";
   if (primary && input.shift && !input.alt && key === "t") return "reopen-closed-tab";
+  if (primary && input.shift && !input.alt && key === "n") return "new-private-tab";
   if (input.control && !input.alt && !input.meta && key === "tab") {
     return input.shift ? "previous-tab" : "next-tab";
   }
@@ -152,7 +153,7 @@ function browserSessionShortcutAction(
 
 const BROWSER_PRIORITY_ACTIONS = new Set([
   "close", "new-tab", "focus-location", "reload", "reload-hard", "print", "toggle-devtools",
-  "reopen-closed-tab", "bookmark", "history",
+  "reopen-closed-tab", "new-private-tab", "bookmark", "history",
 ]);
 
 function browserCommandRequiresOwnerFocus(action) {
@@ -166,6 +167,7 @@ function browserCommandRequiresOwnerFocus(action) {
     "next-tab",
     "previous-tab",
     "reopen-closed-tab",
+    "new-private-tab",
   ].includes(action);
 }
 

@@ -23,7 +23,12 @@ if mode == "fail":
     say(type="error", code="denied", message="Speech recognition is off for Raticode.")
     sys.exit(3)
 if mode == "crash":
+    sys.stderr.write("dyld: Library not loaded: Speech.framework\n")
+    sys.stderr.flush()
     os.abort()
+if mode == "trap":
+    import signal
+    os.kill(os.getpid(), signal.SIGTRAP)
 if mode == "check":
     say(type="status", available=False, reason="Turn on Dictation.", language="en-US")
     sys.exit(0)
@@ -82,6 +87,7 @@ class FakeVosk:
 def clean_sessions():
     chat_media._transcription_sessions.clear()
     system_speech._check_cache.clear()
+    system_speech._logged_checks.clear()
     yield
     for session in list(chat_media._transcription_sessions.values()):
         chat_media._close_session(session)
@@ -255,7 +261,7 @@ def test_without_the_offline_model_a_refusal_explains_how_to_switch(monkeypatch,
         chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))
     assert str(raised.value) == (
         "Speech recognition is off for Raticode. "
-        "You can choose Raticode's offline speech model in Settings > Devices."
+        "You can download Raticode's offline speech model in Settings > Devices."
     )
 
 
@@ -320,3 +326,150 @@ def test_speech_engine_preference_defaults_to_the_os_and_validates(monkeypatch, 
         provider_preferences.save_speech_preference({"engine": "cloud"})
     with pytest.raises(ValueError):
         provider_preferences.save_speech_preference({"engine": "system", "extra": 1})
+
+
+# Logging: each stage of a dictation is in the app log, with no audio and no words.
+
+WORDS = ("first phrase", "heard ", "all ", "offline ")
+
+
+def assert_no_words(caplog) -> None:
+    for record in caplog.records:
+        text = record.getMessage()
+        assert not any(word in text for word in WORDS), text
+
+
+def test_a_missing_helper_says_what_was_looked_for(tmp_path) -> None:
+    assert system_speech.HELPER_ENV in system_speech.system_engine("darwin", {}).detail
+    gone = tmp_path / "gone"
+    mac = system_speech.system_engine("darwin", {system_speech.HELPER_ENV: str(gone)})
+    assert mac.detail == f"no helper at {gone}"
+    plain = tmp_path / "raticode-speech"
+    plain.write_text("")
+    plain.chmod(0o644)
+    mac = system_speech.system_engine("darwin", {system_speech.HELPER_ENV: str(plain)})
+    assert mac.detail == f"{plain} is not executable" and not mac.present
+
+
+def test_a_whole_dictation_is_logged_without_its_words(caplog) -> None:
+    caplog.set_level("DEBUG", logger="gofer.ui.system_speech")
+    speech = system_speech.SystemSpeechSession(fake_engine("phrases"))
+    speech.push(b"\x01\x00" * 8)
+    wait_for(lambda: speech.text().startswith("first phrase"))
+    assert speech.finish().startswith("first phrase")
+    wait_for(lambda: "helper exited" in caplog.text)
+    assert "macOS speech recognition helper started (process" in caplog.text
+    assert "macOS speech recognition is ready after" in caplog.text
+    assert "(language en-US)" in caplog.text
+    assert "helper exited with code 0 after 0.0 s of audio" in caplog.text
+    assert_no_words(caplog)
+
+
+def test_a_crashed_helper_logs_its_signal_and_stderr(caplog) -> None:
+    speech = system_speech.SystemSpeechSession(fake_engine("crash"))
+    wait_for(lambda: speech.failure and "helper exited" in caplog.text)
+    assert "exited on SIGABRT (code -6)" in caplog.text
+    assert "failure exited, before it was ready" in caplog.text
+    assert "stderr: dyld: Library not loaded: Speech.framework" in caplog.text
+    assert speech.stderr_tail() == "dyld: Library not loaded: Speech.framework"
+
+
+def test_only_an_abort_is_blamed_on_missing_permission_text() -> None:
+    speech = system_speech.SystemSpeechSession(fake_engine("trap"))
+    wait_for(lambda: speech.failure)
+    assert speech.failure == "Raticode's macOS speech helper stopped unexpectedly (SIGTRAP)."
+
+
+def test_stopping_the_helper_ourselves_is_not_a_failure(caplog) -> None:
+    caplog.set_level("INFO", logger="gofer.ui.system_speech")
+    speech = system_speech.SystemSpeechSession(fake_engine("listen"))
+    process = speech._process
+    speech.close()
+    wait_for(lambda: process.poll() is not None and "helper exited" in caplog.text)
+    # Before, a terminated helper read as "macOS stopped Raticode's speech helper".
+    assert speech.failure == ""
+    assert "helper exited on SIGTERM" in caplog.text
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_refusal_is_logged_with_its_code(caplog) -> None:
+    speech = system_speech.SystemSpeechSession(fake_engine("fail"))
+    wait_for(lambda: speech.failure and "helper exited" in caplog.text)
+    assert (
+        "macOS speech recognition failed (denied): Speech recognition is off for Raticode."
+        in caplog.text
+    )
+    assert "exited with code 3" in caplog.text
+
+
+def test_a_helper_that_cant_be_started_is_logged(caplog) -> None:
+    engine = system_speech.SystemEngine(
+        "macos", "macOS speech recognition", command=("/nonexistent/raticode-speech", "listen")
+    )
+    with pytest.raises(OSError):
+        system_speech.SystemSpeechSession(engine)
+    assert "couldn't start its helper" in caplog.text
+
+
+def test_check_results_are_logged_once_until_they_change(caplog) -> None:
+    caplog.set_level("INFO", logger="gofer.ui.system_speech")
+    engine = fake_engine("check")
+    system_speech.check_system_engine(engine)
+    system_speech.check_system_engine(engine, refresh=True)
+    unavailable = [r for r in caplog.records if "unavailable for dictation" in r.getMessage()]
+    assert len(unavailable) == 1
+    assert "Turn on Dictation." in unavailable[0].getMessage()
+    assert "check exited with code 0" in unavailable[0].getMessage()
+    missing = system_speech.system_engine("darwin", {})
+    system_speech.check_system_engine(missing)
+    assert system_speech.HELPER_ENV in caplog.text
+
+
+def test_dictation_logs_its_engine_and_how_much_audio_arrived(monkeypatch, tmp_path, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("listen"))
+    session_id = chat_media.start_chat_transcription(data_dir=tmp_path)["sessionId"]
+    chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00" * 16_000))
+    chat_media.finish_chat_transcription({"sessionId": session_id})
+    assert "Dictation started with macOS speech recognition (1 open)" in caplog.text
+    assert "Dictation finished (macOS speech recognition, 1.0 s of audio in 1 chunks" in (
+        caplog.text
+    )
+    assert session_id not in caplog.text
+    assert_no_words(caplog)
+
+
+def test_a_missing_helper_and_a_failed_download_keep_both_reasons(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    def no_model(_dir):
+        raise ChatMediaError("The local speech model couldn't be downloaded: the certificate.")
+
+    monkeypatch.setattr(chat_media, "_new_vosk_recognizer", no_model)
+    real = system_speech.system_engine
+    monkeypatch.setattr(system_speech, "system_engine", lambda: real("darwin", {}))
+    with pytest.raises(ChatMediaError) as raised:
+        chat_media.start_chat_transcription(data_dir=tmp_path)
+    # Before, only the download error was shown and the missing helper wasn't mentioned.
+    assert str(raised.value) == (
+        "This copy of Raticode doesn't include its macOS speech helper. "
+        "The local speech model couldn't be downloaded: the certificate."
+    )
+    assert "Dictation can't use macOS speech recognition" in caplog.text
+    assert system_speech.HELPER_ENV in caplog.text
+    # Choosing the offline model says only what went wrong with it.
+    with pytest.raises(ChatMediaError) as raised:
+        chat_media.start_chat_transcription(data_dir=tmp_path, engine="offline")
+    assert str(raised.value).startswith("The local speech model couldn't")
+
+
+def test_a_fallback_mid_dictation_is_logged(monkeypatch, tmp_path, caplog) -> None:
+    monkeypatch.setattr(system_speech, "system_engine", lambda: fake_engine("fail"))
+    monkeypatch.setattr(chat_media, "_vosk_model_present", lambda _dir: False)
+    session_id = chat_media.start_chat_transcription(data_dir=tmp_path)["sessionId"]
+    chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))
+    wait_for(lambda: chat_media._transcription_sessions[session_id].speech.failure)
+    with pytest.raises(ChatMediaError):
+        chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))
+    assert "macOS speech recognition stopped during dictation (denied)" in caplog.text
+    assert "isn't installed, so dictation can't carry on" in caplog.text

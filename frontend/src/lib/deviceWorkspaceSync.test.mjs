@@ -297,11 +297,15 @@ test("phones see display settings only and their changes go through normal setti
     browser: { remConfirm: "signed-in" }, memory: { reportFormat: "md", secondBrainRoot: "/private" } };
   const shared = phoneSettings(settings);
   assert.equal(shared.assistant.resources, undefined);
-  assert.equal(shared.browser, undefined);
+  // Of the browser section, phones see and change only which engine runs web tabs.
+  assert.deepEqual(shared.browser, { engine: undefined });
+  assert.deepEqual(phoneSettings({ browser: { engine: "firefox", remConfirm: "never", remSites: ["a"] } }).browser, { engine: "firefox" });
   assert.deepEqual(shared.memory, { reportFormat: "md" });
   const changed = applyPhoneSettings(settings, [{ id: "a", values: { "appearance.theme": "dark", "browser.remConfirm": "never", "assistant.provider.x": 1 } }]);
   assert.equal(changed.appearance.theme, "dark");
   assert.equal(changed.browser.remConfirm, "signed-in");
+  const engine = applyPhoneSettings(settings, [{ id: "b", values: { "browser.engine": "firefox", "browser.remSites": [] } }]);
+  assert.deepEqual(engine.browser, { remConfirm: "signed-in", engine: "firefox" });
   assert.equal(settings.appearance.theme, "light");
 
   const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
@@ -460,4 +464,215 @@ test("a running Rem task thread reaches the phone at most every 30 seconds, and 
   } finally {
     stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch;
   }
+});
+
+test("phone sync failures reach the status and the log once, and routine 4xx answers stay quiet", async (t) => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const storage = { getItem: () => null, setItem: () => {} };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const answers = [500, 500, 500, 403, 200];
+  globalThis.fetch = async () => {
+    const status = answers.length > 1 ? answers.shift() : answers[0];
+    return status === 200 ? { ok: true, status, json: async () => ({ workspace_peers: [] }) } : { ok: false, status, json: async () => ({}) };
+  };
+  const warnings = [];
+  t.mock.method(console, "warn", (message) => warnings.push(String(message)));
+  const statuses = [];
+  let stop;
+  try {
+    await new Promise((resolve) => {
+      host.addEventListener("gofer:device-sync-status", (event) => { statuses.push(event.detail); if (statuses.length === 5) resolve(); });
+      stop = startDeviceWorkspaceSync({ storage, repository: { all: async () => [], save: async () => {} }, interval: 1 });
+    });
+    assert.deepEqual(statuses, [
+      "Desktop device status unavailable (HTTP 500)",
+      "Desktop device status unavailable (HTTP 500)",
+      "Desktop device status unavailable (HTTP 500)",
+      "Desktop device status unavailable (HTTP 403)",
+      "",
+    ], "every failed poll shows its status, and recovery clears it");
+    assert.deepEqual(warnings, ["Phone thread sync: Desktop device status unavailable (HTTP 500)"]);
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
+test("a thread too long for the phone is skipped, retried rarely, and doesn't stop the rest", async (t) => {
+  const { startDeviceWorkspaceSync, REFUSED_THREAD_RETRY_MS } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const ids = ["newest", "big", "older"];
+  const data = new Map([["gofer-flow-chat-threads", JSON.stringify(ids.map(id => ({ id })))],
+    ...ids.map(id => [`gofer-flow-chat-thread-meta:${id}`, JSON.stringify({ id, title: id, projectRoot: "/project", updatedAt: "t0" })])]);
+  const repository = { all: async id => [{ id: `${id}-1`, role: "user", body: id }], save: async () => {} };
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const full = "A thread is too long to share with the phone (8 MB or 10,000 messages per thread). It stays off the phone; the others keep syncing.";
+  let quotaFull = true;
+  const exchanges = [];
+  let settingsExchanges = 0;
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["phone"], desktop_control_peers: ["phone"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_poll") return { ok: true, json: async () => ({ threads: [] }) };
+    if (body.action === "settings_exchange") { settingsExchanges += 1; return { ok: true, json: async () => ({ changes: [] }) }; }
+    exchanges.push(body.metadata.id);
+    if (body.metadata.id === "big" && quotaFull) {
+      return { ok: false, status: 400, json: async () => ({ error: full, code: "workspace_thread_too_large" }) };
+    }
+    return { ok: true, json: async () => ({ thread_id: `wire-${body.metadata.id}`, revision: (body.revision || 0) + 1, metadata: body.metadata, messages: body.messages }) };
+  };
+  const warnings = [];
+  t.mock.method(console, "warn", message => warnings.push(String(message)));
+  let clock = 0;
+  let stop;
+  const tick = () => new Promise(resolve => host.addEventListener("gofer:device-sync-status", event => resolve(event.detail), { once: true }));
+  try {
+    const first = tick();
+    stop = startDeviceWorkspaceSync({ storage, repository, interval: 5, getContext: () => ({ settings: { theme: "dark" } }), now: () => clock });
+    assert.equal(await first, `${full} 1 thread isn't up to date on the phone.`);
+    assert.deepEqual(exchanges, ["newest", "big", "older"], "Threads after the refused one still sync");
+    assert.equal(settingsExchanges, 1, "Phone settings changes still go through");
+    clock += 5_000;
+    assert.equal(await tick(), `${full} 1 thread isn't up to date on the phone.`);
+    assert.deepEqual(exchanges, ["newest", "big", "older"], "An unchanged refused thread isn't resent every few seconds");
+    quotaFull = false;
+    clock += REFUSED_THREAD_RETRY_MS;
+    assert.equal(await tick(), "", "Once space is free, the retry succeeds and the status clears");
+    assert.deepEqual(exchanges, ["newest", "big", "older", "big"]);
+    assert.equal(settingsExchanges, 3);
+    assert.deepEqual(warnings, [`Phone thread sync: ${full} 1 thread isn't up to date on the phone.`], "The log gets the problem once");
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
+test("a full phone is refused once, then gets only changes that don't grow its threads until it has room", async (t) => {
+  const { startDeviceWorkspaceSync, FULL_PHONE_RETRY_MS } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const data = new Map();
+  const messages = new Map();
+  // A new message moves a thread's updatedAt, which is what tells the sync it changed.
+  const add = (id, title = id, updatedAt = "t0") => {
+    data.set(`gofer-flow-chat-thread-meta:${id}`, JSON.stringify({ id, title, projectRoot: "/project", updatedAt }));
+    if (!messages.has(id)) messages.set(id, [{ id: `${id}-1`, role: "user", body: id }]);
+  };
+  const order = ids => data.set("gofer-flow-chat-threads", JSON.stringify(ids.map(id => ({ id }))));
+  for (const id of ["a", "b", "c"]) add(id, id === "c" ? "a long title" : id);
+  order(["a", "b", "c"]);
+  const repository = { all: async id => messages.get(id) || [], save: async () => {} };
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const fullMessage = "The phone's share of desktop thread history is full (64 MB per phone). Threads that don't fit stay off the phone; the others keep syncing.";
+  // The phone keeps each thread's size and refuses anything new or bigger once it is full.
+  const stored = new Map();
+  let phoneFull = false;
+  const exchanges = [];
+  let refusals = 0;
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: ["phone"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "workspace_poll") return { ok: true, json: async () => ({ threads: [] }) };
+    const id = body.metadata.id;
+    exchanges.push(id);
+    const size = JSON.stringify([body.metadata, body.messages]).length;
+    if (phoneFull && !(stored.get(id) >= size)) {
+      refusals += 1;
+      return { ok: false, status: 400, json: async () => ({ error: fullMessage, code: "workspace_history_quota" }) };
+    }
+    stored.set(id, size);
+    return { ok: true, json: async () => ({ thread_id: `wire-${id}`, revision: (body.revision || 0) + 1, metadata: body.metadata, messages: body.messages }) };
+  };
+  const warnings = [];
+  t.mock.method(console, "warn", message => warnings.push(String(message)));
+  let clock = 0;
+  const stops = [];
+  const tick = () => new Promise(resolve => host.addEventListener("gofer:device-sync-status", event => resolve(event.detail), { once: true }));
+  const start = () => stops.push(startDeviceWorkspaceSync({ storage, repository, interval: 5, now: () => clock }));
+  try {
+    let next = tick();
+    start();
+    assert.equal(await next, "");
+    assert.deepEqual(exchanges.splice(0), ["a", "b", "c"]);
+
+    // The phone fills up. A new thread and a growing one can't go; a rename that shrinks can.
+    phoneFull = true;
+    add("new");
+    order(["new", "a", "b", "c"]);
+    messages.get("a").push({ id: "a-2", role: "assistant", body: "a running task's progress" });
+    add("a", "a", "t1");
+    add("c", "c");
+    clock += 5_000;
+    next = tick();
+    assert.equal(await next, `${fullMessage} 2 threads aren't up to date on the phone.`);
+    assert.deepEqual(exchanges.splice(0), ["new", "c"], "After one refusal, only the thread that didn't grow is sent");
+
+    // A running task keeps growing; nothing more is asked of the full phone.
+    for (let round = 0; round < 3; round += 1) {
+      messages.get("a").push({ id: `a-more-${round}`, role: "assistant", body: "more progress" });
+      add("a", "a", `t${round + 2}`);
+      clock += 5_000;
+      assert.equal(await tick(), `${fullMessage} 2 threads aren't up to date on the phone.`);
+    }
+    assert.deepEqual(exchanges.splice(0), []);
+    assert.equal(refusals, 1);
+
+    // A restart forgets what was sent, and still costs one refusal instead of one per thread.
+    stops.shift()();
+    next = tick();
+    start();
+    assert.equal(await next, `${fullMessage} 4 threads aren't up to date on the phone.`);
+    assert.deepEqual(exchanges.splice(0), ["new"]);
+    assert.equal(refusals, 2);
+
+    // With room again, the next try after the pause sends everything that waited.
+    phoneFull = false;
+    clock += FULL_PHONE_RETRY_MS;
+    assert.equal(await tick(), "");
+    assert.deepEqual(exchanges.splice(0), ["new", "a", "b", "c"]);
+    assert.deepEqual(warnings, [`Phone thread sync: ${fullMessage} 2 threads aren't up to date on the phone.`,
+      `Phone thread sync: ${fullMessage} 4 threads aren't up to date on the phone.`], "Each sync logs the full phone once, whatever the count");
+  } finally { for (const stop of stops) stop(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
+});
+
+test("browser tabs reach the phone and a page it sends opens once in a background tab", async () => {
+  const { startDeviceWorkspaceSync } = await import("./deviceWorkspaceSync.js");
+  const previousWindow = globalThis.window, previousFetch = globalThis.fetch;
+  const data = new Map([["gofer-flow-chat-threads", "[]"]]);
+  const storage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value) };
+  const host = new EventTarget();
+  Object.assign(host, { localStorage: storage, goferDesktop: { workspace: { pathGrantForApi: () => "grant" } } });
+  globalThis.window = host;
+  const exchanges = [];
+  const page = { id: "request-1", url: "https://example.com/a" };
+  globalThis.fetch = async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ workspace_peers: [], desktop_control_peers: ["phone"] }) };
+    const body = JSON.parse(options.body);
+    if (body.action === "browser_exchange") {
+      exchanges.push(body);
+      // The page is offered until the window acknowledges it.
+      return { ok: true, json: async () => ({ opens: body.opened.includes(page.id) ? [] : [page] }) };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  const opened = [];
+  const tabs = [{ id: "browser:1", title: "Docs", url: "https://example.com/docs", owner: "you", active: true }];
+  const browser = { searchUrl: "https://duckduckgo.com/?q={query}", engine: "firefox", tabs: () => tabs, open: url => opened.push(url) };
+  const tick = () => new Promise(resolve => host.addEventListener("gofer:device-sync-status", () => resolve(), { once: true }));
+  let stop;
+  try {
+    const first = tick();
+    stop = startDeviceWorkspaceSync({ storage, repository: { all: async () => [], save: async () => {} }, interval: 5, getContext: () => ({ browser }) });
+    await first;
+    assert.deepEqual(exchanges[0].tabs, tabs);
+    assert.equal(exchanges[0].search_url, "https://duckduckgo.com/?q={query}");
+    assert.equal(exchanges[0].engine, "firefox");
+    assert.deepEqual(opened, ["https://example.com/a"]);
+    await tick();
+    assert.deepEqual(exchanges[1].opened, ["request-1"], "The next exchange acknowledges the page");
+    await tick();
+    assert.deepEqual(opened, ["https://example.com/a"], "A page opens once");
+  } finally { stop?.(); globalThis.window = previousWindow; globalThis.fetch = previousFetch; }
 });

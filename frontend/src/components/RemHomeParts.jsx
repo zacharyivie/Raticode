@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, BellRing, Check, CheckCircle2, Clock3, Hammer, Loader2, MousePointerClick, Pause, PauseCircle, PencilLine, Play, RotateCw, StopCircle, Telescope, Trash2, Wrench, XCircle } from "lucide-react";
+import { AlertCircle, BellRing, Check, CheckCircle2, Clock3, Hammer, Hourglass, Loader2, MousePointerClick, Pause, PauseCircle, PencilLine, Play, RotateCw, StopCircle, Telescope, Trash2, Wrench, XCircle } from "lucide-react";
 import { TASK_TYPES } from "../lib/remHome.js";
 import { acknowledgeRemRun, cancelRemRun, pauseRemTask, resumeRemTask, runRemTaskNow } from "../lib/remHomeStore.js";
 
@@ -16,6 +16,7 @@ export function TaskGlyph({ activity, type, size = 15 }) {
   if (activity.kind === "queued") return <Clock3 size={size} aria-hidden="true" strokeWidth={1.75} />;
   if (activity.kind === "attention") return <AlertCircle size={size} aria-hidden="true" strokeWidth={1.75} />;
   if (activity.kind === "paused") return <PauseCircle size={size} aria-hidden="true" strokeWidth={1.75} />;
+  if (activity.kind === "waiting") return <Hourglass size={size} aria-hidden="true" strokeWidth={1.75} />;
   return <TaskTypeIcon type={type} size={size} />;
 }
 
@@ -63,11 +64,18 @@ export function RemMenu({ label, trigger, items, className = "" }) {
 // Task controls shared by the sidebar menu and the task sheet footer.
 export function taskActions(task, activity, { onEdit, onDelete }) {
   const running = activity.kind === "running" || activity.kind === "queued";
+  // A task waiting for others can be started now, which drops what it waits for; a held
+  // one also offers to run each prerequisite that didn't succeed again.
+  const waiting = Boolean(task.dependency);
+  const retries = (task.dependency?.prerequisites || []).filter(item => item.retryable).map(item => ({
+    id: `retry-${item.task_id}`, label: `Retry “${item.title}”`, icon: RotateCw, onSelect: () => void runRemTaskNow({ id: item.task_id }),
+  }));
   return [
     { id: "edit", label: "Edit", icon: PencilLine, onSelect: onEdit },
-    running ? { id: "stop", label: "Stop current run", icon: StopCircle, disabled: task.active_run?.state === "cancelling", onSelect: () => void cancelRemRun(task) } : { id: "run", label: task.last_run ? "Run again" : "Run now", icon: RotateCw, onSelect: () => void runRemTaskNow(task) },
+    ...retries,
+    running ? { id: "stop", label: "Stop current run", icon: StopCircle, disabled: task.active_run?.state === "cancelling", onSelect: () => void cancelRemRun(task) } : { id: "run", label: waiting ? "Start now" : task.last_run ? "Run again" : "Run now", icon: waiting ? Play : RotateCw, onSelect: () => void runRemTaskNow(task) },
     task.state === "paused" ? { id: "resume", label: "Resume", icon: Play, onSelect: () => void resumeRemTask(task) } : task.schedule?.kind && task.schedule.kind !== "once" ? { id: "pause", label: "Pause schedule", icon: Pause, onSelect: () => void pauseRemTask(task) } : null,
-    activity.kind === "attention" ? { id: "dismiss", label: "Dismiss", icon: Check, onSelect: () => void acknowledgeRemRun(task) } : null,
+    activity.kind === "attention" && !activity.held ? { id: "dismiss", label: "Dismiss", icon: Check, onSelect: () => void acknowledgeRemRun(task) } : null,
     { id: "delete", label: "Delete…", icon: Trash2, danger: true, onSelect: onDelete },
   ].filter(Boolean);
 }

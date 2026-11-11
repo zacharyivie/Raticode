@@ -1,0 +1,123 @@
+/* The global Kanban board reuses the Organizations board (.oh); these add what's different. */
+.kb .oh-top { flex-wrap: wrap; }
+.kb .oh-top h1 { flex: none; overflow: visible; }
+.kb-view { padding: 14px 18px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.kb-line { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.kb-wrap { flex: 1; min-height: 0; }
+.oh .kb-board { grid-template-columns: repeat(6, minmax(190px, 1fr)); min-width: 1240px; }
+.kb-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; padding: 7px 18px; color: var(--blocked); background: var(--blocked-soft); font-size: 12.5px; }
+.kb-search { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--muted); }
+.kb-search input { border: 0; outline: 0; background: transparent; width: 170px; color: var(--ink); }
+.kb-check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.kb-proposed { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--k-decision); }
+
+.kb-sheet { width: min(420px, 100%); flex: none; display: flex; flex-direction: column; gap: 12px; padding: 14px 18px; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; }
+.kb-sheet-head { display: flex; align-items: center; }
+.kb-sheet h2 { margin: 0; font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }
+.kb-description { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.kb-section { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 6px; }
+.kb-section h3 { margin: 0; font-size: 12px; color: var(--muted); font-weight: 650; }
+.kb-section p { margin: 0; overflow-wrap: anywhere; }
+.kb-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.kb-input { height: 30px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); min-width: 0; flex: 1 1 120px; }
+
+.kb-overlay { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(15, 25, 35, .35); padding: 20px; }
+.kb-dialog { width: min(460px, 100%); max-height: 100%; overflow-y: auto; padding: 18px !important; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.kb-dialog h2 { margin: 0; font-size: 15px; }
+
+.kb-side { display: flex; gap: 10px; padding: 8px 10px 16px; font-size: 12.5px; }
+.kb-side[hidden] { display: none; }
+.kb-side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; }
+.kb-open { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: var(--color-ink, inherit); border: 1px solid var(--color-line, #b6b3aa); border-radius: 6px; padding: 3px 8px; background: transparent; cursor: pointer; }
+.kb-open[aria-pressed="true"] { background: rgba(79, 70, 229, .12); }
+.kb-settings-link { justify-self: start; font-weight: 500; }
+.kb-card { display: grid; gap: 7px; padding: 10px; border: 1px solid var(--color-line, rgba(127, 127, 127, .35)); border-radius: 10px; min-width: 0; }
+.kb-card h3 { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; font-weight: 650; }
+.kb-mode { font-size: 11px; font-weight: 600; opacity: .75; }
+.kb-mode[data-mode="working"] { color: #059669; opacity: 1; }
+.kb-mode[data-mode="paused"] { color: #d97706; opacity: 1; }
+.kb-side-note { margin: 0; line-height: 1.4; overflow-wrap: anywhere; }
+.kb-side-error { margin: 0; color: #dc2626; }
+.kb-activity { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.kb-activity li { min-width: 0; padding-left: 8px; border-left: 2px solid #059669; line-height: 1.35; overflow-wrap: anywhere; }
+.kb-activity button { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.kb-activity button:hover { text-decoration: underline; }
+.kb-hint { margin: 0; opacity: .7; font-size: 11.5px; line-height: 1.35; }
+.kb-report, .kb-notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.kb-report li { display: grid; gap: 1px; padding-left: 8px; border-left: 2px solid rgba(127, 127, 127, .35); min-width: 0; }
+.kb-report li[data-tone="done"] { border-left-color: #059669; }
+.kb-report li[data-tone="blocked"], .kb-report li[data-tone="still_blocked"] { border-left-color: #dc2626; }
+.kb-report li[data-tone="unblocked"] { border-left-color: #2563eb; }
+.kb-report li[data-tone="added"] { border-left-color: #4f46e5; }
+.kb-report strong { font-weight: 600; overflow-wrap: anywhere; }
+.kb-report span, .kb-notes li { opacity: .75; overflow-wrap: anywhere; line-height: 1.35; }
+
+/* Rem's home: what happened while the user was away. */
+.rem-away { display: grid; gap: 4px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid rgba(127, 127, 127, .3); border-radius: 12px; font-size: 13px; }
+.rem-away h2 { margin: 0; font-size: 13px; font-weight: 650; }
+.rem-away p { margin: 0; line-height: 1.4; }
+.rem-away-actions { display: flex; gap: 10px; margin-top: 4px; }
+.rem-away-actions button { background: none; border: 0; padding: 0; cursor: pointer; color: inherit; text-decoration: underline; font: inherit; }
+
+/* People: Rem and every organization's workers, like users in ticket software. */
+.kb-stack { display: inline-flex; align-items: center; padding-left: 6px; }
+.kb-stack button { margin-left: -6px; padding: 0; border-radius: 50%; border: 2px solid var(--canvas) !important; background: none; line-height: 0; }
+.kb-stack button[aria-pressed="true"] { border-color: var(--accent) !important; position: relative; z-index: 1; }
+.kb-stack .kb-more { width: 28px; height: 28px; background: var(--todo-soft); color: var(--todo); font-size: 10.5px; font-weight: 700; line-height: 1; }
+.kb-scope { display: flex; gap: 5px; align-items: flex-start; margin: 0; font-size: 11px; color: var(--review); line-height: 1.3; }
+.kb-scope svg { margin-top: 1px; }
+.kb-field { display: grid; gap: 4px; font-size: 12px; font-weight: 600; }
+.kb-people { display: grid; gap: 18px; align-content: start; max-width: 980px; }
+.kb-people-lead { margin: 0; }
+.kb-people-group h2 { margin: 0 0 6px; font-size: 12px; font-weight: 650; color: var(--muted); }
+.kb-people-group ul { list-style: none; margin: 0; padding: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.kb-person { display: grid; grid-template-columns: 28px minmax(130px, 200px) minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 12px; }
+.kb-person + .kb-person { border-top: 1px solid var(--line); }
+.kb-person-who { display: grid; min-width: 0; font-size: 12px; }
+.kb-person-name { font-size: 13px; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-person-name:hover { text-decoration: underline; }
+.kb-person-projects { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.kb-chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 5px 0 9px; border-radius: 99px; background: var(--soft); color: var(--accent); font-size: 12px; font-weight: 550; }
+.kb-chip button { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; }
+.kb-chip button:hover { background: rgba(127, 127, 127, .25); }
+.kb-chip[data-unavailable] { background: var(--review-soft); color: var(--review); }
+.oh .kb-chip-add { padding: 0 9px; background: none; border: 1px dashed var(--line-strong) !important; color: var(--muted); }
+.kb-add-project { flex: 0 1 180px; height: 26px; }
+.kb-person-line { font-size: 11.5px; white-space: nowrap; }
+@container oh (max-width: 720px) {
+  .kb-person { grid-template-columns: 28px minmax(0, 1fr); }
+  .kb-person-projects, .kb-person-line { grid-column: 2; }
+}
+
+/* A ticket's history: a thin rail with one dot per entry, colored by the column it moved to. */
+.kb-timeline { gap: 8px; }
+.kb-timeline-error { margin: 0; color: var(--blocked); font-size: 12px; }
+.kb-timeline-more { justify-self: start; }
+.kb-timeline-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.kb-entry { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; padding-bottom: 12px; }
+.kb-entry::before { content: ""; position: absolute; left: 6px; top: 14px; bottom: 0; width: 1px; background: var(--line); }
+.kb-entry:last-child::before { display: none; }
+.kb-entry-dot { width: 9px; height: 9px; margin: 5px 0 0 2px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 3px var(--panel); position: relative; z-index: 1; }
+.kb-entry.tone-bad .kb-entry-dot { background: var(--blocked); }
+.kb-entry.tone-done .kb-entry-dot { background: var(--done); }
+.kb-entry.tone-review .kb-entry-dot { background: var(--review); }
+.kb-entry.tone-run .kb-entry-dot { background: var(--run); }
+.kb-entry.tone-note .kb-entry-dot { background: transparent; border: 1.5px solid var(--line-strong); }
+.kb-entry-main { min-width: 0; display: grid; gap: 3px; justify-items: start; }
+.kb-entry-meta { display: flex; gap: 6px; align-items: baseline; font-size: 11px; color: var(--muted); }
+.kb-entry-who { font-weight: 650; color: var(--ink); }
+.kb-entry-title { margin: 0; font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.kb-entry.tone-bad .kb-entry-title { color: var(--blocked); }
+.kb-entry-move { margin: 0; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.kb-entry-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.kb-entry-checks { display: grid; gap: 2px; font-size: 12px; }
+.kb-entry-checks p { margin: 0; color: var(--muted); }
+.kb-entry-checks ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.kb-entry-checks li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 4px; align-items: start; overflow-wrap: anywhere; }
+.kb-entry-checks li.pass svg { color: var(--done); }
+.kb-entry-checks li.fail svg { color: var(--blocked); }
+.kb-entry-details { font-size: 12px; max-width: 100%; }
+.kb-entry-details summary { cursor: pointer; color: var(--accent); }
+.kb-entry-details p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--raised); }
+.kb-comment { display: grid; gap: 6px; justify-items: end; }
+.kb-comment textarea { width: 100%; height: auto; min-height: 52px; padding: 6px 8px; resize: vertical; font: inherit; }

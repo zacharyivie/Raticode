@@ -59,6 +59,22 @@ def test_disabled_sharing_and_revocation_survive_renderer_refresh(application, t
     assert not app.authorized(peer, thread)
 
 
+def test_one_oversized_thread_is_named_apart_from_a_full_phone(application, tmp_path, monkeypatch):
+    """The desktop pauses sharing with a full phone, but only skips a thread that is too long."""
+    app, peer = application
+    app.workspace.enable(peer, True)
+    meta = {"id": "long", "title": "Long", "projectRoot": str(tmp_path)}
+    many = [{"id": f"m{i}", "role": "user", "body": "x"} for i in range(10001)]
+    with pytest.raises(PairingError, match="^workspace_thread_too_large$"):
+        app.workspace.exchange(peer, meta, many, {}, None)
+    real = app.workspace.app._encode
+    monkeypatch.setattr(
+        app.workspace.app, "_encode", lambda *args: real(*args) + b"\0" * (64 * 1024 * 1024)
+    )
+    with pytest.raises(PairingError, match="^workspace_history_quota$"):
+        app.workspace.exchange(peer, {**meta, "id": "small"}, [], {}, None)
+
+
 def test_phone_changes_model_without_changing_project_history_or_native_id(application, tmp_path):
     app, peer = application
     context, meta, shared = share(app, peer, tmp_path)

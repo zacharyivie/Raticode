@@ -331,6 +331,8 @@ class DeviceApplication:
                 "device_workspace_denied",
                 "device_remote_control",
                 "device_desktop_control",
+                "device_wake",
+                "device_wake_answers",
                 "device_rem_requests",
                 "device_rem_files",
                 "device_link_files",
@@ -436,8 +438,11 @@ class DeviceApplication:
                     return None
             if not self.desktop.allowed(peer):
                 return None
-            # Git reads are scoped to the projects this phone may see, read under the lock.
-            scoped = str(event["payload"].get("op", "")).startswith("source_control.")
+            # Git and file reads are scoped to the projects this phone may see, read under
+            # the lock.
+            from gofer.devices.desktop_control import _project_scoped
+
+            scoped = _project_scoped(str(event["payload"].get("op", "")))
             projects = self.desktop.projects(peer) if scoped else None
         return self.desktop.gather(event, projects)
 
@@ -2084,6 +2089,7 @@ class DeviceApplication:
             "LIMIT ?)",
             (peer, cursor, peer, RETAIN_ACKNOWLEDGED),
         )
+        self.desktop.wake.forget_delivered(peer, cursor)
         self.registry.db.execute(
             "DELETE FROM device_chunk_receipts WHERE peer=? AND sequence NOT IN (SELECT "
             "sequence FROM device_outbox WHERE peer=?)",

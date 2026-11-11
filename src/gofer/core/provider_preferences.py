@@ -77,7 +77,7 @@ def commit_message_preference() -> dict[str, Any]:
 
 
 def save_commit_message_preference(changes: dict[str, Any]) -> None:
-    from gofer.core.provider_capabilities import PROVIDER_BINARIES
+    from gofer.core.provider_capabilities import PROVIDER_BINARIES, model_is_blocked
 
     if not changes or set(changes) - {"provider", "model", "template", "autoCommit"}:
         raise ValueError("Unknown commit message setting")
@@ -104,7 +104,7 @@ def save_commit_message_preference(changes: dict[str, Any]) -> None:
     if not isinstance(model, str) or len(model) > 256 or (bool(provider) != bool(model.strip())):
         raise ValueError("Choose a commit provider and model")
     model = model.strip()
-    if provider and model in provider_preference(provider).get("deniedModels", []):
+    if provider and model_is_blocked(provider, model):
         raise ValueError("Allow this model before selecting it for commit messages")
     _save_preference("commitMessage", {**changes, "provider": provider, "model": model})
 
@@ -127,7 +127,7 @@ def voice_tidy_preference() -> dict[str, Any]:
 
 
 def save_voice_tidy_preference(changes: dict[str, Any]) -> None:
-    from gofer.core.provider_capabilities import PROVIDER_BINARIES
+    from gofer.core.provider_capabilities import PROVIDER_BINARIES, model_is_blocked
 
     if not changes or set(changes) - {"enabled", "provider", "model", "effort", "context"}:
         raise ValueError("Unknown voice tidy setting")
@@ -151,7 +151,7 @@ def save_voice_tidy_preference(changes: dict[str, Any]) -> None:
     model = changes.get("model", "")
     if model and not provider:
         raise ValueError("Choose a provider before choosing a voice tidy model")
-    if model and model in provider_preference(provider).get("deniedModels", []):
+    if model and model_is_blocked(provider, model):
         raise ValueError("Allow this model before selecting it for voice tidying")
     _save_preference("voiceTidy", changes)
 

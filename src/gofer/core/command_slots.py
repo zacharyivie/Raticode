@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -28,6 +29,10 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from gofer.utils.logging import RepeatingFailure
+
+_logger = logging.getLogger(__name__)
 
 if sys.platform != "win32":
     import fcntl
@@ -439,10 +444,28 @@ def slots_root(data_dir: Path) -> Path:
     return data_dir / "command-slots"
 
 
+_unreadable_settings: set[tuple[str, int]] = set()
+
+
 def read_settings(root: Path) -> SlotSettings:
+    path = root / "config.json"
     try:
-        return validate_settings(json.loads((root / "config.json").read_text(encoding="utf-8")))
-    except (OSError, ValueError):
+        return validate_settings(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return SlotSettings()
+    except (OSError, ValueError) as exc:
+        # Read on every scheduling tick: warn once per version of the file.
+        try:
+            key = (str(path), path.stat().st_mtime_ns)
+        except OSError:
+            key = (str(path), 0)
+        if key not in _unreadable_settings:
+            _unreadable_settings.add(key)
+            _logger.warning(
+                "Ignoring unreadable resource limits in %s (%s); using the defaults",
+                path,
+                type(exc).__name__,
+            )
         return SlotSettings()
 
 
@@ -1321,7 +1344,7 @@ def reclaim_leftovers(
     reason: str | None,
     proc_root: Path = Path("/proc"),
     stop: Callable[[str], bool] = _stop_unit,
-    log: Callable[[str], None] = lambda line: print(line, file=sys.stderr, flush=True),
+    log: Callable[[str], None] | None = None,
 ) -> str | None:
     """Stop the biggest leftover scope while memory is short; return its name.
 
@@ -1336,10 +1359,18 @@ def reclaim_leftovers(
     biggest = max(leftovers, key=lambda scope: scope.used)
     if not stop(biggest.name):
         return None
-    log(
-        "RATICODE_RECLAIMED "
-        + json.dumps({"unit": biggest.name, "bytes": biggest.used, "reason": reason})
-    )
+    if log is None:
+        _logger.warning(
+            "Memory is running out (%s): stopped leftover %s, which used %d MB",
+            reason,
+            biggest.name,
+            biggest.used // (1024 * 1024),
+        )
+    else:
+        log(
+            "RATICODE_RECLAIMED "
+            + json.dumps({"unit": biggest.name, "bytes": biggest.used, "reason": reason})
+        )
     return biggest.name
 
 
@@ -1351,9 +1382,13 @@ def start_leftover_reclaimer(interval: float = RECLAIM_INTERVAL_SECONDS) -> Call
     stopped = threading.Event()
 
     def loop() -> None:
+        failure = RepeatingFailure(_logger, "Leftover process check", logging.WARNING)
         while not stopped.wait(interval):
-            with contextlib.suppress(Exception):
+            try:
                 reclaim_leftovers(cgroup, reason=memory_critical())
+                failure.succeeded()
+            except Exception as exc:
+                failure.failed(exc)
 
     threading.Thread(target=loop, daemon=True, name="raticode-reclaim").start()
     return stopped.set

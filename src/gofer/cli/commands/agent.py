@@ -7,6 +7,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.commands._legacy import refuse_rattish
+from gofer.cli.output import emit_json, format_option, wants_json
 from gofer.core.agent import (
     Agent,
     AgentConfig,
@@ -24,8 +26,12 @@ from gofer.utils.agent_helpers import resolve_prompt, unique_agent_id
 from gofer.utils.paths import get_data_dir
 from gofer.utils.registry import find_agent, find_workflow, list_all_agents
 
-app = typer.Typer(help="Manage and run agents", no_args_is_help=True)
+app = typer.Typer(
+    help="[Legacy TOML] Manage and run agents in TOML workflows. Rattish declares agents as nodes.",
+    no_args_is_help=True,
+)
 console = Console()
+err_console = Console(stderr=True)
 
 _SUBSCRIPTIONS = {
     "claude_code": ClaudeCodeSubscription(),
@@ -85,7 +91,7 @@ def create(
         )
     subscription = subscription.strip()
     if subscription not in _SUBSCRIPTION_CHOICES:
-        console.print(
+        err_console.print(
             f"[red]Invalid subscription '{subscription}'. "
             f"Choose from: {', '.join(_SUBSCRIPTION_CHOICES)}[/red]"
         )
@@ -111,7 +117,7 @@ def create(
     env_dict: dict[str, str] = {}
     for pair in env or []:
         if "=" not in pair:
-            console.print(f"[red]Invalid --env value '{pair}': expected KEY=VALUE[/red]")
+            err_console.print(f"[red]Invalid --env value '{pair}': expected KEY=VALUE[/red]")
             raise typer.Exit(1)
         k, _, v = pair.partition("=")
         env_dict[k] = v
@@ -168,7 +174,7 @@ def edit(
     try:
         wf, cfg = find_agent(agent_id, base)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     # No flags → interactive TUI editor
@@ -207,7 +213,7 @@ def edit(
     if subscription is not None:
         subscription = subscription.strip()
         if subscription not in _SUBSCRIPTION_CHOICES:
-            console.print(
+            err_console.print(
                 f"[red]Invalid subscription '{subscription}'. "
                 f"Choose from: {', '.join(_SUBSCRIPTION_CHOICES)}[/red]"
             )
@@ -240,7 +246,7 @@ def edit(
         env_dict: dict[str, str] = {}
         for pair in env:
             if "=" not in pair:
-                console.print(f"[red]Invalid --env value '{pair}': expected KEY=VALUE[/red]")
+                err_console.print(f"[red]Invalid --env value '{pair}': expected KEY=VALUE[/red]")
                 raise typer.Exit(1)
             k, _, v = pair.partition("=")
             env_dict[k] = v
@@ -263,16 +269,16 @@ def _print_agent_access_summary(config: AgentConfig) -> None:
     warnings = agent_external_access_warnings(config)
     if not warnings:
         return
-    console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
+    err_console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
     for warning in warnings:
-        console.print(f"[yellow]- {warning}[/yellow]")
+        err_console.print(f"[yellow]- {warning}[/yellow]")
 
 
 def _validate_agent_extra_paths(config: AgentConfig) -> None:
     try:
         configured_extra_paths(config)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
 
@@ -287,7 +293,7 @@ def rm(
     try:
         wf, cfg = find_agent(agent_id, base)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     if not yes:
@@ -326,12 +332,12 @@ def run(
     try:
         _, config = find_agent(agent_id, data_dir)
     except KeyError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     sub = _SUBSCRIPTIONS.get(config.subscription)
     if sub is None:
-        console.print(f"[red]Unknown subscription '{config.subscription}'[/red]")
+        err_console.print(f"[red]Unknown subscription '{config.subscription}'[/red]")
         raise typer.Exit(1)
 
     _validate_agent_extra_paths(config)
@@ -341,28 +347,53 @@ def run(
     if result.success:
         console.print(result.output)
     else:
-        console.print(f"[red]Agent failed (exit {result.exit_code}):[/red]\n{result.output}")
+        err_console.print(f"[red]Agent failed (exit {result.exit_code}):[/red]\n{result.output}")
         raise typer.Exit(1)
 
 
 @app.command("list")
 def list_agents(
     workflow: str | None = typer.Option(None, "--workflow", help="Filter by workflow ID"),
+    output_format: str = format_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """List agents. Without --workflow, lists all agents in the data directory."""
+    as_json = wants_json(output_format)
     base = data_dir or get_data_dir()
 
     if workflow:
+        refuse_rattish(
+            workflow,
+            base,
+            "agent list",
+            "Raticode rattish inspect-ir {source} --pretty (Rattish declares agents as nodes)",
+        )
         try:
             wf = find_workflow(workflow, base)
             pairs = [(wf, cfg) for cfg in wf.agents.values()]
         except KeyError as exc:
-            console.print(f"[red]{exc}[/red]")
+            err_console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1)
     else:
         pairs = list_all_agents(base)
 
+    if as_json:
+        emit_json(
+            [
+                {
+                    "agentId": cfg.agent_id,
+                    "workflowId": wf.config.id,
+                    "subscription": cfg.subscription,
+                    "profile": cfg.profile,
+                    "model": cfg.model,
+                    "effort": cfg.effort,
+                    "workingDir": str(cfg.working_dir),
+                    "promptPath": str(cfg.prompt_path) if cfg.prompt_path else None,
+                }
+                for wf, cfg in pairs
+            ]
+        )
+        return
     if not pairs:
         console.print(f"No agents found in [bold]{base}[/bold].")
         return

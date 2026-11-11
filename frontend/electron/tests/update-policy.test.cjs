@@ -6,13 +6,22 @@ const vm = require("node:vm");
 
 // Exercise the main process handlers without launching Electron or contacting GitHub.
 const source = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
-function context(platform, signing, packaged = true, smoke = false) {
+function context(platform, signing, packaged = true, smoke = false, packageType = null) {
   const calls = [];
   const state = { available: true, info: { installerUrl: "https://github.com/zacharyivie/Raticode/releases/download/v0.3.5/Raticode-0.3.5-arm64.dmg" } };
   const sandbox = {
     app: { isPackaged: packaged, getVersion: () => "0.2.6" },
-    process: { platform, arch: "arm64" },
+    process: { platform, arch: "arm64", resourcesPath: "/opt/raticode/resources" },
+    path,
+    fs: {
+      readFileSync: (file) => {
+        calls.push(`read ${file}`);
+        if (packageType === null) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return packageType;
+      },
+    },
     raticodeReleaseSigning: signing,
+    RELEASES_URL: "https://github.com/zacharyivie/Raticode/releases",
     isSmokeTest: smoke,
     updateState: state,
     setUpdateState: (patch) => Object.assign(state, patch),
@@ -28,7 +37,7 @@ function context(platform, signing, packaged = true, smoke = false) {
   };
   vm.createContext(sandbox);
   vm.runInContext(
-    source.slice(source.indexOf("function supportsAutoUpdates()"), source.indexOf("function setupAutoUpdater()"))
+    source.slice(source.indexOf("let installedPackageManager;"), source.indexOf("function setupAutoUpdater()"))
     + source.slice(source.indexOf("async function checkForUpdates()"), source.indexOf("function setUpdateState(")),
     sandbox,
   );
@@ -45,11 +54,40 @@ for (const [platform, signing, supported] of [
     await sandbox.checkForUpdates();
     await sandbox.downloadAndInstallUpdate();
     await sandbox.installDownloadedUpdate();
-    assert.deepEqual(calls, supported
+    assert.deepEqual(calls.filter((call) => !call.startsWith("read ")), supported
       ? ["auto-check", "auto-download", "stop-backend", "auto-install"]
       : ["manual-check", "mac-installer"]);
   });
 }
+
+test("a pacman-installed copy never updates itself and points to the package manager", async () => {
+  const { sandbox, calls } = context("linux", "unsigned", true, false, "pacman\n");
+  const state = sandbox.getUpdateState();
+  assert.equal(state.supported, false);
+  assert.equal(state.managedBy, "pacman");
+  await sandbox.checkForUpdates();
+  await sandbox.downloadAndInstallUpdate();
+  await sandbox.installDownloadedUpdate();
+  assert.deepEqual(calls, ["read /opt/raticode/resources/package-type", "manual-check", "release-page"]);
+});
+
+for (const packageType of ["deb\n", "rpm", null]) {
+  test(`linux package type ${JSON.stringify(packageType)} keeps electron-updater`, async () => {
+    const { sandbox, calls } = context("linux", "unsigned", true, false, packageType);
+    assert.equal(sandbox.getUpdateState().supported, true);
+    assert.equal(sandbox.getUpdateState().managedBy, "");
+    await sandbox.checkForUpdates();
+    assert.deepEqual(calls.filter((call) => !call.startsWith("read ")), ["auto-check"]);
+  });
+}
+
+test("the package marker is only read for packaged Linux builds", () => {
+  for (const [platform, packaged] of [["darwin", true], ["win32", true], ["linux", false]]) {
+    const { sandbox, calls } = context(platform, "signed", packaged, false, "pacman");
+    assert.equal(sandbox.getUpdateState().managedBy, "");
+    assert.deepEqual(calls, []);
+  }
+});
 
 test("development and smoke builds keep the manual update fallback", () => {
   assert.equal(context("darwin", "signed", false).sandbox.getUpdateState().supported, false);
@@ -174,4 +212,7 @@ test("manual update buttons describe the action accurately", () => {
   assert.match(sandbox.updateButtonTitle(state), /manual installation/);
   assert.equal(sandbox.updateButtonLabel({ downloaded: true, supported: true }), "Restart to update");
   assert.equal(sandbox.updateButtonLabel({ supported: false, platform: "linux" }), "Open update downloads");
+  const pacman = { supported: false, platform: "linux", managedBy: "pacman", info: { version: "0.5.3" } };
+  assert.equal(sandbox.updateButtonLabel(pacman), "Update 0.5.3 with pacman");
+  assert.match(sandbox.updateButtonTitle(pacman), /yay -Syu/);
 });

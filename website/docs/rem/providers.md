@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Providers, models and effort
 
-Choose the coding tool for a task without moving the conversation into another app.
+Choose the coding tool for a task without moving the conversation into another app. Raticode works with the Codex, Claude Code, Cursor, GitHub Copilot, OpenCode, Antigravity and Grok CLIs you have installed and signed in to.
 
 ## Provider, model, and effort
 
@@ -21,7 +21,7 @@ The model and effort catalogs come from provider discovery. They can differ by C
 
 ## Choose a model
 
-Open the model picker in Rem. Select a model the provider exposes. Providers advertising custom model support also offer a custom model ID field. Enter the ID and commit it on blur or Enter; check spelling against that provider's catalog.
+Open the model picker in Rem and choose from the provider's discovered catalog. There is no free-text model field in Rem; if a model is missing, refresh providers or check the provider CLI's own access.
 
 Some models have no effort selector. A CLI-default model delegates selection to the coding tool. That choice is not evidence of a particular underlying model or reasoning level.
 
@@ -33,7 +33,7 @@ Some models have no effort selector. A CLI-default model delegates selection to 
 
 With Claude Code as the chat provider, Rem's reply in its home chat appears as it is written. Other providers show what Rem is doing, such as "Reading earlier messages", and then the finished reply. Hover a reply, or open its ⋯ menu on the phone, to see which model wrote it and how long it took.
 
-Refresh discovery after signing in, changing a binary, or receiving a new model entitlement. Repeated refreshes are not a substitute for authenticating the CLI itself.
+Choose **Refresh providers** in **Settings > Providers** after signing in, changing a binary, or receiving a new model entitlement. Repeated refreshes are not a substitute for authenticating the CLI itself.
 
 ## Conversation continuity
 

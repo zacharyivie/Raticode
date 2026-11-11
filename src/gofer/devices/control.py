@@ -30,6 +30,8 @@ from gofer.devices.registry import DeviceRegistry, PairingError
 from gofer.devices.service import DeviceListener
 from gofer.devices.storage import OSSecretStore, SecretStore, StorageError
 from gofer.devices.tailnet import Detection, detect
+from gofer.devices.wake import supported as wake_supported
+from gofer.utils.logging import RepeatingFailure
 
 # Seconds between Tailscale checks while the opt-in is on. A desktop that is not
 # listening yet checks sooner, so starting Tailscale after Raticode still works.
@@ -260,6 +262,11 @@ class DeviceControl:
                 "desktop_control_peers": self.application.desktop.enabled()
                 if self.application
                 else [],
+                # Device IDs only. The hardware address never appears in this answer.
+                "wake_computer_peers": self.application.desktop.wake.enabled()
+                if self.application
+                else [],
+                "wake_computer_available": wake_supported(),
                 "thread_host_peers": self.application.hosting() if self.application else [],
                 "outbound": outbound,
                 "invitation_available": bool(self.invitations and self.invitations.current),
@@ -640,6 +647,14 @@ class DeviceControl:
                     raise PairingError("invalid_desktop_control_choice")
                 self.application.desktop.enable(str(body.get("device_id", "")), body["enabled"])
                 return self.status()
+            if action == "wake_computer":
+                assert self.application is not None
+                if not isinstance(body.get("enabled"), bool):
+                    raise PairingError("invalid_wake_computer_choice")
+                self.application.desktop.wake.enable(
+                    str(body.get("device_id", "")), body["enabled"]
+                )
+                return self.status()
             if action == "host_threads":
                 assert self.application is not None
                 if not isinstance(body.get("enabled"), bool):
@@ -655,6 +670,13 @@ class DeviceControl:
                 assert self.application is not None
                 return self.application.desktop.exchange_settings(
                     body.get("settings"), body.get("applied")
+                )
+            if action == "browser_exchange":
+                assert self.application is not None
+                if not self.application.desktop.enabled():
+                    return {"opens": []}
+                return self.application.desktop.exchange_browser(
+                    body.get("tabs"), body.get("search_url"), body.get("opened"), body.get("engine")
                 )
             if action == "workspace_remove":
                 assert self.application is not None
@@ -788,6 +810,8 @@ class DeviceControl:
 
     async def _remote_loop(self) -> None:
         last_retry = 0.0
+        # Runs every 5 seconds: each distinct failure is logged once, with its traceback.
+        failure = RepeatingFailure(logger, "Paired device background work", logging.WARNING)
         while True:
             try:
                 if self.application is not None and self.registry is not None:
@@ -813,7 +837,9 @@ class DeviceControl:
                     await asyncio.to_thread(self._note_host_change)
             except Exception as error:  # noqa: BLE001
                 # Keep retrying and refreshing; one bad tick must not end the loop.
-                logger.warning("Paired device background work failed: %s", _failure_name(error))
+                failure.failed(error)
+            else:
+                failure.succeeded()
             await asyncio.sleep(5)
 
     def attach_services(

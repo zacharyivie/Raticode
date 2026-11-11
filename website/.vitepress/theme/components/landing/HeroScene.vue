@@ -16,7 +16,7 @@ const idle: Record<string, NodeState> = { 'run-tests': 'idle', fix: 'idle', revi
 // An illustrative run of the example workflow: tests fail, an agent fixes them,
 // a second agent rejects the first patch, the retry passes and a PR is opened.
 const frames: Frame[] = [
-  { states: { ...idle }, edges: [], log: { tone: 'run', text: '$ Raticode rattish run fix-failing-tests' }, hold: 1300 },
+  { states: { ...idle }, edges: [], log: { tone: 'run', text: '$ Raticode rattish run ./workflow.rattish' }, hold: 1300 },
   { states: { ...idle, 'run-tests': 'running' }, edges: [], log: { tone: 'run', text: 'run-tests   npm test' } },
   { states: { ...idle, 'run-tests': 'failed' }, edges: ['tests-fix'], log: { tone: 'fail', text: 'run-tests   3 failing  →  fix  (when failed)' } },
   { states: { ...idle, 'run-tests': 'failed', fix: 'running' }, edges: [], log: { tone: 'run', text: 'fix         claude-code is reading the failures' }, hold: 1700 },

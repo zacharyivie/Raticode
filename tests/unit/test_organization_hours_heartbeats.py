@@ -88,6 +88,11 @@ def test_hours_are_validated_and_widening_is_detected() -> None:
     assert not widens(office, hours(([0, 1, 2, 3, 4], "10:00", "16:00")))
     assert not widens({"mode": "always"}, office)
     assert widens(office, {**office, "atClose": "finish"})
+    # 04:00–12:00 in New York matches 09:00–17:00 UTC in winter but starts an hour earlier
+    # in summer; checking only a winter week missed that.
+    summer = hours(([0, 1, 2, 3, 4], "04:00", "12:00"), zone=NY)
+    assert widens(office, summer)
+    assert not widens(summer, summer)
 
 
 # ---------------------------------------------------------------- organizations at work
@@ -235,9 +240,53 @@ def test_closing_time_stops_running_work_and_hands_it_back(tmp_path: Path) -> No
     manager.dispatch()  # Raticode notices the hours ended.
     settle(manager)
     stopped = ticket(manager, org, made["id"])
-    assert stopped["status"] == "todo" and stopped["turns"] == 0
-    assert "Working hours ended" in stopped["comments"][-1]["body"]
+    # Blocked until hours open again, saying why, then back in To do by itself.
+    assert stopped["status"] == "blocked" and stopped["turns"] == 0
+    assert stopped["blockReason"] == "Waiting for working hours"
+    assert any("Working hours ended" in c["body"] for c in stopped["comments"])
+    assert stopped["comments"][-1]["kind"] == "status"
+    assert stopped["comments"][-1]["title"] == "Blocked: waiting"
     assert read(manager, org)["runtime"]["state"] == "running"  # Still on, just closed.
+    # It goes first when hours open, ahead of more urgent work queued meanwhile.
+    assert stopped["pulledAt"]
+    manager.close()
+
+
+def test_work_stopped_at_closing_goes_first_when_hours_open(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    async def worker(**options: Any) -> Any:
+        seen.append(options["workflow"]["organizationRun"]["taskId"])
+        if len(seen) == 1:
+            await asyncio.sleep(30)
+        yield {"type": "final", "message": {"body": "Done."}}
+
+    manager = start(tmp_path, worker)
+    org = company(manager, tmp_path)
+    cut = act(manager, org, "task_create", title="Cut off", assignee="mira", priority="low")
+    act(manager, org, "control", state="running")
+    manager.dispatch()
+    # Closing before the worker starts would leave the retry as the first, sleeping, call.
+    until = time.monotonic() + 10
+    while not seen and time.monotonic() < until:
+        time.sleep(0.01)
+    assert seen
+    set_hours(manager, org, window_from_now(120, 180))
+    manager.dispatch()
+    settle(manager)
+    urgent = act(manager, org, "task_create", title="Urgent", assignee="mira", priority="critical")
+    set_hours(manager, org, {"mode": "always"})
+    manager.dispatch()
+    settle(manager)
+    # Before the fix the critical ticket ran first, although the UI said "runs first".
+    assert seen == [cut["id"], cut["id"]]
+    assert ticket(manager, org, cut["id"])["pulledAt"] is None
+    # Its timeline says it waited for hours, then went back to To do by itself.
+    titles = [c.get("title") for c in ticket(manager, org, cut["id"])["comments"]]
+    assert titles.index("Blocked: waiting") < titles.index("Unblocked, back in To do")
+    manager.dispatch()
+    settle(manager)
+    assert seen[-1] == urgent["id"]
     manager.close()
 
 
@@ -325,6 +374,18 @@ def due_now(manager: OrganizationManager, org: dict[str, Any], eid: str = "lead"
     manager.store.mutate("", org["id"], "test", "probe", change)
 
 
+def assign_lead(manager: OrganizationManager, org: dict[str, Any]) -> None:
+    """Check-ins are self-work, so they need an assigned project."""
+    act(
+        manager,
+        org,
+        "self_work_projects",
+        employeeId="lead",
+        projects=[org["projectRoot"]],
+        expectedRevision=0,
+    )
+
+
 def checkins(manager: OrganizationManager, org: dict[str, Any]) -> list[str]:
     return [t["status"] for t in read(manager, org)["runtime"]["tasks"] if t["heartbeat"]]
 
@@ -334,6 +395,7 @@ def test_heartbeat_check_ins_close_themselves_so_the_next_one_comes(tmp_path: Pa
     org = company(
         manager, tmp_path, employees=[{"id": "lead", "name": "Avery Lane", "heartbeatSeconds": 900}]
     )
+    assign_lead(manager, org)
     act(manager, org, "control", state="running")
     manager.dispatch()  # creates the check-in
     manager.dispatch()  # runs it
@@ -345,8 +407,12 @@ def test_heartbeat_check_ins_close_themselves_so_the_next_one_comes(tmp_path: Pa
     manager.dispatch()
     manager.dispatch()
     settle(manager)
-    # Before the fix the first check-in sat in Review and no second one ever came.
-    assert checkins(manager, org) == ["done", "done"]
+    # Before the fix the first check-in sat in Review and no second one ever came. The same
+    # ticket comes back each time, so check-ins don't pile up on the board.
+    assert checkins(manager, org) == ["done"]
+    again = next(t for t in read(manager, org)["runtime"]["tasks"] if t["heartbeat"])
+    assert [c["body"] for c in again["comments"]].count("Done.") == 2
+    assert again["turns"] == 1
     manager.close()
 
 
@@ -355,6 +421,7 @@ def test_a_legacy_check_in_waiting_for_review_no_longer_blocks_heartbeats(tmp_pa
     org = company(
         manager, tmp_path, employees=[{"id": "lead", "name": "Avery Lane", "heartbeatSeconds": 900}]
     )
+    assign_lead(manager, org)
     act(
         manager,
         org,
@@ -387,6 +454,7 @@ def test_failed_check_ins_are_replaced_then_stop_and_say_so(tmp_path: Path) -> N
     org = company(
         manager, tmp_path, employees=[{"id": "lead", "name": "Avery Lane", "heartbeatSeconds": 900}]
     )
+    assign_lead(manager, org)
     act(manager, org, "control", state="running")
     for _ in range(4):
         due_now(manager, org)
@@ -609,4 +677,41 @@ def test_one_ticket_at_a_time_per_worker_and_concurrency_still_hold(tmp_path: Pa
     assert len(manager._active) == 1
     gate["go"] = True
     settle(manager)
+    manager.close()
+
+
+def test_a_workers_pull_keeps_a_start_date_but_yours_skips_it(tmp_path: Path) -> None:
+    manager = start(tmp_path)
+    org = company(manager, tmp_path)
+    act(manager, org, "control", state="running")
+    later = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    planned = act(
+        manager, org, "task_create", title="Planned", assignee="mira", status="backlog", dueAt=later
+    )
+    pulled = as_worker(
+        manager,
+        org,
+        "task_update",
+        taskId=planned["id"],
+        expectedRevision=planned["revision"],
+        changes={"status": "in_progress"},
+    )
+    # Before the fix a worker with only move permission could skip the start date.
+    assert pulled["dueAt"] == later and pulled["pulledAt"]
+    assert pulled["comments"][-1]["body"].endswith("on or after its start date.")
+    assert read(manager, org)["diagnostics"]["taskReasons"][planned["id"]].startswith(
+        "Scheduled for "
+    )
+    other = act(
+        manager, org, "task_create", title="Yours", assignee="mira", status="backlog", dueAt=later
+    )
+    yours = act(
+        manager,
+        org,
+        "task_update",
+        taskId=other["id"],
+        expectedRevision=other["revision"],
+        changes={"status": "in_progress"},
+    )
+    assert yours["dueAt"] is None
     manager.close()

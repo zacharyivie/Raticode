@@ -18,7 +18,7 @@ let win;
 const actions = [];
 const pin = "01".repeat(32);
 const peer = { device_id: "11111111-1111-4111-8111-111111111111", fingerprint: pin, role: "controller", state: "pending", last_seen: null, capabilities: [] };
-const state = { port: 44233, lan_host: "192.168.1.203", enabled: true, network_release: false, notice: "Independent security review pending. Local test peers only.", fingerprint: "02".repeat(32), peers: [peer], outbound: "idle" };
+const state = { port: 44233, lan_host: "192.168.1.203", enabled: true, network_release: false, notice: "Independent security review pending. Local test peers only.", fingerprint: "02".repeat(32), peers: [peer], outbound: "idle", wake_computer_available: true };
 
 async function main() {
   await app.whenReady();
@@ -47,6 +47,8 @@ async function main() {
         if (["unpair", "remove_revoked"].includes(body.action)) state.peers = state.peers.filter(p => p.device_id !== body.device_id);
         if (body.action === "share_workspace") state.workspace_peers = body.enabled ? [peer.device_id] : [];
         if (body.action === "remote_control") state.remote_control_peers = body.enabled ? [peer.device_id] : [];
+        if (body.action === "desktop_control") state.desktop_control_peers = body.enabled ? [peer.device_id] : [];
+        if (body.action === "wake_computer") state.wake_computer_peers = body.enabled ? [peer.device_id] : [];
         if (body.action === "host_threads") {
           // A slow save shows its in-progress state on the switch.
           await new Promise(resolve => setTimeout(resolve, 800));
@@ -242,6 +244,15 @@ async function main() {
   state.grants[0].allow_thread_create = true;
   await wait("document.body.textContent.includes('Rem ready')");
   await wait("document.body.textContent.includes('1 thread shared. New conversations allowed.')");
+  // A full phone history quota names its cause instead of blaming the credential store.
+  const quota = "The phone's share of desktop thread history is full (64 MB per phone). Threads that don't fit stay off the phone; the others keep syncing. 1 thread isn't on the phone.";
+  await evaluate(`window.dispatchEvent(new CustomEvent('gofer:device-sync-status', { detail: ${JSON.stringify(quota)} })); true`);
+  await wait(`Array.from(document.querySelectorAll('[role=alert]')).some(a => a.textContent === ${JSON.stringify("Thread sync needs attention: " + quota)})`);
+  await evaluate("document.querySelector('[role=alert]').scrollIntoView({ block: 'center' }); true");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await screenshot("thread-sync-history-full");
+  await evaluate("window.dispatchEvent(new CustomEvent('gofer:device-sync-status', { detail: '' })); true");
+  await wait("!document.body.textContent.includes('Thread sync needs attention')");
   assert.equal(await evaluate("document.querySelector('input[type=checkbox]').checked"), true);
   assert.equal(await evaluate("document.body.textContent.includes('Project access')"), false);
   assert.equal(await evaluate("document.body.textContent.includes('Device details')"), false);
@@ -256,13 +267,46 @@ async function main() {
   await click("Close setup");
   await click("Dismiss result");
   await evaluate("document.querySelectorAll('details').forEach(d => d.open = false)");
-  // Thread sync plus the remote-control and desktop-control opt-ins, which start off.
-  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 3);
+  // Thread sync plus the remote-control, desktop-control and wake opt-ins, which start off.
+  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 4);
   assert.equal(await evaluate("document.querySelectorAll('input[type=checkbox]')[1].checked"), false);
   assert.equal(await evaluate("document.querySelectorAll('input[type=checkbox]')[2].checked"), false);
   await evaluate("document.querySelectorAll('input[type=checkbox]')[1].click()");
   await wait("document.querySelectorAll('input[type=checkbox]')[1].checked");
   assert.deepEqual([actions.at(-1).action, actions.at(-1).enabled], ["remote_control", true]);
+  // Waking the computer is off by default and waits for Use Raticode from this phone.
+  const wake = "Array.from(document.querySelectorAll('label')).find(l => l.textContent.includes('Let this phone wake this computer'))";
+  assert.equal(await evaluate(wake + ".querySelector('input').checked"), false);
+  assert.equal(await evaluate(wake + ".querySelector('input').disabled"), true);
+  const wakeText = await evaluate(wake + ".textContent");
+  assert.match(wakeText, /hardware address to the phone over the encrypted link/);
+  assert.match(wakeText, /unencrypted wake signal/);
+  assert.match(wakeText, /Wake-on-LAN turned on in this computer's firmware/);
+  assert.match(wakeText, /doesn't work over Tailscale/);
+  assert.match(wakeText, /Turn on Use Raticode from this phone first\./);
+  await evaluate(wake + ".querySelector('input').click()");
+  assert.equal(actions.filter(a => a.action === "wake_computer").length, 0);
+  await evaluate("document.querySelectorAll('input[type=checkbox]')[2].click()");
+  await wait("!" + wake + ".querySelector('input').disabled");
+  assert.deepEqual([actions.at(-1).action, actions.at(-1).enabled], ["desktop_control", true]);
+  await evaluate(wake + ".querySelector('input').click()");
+  await wait(wake + ".querySelector('input').checked");
+  assert.deepEqual(actions.at(-1), { action: "wake_computer", device_id: peer.device_id, enabled: true });
+  await screenshot("phone-wake");
+  // Macs and Windows have no reviewed way to read the address yet.
+  state.wake_computer_available = false;
+  await evaluate("document.querySelectorAll('input[type=checkbox]')[2].click()");
+  await wait("document.body.textContent.includes('Not available on this system yet.')");
+  await evaluate("document.querySelectorAll('input[type=checkbox]')[2].click()");
+  await wait("document.querySelectorAll('input[type=checkbox]')[2].checked");
+  assert.equal(await evaluate(wake + ".querySelector('input').checked"), false);
+  assert.equal(await evaluate(wake + ".querySelector('input').disabled"), true);
+  state.wake_computer_available = true;
+  // With desktop control off again, the switch can't look on or be changed.
+  await evaluate("document.querySelectorAll('input[type=checkbox]')[2].click()");
+  await wait("!document.querySelectorAll('input[type=checkbox]')[2].checked");
+  assert.equal(await evaluate(wake + ".querySelector('input').checked"), false);
+  assert.equal(await evaluate(wake + ".querySelector('input').disabled"), true);
   assert.equal(await evaluate("Array.from(document.querySelectorAll('pre')).filter(i => i.checkVisibility()).length"), 0);
   await screenshot("phone-light");
   await evaluate("document.documentElement.classList.add('dark')");

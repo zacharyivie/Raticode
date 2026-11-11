@@ -54,7 +54,11 @@ def _run_workflow(workflow_id: str, workflow_path: str, subscriptions: dict[str,
         ).with_parameters(wf.config.schedule.invocation_inputs if wf.config.schedule else {})
         result = await executor.run()
         write_run_node_outputs_payload(result, wf.config.resource_limits)
-        log.info("Workflow %s finished: success=%s", workflow_id, result.success)
+        # A failed scheduled run is worth noticing; a successful one is routine.
+        if result.success:
+            log.info("Scheduled workflow %s finished", workflow_id)
+        else:
+            log.warning("Scheduled workflow %s failed; see its run log", workflow_id)
 
     asyncio.run(_exec())
 

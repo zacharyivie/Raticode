@@ -1,0 +1,93 @@
+name: Desktop and phone contract
+
+# The checks that need both apps. Each app's own workflow skips the other's code.
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'src/gofer/devices/**'
+      - 'scripts/device_tls_probe.py'
+      - 'scripts/check-protocol-compat.py'
+      - 'tests/fixtures/device_protocol/**'
+      - 'tests/unit/test_device_protocol.py'
+      - 'tests/unit/test_mobile_contract.py'
+      - 'mobile/android/protocol/**'
+      - 'mobile/android/scripts/check-contract.py'
+      - 'mobile/android/app/src/test/java/dev/raticode/mobile/protocol/**'
+      - '.github/workflows/contract-check.yml'
+  pull_request:
+    paths:
+      - 'src/gofer/devices/**'
+      - 'scripts/device_tls_probe.py'
+      - 'scripts/check-protocol-compat.py'
+      - 'tests/fixtures/device_protocol/**'
+      - 'tests/unit/test_device_protocol.py'
+      - 'tests/unit/test_mobile_contract.py'
+      - 'mobile/android/protocol/**'
+      - 'mobile/android/scripts/check-contract.py'
+      - 'mobile/android/app/src/test/java/dev/raticode/mobile/protocol/**'
+      - '.github/workflows/contract-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Protocol and interop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The older-peer check reads the protocol from the last release tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      # The interop tests run scripts/device_tls_probe.py with this .venv.
+      - name: Install locked Python dependencies
+        run: uv sync --locked --extra dev --extra xlsx --group dev
+
+      - name: Validate the schemas and fixtures for the phone
+        run: uv run --locked python mobile/android/scripts/check-contract.py
+
+      - name: Test the protocol on the desktop side
+        run: uv run --locked pytest tests/unit/test_device_protocol.py tests/unit/test_mobile_contract.py
+
+      - name: Check last release's messages still fit the protocol
+        run: uv run --locked python scripts/check-protocol-compat.py
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: platform-tools platforms;android-37.0 build-tools;36.0.0
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-read-only: true
+
+      # Setting the variable turns a missing Python setup into a failure instead of a skip.
+      - name: Run the phone's interop tests against this desktop code
+        working-directory: mobile/android
+        env:
+          RATICODE_DESKTOP_PROBE_ROOT: ${{ github.workspace }}
+        run: ./gradlew testDebugUnitTest --tests '*PythonTlsInteropTest' --tests '*StreamingInteropTest' --console=plain

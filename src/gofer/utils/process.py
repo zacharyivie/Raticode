@@ -30,6 +30,19 @@ class ProcessError(Exception):
         super().__init__(f"Process exited with code {returncode}: {stderr[:200]}")
 
 
+# Credentials a child process must never inherit, even from a copied parent env or an
+# override: the desktop's own tokens, and the Raticode API token a user may have
+# exported for their terminal (RATICODE_TOKEN / RATICODE_TOKEN_FILE), which would let a
+# Rem worker call the backend with the owner's authority.
+CREDENTIAL_ENV_VARS = (
+    "GOFER_UI_API_TOKEN",
+    "GOFER_DESKTOP_GRANT_SECRET",
+    "GOFER_BROWSER_ADMIN_TOKEN",
+    "RATICODE_TOKEN",
+    "RATICODE_TOKEN_FILE",
+)
+
+
 def build_subprocess_env(
     overrides: dict[str, str] | None = None, *, inherit_parent: bool = True
 ) -> dict[str, str]:
@@ -37,11 +50,14 @@ def build_subprocess_env(
     env = dict(os.environ) if inherit_parent else {}
     _sanitize_packaged_runtime_env(env)
     env.update(overrides or {})
-    # These credentials authorize Studio, desktop path grants and browser
-    # grants, not child providers or workflow commands. Strip them even from a
+    # These credentials authorize Studio, desktop path grants, browser grants and the
+    # Raticode API, not child providers or workflow commands. Strip them even from a
     # copied parent env.
-    for name in ("GOFER_UI_API_TOKEN", "GOFER_DESKTOP_GRANT_SECRET", "GOFER_BROWSER_ADMIN_TOKEN"):
+    for name in CREDENTIAL_ENV_VARS:
         env.pop(name, None)
+    # Marks providers, Rem workers and workflow commands as agents: the CLI then
+    # refuses to read the headless owner token (gofer.ui.headless).
+    env["RATICODE_AGENT_SESSION"] = "1"
     return env
 
 

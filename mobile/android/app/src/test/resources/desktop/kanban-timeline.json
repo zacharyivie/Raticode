@@ -1,0 +1,95 @@
+{
+  "ticket": {
+    "ticket_id": "73e7b4b9-72d8-40b2-bf9f-54338266e57b",
+    "scope": "rem",
+    "organization_id": "",
+    "organization_name": "",
+    "key": "REM-1",
+    "title": "Port the importer",
+    "description": "",
+    "status": "blocked",
+    "priority": "medium",
+    "assignee_id": "rem",
+    "assignee": "Rem",
+    "proposed": false,
+    "proposal_reason": "",
+    "duplicate_of": "",
+    "created_by": "user",
+    "created_at": "2026-11-10T13:34:40.914399+00:00",
+    "updated_at": "2026-11-10T13:34:40.918500+00:00",
+    "revision": 4,
+    "running": false,
+    "block_reason": "The review left these checks unresolved: Implement the requested behavior and demonstrate it works; Pass relevant regression tests and required project checks",
+    "summary": "The review still has unresolved checks.",
+    "type": "develop",
+    "project": "project",
+    "backlog_score": 0,
+    "skip_reason": "",
+    "self_work_scope": "assigned",
+    "run_id": "4c96a1d7-d9d7-406c-8fe2-cf63732b9111",
+    "thread_id": "c4ee0838-92e2-4591-b087-18e4f1f1a694",
+    "project_id": ""
+  },
+  "comments": [
+    {
+      "id": "46040a9e-7877-415c-ac74-b9d0efada188",
+      "at": "2026-11-10T13:34:40.917540+00:00",
+      "author": "system",
+      "author_name": "Raticode",
+      "kind": "status",
+      "title": "Work complete, moved to In review",
+      "body": "Ported it. All 12 tests pass.",
+      "details": "",
+      "from": "in_progress",
+      "to": "in_review",
+      "checks": [],
+      "task_id": "5eba21ca-412c-48a1-a68a-aabe915ac4a0",
+      "run_id": "4c96a1d7-d9d7-406c-8fe2-cf63732b9111",
+      "thread_id": "c4ee0838-92e2-4591-b087-18e4f1f1a694"
+    },
+    {
+      "id": "fe6c1d2b-96b5-48b8-888f-b0eccc8be4a1",
+      "at": "2026-11-10T13:34:40.918550+00:00",
+      "author": "system",
+      "author_name": "Raticode",
+      "kind": "status",
+      "title": "Blocked: review checks failed",
+      "body": "The review left these checks unresolved: Implement the requested behavior and demonstrate it works; Pass relevant regression tests and required project checks",
+      "details": "README still names the old flag.",
+      "from": "in_review",
+      "to": "blocked",
+      "checks": [
+        {
+          "name": "Implement the requested behavior and demonstrate it works",
+          "result": "fail"
+        },
+        {
+          "name": "Pass relevant regression tests and required project checks",
+          "result": "fail"
+        }
+      ],
+      "task_id": "5eba21ca-412c-48a1-a68a-aabe915ac4a0",
+      "run_id": "4c96a1d7-d9d7-406c-8fe2-cf63732b9111",
+      "thread_id": "c4ee0838-92e2-4591-b087-18e4f1f1a694"
+    },
+    {
+      "id": "5a84c8c0-129b-40ba-8607-5df88696dd60",
+      "at": "2026-11-10T13:34:40.920857+00:00",
+      "author": "user",
+      "author_name": "You",
+      "kind": "comment",
+      "title": "",
+      "body": "I'll check the README tonight.",
+      "details": "",
+      "from": "",
+      "to": "",
+      "checks": [],
+      "task_id": "",
+      "run_id": "",
+      "thread_id": ""
+    }
+  ],
+  "earlier": 0,
+  "can_comment": true,
+  "digest": "488f4aacb74340ca59cea2eebd9c038a"
+}

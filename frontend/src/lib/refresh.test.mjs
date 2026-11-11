@@ -97,3 +97,28 @@ test("shared cancellation keeps another subscriber alive and evicts abandoned re
   assert.equal(await shareCancellable("discovery", async () => "retry"), "retry");
   resolve("late");
 });
+
+test("a poller reports each new failure once, stays quiet for aborts and restarts, and resets after success", async () => {
+  const targets = fakeTargets();
+  const warnings = [];
+  const outcomes = [
+    new Error("Workflow list is corrupt"),
+    new Error("Workflow list is corrupt"),
+    Object.assign(new Error("stopped"), { name: "AbortError" }),
+    new Error("The desktop backend is unavailable. Retry when it is ready."),
+    null,
+    new Error("Workflow list is corrupt"),
+  ];
+  const total = outcomes.length;
+  let calls = 0;
+  const stop = startPolling(async () => { calls += 1; const next = outcomes.shift(); if (next) throw next; },
+    { ...targets, immediate: true, label: "workflows", warn: (message) => warnings.push(message) });
+  await tick();
+  while (calls < total) { targets.target.dispatchEvent(new Event("focus")); await tick(); }
+  stop();
+  assert.equal(calls, total);
+  assert.deepEqual(warnings, [
+    "Background refresh of workflows failed: Workflow list is corrupt",
+    "Background refresh of workflows failed: Workflow list is corrupt",
+  ], "the second report comes only after a success in between");
+});

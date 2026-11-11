@@ -6,6 +6,7 @@ import { exportReportTheme, importReportTheme, MAX_REPORT_THEME_FILE_BYTES, norm
 import ChatComposer from "./ChatComposer.jsx";
 import { clipboardAttachmentFiles, encodeChatAttachments, largePasteFile, readChatAttachments, transferContainsFiles } from "../lib/chatAttachments.js";
 import "./ReportThemeSettings.css";
+import { menuModels } from "../lib/providerModels.js";
 
 const palettes = {
   auto: ["#f6f7fb", "#273047", "#6268b3"], light: ["#ffffff", "#243040", "#3769a5"], dark: ["#181e2c", "#eff2fa", "#ada8ff"],
@@ -201,7 +202,7 @@ export default function ReportThemeSettings({ value, onChange, providerState = {
         <option value="">Current Rem selection</option>{providers.map(item => <option key={item.id} value={item.id}>{item.displayName || item.id}</option>)}
         {config.generation.provider && !provider ? <option value={config.generation.provider}>{config.generation.provider} · unavailable</option> : null}
       </select></label>
-      {config.generation.provider ? <><label>Model<select aria-label="Theme generation model" disabled={saving || busy} value={config.generation.model} onChange={event => generation({ model: event.target.value, effort: "" })}><option value="">Provider default</option>{(provider?.models || []).filter(item => item.allowed !== false).map(item => <option key={item.id} value={item.id}>{item.displayName || item.id}</option>)}</select></label>
+      {config.generation.provider ? <><label>Model<select aria-label="Theme generation model" disabled={saving || busy} value={config.generation.model} onChange={event => generation({ model: event.target.value, effort: "" })}><option value="">Provider default</option>{menuModels(provider, config.generation.model).filter(item => item.allowed !== false).map(item => <option key={item.id} value={item.id}>{item.displayName || item.id}</option>)}</select></label>
         <label>Effort<select aria-label="Theme generation effort" value={config.generation.effort} disabled={saving || busy || !model?.efforts?.length} onChange={event => generation({ effort: event.target.value })}><option value="">Model default</option>{(model?.efforts || []).map(item => <option key={item.id} value={item.id}>{item.displayName || item.id}</option>)}</select></label></> : null}
     </details>
     {error && !editing ? <p role="alert" className="report-theme-error">{error}</p> : null}

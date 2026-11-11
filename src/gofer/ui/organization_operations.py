@@ -15,7 +15,9 @@ from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from gofer.ui.organization_hours import hours_state
+from gofer.ui.organization_schedule import schedule_state, template
 from gofer.ui.organization_store import (
+    TASK_EDIT_FIELDS,
     OrganizationConfig,
     Task,
     now,
@@ -108,11 +110,9 @@ def trigger_routine(
         }
         receipts[receipt_id] = receipt
         return receipt
-    draft = {
-        k: v
-        for k, v in routine["task"].items()
-        if k not in {"id", "claim", "comments", "turns", "approvedRevision", "acceptedRevision"}
-    }
+    # Only plan fields come from the template; Raticode's own records never do, even in
+    # templates saved before this was checked.
+    draft = {k: v for k, v in routine["task"].items() if k in TASK_EDIT_FIELDS}
     draft.update(status="todo", routineId=routine["id"], occurrenceId=occurrence)
     if pending:
         draft["dependsOn"] = list(set(draft.get("dependsOn", [])) | {pending[-1]["id"]})
@@ -381,8 +381,27 @@ def diagnostics(org: dict[str, Any]) -> dict[str, Any]:
         for e in config["employees"]
         if e.get("heartbeatSeconds")
     }
+    attempts = runtime.get("attempts", {})
+    # What each running worker is doing, and the focus block its run started under.
+    underway = [
+        {
+            "employeeId": t["assignee"],
+            "taskId": t["id"],
+            "title": t["title"][:200],
+            "checkIn": bool(t.get("heartbeat")),
+            "block": (attempts.get(t["claim"]) or {}).get("scheduleBlock"),
+        }
+        for t in tasks
+        if t["claim"]
+    ]
     return {
         "hours": hours_state(config),
+        "schedule": {
+            **schedule_state(config),
+            "underway": underway,
+            # The suggested schedule the user can start from; never applied by itself.
+            "template": template()["blocks"],
+        },
         "heartbeats": heartbeats,
         "configuredConcurrency": config["maxConcurrency"],
         "effectiveConcurrency": effective,
@@ -824,6 +843,9 @@ def operation(
     prepared: dict[str, Any] = {}
     if action == "routine_save":
         routine = Routine.model_validate(params.get("routine", {})).model_dump()
+        refused = set(routine["task"]) - TASK_EDIT_FIELDS - {"id", "comments", "turns"}
+        if refused:
+            raise ValueError("Routine tasks can't set these fields: " + ", ".join(sorted(refused)))
         task = Task.model_validate(routine["task"]).model_dump()
         manager.store.validate_task(task, org["config"], org["runtime"]["tasks"])
         manager._validate_workspace(org, task)
@@ -864,6 +886,8 @@ def operation(
             expires = params.get("expiresAt")
             if expires and datetime.fromisoformat(expires).tzinfo is None:
                 raise ValueError("Memory expiry needs a timezone")
+            if expires and employee_id and datetime.fromisoformat(expires) <= datetime.now(UTC):
+                raise ValueError("Choose a memory expiry in the future")
             mid = str(uuid4())
             entry = {
                 "id": mid,
@@ -894,12 +918,18 @@ def operation(
                 ) <= datetime.now(UTC)
                 if changed or expired:
                     memory["stale"] = True
-                    if not memory.get("recheckTaskId"):
+                    # A run's rechecks count against the tickets it may create.
+                    limit = current["config"].get("maxChildTasksPerTurn", 5)
+                    room = run_id is None or (
+                        sum(t.get("parentRunId") == run_id for t in runtime["tasks"]) < limit
+                    )
+                    if not memory.get("recheckTaskId") and room:
                         task = Task(
                             title="Recheck memory evidence",
                             description=memory["body"] + "\nSource: " + memory["source"]["path"],
                             assignee=memory["employeeId"],
                             status="backlog",
+                            parentRunId=run_id,
                         ).model_dump()
                         runtime["tasks"].append(task)
                         memory["recheckTaskId"] = task["id"]

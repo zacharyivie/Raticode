@@ -1,6 +1,6 @@
 ---
 title: Schedules
-description: Understand Raticode's persisted scheduler and the current Rattish scheduling boundary.
+description: Schedule Rattish workflows with triggers, and understand the older scheduler.
 pageClass: docs-layout
 ---
 
@@ -8,13 +8,15 @@ pageClass: docs-layout
 
 A schedule repeats work at configured times while a scheduler process is available.
 
+To run a `workflow.rattish` on a schedule, add a [trigger](./triggers.md).
+
 ::: warning Rattish compatibility boundary
-The current `Raticode schedule` commands load the legacy workflow configuration. Rattish 1 has no cron declaration, and `Raticode schedule add` is not a supported registration command for `workflow.rattish`. Keep new workflow source in Rattish.
+The `Raticode schedule` commands load the legacy workflow configuration. `Raticode schedule add` doesn't accept `workflow.rattish`. Use `Raticode rattish triggers add cron` instead.
 :::
 
 ## Schedule a Rattish command externally
 
-For current Rattish workflows, configure your OS scheduler or CI system to run:
+An OS scheduler or CI system can also run a workflow directly, which suits machines where Raticode's scheduler won't be running:
 
 ```bash
 Raticode rattish run /absolute/project/.raticode/WORKFLOW_ID/workflow.rattish --format json

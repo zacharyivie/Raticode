@@ -105,7 +105,12 @@ async def test_claude_probe_uses_slash_catalog_and_supported_efforts(
 
     capability = await ClaudeCodeCapabilityProbe().discover("/tmp/claude")
 
-    assert [command[-1] for command in commands] == ["--version", "/model", "/effort"]
+    assert [command[-1] for command in commands] == [
+        "--version",
+        "--no-session-persistence",
+        "/model",
+        "/effort",
+    ]
     assert capability.default_model == "claude-sonnet-5"
     assert [model.id for model in capability.models] == [
         "claude-sonnet-5",

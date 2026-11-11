@@ -26,7 +26,7 @@ Submission is not successful execution. A queued record can wait indefinitely wh
 
 ## Existing CLI controls
 
-`Raticode runner list` lists known runners. `Raticode runner status` inspects work, optionally by queued run ID. `Raticode runner register --name NAME --label LABEL` registers a local runner record. `Raticode runner start` starts a worker, and `--once` processes at most one eligible run. `Raticode runner cancel RUN_ID` requests cancellation.
+`Raticode runner list` lists known runners. `Raticode runner status` inspects work, optionally by queued run ID. `Raticode runner register --name NAME --label LABEL` registers a local runner record. `Raticode runner start` starts a worker, and `--once` processes at most one eligible run. `Raticode runner cancel RUN_ID` requests cancellation. `Raticode runner queue WORKFLOW` submits a legacy workflow ID or TOML path with optional `--priority`, `--label` and `--param KEY=JSON`.
 
 Use each command's `--help` for workspace-root, provider capability, priority, and label options. Registration does not install a provider or copy a project to another machine.
 

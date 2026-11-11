@@ -5434,6 +5434,8 @@ class WorkflowExecutor:
                 )
             except Exception as exc:  # noqa: BLE001
                 self._log().error(f"{node.node_id} raised exception: {exc}")
+                # The run log has the message; the app log keeps the traceback.
+                log.warning("Workflow node %s raised an exception", node.node_id, exc_info=True)
                 output = NodeOutput(
                     node_id=node.node_id,
                     success=False,

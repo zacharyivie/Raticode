@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, ChevronsLeft, ChevronsRight } from "lucide-react";
 import { ProviderAuthentication } from "./ProviderModelEffortFields.jsx";
 import { apiUrl } from "../lib/api";
+import { menuModels } from "../lib/providerModels.js";
 
 export default function ProviderSettings({ providerState }) {
   const { capabilities, error, loading, refresh } = providerState;
@@ -77,7 +78,7 @@ function ProviderRow({ provider }) {
           value={deniedDefault ? "" : modelOverride} onChange={event => save({ defaultModel: event.target.value, defaultEffort: "" })}>
           <option value="">Automatic{provider.defaultModel ? ` (${provider.defaultModel})` : ""}</option>
           {missingModel ? <option value={modelOverride}>{modelOverride} (unavailable)</option> : null}
-          {models.map(model => <option key={model.id} value={model.id}>{model.displayName || model.id}</option>)}
+          {menuModels(provider, modelOverride).map(model => <option key={model.id} value={model.id}>{model.displayName || model.id}</option>)}
         </select>
       </label>
       <label className="block text-xs text-muted">Default effort
@@ -107,7 +108,7 @@ function ModelAccess({ provider, saving, save }) {
   const [deniedSelection, setDeniedSelection] = useState([]);
   useEffect(() => { setDenied(JSON.parse(deniedKey)); }, [deniedKey]);
   const catalog = provider.discoveredModels ?? provider.models ?? [];
-  const allowed = catalog.filter(model => !denied.includes(model.id));
+  const allowed = catalog.filter(model => model.listed !== false && !denied.includes(model.id));
   const deniedModels = denied.map(id => catalog.find(model => model.id === id) ?? { id, displayName: id });
   const disabled = saving || provider.settingsPending;
   async function move(toDenied, all = false) {

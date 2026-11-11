@@ -10,8 +10,19 @@ import { mergeTaskThreadMetadata, threadIndexEntry } from "./threadActivity.js";
 // (GET/POST /api/rem/...) is authoritative: the renderer submits commands and
 // renders what the server reports. It never launches work or decides completion.
 
+const NO_TICKETS = Object.freeze({});
+
+// The ticket index from a poll, or the one already held when nothing in it changed, so
+// chat rows that show pills re-render only when a ticket they name changes.
+function sameTickets(next, current) {
+  if (!next || !Object.keys(next).length) return NO_TICKETS;
+  return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+}
+
 function initialState() {
-  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], tasks: [], fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
+  // chatTickets and taskTickets: board tickets named in chat and on task cards, by key,
+  // as the board has them now. Only these keys show as ticket pills.
+  return { status: "loading", error: "", contextIssue: "", conversation: null, messages: [], tasks: [], chatTickets: NO_TICKETS, taskTickets: NO_TICKETS, fixture: false, resetting: false, notice: "", sheet: null, composerRequest: null, messageRequest: null };
 }
 
 // Files attached in Rem's chat upload to this chat attachment thread.
@@ -31,6 +42,7 @@ let contextPending = Promise.resolve();
 const mirroredThreads = new Map();
 const threadSyncPending = new Map();
 const finishedThreadVersions = new Map();
+const threadSyncFailures = new Map();
 // Content versions of what this window last applied. The backend answers
 // "unchanged" for a matching version, so a poll while nothing happens downloads,
 // parses and re-renders nothing. Older backends send no version.
@@ -75,6 +87,24 @@ export async function request(path, { method = "GET", body, known = "" } = {}) {
 }
 // The service is absent (older backend) or unreachable; nothing can run.
 const unavailable = error => error?.status === 0 || error?.status === 404 || error?.status === 501;
+
+// Folders Rem opened or created for a request. The window lists them as its own
+// projects, which renews their access and stops the backend reporting them.
+let openedProjectsListener = null;
+export function onRemOpenedProjects(listener) {
+  openedProjectsListener = listener;
+  return () => { if (openedProjectsListener === listener) openedProjectsListener = null; };
+}
+const trimRoot = root => (typeof root === "string" ? root.trim().replace(/(?<=.)[\\/]+$/, "") : "");
+// [current] recent project roots with Rem's opened projects in front; the same array when
+// every one is already listed, so a repeated report changes nothing.
+export function adoptRemProjects(current = [], opened = []) {
+  const listed = new Set(current.map(trimRoot));
+  const missing = [...new Set((Array.isArray(opened) ? opened : []).map(project => trimRoot(project?.root)))]
+    .filter(root => root.startsWith("/") || /^[A-Za-z]:[\\/]/.test(root))
+    .filter(root => !listed.has(root));
+  return missing.length ? [...missing, ...current] : current;
+}
 
 export function setRemHomeContext(factory) {
   stopContextPolling?.();
@@ -194,6 +224,7 @@ export async function refreshRemHome() {
     versions = { conversation: conversation.version || "", tasks: tasks.version || "" };
     // A restarted backend lost the context; queued tasks wait until it's sent again.
     if (conversation.context_ready === false && configuredContext) { configuredContext = ""; void syncContext(); }
+    if (conversation.opened_projects?.length) openedProjectsListener?.(conversation.opened_projects);
     const previousTasks = state.status === "ready" ? state.tasks : null;
     if (conversation.unchanged && tasks.unchanged) {
       // Nothing re-renders unless an earlier failed poll needs clearing.
@@ -208,8 +239,9 @@ export async function refreshRemHome() {
           // Keep optimistic messages until the server reports their request. Messages sent
           // while Rem was replying, from here or a phone, wait on the server and show as waiting.
           messages: mergeMessages([...(conversation.messages ?? []), ...(conversation.waiting ?? []).map(message => ({ ...message, pending: true, waiting: true }))], current.messages),
+          chatTickets: sameTickets(conversation.tickets, current.chatTickets),
         }),
-        ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks) }),
+        ...(tasks.unchanged ? {} : { tasks: mergeTasks(tasks.tasks ?? [], current.tasks), taskTickets: sameTickets(tasks.tickets, current.taskTickets) }),
       }));
       if (!tasks.unchanged) notifyFinishedRuns(previousTasks, tasks.tasks ?? []);
     }
@@ -224,12 +256,24 @@ export async function refreshRemHome() {
         for (const id of [run.thread_id, run.verification_thread_id].filter(Boolean)) if (!threads.has(id)) threads.set(id, version);
       }
     }
-    await Promise.allSettled([...threads].map(async ([id, version]) => {
+    const outcomes = await Promise.allSettled([...threads].map(async ([id, version]) => {
       if (version && finishedThreadVersions.get(id) === version) return;
       await syncRemThread(id, { poll: true });
       if (version) finishedThreadVersions.set(id, version);
       else finishedThreadVersions.delete(id);
     }));
+    // A thread copy that can't be saved (storage full, IndexedDB error) fails on every
+    // poll; report each distinct problem once instead of dropping it.
+    [...threads.keys()].forEach((id, index) => {
+      const outcome = outcomes[index];
+      if (outcome.status !== "rejected") { threadSyncFailures.delete(id); return; }
+      const error = outcome.reason;
+      if (error?.name === "AbortError" || unavailable(error)) return;
+      const message = error?.message || String(error);
+      if (threadSyncFailures.get(id) === message) return;
+      threadSyncFailures.set(id, message);
+      console.warn(`Rem couldn't update its copy of thread ${id}: ${message}`);
+    });
   } catch (error) {
     if (state.fixture || state.resetting || generation !== historyGeneration) return;
     set(unavailable(error) ? { status: "offline", error: "" } : { status: state.status === "loading" ? "error" : state.status, error: error.message });
@@ -302,6 +346,13 @@ function announceTaskSheet() { globalThis.window?.dispatchEvent?.(new CustomEven
 export function showRemMessage(id) {
   set({ messageRequest: { id, seq: ++sequence } });
   globalThis.window?.dispatchEvent?.(new CustomEvent("gofer:rem-show-message", { detail: { id } }));
+}
+// Words to find in Rem's whole saved chat, newest first. The desktop searches its own
+// history; no model reads the words. `before` asks for the page after an earlier one.
+export async function searchRemHistory(query, { before = null, limit = 50 } = {}) {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  if (before != null) params.set("before", String(before));
+  return request(`/search?${params}`);
 }
 export function closeTaskSheet() { set({ sheet: null }); }
 export function suggestMessage(text) { set({ composerRequest: { text, id: ++sequence } }); }

@@ -1,6 +1,6 @@
 ---
 title: File watchers
-description: Understand file-triggered automation, debounce, and the current Rattish watcher boundary.
+description: Watch files with Rattish triggers, and understand the older watcher service.
 pageClass: docs-layout
 ---
 
@@ -8,8 +8,10 @@ pageClass: docs-layout
 
 Watchers respond to filesystem changes instead of requiring a manual run.
 
+To start a `workflow.rattish` when files change, add a [file trigger](./triggers.md#file-changes).
+
 ::: warning Rattish compatibility boundary
-The current `Raticode watch` service discovers legacy `.toml` workflows in its data directory. It does not discover project-registered `workflow.rattish` sources. Rattish 1 does not define a watch declaration. These docs do not create TOML as a workaround.
+The `Raticode watch` service discovers legacy `.toml` workflows in its data directory. It doesn't discover `workflow.rattish` sources. Use `Raticode rattish triggers add file` instead.
 :::
 
 ## Existing watcher service
@@ -20,13 +22,13 @@ The watcher only operates while that process is running. It does not create an O
 
 ## Connect a Rattish workflow
 
-Use a filesystem service you explicitly configure to call `Raticode rattish run WORKFLOW_PATH`. The external tool owns event selection and debounce; Raticode owns that invoked workflow's validation and execution.
+A file trigger handles event selection and debounce for you. An external filesystem service can also call `Raticode rattish run WORKFLOW_PATH`. That tool then owns event selection and debounce, and Raticode owns the workflow's validation and execution.
 
 Start with one watched input directory and a separate output directory. Writing reports back into the same watched glob can retrigger the workflow. Add exclusions, bounded concurrency, and clear failure handling before using the watcher unattended.
 
 ## Events and loops
 
-A Rattish `loop` can consume `trigger-events` supplied by a runtime caller. Declaring that source does not start a filesystem watcher. The ordinary CLI `run` command accepts workflow inputs, not a general trigger-event feed.
+A Rattish `loop` can consume `trigger-events`. A [file trigger](./triggers.md#file-changes) supplies one item per changed file. Declaring that source doesn't start a watcher by itself, and the ordinary CLI `run` command accepts workflow inputs, not trigger events.
 
 ## Useful checks
 

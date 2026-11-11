@@ -1,0 +1,1786 @@
+{
+  "description": "Every backend HTTP route, phone operation, phone protocol message and desktop window request (Electron `gofer:*` IPC), mapped to the CLI command that covers it or a named exclusion. tests/unit/test_cli_parity.py fails when one has neither. `api` means only the generic `Raticode api` command reaches it.",
+  "exclusions": {
+    "window-ui": "Serves the desktop window's own screens: attachments, media and link previews, voice input, the studio editor, generation jobs, themes, its terminal, clipboard, logs and developer tools. Scripts edit workflow.rattish and use `Raticode rattish` instead.",
+    "desktop-auth": "Desktop security handshakes (path grants, trusted roots, the window's session token). A CLI that could call them could grant itself folder access.",
+    "folder-approval": "Registers or opens a folder, which the backend only accepts with a folder approval from the desktop. Do it in the app; the CLI then works with the result.",
+    "pairing": "Pairing and device actions require the Settings UI by design.",
+    "provider-sign-in": "Provider sign-in opens an interactive browser login. Sign in on the machine itself with the provider's own CLI.",
+    "credentials": "Stores account credentials or secret values. Credentials never go through CLI arguments; set them in the app.",
+    "org-run-control": "Starts, pauses or resumes an organization or its heartbeats, or decides a consent request. Needs the user's separate authorization, so it stays in the Organizations tab.",
+    "consent-gated": "The backend asks for the user's consent in the app before this change (archive, routines, webhooks, ingress, GitHub import, and restoring a revision, which can bring back full access). Kept in the app so consent is reviewed where it is shown.",
+    "runs-agents": "Starts or steers agent work outside a workflow run (swarm start/control/messages, organization wake, launches, checks, retries). Not offered by the CLI; start this work in the app.",
+    "worker-tools": "Used by an organization employee during its own run (claims, artifacts, memory). Not a user action.",
+    "thread-list": "Needs the thread list, which lives in the desktop window's storage (threads, their search and the conversation archive). Follow-up: move the thread index into the backend, then add thread list/create/send/delete.",
+    "webhook-ingress": "Called by outside services that fire a webhook, not by a user or script of this computer.",
+    "phone-only": "A phone screen's own data (overview cards, drafts, file explorer, media, developer log). Scripts use the filesystem and the commands above.",
+    "source-control": "Source control. Use git directly; wrapping it would be a second git.",
+    "browser": "Controls Raticode's browser tabs, which need a display.",
+    "window-settings": "App settings that the desktop window owns and applies. Most are UI preferences a script doesn't need.",
+    "user-decision": "Your decision on an organization ticket: approve its plan, accept or send back its review, or reopen it. Each one lets agents start work. The CLI doesn't offer these yet; decide in the Organizations tab.",
+    "protocol-reply": "Sent by the desktop to a phone: a reply, snapshot, progress update or error for one of the phone's requests. Nothing to call.",
+    "device-link": "Belongs to the encrypted link between paired devices: syncing, file transfer, cancelling a phone's request and remote jobs sent to another desktop. A script on this computer uses the backend directly instead, for example `Raticode rem tasks create`.",
+    "file-explorer": "The desktop window's file explorer, editor and project search. Scripts read and write project files directly.",
+    "app-updates": "Updates the desktop app itself. Update the CLI with your package manager or a new release download."
+  },
+  "routes": {
+    "DELETE /api/chat": {
+      "excluded": "thread-list"
+    },
+    "DELETE /api/chat/threads/*": {
+      "excluded": "thread-list"
+    },
+    "DELETE /api/provider/profiles/*": {
+      "cli": "provider profile rm"
+    },
+    "DELETE /api/rattish/triggers/*": {
+      "cli": [
+        "rattish triggers remove",
+        "rattish triggers apply"
+      ]
+    },
+    "DELETE /api/rem/memories/*": {
+      "cli": "rem memories forget"
+    },
+    "DELETE /api/rem/tasks/*": {
+      "cli": "rem tasks delete"
+    },
+    "DELETE /api/swarms/*": {
+      "cli": "swarm delete"
+    },
+    "DELETE /api/workflows/*": {
+      "cli": "workflow rm"
+    },
+    "DELETE /api/workflows/*/chat": {
+      "excluded": "window-ui"
+    },
+    "GET /api/chat/attachments/locate": {
+      "excluded": "window-ui"
+    },
+    "GET /api/chat/events": {
+      "cli": "threads follow"
+    },
+    "GET /api/chat/providers": {
+      "cli": "provider list"
+    },
+    "GET /api/chat/steering": {
+      "cli": "threads steering"
+    },
+    "GET /api/chat/transcribe/engines": {
+      "excluded": "window-ui"
+    },
+    "GET /api/chat/transcribe/model": {
+      "excluded": "window-ui"
+    },
+    "GET /api/desktop/trusted-roots": {
+      "excluded": "desktop-auth"
+    },
+    "GET /api/devices": {
+      "cli": "devices list"
+    },
+    "GET /api/doctor": {
+      "cli": "doctor"
+    },
+    "GET /api/generation-jobs": {
+      "excluded": "window-ui"
+    },
+    "GET /api/health": {
+      "cli": "api"
+    },
+    "GET /api/link-preview": {
+      "excluded": "window-ui"
+    },
+    "GET /api/media-image": {
+      "excluded": "window-ui"
+    },
+    "GET /api/organizations#availability": {
+      "cli": "api"
+    },
+    "GET /api/provider/auth": {
+      "cli": "provider status"
+    },
+    "GET /api/provider/capabilities": {
+      "cli": [
+        "provider list",
+        "provider models"
+      ]
+    },
+    "GET /api/provider/commit-settings": {
+      "excluded": "window-settings"
+    },
+    "GET /api/provider/profiles": {
+      "cli": "provider profile list"
+    },
+    "GET /api/provider/voice-tidy": {
+      "excluded": "window-settings"
+    },
+    "GET /api/queue": {
+      "cli": "runner list"
+    },
+    "GET /api/rattish/triggers": {
+      "cli": [
+        "rattish triggers list",
+        "rattish triggers export"
+      ]
+    },
+    "GET /api/rem-resources": {
+      "cli": "rem resources"
+    },
+    "GET /api/rem/context": {
+      "cli": [
+        "rem settings show",
+        "rem settings export"
+      ]
+    },
+    "GET /api/rem/conversation": {
+      "cli": "api"
+    },
+    "GET /api/rem/events": {
+      "cli": "api"
+    },
+    "GET /api/rem/kanban": {
+      "cli": [
+        "tickets list",
+        "tickets show",
+        "selfwork status",
+        "selfwork export"
+      ]
+    },
+    "GET /api/rem/memories": {
+      "cli": "rem memories list"
+    },
+    "GET /api/rem/messages": {
+      "cli": [
+        "rem messages",
+        "rem follow",
+        "rem say"
+      ]
+    },
+    "GET /api/rem/notices": {
+      "cli": "rem notices"
+    },
+    "GET /api/rem/runs/*": {
+      "cli": "rem runs show"
+    },
+    "GET /api/rem/search": {
+      "cli": "rem search"
+    },
+    "GET /api/rem/tasks": {
+      "cli": [
+        "rem tasks list",
+        "rem tasks show",
+        "rem tasks wait"
+      ]
+    },
+    "GET /api/rem/threads/*": {
+      "cli": "rem thread show"
+    },
+    "GET /api/retention": {
+      "cli": "api"
+    },
+    "GET /api/runners": {
+      "cli": "runner list"
+    },
+    "GET /api/session": {
+      "excluded": "desktop-auth"
+    },
+    "GET /api/swarms": {
+      "cli": "swarm list"
+    },
+    "GET /api/swarms/*": {
+      "cli": [
+        "swarm show",
+        "swarm export"
+      ]
+    },
+    "GET /api/swarms/*/history": {
+      "cli": "swarm history"
+    },
+    "GET /api/usage/credentials": {
+      "excluded": "credentials"
+    },
+    "GET /api/usage/overview": {
+      "cli": "usage show"
+    },
+    "GET /api/workflow-templates": {
+      "excluded": "window-ui"
+    },
+    "GET /api/workflow-templates/*": {
+      "excluded": "window-ui"
+    },
+    "GET /api/workflows": {
+      "cli": [
+        "rattish list",
+        "rattish show",
+        "projects list"
+      ]
+    },
+    "GET /api/workflows/*/approvals": {
+      "cli": "rattish approvals"
+    },
+    "GET /api/workflows/*/doctor": {
+      "cli": "doctor"
+    },
+    "GET /api/workflows/*/document": {
+      "cli": "rattish show"
+    },
+    "GET /api/workflows/*/events": {
+      "cli": "rattish events"
+    },
+    "GET /api/workflows/*/history": {
+      "cli": "api"
+    },
+    "GET /api/workflows/*/history/*/diff": {
+      "cli": "api"
+    },
+    "GET /api/workflows/*/logs": {
+      "cli": [
+        "rattish runs",
+        "rattish wait"
+      ]
+    },
+    "GET /api/workflows/*/logs/*": {
+      "cli": "rattish logs"
+    },
+    "GET /api/workflows/*/logs/latest": {
+      "cli": "rattish logs"
+    },
+    "GET /api/workflows/*/retention": {
+      "cli": "api"
+    },
+    "GET /api/workflows/*/validate": {
+      "cli": "rattish check"
+    },
+    "GET /workflows/*/logs/*": {
+      "excluded": "window-ui"
+    },
+    "GET /workflows/*/usage": {
+      "excluded": "window-ui"
+    },
+    "PATCH /api/rem/memories/*": {
+      "cli": "rem memories edit"
+    },
+    "PATCH /api/rem/tasks/*": {
+      "cli": [
+        "rem tasks edit",
+        "rem tasks resume"
+      ]
+    },
+    "POST /api/chat": {
+      "excluded": "thread-list"
+    },
+    "POST /api/chat/attachments": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/attachments/copy": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/changes/redo": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/changes/undo": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/commit-message": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/steer": {
+      "cli": "threads steer"
+    },
+    "POST /api/chat/stop": {
+      "cli": "threads stop"
+    },
+    "POST /api/chat/stream": {
+      "excluded": "thread-list"
+    },
+    "POST /api/chat/transcribe": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/transcribe/cancel": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/transcribe/chunk": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/transcribe/engines": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/transcribe/engines/test": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/transcribe/finish": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/transcribe/model": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/transcribe/start": {
+      "excluded": "window-ui"
+    },
+    "POST /api/chat/voice-tidy": {
+      "excluded": "window-ui"
+    },
+    "POST /api/desktop/path-grants": {
+      "excluded": "desktop-auth"
+    },
+    "POST /api/devices#approve": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#authorize_thread": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#browser_exchange": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#cancel": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#cancel_invitation": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#cancel_pairing": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#cancel_work": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#confirm": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#desktop_control": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#enable": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#fleet_status": {
+      "cli": "api"
+    },
+    "POST /api/devices#host_template": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#host_threads": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#invite": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#offer_file": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#pair": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#preview": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#reconnect": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#remote_control": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#remove_revoked": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#revoke": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#revoke_thread": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#send": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#set_endpoint": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#settings_exchange": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#share_workspace": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#tailnet": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#tailnet_check": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#thread_history": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#unpair": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#wake_computer": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#work_status": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#workspace_exchange": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#workspace_poll": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#workspace_remove": {
+      "excluded": "pairing"
+    },
+    "POST /api/generation-jobs": {
+      "excluded": "window-ui"
+    },
+    "POST /api/generation-jobs/dismiss": {
+      "excluded": "window-ui"
+    },
+    "POST /api/organization-webhooks/*": {
+      "excluded": "webhook-ingress"
+    },
+    "POST /api/organizations#approve": {
+      "excluded": "user-decision"
+    },
+    "POST /api/organizations#archive": {
+      "excluded": "consent-gated"
+    },
+    "POST /api/organizations#artifact_add": {
+      "excluded": "worker-tools"
+    },
+    "POST /api/organizations#attempts": {
+      "cli": "api"
+    },
+    "POST /api/organizations#audit_verify": {
+      "cli": "api"
+    },
+    "POST /api/organizations#backup": {
+      "cli": "api"
+    },
+    "POST /api/organizations#check_run": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/organizations#claim_add": {
+      "excluded": "worker-tools"
+    },
+    "POST /api/organizations#comment": {
+      "cli": "org tickets comment"
+    },
+    "POST /api/organizations#configure": {
+      "cli": [
+        "org apply",
+        "org employees hold",
+        "org employees release"
+      ]
+    },
+    "POST /api/organizations#control": {
+      "excluded": "org-run-control"
+    },
+    "POST /api/organizations#create": {
+      "cli": "org apply"
+    },
+    "POST /api/organizations#diagnostics": {
+      "cli": "api"
+    },
+    "POST /api/organizations#events": {
+      "cli": "org events"
+    },
+    "POST /api/organizations#execution_reconcile": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/organizations#execution_resolve": {
+      "excluded": "consent-gated"
+    },
+    "POST /api/organizations#export": {
+      "cli": "org export"
+    },
+    "POST /api/organizations#heartbeat_resume": {
+      "excluded": "org-run-control"
+    },
+    "POST /api/organizations#help": {
+      "cli": "api"
+    },
+    "POST /api/organizations#history": {
+      "cli": "org history"
+    },
+    "POST /api/organizations#import": {
+      "cli": "org import"
+    },
+    "POST /api/organizations#import_github": {
+      "excluded": "consent-gated"
+    },
+    "POST /api/organizations#import_github_preview": {
+      "excluded": "consent-gated"
+    },
+    "POST /api/organizations#import_preview": {
+      "cli": "org import"
+    },
+    "POST /api/organizations#knowledge_import": {
+      "cli": "api"
+    },
+    "POST /api/organizations#knowledge_link": {
+      "cli": "api"
+    },
+    "POST /api/organizations#knowledge_read": {
+      "cli": "org knowledge read"
+    },
+    "POST /api/organizations#knowledge_refresh": {
+      "cli": "api"
+    },
+    "POST /api/organizations#knowledge_save": {
+      "cli": "org knowledge save"
+    },
+    "POST /api/organizations#knowledge_search": {
+      "cli": "org knowledge search"
+    },
+    "POST /api/organizations#list": {
+      "cli": "org list"
+    },
+    "POST /api/organizations#memory": {
+      "excluded": "worker-tools"
+    },
+    "POST /api/organizations#memory_check": {
+      "excluded": "worker-tools"
+    },
+    "POST /api/organizations#memory_save": {
+      "excluded": "worker-tools"
+    },
+    "POST /api/organizations#outcomes": {
+      "cli": "api"
+    },
+    "POST /api/organizations#plan_delete": {
+      "cli": "api"
+    },
+    "POST /api/organizations#plan_save": {
+      "cli": "org schedule apply"
+    },
+    "POST /api/organizations#providers": {
+      "cli": "api"
+    },
+    "POST /api/organizations#read": {
+      "cli": [
+        "org show",
+        "org config",
+        "org employees list",
+        "org schedule show",
+        "org projects"
+      ]
+    },
+    "POST /api/organizations#rehearse": {
+      "cli": "api"
+    },
+    "POST /api/organizations#reopen": {
+      "excluded": "user-decision"
+    },
+    "POST /api/organizations#repository": {
+      "cli": "api"
+    },
+    "POST /api/organizations#request_decide": {
+      "excluded": "org-run-control"
+    },
+    "POST /api/organizations#restore": {
+      "excluded": "consent-gated"
+    },
+    "POST /api/organizations#resume_all": {
+      "excluded": "org-run-control"
+    },
+    "POST /api/organizations#review": {
+      "excluded": "user-decision"
+    },
+    "POST /api/organizations#routine_save": {
+      "excluded": "consent-gated"
+    },
+    "POST /api/organizations#routine_trigger": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/organizations#routines": {
+      "cli": "api"
+    },
+    "POST /api/organizations#routing_experiment": {
+      "cli": "api"
+    },
+    "POST /api/organizations#run_events": {
+      "cli": "api"
+    },
+    "POST /api/organizations#run_input": {
+      "cli": "api"
+    },
+    "POST /api/organizations#secret_reference": {
+      "excluded": "credentials"
+    },
+    "POST /api/organizations#secret_store": {
+      "excluded": "credentials"
+    },
+    "POST /api/organizations#self_work_projects": {
+      "cli": "api"
+    },
+    "POST /api/organizations#task_create": {
+      "cli": "org tickets create"
+    },
+    "POST /api/organizations#task_update": {
+      "cli": "org tickets update"
+    },
+    "POST /api/organizations#tasks": {
+      "cli": "org tickets list"
+    },
+    "POST /api/organizations#ticket_changes": {
+      "cli": "org tickets changes"
+    },
+    "POST /api/organizations#wake": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/organizations#webhook_save": {
+      "excluded": "consent-gated"
+    },
+    "POST /api/organizations#workflow_launch": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/organizations#workflow_preview": {
+      "cli": "api"
+    },
+    "POST /api/projects/open": {
+      "excluded": "folder-approval"
+    },
+    "POST /api/provider/auth": {
+      "excluded": "provider-sign-in"
+    },
+    "POST /api/provider/commit-settings": {
+      "excluded": "window-settings"
+    },
+    "POST /api/provider/profiles": {
+      "cli": "provider profile create"
+    },
+    "POST /api/provider/settings": {
+      "cli": "provider set"
+    },
+    "POST /api/provider/voice-tidy": {
+      "excluded": "window-settings"
+    },
+    "POST /api/queue/*/cancel": {
+      "cli": "runner cancel"
+    },
+    "POST /api/rattish/triggers": {
+      "cli": [
+        "rattish triggers apply",
+        "rattish triggers add cron"
+      ]
+    },
+    "POST /api/rattish/triggers/*": {
+      "cli": [
+        "rattish triggers apply",
+        "rattish triggers update",
+        "rattish triggers enable",
+        "rattish triggers disable"
+      ]
+    },
+    "POST /api/rattish/triggers/*/rotate-token": {
+      "cli": "rattish triggers rotate-token"
+    },
+    "POST /api/rattish/triggers/login": {
+      "cli": "rattish triggers login"
+    },
+    "POST /api/rattish/triggers/preview": {
+      "cli": "rattish triggers add cron"
+    },
+    "POST /api/rattish/workflows/*/export": {
+      "cli": "rattish export"
+    },
+    "POST /api/rattish/workflows/import": {
+      "cli": "rattish import"
+    },
+    "POST /api/rattish/workflows/import/preview": {
+      "cli": "rattish import"
+    },
+    "POST /api/rem-resources#add_skill": {
+      "cli": "rem skill add"
+    },
+    "POST /api/rem-resources#remove_mcp": {
+      "cli": "rem mcp remove"
+    },
+    "POST /api/rem-resources#remove_skill": {
+      "cli": "rem skill remove"
+    },
+    "POST /api/rem-resources#save_mcp": {
+      "cli": "rem mcp add"
+    },
+    "POST /api/rem/context": {
+      "cli": "rem settings apply"
+    },
+    "POST /api/rem/kanban/participant": {
+      "cli": "tickets projects"
+    },
+    "POST /api/rem/kanban/report/seen": {
+      "cli": "selfwork report"
+    },
+    "POST /api/rem/kanban/ticket#approve": {
+      "cli": "tickets approve"
+    },
+    "POST /api/rem/kanban/ticket#assign": {
+      "cli": "tickets assign"
+    },
+    "POST /api/rem/kanban/ticket#comment": {
+      "cli": "tickets comment"
+    },
+    "POST /api/rem/kanban/ticket#create": {
+      "cli": "tickets create"
+    },
+    "POST /api/rem/kanban/ticket#decline": {
+      "cli": "tickets decline"
+    },
+    "POST /api/rem/kanban/ticket#edit": {
+      "cli": "tickets edit"
+    },
+    "POST /api/rem/kanban/ticket#move": {
+      "cli": "tickets move"
+    },
+    "POST /api/rem/kanban/timeline": {
+      "cli": [
+        "tickets show",
+        "tickets comments"
+      ]
+    },
+    "POST /api/rem/memories": {
+      "cli": "rem memories add"
+    },
+    "POST /api/rem/messages": {
+      "cli": "rem say"
+    },
+    "POST /api/rem/messages/*/undo-memory": {
+      "cli": "rem memories undo"
+    },
+    "POST /api/rem/reset": {
+      "cli": "api"
+    },
+    "POST /api/rem/runs/*/acknowledge": {
+      "cli": "rem runs acknowledge"
+    },
+    "POST /api/rem/runs/*/cancel": {
+      "cli": "rem runs cancel"
+    },
+    "POST /api/rem/runs/*/retry_review": {
+      "cli": "rem runs retry-review"
+    },
+    "POST /api/rem/tasks": {
+      "cli": "rem tasks create"
+    },
+    "POST /api/rem/tasks/*/pause": {
+      "cli": "rem tasks pause"
+    },
+    "POST /api/rem/tasks/*/run": {
+      "cli": "rem tasks run"
+    },
+    "POST /api/rem/threads/*/messages": {
+      "cli": "rem thread send"
+    },
+    "POST /api/report-themes/generate": {
+      "excluded": "window-ui"
+    },
+    "POST /api/retention": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#backfill_provenance": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#cancel": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#connections": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#dismiss": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#ignore_health": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#import_preview": {
+      "excluded": "folder-approval"
+    },
+    "POST /api/second-brains#job_sources": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#mutate": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#open": {
+      "excluded": "folder-approval"
+    },
+    "POST /api/second-brains#original": {
+      "cli": "brain read"
+    },
+    "POST /api/second-brains#preferences": {
+      "excluded": "window-ui"
+    },
+    "POST /api/second-brains#projects": {
+      "cli": "brain projects"
+    },
+    "POST /api/second-brains#related": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#remove": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#report_sources": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#search": {
+      "cli": "brain search"
+    },
+    "POST /api/second-brains#snapshot": {
+      "cli": [
+        "brain list",
+        "brain documents"
+      ]
+    },
+    "POST /api/second-brains#task": {
+      "cli": "brain save"
+    },
+    "POST /api/second-brains#topic_layout": {
+      "excluded": "window-ui"
+    },
+    "POST /api/second-brains#topics": {
+      "cli": "api"
+    },
+    "POST /api/second-brains#update_brain": {
+      "excluded": "folder-approval"
+    },
+    "POST /api/swarms": {
+      "cli": "swarm apply"
+    },
+    "POST /api/swarms/*/control#cleanup": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/control#pause": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/control#resume": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/control#stop": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/deliveries#dismiss": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/deliveries#retry": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/execution#complete": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/execution#human_response": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/execution#integrate": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/execution#repair": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/execution#replan": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/execution#resolve_attempt": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/execution#verify": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/messages": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/objectives": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/swarms/*/start": {
+      "excluded": "runs-agents"
+    },
+    "POST /api/usage/credentials": {
+      "excluded": "credentials"
+    },
+    "POST /api/usage/refresh": {
+      "cli": "usage refresh"
+    },
+    "POST /api/workflows": {
+      "cli": "rattish create"
+    },
+    "POST /api/workflows/*/approvals/*/approve": {
+      "cli": "rattish approve"
+    },
+    "POST /api/workflows/*/approvals/*/reject": {
+      "cli": "rattish reject"
+    },
+    "POST /api/workflows/*/document/analyze": {
+      "excluded": "window-ui"
+    },
+    "POST /api/workflows/*/document/mutate": {
+      "excluded": "window-ui"
+    },
+    "POST /api/workflows/*/document/save": {
+      "excluded": "window-ui"
+    },
+    "POST /api/workflows/*/duplicate": {
+      "cli": "workflow duplicate"
+    },
+    "POST /api/workflows/*/export": {
+      "cli": "workflow export"
+    },
+    "POST /api/workflows/*/history/*/restore": {
+      "cli": "api"
+    },
+    "POST /api/workflows/*/logs/prune": {
+      "cli": "api"
+    },
+    "POST /api/workflows/*/metadata": {
+      "excluded": "window-ui"
+    },
+    "POST /api/workflows/*/plan": {
+      "cli": "rattish start"
+    },
+    "POST /api/workflows/*/queue": {
+      "cli": "runner queue"
+    },
+    "POST /api/workflows/*/rename": {
+      "cli": "workflow rename"
+    },
+    "POST /api/workflows/*/retention": {
+      "cli": "api"
+    },
+    "POST /api/workflows/*/run": {
+      "cli": "rattish start"
+    },
+    "POST /api/workflows/*/runs/*/resume": {
+      "cli": "rattish resume"
+    },
+    "POST /api/workflows/*/runs/*/stop": {
+      "cli": "rattish stop"
+    },
+    "POST /api/workflows/*/stop": {
+      "cli": "rattish stop"
+    },
+    "POST /api/workflows/*/validate": {
+      "cli": "rattish check"
+    },
+    "POST /api/workflows/*/validate/fix": {
+      "excluded": "window-ui"
+    },
+    "POST /api/workflows/*/webhooks/*/replay": {
+      "excluded": "webhook-ingress"
+    },
+    "POST /api/workflows/*/webhooks/*/trigger": {
+      "excluded": "webhook-ingress"
+    },
+    "POST /api/workflows/import": {
+      "cli": "workflow import"
+    },
+    "POST /api/workflows/import/preview": {
+      "cli": "workflow preview-import"
+    },
+    "PUT /api/rem/kanban/settings": {
+      "cli": [
+        "selfwork set",
+        "selfwork apply"
+      ]
+    },
+    "PUT /api/rem/memory-mode": {
+      "cli": "rem memories mode"
+    },
+    "PUT /api/swarms/*": {
+      "cli": "swarm apply"
+    },
+    "PUT /api/workflows/*": {
+      "excluded": "window-ui"
+    }
+  },
+  "phoneOperations": {
+    "browser.open": {
+      "excluded": "browser"
+    },
+    "browser.tabs": {
+      "excluded": "browser"
+    },
+    "developer.log": {
+      "excluded": "phone-only"
+    },
+    "files.link": {
+      "excluded": "phone-only"
+    },
+    "files.list": {
+      "excluded": "phone-only"
+    },
+    "files.open": {
+      "excluded": "phone-only"
+    },
+    "files.text": {
+      "excluded": "phone-only"
+    },
+    "kanban.board": {
+      "cli": "tickets list"
+    },
+    "kanban.participant": {
+      "cli": "tickets projects"
+    },
+    "kanban.ticket": {
+      "cli": [
+        "tickets create",
+        "tickets edit",
+        "tickets move",
+        "tickets assign",
+        "tickets comment",
+        "tickets approve",
+        "tickets decline"
+      ]
+    },
+    "kanban.timeline": {
+      "cli": "tickets comments"
+    },
+    "media.image": {
+      "excluded": "phone-only"
+    },
+    "media.preview": {
+      "excluded": "phone-only"
+    },
+    "organizations.control": {
+      "excluded": "org-run-control"
+    },
+    "organizations.knowledge": {
+      "cli": "org knowledge save"
+    },
+    "organizations.list": {
+      "cli": "org list"
+    },
+    "organizations.note": {
+      "cli": "org knowledge read"
+    },
+    "organizations.read": {
+      "cli": "org show"
+    },
+    "organizations.schedule": {
+      "cli": "org schedule apply"
+    },
+    "organizations.task": {
+      "cli": [
+        "org tickets create",
+        "org tickets update",
+        "org tickets comment"
+      ]
+    },
+    "organizations.worker": {
+      "cli": [
+        "org employees hold",
+        "org employees release"
+      ]
+    },
+    "overview": {
+      "excluded": "phone-only"
+    },
+    "rem.attachment": {
+      "excluded": "phone-only"
+    },
+    "rem.draft": {
+      "excluded": "phone-only"
+    },
+    "rem.history": {
+      "cli": "rem messages"
+    },
+    "rem.home": {
+      "cli": [
+        "rem messages",
+        "rem tasks list"
+      ]
+    },
+    "rem.instruct": {
+      "cli": "rem thread send"
+    },
+    "rem.memories": {
+      "cli": "rem memories list"
+    },
+    "rem.memory.add": {
+      "cli": "rem memories add"
+    },
+    "rem.memory.edit": {
+      "cli": "rem memories edit"
+    },
+    "rem.memory.forget": {
+      "cli": "rem memories forget"
+    },
+    "rem.memory.mode": {
+      "cli": "rem memories mode"
+    },
+    "rem.memory.undo": {
+      "cli": "rem memories undo"
+    },
+    "rem.message": {
+      "cli": "rem say"
+    },
+    "rem.notices": {
+      "cli": "rem notices"
+    },
+    "rem.run.acknowledge": {
+      "cli": "rem runs acknowledge"
+    },
+    "rem.run.cancel": {
+      "cli": "rem runs cancel"
+    },
+    "rem.run.retry_review": {
+      "cli": "rem runs retry-review"
+    },
+    "rem.search": {
+      "cli": "rem search"
+    },
+    "rem.task": {
+      "cli": "rem tasks show"
+    },
+    "rem.task.create": {
+      "cli": "rem tasks create"
+    },
+    "rem.task.delete": {
+      "cli": "rem tasks delete"
+    },
+    "rem.task.pause": {
+      "cli": "rem tasks pause"
+    },
+    "rem.task.resume": {
+      "cli": "rem tasks resume"
+    },
+    "rem.task.run": {
+      "cli": "rem tasks run"
+    },
+    "rem.thread": {
+      "cli": "rem thread show"
+    },
+    "rem.tidy": {
+      "excluded": "phone-only"
+    },
+    "selfwork.read": {
+      "cli": "selfwork status"
+    },
+    "selfwork.report.seen": {
+      "cli": "selfwork report"
+    },
+    "selfwork.settings": {
+      "cli": "selfwork set"
+    },
+    "settings.get": {
+      "excluded": "window-settings"
+    },
+    "settings.update": {
+      "excluded": "window-settings"
+    },
+    "source_control.commit": {
+      "excluded": "source-control"
+    },
+    "source_control.diff": {
+      "excluded": "source-control"
+    },
+    "source_control.history": {
+      "excluded": "source-control"
+    },
+    "source_control.list": {
+      "excluded": "source-control"
+    },
+    "source_control.read": {
+      "excluded": "source-control"
+    },
+    "swarms.start": {
+      "excluded": "runs-agents"
+    },
+    "usage.overview": {
+      "cli": "usage show"
+    },
+    "workflows.list": {
+      "cli": "rattish list"
+    },
+    "workflows.read": {
+      "cli": "rattish show"
+    },
+    "workflows.resume": {
+      "cli": "rattish resume"
+    },
+    "workflows.run": {
+      "cli": "rattish start"
+    },
+    "workflows.stop": {
+      "cli": "rattish stop"
+    }
+  },
+  "phoneMessages": {
+    "approval.request": {
+      "cli": "rattish approvals"
+    },
+    "approval.required": {
+      "excluded": "protocol-reply"
+    },
+    "approval.resolve#approve": {
+      "cli": "rattish approve"
+    },
+    "approval.resolve#deny": {
+      "cli": "rattish reject"
+    },
+    "approval.snapshot": {
+      "excluded": "protocol-reply"
+    },
+    "catalog.request": {
+      "cli": [
+        "projects list",
+        "provider list",
+        "rem resources"
+      ]
+    },
+    "catalog.snapshot": {
+      "excluded": "protocol-reply"
+    },
+    "chat.accepted": {
+      "excluded": "protocol-reply"
+    },
+    "chat.message": {
+      "excluded": "protocol-reply"
+    },
+    "chat.submit": {
+      "excluded": "thread-list"
+    },
+    "error": {
+      "excluded": "protocol-reply"
+    },
+    "file.cancel": {
+      "excluded": "device-link"
+    },
+    "file.chunk": {
+      "excluded": "device-link"
+    },
+    "file.offer": {
+      "excluded": "device-link"
+    },
+    "file.request": {
+      "excluded": "device-link"
+    },
+    "file.status": {
+      "excluded": "device-link"
+    },
+    "fleet.request": {
+      "cli": "devices list"
+    },
+    "fleet.snapshot": {
+      "excluded": "protocol-reply"
+    },
+    "job.cancel": {
+      "excluded": "device-link"
+    },
+    "job.get": {
+      "excluded": "device-link"
+    },
+    "job.status": {
+      "excluded": "protocol-reply"
+    },
+    "job.submit": {
+      "excluded": "device-link"
+    },
+    "request.cancel": {
+      "excluded": "device-link"
+    },
+    "request.status": {
+      "excluded": "protocol-reply"
+    },
+    "swarm.control#pause": {
+      "excluded": "runs-agents"
+    },
+    "swarm.control#resume": {
+      "excluded": "runs-agents"
+    },
+    "swarm.control#stop": {
+      "excluded": "runs-agents"
+    },
+    "swarm.message": {
+      "excluded": "runs-agents"
+    },
+    "swarm.request": {
+      "cli": [
+        "swarm list",
+        "swarm show"
+      ]
+    },
+    "swarm.snapshot": {
+      "excluded": "protocol-reply"
+    },
+    "sync.request": {
+      "excluded": "device-link"
+    },
+    "sync.snapshot": {
+      "excluded": "protocol-reply"
+    },
+    "thread.context.update": {
+      "excluded": "thread-list"
+    },
+    "thread.create": {
+      "excluded": "thread-list"
+    },
+    "thread.history.request": {
+      "excluded": "thread-list"
+    },
+    "thread.history.snapshot": {
+      "excluded": "protocol-reply"
+    },
+    "thread.manage#archive": {
+      "excluded": "thread-list"
+    },
+    "thread.manage#delete": {
+      "excluded": "thread-list"
+    },
+    "thread.manage#pin": {
+      "excluded": "thread-list"
+    },
+    "thread.manage#read": {
+      "excluded": "thread-list"
+    },
+    "thread.manage#restore": {
+      "excluded": "thread-list"
+    },
+    "thread.manage#unpin": {
+      "excluded": "thread-list"
+    },
+    "thread.manage#unread": {
+      "excluded": "thread-list"
+    },
+    "thread.search.request": {
+      "excluded": "thread-list"
+    },
+    "thread.search.snapshot": {
+      "excluded": "protocol-reply"
+    },
+    "thread.snapshot": {
+      "excluded": "protocol-reply"
+    }
+  },
+  "electron": {
+    "gofer:api-session": {
+      "excluded": "desktop-auth"
+    },
+    "gofer:archive-rem": {
+      "excluded": "thread-list"
+    },
+    "gofer:browser-action": {
+      "excluded": "browser"
+    },
+    "gofer:browser-create": {
+      "excluded": "browser"
+    },
+    "gofer:browser-library": {
+      "excluded": "browser"
+    },
+    "gofer:browser-owner-zoom": {
+      "excluded": "browser"
+    },
+    "gofer:browser-policy": {
+      "excluded": "browser"
+    },
+    "gofer:check-for-updates": {
+      "excluded": "app-updates"
+    },
+    "gofer:clipboard-read": {
+      "excluded": "window-ui"
+    },
+    "gofer:close-media-preview": {
+      "excluded": "window-ui"
+    },
+    "gofer:configure-rem": {
+      "excluded": "window-settings"
+    },
+    "gofer:copy-path": {
+      "excluded": "file-explorer"
+    },
+    "gofer:create-file": {
+      "excluded": "file-explorer"
+    },
+    "gofer:create-folder": {
+      "excluded": "file-explorer"
+    },
+    "gofer:delete-path": {
+      "excluded": "file-explorer"
+    },
+    "gofer:developer-action": {
+      "excluded": "window-ui"
+    },
+    "gofer:developer-info": {
+      "excluded": "window-ui"
+    },
+    "gofer:developer-log": {
+      "excluded": "window-ui"
+    },
+    "gofer:download-and-install-update": {
+      "excluded": "app-updates"
+    },
+    "gofer:edit-focused": {
+      "excluded": "window-ui"
+    },
+    "gofer:feature-preview": {
+      "excluded": "window-settings"
+    },
+    "gofer:forget-rem": {
+      "excluded": "thread-list"
+    },
+    "gofer:gecko": {
+      "excluded": "browser"
+    },
+    "gofer:get-data-dir": {
+      "cli": "doctor"
+    },
+    "gofer:get-update-state": {
+      "excluded": "app-updates"
+    },
+    "gofer:git-branches": {
+      "excluded": "source-control"
+    },
+    "gofer:git-file-action": {
+      "excluded": "source-control"
+    },
+    "gofer:git-file-baseline": {
+      "excluded": "source-control"
+    },
+    "gofer:git-history": {
+      "excluded": "source-control"
+    },
+    "gofer:git-repo-action": {
+      "excluded": "source-control"
+    },
+    "gofer:git-status": {
+      "excluded": "source-control"
+    },
+    "gofer:git-switch-branch": {
+      "excluded": "source-control"
+    },
+    "gofer:git-unwatch": {
+      "excluded": "source-control"
+    },
+    "gofer:git-watch": {
+      "excluded": "source-control"
+    },
+    "gofer:git-worktree-add": {
+      "excluded": "source-control"
+    },
+    "gofer:git-worktree-remove": {
+      "excluded": "source-control"
+    },
+    "gofer:git-worktrees": {
+      "excluded": "source-control"
+    },
+    "gofer:grant-dropped-path": {
+      "excluded": "desktop-auth"
+    },
+    "gofer:grant-path": {
+      "excluded": "desktop-auth"
+    },
+    "gofer:grant-user-path": {
+      "excluded": "desktop-auth"
+    },
+    "gofer:install-downloaded-update": {
+      "excluded": "app-updates"
+    },
+    "gofer:list-directory": {
+      "excluded": "file-explorer"
+    },
+    "gofer:migrate-legacy-projects": {
+      "excluded": "window-ui"
+    },
+    "gofer:missing-recent-files": {
+      "excluded": "file-explorer"
+    },
+    "gofer:missing-thread-roots": {
+      "excluded": "thread-list"
+    },
+    "gofer:move-path": {
+      "excluded": "file-explorer"
+    },
+    "gofer:open-logs": {
+      "excluded": "window-ui"
+    },
+    "gofer:open-media-preview": {
+      "excluded": "window-ui"
+    },
+    "gofer:open-path": {
+      "excluded": "file-explorer"
+    },
+    "gofer:open-update-release": {
+      "excluded": "app-updates"
+    },
+    "gofer:path-info": {
+      "excluded": "file-explorer"
+    },
+    "gofer:prepare-lifecycle-result": {
+      "excluded": "window-ui"
+    },
+    "gofer:read-attachment-file": {
+      "excluded": "window-ui"
+    },
+    "gofer:read-binary-preview": {
+      "excluded": "window-ui"
+    },
+    "gofer:read-text-file": {
+      "excluded": "file-explorer"
+    },
+    "gofer:rem-settings": {
+      "excluded": "window-settings"
+    },
+    "gofer:rename-path": {
+      "excluded": "file-explorer"
+    },
+    "gofer:renderer-log": {
+      "excluded": "window-ui"
+    },
+    "gofer:replace-project": {
+      "excluded": "file-explorer"
+    },
+    "gofer:resolve-project-file": {
+      "excluded": "file-explorer"
+    },
+    "gofer:restart-backend": {
+      "excluded": "window-ui"
+    },
+    "gofer:reveal-path": {
+      "excluded": "file-explorer"
+    },
+    "gofer:search-project": {
+      "excluded": "file-explorer"
+    },
+    "gofer:select-path": {
+      "excluded": "window-ui"
+    },
+    "gofer:set-data-dir": {
+      "excluded": "window-settings"
+    },
+    "gofer:set-feature-preview": {
+      "excluded": "window-settings"
+    },
+    "gofer:terminal-close": {
+      "excluded": "window-ui"
+    },
+    "gofer:terminal-create": {
+      "excluded": "window-ui"
+    },
+    "gofer:terminal-editor-complete": {
+      "excluded": "window-ui"
+    },
+    "gofer:terminal-resize": {
+      "excluded": "window-ui"
+    },
+    "gofer:terminal-write": {
+      "excluded": "window-ui"
+    },
+    "gofer:write-text-file": {
+      "excluded": "file-explorer"
+    }
+  },
+  "commands": {
+    "agent create": "legacy",
+    "agent edit": "legacy",
+    "agent list": "legacy",
+    "agent rm": "legacy",
+    "agent run": "legacy",
+    "api": "backend",
+    "brain documents": "backend",
+    "brain list": "backend",
+    "brain projects": "backend",
+    "brain read": "backend",
+    "brain save": "backend",
+    "brain search": "backend",
+    "completion": "offline",
+    "devices list": "backend",
+    "doctor": "offline",
+    "licenses": "offline",
+    "org apply": "backend",
+    "org config": "backend",
+    "org employees hold": "backend",
+    "org employees list": "backend",
+    "org employees release": "backend",
+    "org events": "backend",
+    "org export": "backend",
+    "org history": "backend",
+    "org import": "backend",
+    "org knowledge read": "backend",
+    "org knowledge save": "backend",
+    "org knowledge search": "backend",
+    "org list": "backend",
+    "org projects": "backend",
+    "org schedule apply": "backend",
+    "org schedule show": "backend",
+    "org show": "backend",
+    "org tickets changes": "backend",
+    "org tickets comment": "backend",
+    "org tickets create": "backend",
+    "org tickets list": "backend",
+    "org tickets update": "backend",
+    "projects list": "backend",
+    "provider list": "backend",
+    "provider models": "backend",
+    "provider profile create": "offline",
+    "provider profile edit": "offline",
+    "provider profile list": "offline",
+    "provider profile rm": "offline",
+    "provider set": "backend",
+    "provider status": "backend",
+    "rattish approvals": "backend",
+    "rattish approve": "backend",
+    "rattish check": "offline",
+    "rattish compile": "offline",
+    "rattish create": "offline",
+    "rattish docs": "offline",
+    "rattish events": "backend",
+    "rattish export": "backend",
+    "rattish format": "offline",
+    "rattish import": "backend",
+    "rattish inspect-ir": "offline",
+    "rattish list": "offline",
+    "rattish logs": "backend",
+    "rattish preflight": "offline",
+    "rattish reject": "backend",
+    "rattish resume": "backend",
+    "rattish run": "offline",
+    "rattish runs": "backend",
+    "rattish show": "backend",
+    "rattish start": "backend",
+    "rattish stop": "backend",
+    "rattish triggers add cron": "offline",
+    "rattish triggers add file": "offline",
+    "rattish triggers add webhook": "offline",
+    "rattish triggers apply": "backend",
+    "rattish triggers disable": "offline",
+    "rattish triggers enable": "offline",
+    "rattish triggers export": "backend",
+    "rattish triggers history": "offline",
+    "rattish triggers list": "offline",
+    "rattish triggers login": "offline",
+    "rattish triggers remove": "offline",
+    "rattish triggers rotate-token": "offline",
+    "rattish triggers start": "offline",
+    "rattish triggers status": "offline",
+    "rattish triggers update": "offline",
+    "rattish triggers webhook-port": "offline",
+    "rattish wait": "backend",
+    "rem follow": "backend",
+    "rem mcp add": "offline",
+    "rem mcp list": "offline",
+    "rem mcp remove": "offline",
+    "rem memories add": "backend",
+    "rem memories edit": "backend",
+    "rem memories forget": "backend",
+    "rem memories list": "backend",
+    "rem memories mode": "backend",
+    "rem memories undo": "backend",
+    "rem messages": "backend",
+    "rem notices": "backend",
+    "rem resources": "offline",
+    "rem runs acknowledge": "backend",
+    "rem runs cancel": "backend",
+    "rem runs retry-review": "backend",
+    "rem runs show": "backend",
+    "rem say": "backend",
+    "rem search": "backend",
+    "rem settings apply": "backend",
+    "rem settings export": "backend",
+    "rem settings show": "backend",
+    "rem skill add": "offline",
+    "rem skill list": "offline",
+    "rem skill new": "offline",
+    "rem skill path": "offline",
+    "rem skill remove": "offline",
+    "rem tasks create": "backend",
+    "rem tasks delete": "backend",
+    "rem tasks edit": "backend",
+    "rem tasks list": "backend",
+    "rem tasks pause": "backend",
+    "rem tasks resume": "backend",
+    "rem tasks run": "backend",
+    "rem tasks show": "backend",
+    "rem tasks wait": "backend",
+    "rem thread send": "backend",
+    "rem thread show": "backend",
+    "runner cancel": "legacy",
+    "runner list": "legacy",
+    "runner queue": "legacy",
+    "runner register": "legacy",
+    "runner start": "legacy",
+    "runner status": "legacy",
+    "schedule add": "legacy",
+    "schedule list": "legacy",
+    "schedule remove": "legacy",
+    "schedule start": "legacy",
+    "schedule stop": "legacy",
+    "schema": "offline",
+    "selfwork apply": "backend",
+    "selfwork export": "backend",
+    "selfwork report": "backend",
+    "selfwork set": "backend",
+    "selfwork status": "backend",
+    "serve": "offline",
+    "swarm apply": "backend",
+    "swarm delete": "backend",
+    "swarm export": "backend",
+    "swarm history": "backend",
+    "swarm list": "backend",
+    "swarm show": "backend",
+    "threads follow": "backend",
+    "threads steer": "backend",
+    "threads steering": "backend",
+    "threads stop": "backend",
+    "tickets approve": "backend",
+    "tickets assign": "backend",
+    "tickets comment": "backend",
+    "tickets comments": "backend",
+    "tickets create": "backend",
+    "tickets decline": "backend",
+    "tickets edit": "backend",
+    "tickets list": "backend",
+    "tickets move": "backend",
+    "tickets projects": "backend",
+    "tickets show": "backend",
+    "tokens create": "offline",
+    "tokens list": "offline",
+    "tokens revoke": "offline",
+    "ui browser": "hidden",
+    "ui reports": "hidden",
+    "ui second-brain": "hidden",
+    "ui serve": "offline",
+    "usage refresh": "backend",
+    "usage show": "backend",
+    "wait": "backend",
+    "watch list": "legacy",
+    "watch start": "legacy",
+    "workflow add-agent": "legacy",
+    "workflow add-edge": "legacy",
+    "workflow add-node": "legacy",
+    "workflow approvals": "legacy",
+    "workflow approve": "legacy",
+    "workflow build": "legacy",
+    "workflow clear-schedule": "legacy",
+    "workflow clear-watch": "legacy",
+    "workflow create": "legacy",
+    "workflow diff": "legacy",
+    "workflow duplicate": "legacy",
+    "workflow edit": "legacy",
+    "workflow export": "legacy",
+    "workflow history": "legacy",
+    "workflow import": "legacy",
+    "workflow list": "legacy",
+    "workflow logs latest": "legacy",
+    "workflow logs list": "legacy",
+    "workflow logs prune": "legacy",
+    "workflow logs show": "legacy",
+    "workflow plan": "legacy",
+    "workflow preview-import": "legacy",
+    "workflow recipe watch-folder-summarize": "legacy",
+    "workflow reject": "legacy",
+    "workflow rename": "legacy",
+    "workflow restore": "legacy",
+    "workflow resume": "legacy",
+    "workflow rm": "legacy",
+    "workflow rm-edge": "legacy",
+    "workflow rm-node": "legacy",
+    "workflow run": "legacy",
+    "workflow secrets": "legacy",
+    "workflow set-info": "legacy",
+    "workflow set-schedule": "legacy",
+    "workflow set-watch": "legacy",
+    "workflow show": "legacy",
+    "workflow stop": "legacy",
+    "workflow trigger": "legacy",
+    "workflow usage": "legacy",
+    "workflow validate": "legacy"
+  }
+}

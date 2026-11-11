@@ -1,0 +1,417 @@
+{
+ "organization_id": "f1b55d88-e4b8-4fdb-abc4-19fe19639e7a",
+ "name": "Eng",
+ "description": "",
+ "state": "paused",
+ "pause_reason": "Paused because project folders, destinations or Second Brain settings changed. Review, then start again.",
+ "usage": {
+  "month": "2026-11",
+  "runs": 0,
+  "tokens": 0,
+  "cost_usd": 0.0
+ },
+ "pending_requests": 0,
+ "projects": [
+  "Notes"
+ ],
+ "employees": [
+  {
+   "employee_id": "lead",
+   "name": "Lead",
+   "title": "CTO",
+   "reports_to": "",
+   "provider": "codex",
+   "model": "cli-default",
+   "paused": false
+  },
+  {
+   "employee_id": "dev",
+   "name": "Dev",
+   "title": "",
+   "reports_to": "lead",
+   "provider": "codex",
+   "model": "cli-default",
+   "paused": true
+  }
+ ],
+ "tasks": [
+  {
+   "key": "ORG-1",
+   "assignee_id": "lead",
+   "epic_id": "e1",
+   "project_id": "app",
+   "done_when": "Entries appear live",
+   "approval_required": false,
+   "notes": [
+    "kb45e838fde"
+   ],
+   "read_notes": [],
+   "start_hint": "Organization is paused",
+   "evidence_counts": {
+    "ok": 0,
+    "warn": 0,
+    "bad": 0,
+    "none": 0,
+    "pending": 0
+   },
+   "claims": [],
+   "created_at": "2026-11-06T14:43:08.213503+00:00",
+   "task_id": "a239500d-3c06-4339-a0dc-40fef29c0637",
+   "title": "Follow the log",
+   "description": "",
+   "status": "todo",
+   "priority": "medium",
+   "assignee": "Lead",
+   "revision": 1,
+   "running": false,
+   "needs_approval": false,
+   "needs_review": false,
+   "attention": false,
+   "block_reason": "",
+   "evidence": "",
+   "due_at": "",
+   "comments": []
+  },
+  {
+   "key": "ORG-2",
+   "assignee_id": "dev",
+   "epic_id": "",
+   "project_id": "",
+   "done_when": "",
+   "approval_required": false,
+   "notes": [],
+   "read_notes": [],
+   "start_hint": "backlog",
+   "evidence_counts": {
+    "ok": 0,
+    "warn": 0,
+    "bad": 0,
+    "none": 0,
+    "pending": 0
+   },
+   "claims": [],
+   "created_at": "2026-11-06T14:43:08.214767+00:00",
+   "task_id": "ad7c2dcb-99f4-4540-9c8e-842d35104af0",
+   "title": "Board polish",
+   "description": "",
+   "status": "backlog",
+   "priority": "medium",
+   "assignee": "Dev",
+   "revision": 1,
+   "running": false,
+   "needs_approval": false,
+   "needs_review": false,
+   "attention": false,
+   "block_reason": "",
+   "evidence": "",
+   "due_at": "",
+   "comments": []
+  },
+  {
+   "key": "ORG-3",
+   "assignee_id": "",
+   "epic_id": "",
+   "project_id": "",
+   "done_when": "",
+   "approval_required": true,
+   "notes": [],
+   "read_notes": [],
+   "start_hint": "Waiting for plan approval",
+   "evidence_counts": {
+    "ok": 0,
+    "warn": 0,
+    "bad": 0,
+    "none": 0,
+    "pending": 0
+   },
+   "claims": [],
+   "created_at": "2026-11-06T14:43:08.216158+00:00",
+   "task_id": "a06b72a3-efee-497d-8cb4-e2bda771b96d",
+   "title": "Approve me",
+   "description": "",
+   "status": "todo",
+   "priority": "medium",
+   "assignee": "",
+   "revision": 1,
+   "running": false,
+   "needs_approval": true,
+   "needs_review": false,
+   "attention": true,
+   "block_reason": "",
+   "evidence": "",
+   "due_at": "",
+   "comments": []
+  }
+ ],
+ "revision": 5,
+ "v2": true,
+ "mission": "Ship a calm phone app",
+ "ticket_prefix": "",
+ "milestones": [
+  {
+   "milestone_id": "beta",
+   "title": "Beta",
+   "short": "",
+   "due_at": "2026-12-01",
+   "project_id": "",
+   "parent_id": "",
+   "status": "active"
+  },
+  {
+   "milestone_id": "m1",
+   "title": "Logs",
+   "short": "",
+   "due_at": "",
+   "project_id": "app",
+   "parent_id": "beta",
+   "status": "active"
+  }
+ ],
+ "epics": [
+  {
+   "epic_id": "e1",
+   "title": "Developer log",
+   "milestone_id": "m1",
+   "project_id": "app",
+   "owner": "",
+   "description": "",
+   "status": "active"
+  }
+ ],
+ "initiatives": [
+  {
+   "project_id": "app",
+   "name": "Phone app",
+   "owner": "lead",
+   "color": "",
+   "description": "",
+   "folder": "Notes",
+   "checks": 0
+  }
+ ],
+ "workers": [
+  {
+   "employee_id": "lead",
+   "persona": "Careful",
+   "responsibilities": [],
+   "role": "",
+   "effort": "",
+   "permission": "Workspace access",
+   "full_access": false,
+   "heartbeat_seconds": 0,
+   "ticket_access": null,
+   "stalled": ""
+  },
+  {
+   "employee_id": "dev",
+   "persona": "",
+   "responsibilities": [
+    "Builds"
+   ],
+   "role": "",
+   "effort": "",
+   "permission": "Workspace access",
+   "full_access": false,
+   "heartbeat_seconds": 0,
+   "ticket_access": null,
+   "stalled": ""
+  }
+ ],
+ "notes": [
+  {
+   "note_id": "ka7f17196db",
+   "kind": "decision",
+   "title": "Keep the link alive",
+   "summary": "Reconnect on unlock.",
+   "topic": "General",
+   "project_id": "",
+   "links": [
+    "kb45e838fde"
+   ],
+   "author": "You",
+   "updated_at": "2026-11-06T14:43:08.212099+00:00",
+   "second_brain": false,
+   "changed": false
+  },
+  {
+   "note_id": "kb45e838fde",
+   "kind": "finding",
+   "title": "Phone drops on sleep",
+   "summary": "Seen after a minute",
+   "topic": "Mobile",
+   "project_id": "app",
+   "links": [],
+   "author": "You",
+   "updated_at": "2026-11-06T14:43:08.210902+00:00",
+   "second_brain": false,
+   "changed": false
+  }
+ ],
+ "note_links": [],
+ "requests": [],
+ "hours": {
+  "mode": "always",
+  "open": true,
+  "opens_at": "",
+  "closes_at": ""
+ },
+ "repository": null,
+ "archived": false,
+ "digest": "c26e1d40f01b605ab1bbe940d8448b5c",
+ "schedule": {
+  "timezone": "UTC",
+  "configured": false,
+  "blocks": [],
+  "template": [
+   {
+    "block_id": "features",
+    "label": "New feature work",
+    "focus": "Build planned features and the tickets that move milestones forward.",
+    "cadence": "daily",
+    "start": "08:00",
+    "end": "17:00",
+    "days": [],
+    "month_day": null,
+    "nth_week": null,
+    "weekday": null,
+    "quarter_month": 1,
+    "keywords": [
+     "feature",
+     "build",
+     "implement",
+     "add"
+    ],
+    "when": "Every day 08:00–17:00"
+   },
+   {
+    "block_id": "hardening",
+    "label": "Application hardening",
+    "focus": "Fix bugs, add tests, close security and reliability gaps, speed things up.",
+    "cadence": "daily",
+    "start": "17:00",
+    "end": "00:00",
+    "days": [],
+    "month_day": null,
+    "nth_week": null,
+    "weekday": null,
+    "quarter_month": 1,
+    "keywords": [
+     "bug",
+     "fix",
+     "test",
+     "security",
+     "reliability",
+     "performance",
+     "hardening"
+    ],
+    "when": "Every day 17:00–00:00"
+   },
+   {
+    "block_id": "nightly-release",
+    "label": "Nightly release",
+    "focus": "Prepare the day's finished work for release: changelog, version, checks.",
+    "cadence": "daily",
+    "start": "00:00",
+    "end": "01:00",
+    "days": [],
+    "month_day": null,
+    "nth_week": null,
+    "weekday": null,
+    "quarter_month": 1,
+    "keywords": [
+     "release",
+     "changelog",
+     "version"
+    ],
+    "when": "Every day 00:00–01:00"
+   },
+   {
+    "block_id": "gardening",
+    "label": "Process improvement and gardening",
+    "focus": "Refactor, tidy up, improve docs, tooling and the way the team works.",
+    "cadence": "daily",
+    "start": "00:00",
+    "end": "08:00",
+    "days": [],
+    "month_day": null,
+    "nth_week": null,
+    "weekday": null,
+    "quarter_month": 1,
+    "keywords": [
+     "refactor",
+     "cleanup",
+     "docs",
+     "process",
+     "tooling",
+     "dependency"
+    ],
+    "when": "Every day 00:00–08:00"
+   },
+   {
+    "block_id": "weekly-release",
+    "label": "Weekly release",
+    "focus": "Stabilize the week's work and get it ready to ship.",
+    "cadence": "weekly",
+    "start": "13:00",
+    "end": "17:00",
+    "days": [
+     4
+    ],
+    "month_day": null,
+    "nth_week": null,
+    "weekday": null,
+    "quarter_month": 1,
+    "keywords": [
+     "release",
+     "changelog",
+     "regression"
+    ],
+    "when": "Fridays 13:00–17:00"
+   },
+   {
+    "block_id": "dependency-audit",
+    "label": "Dependency updates and audit",
+    "focus": "Update dependencies, review advisories and remove what's unused.",
+    "cadence": "monthly",
+    "start": "09:00",
+    "end": "12:00",
+    "days": [],
+    "month_day": null,
+    "nth_week": 1,
+    "weekday": 0,
+    "quarter_month": 1,
+    "keywords": [
+     "dependency",
+     "upgrade",
+     "audit",
+     "advisory"
+    ],
+    "when": "Monthly, 1st Monday, 09:00–12:00"
+   },
+   {
+    "block_id": "quarterly-review",
+    "label": "Quarterly planning and security review",
+    "focus": "Review security, revisit the roadmap and propose next quarter's work.",
+    "cadence": "quarterly",
+    "start": "09:00",
+    "end": "17:00",
+    "days": [],
+    "month_day": null,
+    "nth_week": 1,
+    "weekday": 1,
+    "quarter_month": 1,
+    "keywords": [
+     "security",
+     "planning",
+     "roadmap"
+    ],
+    "when": "Quarterly, 1st Tuesday of the 1st month, 09:00–17:00"
+   }
+  ],
+  "current": null,
+  "next": null,
+  "changes_at": "",
+  "issues": [],
+  "underway": []
+ }
+}

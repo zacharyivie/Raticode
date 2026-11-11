@@ -1,0 +1,413 @@
+{
+  "milestone": "m-security",
+  "attempt": "5dbfda48f9854d2cb87a044053052876",
+  "recovered_revision": "8eaa2c6516376d866c73da6d39449bf32e451627",
+  "retained_source": "/home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1/6020740cbd6043958328c2b1feea9b29",
+  "retained_source_clean": true,
+  "historical_artifacts_verified": 446,
+  "historical_mismatches": 0,
+  "changes_from_recovered": [
+    "README.md",
+    "app/src/main/java/dev/raticode/mobile/data/LocalVault.kt",
+    "app/src/main/java/dev/raticode/mobile/ui/RemViewModel.kt",
+    "app/src/androidTest/java/dev/raticode/mobile/VaultOwnershipTest.kt",
+    "docs/architecture.md",
+    "docs/mobile-security-fixes.md"
+  ],
+  "protocol_unchanged": true,
+  "protocol_manifest_sha256": "f3faf4bb173b6fe4238530cf271c9fbe647025ce7587195cb1e7401ac9ba8e60",
+  "desktop_revision": "e5f46649a2f6be0cd85e41c013397d8cebe136a5",
+  "environment": {
+    "JAVA_HOME": "/home/doonk/.local/opt/jdk-21",
+    "ANDROID_HOME": "/home/doonk/Android/Sdk",
+    "ANDROID_SDK_ROOT": "/home/doonk/Android/Sdk",
+    "ANDROID_SERIAL": "emulator-5582",
+    "RATICODE_DESKTOP_PROBE_ROOT": "/home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/integration-f58b41c1dd704380af0b9482ced7dfb5"
+  },
+  "checks": {
+    "gradle": {
+      "command": "./gradlew assembleDebug testDebugUnitTest lintDebug connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.interop=true",
+      "exit_code": 0,
+      "log": "artifacts/security/ownership-repair/full.log"
+    },
+    "schema": {
+      "command": ".venv-contract/bin/python scripts/check-contract.py",
+      "exit_code": 0,
+      "log": "artifacts/security/ownership-repair/schema.log"
+    },
+    "device": {
+      "tests": 38,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "jvm": {
+      "tests": 44,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "regressions": [
+    "Actual ViewModelStore.clear while AtomicFile write is open; replacement load orders behind write; replacement reset and vault reload before teardown.",
+    "Actual ViewModelStore.clear while save waits before ownership check; replacement reset completes first; late old save rejects and cannot resurrect data.",
+    "Queued closed-owner operation rejects; replacement invalidates an owner even without close; cleanup cannot run with stale ownership.",
+    "Pending debounce and real ON_STOP lifecycle observer flush while reset is busy; subsequent thread selection/deletion and durable reload."
+  ],
+  "limits": [
+    "In-process serialization only; no multiple Android processes.",
+    "Synchronous operation already inside lock completes before replacement access.",
+    "Physical-device, process-kill, public-network and independent cryptographic review remain open.",
+    "Live pairing/sync/chat/fleet/files/background feature milestones remain downstream."
+  ],
+  "source_hashes": {
+    "README.md": "fc859113455364fa27102c93753ab0fcc41ec19685bb443d35299d1be4dc2904",
+    "app/src/main/java/dev/raticode/mobile/data/LocalVault.kt": "5c052dc62c92f1029950ea0e0afa55c5a974fd301f0da8901b31bf2256cf7f60",
+    "app/src/main/java/dev/raticode/mobile/ui/RemViewModel.kt": "30c95e6cabe93449b617093cdac8bb852c6f32da77121f2b4fda72133b5ab27b",
+    "app/src/androidTest/java/dev/raticode/mobile/VaultOwnershipTest.kt": "ec509a3e064b0d6f210914daba9d67217a0c8c4492d14624feeb45c796d3783c",
+    "docs/architecture.md": "54b4ce12aaff47b2192256be05e395b59dc3c35a426fe0d623655554403086fd",
+    "docs/mobile-security-fixes.md": "323c25068fa73bbcba9aeff49d84ed786dbabc234e3d83359560de5c25846f77"
+  },
+  "artifacts": [
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/aapt.1.ok.txt",
+      "sha256": "2c3a6cf48538ab8ce136a542ef4a8fb989994d55047a90be1d95d0a87d1f95e0"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/aapt.2.ok.txt",
+      "sha256": "edd1fbc6b94d3975861dad3e64bb6258bee3fed1091623300da0dc376006e838"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/cpuinfo",
+      "sha256": "9b99d22c1f793da4126e85d477a28fb71ba2ffd245dc56f3d0873a56d8fd6142"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/device-info.pb",
+      "sha256": "2ff3cf2245d27ae1e288e22da77565f3599d4f134823ad3ecfe7ffc55f98e0a1"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-composerAndSendStayVisibleWithKeyboard.txt",
+      "sha256": "cb209942e3e51b1729025338a9cc2eca9803963027de120d6a8914a9daa6fdf6"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-conversationAndDraftSurviveActivityRecreation.txt",
+      "sha256": "25114aff137222f5f9e05e5a6cb46860df639632b2a8cf6a4ba64064b8a4f3ef"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-dictationConsentCanBeCancelledAndActivityIsLabeled.txt",
+      "sha256": "67a2018624664f3ae8c32e8a9f29b0a66341d01df2f1997d4d944d2bec440c9e"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-genericNotificationRoutesToItsOriginalThread.txt",
+      "sha256": "7b054a3ee8d669d2b2fce719b519931c4f962c4538ba08f3e1157736c7530128"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-landscapeLeavesRoomForChatAndThreads.txt",
+      "sha256": "1b264033575fed8d4899300e37a0a22805f6ff52e47176b3c543ca16f7a52bfe"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-malformedPairingCodeDoesNotOpenWorkspace.txt",
+      "sha256": "a417c65637a5ff3cfc524e7364c00c021992d465486749c4a0a81c54219629d6"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-offlineQueueCancellationAndRetry.txt",
+      "sha256": "26baa86bf081cd1953a57ed92dd10724093d3bad10586d13fa732f882f211f67"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-pairingChatAndConfirmedReset.txt",
+      "sha256": "5170bc1d4426df846545d29fc2040ea0781f1f05000048720bdbfa1732e2c931"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-threadBackArrowAndPhoneBackReturnToThreadsWithDraft.txt",
+      "sha256": "7c0f640ef7346f20689a28fd678e7197e15fe8857e7508522b754f1efd5b7e85"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.AppFlowTest-threadsRetainIndependentHistoryAndProviderContext.txt",
+      "sha256": "0f21b5a36a41988593cc669077fdef09ca497d03d4cd372093d8e38e338e4dbd"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.DocumentImportTest-actualBytesRejectOversizeWithoutTrustingMetadata.txt",
+      "sha256": "4d1bde7cd489c3e7cb29e56b1582e581530c53cabe7d243739f47a88d67b1a5a"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.DocumentImportTest-deadlineReleasesCallerEvenWhenProviderIgnoresCancellation.txt",
+      "sha256": "5eb76f1778c2ecbb24029eeac2c115d10d581710219037cb576ed6f49d663851"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.DocumentImportTest-stalledQueryCanCancelAndResetWithoutLateCommit.txt",
+      "sha256": "4c7c178d9726780c4d37ad026a1987fbdf1b4a63bb6bb1916707020062eb4fcf"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.DocumentImportTest-stalledReadCanCancelAndResetWithoutLateCommit.txt",
+      "sha256": "0fd9ad0993390f164a4cfa75dba45fdf0d70f938e8cef811882b98b28ba8a382"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.DocumentImportUiTest-cancelButtonReleasesWorkspaceDuringStalledProvider.txt",
+      "sha256": "f17a2f768d7480e2109b94e39f5f43f559ea6e404091a698c096994cdb5052e6"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.LocalVaultTest-fileImportEncryptsAndExportVerifiesBytes.txt",
+      "sha256": "5d978192bba3ba80b3f836a5fd79dfefeeb037e880ae0bcce5b723e5cb715c6c"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.LocalVaultTest-missingKeyDoesNotSilentlyReplaceSavedWorkspace.txt",
+      "sha256": "2bf1bc6b89e87aa330d7e4961fc2e6be9f85c43197ef67413ad29f6a10d2ed1c"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.LocalVaultTest-oversizedImportIsRejectedWithoutRetainingBlob.txt",
+      "sha256": "36196aa5972cfd8461500e86fcbe1c46d1ac188ef7816191a8b12e0771b7625c"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.LocalVaultTest-resetDeletesMessagesAndAttachments.txt",
+      "sha256": "cf8723e5d84a0d471bf154ba12955b1df208c44843135a705750675a3082ad76"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.LocalVaultTest-snapshotIsEncryptedAndSurvivesNewRepositoryInstance.txt",
+      "sha256": "33fe8a2dd2e05fec480d385338e78971b885cb81790ed0c815994174d4382b1d"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.LocalVaultTest-tamperedSnapshotFailsWithoutReplacingIt.txt",
+      "sha256": "6c51673fd15e766af568914f1f7ce950671718f795d25c59ffb3128fefb4cee9"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.VaultOwnershipTest-closedAndReplacedOwnersRejectQueuedWritesAfterReset.txt",
+      "sha256": "66dd12eb3198277e3db9d2dea660c9e36f879478d7ef00857e4083b6f9d2b7ac"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.VaultOwnershipTest-destroyedOwnerQueuedSaveCannotResurrectReplacementReset.txt",
+      "sha256": "130cbbeb3bf30e36eb9f998def9ffc688b049f1aa57faef318d21dbed889092f"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.VaultOwnershipTest-destroyedOwnerWriteFinishesBeforeReplacementLoadAndReset.txt",
+      "sha256": "698d1d5ecc71b947e1c0772050a13c39c643ed2f4e6d0d62e4d01f023cc346c9"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.VaultOwnershipTest-pendingDebounceAndStopFlushRespectResetSelectionAndDeletion.txt",
+      "sha256": "4868eee10f6f450ae01ee98e94f9efb4998acb4d6f517c36c14af5c8c5a556b1"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest-boundsAndHandshakeRequired.txt",
+      "sha256": "cc7e99b622bb895d084a3bda5ae2dbcd5f13dd464fe05f1199e009d5c9748549"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest-fragmentedMutualTlsRoundTrip.txt",
+      "sha256": "06a78f60f509c32cc4188823b89bd4216959ec2f1c85bf0912a4dfb37b3313a5"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest-invalidCertificateProfiles.txt",
+      "sha256": "d932b1dfbb51b0b9c01e399e0ee42fc48b530799f0dbbb50e8f89534fd1ab560"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest-maximumRecordsThroughTls.txt",
+      "sha256": "f9033ccda48087d8eac613cbda6db5748534d74861ee132e1ea859b2016255a4"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest-tamperReplayAndPreviousSessionFail.txt",
+      "sha256": "0d9045bdc21ed6fba007d69a35d71ede6b0527ca66db43c5abbf1abd82cae9ba"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PinnedTlsEngineDeviceTest-wrongPinsFailBothDirections.txt",
+      "sha256": "75b5388bb2936c4105343f605f2d905abab1554e2bdc63ca05b80d004270224a"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest-androidClientToPython.txt",
+      "sha256": "3739a003367e819df2b8fd06bf31a8fb8954aab64d13bb1161ab58f898db1336"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest-androidRejectsAbsentAlpn.txt",
+      "sha256": "3bd2b0107b43e102f30b481252996f8681108b23c368c47e4179cc6bacf8a9ff"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest-androidRejectsWrongAlpn.txt",
+      "sha256": "c8a8078efd24a92db9f109833dd271b950b72110c2d284ef8090ad1d20af7644"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.PythonTlsDeviceTest-pythonClientToAndroid.txt",
+      "sha256": "4c2dbc397dc42678cc519b8d6edb64118cbc3cd2b7b9c6dcc00cdef239c34870"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.StreamingDeviceTest-multiSegmentBoundaries.txt",
+      "sha256": "a82c00e85858a7e996c1f0198be65dbb15ae799138f6b53af77d4ba0d80196ce"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.StreamingDeviceTest-pythonToAndroid.txt",
+      "sha256": "8b7f618e7c0061c360a71fa3a0f9387c3e5dc1378a8c4b58d11b56e5ecb647f9"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.protocol.v2.StreamingDeviceTest-tamperTruncationWrongAad.txt",
+      "sha256": "157ad12a8d0586435d0a4c52e592343a4c466b885d610feb3945f6b725fd62ef"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/meminfo",
+      "sha256": "1997e8f5d5d275d5f41e9f5bbbe68412bdf0b1a0308487031daae6a0a89634f7"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/test-result.pb",
+      "sha256": "db7e60cc6344488955ba1344f567d6f1e3627266b5695bcfb98c554d51621635"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/test-result.textproto",
+      "sha256": "3bd707991ad88cfc9b376cbf145e0b72332c8a5a019efe3df0e8321a3fe036ea"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/testlog/test-results.log",
+      "sha256": "199b6c4bdccf0af3b185149e59dcf8ae7773f9c4ed2295afe78e02e07c48fb27"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/utp.0.log",
+      "sha256": "f124cbe397d6c889920dac2811f285d5157bbf95812c45dfec1c0e1946ef3fbd"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/utp.0.log.lck",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/TEST-Swarm_Mobile_Protocol_API36(AVD) - 16-_app-.xml",
+      "sha256": "f0ec924e2dacfd4675857c0799a746085d33578a879ec38f2e44853315920963"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/test-result-exit-code.txt",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/device/connected/debug/test-result.pb",
+      "sha256": "c81262275b6b2e9cacf1456b31f1f058a4a5d9211f82a3ef99fa1860e400f1a0"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/full.log",
+      "sha256": "0b1271cc4491f2af4525f199de0b3f381fed86e7001675f241b3efc3623e1bbb"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/historical-manifest.json",
+      "sha256": "8b5c37ad4532e712d875cf19761d288e8eb92565fc5d3550710cf23d691976e9"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/aapt.1.ok.txt",
+      "sha256": "c473cc5b66074007f0605771ac6eb2729ded8e4db921fd576ed81317218a9f6e"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/aapt.2.ok.txt",
+      "sha256": "a7aa11de0d60a981ed0387b93d9333696e6342ecf1016c2d92a1ebfb92bd4adc"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/cpuinfo",
+      "sha256": "9b99d22c1f793da4126e85d477a28fb71ba2ffd245dc56f3d0873a56d8fd6142"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/device-info.pb",
+      "sha256": "2ff3cf2245d27ae1e288e22da77565f3599d4f134823ad3ecfe7ffc55f98e0a1"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.VaultOwnershipTest-closedAndReplacedOwnersRejectQueuedWritesAfterReset.txt",
+      "sha256": "3e29d1b8f952ad12f28639c086ee03f05b66d494c6252183a4d4d95ecb594a9a"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.VaultOwnershipTest-destroyedOwnerWriteFinishesBeforeReplacementLoadAndReset.txt",
+      "sha256": "1fe610ec8f908415750d71be24eff5c075350515e0b5785f3c9049ba1f8fde77"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/logcat-dev.raticode.mobile.VaultOwnershipTest-pendingDebounceAndStopFlushRespectResetSelectionAndDeletion.txt",
+      "sha256": "4f18ebb9bc3cf784012fad7a5fed1bfc7d227f05eaa30a78aaff40a0b9888336"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/meminfo",
+      "sha256": "753cd638b9cf5023b52572b1897b7c66a514a0c9573ded777190bf8fb794205f"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/test-result.pb",
+      "sha256": "e8e0442031d04f78ac5fca173013ae5e352b9350de14e6ef06594678d7a24225"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/test-result.textproto",
+      "sha256": "56eda65097cc025365f94b5bf8ca4ab7d6ba2e66dace9993e3585ba132203e3a"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/testlog/test-results.log",
+      "sha256": "5f0b5b3faf5cfcf6ba8071cdedf8573a0ed1750e7a2abbdd2ab5ab446cb5fc36"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/utp.0.log",
+      "sha256": "1c7d248b23efe7538889be28459f2d76ddb36d0ab109053934f56aededd2cdc6"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/Swarm_Mobile_Protocol_API36(AVD) - 16/utp.0.log.lck",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/TEST-Swarm_Mobile_Protocol_API36(AVD) - 16-_app-.xml",
+      "sha256": "6a6a21b93d0cf62f42ba52c8767001f58aaad0969bd2500f476cc12f3c59dec9"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/test-result-exit-code.txt",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/initial-targeted/connected/debug/test-result.pb",
+      "sha256": "59f2933ad5a58a05db43b5fa48b40581f030134975acc4757df9663537f9f66d"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.ProtocolTest.xml",
+      "sha256": "3543cc3de1ee02e94f790fc7f13c7f44dd3b7d59b500576ef552340acd0373ac"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.WorkspaceTest.xml",
+      "sha256": "4b9738f1980d362032ef7cc1c3f94016ea8248b98c16250ef38f0fc20c67e424"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml",
+      "sha256": "d594192a53ec7b7dd5e26a7272b41427b2c6b93df9adcc1ff7f8f35b5c8abf6c"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml",
+      "sha256": "9b046cf8f0b021f43e2489d364a61bd7ca3c9c065765b7a3c303d1f9b4b596c2"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml",
+      "sha256": "86a19d689781e28d9947fa89ffb18011cc7cb47d3357fb17030c8b45256bd4e6"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml",
+      "sha256": "092af5701e6f7379f75aed4cc62b41bc3cdb1317908a3f0ff2988f661c55042d"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml",
+      "sha256": "83c7abae47ae75081ad17610cc56342da7b0388d5c087d161aac4d08c2142074"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml",
+      "sha256": "401369712639aaac78ff4f6e53cec26c764e2aee16390bf825c1441dd450f5c7"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/binary/output.bin",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/binary/output.bin.idx",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/jvm/binary/results.bin",
+      "sha256": "cda5354b1721a19fd08d978e99c4a308c0b32c34f5c838bbe3ca4d3f2543c05d"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/lint-results-debug.html",
+      "sha256": "20bec9205693d3194c2c9ab039b89c4942e4ea08e099d0a7fee4a152a010bc75"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/lint-results-debug.txt",
+      "sha256": "f6929b1eccce2396788fa58ddf93df03e76b5ffc6a7c9fc991a848f1361a5472"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/lint-results-debug.xml",
+      "sha256": "4250643613df73cea48b32cb4ddd478c5e10587938133bb81a9a05a78f82ed07"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/schema.log",
+      "sha256": "ec1c953e73575e86dbad78861abc3e45ae94f1922c8f5a4e8178602194a317f0"
+    },
+    {
+      "path": "artifacts/security/ownership-repair/targeted.log",
+      "sha256": "c84b184c6b6a1babb59cda916865de8418ceb13de00d036c387c694498df3493"
+    }
+  ]
+}

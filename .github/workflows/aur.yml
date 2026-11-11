@@ -1,0 +1,184 @@
+name: Update AUR packages
+
+# After a desktop release is published, move raticode-bin and raticode-cli-bin to it.
+# Their checksums come only from the release's attested checksums-linux.txt, which the
+# release build computed from the packages it built, and an Arch container builds both
+# packages from the published files before anything is pushed.
+#
+# Pushing is opt-in. It happens only when an AUR_SSH_PRIVATE_KEY secret exists, ideally
+# in the aur-publish environment with a required reviewer. Without the secret, the run
+# renders and checks the packages and pushes nothing. See docs/releasing.md.
+on:
+  workflow_run:
+    workflows: ["Publish release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published desktop version to package, such as 0.5.3
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aur-packages
+  cancel-in-progress: false
+
+jobs:
+  render:
+    name: Render packages from the published release
+    if: >-
+      github.repository == 'zacharyivie/Raticode' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve the released version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${RELEASE_TAG#v}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not a desktop release version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # A release run packages with the files reviewed at its tag. A manual run uses the
+      # branch it was started from, so a packaging fix can ship without a new release.
+      - name: Check out the packaging files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || format('v{0}', steps.version.outputs.version) }}
+          persist-credentials: false
+
+      - name: Download and verify the release's checksum file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          draft="$(gh release view "v$VERSION" -R "$REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$draft" != "false" ]; then
+            echo "::error::v$VERSION is not a published release" >&2
+            exit 1
+          fi
+          gh release download "v$VERSION" -R "$REPOSITORY" -p checksums-linux.txt -D release
+          gh attestation verify release/checksums-linux.txt -R "$REPOSITORY" \
+            --signer-workflow "$REPOSITORY/.github/workflows/release-candidate.yml"
+
+      - name: Render the AUR packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/aur-packages.py update --version "$VERSION" --checksums release/checksums-linux.txt
+          python3 scripts/aur-packages.py check --checksums release/checksums-linux.txt
+
+      - name: Keep the rendered packages for the next jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aur-packages
+          path: packaging/aur
+          include-hidden-files: true
+          if-no-files-found: error
+
+  verify:
+    name: Build both packages on Arch Linux
+    needs: render
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel@sha256:fa2d4ce3310ddd90a4208e5168be8ad367da5129af1245f38fd2d803bcbe3239
+    steps:
+      - name: Download the rendered packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: aur-packages
+          path: aur
+
+      - name: Install namcap
+        run: pacman -Syu --noconfirm --needed namcap
+
+      # makepkg downloads the published files and refuses any whose sha256 differs.
+      - name: Build each package and run namcap
+        run: |
+          set -euo pipefail
+          useradd --create-home builder
+          chown -R builder aur
+          for pkg in raticode-cli-bin raticode-bin; do
+            cd "$GITHUB_WORKSPACE/aur/$pkg"
+            runuser -u builder -- makepkg --printsrcinfo | diff -u .SRCINFO -
+            findings="$(namcap PKGBUILD)"
+            if [ -n "$findings" ]; then
+              echo "$findings"
+              echo "::error::namcap found problems in $pkg/PKGBUILD" >&2
+              exit 1
+            fi
+            runuser -u builder -- makepkg --noconfirm --nodeps
+            # Prebuilt Electron and PyInstaller files always draw RELRO, PIE and /opt
+            # warnings, so package findings are shown for review rather than enforced.
+            namcap ./*.pkg.tar.zst
+          done
+
+  publish:
+    name: Push to the AUR
+    needs: [render, verify]
+    runs-on: ubuntu-24.04
+    environment: aur-publish
+    steps:
+      - name: Download the rendered packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: aur-packages
+          path: aur
+
+      - name: Push changed packages
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_COMMIT_NAME: ${{ vars.AUR_COMMIT_NAME || 'Zack Ivie' }}
+          AUR_COMMIT_EMAIL: ${{ vars.AUR_COMMIT_EMAIL || 'publisheddoonk@gmail.com' }}
+          VERSION: ${{ needs.render.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "::notice title=AUR publishing is off::Nothing was pushed. Add an AUR_SSH_PRIVATE_KEY secret to the aur-publish environment to publish."
+            exit 0
+          fi
+          ssh_dir="$RUNNER_TEMP/aur-ssh"
+          install -d -m 700 "$ssh_dir"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$ssh_dir/id"
+          chmod 600 "$ssh_dir/id"
+          # Only the pinned aur.archlinux.org host keys are trusted.
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/id -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/aur/known_hosts"
+          for pkg in raticode-bin raticode-cli-bin; do
+            repo="$RUNNER_TEMP/aur-repos/$pkg"
+            git -c init.defaultBranch=master clone "ssh://aur@aur.archlinux.org/$pkg.git" "$repo"
+            find "$repo" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            cp -a "$GITHUB_WORKSPACE/aur/$pkg/." "$repo/"
+            git -C "$repo" add -A
+            if git -C "$repo" diff --cached --quiet; then
+              echo "$pkg is already up to date on the AUR"
+              continue
+            fi
+            git -C "$repo" -c user.name="$AUR_COMMIT_NAME" -c user.email="$AUR_COMMIT_EMAIL" \
+              commit -m "Update to $VERSION"
+            git -C "$repo" push origin HEAD:master
+          done
+
+      - name: Delete the AUR key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/aur-ssh"

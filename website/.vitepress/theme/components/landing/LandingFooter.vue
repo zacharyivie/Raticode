@@ -20,7 +20,8 @@ const repo = 'https://github.com/zacharyivie/Raticode'
         <a href="#download">Download</a>
         <a :href="allReleasesUrl">Changelog</a>
         <a :href="repo">GitHub</a>
-        <a :href="`${repo}/issues`">Support</a>
+        <a :href="withBase('/docs/support')">Support</a>
+        <a :href="withBase('/docs/privacy')">Privacy</a>
         <a :href="`${repo}/blob/main/LICENSE`">AGPL-3.0</a>
       </nav>
     </div>

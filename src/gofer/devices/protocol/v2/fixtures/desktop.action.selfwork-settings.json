@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000185",
+  "id": "10000000-0000-4000-8000-000000000185",
+  "sequence": 185,
+  "type": "desktop.action",
+  "payload": {
+    "op": "selfwork.settings",
+    "params": {
+      "enabled": true,
+      "max_threads": 3,
+      "auto_pull_backlog": false,
+      "expected_revision": 4
+    }
+  }
+}

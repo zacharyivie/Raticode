@@ -131,14 +131,17 @@ def widens(before: dict[str, Any] | None, after: dict[str, Any] | None) -> bool:
         return before is not None and before.get("mode", "always") != "always"
     if not before or before.get("mode", "always") == "always":
         return False
-    # Compare every minute of a week; windows repeat weekly, so a week covers every case.
-    start = datetime(2026, 1, 5, tzinfo=ZoneInfo(after["timezone"]))  # a Monday
     if after.get("atClose") == "finish" and before.get("atClose", "stop") == "stop":
         return True
-    return any(
-        is_open(after, moment) and not is_open(before, moment)
-        for moment in (start + timedelta(minutes=step) for step in range(7 * 24 * 60))
-    )
+    # Windows repeat weekly, so a week covers every case for one set of clock offsets. A
+    # January and a July week cover both sides of daylight saving in either hemisphere,
+    # which matters when the time zone changes.
+    for monday in (datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 7, 6, tzinfo=UTC)):
+        for step in range(-24 * 60, 8 * 24 * 60):
+            moment = monday + timedelta(minutes=step)
+            if is_open(after, moment) and not is_open(before, moment):
+                return True
+    return False
 
 
 def describe(hours: dict[str, Any] | None) -> str:

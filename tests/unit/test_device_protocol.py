@@ -509,7 +509,7 @@ def test_collection_exact_limit_is_accepted(collection) -> None:
 def test_canonical_mobile_contract_manifest() -> None:
     manifest = (CONTRACT / "SHA256SUMS").read_bytes()
     assert hashlib.sha256(manifest).hexdigest() == (
-        "0b7275c849727c1a0d4374858fdbe0d0b40b0e60a4897dea2ae79a25dad11913"
+        "1bf624cf8c01f93fbb0c680d7691f55f1430e190635467697bf308d34fa10215"
     )
     for line in manifest.decode().splitlines():
         digest, relative = line.split("  ", 1)
@@ -576,6 +576,12 @@ def test_canonical_mobile_worker_grant_is_forbidden() -> None:
         ("desktop.action", "op", "workflows.read"),
         ("desktop.action", "op", "workflows.save"),
         ("desktop.action", "path", "/etc/passwd"),
+        # The file explorer reads and opens files; it never writes, renames or deletes them.
+        ("desktop.read.files-list", "op", "files.delete"),
+        ("desktop.read.files-list", "path", "/etc/passwd"),
+        ("desktop.read.files-text", "op", "files.open"),
+        ("desktop.action.files-open", "op", "files.list"),
+        ("desktop.action.files-open", "op", "files.rename"),
         ("desktop.result", "parts", 0),
         ("desktop.result", "code", "crash"),
     ],

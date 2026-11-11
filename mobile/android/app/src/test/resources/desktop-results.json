@@ -1,0 +1,597 @@
+{
+ "overview": {
+  "projects": [
+   {
+    "project_id": "b18e1ebd-5e5e-5939-8ba0-214a9a37e845",
+    "name": "Notes"
+   },
+   {
+    "project_id": "cc5960bc-6a01-5d42-b036-faa7a5a360d9",
+    "name": "Code"
+   }
+  ],
+  "rem": true,
+  "organizations": true,
+  "swarms": false,
+  "settings": true,
+  "usage": true,
+  "digest": "771ef7d7987e6ed0eddd88ccf1767ec9"
+ },
+ "rem.home": {
+  "turn_state": "idle",
+  "provider": "codex",
+  "model": "",
+  "earlier": 0,
+  "messages": [
+   {
+    "id": "m1",
+    "role": "user",
+    "body": "Check builds",
+    "created_at": "t1"
+   },
+   {
+    "id": "m2",
+    "role": "rem",
+    "body": "Started Build check.",
+    "created_at": "t2",
+    "work": {
+     "task_id": "task1",
+     "run_id": "run1",
+     "thread_id": "thread1",
+     "title": "Build check",
+     "type": "",
+     "state": ""
+    }
+   }
+  ],
+  "tasks": [
+   {
+    "task_id": "task1",
+    "title": "Build check",
+    "type": "maintain",
+    "state": "enabled",
+    "revision": 3,
+    "schedule": {
+     "kind": "weekly",
+     "at": "",
+     "local_time": "09:00",
+     "weekdays": [
+      "monday"
+     ],
+     "every_minutes": 0,
+     "timezone": ""
+    },
+    "next_occurrence_at": "",
+    "project_name": "Notes",
+    "active_run": {
+     "run_id": "run1",
+     "state": "executing",
+     "created_at": "",
+     "finished_at": "",
+     "summary": "",
+     "needs_user": false,
+     "acknowledged": false,
+     "thread_id": "thread1",
+     "verification_thread_id": ""
+    },
+    "last_run": {
+     "run_id": "run0",
+     "state": "succeeded",
+     "created_at": "",
+     "finished_at": "2026-10-26T09:00:00+00:00",
+     "summary": "No failures",
+     "needs_user": false,
+     "acknowledged": false,
+     "thread_id": "",
+     "verification_thread_id": ""
+    }
+   }
+  ],
+  "digest": "6f25f1ae328415232f8e0075e9370429"
+ },
+ "rem.task": {
+  "task_id": "task1",
+  "title": "Build check",
+  "type": "maintain",
+  "state": "enabled",
+  "revision": 3,
+  "schedule": {
+   "kind": "weekly",
+   "at": "",
+   "local_time": "09:00",
+   "weekdays": [
+    "monday"
+   ],
+   "every_minutes": 0,
+   "timezone": ""
+  },
+  "next_occurrence_at": "",
+  "project_name": "Notes",
+  "active_run": {
+   "run_id": "run1",
+   "state": "executing",
+   "created_at": "",
+   "finished_at": "",
+   "summary": "",
+   "needs_user": false,
+   "acknowledged": false,
+   "thread_id": "thread1",
+   "verification_thread_id": ""
+  },
+  "last_run": {
+   "run_id": "run0",
+   "state": "succeeded",
+   "created_at": "",
+   "finished_at": "2026-10-26T09:00:00+00:00",
+   "summary": "No failures",
+   "needs_user": false,
+   "acknowledged": false,
+   "thread_id": "",
+   "verification_thread_id": ""
+  },
+  "prompt": "Look for failed builds",
+  "provider": "",
+  "model": "",
+  "effort": "",
+  "criteria": [
+   "Report failures"
+  ],
+  "runs": [
+   {
+    "run_id": "run1",
+    "state": "executing",
+    "created_at": "",
+    "finished_at": "",
+    "summary": "",
+    "needs_user": false,
+    "acknowledged": false,
+    "thread_id": "thread1",
+    "verification_thread_id": ""
+   },
+   {
+    "run_id": "run0",
+    "state": "succeeded",
+    "created_at": "",
+    "finished_at": "2026-10-26T09:00:00+00:00",
+    "summary": "No failures",
+    "needs_user": false,
+    "acknowledged": false,
+    "thread_id": "",
+    "verification_thread_id": ""
+   }
+  ],
+  "digest": "dcbd32bcead0a69e4b3a8b0df52715be"
+ },
+ "rem.thread": {
+  "thread_id": "thread1",
+  "title": "Build check",
+  "running": true,
+  "earlier": 0,
+  "messages": [
+   {
+    "id": "t1",
+    "role": "assistant",
+    "body": "Working",
+    "kind": ""
+   }
+  ],
+  "digest": "900835c8103251cdfb7cefa63b0c2533"
+ },
+ "organizations.list": {
+  "organizations": [
+   {
+    "organization_id": "30068554-9e25-4c12-a850-47ba1a6e956e",
+    "name": "Eng",
+    "state": "paused",
+    "employees": 1,
+    "open_tasks": 1,
+    "projects": [
+     "Notes"
+    ]
+   }
+  ],
+  "digest": "2f8d2e17e3064ec8626e8b4bcd5c0adc"
+ },
+ "organizations.read": {
+  "organization_id": "30068554-9e25-4c12-a850-47ba1a6e956e",
+  "name": "Eng",
+  "description": "Ships Raticode",
+  "state": "paused",
+  "projects": [
+   "Notes"
+  ],
+  "employees": [
+   {
+    "employee_id": "lead",
+    "name": "Lead",
+    "title": "CTO",
+    "reports_to": "",
+    "provider": "codex",
+    "model": "cli-default",
+    "paused": false
+   }
+  ],
+  "tasks": [
+   {
+    "task_id": "7ff0db7b-ce1b-45e9-86a1-c7d25c5d91ac",
+    "title": "Ship 0.7",
+    "description": "",
+    "status": "todo",
+    "priority": "medium",
+    "assignee": "Lead",
+    "revision": 1,
+    "running": false,
+    "needs_approval": true,
+    "needs_review": false,
+    "attention": true,
+    "block_reason": "",
+    "evidence": "",
+    "due_at": "",
+    "comments": []
+   }
+  ],
+  "digest": "abff24a8b24ce8d55c2907be1f156ab5"
+ },
+ "settings.get": {
+  "available": true,
+  "updated_at": 1793159851.8050628,
+  "pending": 0,
+  "values": {
+   "appearance.theme": "dark",
+   "appearance.reducedMotion": null,
+   "general.initialActivity": null,
+   "general.autosave": null,
+   "general.checkForUpdates": null,
+   "general.archivedThreadRetention": null,
+   "assistant.provider": "codex",
+   "assistant.model": "model-a",
+   "assistant.effort": null,
+   "assistant.defaultScope": null,
+   "assistant.autoHideThoughts": null,
+   "assistant.avatarEnabled": null,
+   "assistant.avatarAnimated": null,
+   "memory.reportFormat": null,
+   "editor.fontSize": 13,
+   "editor.tabSize": null,
+   "editor.wordWrap": null,
+   "editor.minimap": null,
+   "editor.markdownDefault": null,
+   "terminal.fontSize": 12.5,
+   "terminal.cursorBlink": null,
+   "terminal.scrollback": null
+  },
+  "settings": [
+   {
+    "key": "appearance.theme",
+    "group": "Appearance",
+    "label": "Theme",
+    "kind": "enum",
+    "options": [
+     [
+      "system",
+      "System"
+     ],
+     [
+      "light",
+      "Light"
+     ],
+     [
+      "dark",
+      "Dark"
+     ]
+    ]
+   },
+   {
+    "key": "appearance.reducedMotion",
+    "group": "Appearance",
+    "label": "Reduce motion",
+    "kind": "enum",
+    "options": [
+     [
+      "system",
+      "System"
+     ],
+     [
+      "on",
+      "On"
+     ],
+     [
+      "off",
+      "Off"
+     ]
+    ]
+   },
+   {
+    "key": "general.initialActivity",
+    "group": "General",
+    "label": "Open Raticode to",
+    "kind": "enum",
+    "options": [
+     [
+      "rem",
+      "Rem"
+     ],
+     [
+      "workflows",
+      "Workflows"
+     ],
+     [
+      "files",
+      "Files"
+     ],
+     [
+      "search",
+      "Search"
+     ],
+     [
+      "source-control",
+      "Source control"
+     ],
+     [
+      "organizations",
+      "Organizations"
+     ],
+     [
+      "second-brain",
+      "Second Brain"
+     ]
+    ]
+   },
+   {
+    "key": "general.autosave",
+    "group": "General",
+    "label": "Save workflow edits automatically",
+    "kind": "bool"
+   },
+   {
+    "key": "general.checkForUpdates",
+    "group": "General",
+    "label": "Check for updates",
+    "kind": "bool"
+   },
+   {
+    "key": "general.archivedThreadRetention",
+    "group": "General",
+    "label": "Delete archived threads",
+    "kind": "enum",
+    "options": [
+     [
+      "never",
+      "Never"
+     ],
+     [
+      "7",
+      "After 7 days"
+     ],
+     [
+      "30",
+      "After 30 days"
+     ],
+     [
+      "90",
+      "After 90 days"
+     ]
+    ]
+   },
+   {
+    "key": "assistant.provider",
+    "group": "Rem",
+    "label": "Default provider",
+    "kind": "enum",
+    "options": [
+     [
+      "codex",
+      "codex"
+     ],
+     [
+      "antigravity",
+      "antigravity"
+     ],
+     [
+      "grok",
+      "grok"
+     ]
+    ]
+   },
+   {
+    "key": "assistant.model",
+    "group": "Rem",
+    "label": "Default model",
+    "kind": "enum",
+    "options": [
+     [
+      "",
+      "Default"
+     ],
+     [
+      "model-a",
+      "model-a"
+     ]
+    ]
+   },
+   {
+    "key": "assistant.effort",
+    "group": "Rem",
+    "label": "Default effort",
+    "kind": "enum",
+    "options": [
+     [
+      "",
+      "Default"
+     ],
+     [
+      "high",
+      "high"
+     ],
+     [
+      "low",
+      "low"
+     ]
+    ]
+   },
+   {
+    "key": "assistant.defaultScope",
+    "group": "Rem",
+    "label": "New thread scope",
+    "kind": "enum",
+    "options": [
+     [
+      "current-directory",
+      "Current project"
+     ],
+     [
+      "global",
+      "Global"
+     ]
+    ]
+   },
+   {
+    "key": "assistant.autoHideThoughts",
+    "group": "Rem",
+    "label": "Hide thoughts after a reply",
+    "kind": "bool"
+   },
+   {
+    "key": "assistant.avatarEnabled",
+    "group": "Rem",
+    "label": "Show Rem's avatar",
+    "kind": "bool"
+   },
+   {
+    "key": "assistant.avatarAnimated",
+    "group": "Rem",
+    "label": "Animate Rem's avatar",
+    "kind": "bool"
+   },
+   {
+    "key": "memory.reportFormat",
+    "group": "Reports",
+    "label": "Report format",
+    "kind": "enum",
+    "options": [
+     [
+      "md",
+      "Markdown"
+     ],
+     [
+      "html",
+      "HTML"
+     ],
+     [
+      "slides",
+      "Slides"
+     ],
+     [
+      "pdf",
+      "PDF"
+     ]
+    ]
+   },
+   {
+    "key": "editor.fontSize",
+    "group": "Editor",
+    "label": "Font size",
+    "kind": "number",
+    "min": 10,
+    "max": 24,
+    "step": 1
+   },
+   {
+    "key": "editor.tabSize",
+    "group": "Editor",
+    "label": "Tab size",
+    "kind": "number",
+    "min": 1,
+    "max": 8,
+    "step": 1
+   },
+   {
+    "key": "editor.wordWrap",
+    "group": "Editor",
+    "label": "Word wrap",
+    "kind": "bool"
+   },
+   {
+    "key": "editor.minimap",
+    "group": "Editor",
+    "label": "Minimap",
+    "kind": "bool"
+   },
+   {
+    "key": "editor.markdownDefault",
+    "group": "Editor",
+    "label": "Open Markdown as",
+    "kind": "enum",
+    "options": [
+     [
+      "preview",
+      "Preview"
+     ],
+     [
+      "edit",
+      "Editor"
+     ]
+    ]
+   },
+   {
+    "key": "terminal.fontSize",
+    "group": "Terminal",
+    "label": "Font size",
+    "kind": "number",
+    "min": 8,
+    "max": 28,
+    "step": 0.5
+   },
+   {
+    "key": "terminal.cursorBlink",
+    "group": "Terminal",
+    "label": "Blinking cursor",
+    "kind": "bool"
+   },
+   {
+    "key": "terminal.scrollback",
+    "group": "Terminal",
+    "label": "Scrollback lines",
+    "kind": "number",
+    "min": 100,
+    "max": 100000,
+    "step": 100
+   }
+  ],
+  "digest": "5b3649c80d62e276f9de832ac535680a"
+ },
+ "usage.overview": {
+  "days": 30,
+  "observed_at": "2026-10-27T10:00:00+00:00",
+  "accounts": [
+   {
+    "provider": "claude_code",
+    "label": "Claude Code",
+    "status": "available",
+    "reason": "",
+    "observed_at": "",
+    "windows": [
+     {
+      "label": "five hour",
+      "used_percent": 40,
+      "resets_at": "2026-10-27T15:00:00+00:00"
+     }
+    ]
+   }
+  ],
+  "activity": {
+   "calls": 12,
+   "input_tokens": 1000,
+   "output_tokens": 200,
+   "providers": [
+    {
+     "provider": "claude_code",
+     "calls": 12,
+     "input_tokens": 1000,
+     "output_tokens": 200
+    }
+   ]
+  },
+  "digest": "e8036241d1815afb0a52811e8a048523"
+ }
+}

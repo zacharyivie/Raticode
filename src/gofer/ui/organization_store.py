@@ -23,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from gofer.core.prompt_envelope import AgentResources
 from gofer.core.provider_permissions import provider_permission_args
 from gofer.ui.organization_hours import OperatingHours
+from gofer.ui.organization_schedule import WorkSchedule
+from gofer.ui.rem_ticket_activity import note_organization_transitions
 from gofer.utils.process import build_subprocess_env
 
 
@@ -95,6 +97,10 @@ def event_digest(previous: str, oid: str, at: str, actor: str, kind: str, body: 
     return hashlib.sha256(json.dumps([previous, oid, at, actor, kind, body]).encode()).hexdigest()
 
 
+# Matching events one phone alert read looks at; it reads again for the rest.
+ALERT_EVENTS = 300
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -156,6 +162,61 @@ def ticket_allowed(employee: dict[str, Any], project: str | None, action: str) -
     if access is None:
         return True
     return action in access.get(project or "*", [])
+
+
+def task_root(config: dict[str, Any], task: dict[str, Any]) -> str:
+    """The folder a ticket runs in: its own, its initiative's, or the organization's first."""
+    initiative: dict[str, Any] = next(
+        (p for p in config["projects"] if p["id"] == task.get("project")), {}
+    )
+    roots = config.get("projectRoots", [])
+    return str(
+        task.get("workspacePath") or initiative.get("workspacePath") or (roots[0] if roots else "")
+    )
+
+
+def self_work_assignment(runtime: dict[str, Any], employee_id: str) -> dict[str, Any]:
+    """The projects assigned to a worker for self-work, with their revision."""
+    saved = runtime.get("selfWorkProjects", {}).get(employee_id) or {}
+    return {"projects": list(saved.get("projects", [])), "revision": int(saved.get("revision", 0))}
+
+
+def assignable_roots(config: dict[str, Any], employee: dict[str, Any]) -> list[str]:
+    """Projects this worker can be given: its organization's, within its workspace grants."""
+    grants = employee.get("workspacePaths")
+    return [r for r in config.get("projectRoots", []) if grants is None or r in grants]
+
+
+def self_work_roots(org: dict[str, Any], employee_id: str) -> list[str]:
+    """The assigned projects a worker can use right now. No assignment means none."""
+    employee = next((e for e in org["config"]["employees"] if e["id"] == employee_id), None)
+    if employee is None:
+        return []
+    allowed = set(assignable_roots(org["config"], employee))
+    return [
+        root
+        for root in self_work_assignment(org["runtime"], employee_id)["projects"]
+        if root in allowed and Path(root).is_dir()
+    ]
+
+
+def within_self_work(org: dict[str, Any], employee_id: str, root: str) -> bool:
+    """Whether a folder is one of a worker's assigned projects, or a worktree of one."""
+    if not root:
+        return False
+    identity = project_identity(root)[0]
+    return any(project_identity(r)[0] == identity for r in self_work_roots(org, employee_id))
+
+
+def has_assignment(org: dict[str, Any], employee_id: str) -> bool:
+    """Whether the user has chosen this worker's projects.
+
+    A worker with chosen projects is bounded to them for everything it does. A worker saved
+    before projects were assigned keeps its old reach, the organization's projects within its
+    workspace access, for the tickets it is given, but doesn't work on its own until the user
+    assigns its projects.
+    """
+    return bool(self_work_assignment(org["runtime"], employee_id)["revision"] > 0)
 
 
 class Employee(BaseModel):
@@ -313,6 +374,10 @@ class OrganizationConfig(BaseModel):
     # When workers may work. Outside these hours nothing starts, and running work stops or
     # finishes as chosen. Defaults to always, which is how organizations worked before.
     operatingHours: OperatingHours = Field(default_factory=OperatingHours)
+    # What kind of work workers favor when: named focus blocks that repeat daily, weekly,
+    # monthly or quarterly, in the working hours' time zone. Empty, the default, keeps the
+    # usual priorities all the time. See organization_schedule.
+    workSchedule: WorkSchedule = Field(default_factory=WorkSchedule)
     # Keep running after Raticode restarts instead of pausing. Interrupted tickets still
     # wait for review either way.
     resumeAfterRestart: bool = False
@@ -471,6 +536,36 @@ PLAN_RECORDS = ("knowledge", "links", "claims")
 TaskStatus = Literal["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"]
 
 
+# Task fields callers may set; the rest are Raticode's own records.
+TASK_EDIT_FIELDS = {
+    "title",
+    "description",
+    "assignee",
+    "project",
+    "parentId",
+    "goal",
+    "priority",
+    "status",
+    "evidence",
+    "dueAt",
+    "recurring",
+    "intervalSeconds",
+    "approvalRequired",
+    "workspacePath",
+    "dependsOn",
+    "blockReason",
+    "reviewRequired",
+    "reviewer",
+    "goalId",
+    "artifacts",
+    "workflowContract",
+    "execution",
+    "epicId",
+    "doneWhen",
+    "knowledge",
+}
+
+
 class Task(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(default_factory=lambda: str(uuid4()))
@@ -519,6 +614,8 @@ class Task(BaseModel):
     sharedWorktree: dict[str, str] | None = None
     # A heartbeat check-in Raticode created, not work someone planned.
     heartbeat: bool = False
+    # Created during a check-in, so it stays within its assignee's self-work projects.
+    selfWork: bool = False
     # When a worker, you or Rem asked to work on this next ("move to In progress").
     pulledAt: str | None = None
     # Ticket fields: the epic this belongs to, its number in PREFIX-n, what done means,
@@ -961,6 +1058,7 @@ class OrganizationStore:
                         "settings changed. Review, then start again."
                     ),
                 )
+            statuses = {t["id"]: t["status"] for t in runtime["tasks"]}
             for task in runtime["tasks"]:
                 orphaned = task["status"] not in {"done", "cancelled"} and (
                     (
@@ -996,6 +1094,7 @@ class OrganizationStore:
                             ),
                         }
                     )
+            note_organization_transitions(current, statuses, "system")
             self._write_runtime(db, oid, runtime)
             self._revision(db, oid, validated, actor, reason, restored_from)
         return self.get(project, oid)
@@ -1152,6 +1251,8 @@ class OrganizationStore:
             payload = callback(organization)
             if before == json.dumps(organization["runtime"]) and not payload:
                 return organization
+            # Each ticket's timeline says why its status changed, in the same write.
+            note_organization_transitions(organization, statuses, actor)
             self._write_runtime(db, oid, organization["runtime"])
             # Every state change leaves an event, including scheduler-only updates.
             changes = [
@@ -1348,6 +1449,42 @@ class OrganizationStore:
                 ).fetchall()
         return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
 
+    def alert_events(self, after: int | None, limit: int = ALERT_EVENTS) -> dict[str, Any]:
+        """Task changes and consent requests after ``after``, across every organization,
+        with each organization as it is now so a settled item can be left out.
+
+        ``sequence`` is shared by all organizations. Without a position, or one past a
+        rebuilt database, only the current position comes back.
+        """
+        with self.connect() as db:
+            latest = int(
+                db.execute("SELECT COALESCE(MAX(sequence), 0) FROM organization_events").fetchone()[
+                    0
+                ]
+            )
+            if after is None or after > latest:
+                return {"last": latest, "more": False, "rows": [], "organizations": {}}
+            rows = db.execute(
+                "SELECT sequence, organization, at, actor, kind, payload "
+                "FROM organization_events WHERE sequence>? AND kind!='turn_event' "
+                "AND (kind='consent_requested' OR json_extract(payload, '$.taskChanges') "
+                "IS NOT NULL) ORDER BY sequence LIMIT ?",
+                (after, limit),
+            ).fetchall()
+            organizations = {}
+            for oid in {row["organization"] for row in rows}:
+                try:
+                    organizations[oid] = self._get(db, "", oid)
+                except ValueError:
+                    continue
+        last = int(rows[-1]["sequence"]) if len(rows) == limit else latest
+        return {
+            "last": last,
+            "more": last < latest,
+            "rows": [{**dict(row), "payload": json.loads(row["payload"])} for row in rows],
+            "organizations": organizations,
+        }
+
     def turn_events(self, oid: str, turn: str, limit: int = 2000) -> list[dict[str, Any]]:
         """Stored provider events of one employee run, oldest first."""
         with self.connect() as db:
@@ -1364,8 +1501,16 @@ class OrganizationStore:
 
     @staticmethod
     def validate_task(
-        task: dict[str, Any], config: dict[str, Any], tasks: list[dict[str, Any]]
+        task: dict[str, Any],
+        config: dict[str, Any],
+        tasks: list[dict[str, Any]],
+        before: dict[str, Any] | None = None,
     ) -> None:
+        # A reference that was already gone and isn't being changed, such as a removed
+        # worker's assignment, must not stop the ticket from being reassigned or cancelled.
+        def kept(field: str) -> bool:
+            return before is not None and before.get(field) == task.get(field)
+
         if (
             task["approvalRequired"]
             and task["status"] in {"in_progress", "done"}
@@ -1380,21 +1525,27 @@ class OrganizationStore:
             raise ValueError("An independent reviewer must accept this result")
         if task.get("reviewer") and (
             task["reviewer"] == task["assignee"]
-            or task["reviewer"] not in {e["id"] for e in config["employees"]}
+            or (
+                task["reviewer"] not in {e["id"] for e in config["employees"]}
+                and not kept("reviewer")
+            )
         ):
             raise ValueError("Reviewer must be a different, existing employee")
-        if task.get("goalId") and task["goalId"] not in {
-            g["id"] for g in config.get("goalRecords", [])
-        }:
+        if (
+            task.get("goalId")
+            and task["goalId"] not in {g["id"] for g in config.get("goalRecords", [])}
+            and not kept("goalId")
+        ):
             raise ValueError("Unknown goal")
         if task.get("epicId"):
             epic = next((e for e in config.get("epics", []) if e["id"] == task["epicId"]), None)
-            if epic is None:
+            if epic is None and not kept("epicId"):
                 raise ValueError("Unknown epic")
             # A ticket counts against its epic's project budget, so they always agree.
-            if task.get("project") not in {None, epic["projectId"]}:
-                raise ValueError("A ticket's project must match its epic's project")
-            task["project"] = epic["projectId"]
+            if epic is not None:
+                if task.get("project") not in {None, epic["projectId"]}:
+                    raise ValueError("A ticket's project must match its epic's project")
+                task["project"] = epic["projectId"]
         graph = {t["id"]: t.get("dependsOn", []) for t in tasks}
         graph[task["id"]] = task.get("dependsOn", [])
 
@@ -1423,9 +1574,17 @@ class OrganizationStore:
                 raise ValueError(f"Task {field} needs a timezone")
         if task["status"] == "done" and not task["evidence"].strip():
             raise ValueError("Completed tasks need evidence")
-        if task["assignee"] and task["assignee"] not in {e["id"] for e in config["employees"]}:
+        if (
+            task["assignee"]
+            and task["assignee"] not in {e["id"] for e in config["employees"]}
+            and not kept("assignee")
+        ):
             raise ValueError("Unknown employee")
-        if task["project"] and task["project"] not in {p["id"] for p in config["projects"]}:
+        if (
+            task["project"]
+            and task["project"] not in {p["id"] for p in config["projects"]}
+            and not kept("project")
+        ):
             raise ValueError("Unknown organization initiative")
         parents = {t["id"]: t.get("parentId") for t in tasks}
         seen = {task["id"]}

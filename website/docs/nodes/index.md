@@ -1,6 +1,6 @@
 ---
 title: Node reference
-description: Choose among the 22 built-in Rattish node types and understand shared execution fields.
+description: Choose among the 24 built-in Rattish node types and understand shared execution fields.
 pageClass: docs-layout
 ---
 

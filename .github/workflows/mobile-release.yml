@@ -1,0 +1,40 @@
+name: Publish mobile release
+
+on:
+  push:
+    tags:
+      - 'mobile-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish verified candidate
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: mobile/android
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Verify candidate and publish existing draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: python scripts/release-candidate.py publish

@@ -2,13 +2,16 @@
 // is its default order. `required` plugins are always shown. `experimental`
 // plugins exist only once turned on in Settings > Developer > Feature Preview;
 // while off they appear nowhere else in the app. Showing or hiding a plugin in
-// the sidebar is a separate choice. Mark a plugin experimental here.
+// the sidebar is a separate choice. Mark a plugin experimental here. A plugin
+// with `pane: false` has no side pane: choosing it shows only its main area.
 export const SIDEBAR_PLUGINS = Object.freeze([
   { id: "rem", label: "Rem", description: "Rem's home with threads, tasks, and reviews." },
   { id: "workflows", label: "Workflows", description: "Workflows in the current project." },
   { id: "files", label: "File explorer", description: "Browse, create, and organize project files.", required: true },
+  { id: "browser", label: "Browser", description: "Web tabs from Raticode (chromium), Raticode (gecko), Firefox, Chrome, and Edge in one tab bar.", pane: false },
   { id: "search", label: "Search", description: "Find and replace text across the project." },
   { id: "source-control", label: "Source control", description: "Changes, branches, worktrees, and history." },
+  { id: "kanban", label: "Kanban", description: "Tickets from Rem and every organization in one board." },
   { id: "swarms", label: "Swarms", description: "Agent teams working in the current project.", experimental: true },
   { id: "organizations", label: "Organizations", description: "Rem employees, teams, and their work queues.", experimental: true },
   { id: "second-brain", label: "Second Brain", description: "Notes, reports, and knowledge collections.", experimental: true },
@@ -31,6 +34,11 @@ export const DEFAULT_PLUGIN_SETTINGS = Object.freeze({
 
 export function sidebarPlugin(id) {
   return SIDEBAR_PLUGINS.find((plugin) => plugin.id === id) ?? null;
+}
+
+// Whether choosing the plugin shows a side pane next to the rail.
+export function pluginHasPane(id) {
+  return sidebarPlugin(id)?.pane !== false;
 }
 
 export function normalizePluginSettings(value = {}) {
@@ -124,15 +132,20 @@ export function resolvePluginActivity(pluginSettings, activity, fallback = FALLB
 }
 
 // The main content area is chosen separately from the sidebar. "editor" shows
-// open files, graphs, and browser tabs; the other values are plugins with their
-// own workspace. A workspace whose plugin is turned off falls back to the editor.
+// open files and graphs; the other values are plugins with their own
+// workspace. A workspace whose plugin is turned off falls back to the editor.
 export const EDITOR_CONTENT = "editor";
-const WORKSPACE_PLUGIN_IDS = ["rem", "second-brain", "swarms", "organizations"];
+export const BROWSER_CONTENT = "browser";
+const WORKSPACE_PLUGIN_IDS = ["rem", "second-brain", "swarms", "organizations", "kanban", BROWSER_CONTENT];
 // Plugins whose home fills the main area. Clicking one in the activity rail
-// opens it; every other plugin changes only the sidebar.
-const HOME_PLUGIN_IDS = ["rem", "second-brain"];
+// opens it, and clicking File explorer shows the editor's tabs; every other
+// plugin changes only the sidebar.
+const HOME_PLUGIN_IDS = ["rem", "second-brain", "kanban", BROWSER_CONTENT];
 
 export function resolveMainContent(pluginSettings, content) {
+  // Hiding Browser from the rail keeps web tabs reachable: links, Rem's tabs
+  // and the open-browser shortcut still show them.
+  if (content === BROWSER_CONTENT) return BROWSER_CONTENT;
   return WORKSPACE_PLUGIN_IDS.includes(content) && pluginEnabled(pluginSettings, content) ? content : EDITOR_CONTENT;
 }
 

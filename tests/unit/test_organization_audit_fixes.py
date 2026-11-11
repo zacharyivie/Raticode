@@ -109,9 +109,13 @@ def test_pause_returns_running_work_to_todo_and_start_runs_it_again(tmp_path: Pa
     act(manager, org, "control", state="paused")
     settle(manager)
     paused = task(manager, org, created["id"])
-    assert paused["status"] == "todo"
+    # Blocked while the company is paused, saying why; Start puts it back in To do.
+    assert paused["status"] == "blocked"
+    assert paused["blockReason"] == "Waiting for the organization to start again"
     assert paused["turns"] == 0
-    assert "runs again when the organization starts" in paused["comments"][-1]["body"]
+    said = [c for c in paused["comments"] if c.get("kind") != "status"]
+    assert "runs again when the organization starts" in said[-1]["body"]
+    assert paused["comments"][-1]["title"] == "Blocked: waiting"
     current = manager.store.get("", org["id"])
     assert current["runtime"]["pauseReason"] == "Paused by you"
     assert [a["status"] for a in current["runtime"]["attempts"].values()] == ["paused"]
@@ -286,7 +290,8 @@ def test_checkout_mode_refuses_a_dirty_project_folder(tmp_path: Path) -> None:
     assert not calls
     blocked = task(manager, org, created["id"])
     assert blocked["status"] == "blocked"
-    assert "uncommitted changes" in blocked["comments"][-1]["body"]
+    said = [c for c in blocked["comments"] if c.get("kind") != "status"]
+    assert "uncommitted changes" in said[-1]["body"]
     manager.close()
 
 

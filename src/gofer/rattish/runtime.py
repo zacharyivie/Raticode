@@ -13,7 +13,7 @@ import shutil
 import stat
 import sys
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,8 +69,11 @@ from gofer.rattish.provider_runtime import (
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
 from gofer.subscriptions.base import Subscription
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links, open_binary_input
+from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
+
+log = get_logger(__name__)
 
 
 class UnsupportedRattishRuntimeError(RuntimeError):
@@ -1099,9 +1102,10 @@ async def _approval_gate_handler(
             await context.notification_adapter.send(
                 Notification(title=configuration["notification_title"], body=message)
             )
-        except Exception:  # noqa: BLE001
-            # Notification is best-effort. The persisted approval remains actionable.
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Notification is best-effort. The persisted approval remains actionable,
+            # but the user should be able to find out why no notification arrived.
+            log.warning("Approval notification could not be sent (%s)", type(exc).__name__)
     try:
         decision = await wait_for_decision(
             store,
@@ -1177,6 +1181,17 @@ async def _await_rem_run(
     return HandlerResult(True, rem_workflow.run_output(finished, attached=attached))
 
 
+# Triggers whose events carry content someone else can write: a webhook's body, and the
+# files a file trigger watches.
+_OUTSIDE_TRIGGER_TYPES = ("webhook", "file")
+
+
+def _outside_trigger_kinds(events: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """The outside-input trigger types (webhook, file) that started this run."""
+    seen = {str(event.get("type")) for event in events if isinstance(event, Mapping)}
+    return tuple(kind for kind in _OUTSIDE_TRIGGER_TYPES if kind in seen)
+
+
 async def _rem_prompt_handler(
     node: Mapping[str, Any], context: RuntimeContext, bindings: ResolvedBindings
 ) -> HandlerResult:
@@ -1187,6 +1202,19 @@ async def _rem_prompt_handler(
     if not isinstance(prompt, str):
         prompt = json.dumps(prompt, sort_keys=True)
     store = rem_workflow.existing_store(context.data_dir)
+    allow_actions = bool(configuration["allow_actions"])
+    # A webhook body or a changed file's content may reach this prompt, and someone
+    # other than the user may have written it. Rem is told so, and the log says so
+    # when the prompt may also start work.
+    outside = _outside_trigger_kinds(context.trigger_events)
+    if outside and allow_actions:
+        log.warning(
+            "Rem prompt %r in workflow %r may start work and was started by a %s trigger; "
+            "Rem treats the request as possibly written by someone else",
+            str(node["id"]),
+            context.workflow_name or context.workflow_id,
+            " and ".join(outside),
+        )
     try:
         if store is None or not rem_workflow.rem_running(store):
             raise rem_workflow.unavailable()
@@ -1194,7 +1222,8 @@ async def _rem_prompt_handler(
             store,
             _rem_origin(node, context),
             prompt,
-            allow_actions=bool(configuration["allow_actions"]),
+            allow_actions=allow_actions,
+            outside_input=outside,
         )
     except rem_workflow.RemWorkflowError as exc:
         return HandlerResult(False, {}, _rem_error(exc))

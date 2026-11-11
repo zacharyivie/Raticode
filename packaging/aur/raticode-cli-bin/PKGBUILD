@@ -1,0 +1,22 @@
+# Maintainer: Zack Ivie <publisheddoonk at gmail dot com>
+#
+# Generated values: scripts/aur-packages.py in https://github.com/zacharyivie/Raticode
+# sets pkgver, pkgrel and sha256sums from the release's published checksums-linux.txt.
+pkgname=raticode-cli-bin
+pkgver=0.5.2
+pkgrel=1
+pkgdesc="Raticode command line tool for running Rattish workflows (prebuilt)"
+arch=('x86_64')
+url="https://github.com/zacharyivie/Raticode"
+license=('AGPL-3.0-only')
+depends=('glibc' 'zlib')
+provides=('raticode-cli')
+conflicts=('raticode-cli')
+# A PyInstaller binary carries its program inside the file; stripping it breaks it.
+options=('!strip' '!debug')
+source=("raticode-cli-$pkgver::$url/releases/download/v$pkgver/raticode-cli-linux-x64")
+sha256sums=('87401d69a74f830f6c7913bb534c95b040f733b527aac940e35b2be5c9848396')
+
+package() {
+  install -Dm755 "raticode-cli-$pkgver" "$pkgdir/usr/bin/Raticode"
+}

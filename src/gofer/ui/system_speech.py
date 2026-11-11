@@ -14,6 +14,9 @@ helper's stdin; the helper answers with one JSON object per line on stdout:
 ``ready``, ``partial`` (the words of the current phrase so far), ``final`` (a finished
 phrase), ``error`` (a code and a plain-language message) and ``done``. Nothing is
 written to disk and no audio leaves the computer.
+
+The log records how each dictation went (which recognizer, why one was skipped, when
+the helper started, got ready, failed or exited) but never audio or recognized words.
 """
 
 from __future__ import annotations
@@ -23,14 +26,20 @@ import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
+
+from gofer.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 HELPER_ENV = "GOFER_SPEECH_HELPER"
 # macOS asks for permission the first time; that dialog waits for the user.
@@ -41,6 +50,9 @@ CHECK_CACHE_SECONDS = 60.0
 # Audio is kept until the recognizer is ready, so it can be replayed into the offline
 # model if the OS recognizer turns out to be unavailable. Two minutes is plenty.
 REPLAY_MAX_BYTES = 16_000 * 2 * 120
+# The helpers write nothing to stderr themselves; what lands there comes from the OS
+# (a missing library, a refused signature), so its last lines are kept for the log.
+STDERR_TAIL_BYTES = 2_000
 
 MACOS_NAME = "macOS speech recognition"
 WINDOWS_NAME = "Windows speech recognition"
@@ -58,6 +70,8 @@ class SystemEngine:
     env: tuple[tuple[str, str], ...] = ()
     check_env: tuple[tuple[str, str], ...] = ()
     reason: str = ""
+    # For the log: what was looked for and found, such as the helper's path.
+    detail: str = ""
 
     @property
     def present(self) -> bool:
@@ -72,23 +86,29 @@ def system_engine(
     environ = os.environ if environ is None else environ
     if platform == "darwin":
         helper = str(environ.get(HELPER_ENV) or "").strip()
-        if not helper or not Path(helper).is_file() or not os.access(helper, os.X_OK):
+        problem = _helper_problem(helper)
+        if problem:
             return SystemEngine(
                 "macos",
                 MACOS_NAME,
                 reason="This copy of Raticode doesn't include its macOS speech helper.",
+                detail=problem,
             )
         return SystemEngine(
             "macos",
             MACOS_NAME,
             command=(helper, "listen"),
             check_command=(helper, "check"),
+            detail=f"helper {helper}",
         )
     if platform == "win32":
         powershell = _windows_powershell(environ)
         if not powershell:
             return SystemEngine(
-                "windows", WINDOWS_NAME, reason="Windows PowerShell wasn't found on this PC."
+                "windows",
+                WINDOWS_NAME,
+                reason="Windows PowerShell wasn't found on this PC.",
+                detail="no powershell.exe under SystemRoot or on PATH",
             )
         command = (
             powershell,
@@ -107,12 +127,33 @@ def system_engine(
             check_command=command,
             env=(("RATICODE_SPEECH_MODE", "listen"),),
             check_env=(("RATICODE_SPEECH_MODE", "check"),),
+            detail=f"PowerShell {powershell}",
         )
-    return SystemEngine("", "", reason=LINUX_REASON)
+    return SystemEngine("", "", reason=LINUX_REASON, detail=f"platform {platform}")
+
+
+def _helper_problem(helper: str) -> str:
+    """Why the macOS helper can't be run, in the words a log reader needs; "" if it can."""
+    if not helper:
+        return f"{HELPER_ENV} is not set, so the desktop app didn't pass a helper path"
+    path = Path(helper)
+    try:
+        if not path.exists():
+            return f"no helper at {helper}"
+        if not path.is_file():
+            return f"{helper} is not a file"
+    except OSError as exc:
+        return f"{helper} can't be read: {exc}"
+    if not os.access(helper, os.X_OK):
+        return f"{helper} is not executable"
+    return ""
 
 
 _check_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
 _check_lock = threading.Lock()
+# The last check result logged per engine, so a Settings page polling the same answer
+# doesn't fill the log.
+_logged_checks: dict[str, tuple[Any, ...]] = {}
 
 
 def check_system_engine(
@@ -125,6 +166,8 @@ def check_system_engine(
     engine = engine or system_engine()
     result: dict[str, Any] = {"id": engine.id, "name": engine.name}
     if not engine.present:
+        if engine.id:
+            _log_check(engine, False, engine.reason, engine.detail)
         return {**result, "available": False, "reason": engine.reason}
     key = engine.check_command
     now = time.monotonic()
@@ -146,14 +189,104 @@ def check_system_engine(
         )
     except subprocess.TimeoutExpired:
         status = {"available": False, "reason": f"{engine.name} didn't answer in time."}
+        how = f"check timed out after {CHECK_TIMEOUT_SECONDS:.0f} s"
     except OSError as exc:
         status = {"available": False, "reason": f"{engine.name} couldn't start: {exc}"}
+        how = f"check couldn't start ({type(exc).__name__})"
     else:
         status = _check_status(engine, completed)
+        how = f"check exited {_describe_exit(completed.returncode)}"
+        if completed.returncode and completed.stderr:
+            how += f"; stderr: {_tail(completed.stderr)}"
+    _log_check(engine, status.get("available") is True, str(status.get("reason") or ""), how)
     result.update(status)
     with _check_lock:
         _check_cache[key] = (now, dict(result))
     return result
+
+
+def try_system_engine(
+    engine: SystemEngine | None = None,
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, Any]:
+    """Starts the macOS recognizer once with no audio, so macOS asks for its permission.
+
+    `check` never asks, so without this the question only comes up in the middle of the
+    first dictation. The helper gets an empty input: nothing is recorded or recognized.
+    Only the macOS helper is tested; Windows needs no permission and `check` covers it.
+    """
+    engine = engine or system_engine()
+    result: dict[str, Any] = {"id": engine.id, "name": engine.name}
+    if engine.id != "macos":
+        return {**result, "ok": False, "message": "Only macOS speech recognition needs a test."}
+    if not engine.present:
+        return {**result, "ok": False, "message": engine.reason}
+    log.info("Testing %s (%s)", engine.name, engine.detail)
+    try:
+        completed = run(
+            list(engine.command),
+            input="",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            # macOS's permission dialog waits for the user.
+            timeout=READY_TIMEOUT_SECONDS,
+            env=_helper_env(engine.env),
+            **_no_window(),
+        )
+    except subprocess.TimeoutExpired:
+        ok, message, how = False, f"{engine.name} didn't answer in time.", "test timed out"
+    except OSError as exc:
+        ok, message, how = False, f"{engine.name} couldn't start: {exc}", "test couldn't start"
+    else:
+        ok, message = _trial_outcome(engine, completed)
+        how = f"test exited {_describe_exit(completed.returncode)}"
+        if not ok and completed.stderr:
+            how += f"; stderr: {_tail(completed.stderr)}"
+    if ok:
+        log.info("%s test passed (%s)", engine.name, how)
+    else:
+        log.warning("%s test failed: %s (%s)", engine.name, message, how)
+    with _check_lock:
+        # The permission may have just changed; the next check asks the helper again.
+        _check_cache.pop(engine.check_command, None)
+    return {**result, "ok": ok, "message": message}
+
+
+def _trial_outcome(
+    engine: SystemEngine, completed: subprocess.CompletedProcess[str]
+) -> tuple[bool, str]:
+    events = [event for event in map(_parse_event, completed.stdout.splitlines()) if event]
+    for event in events:
+        if event.get("type") == "error":
+            return False, _clip(event.get("message")) or f"{engine.name} stopped."
+    ready = next((event for event in events if event.get("type") == "ready"), None)
+    if ready is not None and completed.returncode == 0:
+        language = _clip(ready.get("language"), 40)
+        return True, (
+            f"{engine.name} works" + (f" ({language})" if language else "") + ". "
+            "Speech is recognized on this Mac."
+        )
+    return False, _exit_reason(engine, completed.returncode)
+
+
+def _log_check(engine: SystemEngine, available: bool, reason: str, how: str) -> None:
+    key = (available, reason)
+    with _check_lock:
+        if _logged_checks.get(engine.id) == key:
+            return
+        _logged_checks[engine.id] = key
+    if available:
+        log.info("%s is available for dictation (%s)", engine.name, engine.detail or how)
+    else:
+        log.warning(
+            "%s is unavailable for dictation: %s (%s)",
+            engine.name,
+            reason or "no reason given",
+            "; ".join(part for part in (engine.detail, how) if part),
+        )
 
 
 def _check_status(
@@ -196,17 +329,35 @@ class SystemSpeechSession:
         self._replay: list[bytes] | None = []
         self._replay_bytes = 0
         self._started = clock()
+        self._closing = False
+        self._pushed_bytes = 0
+        self._stderr: deque[bytes] = deque()
+        self._stderr_bytes = 0
         self._writes: queue.Queue[bytes | None] = queue.Queue()
-        self._process = popen(
-            list(engine.command),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=_helper_env(engine.env),
-            **_no_window(),
+        try:
+            self._process = popen(
+                list(engine.command),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=_helper_env(engine.env),
+                **_no_window(),
+            )
+        except OSError as exc:
+            log.warning("%s couldn't start its helper (%s): %s", engine.name, engine.detail, exc)
+            raise
+        log.info(
+            "%s helper started (process %s, %s)",
+            engine.name,
+            getattr(self._process, "pid", "unknown"),
+            engine.detail or engine.command[0],
         )
         threading.Thread(target=self._read, name="speech-helper-read", daemon=True).start()
         threading.Thread(target=self._write, name="speech-helper-write", daemon=True).start()
+        if getattr(self._process, "stderr", None) is not None:
+            threading.Thread(
+                target=self._read_stderr, name="speech-helper-stderr", daemon=True
+            ).start()
 
     # The desktop window's side.
 
@@ -221,6 +372,7 @@ class SystemSpeechSession:
                 if self._clock() - self._started > READY_TIMEOUT_SECONDS:
                     self._fail_locked("timeout", f"{self.engine.name} didn't start in time.")
                     return
+            self._pushed_bytes += len(pcm)
         self._writes.put(pcm)
 
     def text(self) -> str:
@@ -250,6 +402,12 @@ class SystemSpeechSession:
         """Ends the audio and waits for the last phrase. Words heard so far are kept on timeout."""
         self._writes.put(None)
         if not self._done.wait(timeout):
+            log.warning(
+                "%s didn't finish within %.0f s of the end of the audio; "
+                "keeping the words heard so far",
+                self.engine.name,
+                timeout,
+            )
             with self._lock:
                 self._committed = [_join(*self._committed, self._partial)]
                 self._partial = ""
@@ -257,8 +415,17 @@ class SystemSpeechSession:
         return self.text()
 
     def close(self) -> None:
+        with self._lock:
+            self._closing = True
         self._writes.put(None)
         process = self._process
+        if self._done.is_set() and process.poll() is None:
+            # It said it was done and is about to exit on its own; let it, so its exit
+            # status in the log is its own.
+            try:
+                process.wait(timeout=0.5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         if process.poll() is None:
             try:
                 process.terminate()
@@ -282,11 +449,51 @@ class SystemSpeechSession:
             pass
         returncode = self._wait_exit()
         with self._lock:
-            if not self._done.is_set() and not self._failure:
+            closing = self._closing
+            if not self._done.is_set() and not self._failure and not closing:
                 if returncode not in (0, None) or not self._ready.is_set():
                     self._fail_locked("exited", _exit_reason(self.engine, returncode))
+            failure, code = self._failure, self._failure_code
+            was_ready = self._ready.is_set() and self._replay is None
+            seconds = self._pushed_bytes / 32_000
         self._ready.set()
         self._done.set()
+        exit_text = _describe_exit(returncode)
+        if failure or (returncode not in (0, None) and not closing):
+            stderr = self.stderr_tail()
+            log.warning(
+                "%s helper exited %s after %.1f s of audio (%s%s)%s",
+                self.engine.name,
+                exit_text,
+                seconds,
+                f"failure {code}" if failure else "no failure reported",
+                "" if was_ready else ", before it was ready",
+                f"; stderr: {stderr}" if stderr else "",
+            )
+        else:
+            log.info(
+                "%s helper exited %s after %.1f s of audio",
+                self.engine.name,
+                exit_text,
+                seconds,
+            )
+
+    def stderr_tail(self) -> str:
+        with self._lock:
+            return _tail(b"".join(self._stderr).decode("utf-8", errors="replace"))
+
+    def _read_stderr(self) -> None:
+        stderr: IO[bytes] = self._process.stderr
+        read = getattr(stderr, "read1", stderr.read)
+        try:
+            for raw in iter(lambda: read(4096), b""):
+                with self._lock:
+                    self._stderr.append(raw)
+                    self._stderr_bytes += len(raw)
+                    while self._stderr_bytes > STDERR_TAIL_BYTES and len(self._stderr) > 1:
+                        self._stderr_bytes -= len(self._stderr.popleft())
+        except (OSError, ValueError):
+            pass
 
     def _wait_exit(self) -> int | None:
         try:
@@ -298,6 +505,12 @@ class SystemSpeechSession:
         kind = event.get("type")
         with self._lock:
             if kind == "ready":
+                log.info(
+                    "%s is ready after %.1f s (language %s)",
+                    self.engine.name,
+                    self._clock() - self._started,
+                    _clip(event.get("language"), 40) or "unknown",
+                )
                 self._replay = None
                 self._replay_bytes = 0
                 self._ready.set()
@@ -319,6 +532,7 @@ class SystemSpeechSession:
     def _fail_locked(self, code: str, message: str) -> None:
         if self._failure:
             return
+        log.warning("%s failed (%s): %s", self.engine.name, code, message)
         # Words of the phrase in progress stay with the dictation.
         if self._partial:
             self._committed.append(self._partial)
@@ -346,7 +560,14 @@ class SystemSpeechSession:
 
 def _exit_reason(engine: SystemEngine, returncode: int | None) -> str:
     if engine.id == "macos" and returncode is not None and returncode < 0:
-        # TCC ends a process that asks for speech recognition from an app whose
+        if returncode != -signal.SIGABRT:
+            # A crash (SIGTRAP, SIGSEGV) or a refused code signature (SIGKILL), which the
+            # permission text below would misdescribe. The log has the signal's name.
+            return (
+                f"Raticode's macOS speech helper stopped unexpectedly "
+                f"({_signal_name(-returncode)})."
+            )
+        # TCC aborts a process that asks for speech recognition from an app whose
         # Info.plist lacks NSSpeechRecognitionUsageDescription, such as a development
         # Electron build.
         return (
@@ -360,6 +581,28 @@ def _exit_reason(engine: SystemEngine, returncode: int | None) -> str:
             "Settings > Time & language > Speech, or use Raticode's offline model."
         )
     return f"{engine.name} stopped unexpectedly."
+
+
+def _describe_exit(returncode: int | None) -> str:
+    if returncode is None:
+        return "with an unknown status"
+    if returncode < 0:
+        return f"on {_signal_name(-returncode)} (code {returncode})"
+    return f"with code {returncode}"
+
+
+def _signal_name(number: int) -> str:
+    try:
+        return signal.Signals(number).name
+    except ValueError:
+        return f"signal {number}"
+
+
+def _tail(text: str, limit: int = 600) -> str:
+    """The end of a helper's stderr, on one line, for the log."""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    joined = " | ".join(lines)
+    return joined if len(joined) <= limit else "…" + joined[-limit:]
 
 
 def _parse_event(line: str) -> dict[str, Any] | None:

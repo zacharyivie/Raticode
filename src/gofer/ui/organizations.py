@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from gofer.core.usage_ledger import record_invocation
 from gofer.subscriptions.usage import normalize_usage
@@ -67,25 +68,46 @@ from gofer.ui.organization_packages import (
     safe_path,
     zip_package,
 )
+from gofer.ui.organization_schedule import (
+    HANDOFF,
+    run_brief,
+    schedule_state,
+    ticket_text,
+)
+from gofer.ui.organization_schedule import (
+    active_at as schedule_active_at,
+)
+from gofer.ui.organization_schedule import (
+    matches as fits_block,
+)
 from gofer.ui.organization_store import (
+    DANGEROUS_PERMISSION_MODES,
     MIN_HEARTBEAT_SECONDS,
+    TASK_EDIT_FIELDS,
     OrganizationConfig,
     OrganizationConflict,
     OrganizationStore,
     Task,
+    assignable_roots,
     config_diff,
+    has_assignment,
     now,
     number_tickets,
     project_identity,
+    self_work_assignment,
+    self_work_roots,
+    task_root,
     ticket_allowed,
+    within_self_work,
 )
-from gofer.ui.organization_tools import READ_ACTIONS, TASK_EDIT_FIELDS, TOOL, management_help
+from gofer.ui.organization_tools import READ_ACTIONS, TOOL, management_help
 from gofer.ui.rem_home_worktree import (
     WorktreeError,
     ensure_worktree,
     plan_worktree,
     release_worktree,
 )
+from gofer.ui.rem_ticket_activity import HOURS_REASON, PAUSED_REASON, WAITING_REASONS
 from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
 from gofer.utils.process import build_subprocess_env
@@ -209,6 +231,49 @@ CONFIG_ACTIONS = {
     "archive",
     "request_decide",
 }
+# Everything a worker's organization tool offers. Workers manage their own tickets and
+# knowledge; organizations, swarms, workers, schedules and limits stay the user's.
+EMPLOYEE_ACTIONS = {
+    "help",
+    "list",
+    "read",
+    "events",
+    "run_events",
+    "run_input",
+    "diagnostics",
+    "tasks",
+    "attempts",
+    "routines",
+    "outcomes",
+    "workflow_preview",
+    "knowledge_search",
+    "knowledge_read",
+    "ticket_changes",
+    "repository",
+    "task_create",
+    "task_update",
+    "comment",
+    "approve",
+    "review",
+    "reopen",
+    "wake",
+    "memory",
+    "memory_save",
+    "memory_check",
+    "artifact_add",
+    "knowledge_save",
+    "knowledge_link",
+    "claim_add",
+}
+WORKER_REFUSAL = (
+    "Only the user or Rem can create, change, start or pause organizations, swarms, workers, "
+    "schedules or limits; employees cannot configure organizations or change operating "
+    "policy. Ask the user in a comment on your ticket."
+)
+# A worker with nothing to do checks in this often unless its heartbeat says otherwise.
+DEFAULT_CHECKIN_SECONDS = 3600
+# Check-ins that change nothing space out, doubling up to this many times.
+MAX_QUIET_DOUBLINGS = 3
 # Rem may ask for these; the user approves them in the Organizations tab.
 CONSENT_ACTIONS = {
     "control",
@@ -329,8 +394,29 @@ def takes_unassigned(task: dict[str, Any], params: dict[str, Any], employee_id: 
 
 
 HEARTBEAT_TITLE = "Heartbeat: review assignments"
+CHECKIN_OPENING = "Review organization goals and blocked work."
 # A worker's heartbeat stops replacing its failed check-ins after this many in a row.
 MAX_HEARTBEAT_FAILURES = 3
+
+
+def hashed(value: str) -> str:
+    """A short, stable stand-in for an ID of any length inside an alert's own ID."""
+    return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
+def task_alert(status: str, task: dict[str, Any]) -> str:
+    """Why a task reaching ``status`` is worth a phone alert, or an empty string."""
+    if status == "done":
+        return "finished"
+    if status == "in_review":
+        return "needs_you"
+    # Waiting on another ticket, a Start or working hours clears itself; anything else is
+    # stuck until someone acts.
+    if status == "blocked" and task.get("blockReason") not in {"dependencies", *WAITING_REASONS}:
+        return "needs_you"
+    if status == "todo" and task.get("approvalRequired") and task.get("approvedRevision") is None:
+        return "needs_you"
+    return ""
 
 
 def is_heartbeat(task: dict[str, Any]) -> bool:
@@ -338,19 +424,149 @@ def is_heartbeat(task: dict[str, Any]) -> bool:
     return bool(task.get("heartbeat")) or task.get("title") == HEARTBEAT_TITLE
 
 
-def heartbeat_due(org: dict[str, Any], eid: str) -> str:
+def self_directed(task: dict[str, Any]) -> bool:
+    """A check-in Raticode made, or work one created: a worker's own self-work.
+
+    Goes by the flags Raticode sets, so a renamed ticket stays what it was. Check-ins saved
+    before the flag existed are recognized by the title and brief Raticode wrote together.
+    """
+    return bool(
+        task.get("heartbeat")
+        or task.get("selfWork")
+        or (
+            task.get("title") == HEARTBEAT_TITLE
+            and str(task.get("description") or "").startswith(CHECKIN_OPENING)
+        )
+    )
+
+
+def drop_checkin(task: dict[str, Any]) -> None:
+    task.update(status="cancelled", cancellation="acknowledged", revision=task["revision"] + 1)
+    task["comments"].append(
+        {"actor": "system", "at": now(), "body": "Closed: this worker has no project assigned."}
+    )
+
+
+def checkin_brief(roots: list[str], review: list[str] | None = None) -> str:
+    first = (
+        "Start with your blocked tickets: "
+        + "; ".join(review)
+        + ". For each, check from its conversation and runs whether it is still blocked. "
+        "If you can get it going, do so and say what changed. If it needs the user or "
+        "something outside your projects, leave it blocked and comment exactly what is "
+        "needed, once. "
+        if review
+        else ""
+    )
+    return (
+        f"{CHECKIN_OPENING} {first}Then pick your most useful To do ticket that fits the "
+        "current focus block and move it to In progress. If you have none, propose new work "
+        "that fits the focus as Backlog tickets for approval; plan follow-ups of your own "
+        "tickets in To do. Work only in these assigned projects: "
+        + ", ".join(Path(root).name for root in roots)
+        + "."
+    )
+
+
+def block_marker(task: dict[str, Any]) -> str:
+    """One blocked spell of a ticket: its reason and when it was blocked."""
+    at = next(
+        (
+            str(c.get("at") or "")
+            for c in reversed(task.get("comments") or [])
+            if c.get("kind") == "status" and c.get("to") == "blocked"
+        ),
+        "",
+    )
+    return f"{task.get('blockReason') or ''}|{at}"
+
+
+def blocked_for_review(org: dict[str, Any], eid: str) -> list[dict[str, Any]]:
+    """A worker's blocked tickets it hasn't looked at since they were blocked.
+
+    Waiting for other tickets, a Start or working hours clears itself, and a failed
+    check-in is replaced by the next one, so those aren't reviewed. Each blocked spell is
+    reviewed once, so a ticket that stays stuck doesn't start a check-in on every pass.
+    """
+    reviews = org["runtime"].get("blockReviews", {})
+    bounded = has_assignment(org, eid)
+    return [
+        t
+        for t in org["runtime"]["tasks"]
+        if t["assignee"] == eid
+        and t["status"] == "blocked"
+        and not t["claim"]
+        and not is_heartbeat(t)
+        and t.get("blockReason") not in {"dependencies", *WAITING_REASONS}
+        and reviews.get(t["id"]) != block_marker(t)
+        and (not bounded or within_self_work(org, eid, task_root(org["config"], t)))
+    ]
+
+
+def checkin_seconds(runtime: dict[str, Any], employee: dict[str, Any]) -> int:
+    """How long an idle worker waits between check-ins: its heartbeat, or an hour, doubled
+    for each check-in in a row that found nothing to do."""
+    base = employee.get("heartbeatSeconds") or DEFAULT_CHECKIN_SECONDS
+    quiet = min(runtime.get("quietCheckins", {}).get(employee["id"], 0), MAX_QUIET_DOUBLINGS)
+    return int(base * 2**quiet)
+
+
+def heartbeat_due(org: dict[str, Any], eid: str, review: list[dict[str, Any]] | None = None) -> str:
     """Give a worker a check-in when it has nothing to do; never pile them up.
 
-    Returns what happened: created, busy, waiting, replaced or stalled.
+    With ``review``, the check-in looks at those blocked tickets first, ahead of To do work,
+    and goes to the front of the queue. Returns what happened: created, busy, waiting,
+    replaced or stalled.
     """
     runtime = org["runtime"]
     mine = [t for t in runtime["tasks"] if t["assignee"] == eid]
-    if any(t["claim"] or (t["status"] == "todo" and task_reason(org, t) == "Ready") for t in mine):
+    allowed = self_work_roots(org, eid)
+    if not allowed:
+        # A check-in is the worker's own self-work, so it needs an assigned project.
+        for task in mine:
+            if (
+                task.get("heartbeat")
+                and task["status"] in {"backlog", "todo"}
+                and not task["claim"]
+            ):
+                drop_checkin(task)
+        return "unassigned"
+    if any(t["claim"] for t in mine) or (
+        not review
+        and any(
+            (t["status"] == "todo" and task_reason(org, t) == "Ready")
+            or (t["status"] == "blocked" and t.get("blockReason") in WAITING_REASONS)
+            for t in mine
+        )
+    ):
         return "busy"
+    keys = [
+        f"{ticket_key(org['config'], t)} ({t.get('blockReason') or 'no reason given'})"[:300]
+        for t in review or []
+    ]
+
+    def reviewed() -> None:
+        # Recorded when a check-in will look at them, never when heartbeats are stalled.
+        reviews = runtime.setdefault("blockReviews", {})
+        for task in review or []:
+            reviews[task["id"]] = block_marker(task)
+        blocked_now = {t["id"] for t in runtime["tasks"] if t["status"] == "blocked"}
+        for stale in set(reviews) - blocked_now:
+            reviews.pop(stale)
+
     open_checkins = [
         t for t in mine if is_heartbeat(t) and t["status"] in {"backlog", "todo", "in_progress"}
     ]
     if open_checkins:
+        if review:
+            reviewed()
+            for checkin in open_checkins:
+                if checkin["status"] != "in_progress":
+                    checkin.update(
+                        pulledAt=checkin.get("pulledAt") or now(),
+                        description=checkin_brief(allowed, keys),
+                        revision=checkin["revision"] + 1,
+                    )
         return "waiting"
     failures = runtime.setdefault("heartbeatFailures", {})
     stalls = runtime.setdefault("heartbeatStalls", {})
@@ -377,13 +593,38 @@ def heartbeat_due(org: dict[str, Any], eid: str) -> str:
         failures[eid] = failures.get(eid, 0) + 1
         outcome = "replaced"
     stalls.pop(eid, None)
+    # Each worker keeps one check-in ticket that comes back each time, so frequent check-ins
+    # don't fill the board, and every pass, with hundreds of finished tickets.
+    previous = next(
+        (
+            t
+            for t in reversed(mine)
+            if t.get("heartbeat") and t["status"] == "done" and not t["claim"]
+        ),
+        None,
+    )
+    if review:
+        reviewed()
+    if previous is not None:
+        previous.update(
+            status="todo",
+            turns=0,
+            evidence="",
+            acceptedRevision=None,
+            revision=previous["revision"] + 1,
+            workspacePath=allowed[0],
+            description=checkin_brief(allowed, keys),
+            pulledAt=now() if review else None,
+        )
+        return outcome
     runtime["tasks"].append(
         Task(
             title=HEARTBEAT_TITLE,
             assignee=eid,
             heartbeat=True,
-            description="Review organization goals and blocked work. "
-            "Delegate or record the next useful action.",
+            workspacePath=allowed[0],
+            description=checkin_brief(allowed, keys),
+            pulledAt=now() if review else None,
         ).model_dump()
     )
     return outcome
@@ -419,9 +660,65 @@ def check_recurring(
         raise ValueError("Recurring work must be at least 15 minutes (900 seconds) apart")
 
 
+def actor_label(org: dict[str, Any], actor: str) -> str:
+    if actor == "user":
+        return "you"
+    if actor.startswith("Rem"):
+        return "Rem"
+    employee = next((e for e in org["config"]["employees"] if f"employee:{e['id']}" == actor), None)
+    return employee["name"] if employee else actor
+
+
+# Fields a caller may set when creating a ticket. Everything else is Raticode's own record.
+IGNORED_ON_CREATE = {
+    "id",
+    "revision",
+    "comments",
+    "turns",
+    "claim",
+    "approvedRevision",
+    "acceptedRevision",
+    "planRevision",
+    "cancellation",
+    "reviewRequestedAt",
+    "acceptedAt",
+    "idempotencyKey",
+    "workflowAuthorization",
+}
+
+
+def creatable_fields(params: dict[str, Any]) -> dict[str, Any]:
+    refused = set(params) - TASK_EDIT_FIELDS - IGNORED_ON_CREATE
+    if refused:
+        raise ValueError("Raticode sets these task fields itself: " + ", ".join(sorted(refused)))
+    return {k: v for k, v in params.items() if k in TASK_EDIT_FIELDS}
+
+
+def resume_waiting(org: dict[str, Any]) -> None:
+    """Put work a pause or closing time cut off back in To do, once the company runs again."""
+    for task in org["runtime"]["tasks"]:
+        reason = task.get("blockReason")
+        if task["status"] != "blocked" or task["claim"] or reason not in WAITING_REASONS:
+            continue
+        task.update(status="todo", blockReason="", revision=task["revision"] + 1)
+        task["comments"].append(
+            {
+                "actor": "system",
+                "at": now(),
+                "kind": "status",
+                "from": "blocked",
+                "to": "todo",
+                "title": "Unblocked, back in To do",
+                "body": "Working hours started again; it runs next."
+                if reason == HOURS_REASON
+                else "The organization started again; it runs next.",
+            }
+        )
+
+
 def employee_may_unblock(task: dict[str, Any]) -> bool:
     reason = task.get("blockReason") or ""
-    return reason in {"", "dependencies"} or (
+    return reason in {"", "dependencies", *WAITING_REASONS} or (
         reason.startswith("Blocked by ")
         and not reason.startswith(("Blocked by you", "Blocked by Rem"))
     )
@@ -457,9 +754,45 @@ def _tool_names(resources: dict[str, Any]) -> set[str]:
         for flag in ("shell", "web", "agents", "browser")
         if resources.get(flag, flag != "browser")
     }
-    names |= {f"mcp:{server.get('name')}" for server in resources.get("mcpServers", [])}
-    names |= {f"skill:{skill.get('path')}" for skill in resources.get("skills", [])}
+    # A server is known by what it runs, not only its name, so pointing an existing name
+    # at another command or address counts as a new tool. Disabled entries grant nothing.
+    names |= {
+        "mcp:"
+        + json.dumps(
+            [server.get(key) for key in ("name", "type", "url", "command", "args", "library")]
+        )
+        for server in resources.get("mcpServers", [])
+        if server.get("enabled", True)
+    }
+    names |= {
+        f"skill:{skill.get('path')}"
+        for skill in resources.get("skills", [])
+        if skill.get("enabled", True)
+    }
     return names
+
+
+def starting_risks(config: dict[str, Any]) -> str:
+    """The settings worth naming before someone approves starting an organization."""
+    risks = []
+    unchecked = [
+        e.get("name") or e["id"]
+        for e in config.get("employees", [])
+        if e.get("permissionMode") in DANGEROUS_PERMISSION_MODES
+    ]
+    if unchecked:
+        risks.append("without sandbox or approvals: " + ", ".join(unchecked))
+    if config.get("blockGitPush", True) is False:
+        risks.append("git push allowed")
+    if config.get("workspaceIsolation", "worktree") == "checkout":
+        risks.append("edits the project folder directly")
+    if config.get("executionTargets"):
+        risks.append("can run work on other destinations")
+    if config.get("resumeAfterRestart"):
+        risks.append("keeps running after restarts")
+    if any(e.get("secretRefs") for e in config.get("employees", [])):
+        risks.append("workers hold credentials")
+    return "; ".join(risks)
 
 
 def escalation(before: dict[str, Any], after: dict[str, Any]) -> str:
@@ -508,6 +841,13 @@ def escalation(before: dict[str, Any], after: dict[str, Any]) -> str:
             reasons.append(f"let {name} do more with tickets")
         if _loosened(previous, employee, OPEN_ENDED_LIMITS):
             reasons.append(f"raise or remove {name}'s monthly limits")
+        if (
+            previous.get("id")
+            and employee.get("reportsTo")
+            and employee.get("reportsTo") != previous.get("reportsTo")
+        ):
+            # A manager may change their reports' tickets.
+            reasons.append(f"change who {name} reports to")
         beat, old_beat = (
             employee.get("heartbeatSeconds") or 0,
             previous.get("heartbeatSeconds") or 0,
@@ -562,6 +902,46 @@ def escalation(before: dict[str, Any], after: dict[str, Any]) -> str:
     return ("Change settings to " + ", ".join(dict.fromkeys(reasons))) if reasons else ""
 
 
+def mini_rem_brief(roots: list[str]) -> str:
+    """How a worker runs its own loop, like a small Rem, inside its assigned projects."""
+    where = (
+        "Your assigned projects: " + ", ".join(Path(r).name for r in roots) + ". Work, create "
+        "and change tickets only there."
+        if roots
+        else "You have no assigned projects yet, so you only work on tickets you're given."
+    )
+    return (
+        "You work like a small Rem for this organization. " + where + " Look after the "
+        "tickets assigned to you: blocked ones first (get them going or say exactly what "
+        "they need), then To do, then propose new Backlog tickets that fit the current focus. "
+        "Tickets that need approval wait for it. If another worker in this organization is "
+        "the better fit for one of your tickets, reassign it with task_update "
+        "changes.assignee and a comment parameter saying why; never leave it unexplained. "
+        "You can't create, change, start or pause organizations, swarms, workers, schedules "
+        "or limits.\n"
+    )
+
+
+def session_tool(scope: dict[str, Any]) -> dict[str, Any]:
+    """The organization tool a session offers: workers only see what they may do."""
+    tool = copy.deepcopy(TOOL)
+    offered = set(tool["inputSchema"]["properties"]["action"]["enum"])
+    if scope.get("employee_id"):
+        # The call still refuses anything else.
+        offered &= EMPLOYEE_ACTIONS
+        tool["description"] = (
+            "Work on your organization's tickets: read assignments, create, update, "
+            "comment, review, reassign within the organization, save knowledge and "
+            "evidence. Organizations, swarms, workers, schedules and limits are the "
+            "user's. Call action=help for parameters."
+        )
+    if scope.get("read_only"):
+        tool["annotations"] = {"readOnlyHint": True}
+        offered &= READ_ACTIONS
+    tool["inputSchema"]["properties"]["action"]["enum"] = sorted(offered)
+    return tool
+
+
 class OrganizationManager:
     def __init__(
         self,
@@ -583,6 +963,8 @@ class OrganizationManager:
         self._wake = threading.Event()
         self._active: dict[str, tuple[str, threading.Event, threading.Thread]] = {}
         self._active_roots: dict[str, str] = {}
+        # Which ticket each live run belongs to, even after its claim is cleared.
+        self._active_tasks: dict[str, str] = {}
         self._cancel_reasons: dict[str, str] = {}
         self._dispatch_cursor = 0
         self._secret_values: dict[str, list[str]] = {}
@@ -662,6 +1044,14 @@ class OrganizationManager:
         if self._http:
             self._http.close()
 
+    def stop_revoked(self, oid: str, result: dict[str, Any]) -> None:
+        """Stop runs whose claim a saved change revoked."""
+        valid_claims = {t["claim"] for t in result["runtime"]["tasks"] if t["claim"]}
+        with self._lock:
+            for claim_id, (active_oid, cancel, _) in self._active.items():
+                if active_oid == oid and claim_id not in valid_claims:
+                    cancel.set()
+
     def cancel(self, oid: str, reason: str = "cancelled") -> None:
         with self._lock:
             for turn_id, (organization, cancel, _) in self._active.items():
@@ -674,7 +1064,12 @@ class OrganizationManager:
     ) -> str:
         """Why an action from Rem needs the user's approval, or "" when it does not."""
         if action == "control":
-            return "Start the organization" if params.get("state") == "running" else ""
+            if params.get("state") != "running":
+                return ""
+            # Settings that came with the company, for example from Rem creating or
+            # importing it, are named here, since nothing else asked about them.
+            risky = starting_risks(org["config"])
+            return "Start the organization" + (f" ({risky})" if risky else "")
         if action == "resume_all":
             return "Lift every employee hold"
         if action == "archive":
@@ -697,7 +1092,11 @@ class OrganizationManager:
                 return ""
             if not previous.get("enabled", False):
                 return f"Schedule recurring work: {name}"
-            return f"Run the routine {name} more often" if more_often(previous, routine) else ""
+            if more_often(previous, routine):
+                return f"Run the routine {name} more often"
+            if (routine.get("task") or {}) != (previous.get("task") or {}):
+                return f"Change the work the routine {name} creates"
+            return ""
         task = next((t for t in org["runtime"]["tasks"] if t["id"] == params.get("taskId")), None)
         title = f"\u201c{task['title']}\u201d" if task else "a task"
         if action == "task_create":
@@ -895,6 +1294,49 @@ class OrganizationManager:
             return [self._clean(item) for item in value]
         return value
 
+    def alerts_after(self, after: int | None) -> dict[str, Any]:
+        """What organizations did after event position ``after``, for a phone's alerts.
+
+        The user's own moves and routine check-ins don't count, and neither does anything
+        already settled by the time the phone reads it. One task counts once per read.
+        """
+        read = self.store.alert_events(after)
+        found: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in read["rows"]:
+            org = read["organizations"].get(row["organization"])
+            if org is None or row["actor"] == "user":
+                continue
+            name = str(org["config"].get("name") or "")
+            at = str(row["at"])
+            payload = row["payload"]
+            if row["kind"] == "consent_requested":
+                request = str(payload.get("requestId") or "")
+                requests = org["runtime"].get("consentRequests") or {}
+                if (requests.get(request) or {}).get("status") == "pending":
+                    found[(row["organization"], request)] = {
+                        "id": f"organization-consent-{hashed(request)}",
+                        "reason": "needs_you",
+                        "title": "",
+                        "organization": name,
+                        "at": at,
+                    }
+                continue
+            tasks = {t["id"]: t for t in org["runtime"]["tasks"]}
+            for change in payload.get("taskChanges") or []:
+                task = tasks.get(change.get("taskId"))
+                if task is None or is_heartbeat(task) or task["status"] != change.get("to"):
+                    continue
+                reason = task_alert(task["status"], task)
+                if reason:
+                    found[(row["organization"], task["id"])] = {
+                        "id": f"organization-{row['sequence']}-{hashed(task['id'])}",
+                        "reason": reason,
+                        "title": str(task.get("title") or ""),
+                        "organization": name,
+                        "at": at,
+                    }
+        return {"last": read["last"], "more": read["more"], "alerts": list(found.values())}
+
     def call(
         self,
         project: str,
@@ -936,10 +1378,13 @@ class OrganizationManager:
             "approve": {"taskId", "expectedRevision"},
             "comment": {"taskId", "body"},
             "wake": {"employeeId", "message"},
+            "self_work_projects": {"employeeId", "projects", "expectedRevision"},
         }
         # Check privilege before inspecting configuration payloads from employees.
         if employee_id and action in CONFIG_ACTIONS:
             raise ValueError("Employees cannot configure organizations; ask Rem or the user")
+        if employee_id and action not in EMPLOYEE_ACTIONS:
+            raise ValueError(WORKER_REFUSAL)
         if missing := required.get(action, set()) - params.keys():
             raise ValueError("Missing parameters: " + ", ".join(sorted(missing)))
         if read_only and action not in READ_ACTIONS:
@@ -962,8 +1407,15 @@ class OrganizationManager:
             ):
                 raise OrganizationConflict("This employee turn has been revoked")
         if action == "help":
+            guide = management_help()
+            if employee_id:
+                guide["actions"] = {
+                    name: value
+                    for name, value in guide["actions"].items()
+                    if name in EMPLOYEE_ACTIONS
+                }
             return {
-                **management_help(),
+                **guide,
                 "instructions": HELP,
                 "employee": employee_id,
                 "readOnly": read_only,
@@ -1082,6 +1534,10 @@ class OrganizationManager:
         if not isinstance(oid, str):
             raise ValueError("organizationId is required")
         org = self.store.get(project, oid)
+        if action == "self_work_projects":
+            if actor != "user":
+                raise ValueError("Only the user can assign workers to projects")
+            return self._assign_self_work(project, org, params)
         if action == "request_decide":
             if actor != "user":
                 raise ValueError("Only the user can approve or decline Rem's requests")
@@ -1289,11 +1745,8 @@ class OrganizationManager:
                         actor,
                         params.get("reason", ""),
                     )
+                self.stop_revoked(oid, result)
                 self.ensure_repository(result)
-                valid_claims = {t["claim"] for t in result["runtime"]["tasks"] if t["claim"]}
-                for claim_id, (active_oid, cancel, _) in self._active.items():
-                    if active_oid == oid and claim_id not in valid_claims:
-                        cancel.set()
                 return self.public(result)
         if action == "control":
             state = params.get("state")
@@ -1388,54 +1841,53 @@ class OrganizationManager:
                 result_task.update(saved["result"])
                 return {}
             tasks = current["runtime"]["tasks"]
+            # A check-in, or work it created, is self-work and stays in assigned projects.
+            self_run = next(
+                (
+                    t
+                    for t in tasks
+                    if employee_id and run_id and t["claim"] == run_id and self_directed(t)
+                ),
+                None,
+            )
+            # A worker the user gave projects to stays inside them in every run, like a
+            # check-in does; workers saved before that keep their old reach.
+            scoped = bool(employee_id and (self_run or has_assignment(current, employee_id)))
             if action == "task_create":
-                allowed = {
-                    k: v
-                    for k, v in params.items()
-                    if k
-                    not in {
-                        "id",
-                        "revision",
-                        "comments",
-                        "turns",
-                        "claim",
-                        "approvedRevision",
-                        "acceptedRevision",
-                        "planRevision",
-                        "cancellation",
-                        "reviewRequestedAt",
-                        "acceptedAt",
-                        "idempotencyKey",
-                        "workflowAuthorization",
-                    }
-                }
-                task = Task.model_validate(allowed).model_dump()
+                task = Task.model_validate(creatable_fields(params)).model_dump()
+                if self_run and employee_id:
+                    task["selfWork"] = True
+                    if not task.get("workspacePath") and not task.get("project"):
+                        task["workspacePath"] = task_root(current["config"], self_run)
                 check_recurring(None, task, employee_id)
                 if employee_id:
                     task["parentRunId"] = run_id
                     if task["status"] not in {"backlog", "todo"}:
                         raise ValueError("Employees must create pending work")
-                    parent = next(
-                        (
-                            t
-                            for t in tasks
-                            if t["id"] == task.get("parentId") or (run_id and t["claim"] == run_id)
-                        ),
-                        None,
-                    )
-                    if parent:
-                        if run_id and not task.get("parentId"):
-                            task["parentId"] = parent["id"]
-                        task["approvalRequired"] = (
-                            task["approvalRequired"] or parent["approvalRequired"]
-                        )
-                        task["reviewRequired"] = task["reviewRequired"] or parent.get(
-                            "reviewRequired", False
-                        )
-                    self._limit_delegation(current, task, run_id)
+                    # Work created during a run inherits the rules of the run's own ticket,
+                    # whatever parent the worker names, so naming an older ticket can't
+                    # shed approval or review, or reset the delegation depth.
+                    origin = next((t for t in tasks if run_id and t["claim"] == run_id), None)
+                    named = next((t for t in tasks if t["id"] == task.get("parentId")), None)
+                    if origin and not task.get("parentId"):
+                        task["parentId"] = origin["id"]
+                    for parent in (origin, named):
+                        if parent:
+                            task["approvalRequired"] = (
+                                task["approvalRequired"] or parent["approvalRequired"]
+                            )
+                            task["reviewRequired"] = task["reviewRequired"] or parent.get(
+                                "reviewRequired", False
+                            )
+                    self._limit_delegation(current, task, run_id, origin["id"] if origin else None)
                 self._validate_workspace(current, task, employee_id)
                 validate_execution(current, task)
                 self.store.validate_task(task, current["config"], tasks)
+                if scoped and employee_id:
+                    # After validation, which can give the ticket its epic's project.
+                    self._within_assigned(current, employee_id, task)
+                if employee_id:
+                    self._handover_checked(current, {}, task, scoped)
                 if employee_id:
                     self._ticket_access(current, employee_id, task.get("project"), "create")
                 tasks.append(task)
@@ -1445,6 +1897,19 @@ class OrganizationManager:
                 if found is None:
                     raise ValueError("Task not found")
                 task = found
+                before = dict(task)
+                if (
+                    scoped
+                    and employee_id
+                    and task is not self_run
+                    # A worker may always talk about its own tickets.
+                    and (
+                        action != "comment"
+                        or params.get("unblock")
+                        or task["assignee"] != employee_id
+                    )
+                ):
+                    self._within_assigned(current, employee_id, task)
                 if action == "comment":
                     body = params.get("body")
                     if not isinstance(body, str) or not body.strip() or len(body) > 100_000:
@@ -1463,6 +1928,8 @@ class OrganizationManager:
                         if task["status"] != "blocked" or task["claim"]:
                             raise ValueError("Only stopped blocked work can be unblocked")
                         task.update(status="todo", blockReason="")
+                        if self_run:
+                            task["selfWork"] = True
                     task["revision"] += 1
                 else:
                     if task["revision"] != params.get("expectedRevision", -1):
@@ -1504,13 +1971,21 @@ class OrganizationManager:
                         elif not task["evidence"].strip():
                             # The accepted claims and their checked states become the record.
                             task["evidence"] = acceptance_evidence(current, task, params["body"])
+                        if self_run and decision == "revise":
+                            # Sending work back starts it again, so it's this check-in's doing.
+                            task["selfWork"] = True
                         task.update(
                             acceptedRevision=task["revision"] if decision == "accept" else None,
                             status={"accept": "done", "revise": "todo", "reject": "blocked"}[
                                 decision
                             ],
                         )
-                        self.store.validate_task(task, current["config"], tasks)
+                        if decision == "reject":
+                            task["blockReason"] = (
+                                f"Rejected in review by {actor_label(current, actor)}; "
+                                "the user or Rem can reopen it"
+                            )
+                        self.store.validate_task(task, current["config"], tasks, before)
                     elif action == "reopen":
                         if task["claim"] or task["status"] not in {"done", "cancelled", "blocked"}:
                             raise ValueError("Only stopped work can be reopened")
@@ -1524,8 +1999,16 @@ class OrganizationManager:
                                 "Only the user or Rem can reopen work that was cancelled or "
                                 "blocked for review"
                             )
+                        target = params.get("status", "todo")
+                        if target not in {"todo", "backlog"}:
+                            raise ValueError("Reopen into To do or Backlog")
                         task.update(
-                            status="todo", cancellation=None, blockReason="", acceptedRevision=None
+                            status=target,
+                            cancellation=None,
+                            blockReason="",
+                            acceptedRevision=None,
+                            pulledAt=None,
+                            selfWork=bool(employee_id and (self_run or task.get("selfWork"))),
                         )
                         # Only the user's reopen grants a fresh run allowance.
                         if actor == "user" and task["turns"] >= current["config"]["maxTaskTurns"]:
@@ -1534,13 +2017,23 @@ class OrganizationManager:
                         changes = params.get("changes", {})
                         if not isinstance(changes, dict) or set(changes) - TASK_EDIT_FIELDS:
                             raise ValueError("Unsupported task fields")
+                        # Moving a ticket someone pulled back to To do or Backlog takes it out of
+                        # the front of the queue, even though its status doesn't change.
+                        unpull = bool(
+                            task.get("pulledAt")
+                            and not task["claim"]
+                            and changes.get("status") in {"todo", "backlog"}
+                        )
                         changes = {
                             key: value for key, value in changes.items() if task.get(key) != value
                         }
                         if (
                             employee_id
                             and task["status"] == "blocked"
-                            and changes.get("status") not in {None, "blocked", "cancelled"}
+                            and (
+                                changes.get("status") not in {None, "blocked", "cancelled"}
+                                or "blockReason" in changes
+                            )
                             and not employee_may_unblock(task)
                         ):
                             raise ValueError(
@@ -1558,6 +2051,9 @@ class OrganizationManager:
                             "reviewer",
                         }:
                             raise ValueError("Employees cannot change approval or review policy")
+                        if employee_id and "artifacts" in changes:
+                            # artifact_add checks the file; a direct edit would skip that.
+                            raise ValueError("Record files with artifact_add")
                         if (
                             task["status"] == "cancelled"
                             and changes.get("status", "cancelled") != "cancelled"
@@ -1569,17 +2065,33 @@ class OrganizationManager:
                         if pulled:
                             changes = {**changes, "status": "todo"}
                         candidate = Task.model_validate({**task, **changes}).model_dump()
+                        waits_for_start = False
                         if pulled:
                             candidate["pulledAt"] = now()
                             if candidate.get("dueAt") and datetime.fromisoformat(
                                 candidate["dueAt"]
                             ) > datetime.now(UTC):
-                                candidate["dueAt"] = None
-                        if set(changes) - {"status", "evidence", "artifacts", "blockReason"}:
+                                # Only the user or Rem can skip a start date someone set;
+                                # a worker's pull still waits for it.
+                                if employee_id and "dueAt" not in changes:
+                                    waits_for_start = True
+                                else:
+                                    candidate["dueAt"] = None
+                        context = {"knowledge"} if actor == "user" else set()
+                        if (
+                            set(changes)
+                            - {"status", "evidence", "artifacts", "blockReason"}
+                            - context
+                        ):
                             candidate["approvedRevision"] = None
                             candidate["workflowAuthorization"] = None
                             candidate["planRevision"] += 1
-                        if set(changes) - {"status", "blockReason"}:
+                        if set(changes) - {"status", "blockReason"} or changes.get(
+                            "status"
+                        ) not in {
+                            None,
+                            "done",
+                        }:
                             candidate["acceptedRevision"] = None
                         if changes.get("status") == "in_review":
                             candidate["reviewRequestedAt"] = now()
@@ -1601,7 +2113,24 @@ class OrganizationManager:
                             candidate.update(claim=None, cancellation="requested")
                         self._validate_workspace(current, candidate, employee_id)
                         validate_execution(current, candidate)
-                        self.store.validate_task(candidate, current["config"], tasks)
+                        self.store.validate_task(candidate, current["config"], tasks, before)
+                        if scoped and employee_id:
+                            # Where the ticket would run after this change, not just before.
+                            self._within_assigned(current, employee_id, candidate)
+                        if employee_id:
+                            self._handover_checked(current, before, candidate, scoped)
+                            reassigned = self._reassignment_note(
+                                current, employee_id, before, candidate, params
+                            )
+                            if reassigned:
+                                candidate["comments"].append(reassigned)
+                        if self_run and employee_id:
+                            # Taking it, or starting it up, makes it this check-in's own work.
+                            # Requested work that is only updated stays requested.
+                            if (not before.get("assignee") and candidate.get("assignee")) or (
+                                before["status"] != "todo" and candidate["status"] == "todo"
+                            ):
+                                candidate["selfWork"] = True
                         if employee_id:
                             needed = set()
                             if "status" in changes:
@@ -1613,6 +2142,11 @@ class OrganizationManager:
                                 for permission in sorted(needed):
                                     self._ticket_access(current, employee_id, where, permission)
                         task.update(candidate)
+                        if not employee_id and {"status", "assignee"} & set(changes):
+                            # Someone took it over, so it's no longer the worker's own idea.
+                            task["selfWork"] = False
+                        if unpull and not pulled:
+                            task["pulledAt"] = None
                         if pulled:
                             who = (
                                 "You"
@@ -1626,7 +2160,8 @@ class OrganizationManager:
                                     "actor": "system",
                                     "at": now(),
                                     "body": f"{who} moved this to In progress. It starts as soon "
-                                    "as its worker is free and working hours allow.",
+                                    "as its worker is free and working hours allow"
+                                    + (", on or after its start date." if waits_for_start else "."),
                                 }
                             )
                     task["revision"] += 1
@@ -1749,6 +2284,129 @@ class OrganizationManager:
         )
 
     @staticmethod
+    def _within_assigned(org: dict[str, Any], employee_id: str, task: dict[str, Any]) -> None:
+        """Refuse what a self-directed run does outside its worker's assigned projects."""
+        root = task_root(org["config"], task)
+        if not within_self_work(org, employee_id, root):
+            name = Path(root).name or "this project"
+            raise ValueError(f"You aren't assigned to {name} for self-work; leave it alone")
+
+    @staticmethod
+    def _handover_allowed(
+        org: dict[str, Any], before: dict[str, Any], candidate: dict[str, Any]
+    ) -> None:
+        """Refuse a check-in giving a worker a ticket in a project that worker doesn't have."""
+        assignee = candidate.get("assignee")
+        root = task_root(org["config"], candidate)
+        unchanged = assignee == before.get("assignee") and root == task_root(org["config"], before)
+        if unchanged or not assignee or within_self_work(org, assignee, root):
+            return
+        name = next(
+            (e["name"] for e in org["config"]["employees"] if e["id"] == assignee), assignee
+        )
+        raise ValueError(
+            f"{name} isn't assigned to {Path(root).name or 'this project'} for self-work, "
+            "so you can't give them this ticket there"
+        )
+
+    @classmethod
+    def _handover_checked(
+        cls,
+        org: dict[str, Any],
+        before: dict[str, Any],
+        candidate: dict[str, Any],
+        scoped: bool,
+    ) -> None:
+        """A worker gives a ticket only to a coworker who works in the ticket's project.
+
+        Bounded workers and check-ins always check; any worker checks when the coworker
+        has assigned projects, since that coworker could never run the ticket otherwise.
+        """
+        assignee = candidate.get("assignee")
+        if assignee and (scoped or has_assignment(org, assignee)):
+            cls._handover_allowed(org, before, candidate)
+
+    @staticmethod
+    def _reassignment_note(
+        org: dict[str, Any],
+        employee_id: str,
+        before: dict[str, Any],
+        candidate: dict[str, Any],
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """The comment a worker must give when it hands a ticket to someone else."""
+        old, new = before.get("assignee"), candidate.get("assignee")
+        if old == new or (not old and new == employee_id):
+            return None
+        if candidate.get("claim"):
+            raise OrganizationConflict("Wait for the run to finish before reassigning it")
+        why = params.get("comment")
+        if not isinstance(why, str) or len(why.strip()) < 10 or len(why) > 4000:
+            raise ValueError(
+                "Say why you're reassigning it: add a comment parameter of 10 to 4000 characters"
+            )
+        names = {e["id"]: e["name"] for e in org["config"]["employees"]}
+        target = names.get(new, new) if new else "nobody"
+        return {
+            "actor": f"employee:{employee_id}",
+            "at": now(),
+            "kind": "reassigned",
+            "from": old,
+            "to": new,
+            "body": f"Reassigned to {target}: {why.strip()}",
+        }
+
+    def _assign_self_work(
+        self, project: str, org: dict[str, Any], params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Set which projects a worker may use on its own; only ever the user's choice."""
+        eid = params["employeeId"]
+        roots = params["projects"]
+        if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
+            raise ValueError("Choose projects by their folders")
+        if len(roots) > 100 or len(set(roots)) != len(roots):
+            raise ValueError("Choose each project once, at most 100")
+        revoked: list[str] = []
+
+        def update(current: dict[str, Any]) -> dict[str, Any]:
+            employee = next((e for e in current["config"]["employees"] if e["id"] == eid), None)
+            if employee is None:
+                raise ValueError("Unknown employee")
+            runtime = current["runtime"]
+            saved = self_work_assignment(runtime, eid)
+            if params["expectedRevision"] != saved["revision"]:
+                raise OrganizationConflict("These assignments changed. Check them and try again.")
+            if (
+                set(roots)
+                - set(saved["projects"])
+                - set(assignable_roots(current["config"], employee))
+            ):
+                raise ValueError(
+                    f"{employee['name']} can only be given this organization's projects "
+                    "within its workspace access"
+                )
+            runtime.setdefault("selfWorkProjects", {})[eid] = {
+                "projects": roots,
+                "revision": saved["revision"] + 1,
+            }
+            revoked.extend(
+                t["claim"]
+                for t in runtime["tasks"]
+                if t["claim"]
+                and t["assignee"] == eid
+                and self_directed(t)
+                and not within_self_work(current, eid, task_root(current["config"], t))
+            )
+            return {"employeeId": eid, "projects": roots}
+
+        with self._lock:
+            result = self.store.mutate(project, org["id"], "user", "self_work_projects", update)
+            for claim_id in revoked:
+                if claim_id in self._active:
+                    self._active[claim_id][1].set()
+        return self_work_assignment(result["runtime"], eid)
+
+    @staticmethod
     def _record_occurrence(org: dict[str, Any], task: dict[str, Any]) -> None:
         key = task["claim"] or f"{task['id']}:{task['revision']}"
         org["runtime"].setdefault("occurrences", {})[key] = {
@@ -1776,7 +2434,9 @@ class OrganizationManager:
                     raise ValueError("Task workspace is outside employee grants")
 
     @staticmethod
-    def _limit_delegation(org: dict[str, Any], task: dict[str, Any], run_id: str | None) -> None:
+    def _limit_delegation(
+        org: dict[str, Any], task: dict[str, Any], run_id: str | None, origin: str | None = None
+    ) -> None:
         """Bound how much work one employee run can create, and how deep delegation goes."""
         config, tasks = org["config"], org["runtime"]["tasks"]
         limit = config.get("maxChildTasksPerTurn", 5)
@@ -1786,10 +2446,15 @@ class OrganizationManager:
                 "Record the remaining ideas in a comment for the owner to schedule."
             )
         parents = {t["id"]: t.get("parentId") for t in tasks}
-        depth, parent = 0, task.get("parentId")
-        while parent and depth <= 100:
-            depth += 1
-            parent = parents.get(parent)
+
+        def depth_of(parent: str | None) -> int:
+            depth = 0
+            while parent and depth <= 100:
+                depth += 1
+                parent = parents.get(parent)
+            return depth
+
+        depth = max(depth_of(task.get("parentId")), depth_of(origin))
         if depth > config.get("maxDelegationDepth", 3):
             raise ValueError(
                 "Delegation is nested too deeply for this organization. Finish or report "
@@ -1828,10 +2493,7 @@ class OrganizationManager:
             if self._http is None:
                 self._http = SwarmToolServer(max_request_bytes=24 * 1024 * 1024)
             http = self._http
-            tool = copy.deepcopy(TOOL)
-            if scope.get("read_only"):
-                tool["annotations"] = {"readOnlyHint": True}
-                tool["inputSchema"]["properties"]["action"]["enum"] = sorted(READ_ACTIONS)
+            tool = session_tool(scope)
             url = http.register(
                 lambda name, args: self.call(project, actor, args, **scope),
                 [tool],
@@ -1979,6 +2641,8 @@ class OrganizationManager:
         """Merge accepted tickets' shared changes; keep others' on their branch."""
         with self._lock:
             in_use = set(self._active_roots.values())
+            # A cancelled run can still be writing in its shared checkout until it stops.
+            running = set(self._active_tasks.values())
         for task in org["runtime"]["tasks"]:
             worktree = task.get("sharedWorktree")
             if (
@@ -1986,19 +2650,36 @@ class OrganizationManager:
                 or task["claim"]
                 or task["status"] not in {"done", "cancelled"}
                 or f"task:{task['id']}" in in_use
+                or task["id"] in running
             ):
                 continue
             accepted = task["status"] == "done" and task.get("acceptedRevision") is not None
+            failed = False
             try:
                 note = repository.finish(worktree, org["id"], task["title"], accepted)
             except repository.RepositoryError as exc:
-                note = f"Raticode couldn't finish the shared repository changes: {exc}"
+                failed = True
+                note = (
+                    f"Raticode couldn't finish the shared repository changes: {exc}. "
+                    "It keeps the checkout and tries again."
+                )
 
             def clear(
-                current: dict[str, Any], task: dict[str, Any] = task, note: str = note
+                current: dict[str, Any],
+                task: dict[str, Any] = task,
+                note: str = note,
+                failed: bool = failed,
             ) -> Any:
                 found = next(t for t in current["runtime"]["tasks"] if t["id"] == task["id"])
                 if found.get("sharedWorktree") != task["sharedWorktree"] or found["claim"]:
+                    return {}
+                if failed:
+                    # Keep the record so the work isn't lost; say so once, not every retry.
+                    said = [c for c in found["comments"] if c.get("kind") != "status"]
+                    if not said or said[-1]["body"] != note:
+                        found["comments"].append({"actor": "system", "at": now(), "body": note})
+                        found["revision"] += 1
+                        return {"taskId": task["id"], "shared": True, "error": note}
                     return {}
                 found["sharedWorktree"] = None
                 if note:
@@ -2168,20 +2849,29 @@ class OrganizationManager:
                             attempt.update(status="interrupted", finishedAt=now())
                         self._active.pop(claim_id, None)
                         self._active_roots.pop(claim_id, None)
+                if runtime["state"] != "running":
+                    return {}
+                schedule_routines(org, datetime.now(UTC))
+                if not is_open(config.get("operatingHours"), datetime.now(UTC)):
+                    return {}
+                # Running and open: work a pause or closing time cut off is ready again.
+                resume_waiting(org)
                 if (
-                    runtime["state"] != "running"
-                    or not is_open(config.get("operatingHours"), datetime.now(UTC))
-                    or sum(active_oid == oid for active_oid, _, _ in self._active.values())
+                    sum(active_oid == oid for active_oid, _, _ in self._active.values())
                     >= config["maxConcurrency"]
                 ):
                     return {}
-                schedule_routines(org, datetime.now(UTC))
                 self._unblock(org)
                 month = datetime.now(UTC).strftime("%Y-%m")
                 usage = runtime.setdefault("usage", {}).setdefault(month, {})
                 exhausted = self._exhausted
 
                 if exhausted(config, usage.get("company", {})):
+                    # Runs already under way were within the limit when they started, and
+                    # pausing would revoke their tools mid-run. Start nothing new, and pause
+                    # once they finish.
+                    if any(active_oid == oid for active_oid, _, _ in self._active.values()):
+                        return {}
                     runtime["state"] = "paused"
                     runtime["pauseReason"] = (
                         "Monthly limit reached, or the provider doesn't report the cost or "
@@ -2194,32 +2884,48 @@ class OrganizationManager:
                     for eid, e in employees.items()
                     if not exhausted(e, usage.get(f"employee:{eid}", {}))
                 }
+                # Every worker with assigned projects works like a small Rem: blocked
+                # tickets it hasn't looked at come first, then To do, and when it has
+                # nothing to do it checks in to plan and propose more.
                 for eid, employee in employees.items():
-                    interval = employee["heartbeatSeconds"]
+                    assigned = bool(self_work_roots(org, eid))
+                    review = blocked_for_review(org, eid) if assigned else []
+                    if review and heartbeat_due(org, eid, review) != "busy":
+                        continue
+                    if not (assigned or employee["heartbeatSeconds"]):
+                        continue
                     last = runtime["heartbeats"].get(eid)
-                    if interval and (not last or datetime.fromisoformat(last) <= datetime.now(UTC)):
+                    if not last or datetime.fromisoformat(last) <= datetime.now(UTC):
                         heartbeat_due(org, eid)
                         runtime["heartbeats"][eid] = (
-                            datetime.now(UTC) + timedelta(seconds=interval)
+                            datetime.now(UTC)
+                            + timedelta(seconds=checkin_seconds(runtime, employee))
                         ).isoformat()
+                # The work schedule's current block favors the tickets that fit it.
+                block = schedule_active_at(
+                    (config.get("workSchedule") or {}).get("blocks") or [],
+                    ZoneInfo((config.get("operatingHours") or {}).get("timezone") or "UTC"),
+                    datetime.now(UTC),
+                )
+                focus = block[0] if block else None
+
                 # Priority first. Waiting work gains up to one priority level per day, so
-                # it isn't starved, but an old low-priority ticket never jumps a critical one.
-                # Tickets someone moved to In progress go first, in the order they were moved.
-                for task in sorted(
-                    runtime["tasks"],
-                    key=lambda t: (
+                # it isn't starved, and work that fits the current block gains one more,
+                # but neither lets a ticket jump one two levels above it. Tickets someone
+                # moved to In progress go first, in the order they were moved.
+                def rank(t: dict[str, Any]) -> tuple[int, str, float]:
+                    level = {"critical": 0, "high": 1, "medium": 2, "low": 3}[t["priority"]]
+                    waited = (
+                        datetime.now(UTC) - datetime.fromisoformat(t["createdAt"])
+                    ).total_seconds() / 86400
+                    fits = fits_block(focus, ticket_text(config, t))
+                    return (
                         0 if t.get("pulledAt") else 1,
                         t.get("pulledAt") or "",
-                        {"critical": 0, "high": 1, "medium": 2, "low": 3}[t["priority"]]
-                        - min(
-                            1.0,
-                            (
-                                datetime.now(UTC) - datetime.fromisoformat(t["createdAt"])
-                            ).total_seconds()
-                            / 86400,
-                        ),
-                    ),
-                ):
+                        level - min(1.0, waited) - (1.0 if fits else 0.0),
+                    )
+
+                for task in sorted(runtime["tasks"], key=rank):
                     if (
                         task["status"] != "todo"
                         or task["claim"]
@@ -2250,6 +2956,32 @@ class OrganizationManager:
                         or task_project.get("workspacePath")
                         or (roots[0] if roots else "")
                     )
+                    if not self_directed(task) and has_assignment(org, task["assignee"]):
+                        # A worker the user gave projects to works only inside them.
+                        if not within_self_work(org, task["assignee"], working_root):
+                            self._block(
+                                task,
+                                f"{employees[task['assignee']]['name']} isn't assigned to "
+                                f"{Path(working_root).name or 'this project'}. Assign them to "
+                                "it, or give the ticket to someone who is.",
+                            )
+                            continue
+                    if self_directed(task):
+                        # Self-directed work stays inside its assignee's assigned projects.
+                        allowed = self_work_roots(org, task["assignee"])
+                        if not within_self_work(org, task["assignee"], working_root):
+                            if not task.get("heartbeat"):
+                                self._block(
+                                    task,
+                                    "This worker isn't assigned to this project on the "
+                                    "Kanban board",
+                                )
+                                continue
+                            if not allowed:
+                                drop_checkin(task)
+                                continue
+                            working_root = allowed[0]
+                            task.update(workspacePath=working_root)
                     if not working_root or not self.store.owns_project(oid, working_root):
                         self._block(task, "Assign an owned Raticode project before retrying")
                         continue
@@ -2302,6 +3034,7 @@ class OrganizationManager:
                         turns=task["turns"] + reserved,
                         revision=task["revision"] + 1,
                         pulledAt=None,
+                        acceptedRevision=None,
                     )
                     for account_id in (
                         "company",
@@ -2332,7 +3065,14 @@ class OrganizationManager:
                         "permissionMode": employees[task["assignee"]]["permissionMode"],
                         "isolation": "worktree" if isolated else "folder",
                         "blockGitPush": config.get("blockGitPush", True),
+                        # The focus block it started under; it finishes under it too.
+                        "scheduleBlock": {"id": focus["id"], "label": focus["label"]}
+                        if focus
+                        else None,
                     }
+                    if not task.get("heartbeat"):
+                        # Real work came up, so check-ins go back to their usual pace.
+                        runtime.setdefault("quietCheckins", {}).pop(task["assignee"], None)
                     chosen.update(
                         budget=min(
                             (
@@ -2389,13 +3129,28 @@ class OrganizationManager:
                     )
                     for t in runtime["tasks"]
                 )
+                # Work a pause or closing time cut off goes back to To do.
                 or any(
-                    e["heartbeatSeconds"]
+                    t["status"] == "blocked"
+                    and not t["claim"]
+                    and t.get("blockReason") in WAITING_REASONS
+                    for t in runtime["tasks"]
+                )
+                or any(
+                    (e["heartbeatSeconds"] or self_work_roots(org, e["id"]))
                     and not e["paused"]
                     and (
                         not runtime["heartbeats"].get(e["id"])
                         or datetime.fromisoformat(runtime["heartbeats"][e["id"]]) <= instant
                     )
+                    for e in org["config"]["employees"]
+                )
+                # A worker that is free and has blocked tickets to look at.
+                or any(
+                    not e["paused"]
+                    and not any(t["claim"] and t["assignee"] == e["id"] for t in runtime["tasks"])
+                    and self_work_roots(org, e["id"])
+                    and blocked_for_review(org, e["id"])
                     for e in org["config"]["employees"]
                 )
                 or any(
@@ -2419,6 +3174,7 @@ class OrganizationManager:
             )
             self._active[turn_id] = (oid, cancel, thread)
             self._active_roots[turn_id] = chosen["root_key"]
+            self._active_tasks[turn_id] = chosen["task"]["id"]
             try:
                 thread.start()
                 self._wake.set()
@@ -2431,6 +3187,7 @@ class OrganizationManager:
         project, oid, turn_id = org["projectRoot"], org["id"], task["claim"]
         error: str | None = None
         final = ""
+        stream_finished = False
         working_root = chosen["working_root"]
         usage: dict[str, Any] = {}
         managed_turns: int | None = None
@@ -2456,6 +3213,13 @@ class OrganizationManager:
                 workspace_paths = [
                     root for root in workspace_paths if root in employee["workspacePaths"]
                 ]
+            assigned_roots = self_work_roots(org, employee["id"])
+            if has_assignment(org, employee["id"]):
+                # A worker with assigned projects can open threads only in those.
+                workspace_paths = [
+                    root for root in workspace_paths if within_self_work(org, employee["id"], root)
+                ]
+            schedule = schedule_state(org["config"])
 
             operation(self, org, "memory_check", {}, "system", employee["id"])
             fresh = self.store.get(project, oid)
@@ -2572,6 +3336,8 @@ class OrganizationManager:
                         f"Organization instructions: {org['config']['instructions']}\n"
                         f"Your instructions: {employee['instructions']}\n"
                         + workspace_note
+                        + mini_rem_brief(assigned_roots)
+                        + run_brief(schedule)
                         + f"Persistent memory: {employee['memory']}\n"
                         "Working memory: "
                         + org["runtime"].get("employeeMemory", {}).get(employee["id"], "")
@@ -2624,6 +3390,19 @@ class OrganizationManager:
                                     "goals": org["config"]["goals"],
                                     "task": task_context,
                                     "plan": run_context(fresh, task),
+                                    **(
+                                        {
+                                            "workSchedule": {
+                                                "timezone": schedule["timezone"],
+                                                "current": schedule["current"],
+                                                "next": schedule["next"],
+                                                "changesAt": schedule["changesAt"],
+                                                "handoff": HANDOFF,
+                                            }
+                                        }
+                                        if schedule["configured"]
+                                        else {}
+                                    ),
                                 },
                                 ensure_ascii=False,
                             ),
@@ -2758,36 +3537,48 @@ class OrganizationManager:
 
                     # Watch for cancellation even while a provider is silent.
                     consumer = asyncio.ensure_future(consume())
+                    limit = org["config"]["turnTimeoutSeconds"]
+                    timed_out = False
                     try:
-                        async with asyncio.timeout(org["config"]["turnTimeoutSeconds"]):
+                        async with asyncio.timeout(limit):
                             while not consumer.done():
                                 if cancel.is_set():
                                     consumer.cancel()
                                     break
                                 await asyncio.wait({consumer}, timeout=0.25)
+                    except TimeoutError:
+                        timed_out = True
                     finally:
                         if not consumer.done():
                             consumer.cancel()
                         try:
                             await consumer
                         except asyncio.CancelledError:
-                            if not cancel.is_set():
+                            # Stopping the provider at the time limit is expected; only an
+                            # unexplained cancellation is passed on.
+                            if not cancel.is_set() and not timed_out:
                                 raise
+                    if timed_out:
+                        raise TimeoutError(
+                            f"The run took longer than its {limit}-second limit and was stopped"
+                        )
 
             asyncio.run(execute())
+            # A stop that arrives after the provider has already finished doesn't undo the
+            # finished run.
+            stream_finished = True
         except Exception as exc:
             error = self._redact(str(exc)) or type(exc).__name__
         finally:
             final = self._redact(final)
+            cancelled = cancel.is_set() and not (stream_finished and final and not error)
             if chosen.get("isolated") and provenance.get("runRoot"):
                 provenance.update(_worktree_state(provenance["runRoot"]))
             with self._lock:
                 cancel_reason = self._cancel_reasons.pop(turn_id, "cancelled")
             # Delegated executions may have external effects, so they stay blocked for review.
             paused = (
-                cancel.is_set()
-                and cancel_reason in {"paused", "hours"}
-                and not task.get("execution")
+                cancelled and cancel_reason in {"paused", "hours"} and not task.get("execution")
             )
 
             def finish(current: dict[str, Any]) -> dict[str, Any]:
@@ -2798,7 +3589,7 @@ class OrganizationManager:
                 # Only a completed execution proves unused reservations can be returned.
                 used = (
                     managed_turns
-                    if final and not error and not cancel.is_set() and managed_turns is not None
+                    if final and not error and not cancelled and managed_turns is not None
                     else reserved
                 )
                 used = min(reserved, max(0, used))
@@ -2831,7 +3622,7 @@ class OrganizationManager:
                     if attempt.get("executionHandle") and (
                         final
                         and not error
-                        and not cancel.is_set()
+                        and not cancelled
                         or attempt["executionHandle"]["kind"] == "workflow"
                     ):
                         attempt["executionHandle"]["settled"] = True
@@ -2843,7 +3634,7 @@ class OrganizationManager:
                         status="paused"
                         if paused
                         else "cancelled"
-                        if cancel.is_set()
+                        if cancelled
                         else "failed"
                         if error or not final
                         else "completed",
@@ -2870,11 +3661,36 @@ class OrganizationManager:
                     existing["comments"].append(
                         {"actor": f"employee:{employee['id']}", "at": now(), "body": final}
                     )
-                failed = error or cancel.is_set() or not final
+                failed = error or cancelled or not final
+                # A worker that already marked its ticket Done or ready for review keeps that
+                # result when the run ends badly afterwards; the conversation says so.
+                settled = existing["status"] in {"done", "in_review"}
+                if failed and settled:
+                    existing["comments"].append(
+                        {
+                            "actor": "system",
+                            "at": now(),
+                            "body": "The run stopped after the worker set this ticket to "
+                            + ("Done" if existing["status"] == "done" else "Review")
+                            + (f": {error}" if error else ".")
+                            + " Its status was kept.",
+                        }
+                    )
                 if paused and existing["status"] == "in_progress":
-                    # Pausing is not a failure: the task waits for the next Start, and the
+                    # Pausing is not a failure: the task waits, blocked, for the next Start or
+                    # for hours to open, then goes back to To do by itself, and the
                     # interrupted run doesn't count against its run limit.
-                    existing.update(status="todo", turns=max(0, existing["turns"] - used))
+                    existing.update(
+                        status="blocked",
+                        blockReason=HOURS_REASON if cancel_reason == "hours" else PAUSED_REASON,
+                        turns=max(0, existing["turns"] - used),
+                    )
+                    if cancel_reason == "hours":
+                        # Work cut off by closing time goes first when hours open again,
+                        # in the order it originally started.
+                        existing["pulledAt"] = existing.get("pulledAt") or (
+                            attempt["startedAt"] if attempt else now()
+                        )
                     existing["comments"].append(
                         {
                             "actor": "system",
@@ -2886,14 +3702,14 @@ class OrganizationManager:
                             "The task runs again when the organization starts.",
                         }
                     )
-                elif failed:
+                elif failed and not settled:
                     existing.update(
                         status="blocked",
                         blockReason=(
                             "The last run failed; see the conversation"
                             if error
                             else "Cancelled before it finished"
-                            if cancel.is_set()
+                            if cancelled
                             else "The last run ended without a final response"
                         ),
                     )
@@ -2905,13 +3721,19 @@ class OrganizationManager:
                             or "Turn ended without a final response; review before retrying",
                         }
                     )
-                elif existing["status"] == "in_progress" and is_heartbeat(existing):
+                elif existing["status"] == "in_progress" and existing.get("heartbeat"):
                     # A check-in is not deliverable work: it closes itself, so the next
                     # heartbeat isn't held up waiting for a review nobody asked for.
                     existing.update(
                         status="done", evidence="Check-in: " + (final[:4000] or "finished")
                     )
                     current["runtime"].setdefault("heartbeatFailures", {}).pop(employee["id"], None)
+                    # A check-in that planned nothing new makes the next one wait longer.
+                    quiet = current["runtime"].setdefault("quietCheckins", {})
+                    if any(t.get("parentRunId") == turn_id for t in current["runtime"]["tasks"]):
+                        quiet.pop(employee["id"], None)
+                    else:
+                        quiet[employee["id"]] = quiet.get(employee["id"], 0) + 1
                 elif existing["status"] == "in_progress":
                     existing["status"] = "in_review"
                     existing["reviewRequestedAt"] = now()
@@ -2959,7 +3781,7 @@ class OrganizationManager:
                         model=employee["model"] if execution_kind is None else None,
                         metadata=usage,
                         status="stopped"
-                        if cancel.is_set()
+                        if cancelled
                         else "failed"
                         if error or not final
                         else "completed",
@@ -2968,6 +3790,8 @@ class OrganizationManager:
             finally:
                 with self._lock:
                     self._secret_values.pop(turn_id, None)
+                    self._cancel_reasons.pop(turn_id, None)
+                    self._active_tasks.pop(turn_id, None)
                     self._active.pop(turn_id, None)
                     self._active_roots.pop(turn_id, None)
                 self._wake.set()

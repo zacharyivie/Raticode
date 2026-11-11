@@ -1,0 +1,51 @@
+/* A board ticket in Rem's chat: a small inline card with its key, status and title, like a
+   smart link. It sits on the text's baseline and wraps with the line, not like a hyperlink. */
+.ticket-pill {
+  --tp-mark: rgb(var(--color-muted));
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(100%, 26em);
+  margin: 0 1px;
+  padding: 0 7px 0 6px;
+  border: 1px solid rgb(var(--color-line) / .9);
+  border-radius: 6px;
+  background: rgb(var(--color-surface));
+  color: rgb(var(--color-ink));
+  font: inherit;
+  font-size: .92em;
+  line-height: 1.6;
+  vertical-align: baseline;
+  text-align: left;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgb(var(--color-line) / .35);
+  transition: background-color .12s, border-color .12s;
+}
+button.ticket-pill:hover { border-color: rgb(var(--color-brand) / .7); background: rgb(var(--color-brand) / .08); }
+button.ticket-pill:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: 1px; }
+.ticket-pill-mark { flex-shrink: 0; color: var(--tp-mark); }
+.ticket-pill-key { flex-shrink: 0; font-family: ui-monospace, "JetBrains Mono", "SF Mono", Consolas, monospace; font-size: .9em; font-weight: 600; color: rgb(var(--color-muted)); }
+.ticket-pill-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.ticket-pill[data-status=in_progress], .ticket-pill[data-status=in_review] { --tp-mark: rgb(var(--color-brand)); }
+.ticket-pill[data-status=done] { --tp-mark: #047857; }
+.ticket-pill[data-status=blocked] { --tp-mark: #b45309; }
+.dark .ticket-pill[data-status=done] { --tp-mark: #6ee7b7; }
+.dark .ticket-pill[data-status=blocked] { --tp-mark: #fcd34d; }
+.ticket-pill[data-status=cancelled] .ticket-pill-title, .ticket-pill[data-status=done] .ticket-pill-title { color: rgb(var(--color-muted)); }
+/* A ticket that was deleted: still named, but dashed and not clickable. */
+.ticket-pill[data-gone] { cursor: default; border-style: dashed; background: transparent; box-shadow: none; color: rgb(var(--color-muted)); }
+.ticket-pill[data-gone] .ticket-pill-title { text-decoration: line-through; }
+
+/* The tickets a task card or task lists. */
+.ticket-pills { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.ticket-pills .ticket-pill { margin: 0; max-width: 100%; }
+.ticket-pills-more { padding: 0 6px; border-radius: 6px; font-size: 11.5px; line-height: 1.6; color: rgb(var(--color-muted)); }
+.ticket-pills-more:hover { color: rgb(var(--color-ink)); text-decoration: underline; }
+.ticket-pills-more:focus-visible { outline: 2px solid rgb(var(--color-brand)); outline-offset: 1px; }
+
+@media (forced-colors: active) {
+  .ticket-pill { border-color: ButtonText; }
+  .ticket-pill-mark { color: ButtonText; }
+}

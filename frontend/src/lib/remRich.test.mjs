@@ -148,3 +148,27 @@ test("action chips come from the task record and show only when their control wo
   assert.deepEqual(ids({ ...update, kind: undefined, body: "Run again? Retry review?" }, [interrupted]), []);
   assert.deepEqual(ids({ ...update, result: undefined }, [finished]), ["run"]);
 });
+
+test("a queued run whose work is done is at Check, not Plan", () => {
+  // A retried review, a restart's recovery check or a wait for proof requeue finished work.
+  assert.deepEqual(runSteps("queued", { step: "check" }).map(step => step.state), ["done", "done", "current", "todo"]);
+  assert.deepEqual(runSteps("queued", { step: "work" }).map(step => step.state), ["done", "current", "todo", "todo"]);
+  assert.deepEqual(runSteps("queued", { step: "plan" }).map(step => step.state), ["current", "todo", "todo", "todo"]);
+  // An older desktop sends no step; the state decides, as before.
+  assert.deepEqual(runSteps("queued").map(step => step.state), ["current", "todo", "todo", "todo"]);
+  assert.deepEqual(runSteps("blocked", { step: "check" }).map(step => step.state), ["done", "done", "stopped", "todo"]);
+  assert.deepEqual(runSteps("succeeded", { step: "plan" }).map(step => step.state), ["done", "done", "done", "done"]);
+  assert.deepEqual(runSteps("mystery", { step: "check" }), []);
+});
+
+test("a hold notice offers to retry what it waits for or start it now", () => {
+  const message = { id: "h", role: "rem", kind: "task_update", work: { task_id: "fix", run_id: "", state: "held" } };
+  const task = { id: "fix", dependency: { state: "held", prerequisites: [
+    { task_id: "audit", title: "Audit", state: "held", retryable: true },
+    { task_id: "gone", title: "Gone", state: "held", retryable: false },
+  ] } };
+  assert.deepEqual(resultActions(message, [task]).map(action => [action.id, action.label]), [["retry-after:audit", "Retry “Audit”"], ["run", "Start now"]]);
+  assert.deepEqual(resultActions(message, [task])[0].task, { id: "audit" });
+  // Once it runs, the card offers nothing while the run is going.
+  assert.deepEqual(resultActions(message, [{ ...task, dependency: undefined, active_run: { id: "r", state: "queued" } }]), []);
+});

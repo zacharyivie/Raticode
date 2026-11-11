@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import uuid4
@@ -11,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from gofer.core.provider_capabilities import ProviderId
+from gofer.ui.rem_projects import ProjectOpen
 
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 ACTIVE = {"queued", "executing", "verifying", "repairing", "cancelling"}
@@ -111,6 +113,19 @@ class Recipe(BaseModel):
     # The user asked to be sent the file this task finds or makes. Only a run started
     # by that user's chat message attaches it, so scheduled runs never send files.
     send_files: bool = Field(default=False, strict=True)
+    # Start condition: task or run IDs this one-time task waits for (rem_task_after).
+    # It starts once every one of them has succeeded.
+    after: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        default_factory=list, max_length=10
+    )
+    # With after, a reminder whose prompt goes back to Rem as the user's request when
+    # the prerequisites succeed, so Rem can plan work from what they found.
+    ask_rem: bool = Field(default=False, strict=True)
+
+    @field_validator("after", mode="before")
+    @classmethod
+    def default_after(cls, value: Any) -> Any:
+        return [] if value is None else value
 
     @field_validator("model", "effort")
     @classmethod
@@ -136,6 +151,13 @@ class Recipe(BaseModel):
             raise ValueError("Maintenance work needs a project")
         if self.execution_mode == "conversation" and self.type != "errand":
             raise ValueError("Only discussion tasks can use conversational execution")
+        self.after = list(dict.fromkeys(ref.strip() for ref in self.after))
+        if any(not ref for ref in self.after):
+            raise ValueError("Name each task to wait for by its ID")
+        if self.after and self.schedule.kind != "once":
+            raise ValueError("Only a one-time task can wait for another task")
+        if self.ask_rem and (self.type != "reminder" or not self.after):
+            raise ValueError("ask_rem needs a reminder that waits for another task")
         if any(not c.description.strip() for c in self.acceptance_criteria):
             raise ValueError("Acceptance criteria must not be blank")
         ids = [c.id for c in self.acceptance_criteria]
@@ -233,21 +255,51 @@ def worker_resources(config: dict[str, Any], *, readonly: bool, review: bool) ->
     return resources
 
 
-def worktree_skill(resources: dict[str, Any]) -> str | None:
-    """Name of an enabled skill that sets the project's own worktree process.
-
-    Such a skill decides where and on which branch changes go, so Rem must not
-    put the task in a worktree of its own.
-    """
+def _worktree_skills(resources: dict[str, Any]) -> list[tuple[str, str]]:
+    """Name and description of each enabled skill about the project's worktree process."""
     from gofer.core.rem_library import skill_folder, skill_header
 
+    found = []
     for skill in resources.get("skills") or []:
         if not isinstance(skill, dict) or skill.get("enabled") is False or not skill.get("path"):
             continue
         folder = skill_folder(str(skill["path"]))
         header = skill_header(folder)
         name = header.get("name") or folder.name
-        if "worktree" in f"{name} {header.get('description', '')}".lower():
+        description = header.get("description", "")
+        if "worktree" in f"{name} {description}".lower():
+            found.append((name, description))
+    return found
+
+
+def worktree_skill(resources: dict[str, Any]) -> str | None:
+    """Name of an enabled skill that sets the project's own worktree process.
+
+    Such a skill decides where and on which branch changes go, so Rem must not
+    put the task in a worktree of its own.
+    """
+    skills = _worktree_skills(resources)
+    return skills[0][0] if skills else None
+
+
+# A skill that says its branches end up on a local ``dev`` branch, such as
+# "rebases onto dev and fast-forwards dev". A general worktree skill (for example one
+# that only creates isolated worktrees) doesn't, so Rem's landing check stays off for it.
+_LANDS_ON_DEV = re.compile(
+    r"\b(?:fast-forward\w*|merg\w*|land\w*|rebas\w*|integrat\w*)\b[^.\n]{0,60}?\bdev\b",
+    re.IGNORECASE,
+)
+
+
+def landing_skill(resources: dict[str, Any]) -> str | None:
+    """Name of an enabled worktree skill whose description says changes land on dev.
+
+    Only such a skill turns on the check that a writer task's branch reached local
+    ``dev``; a repository that merely has a ``dev`` branch and some worktree skill
+    keeps working as before.
+    """
+    for name, description in _worktree_skills(resources):
+        if _LANDS_ON_DEV.search(description):
             return name
     return None
 
@@ -365,6 +417,47 @@ class MemoryChange(BaseModel):
         return self
 
 
+class TicketRequest(BaseModel):
+    """A change Rem makes to the global Kanban board because the user asked for it."""
+
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["create", "edit", "move", "assign"]
+    ticket_id: str | None = Field(default=None, max_length=128)
+    scope: Literal["rem", "organization"] | None = None
+    organization_id: str | None = Field(default=None, max_length=100)
+    to_organization_id: str | None = Field(default=None, max_length=100)
+    assignee_id: str | None = Field(default=None, max_length=100)
+    expected_revision: int | None = None
+    title: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=100000)
+    priority: Literal["critical", "high", "medium", "low"] | None = None
+    status: Literal["backlog", "todo"] | None = None
+    column: Literal["backlog", "todo", "in_progress", "cancelled"] | None = None
+    type: Literal["research", "maintain", "develop", "errand"] | None = None
+    project_dir: str | None = None
+    done_when: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def enough_to_act(self) -> TicketRequest:
+        if self.action == "create":
+            if not (self.title or "").strip():
+                raise ValueError("A new ticket needs a title")
+        elif not self.ticket_id or self.expected_revision is None:
+            raise ValueError("Changing a ticket needs its exact ticket_id and revision")
+        return self
+
+    def label(self) -> str:
+        return self.title or self.ticket_id or "a ticket"
+
+    def done_text(self, owner: str, key: str = "") -> str:
+        """What the reply says was done. A ticket's key shows in chat as a pill with its title."""
+        subject = key or f"“{self.label()}”"
+        if self.action == "create":
+            column = "Backlog" if self.status == "backlog" else "To do"
+            return f"Added {subject} to {owner} {column}."
+        return f"Updated {subject} on the board."
+
+
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reply: str = Field(min_length=1, max_length=4000)
@@ -384,6 +477,11 @@ class Decision(BaseModel):
     )
     # Cards for the phone that asked (rem_phone_actions); invalid ones are dropped, not fatal.
     phone_actions: list[Any] = Field(default_factory=list, max_length=10)
+    # Local folders this request needs open as projects; Raticode opens or creates them
+    # before the decision's tasks start (rem_projects).
+    open_projects: list[ProjectOpen] = Field(default_factory=list, max_length=3)
+    # Changes to the global Kanban board the user asked for (rem_kanban).
+    tickets: list[TicketRequest] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def suggested_criteria(self) -> Decision:

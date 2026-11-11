@@ -184,6 +184,21 @@ function parseGitStatus(output = "") {
   return entries;
 }
 
+// "Not a repository" and a missing folder are normal answers. Anything else (git
+// missing, "dubious ownership", a lock, a timeout) used to look the same, so say
+// why once per folder and reason. The result shape stays the same for callers.
+const reportedGitFailures = new Set();
+function noteGitFailure(what, projectRoot, error, log = console.warn) {
+  const text = String(error?.stderr || error?.message || error || "");
+  if (error?.code === "ENOENT" && !/spawn/i.test(text)) return;
+  if (/not a git repository|No such file or directory|cannot change to/i.test(text)) return;
+  const reason = text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 200) || error?.code || "unknown error";
+  const key = `${what}:${projectRoot}:${reason}`;
+  if (reportedGitFailures.has(key)) return;
+  reportedGitFailures.add(key);
+  log(`Git ${what} failed in ${projectRoot}: ${reason}`);
+}
+
 async function readGitStatus(projectRoot, options = {}) {
   const runner = options.runGit || runGit;
   try {
@@ -215,7 +230,8 @@ async function readGitStatus(projectRoot, options = {}) {
       } catch { /* Optional operation metadata. */ }
     }
     return { active: true, entries, root, branch, branches, ahead, behind, remotes, stashCount, ...(branchesUnavailable ? { branchesUnavailable } : {}), ...(operation ? { operation } : {}) };
-  } catch {
+  } catch (error) {
+    noteGitFailure("status", projectRoot, error, options.log);
     return { active: false, entries: [], root: "" };
   }
 }
@@ -437,7 +453,8 @@ async function readGitHistory(projectRoot, options = {}) {
   let root;
   try {
     root = String(await runner(["-C", projectRoot, "rev-parse", "--show-toplevel"])).trim();
-  } catch {
+  } catch (error) {
+    noteGitFailure("history", projectRoot, error, options.log);
     return { active: false, commits: [], refs: [], root: "" };
   }
   const [refOutput, head, headRef] = await Promise.all([
@@ -538,7 +555,8 @@ async function readGitWorktrees(projectRoot, options = {}) {
       root,
       worktrees: parseGitWorktrees(output).filter((worktree) => fs.existsSync(worktree.path)),
     };
-  } catch {
+  } catch (error) {
+    noteGitFailure("worktree list", projectRoot, error, options.log);
     return { active: false, root: "", worktrees: [] };
   }
 }
@@ -672,7 +690,8 @@ async function readGitFileBaseline(targetPath, options = {}) {
       }
     }
     return result;
-  } catch {
+  } catch (error) {
+    noteGitFailure("file comparison", targetPath, error, options.log);
     return { changed: false, content: "", hunks: [], tracked: false };
   }
 }

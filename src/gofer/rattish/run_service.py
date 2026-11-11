@@ -29,10 +29,12 @@ else:
 from gofer.core.approvals import ApprovalStore, NotificationAdapter
 from gofer.rattish.artifacts import (
     CompiledArtifact,
+    RattishArtifactError,
     compile_rattish_file,
     rattish_asset_root,
 )
 from gofer.rattish.contracts import canonical_json_bytes
+from gofer.rattish.diagnostics import RattishError
 from gofer.rattish.preflight import PreflightRegistry, PreflightResult, run_preflight
 from gofer.rattish.provider_runtime import default_provider_subscriptions
 from gofer.rattish.runtime import (
@@ -718,6 +720,26 @@ def run_artifact_path(source_path: Path, run_id: str, *, data_dir: Path | None =
         run_id,
         source_path=compiled.source_path,
     )
+
+
+def has_live_run(source_path: Path, *, data_dir: Path | None = None, recent: int = 8) -> bool:
+    """Whether a run of this source file is going now, started from anywhere.
+
+    Run IDs sort by start time, so only the newest few records need reading.
+    """
+    try:
+        directory = run_artifact_path(source_path, "probe", data_dir=data_dir).parent
+        records = sorted(directory.glob("*.json"), reverse=True)[:recent]
+    except (OSError, RattishArtifactError, RattishError):
+        return False
+    for record in records:
+        try:
+            document = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if isinstance(document, dict) and effective_run_status(document) == "running":
+            return True
+    return False
 
 
 def _run_path(

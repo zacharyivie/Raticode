@@ -8,6 +8,10 @@ pageClass: docs-layout
 
 A swarm is a persistent agent team working toward one project goal. Its orchestrator assigns work and reviews results while you keep control of execution.
 
+::: warning Experimental
+Swarms is off by default. Turn it on in **Settings > Developer > Feature Preview** to show **Swarms** in the sidebar.
+:::
+
 ## Create a team
 
 Open a project and choose **Swarms** in the sidebar. Create a swarm, write its charter, and define the members. A team has exactly one orchestrator; other members can specialize in implementation, testing, review, or research.
@@ -61,6 +65,6 @@ After an application restart, runs that were working stay paused, even when othe
 
 ## Manage through Rem
 
-Rem's Swarm access resource is enabled by default and applies on the next turn after a change. With access enabled, Rem can inspect and manage teams within its project scope. Inspection remains possible in read-only sessions and with shell tools disabled; mutations still follow session permissions.
+**Settings > Rem > Swarm access** is on by default and applies to the next message after a change. It is always off for Rem's unattended [self-work](../rem/board.md#self-work). With access enabled, Rem can inspect and manage teams within its project scope. Inspection remains possible in read-only sessions and with shell tools disabled; mutations still follow session permissions.
 
 Ask Rem to inspect an existing team, explain its blocked assignments, or propose a charter. Give an explicit instruction before starting execution. Rem can't answer an agent's approval request, waive verification, or repair past the repair limit; those decisions stay with you in the swarm's human inbox and dashboard. Rem can start a team with full-access agents only after you confirm them in the conversation, and its actions are recorded as Rem's. See [Resources](../rem/resources.md), [Usage](../rem/usage.md), and [Source control](../studio/source-control.md).

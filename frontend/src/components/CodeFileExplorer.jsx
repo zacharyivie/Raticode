@@ -41,10 +41,11 @@ import {
 } from "lucide-react";
 import GitIntegrationControls from "./GitIntegrationControls.jsx";
 import WorktreeContextMenu, { historyOperations, integrationOperations } from "./WorktreeContextMenu.jsx";
+import KanbanSidebar from "./KanbanSidebar.jsx";
 import OrganizationSidebar from "./OrganizationSidebar.jsx";
 import SwarmSidebar from "./SwarmSidebar.jsx";
 import { PLUGIN_ICONS } from "./pluginIcons.js";
-import { dropPlacement, enabledPlugins, movePlugin, PLUGIN_DRAG_TYPE, pluginEnabled, resolvePluginActivity, stepPlugin } from "../lib/plugins.js";
+import { dropPlacement, enabledPlugins, movePlugin, PLUGIN_DRAG_TYPE, pluginEnabled, pluginHasPane, resolvePluginActivity, stepPlugin } from "../lib/plugins.js";
 import ProjectSearch from "./ProjectSearch.jsx";
 const SecondBrainSidebar = lazy(() => import("./SecondBrainSidebar.jsx"));
 const RemHomeSidebar = lazy(() => import("./RemHomeSidebar.jsx"));
@@ -72,9 +73,13 @@ export default function CodeFileExplorer({
   onOpenOrganization,
   selectedOrganizationId,
   onOpenSecondBrain,
+  onOpenKanban,
+  kanbanOpen,
   secondBrainOpen = false,
   onOpenRemHome,
   remHomeOpen = false,
+  onShowEditor,
+  onOpenBrowser,
   remProjectOptions = [],
   onFilesystemChange,
   onCloseActiveFile,
@@ -213,7 +218,8 @@ export default function CodeFileExplorer({
   const [remote, setRemote] = useState("");
   const [gitError, setGitError] = useState("");
   useEffect(() => { setCommitMessage(""); setBlockedBranch(""); setGitError(""); setGitNotice(""); setRemote(""); }, [rootPath]);
-  const [sourceTab, setSourceTab] = useState("changes");
+  // Source control opens to History each time it is opened; Changes and Branches are a tab away.
+  const [sourceTab, setSourceTab] = useState("history");
   const stagedCount = sourceControl.entries.filter((entry) => entry.staged && entry.status !== "!").length;
   const pluginSettings = settings?.plugins ?? DEFAULT_APP_SETTINGS.plugins;
   const railPlugins = enabledPlugins(pluginSettings).filter((plugin) => plugin.id !== "workflows" || workflowsContent !== undefined);
@@ -226,6 +232,12 @@ export default function CodeFileExplorer({
   }
   const [localSidebarView, setLocalSidebarView] = useState("files");
   const sidebarView = resolvePluginActivity(pluginSettings, controlledSidebarView || localSidebarView);
+  const sourceControlShownRef = useRef(sidebarView === "source-control");
+  useEffect(() => {
+    const shown = sidebarView === "source-control";
+    if (shown && !sourceControlShownRef.current) setSourceTab("history");
+    sourceControlShownRef.current = shown;
+  }, [sidebarView]);
   // Rem's panel stays mounted once shown, so a task being edited there survives
   // switching to another plugin and back.
   const [remPanelMounted, setRemPanelMounted] = useState(false);
@@ -516,13 +528,18 @@ export default function CodeFileExplorer({
     if (includeHistory) setGitHistory((current) => ({ ...current, loading: true }));
     if (includeHistory) setWorktrees((current) => ({ ...current, loading: true }));
     try {
-      const [historyPayload, worktreePayload] = await Promise.all([
-        includeHistory ? window.goferDesktop?.workspace?.gitHistory?.(rootPath, { refs: historyRefs, limit: historyLimit }) : null,
-        window.goferDesktop?.workspace?.gitWorktrees?.(rootPath),
-      ]);
+      // Both reads start together, but history shows as soon as it arrives: Source control opens to
+      // History, and a slow worktree list must not hold the commits back.
+      const worktreeResult = Promise.resolve(window.goferDesktop?.workspace?.gitWorktrees?.(rootPath)).then(value => ({ value }), error => ({ error }));
+      const historyPayload = includeHistory ? await window.goferDesktop?.workspace?.gitHistory?.(rootPath, { refs: historyRefs, limit: historyLimit }) : null;
       if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
-      if (historyPayload?.error || worktreePayload?.error) throw new Error(historyPayload?.error || worktreePayload.error);
+      if (historyPayload?.error) throw new Error(historyPayload.error);
       if (includeHistory && historySelectionRef.current.refs === historyRefs && historySelectionRef.current.limit === historyLimit) setGitHistory({ ...historyPayload, active: Boolean(historyPayload?.active), commits: historyPayload?.commits ?? [], loading: false });
+      const worktreeRead = await worktreeResult;
+      if (worktreeRead.error) throw worktreeRead.error;
+      const worktreePayload = worktreeRead.value;
+      if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath) return;
+      if (worktreePayload?.error) throw new Error(worktreePayload.error);
       setWorktrees({ active: Boolean(worktreePayload?.active), items: worktreePayload?.worktrees ?? [], loading: false });
     } catch (loadError) {
       if (gitPanelsLoadingRef.current !== request || currentRootRef.current !== rootPath || loadError?.name === "AbortError") return;
@@ -1260,11 +1277,11 @@ export default function CodeFileExplorer({
                 aria-label={label}
                 title={pluginsLocked ? label : `${label} · Drag to reorder`}
                 aria-selected={sidebarView === id}
-                aria-controls={`sidebar-panel-${id}`}
+                aria-controls={pluginHasPane(id) ? `sidebar-panel-${id}` : `main-panel-${id}`}
                 tabIndex={sidebarView === id ? 0 : -1}
                 draggable={!pluginsLocked}
                 className={`relative grid h-10 w-full shrink-0 place-items-center ${railOnRight ? "border-r-2" : "border-l-2"} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand ${sidebarView === id ? "border-brand text-ink" : "border-transparent text-muted hover:bg-slate-100 hover:text-ink"} ${pluginDrag?.id === id ? "opacity-40" : ""}`}
-                onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); if (id === "second-brain") onOpenSecondBrain?.(); setContextMenu(null); setRecentMenuOpen(false); }}
+                onClick={() => { setSidebarView(id); if (id === "search") setSearchFocusRequest((value) => value + 1); if (id === "rem") onOpenRemHome?.(); if (id === "second-brain") onOpenSecondBrain?.(); if (id === "kanban") onOpenKanban?.(); if (id === "files") onShowEditor?.(); if (id === "browser") onOpenBrowser?.(); setContextMenu(null); setRecentMenuOpen(false); }}
                 onDragStart={(event) => {
                   if (pluginsLocked) { event.preventDefault(); return; }
                   event.dataTransfer?.setData(PLUGIN_DRAG_TYPE, id);
@@ -1332,6 +1349,7 @@ export default function CodeFileExplorer({
         </div>
       ) : null}
       {remPanelMounted && railIds.includes("rem") ? <Suspense fallback={sidebarView === "rem" ? <section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" className="flex-1 p-3 text-xs text-muted">Loading Rem…</section> : null}><RemHomeSidebar active={sidebarView === "rem"} open={remHomeOpen} onOpen={() => onOpenRemHome?.()} projectOptions={remProjectOptions} /></Suspense> : null}
+      {railIds.includes("kanban") ? <KanbanSidebar active={sidebarView === "kanban"} open={kanbanOpen} onOpen={onOpenKanban} /> : null}
       {railIds.includes("organizations") ? <OrganizationSidebar active={sidebarView === "organizations"} selectedId={selectedOrganizationId} onSelect={onOpenOrganization} /> : null}
       {sidebarView === "second-brain" ? <Suspense fallback={<section id="sidebar-panel-second-brain" role="tabpanel" aria-labelledby="sidebar-tab-second-brain" className="flex-1 p-3 text-xs text-muted">Loading Second Brain…</section>}><SecondBrainSidebar active open={secondBrainOpen} onOpen={() => onOpenSecondBrain?.()} /></Suspense> : null}
       {railIds.includes("swarms") ? <SwarmSidebar key={`swarms:${rootPath}`} rootPath={rootPath} active={sidebarView === "swarms"} selectedId={selectedSwarmId} onSelect={onOpenSwarm} /> : null}

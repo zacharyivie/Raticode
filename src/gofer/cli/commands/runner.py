@@ -10,6 +10,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.commands._legacy import refuse_rattish
+from gofer.cli.output import emit_json, format_option, wants_json
 from gofer.core.runner import (
     RunnerQueueStore,
     default_runner_capabilities,
@@ -19,8 +21,15 @@ from gofer.core.runner import (
 from gofer.core.workflow import AgenticWorkflow, resolve_workflow_parameters
 from gofer.utils.paths import get_data_dir
 
-app = typer.Typer(help="Manage remote runners and queued workflow runs", no_args_is_help=True)
+app = typer.Typer(
+    help=(
+        "[Legacy TOML] Manage remote runners and queued workflow runs. "
+        "The queue loads TOML workflows only."
+    ),
+    no_args_is_help=True,
+)
 console = Console()
+err_console = Console(stderr=True)
 
 
 @app.command("register")
@@ -55,9 +64,16 @@ def register(
 
 
 @app.command("list")
-def list_runners(data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True)) -> None:
+def list_runners(
+    output_format: str = format_option(),
+    data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
+) -> None:
     """List known runners."""
+    as_json = wants_json(output_format)
     rows = RunnerQueueStore(data_dir).list_runners()
+    if as_json:
+        emit_json([runner.to_payload() for runner in rows])
+        return
     if not rows:
         console.print("No runners registered.")
         return
@@ -91,13 +107,20 @@ def queue_run(
 ) -> None:
     """Queue a workflow run for a separate runner process."""
     base = data_dir or get_data_dir()
+    refuse_rattish(
+        workflow,
+        base,
+        "runner queue",
+        "Raticode rattish run {source}, or Raticode rattish start WORKFLOW_ID "
+        "through a running backend",
+    )
     parameters = _parse_parameters(parameter or [])
     try:
         workflow_obj, workflow_path = _resolve_workflow(workflow, base)
         workflow_obj.validate(workflow_path, base)
         resolved_inputs = resolve_workflow_parameters(workflow_obj.config, parameters)
     except Exception as exc:
-        console.print(f"[red]Queue failed: {exc}[/red]")
+        err_console.print(f"[red]Queue failed: {exc}[/red]")
         raise typer.Exit(1)
 
     queued = RunnerQueueStore(base).enqueue(
@@ -116,18 +139,23 @@ def queue_run(
 def queue_status(
     run_id: str | None = typer.Argument(None, help="Queued run ID"),
     limit: int = typer.Option(20, "--limit", min=1, help="Maximum runs to list"),
+    output_format: str = format_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
-    """Inspect queued and running work."""
+    """Inspect queued and running work. One run always prints as JSON."""
+    as_json = wants_json(output_format)
     store = RunnerQueueStore(data_dir)
     if run_id:
         run = store.get_run(run_id)
         if run is None:
-            console.print(f"[red]Queued run '{run_id}' not found[/red]")
+            err_console.print(f"[red]Queued run '{run_id}' not found[/red]")
             raise typer.Exit(1)
-        console.print(json.dumps(run.to_payload(), indent=2, sort_keys=True))
+        typer.echo(json.dumps(run.to_payload(), indent=2, sort_keys=True))
         return
     runs = store.list_runs(limit)
+    if as_json:
+        emit_json([run.to_payload() for run in runs])
+        return
     if not runs:
         console.print("No queued runs.")
         return
@@ -153,7 +181,7 @@ def cancel(
     try:
         run = RunnerQueueStore(data_dir).cancel_run(run_id)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]Cancel requested[/green] {run.id} ({run.status})")
 

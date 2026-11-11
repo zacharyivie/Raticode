@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000173",
+  "id": "10000000-0000-4000-8000-000000000173",
+  "sequence": 173,
+  "type": "desktop.action",
+  "payload": {
+    "op": "files.open",
+    "params": {
+      "project_id": "project-1",
+      "path": "media/demo clip.mp4"
+    }
+  }
+}

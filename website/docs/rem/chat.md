@@ -6,13 +6,15 @@ pageClass: docs-layout
 
 # Chat and threads
 
-Rem helps you build workflows, edit code, debug, and understand a project. Each thread keeps its own conversation, scope, resources, and provider settings.
+Threads are your own conversations with a coding agent through Rem. Each thread keeps its own conversation, scope, resources, and provider settings. For Rem's single ongoing conversation, tasks and worker threads, see [Rem's home and tasks](./home.md).
 
 ## Start a conversation
 
-Open Rem and send a message to create a thread, or use the new-thread control. Review the project scope and composer settings first. Enter sends; Shift+Enter inserts a line break. Threads are organized into pinned, active, and archived lists, ordered by message activity.
+Threads live in the Rem pane. **Settings > Layout > Rem pane shows** switches that pane between **Threads** (the default) and Rem's home. Use **New thread** there, review the project scope and composer settings, then send. Enter sends; Shift+Enter inserts a line break; Ctrl+Enter starts the thread in the background.
 
-Name a thread for its task, pin ongoing work, and archive finished work to keep the active list readable. Archiving marks a thread read, and new activity brings it back. **Mark as read** on an unread row, or **Mark all read** on the Unread header, clears the blue dot. Ctrl- or Cmd-click threads to select several, Shift-click to select a range, or click a section's name, such as Unread, to select every thread in it; the chevron still opens and closes Running and Archived. Right-click, press Shift+F10, or use the bar above the list to mark the selection read or unread, pin, archive, restore or delete it. Esc clears the selection. The phone app offers the same actions with a long press. Search threads to find a title or text anywhere in saved history, including older messages that are not currently loaded.
+Threads are grouped as **Pinned**, **Unread**, **Read** (your seven most recently read), **Running** and **Archived**, ordered by message activity. Rem's worker threads appear here too, labelled with who wrote each instruction (**Rem** or **You**).
+
+Name a thread for its task, pin ongoing work, and archive finished work to keep the active list readable. Archiving marks a thread read, and new activity brings it back. **Settings > General > Delete archived threads** can remove archived threads automatically after 7, 30 or 90 days. **Mark as read** on an unread row, or **Mark all read** on the Unread header, clears the blue dot. Ctrl- or Cmd-click threads to select several, Shift-click to select a range, or click a section's name, such as Unread, to select every thread in it; the chevron still opens and closes Running and Archived. Right-click, press Shift+F10, or use the bar above the list to mark the selection read or unread, pin, archive, restore or delete it. Esc clears the selection. The phone app offers the same actions with a long press. Search threads to find a title or text anywhere in saved history, including older messages that are not currently loaded.
 
 ## Switch models when sending
 

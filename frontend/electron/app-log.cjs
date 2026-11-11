@@ -16,6 +16,9 @@ function redactLog(value) {
     // The last @ in the authority separates userinfo from the host. Passwords
     // can contain earlier @ characters, and URL schemes are case insensitive.
     .replace(/(https?:\/\/)[^\s/?#"'<>]*@/gi, "$1[redacted]@")
+    // Bare tokens with a well-known prefix: Raticode agent tokens, GitHub, OpenAI and
+    // Anthropic keys, Slack tokens and AWS access key IDs (same as app_log.py).
+    .replace(/\b(?:rtk_agent_|gh[opusr]_|github_pat_|sk-|xox[abprs]-|AKIA)[A-Za-z0-9_-]{12,}/g, "[redacted]")
     // Pairing invitations carry one-time secrets.
     .replace(/(raticode:\/\/pair\?)[^\s"'<>]*/gi, "$1[redacted]")
     .slice(0, 32768);

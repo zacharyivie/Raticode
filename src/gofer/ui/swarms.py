@@ -33,6 +33,18 @@ from gofer.ui import swarm_workspaces as workspaces
 from gofer.ui.chat import stream_workflow_chat
 from gofer.ui.swarm_store import SwarmStore
 from gofer.ui.swarm_tools import SwarmToolServer
+from gofer.utils.logging import RepeatingFailure, get_logger
+
+log = get_logger(__name__)
+
+
+def _log_task_failure(task: asyncio.Task[Any]) -> None:
+    """Background tasks are not awaited; report their failures instead of losing them."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Swarm background task %s failed", task.get_name(), exc_info=exc)
 
 
 def _id() -> str:
@@ -2904,130 +2916,148 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
 
     async def _loop(self) -> None:
         tasks: set[asyncio.Task[None]] = set()
+        failure = RepeatingFailure(log, "Swarm runtime pass")
         while not self._closed.is_set():
-            with self._lock:
-                self._wake.clear()
-                for swarm_id, root in list(self._runnable.items()):
-                    if self._due.get(swarm_id, 0) > time.time():
-                        continue
-                    swarm = self._get(root, swarm_id)
-                    run = swarm.get("run")
-                    if not run or run["state"] != "running":
-                        continue
-                    busy = {
-                        a["agentId"] for a in self._active.values() if a["swarmId"] == swarm["id"]
-                    }
-                    scope = run.get("organization")
-                    if scope and run["turnCount"] >= scope["turnLimit"] and not busy:
-                        set_run_state(run, "paused")
-                        run["pauseReason"] = "Organization turn reservation exhausted"
-                        self._save(swarm)
-                        continue
-                    if not scope and (limit := self._limit_reached(run)):
-                        set_run_state(run, "paused")
-                        run["pauseReason"] = limit + " Agents already working finish their turn."
-                        self._event(run, "limit_reached", "system", {"reason": limit})
-                        self._save(swarm)
-                        continue
-                    if self._recover_idle(swarm):
-                        continue
-                    if time.time() >= run["nextCheckAt"]:
-                        # Timers reconcile unseen updates; idle ticks cost no model call.
-                        unread = [
-                            m
-                            for m in run["messages"]
-                            if m["createdAt"] > (run["lastCheckedAt"] or "")
-                            and m["senderId"] not in {"system", self._orchestrator(swarm)}
-                        ]
-                        if unread and not any(
-                            d["state"] == "queued" and d["agentId"] == self._orchestrator(swarm)
-                            for m in run["messages"]
-                            for d in m["deliveries"]
-                        ):
-                            self._post(
-                                swarm,
-                                "system",
-                                {
-                                    "body": (
-                                        "Periodic check: review new board updates, blockers and "
-                                        "milestone evidence; update tasking if needed. "
-                                        "Publish a concise "
-                                        "digest with one current summary for every agent."
-                                    ),
-                                    "actionable": True,
-                                },
-                            )
-                        run["lastCheckedAt"] = _now()
-                        run["nextCheckAt"] = (
-                            time.time() + run["configuration"]["wakeIntervalSeconds"]
-                        )
-                        self._save(swarm)
-                    target = next(
-                        (
-                            d["agentId"]
-                            for m in run["messages"]
-                            for d in m["deliveries"]
-                            if d["state"] == "queued"
-                            and d["agentId"] not in busy
-                            and self._dispatchable(run, m, d["agentId"])
-                            and not self._project_busy(run, d["agentId"])
-                        ),
-                        None,
-                    )
-                    if (
-                        target
-                        and len(self._active) < self.max_concurrency
-                        and len(busy) < run["configuration"]["maxConcurrency"]
-                    ):
-                        cancel = threading.Event()
-                        self._active[f"{swarm['id']}:{target}"] = {
-                            "swarmId": swarm["id"],
-                            "projectRoot": root,
-                            "workspaceRoot": self._agent_project(run, target),
-                            "runId": run["id"],
-                            "agentId": target,
-                            "cancel": cancel,
-                            "steering": None,
-                        }
-                        # Move a served team to the back for round-robin admission.
-                        self._runnable.pop(swarm_id, None)
-                        self._runnable[swarm_id] = root
-                        task = asyncio.create_task(
-                            self._turn(swarm["projectRoot"], swarm["id"], target, cancel)
-                        )
-                        tasks.add(task)
-                        task.add_done_callback(tasks.discard)
-            for sid, root in list(self._terminal.items()):
+            try:
                 with self._lock:
-                    if (
-                        sid in self._finalizing
-                        or self._cleaning_attempts
-                        or any(
-                            a["swarmId"] == sid
-                            for a in [*self._active.values(), *self._checks.values()]
+                    self._wake.clear()
+                    for swarm_id, root in list(self._runnable.items()):
+                        if self._due.get(swarm_id, 0) > time.time():
+                            continue
+                        swarm = self._get(root, swarm_id)
+                        run = swarm.get("run")
+                        if not run or run["state"] != "running":
+                            continue
+                        busy = {
+                            a["agentId"]
+                            for a in self._active.values()
+                            if a["swarmId"] == swarm["id"]
+                        }
+                        scope = run.get("organization")
+                        if scope and run["turnCount"] >= scope["turnLimit"] and not busy:
+                            set_run_state(run, "paused")
+                            run["pauseReason"] = "Organization turn reservation exhausted"
+                            self._save(swarm)
+                            continue
+                        if not scope and (limit := self._limit_reached(run)):
+                            set_run_state(run, "paused")
+                            run["pauseReason"] = (
+                                limit + " Agents already working finish their turn."
+                            )
+                            self._event(run, "limit_reached", "system", {"reason": limit})
+                            self._save(swarm)
+                            continue
+                        if self._recover_idle(swarm):
+                            continue
+                        if time.time() >= run["nextCheckAt"]:
+                            # Timers reconcile unseen updates; idle ticks cost no model call.
+                            unread = [
+                                m
+                                for m in run["messages"]
+                                if m["createdAt"] > (run["lastCheckedAt"] or "")
+                                and m["senderId"] not in {"system", self._orchestrator(swarm)}
+                            ]
+                            if unread and not any(
+                                d["state"] == "queued" and d["agentId"] == self._orchestrator(swarm)
+                                for m in run["messages"]
+                                for d in m["deliveries"]
+                            ):
+                                self._post(
+                                    swarm,
+                                    "system",
+                                    {
+                                        "body": (
+                                            "Periodic check: review new board updates, "
+                                            "blockers and milestone evidence; update "
+                                            "tasking if needed. "
+                                            "Publish a concise "
+                                            "digest with one current summary for every agent."
+                                        ),
+                                        "actionable": True,
+                                    },
+                                )
+                            run["lastCheckedAt"] = _now()
+                            run["nextCheckAt"] = (
+                                time.time() + run["configuration"]["wakeIntervalSeconds"]
+                            )
+                            self._save(swarm)
+                        target = next(
+                            (
+                                d["agentId"]
+                                for m in run["messages"]
+                                for d in m["deliveries"]
+                                if d["state"] == "queued"
+                                and d["agentId"] not in busy
+                                and self._dispatchable(run, m, d["agentId"])
+                                and not self._project_busy(run, d["agentId"])
+                            ),
+                            None,
                         )
-                    ):
-                        continue
-                    if len(self._active) + len(self._finalizing) >= self.max_concurrency:
-                        continue
-                    self._finalizing.add(sid)
-                task = asyncio.create_task(self._finish_run(root, sid))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
-            if not any(t.get_name() == "swarm-steering" for t in tasks):
-                steering_task = asyncio.create_task(self._steer_pending(), name="swarm-steering")
-                tasks.add(steering_task)
-                steering_task.add_done_callback(tasks.discard)
-            # Provider/steering tasks need the event loop; a worker waits without
-            # repeatedly reading SQLite when no team can run.
-            timeout = (
-                0.2
-                if self._active
-                else min(
-                    1.0, max(0.01, min(self._due.values(), default=time.time() + 1) - time.time())
+                        if (
+                            target
+                            and len(self._active) < self.max_concurrency
+                            and len(busy) < run["configuration"]["maxConcurrency"]
+                        ):
+                            cancel = threading.Event()
+                            self._active[f"{swarm['id']}:{target}"] = {
+                                "swarmId": swarm["id"],
+                                "projectRoot": root,
+                                "workspaceRoot": self._agent_project(run, target),
+                                "runId": run["id"],
+                                "agentId": target,
+                                "cancel": cancel,
+                                "steering": None,
+                            }
+                            # Move a served team to the back for round-robin admission.
+                            self._runnable.pop(swarm_id, None)
+                            self._runnable[swarm_id] = root
+                            task = asyncio.create_task(
+                                self._turn(swarm["projectRoot"], swarm["id"], target, cancel)
+                            )
+                            tasks.add(task)
+                            task.add_done_callback(tasks.discard)
+                            task.add_done_callback(_log_task_failure)
+                for sid, root in list(self._terminal.items()):
+                    with self._lock:
+                        if (
+                            sid in self._finalizing
+                            or self._cleaning_attempts
+                            or any(
+                                a["swarmId"] == sid
+                                for a in [*self._active.values(), *self._checks.values()]
+                            )
+                        ):
+                            continue
+                        if len(self._active) + len(self._finalizing) >= self.max_concurrency:
+                            continue
+                        self._finalizing.add(sid)
+                    task = asyncio.create_task(self._finish_run(root, sid))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    task.add_done_callback(_log_task_failure)
+                if not any(t.get_name() == "swarm-steering" for t in tasks):
+                    steering_task = asyncio.create_task(
+                        self._steer_pending(), name="swarm-steering"
+                    )
+                    tasks.add(steering_task)
+                    steering_task.add_done_callback(tasks.discard)
+                    steering_task.add_done_callback(_log_task_failure)
+                # Provider/steering tasks need the event loop; a worker waits without
+                # repeatedly reading SQLite when no team can run.
+                timeout = (
+                    0.2
+                    if self._active
+                    else min(
+                        1.0,
+                        max(0.01, min(self._due.values(), default=time.time() + 1) - time.time()),
+                    )
                 )
-            )
-            await asyncio.to_thread(self._wake.wait, timeout)
+                await asyncio.to_thread(self._wake.wait, timeout)
+                failure.succeeded()
+            except Exception as exc:
+                # One unreadable swarm must not stop every swarm for the session.
+                failure.failed(exc)
+                await asyncio.sleep(1)
         for active in self._active.values():
             active["cancel"].set()
         if tasks:
@@ -3078,7 +3108,8 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
                     f"Board message {message['id']} from {message['senderId']}: {message['body']}"
                 )
                 state = "accepted" if accepted else "queued"
-            except Exception:
+            except Exception as exc:
+                log.info("Board message steering is uncertain (%s)", type(exc).__name__)
                 state = "uncertain"
             with self._lock:
                 swarm = self._get(swarm["projectRoot"], swarm_id)
@@ -3428,6 +3459,7 @@ an actionable acknowledgement merely to acknowledge another acknowledgement.
         except asyncio.CancelledError:
             error = "Agent turn interrupted"
         except Exception as exc:
+            log.warning("Swarm agent %s turn failed", agent_id, exc_info=True)
             error = str(exc)
         finally:
             if deadline is not None:

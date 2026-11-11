@@ -1,0 +1,36 @@
+{
+ "digest": "aa015105c07be1864391a5d9539dd161",
+ "limits": {
+  "max_threads_max": 16,
+  "max_threads_min": 1
+ },
+ "report": {
+  "duplicates_merged": [],
+  "notes": [],
+  "since": "",
+  "summary": "Nothing to report yet.",
+  "tickets_added": [],
+  "unseen": false,
+  "updated_at": "",
+  "work_done": []
+ },
+ "settings": {
+  "auto_pull_backlog": false,
+  "enabled": true,
+  "idle_minutes": 15,
+  "max_threads": 2,
+  "revision": 0
+ },
+ "state": {
+  "active_threads": 0,
+  "assigned_projects": 1,
+  "detail": "Starts after 15 minutes without a prompt.",
+  "last_prompt_at": "",
+  "mode": "waiting",
+  "outside_projects": 2,
+  "proposals_waiting": 0,
+  "starts_at": "2026-11-09T12:15:00+00:00",
+  "thread_limit": 2,
+  "todo_remaining": 1
+ }
+}

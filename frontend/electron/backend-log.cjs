@@ -8,6 +8,10 @@
 const PREFIX = "GOFER_LOG ";
 const MAX_LINE = 65536;
 const ERROR_TEXT = /\b(Traceback|Error|Exception|CRITICAL|FATAL|panic|Segmentation fault)\b/;
+// In development the backend starts through `uv run`, which reports routine
+// progress on stderr (building and installing the project). Those lines are
+// status, not warnings; uv's own "warning:" and "error:" lines are not matched.
+const UV_STATUS = /^\s*(?:(?:Building|Built|Installed|Uninstalled|Resolved|Prepared|Audited|Downloading|Downloaded|Updated|Bytecode compiled)\b|Using (?:CPython|Python)\b|Creating virtual environment\b|Activate with:|[+-] [A-Za-z0-9_.-]+(?:==| @ ))/;
 
 function sourceFor(logger) {
   return /^gofer\.devices(\.|$)/.test(logger) ? "devices" : "backend";
@@ -34,11 +38,12 @@ function createBackendOutput({ write, echo = () => {} }) {
 
   function flushGroup(stream, group) {
     if (!group.length) return;
-    const text = group.join("\n");
-    group.length = 0;
+    const lines = group.splice(0);
+    const text = lines.join("\n");
     if (!text.trim()) return;
     if (stream === "stdout") { write("info", "backend", text); return; }
     if (/^GOFER_UI_STOPPED\s*$/.test(text)) { write("info", "backend", "Backend stopped its server"); return; }
+    if (lines.every((line) => !line.trim() || UV_STATUS.test(line))) { write("info", "backend", text, "uv"); return; }
     write(ERROR_TEXT.test(text) ? "error" : "warn", "backend", text, "stderr");
   }
 

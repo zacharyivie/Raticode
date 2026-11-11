@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from gofer.ui.chat_steering import _identifier
+from gofer.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 
 class ChatJobs:
@@ -56,6 +59,8 @@ class ChatJobs:
             try:
                 run(emit)
             except Exception as exc:  # noqa: BLE001
+                # Failures before the provider stream starts reach only this handler.
+                log.exception("Chat turn %s failed", turn_id)
                 emit({"type": "error", "error": str(exc)})
             finally:
                 try:

@@ -132,6 +132,8 @@ from gofer.rattish.run_service import (
     run_rattish_file,
 )
 from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_directory
+from gofer.rattish.trigger_service import TriggerRun, run_in_process
+from gofer.rattish.triggers import TriggerStore
 from gofer.rattish.workspaces import (
     RattishWorkspaceError,
     RegisteredWorkflow,
@@ -151,11 +153,14 @@ from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSu
 from gofer.ui.chat import delete_workflow_chat_prompt, workflow_chat_prompt_path
 from gofer.utils.atomic_output import atomic_binary_output
 from gofer.utils.brand_compat import LEGACY_WORKSPACE_DIRECTORIES
+from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.run_state import (
     request_workflow_run_stop,
     request_workflow_stop,
 )
+
+log = get_logger(__name__)
 
 _UNSET = object()
 
@@ -1216,10 +1221,14 @@ def delete_workflow_payload(
 ) -> dict[str, Any]:
     base = _data_dir(data_dir)
     if source_format == "rattish":
+        registered = _registered_workflow_or_none(workflow_id, base)
         try:
             delete_registered_workflow(workflow_id, registry_dir=base)
         except (OSError, RattishWorkspaceError) as exc:
             raise WorkflowUpdateError(str(exc)) from exc
+        if registered is not None:
+            # Its triggers would otherwise fail on every occurrence from now on.
+            TriggerStore(base).delete_for_source(registered.entrypoint)
         delete_workflow_chat_prompt(base, workflow_id)
         return {"workflowId": workflow_id, "deleted": True}
     path = _workflow_toml_path(workflow_id, base, error_cls=WorkflowUpdateError)
@@ -2147,6 +2156,10 @@ async def _start_rattish_background_run(
                 )
             result["run"] = _rattish_run_payload(run)
         except Exception as exc:
+            # Before the run is acknowledged the caller reports this; afterwards nobody reads
+            # it, so it must reach the log.
+            if acknowledged.is_set():
+                log.exception("Workflow run %s failed after it started", run_id)
             result["error"] = str(exc)
         finally:
             with _active_run_lock:
@@ -2176,6 +2189,18 @@ async def _start_rattish_background_run(
             with _active_run_lock:
                 _active_rattish_runs.pop(active_key, None)
         raise
+
+
+def run_triggered_rattish(run: TriggerRun) -> RattishRunResult:
+    """Run a trigger's workflow so the app's Stop button can reach it."""
+    active_key = (*_run_key(run.data_dir, run.workflow_id), run.run_id)
+    with _active_run_lock:
+        _active_rattish_runs[active_key] = run.cancel_event
+    try:
+        return run_in_process(run)
+    finally:
+        with _active_run_lock:
+            _active_rattish_runs.pop(active_key, None)
 
 
 def stop_rattish_runs_for_shutdown(data_dir: Path | None = None) -> None:

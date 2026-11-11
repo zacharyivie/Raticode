@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, Brain, Check, FlaskConical, Play, GitBranch, Network, Plus, SquareKanban, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Brain, Check, ChevronDown, ChevronRight, FlaskConical, Play, GitBranch, Network, Plus, SquareKanban, Trash2, X } from "lucide-react";
 import {
   COLUMN_LABELS, EVIDENCE_LABELS, KINDS, describeHours, entity, epicProgress, epicsOfMilestone, evidenceState, formatDate, knowledgeEdges,
   milestoneProgress, milestonesOfProject, milestonesServing, openTickets, orgMilestoneProgress, reviewCaution, runSteps,
-  startHint, ticketsOfEpic, zoneTime, ago, timeAgo, usedBy, workerStatus,
+  removeWorker, startHint, ticketsOfEpic, zoneTime, ago, timeAgo, usedBy, workerStatus,
 } from "../lib/organizationModel.js";
 import { dangerousPermission, organizationRequest, plural, runProvenance, transcriptEntries } from "../lib/organizations.js";
 import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
+import { CADENCES, DAY_NAMES, LONG_DAYS, ORDINALS, blockId, blockProblem, cleanBlock, describeBlock, keywordsText, parseKeywords, scheduleProblem, withCadence } from "../lib/organizationSchedule.js";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import { Avatar, Bar, Chip, Pill } from "./OrganizationViews.jsx";
 
@@ -87,6 +88,7 @@ function TicketSheet({ model, ticket, ctx }) {
   const [note, setNote] = useState("");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState({});
+  const [opened, setOpened] = useState(null);
   const changes = useLoad(() => (ticket.worktree?.branch || ticket.releasedWorktree?.branch || ticket.runs.length ? organizationRequest("", "ticket_changes", ctx.organizationId, { taskId: ticket.id }) : null), [ticket.id, ticket.revision]);
   const update = (changesToSave, message) => ctx.onAct("task_update", { taskId: ticket.id, expectedRevision: ticket.revision, changes: changesToSave }, message);
   const caution = reviewCaution(ticket.claims);
@@ -95,9 +97,13 @@ function TicketSheet({ model, ticket, ctx }) {
     decision === "accept" ? `${ticket.key} accepted. Its epic and milestones now count it.` : `${ticket.key} sent back to To do with your note. Its claims were cleared for the next run.`);
   const branch = changes.data?.branch || ticket.worktree?.branch || ticket.releasedWorktree?.branch;
   const files = changes.data?.files || [];
-  const startEdit = () => { setDraft({ title: ticket.title, description: ticket.description, epicId: ticket.epicId || "", assignee: ticket.assignee || "", doneWhen: ticket.doneWhen, priority: ticket.priority }); setEditing(true); };
+  const startEdit = () => {
+    const values = { title: ticket.title, description: ticket.description, epicId: ticket.epicId || "", assignee: ticket.assignee || "", doneWhen: ticket.doneWhen, priority: ticket.priority };
+    setDraft(values); setOpened({ values, revision: ticket.revision }); setEditing(true);
+  };
   if (editing) {
-    return <form className="oh-form" onSubmit={async event => { event.preventDefault(); const next = { ...draft, epicId: draft.epicId || null, assignee: draft.assignee || null }; const diff = Object.fromEntries(Object.entries(next).filter(([key, value]) => (ticket[key] ?? "") !== (value ?? ""))); if (!Object.keys(diff).length || await update(diff, `${ticket.key} saved`)) setEditing(false); }}>
+    // Only fields you changed are sent, at the revision you opened; if the ticket changed meanwhile, saving says so instead of overwriting.
+    return <form className="oh-form" onSubmit={async event => { event.preventDefault(); const next = { ...draft, epicId: draft.epicId || null, assignee: draft.assignee || null }; const diff = Object.fromEntries(Object.entries(next).filter(([key, value]) => (opened.values[key] || null) !== (value || null))); if (!Object.keys(diff).length || await ctx.onAct("task_update", { taskId: ticket.id, expectedRevision: opened.revision, changes: diff }, `${ticket.key} saved`)) setEditing(false); }}>
       <label>Title<input value={draft.title} required maxLength={500} onChange={e => setDraft(d => ({ ...d, title: e.target.value }))} /></label>
       <label>Done when <small>One line in your words. The worker sees it.</small><textarea maxLength={1000} value={draft.doneWhen} onChange={e => setDraft(d => ({ ...d, doneWhen: e.target.value }))} /></label>
       <EpicSelect model={model} value={draft.epicId} onChange={epicId => setDraft(d => ({ ...d, epicId }))} />
@@ -115,8 +121,8 @@ function TicketSheet({ model, ticket, ctx }) {
       {ticket.description && <details className="oh-fold"><summary>Details</summary><p className="oh-prose">{ticket.description}</p></details>}</Rec>
     <Rec label="Part of"><div className="oh-chips">{ticket.project && <Chip model={model} refId={`project:${ticket.project}`} onOpen={ctx.onOpen} />}{milestone && <Chip model={model} refId={`ms:${milestone.id}`} onOpen={ctx.onOpen} />}{epic ? <Chip model={model} refId={`epic:${epic.id}`} onOpen={ctx.onOpen} /> : <Muted>No epic</Muted>}</div></Rec>
     <Rec label="Used">{ticket.used.length ? <div className="oh-link-list">{ticket.used.map(id => <div className="oh-link-row" key={id}><span className="oh-link-kind">{ticket.observed.has(id) ? "Read in a run" : "Linked"}</span><Chip model={model} refId={`kb:${id}`} onOpen={ctx.onOpen} />
-      {!ticket.observed.has(id) && <button className="oh-icon-btn" type="button" aria-label="Unlink note" title="Unlink note" onClick={() => update({ knowledge: (ticket.knowledge || []).filter(k => k !== id) }, "Note unlinked")}><X size={12} /></button>}</div>)}</div> : <Muted>No notes linked.</Muted>}
-      {linkable.length > 0 && <select className="oh-inline-select" aria-label="Link a note" value="" onChange={event => event.target.value && update({ knowledge: [...(ticket.knowledge || []), event.target.value] }, "Note linked. The next run sees it.")}><option value="">Link a note…</option>{linkable.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select>}
+      {!ticket.observed.has(id) && ticket.column !== "running" && <button className="oh-icon-btn" type="button" aria-label="Unlink note" title="Unlink note" onClick={() => update({ knowledge: (ticket.knowledge || []).filter(k => k !== id) }, "Note unlinked")}><X size={12} /></button>}</div>)}</div> : <Muted>No notes linked.</Muted>}
+      {linkable.length > 0 && ticket.column !== "running" && <select className="oh-inline-select" aria-label="Link a note" value="" onChange={event => event.target.value && update({ knowledge: [...(ticket.knowledge || []), event.target.value] }, "Note linked. The next run sees it.")}><option value="">Link a note…</option>{linkable.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select>}
     </Rec>
     <Rec label="Did">{branch ? <><div className="oh-chips"><span className="oh-chip static"><GitBranch size={13} /><span className="oh-key">{branch}</span></span></div>
       {files.length > 0 ? <details className="oh-fold"><summary>{plural(files.length, "file")}, <span className="oh-add">+{files.reduce((sum, f) => sum + f[1], 0)}</span> <span className="oh-del">−{files.reduce((sum, f) => sum + f[2], 0)}</span></summary><Files files={files} /></details> : <Muted>{changes.error ? `Couldn't read the branch: ${changes.error}` : changes.data ? "No committed changes yet" : "Reading changes…"}</Muted>}</>
@@ -195,22 +201,26 @@ function RunSheet({ model, run, ctx }) {
 /* ---------------------------------------------------------- Plan item forms */
 
 function EpicSelect({ model, value, onChange, projectId }) {
-  return <label>Epic<select value={value || ""} onChange={e => onChange(e.target.value)}><option value="">No epic</option>
+  return <label>Epic<select value={value || ""} onChange={e => onChange(e.target.value)}><option value="">No epic</option>{value && !model.epics[value] && <option value={value}>Removed epic</option>}
     {Object.values(model.projects).filter(p => !projectId || p.id === projectId).map(project => <optgroup key={project.id} label={project.name}>{Object.values(model.epics).filter(epic => epic.projectId === project.id).map(epic => <option key={epic.id} value={epic.id}>{epic.title}</option>)}</optgroup>)}
   </select></label>;
 }
 
 function WorkerSelect({ model, label, value, onChange, empty = "Unassigned", exclude }) {
-  return <label>{label}<select value={value || ""} onChange={e => onChange(e.target.value)}><option value="">{empty}</option>{Object.values(model.workers).filter(w => w.id !== exclude).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>;
+  return <label>{label}<select value={value || ""} onChange={e => onChange(e.target.value)}><option value="">{empty}</option>{value && !model.workers[value] && <option value={value}>Removed worker</option>}{Object.values(model.workers).filter(w => w.id !== exclude).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>;
 }
 
 function PlanForm({ kind, model, item, ctx, onDone, fixed = {} }) {
   const [draft, setDraft] = useState(() => ({ ...item }));
+  // What the form started from: saving sends only what you changed, so it can't undo
+  // someone else's edit to another field made while the form was open.
+  const [base] = useState(() => ({ ...item }));
   const set = values => setDraft(current => ({ ...current, ...values }));
   const isNew = !item.id;
   async function save(event) {
     event.preventDefault();
-    const clean = Object.fromEntries(Object.entries({ ...draft, ...fixed }).map(([key, value]) => [key, value === "" ? null : value]));
+    const changed = isNew ? { ...draft } : { id: item.id, ...Object.fromEntries(Object.entries(draft).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(base[key]))) };
+    const clean = Object.fromEntries(Object.entries({ ...changed, ...fixed }).map(([key, value]) => [key, value === "" ? null : value]));
     const result = await ctx.onAct("plan_save", { kind, item: clean, expectedRevision: model.organization.revision }, isNew ? `${{ milestone: "Milestone", epic: "Epic", project: "Project" }[kind]} added` : "Saved as a new configuration revision");
     if (result) onDone?.(result);
   }
@@ -221,8 +231,8 @@ function PlanForm({ kind, model, item, ctx, onDone, fixed = {} }) {
     {kind === "milestone" && !fixed.projectId && !draft.projectId && <label>Short label <small>Shown on the timeline</small><input maxLength={40} value={draft.short || ""} onChange={e => set({ short: e.target.value })} /></label>}
     {kind === "milestone" && <label>Due<input type="date" value={draft.dueAt || ""} onChange={e => set({ dueAt: e.target.value })} /></label>}
     {kind === "milestone" && (fixed.projectId || draft.projectId) && <label>Serves<select value={draft.parentId || ""} onChange={e => set({ parentId: e.target.value })}><option value="">No organization milestone</option>{Object.values(model.orgMilestones).map(m => <option key={m.id} value={m.id}>{m.title}</option>)}</select></label>}
-    {kind === "epic" && <label>Milestone<select required value={draft.milestoneId || ""} onChange={e => set({ milestoneId: e.target.value })}><option value="" disabled>Choose a milestone</option>
-      {Object.values(model.projects).map(project => <optgroup key={project.id} label={project.name}>{milestonesOfProject(model, project.id).map(m => <option key={m.id} value={m.id}>{m.title}</option>)}</optgroup>)}</select></label>}
+    {kind === "epic" && <label>Milestone{!isNew && <small>Its tickets belong to this project, so an epic moves between this project&apos;s milestones.</small>}<select required value={draft.milestoneId || ""} onChange={e => set({ milestoneId: e.target.value, projectId: model.milestones[e.target.value]?.projectId || draft.projectId })}><option value="" disabled>Choose a milestone</option>
+      {Object.values(model.projects).filter(project => isNew || !base.projectId || project.id === base.projectId).map(project => <optgroup key={project.id} label={project.name}>{milestonesOfProject(model, project.id).map(m => <option key={m.id} value={m.id}>{m.title}</option>)}</optgroup>)}</select></label>}
     {kind === "epic" && <WorkerSelect model={model} label="Owner" value={draft.owner} onChange={owner => set({ owner })} empty="No owner" />}
     {kind === "project" && <WorkerSelect model={model} label="Lead" value={draft.owner} onChange={owner => set({ owner })} empty="No lead" />}
     {kind === "project" && <label>Folder <small>One of the organization&apos;s folders. Add folders in the Folders list on the Projects tab.</small><select value={draft.workspacePath || ""} onChange={e => set({ workspacePath: e.target.value })}><option value="">Organization default</option>{roots.map(root => <option key={root} value={root}>{root}</option>)}</select></label>}
@@ -316,6 +326,7 @@ function ProjectSheet({ model, project, ctx }) {
 
 function EntryForm({ model, entry, ctx, onDone, fixedProject }) {
   const [draft, setDraft] = useState(() => ({ kind: "note", title: "", topic: "", summary: "", body: "", projectId: fixedProject || "", links: [], ...(entry || {}) }));
+  const [version] = useState(() => entry?.version);
   const set = values => setDraft(current => ({ ...current, ...values }));
   const others = Object.values(model.knowledge).filter(item => item.id !== entry?.id);
   const topics = [...new Set(Object.values(model.knowledge).map(item => item.topic).filter(Boolean))];
@@ -323,7 +334,7 @@ function EntryForm({ model, entry, ctx, onDone, fixedProject }) {
     event.preventDefault();
     const fields = entry?.source ? ["kind", "topic", "projectId", "links", "summary"] : ["kind", "title", "topic", "summary", "body", "projectId", "links"];
     const payload = Object.fromEntries(fields.map(key => [key, key === "projectId" ? draft[key] || null : draft[key]]));
-    const result = await ctx.onAct("knowledge_save", { entry: entry ? { id: entry.id, ...payload } : payload, ...(entry ? { expectedVersion: entry.version } : {}) }, entry ? "Note saved" : "Note added");
+    const result = await ctx.onAct("knowledge_save", { entry: entry ? { id: entry.id, ...payload } : payload, ...(entry ? { expectedVersion: version } : {}) }, entry ? "Note saved" : "Note added");
     if (result) onDone(result);
   }
   return <form className="oh-form" onSubmit={save}>
@@ -415,7 +426,7 @@ function TicketAccess({ model, value, onChange }) {
   </div>;
 }
 
-const CHECK_INS = [[0, "Off"], [900, "Every 15 minutes"], [1800, "Every 30 minutes"], [3600, "Every hour"], [14400, "Every 4 hours"], [86400, "Once a day"]];
+const CHECK_INS = [[0, "Automatic"], [900, "Every 15 minutes"], [1800, "Every 30 minutes"], [3600, "Every hour"], [14400, "Every 4 hours"], [86400, "Once a day"]];
 // A saved interval that isn't one of the usual choices stays selectable.
 const checkInOptions = current => (CHECK_INS.some(([value]) => value === current) ? CHECK_INS : [...CHECK_INS, [current, `Every ${Math.round(current / 60)} minutes`]]);
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -428,7 +439,11 @@ function HoursEditor({ model, ctx }) {
   const start = () => ({ ...saved, timezone: saved.mode === "scheduled" ? saved.timezone : localZone(), windows: saved.windows?.length ? saved.windows : [{ days: [0, 1, 2, 3, 4], start: "09:00", end: "17:00" }], atClose: saved.atClose || "stop" });
   const [draft, setDraft] = useState(start);
   const [resume, setResume] = useState(model.config.resumeAfterRestart === true);
-  const set = values => setDraft(current => ({ ...current, ...values }));
+  const [touched, setTouched] = useState(false);
+  const live = JSON.stringify([saved, model.config.resumeAfterRestart === true]);
+  const [seen, setSeen] = useState(live);
+  if (seen !== live && !touched) { setSeen(live); setDraft(start()); setResume(model.config.resumeAfterRestart === true); }
+  const set = values => { setTouched(true); setDraft(current => ({ ...current, ...values })); };
   const setWindow = (index, values) => set({ windows: draft.windows.map((w, i) => (i === index ? { ...w, ...values } : w)) });
   const toggleDay = (index, day) => { const days = draft.windows[index].days; setWindow(index, { days: days.includes(day) ? days.filter(d => d !== day) : [...days, day].sort() }); };
   const hours = draft.mode === "scheduled" ? { mode: "scheduled", timezone: draft.timezone, windows: draft.windows, atClose: draft.atClose } : { ...saved, mode: "always" };
@@ -441,7 +456,7 @@ function HoursEditor({ model, ctx }) {
     if (result) ctx.close();
   }
   return <form className="oh-form" onSubmit={save}>
-    <p className="oh-muted">Now: {describeHours(saved)}{state?.mode === "scheduled" && (state.open ? `. Open until ${zoneTime(state.closesAt, state.timezone)}.` : `. Closed until ${zoneTime(state.opensAt, state.timezone)}.`)}</p>
+    <p className="oh-muted">Now: {describeHours(saved)}{state?.mode === "scheduled" && (state.open ? (state.closesAt ? `. Open until ${zoneTime(state.closesAt, state.timezone)}.` : ". Open now.") : (state.opensAt ? `. Closed until ${zoneTime(state.opensAt, state.timezone)}.` : ". Closed, and no hours are coming up."))}</p>
     <fieldset><legend>When workers may work</legend>
       <label className="oh-radio"><input type="radio" name="oh-hours-mode" checked={draft.mode !== "scheduled"} onChange={() => set({ mode: "always" })} />Around the clock (24/7)</label>
       <label className="oh-radio"><input type="radio" name="oh-hours-mode" checked={draft.mode === "scheduled"} onChange={() => set({ mode: "scheduled" })} />Only during these hours</label>
@@ -462,10 +477,94 @@ function HoursEditor({ model, ctx }) {
         <option value="stop">Stop running work. It returns to To do and runs first when hours open</option>
         <option value="finish">Let running work finish. Nothing new starts</option></select></label>
     </>}
-    <label className="oh-switch">Keep running after Raticode restarts<input type="checkbox" checked={resume} onChange={e => setResume(e.target.checked)} /></label>
+    <label className="oh-switch">Keep running after Raticode restarts<input type="checkbox" checked={resume} onChange={e => { setTouched(true); setResume(e.target.checked); }} /></label>
     <small className="oh-faint">{resume ? "After a restart the organization carries on by itself. Work that was mid-run is flagged for you to reopen." : "After a restart the organization pauses until you start it."}</small>
     {problem && <p className="oh-warn-line"><AlertTriangle size={14} />{problem}</p>}
     <div className="oh-form-actions"><button className="oh-btn primary" type="submit" disabled={ctx.busy || Boolean(problem)}>Save hours</button><button className="oh-btn" type="button" onClick={ctx.close}>Cancel</button></div>
+  </form>;
+}
+
+// Text typed into a field that saves a parsed value: kept as typed while focused, saved on blur
+// or Enter, so clearing it doesn't snap back.
+function DraftField({ value, format, parse, onCommit, ...props }) {
+  const [draft, setDraft] = useState(null);
+  const commit = () => { if (draft !== null) { onCommit(parse(draft)); setDraft(null); } };
+  return <input {...props} value={draft ?? format(value)} onFocus={() => setDraft(format(value))} onChange={e => setDraft(e.target.value)} onBlur={commit} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commit(); } }} />;
+}
+
+function BlockFields({ block, index, onChange }) {
+  const set = values => onChange({ ...block, ...values });
+  const monthly = block.cadence === "monthly" || block.cadence === "quarterly";
+  const byDay = block.monthDay != null;
+  const n = index + 1;
+  return <div className="oh-block-fields">
+    <label>Name<input maxLength={80} required value={block.label} onChange={e => set({ label: e.target.value })} /></label>
+    <label>Focus <small>What workers should favor during this block</small><textarea rows={2} maxLength={600} value={block.focus || ""} onChange={e => set({ focus: e.target.value })} /></label>
+    <div className="oh-block-when">
+      <label>How often<select value={block.cadence} onChange={e => onChange(withCadence(block, e.target.value))}>{CADENCES.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
+      <label>Starts<input type="time" aria-label={`Start of block ${n}`} value={block.start} required onChange={e => set({ start: e.target.value })} /></label>
+      <label>Ends<input type="time" aria-label={`End of block ${n}`} value={block.end} required onChange={e => set({ end: e.target.value })} /></label>
+      <span className="night">{block.start === block.end ? "All day" : block.end < block.start ? "Ends the next day" : ""}</span>
+    </div>
+    {block.cadence === "weekly" && <div className="oh-days" role="group" aria-label={`Days for block ${n}`}>{DAY_NAMES.map((name, day) => <button key={name} type="button" aria-pressed={(block.days || []).includes(day)} onClick={() => { const days = block.days || []; set({ days: days.includes(day) ? days.filter(d => d !== day) : [...days, day].sort() }); }}>{name}</button>)}</div>}
+    {monthly && <div className="oh-block-when">
+      {block.cadence === "quarterly" && <label>Month of the quarter<select value={block.quarterMonth || 1} onChange={e => set({ quarterMonth: Number(e.target.value) })}><option value={1}>1st (Jan, Apr, Jul, Oct)</option><option value={2}>2nd (Feb, May, Aug, Nov)</option><option value={3}>3rd (Mar, Jun, Sep, Dec)</option></select></label>}
+      <label>On<select value={byDay ? "day" : "weekday"} onChange={e => (e.target.value === "day" ? set({ monthDay: 1, nthWeek: undefined, weekday: undefined }) : set({ monthDay: undefined, nthWeek: 1, weekday: 0 }))}><option value="weekday">A weekday</option><option value="day">A day of the month</option></select></label>
+      {byDay ? <label>Day <small>31 is the last day</small><DraftField type="number" min={1} max={31} aria-label={`Day of the month for block ${n}`} value={block.monthDay} format={v => String(v ?? "")} parse={text => Math.min(31, Math.max(1, Math.round(Number(text)) || 1))} onCommit={monthDay => set({ monthDay })} /></label>
+        : <><label>Which<select value={block.nthWeek} onChange={e => set({ nthWeek: Number(e.target.value) })}>{ORDINALS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}</select></label>
+          <label>Weekday<select value={block.weekday} onChange={e => set({ weekday: Number(e.target.value) })}>{LONG_DAYS.map((name, day) => <option key={name} value={day}>{name}</option>)}</select></label></>}
+    </div>}
+    <label>Keywords <small>Tickets that mention these move up while this block is on. Separate with commas.</small><DraftField maxLength={500} value={block.keywords} format={keywordsText} parse={parseKeywords} onCommit={keywords => set({ keywords })} /></label>
+  </div>;
+}
+
+// The work schedule: named blocks that repeat, each with a focus workers favor while it's on.
+function ScheduleEditor({ model, ctx, suggested }) {
+  const saved = model.config.workSchedule?.blocks || [];
+  const template = model.organization.diagnostics?.schedule?.template || [];
+  const hours = model.config.operatingHours || { mode: "always", timezone: "UTC", windows: [], atClose: "stop" };
+  const [blocks, setBlocks] = useState(() => structuredClone(suggested && !saved.length ? template : saved));
+  // With no schedule and no working hours yet, start from this computer's time zone.
+  const [zone, setZone] = useState(() => (!saved.length && hours.mode !== "scheduled" ? localZone() : hours.timezone || "UTC"));
+  const [openRow, setOpenRow] = useState(suggested ? null : saved.length ? null : 0);
+  const problem = scheduleProblem(blocks) || (zone.trim() ? "" : "Choose a time zone.");
+  const change = (index, block) => setBlocks(current => current.map((b, i) => (i === index ? block : b)));
+  function add() {
+    const block = { id: blockId("New block", blocks.map(b => b.id)), label: "New block", focus: "", cadence: "daily", start: "09:00", end: "12:00", keywords: [] };
+    setBlocks(current => [...current, block]);
+    setOpenRow(blocks.length);
+  }
+  async function save(event) {
+    event.preventDefault();
+    const taken = [];
+    const clean = blocks.map(block => { const id = block.id && !taken.includes(block.id) ? block.id : blockId(block.label, taken); taken.push(id); return cleanBlock({ ...block, id }); });
+    const item = { workSchedule: { blocks: clean } };
+    if (zone !== (hours.timezone || "UTC")) item.operatingHours = { ...hours, timezone: zone };
+    const result = await ctx.onAct("plan_save", { kind: "operations", item, expectedRevision: model.organization.revision }, clean.length ? `Work schedule saved: ${plural(clean.length, "block")}` : "Work schedule cleared");
+    if (result) ctx.close();
+  }
+  return <form className="oh-form oh-schedule-form" onSubmit={save}>
+    <label>Time zone <small>Shared with working hours</small><input list="oh-zones" value={zone} onChange={e => setZone(e.target.value)} required /><datalist id="oh-zones">{zones().map(name => <option key={name} value={name} />)}</datalist></label>
+    {hours.mode === "scheduled" && zone !== hours.timezone && <p className="oh-warn-line"><AlertTriangle size={14} />Working hours move to this time zone too.</p>}
+    <div className="oh-block-list">
+      {blocks.map((block, index) => { const issue = blockProblem(block); return <div className={`oh-block-row ${openRow === index ? "open" : ""}`} key={index}>
+        <div className="oh-block-summary">
+          <button className="oh-block-toggle" type="button" aria-expanded={openRow === index} onClick={() => setOpenRow(openRow === index ? null : index)}>
+            {openRow === index ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<i className={`oh-b${index % 6}`} /><b>{block.label || "Unnamed block"}</b><span className="oh-muted">{describeBlock(block)}</span>{issue && <AlertTriangle size={13} aria-label="Needs attention" />}
+          </button>
+          <button className="oh-icon-btn" type="button" aria-label={`Remove ${block.label || `block ${index + 1}`}`} onClick={() => { setBlocks(current => current.filter((_, i) => i !== index)); setOpenRow(null); }}><X size={12} /></button>
+        </div>
+        {openRow === index && <BlockFields block={block} index={index} onChange={next => change(index, next)} />}
+      </div>; })}
+      {!blocks.length && <p className="oh-muted">No blocks. Workers use their usual priorities at any hour.</p>}
+    </div>
+    <div className="oh-schedule-tools">
+      <button className="oh-btn small ghost" type="button" disabled={blocks.length >= 40} onClick={add}><Plus size={14} />Add block</button>
+      {template.length > 0 && <button className="oh-btn small ghost" type="button" onClick={() => { setBlocks(structuredClone(template)); setOpenRow(null); }}>{blocks.length ? "Replace with the suggested schedule" : "Use the suggested schedule"}</button>}
+    </div>
+    <small className="oh-faint">When blocks overlap, the one that comes round less often wins: quarterly, then monthly, weekly and daily. With the same cadence, the shorter block wins, so a one-hour release at midnight beats overnight gardening. A block change never stops running work; the next ticket follows the new block.</small>
+    {problem && <p className="oh-warn-line" role="alert"><AlertTriangle size={14} />{problem}</p>}
+    <div className="oh-form-actions"><button className="oh-btn primary" type="submit" disabled={ctx.busy || Boolean(problem)}>Save schedule</button><button className="oh-btn" type="button" onClick={ctx.close}>Cancel</button></div>
   </form>;
 }
 
@@ -473,35 +572,33 @@ function WorkerEditor({ model, worker, ctx, isNew }) {
   const { capabilities, loading, refresh } = useProviderCapabilities();
   const base = worker || { id: crypto.randomUUID(), name: "", title: "", role: "", reportsTo: null, provider: "codex", model: "cli-default", effort: null, permissionMode: providerPermissionDefault("codex"), paused: true, persona: "", responsibilities: [], instructions: "", resources: { shell: true, web: false, skills: [], mcpServers: [] }, skills: [], memory: "", metadata: {}, heartbeatSeconds: 0 };
   const [draft, setDraft] = useState(() => structuredClone(base));
+  // The worker as the form last loaded it. Edits are what differs from it, and only those are
+  // saved, so a change made elsewhere meanwhile (by Rem, say) isn't undone.
+  const [opened, setOpened] = useState(() => structuredClone(base));
   const [responsibility, setResponsibility] = useState("");
   const set = values => setDraft(current => ({ ...current, ...values }));
   const fields = ["name", "title", "persona", "reportsTo", "provider", "model", "effort", "permissionMode", "paused", "responsibilities", "instructions", "ticketAccess", "heartbeatSeconds"];
-  const changed = fields.filter(key => JSON.stringify(base[key] ?? null) !== JSON.stringify(draft[key] ?? null));
+  const changed = fields.filter(key => JSON.stringify(opened[key] ?? null) !== JSON.stringify(draft[key] ?? null));
   const dirty = isNew || changed.length > 0;
+  // Without unsaved edits, the form follows the saved worker as it changes.
+  const live = JSON.stringify(fields.map(key => base[key] ?? null));
+  const [seen, setSeen] = useState(live);
+  if (!isNew && seen !== live && !changed.length) { setSeen(live); setDraft(structuredClone(base)); setOpened(structuredClone(base)); }
   const capability = capabilities.find(item => item.id === draft.provider);
   const danger = dangerousPermission(draft.permissionMode) && !dangerousPermission(base.permissionMode);
   const managers = Object.values(model.workers).filter(w => w.id !== draft.id);
   async function save() {
     const clean = { ...draft };
     delete clean.color;
-    const employees = isNew ? [...model.config.employees, clean] : model.config.employees.map(e => (e.id === clean.id ? { ...e, ...Object.fromEntries(fields.map(key => [key, clean[key]])) } : e));
+    const employees = isNew ? [...model.config.employees, clean] : model.config.employees.map(e => (e.id === clean.id ? { ...e, ...Object.fromEntries(changed.map(key => [key, clean[key]])) } : e));
     const reason = isNew ? `Added ${clean.name || "a worker"}, held until you start them` : `Updated ${clean.name}: ${changed.map(key => ({ reportsTo: "reports to", permissionMode: "permissions", paused: "hold", ticketAccess: "ticket permissions", heartbeatSeconds: "check-ins" }[key] || key)).join(", ")}`;
     const result = await ctx.onAct("configure", { config: { ...model.config, employees }, expectedRevision: model.organization.revision, reason }, `${reason}. Recorded as a new revision.`);
+    if (result && !result.needsUserConsent) setOpened(structuredClone(draft));
     if (result && isNew) ctx.replace(`worker:${clean.id}`);
   }
   async function remove() {
     // Their reports move up to their manager, so the chart stays connected.
-    const id = base.id, config = model.config;
-    const employees = config.employees.filter(e => e.id !== id).map(e => (e.reportsTo === id ? { ...e, reportsTo: base.reportsTo || null } : e));
-    const without = (item, key) => { if (item[key] !== id) return item; const copy = { ...item }; delete copy[key]; return copy; };
-    const next = {
-      ...config, employees,
-      projects: config.projects.map(item => without(item, "owner")),
-      teams: (config.teams || []).map(item => without(item, "manager")),
-      epics: (config.epics || []).map(item => (item.owner === id ? { ...item, owner: null } : item)),
-      goalRecords: (config.goalRecords || []).map(item => (item.owner === id ? { ...item, owner: null } : item)),
-      executionTargets: (config.executionTargets || []).map(item => ({ ...item, employees: item.employees.filter(e => e !== id) })).filter(item => item.employees.length),
-    };
+    const next = removeWorker(model.config, base.id);
     const result = await ctx.onAct("configure", { config: next, expectedRevision: model.organization.revision, reason: `Removed ${base.name}` }, `Removed ${base.name}. Their open tickets are blocked until you reassign them.`);
     if (result) ctx.close();
   }
@@ -520,13 +617,13 @@ function WorkerEditor({ model, worker, ctx, isNew }) {
       <label>Permissions<select value={draft.permissionMode} onChange={e => set({ permissionMode: e.target.value })}>{providerPermissionOptions(draft.provider, capability).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></label>
       {danger && <p className="oh-warn-line"><AlertTriangle size={14} />This skips the provider&apos;s sandbox or approvals. Saving asks you to confirm.</p>}
       <details className="oh-fold"><summary>Detailed instructions</summary><textarea rows={6} maxLength={100000} value={draft.instructions} onChange={e => set({ instructions: e.target.value })} aria-label="Detailed instructions" /></details>
-      <label>Check-ins <small>A short run where the worker reviews their tickets, plans work into To do and picks what to do next. Only during working hours.</small>
+      <label>Check-ins <small>When a worker with assigned projects has nothing to do, it checks in: blocked tickets first, then To do, then it proposes work that fits the current schedule block. Automatic is hourly, and slower while check-ins find nothing. Only during working hours.</small>
         <select value={draft.heartbeatSeconds || 0} onChange={e => set({ heartbeatSeconds: Number(e.target.value) })}>{checkInOptions(draft.heartbeatSeconds || 0).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <TicketAccess model={model} value={draft.ticketAccess ?? null} onChange={ticketAccess => set({ ticketAccess })} />
       <label className="oh-switch">Hold this worker<input type="checkbox" checked={draft.paused} onChange={e => set({ paused: e.target.checked })} /></label>
       <div className="oh-form-actions">{danger ? <Confirm busy={ctx.busy} className="oh-btn primary" label="Save worker" confirmLabel="Save with these permissions" danger message={`${draft.name || "This worker"} could run commands without approval.`} onConfirm={save} />
         : <button className="oh-btn primary" type="button" disabled={!dirty || ctx.busy || !draft.name.trim()} onClick={save}>{isNew ? "Add worker" : "Save worker"}</button>}
-        {isNew ? <button className="oh-btn" type="button" onClick={ctx.close}>Cancel</button> : <button className="oh-btn" type="button" disabled={!dirty} onClick={() => setDraft(structuredClone(base))}>Discard</button>}
+        {isNew ? <button className="oh-btn" type="button" onClick={ctx.close}>Cancel</button> : <button className="oh-btn" type="button" disabled={!dirty} onClick={() => { setDraft(structuredClone(base)); setOpened(structuredClone(base)); setSeen(live); }}>Discard</button>}
         {dirty && !isNew && <span className="oh-dirty">Unsaved changes</span>}
         {!isNew && <span className="oh-push"><Confirm busy={ctx.busy} danger label={<><Trash2 size={14} />Remove worker</>} confirmLabel="Remove" message={`Remove ${base.name}? ${plural(Object.values(model.tickets).filter(t => t.assignee === base.id && t.column !== "done").length, "open ticket")} will be blocked until reassigned. History is kept.`} onConfirm={remove} /></span>}</div>
     </form>
@@ -560,7 +657,7 @@ function renderSheet(model, ref, ctx) {
   if (type === "orgms") { const m = model.orgMilestones[id]; return m && { title: m.title, sub: <><span>Organization milestone</span>{m.dueAt && <span>Due {formatDate(m.dueAt)}</span>}</>, body: <OrgMilestoneSheet key={id} model={model} milestone={m} ctx={ctx} /> }; }
   if (type === "project") { const p = model.projects[id]; return p && { title: p.name, sub: <><span>Project</span>{p.workspacePath && <code>{p.workspacePath}</code>}</>, body: <ProjectSheet key={id} model={model} project={p} ctx={ctx} /> }; }
   if (type === "kb") { const k = model.knowledge[id]; return k && { title: k.title, sub: <><span className="oh-kind"><i style={{ background: `var(--k-${k.kind})` }} />{KINDS[k.kind]}</span>{k.topic && <span>{k.topic}</span>}{k.changedAt && <span className="oh-ev warn"><AlertTriangle size={12} />Changed {ago(k.changedAt)}</span>}</>, body: <KnowledgeSheet key={id} model={model} entry={k} ctx={ctx} /> }; }
-  if (type === "worker") { const w = model.workers[id]; const [state, label] = workerStatus(model, id); const runs = Object.values(model.runs).filter(r => r.employeeId === id).length; return w && { title: w.name, sub: <><Avatar model={model} id={id} /><span>{w.title || w.role}</span><Pill state={state}>{label}</Pill><span>{plural(runs, "run")}</span></>, body: <WorkerEditor key={`${id}-${model.organization.revision}`} model={model} worker={w} ctx={ctx} /> }; }
+  if (type === "worker") { const w = model.workers[id]; const [state, label] = workerStatus(model, id); const runs = Object.values(model.runs).filter(r => r.employeeId === id).length; return w && { title: w.name, sub: <><Avatar model={model} id={id} /><span>{w.title || w.role}</span><Pill state={state}>{label}</Pill><span>{plural(runs, "run")}</span></>, body: <WorkerEditor key={id} model={model} worker={w} ctx={ctx} /> }; }
   if (type === "new") {
     const [kind, context] = [id.split(":")[0], id.split(":").slice(1).join(":")];
     const forms = {
@@ -572,9 +669,10 @@ function renderSheet(model, ref, ctx) {
       kb: () => <EntryForm model={model} ctx={ctx} onDone={result => (result ? ctx.replace(`kb:${result.id}`) : ctx.close())} />,
       worker: () => <WorkerEditor model={model} ctx={ctx} isNew />,
       import: () => <ImportForm model={model} ctx={ctx} />,
-      hours: () => <HoursEditor key={model.organization.revision} model={model} ctx={ctx} />,
+      hours: () => <HoursEditor model={model} ctx={ctx} />,
+      schedule: () => <ScheduleEditor model={model} ctx={ctx} suggested={context === "suggested"} />,
     };
-    return forms[kind] && { title: entity(model, ref)?.label || "New", sub: kind === "worker" ? <span>New workers start held. Start them when they&apos;re ready.</span> : kind === "ms" ? <span>{model.projects[context]?.name}</span> : kind === "hours" ? <span>When workers may start and keep working</span> : null, body: forms[kind]() };
+    return forms[kind] && { title: entity(model, ref)?.label || "New", sub: kind === "worker" ? <span>New workers start held. Start them when they&apos;re ready.</span> : kind === "ms" ? <span>{model.projects[context]?.name}</span> : kind === "hours" ? <span>When workers may start and keep working</span> : kind === "schedule" ? <span>What workers focus on when</span> : null, body: forms[kind]() };
   }
   return null;
 }

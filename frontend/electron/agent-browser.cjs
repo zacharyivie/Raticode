@@ -1,6 +1,8 @@
 // Lets Rem drive Raticode's own browser tabs in the background. Each tab gets
 // its own DevTools session, so no debugging port is opened. Input is dispatched
 // as page events because native input would take the user's keyboard focus.
+// Firefox tabs (firefox-contents.cjs) run in a headless Firefox with no
+// window to take focus, so they get Firefox's real input instead.
 //
 // Access is granted per Rem turn. The backend asks for a capability bound to
 // one thread's owner ID while that thread's Browser switch is on, and revokes
@@ -291,6 +293,16 @@ globalThis.__raticodeAgent ||= (() => {
       receiver.dispatchEvent(new Type(type, { ...init, bubbles: !type.endsWith("enter") }));
     }
   }
+  // Where a click would land, in top-level viewport coordinates, for
+  // engines that deliver real input instead of page events.
+  function point(arg) {
+    const { covered, box: area } = locate(arg);
+    return { x: area.x + area.width / 2, y: area.y + area.height / 2, covered, box: area };
+  }
+  function focusedName() {
+    const focused = deepActive();
+    return { focused: focused === focused.ownerDocument.body ? "page" : clean(focused.localName + (focused.id ? "#" + focused.id : ""), 80) };
+  }
   function hover(arg) {
     const { receiver, x, y, covered, box: area } = locate(arg);
     enterPointer(receiver, x, y);
@@ -500,7 +512,7 @@ globalThis.__raticodeAgent ||= (() => {
     }
     return true;
   }
-  const methods = { snapshot, click, hover, type, press, select, hasText, intent, markUpload, unmarkUpload };
+  const methods = { snapshot, click, hover, type, press, select, hasText, intent, markUpload, unmarkUpload, point, focusedName };
   return (method, arg) => {
     try { return { value: methods[method](arg || {}) }; }
     catch (error) { return { error: String(error?.message || error) }; }
@@ -644,7 +656,9 @@ function createAgentBrowserController({
         case "click":
           return click(session, request);
         case "hover": {
-          const result = await inPage(session, "hover", targetArg(request));
+          const native = contentsOf(session).nativeInput;
+          const result = await inPage(session, native ? "point" : "hover", targetArg(request));
+          if (native) await native.hover(result);
           void highlight(session, result?.box);
           return withWarning(result, tabSummary(session));
         }
@@ -717,11 +731,18 @@ function createAgentBrowserController({
     await guard(session, "click", intent);
     void highlight(session, intent?.box);
     log(session, "click", intent?.label || "");
-    const result = await inPage(session, "click", {
-      ...target,
-      button: ["left", "right", "middle"].includes(request.button) ? request.button : "left",
-      clicks: request.doubleClick === true ? 2 : 1,
-    });
+    const button = ["left", "right", "middle"].includes(request.button) ? request.button : "left";
+    const clicks = request.doubleClick === true ? 2 : 1;
+    // Firefox tabs take real input at the element's centre; Raticode tabs
+    // get page events so the user's keyboard focus stays where it is.
+    const native = contentsOf(session).nativeInput;
+    let result;
+    if (native) {
+      result = await inPage(session, "point", target);
+      await native.click({ x: result.x, y: result.y, button, clicks });
+    } else {
+      result = await inPage(session, "click", { ...target, button, clicks });
+    }
     await settle(session);
     return withWarning(result, tabSummary(session));
   }
@@ -742,7 +763,9 @@ function createAgentBrowserController({
     const key = parseKey(request.key);
     if (key.key === "Enter") await guard(session, "press Enter", await inPage(session, "intent", { focused: true }));
     if (!quiet) log(session, "press", request.key);
-    const { focused } = await inPage(session, "press", key);
+    const native = contentsOf(session).nativeInput;
+    if (native) await native.press(key);
+    const { focused } = native ? await inPage(session, "focusedName") : await inPage(session, "press", key);
     await settle(session);
     return { ...tabSummary(session), focused };
   }
@@ -1047,6 +1070,8 @@ async function settle(session) {
   await delay(150);
   const deadline = Date.now() + SETTLE_TIMEOUT_MS;
   while (liveContents(session)?.isLoading() && !session.agentDialog && Date.now() < deadline) await delay(100);
+  // Firefox tabs read the title and address on request rather than live.
+  if (!session.agentDialog) await liveContents(session)?.refreshState?.();
 }
 
 async function snapshot(session) {
@@ -1229,7 +1254,11 @@ async function startAgentBrowserService(handle, capabilities = createCapabilityR
 
 // Earlier versions published a master token here; delete it if it remains.
 function removeLegacyAgentBrowserConnection(dataDir) {
-  try { fs.rmSync(path.join(dataDir, LEGACY_CONNECTION_FILE), { force: true }); } catch { /* Nothing to remove. */ }
+  try { fs.rmSync(path.join(dataDir, LEGACY_CONNECTION_FILE), { force: true }); }
+  catch (error) {
+    // `force` already ignores a missing file; anything else leaves an old access token behind.
+    console.warn(`Could not delete the old browser connection file, which holds an outdated access token (${error.code || error.name}). Delete ${LEGACY_CONNECTION_FILE} from the data folder.`);
+  }
 }
 
 module.exports = {

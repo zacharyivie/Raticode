@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000169",
+  "id": "10000000-0000-4000-8000-000000000169",
+  "sequence": 169,
+  "type": "desktop.action",
+  "payload": {
+    "op": "organizations.knowledge",
+    "params": {
+      "organization_id": "org1",
+      "action": "create",
+      "kind": "finding",
+      "title": "Login fails on Wi-Fi only",
+      "topic": "Mobile",
+      "body": "Seen from the phone."
+    }
+  }
+}

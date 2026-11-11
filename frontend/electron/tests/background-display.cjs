@@ -3,6 +3,7 @@
 // appear or take keyboard focus, and it can't add a tray icon, show a notification,
 // or start the desktop's portal or wallet services.
 // Set RATICODE_TEST_VISIBLE=1 to watch the windows instead.
+require("./test-tmp.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");

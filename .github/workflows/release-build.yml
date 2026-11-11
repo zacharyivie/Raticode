@@ -3,14 +3,21 @@ name: Prepare release packages
 on:
   workflow_call:
     inputs:
-      signed_release:
-        description: Require Windows signing and Apple signing/notarization
+      macos_signing:
+        description: Require Developer ID signing, notarization and stapling of the Mac packages
+        type: boolean
+        default: false
+      windows_signing:
+        description: Require Authenticode signing of the Windows packages
         type: boolean
         default: false
     outputs:
-      signed_release:
-        description: Signing policy used to build this candidate
-        value: ${{ jobs.credentials.outputs.signed_release }}
+      macos_signed:
+        description: Whether the Mac packages were built with the Developer ID policy
+        value: ${{ jobs.credentials.outputs.macos_signed }}
+      windows_signed:
+        description: Whether the Windows packages were built with the signing policy
+        value: ${{ jobs.credentials.outputs.windows_signed }}
 
 permissions:
   contents: read
@@ -23,43 +30,57 @@ jobs:
   credentials:
     name: Check signing configuration
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.signed_release && 'release-signing' || 'release-unsigned' }}
+    environment: ${{ (inputs.macos_signing || inputs.windows_signing) && 'release-signing' || 'release-unsigned' }}
     outputs:
-      signed_release: ${{ steps.policy.outputs.signed_release }}
+      macos_signed: ${{ steps.policy.outputs.macos_signed }}
+      windows_signed: ${{ steps.policy.outputs.windows_signed }}
     steps:
       - name: Record signing policy
         id: policy
         env:
-          SIGNED_RELEASE: ${{ inputs.signed_release }}
-        run: echo "signed_release=$SIGNED_RELEASE" >> "$GITHUB_OUTPUT"
+          MACOS_SIGNING: ${{ inputs.macos_signing }}
+          WINDOWS_SIGNING: ${{ inputs.windows_signing }}
+        run: |
+          echo "macos_signed=$MACOS_SIGNING" >> "$GITHUB_OUTPUT"
+          echo "windows_signed=$WINDOWS_SIGNING" >> "$GITHUB_OUTPUT"
+          if [ "$MACOS_SIGNING" != "true" ]; then
+            echo "::warning title=Unsigned macOS build::This run builds unsigned Mac packages. They can't be published as a release."
+          fi
+      # Only presence is checked here. The macOS job checks the certificate and Apple
+      # account themselves before it builds anything.
       - name: Check all required settings without printing values
-        if: inputs.signed_release
+        if: inputs.macos_signing || inputs.windows_signing
         env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ inputs.signed_release && vars.MACOS_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ vars.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          MACOS_SIGNING: ${{ inputs.macos_signing }}
+          WINDOWS_SIGNING: ${{ inputs.windows_signing }}
+          WINDOWS_CERTIFICATE: ${{ inputs.windows_signing && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ inputs.windows_signing && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          MACOS_CERTIFICATE: ${{ inputs.macos_signing && (secrets.MACOS_CERTIFICATE || secrets.APPLE_CERTIFICATE_P12_BASE64 || secrets.CSC_LINK) || '' }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ inputs.macos_signing && (secrets.MACOS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD || secrets.CSC_KEY_PASSWORD) || '' }}
+          APPLE_ID: ${{ inputs.macos_signing && (secrets.APPLE_ID || vars.APPLE_ID) || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.macos_signing && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
         run: |
           python - <<'PYCODE'
           import os
-          names = ('WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD',
-                   'MACOS_CERTIFICATE', 'MACOS_CERTIFICATE_PASSWORD',
-                   'APPLE_APP_SPECIFIC_PASSWORD', 'MACOS_SIGNING_IDENTITY',
-                   'APPLE_ID', 'APPLE_TEAM_ID')
-          missing = [name for name in names if not os.environ.get(name, '').strip()]
+          required = []
+          if os.environ.get('MACOS_SIGNING') == 'true':
+              required += [('MACOS_CERTIFICATE', 'APPLE_CERTIFICATE_P12_BASE64 or CSC_LINK'),
+                           ('MACOS_CERTIFICATE_PASSWORD', 'APPLE_CERTIFICATE_PASSWORD or CSC_KEY_PASSWORD'),
+                           ('APPLE_ID', None), ('APPLE_APP_SPECIFIC_PASSWORD', None)]
+          if os.environ.get('WINDOWS_SIGNING') == 'true':
+              required += [('WINDOWS_CERTIFICATE', None), ('WINDOWS_CERTIFICATE_PASSWORD', None)]
+          missing = [name + (f' (or {other})' if other else '')
+                     for name, other in required if not os.environ.get(name, '').strip()]
           if missing:
-              raise SystemExit('Missing release-signing settings: ' + ', '.join(missing))
-          print('All eight signing settings are present. Native builds will verify them.')
+              raise SystemExit('Missing release-signing secrets: ' + ', '.join(missing))
+          print(f'All {len(required)} required signing secrets are present. Native builds will verify them.')
           PYCODE
 
   build:
     name: Build ${{ matrix.name }}
     needs: [validate, credentials]
-    environment: ${{ inputs.signed_release && 'release-signing' || 'release-unsigned' }}
+    # Only a platform that signs enters the signing environment.
+    environment: ${{ (matrix.name == 'macos' && inputs.macos_signing || matrix.name == 'windows' && inputs.windows_signing) && 'release-signing' || 'release-unsigned' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -153,68 +174,95 @@ jobs:
 
       - name: Require Windows signing credentials
         env:
-          CSC_LINK: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE) || '' }}
-          CSC_KEY_PASSWORD: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_PASSWORD) || '' }}
-        if: inputs.signed_release && runner.os == 'Windows'
+          CSC_LINK: ${{ inputs.windows_signing && runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || '' }}
+          CSC_KEY_PASSWORD: ${{ inputs.windows_signing && runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+        if: inputs.windows_signing && runner.os == 'Windows'
         shell: pwsh
         run: |
           if (-not $env:CSC_LINK -or -not $env:CSC_KEY_PASSWORD) {
             throw "Release requires WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD."
           }
 
+      # The only step that sees the Apple secrets. It imports the certificate into a
+      # temporary keychain, stores notarytool's credentials there, and outputs only the
+      # identity hash, team ID and keychain path. Later steps sign through that keychain.
       - name: Prepare macOS signing keychain
+        id: macos-signing
         env:
-          CSC_LINK: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE) || '' }}
-          CSC_KEY_PASSWORD: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_PASSWORD) || '' }}
-          APPLE_ID: ${{ inputs.signed_release && runner.os == 'macOS' && vars.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.signed_release && runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ inputs.signed_release && runner.os == 'macOS' && vars.APPLE_TEAM_ID || '' }}
-          GOFER_CODESIGN_IDENTITY: ${{ inputs.signed_release && vars.MACOS_SIGNING_IDENTITY || '' }}
-        if: inputs.signed_release && runner.os == 'macOS'
-        shell: bash
-        run: scripts/prepare-macos-signing.sh
+          MACOS_CERTIFICATE: ${{ inputs.macos_signing && runner.os == 'macOS' && (secrets.MACOS_CERTIFICATE || secrets.APPLE_CERTIFICATE_P12_BASE64 || secrets.CSC_LINK) || '' }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ inputs.macos_signing && runner.os == 'macOS' && (secrets.MACOS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD || secrets.CSC_KEY_PASSWORD) || '' }}
+          APPLE_ID: ${{ inputs.macos_signing && runner.os == 'macOS' && (secrets.APPLE_ID || vars.APPLE_ID) || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.macos_signing && runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ inputs.macos_signing && runner.os == 'macOS' && (secrets.APPLE_TEAM_ID || vars.APPLE_TEAM_ID) || '' }}
+          MACOS_SIGNING_IDENTITY: ${{ inputs.macos_signing && runner.os == 'macOS' && (secrets.MACOS_SIGNING_IDENTITY || vars.MACOS_SIGNING_IDENTITY) || '' }}
+        if: inputs.macos_signing && runner.os == 'macOS'
+        run: uv run --locked python scripts/macos-release-signing.py prepare
 
       - name: Build backend
         working-directory: frontend
         env:
-          GOFER_CODESIGN_IDENTITY: ${{ inputs.signed_release && runner.os == 'macOS' && vars.MACOS_SIGNING_IDENTITY || '' }}
+          GOFER_CODESIGN_IDENTITY: ${{ steps.macos-signing.outputs.identity }}
+          GOFER_CODESIGN_ENTITLEMENTS: ${{ steps.macos-signing.outputs.identity && 'frontend/build-resources/entitlements.mac.plist' || '' }}
         run: npm run backend:build
 
       - name: Sign Windows backend before packaging
         env:
-          CSC_LINK: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE) || '' }}
-          CSC_KEY_PASSWORD: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_PASSWORD) || '' }}
-        if: inputs.signed_release && runner.os == 'Windows'
+          CSC_LINK: ${{ inputs.windows_signing && runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || '' }}
+          CSC_KEY_PASSWORD: ${{ inputs.windows_signing && runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+        if: inputs.windows_signing && runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/sign-windows-backend.ps1
+
+      # electron-builder skips a missing extraResources file without failing, so a Mac
+      # package built without this step has no dictation helper.
+      - name: Build macOS speech helper
+        if: runner.os == 'macOS'
+        run: node scripts/build-macos-speech-helper.cjs --require
 
       - name: Build Electron packages
         working-directory: frontend
         shell: bash
         env:
-          CSC_LINK: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE) || '' }}
-          CSC_KEY_PASSWORD: ${{ inputs.signed_release && (runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_PASSWORD) || '' }}
-          APPLE_ID: ${{ inputs.signed_release && runner.os == 'macOS' && vars.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.signed_release && runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ inputs.signed_release && runner.os == 'macOS' && vars.APPLE_TEAM_ID || '' }}
-          SIGNED_RELEASE: ${{ inputs.signed_release }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.signed_release }}
+          CSC_LINK: ${{ inputs.windows_signing && runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE || '' }}
+          CSC_KEY_PASSWORD: ${{ inputs.windows_signing && runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          # electron-builder signs with the identity in the temporary keychain and
+          # notarizes and staples the app through notarytool's stored profile.
+          CSC_NAME: ${{ steps.macos-signing.outputs.identity }}
+          CSC_KEYCHAIN: ${{ steps.macos-signing.outputs.keychain }}
+          APPLE_KEYCHAIN: ${{ steps.macos-signing.outputs.keychain }}
+          APPLE_KEYCHAIN_PROFILE: ${{ steps.macos-signing.outputs.notary-profile }}
+          MACOS_SIGNING: ${{ inputs.macos_signing }}
+          WINDOWS_SIGNING: ${{ inputs.windows_signing }}
         run: |
-          # Empty CSC_LINK is treated as a file path by electron-builder.
-          if [ "$SIGNED_RELEASE" != "true" ] || [ "$RUNNER_OS" = "Linux" ]; then
-            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
-          fi
+          # electron-builder reads an empty CSC_LINK as a file path, so drop empty values.
+          for name in CSC_LINK CSC_KEY_PASSWORD CSC_NAME CSC_KEYCHAIN APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE; do
+            [ -n "${!name:-}" ] || unset "$name"
+          done
+          # Notarization uses only the keychain profile; never the Apple ID variables.
+          unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER
           npm run build
-          signing_args=(--config.extraMetadata.raticodeReleaseSigning=unsigned)
-          if [ "$SIGNED_RELEASE" = "true" ] && [ "$RUNNER_OS" != "Linux" ]; then
+          case "$RUNNER_OS" in
+            macOS) signed="$MACOS_SIGNING" ;;
+            Windows) signed="$WINDOWS_SIGNING" ;;
+            *) signed=false ;;
+          esac
+          if [ "$signed" = "true" ]; then
+            export CSC_IDENTITY_AUTO_DISCOVERY=true
             signing_args=(--config.forceCodeSigning=true --config.extraMetadata.raticodeReleaseSigning=signed)
             if [ "$RUNNER_OS" = "macOS" ]; then
-              signing_args+=(--config.mac.notarize=true --config.dmg.sign=true)
+              if [ -z "${CSC_NAME:-}" ] || [ -z "${CSC_KEYCHAIN:-}" ] || [ -z "${APPLE_KEYCHAIN_PROFILE:-}" ]; then
+                echo "::error::Signed macOS build has no prepared signing keychain." >&2
+                exit 1
+              fi
+              # The DMG is signed with a secure timestamp, notarized and stapled afterwards.
+              signing_args+=(--config.mac.hardenedRuntime=true --config.mac.notarize=true --config.dmg.sign=false)
             fi
           else
+            unset CSC_LINK CSC_KEY_PASSWORD CSC_NAME CSC_KEYCHAIN APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE
             export CSC_IDENTITY_AUTO_DISCOVERY=false
-            signing_args+=(--config.forceCodeSigning=false)
+            signing_args=(--config.forceCodeSigning=false --config.extraMetadata.raticodeReleaseSigning=unsigned)
             if [ "$RUNNER_OS" = "macOS" ]; then
+              echo "::warning title=Unsigned macOS build::Building an unsigned, ad-hoc signed Mac app. It is not notarized and can't be published."
               # Apple Silicon still needs an ad-hoc signature to run locally.
               signing_args+=(--config.mac.identity=- --config.mac.notarize=false --config.dmg.sign=false)
             fi
@@ -224,13 +272,6 @@ jobs:
       - name: Test native terminal and Electron security on packaged runtime version
         working-directory: frontend
         run: npm run test:platform
-
-      - name: Delete temporary macOS signing keychain
-        if: always() && inputs.signed_release && runner.os == 'macOS'
-        shell: bash
-        run: |
-          security delete-keychain "$RUNNER_TEMP/raticode-signing.keychain-db" || true
-          rm -f "$RUNNER_TEMP/raticode-signing.p12"
 
       - name: Copy Linux CLI artifact
         if: runner.os == 'Linux'
@@ -263,23 +304,32 @@ jobs:
           chmod +x "frontend/release/raticode-cli-macos-${artifact_arch}"
 
       - name: Verify Windows release signatures
-        if: inputs.signed_release && runner.os == 'Windows'
+        if: inputs.windows_signing && runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/verify-windows-release.ps1
 
+      # Checks the app and its nested backend and speech helper, then notarizes and
+      # staples the DMG, rebuilds its blockmap and updater entry, and notarizes the CLI.
       - name: Verify macOS signatures and notarization
         env:
-          APPLE_ID: ${{ inputs.signed_release && runner.os == 'macOS' && vars.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.signed_release && runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ inputs.signed_release && runner.os == 'macOS' && vars.APPLE_TEAM_ID || '' }}
-        if: inputs.signed_release && runner.os == 'macOS'
-        shell: bash
-        run: scripts/verify-macos-release.sh
+          RATICODE_IDENTITY: ${{ steps.macos-signing.outputs.identity }}
+          RATICODE_TEAM_ID: ${{ steps.macos-signing.outputs.team-id }}
+          RATICODE_KEYCHAIN: ${{ steps.macos-signing.outputs.keychain }}
+          RATICODE_NOTARY_PROFILE: ${{ steps.macos-signing.outputs.notary-profile }}
+        if: inputs.macos_signing && runner.os == 'macOS'
+        run: uv run --locked python scripts/macos-release-signing.py verify
+
+      - name: Delete temporary macOS signing keychain
+        if: always() && inputs.macos_signing && runner.os == 'macOS'
+        run: python3 scripts/macos-release-signing.py cleanup
 
       - name: Verify final updater hashes
         run: node scripts/verify-update-metadata.cjs
 
       - name: Smoke-test final distributions
+        env:
+          RATICODE_MACOS_SIGNING: ${{ inputs.macos_signing && 'developer-id' || 'unsigned' }}
+          RATICODE_MACOS_TEAM_ID: ${{ steps.macos-signing.outputs.team-id }}
         run: uv run --locked python scripts/test-release-packages.py
 
       - name: Generate Linux checksums

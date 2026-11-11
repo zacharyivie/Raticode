@@ -1,0 +1,3 @@
+#!/bin/sh
+# Start the Raticode desktop app that raticode-bin installs under /opt/raticode.
+exec /opt/raticode/gofer-flow "$@"

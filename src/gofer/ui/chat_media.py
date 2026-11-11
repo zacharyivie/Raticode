@@ -7,16 +7,22 @@ import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 import wave
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from gofer.ui import system_speech
@@ -25,6 +31,9 @@ from gofer.utils.atomic_output import (
     open_binary_input,
     unlink_without_links,
 )
+from gofer.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 CHAT_ATTACHMENT_MAX_COUNT = 5
 CHAT_ATTACHMENT_MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -68,7 +77,27 @@ VOSK_MODEL_FILES = {
 SYSTEM_ENGINE = "system"
 OFFLINE_ENGINE = "offline"
 OFFLINE_ENGINE_NAME = "Raticode's offline speech model"
-OFFLINE_SWITCH = "You can choose Raticode's offline speech model in Settings > Devices."
+OFFLINE_SWITCH = "You can download Raticode's offline speech model in Settings > Devices."
+OFFLINE_MODEL_MISSING = (
+    f"{OFFLINE_ENGINE_NAME} isn't downloaded yet. Download it (about "
+    f"{VOSK_MODEL_DOWNLOAD_MB} MB) in Settings > Devices > Speech recognition."
+)
+OFFLINE_MODEL_DAMAGED = (
+    f"{OFFLINE_ENGINE_NAME} is damaged or out of date. Download it again in "
+    "Settings > Devices > Speech recognition."
+)
+# The Mac's own trust store: Apple's roots, and the System keychain, where an administrator
+# or a device-management profile installs a company's root certificate. The frozen
+# backend's OpenSSL can't see either, so they are read with Apple's `security` tool.
+MACOS_SECURITY_TOOL = "/usr/bin/security"
+MACOS_KEYCHAINS = (
+    "/System/Library/Keychains/SystemRootCertificates.keychain",
+    "/Library/Keychains/System.keychain",
+)
+MACOS_KEYCHAIN_TIMEOUT_SECONDS = 15
+_PEM_CERTIFICATE = re.compile(
+    r"-----BEGIN CERTIFICATE-----\s.+?-----END CERTIFICATE-----", re.DOTALL
+)
 _SAFE_PART = re.compile(r"[^A-Za-z0-9_.-]+")
 _vosk_model: Any | None = None
 _vosk_model_path: Path | None = None
@@ -88,10 +117,44 @@ class _TranscriptionSession:
     data_dir: Path | None = None
     engine: str = OFFLINE_ENGINE
     notice: str = ""
+    # For the log only: how much audio arrived, never the audio or the words.
+    started_at: float = field(default_factory=time.monotonic)
+    audio_bytes: int = 0
+    chunks: int = 0
 
 
 class ChatMediaError(ValueError):
     pass
+
+
+@dataclass
+class _ModelDownload:
+    """The offline model's download, started from Settings > Devices and run in the background."""
+
+    model_path: Path
+    # starting, downloading, installing (checksum, unpacking, checking), installed or failed.
+    state: str = "starting"
+    received: int = 0
+    total: int = 0
+    error: str = ""
+
+    @property
+    def active(self) -> bool:
+        return self.state in {"starting", "downloading", "installing"}
+
+    def view(self) -> dict[str, Any]:
+        view: dict[str, Any] = {
+            "state": self.state,
+            "receivedBytes": self.received,
+            "totalBytes": self.total,
+        }
+        if self.error:
+            view["error"] = self.error
+        return view
+
+
+_model_download: _ModelDownload | None = None
+_model_download_lock = threading.Lock()
 
 
 def store_chat_attachments(
@@ -262,6 +325,7 @@ def transcribe_chat_audio(
     except ChatMediaError:
         raise
     except Exception as exc:  # noqa: BLE001
+        log.warning("Local transcription failed", exc_info=True)
         raise ChatMediaError(f"Local transcription failed: {exc}") from exc
     if not text:
         raise ChatMediaError(
@@ -283,15 +347,22 @@ def start_chat_transcription(
     """
     speech: system_speech.SystemSpeechSession | None = None
     notice = ""
+    # Why the OS recognizer wasn't used, kept for the error if the offline model fails too.
+    skipped = ""
     if engine != OFFLINE_ENGINE:
         found = system_speech.system_engine()
         if found.present:
             try:
                 speech = system_speech.SystemSpeechSession(found)
             except (OSError, ValueError) as exc:
-                notice = _offline_notice(f"{found.name} couldn't start: {exc}")
+                skipped = f"{found.name} couldn't start: {exc}"
         elif found.id:
-            notice = _offline_notice(found.reason)
+            skipped = found.reason
+            log.warning("Dictation can't use %s: %s (%s)", found.name, found.reason, found.detail)
+        if skipped:
+            notice = _offline_notice(skipped)
+    else:
+        log.info("Dictation uses %s, as chosen in Settings", OFFLINE_ENGINE_NAME)
     if speech is not None:
         session = _TranscriptionSession(
             recognizer=None,
@@ -301,8 +372,14 @@ def start_chat_transcription(
         )
         name = speech.engine.name
     else:
+        try:
+            recognizer = _new_vosk_recognizer(data_dir)
+        except ChatMediaError as exc:
+            log.warning("Dictation couldn't start %s: %s", OFFLINE_ENGINE_NAME, exc)
+            # Both recognizers failed; the first reason is usually the one to fix.
+            raise ChatMediaError(f"{skipped.rstrip('.')}. {exc}" if skipped else str(exc)) from exc
         session = _TranscriptionSession(
-            recognizer=_new_vosk_recognizer(data_dir),
+            recognizer=recognizer,
             data_dir=data_dir,
             notice=notice,
         )
@@ -317,6 +394,8 @@ def start_chat_transcription(
             )
             _close_session(_transcription_sessions.pop(oldest_id, None))
         _transcription_sessions[session_id] = session
+        open_sessions = len(_transcription_sessions)
+    log.info("Dictation started with %s (%d open)", name, open_sessions)
     result = {"sessionId": session_id, "engine": session.engine, "engineName": name}
     if notice:
         result["notice"] = notice
@@ -330,6 +409,8 @@ def stream_chat_transcription(payload: dict[str, Any]) -> dict[str, str]:
         raise ChatMediaError("The transcription audio chunk is not valid 16-bit PCM.")
     with session.lock:
         session.updated_at = time.monotonic()
+        session.audio_bytes += len(pcm)
+        session.chunks += 1
         speech = session.speech
         if speech is not None and not speech.failure:
             speech.push(pcm)
@@ -349,47 +430,73 @@ def finish_chat_transcription(payload: dict[str, Any]) -> dict[str, str]:
     with _transcription_sessions_lock:
         session = _transcription_sessions.pop(session_id, None)
     if session is None:
+        log.warning("Dictation finished after its session had expired or was replaced")
         raise ChatMediaError("The transcription session expired. Start recording again.")
     with session.lock:
-        speech = session.speech
-        text = ""
-        if speech is not None and not speech.failure:
-            text = speech.finish()
-            if speech.failure and text:
-                # It stopped at the very end; the words it heard still count.
-                session.notice = f"{speech.failure} The words heard before it stopped are kept."
-                speech = None
-            elif not speech.failure:
-                speech = None
-        if speech is not None:
-            try:
-                _fall_back_to_offline(session)
-            except ChatMediaError as exc:
-                # No offline model to carry on with: the words already heard still count.
-                text = _combined_transcription(session.committed)
-                if not text:
-                    raise
-                session.notice = f"{exc} The words heard before it stopped are kept."
-        if session.recognizer is not None:
-            final = _vosk_result_text(session.recognizer.FinalResult())
-            if final:
-                session.committed.append(final)
+        try:
+            return _finish_session(session)
+        except ChatMediaError as exc:
+            log.warning("Dictation ended without words: %s (%s)", exc, _session_summary(session))
+            raise
+
+
+def _finish_session(session: _TranscriptionSession) -> dict[str, str]:
+    speech = session.speech
+    text = ""
+    if speech is not None and not speech.failure:
+        text = speech.finish()
+        if speech.failure and text:
+            # It stopped at the very end; the words it heard still count.
+            session.notice = f"{speech.failure} The words heard before it stopped are kept."
+            speech = None
+        elif not speech.failure:
+            speech = None
+    if speech is not None:
+        try:
+            _fall_back_to_offline(session)
+        except ChatMediaError as exc:
+            # No offline model to carry on with: the words already heard still count.
             text = _combined_transcription(session.committed)
+            if not text:
+                raise
+            session.notice = f"{exc} The words heard before it stopped are kept."
+    if session.recognizer is not None:
+        final = _vosk_result_text(session.recognizer.FinalResult())
+        if final:
+            session.committed.append(final)
+        text = _combined_transcription(session.committed)
     if not text:
         raise ChatMediaError(
             "No speech was detected. Test the microphone in Settings > Devices, "
             "then speak closer to the selected input."
         )
+    log.info("Dictation finished (%s)", _session_summary(session))
     result = {"text": text}
     if session.notice:
         result["notice"] = session.notice
     return result
 
 
+def _session_summary(session: _TranscriptionSession) -> str:
+    seconds = session.audio_bytes / 32_000
+    return (
+        f"{_engine_name(session)}, {seconds:.1f} s of audio in {session.chunks} chunks "
+        f"over {time.monotonic() - session.started_at:.1f} s"
+    )
+
+
+def _engine_name(session: _TranscriptionSession) -> str:
+    if session.speech is not None:
+        return session.speech.engine.name
+    return OFFLINE_ENGINE_NAME if session.recognizer is not None else "no recognizer"
+
+
 def cancel_chat_transcription(payload: dict[str, Any]) -> dict[str, bool]:
     session_id = _transcription_session_id(payload)
     with _transcription_sessions_lock:
         session = _transcription_sessions.pop(session_id, None)
+    if session is not None:
+        log.info("Dictation cancelled (%s)", _session_summary(session))
     _close_session(session)
     return {"cancelled": session is not None}
 
@@ -398,14 +505,79 @@ def transcription_engines(*, data_dir: Path, refresh: bool = False) -> dict[str,
     """What Settings > Devices shows: the OS recognizer's state and the offline model's."""
     found = system_speech.system_engine()
     status = system_speech.check_system_engine(found, refresh=refresh)
-    return {
-        "system": status,
-        "offline": {
-            "name": OFFLINE_ENGINE_NAME,
-            "installed": _vosk_model_present(data_dir),
-            "downloadMb": VOSK_MODEL_DOWNLOAD_MB,
-        },
+    return {"system": status, "offline": offline_model_status(data_dir=data_dir)}
+
+
+def offline_model_status(*, data_dir: Path) -> dict[str, Any]:
+    """Whether the offline model is installed, and how its download is going if one ran."""
+    status: dict[str, Any] = {
+        "name": OFFLINE_ENGINE_NAME,
+        "installed": _vosk_model_present(data_dir),
+        "downloadMb": VOSK_MODEL_DOWNLOAD_MB,
     }
+    job = _download_for(_vosk_model_dir(data_dir))
+    if job is not None and (job.active or (job.state == "failed" and not status["installed"])):
+        status["download"] = job.view()
+    return status
+
+
+def start_offline_model_download(*, data_dir: Path) -> dict[str, Any]:
+    """Downloads and installs the offline model in the background; the user asked for it.
+
+    Only one download runs at a time. Its progress is read with offline_model_status.
+    """
+    global _model_download
+    model_path = _vosk_model_dir(data_dir)
+    with _model_download_lock:
+        current = _model_download
+        if current is not None and current.active and current.model_path == model_path:
+            busy = True
+        else:
+            busy = False
+            job = _ModelDownload(model_path)
+            _model_download = job
+    if busy:
+        return offline_model_status(data_dir=data_dir)
+    log.info("Downloading %s, as asked in Settings > Devices", OFFLINE_ENGINE_NAME)
+    threading.Thread(
+        target=_run_model_download, args=(job,), name="offline-speech-model", daemon=True
+    ).start()
+    return offline_model_status(data_dir=data_dir)
+
+
+def _run_model_download(job: _ModelDownload) -> None:
+    def progress(state: str, received: int, total: int) -> None:
+        with _model_download_lock:
+            job.state, job.received, job.total = state, received, total
+
+    try:
+        _ensure_vosk_model(job.model_path, progress=progress)
+    except ChatMediaError as exc:
+        with _model_download_lock:
+            job.state, job.error = "failed", str(exc)
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("The offline speech model download stopped unexpectedly")
+        with _model_download_lock:
+            job.state = "failed"
+            job.error = "The local speech model could not be installed. Try again."
+        return
+    with _model_download_lock:
+        job.state = "installed"
+
+
+def _download_for(model_path: Path) -> _ModelDownload | None:
+    with _model_download_lock:
+        job = _model_download
+        if job is None or job.model_path != model_path:
+            return None
+        return _ModelDownload(job.model_path, job.state, job.received, job.total, job.error)
+
+
+def _vosk_model_dir(data_dir: Path) -> Path:
+    # macOS data roots can pass through /var -> /private/var. Canonicalize
+    # the trusted root, while preserving link checks below it.
+    return data_dir.resolve() / "speech-models" / VOSK_MODEL_NAME
 
 
 def _offline_notice(reason: str) -> str:
@@ -434,6 +606,12 @@ def _fall_back_to_offline(session: _TranscriptionSession) -> None:
     if speech is None:
         return
     reason = speech.failure or f"{speech.engine.name} stopped."
+    log.warning(
+        "%s stopped during dictation (%s): %s",
+        speech.engine.name,
+        speech.failure_code or "no code",
+        reason,
+    )
     heard = speech.text()
     replay = speech.replay()
     speech.close()
@@ -442,11 +620,18 @@ def _fall_back_to_offline(session: _TranscriptionSession) -> None:
         session.committed.append(heard)
     data_dir = session.data_dir
     if data_dir is None or not _vosk_model_present(data_dir):
+        log.warning("%s isn't installed, so dictation can't carry on", OFFLINE_ENGINE_NAME)
         raise ChatMediaError(f"{reason} {OFFLINE_SWITCH}")
     try:
         session.recognizer = _new_vosk_recognizer(data_dir)
     except ChatMediaError as exc:
+        log.warning("%s couldn't take over: %s", OFFLINE_ENGINE_NAME, exc)
         raise ChatMediaError(f"{reason} {exc}") from exc
+    log.info(
+        "%s took over, replaying %.1f s of audio heard before the first recognizer was ready",
+        OFFLINE_ENGINE_NAME,
+        sum(map(len, replay)) / 32_000,
+    )
     session.engine = OFFLINE_ENGINE
     session.notice = _offline_notice(reason)
     for chunk in replay:
@@ -463,7 +648,7 @@ def _vosk_model_present(data_dir: Path) -> bool:
     if _vosk_model is not None:
         return True
     try:
-        model_path = data_dir.resolve() / "speech-models" / VOSK_MODEL_NAME
+        model_path = _vosk_model_dir(data_dir)
         return model_path.is_dir() and all(
             (model_path / name).is_file() for name in VOSK_MODEL_FILES
         )
@@ -495,6 +680,7 @@ def _new_vosk_recognizer(data_dir: Path) -> Any:
     try:
         from vosk import KaldiRecognizer, SetLogLevel
     except ImportError as exc:
+        log.warning("The Vosk speech library can't be imported", exc_info=True)
         raise ChatMediaError(
             "Local transcription support is not installed. Reinstall Raticode with Vosk support."
         ) from exc
@@ -504,22 +690,29 @@ def _new_vosk_recognizer(data_dir: Path) -> Any:
 
 def _load_vosk_model(data_dir: Path) -> Any:
     global _vosk_model, _vosk_model_path
-    # macOS data roots can pass through /var -> /private/var. Canonicalize
-    # the trusted root, while preserving link checks below it.
-    model_path = data_dir.resolve() / "speech-models" / VOSK_MODEL_NAME
+    model_path = _vosk_model_dir(data_dir)
     with _vosk_model_lock:
         if _vosk_model is not None and _vosk_model_path == model_path:
             return _vosk_model
-        _ensure_vosk_model(model_path)
+        _require_vosk_model(model_path)
         try:
             from vosk import Model
         except ImportError as exc:
+            log.warning("The Vosk speech library can't be imported", exc_info=True)
             raise ChatMediaError(
                 "Local transcription support is not installed. "
                 "Reinstall Raticode with Vosk support."
             ) from exc
-        _vosk_model = Model(str(model_path))
+        started = time.monotonic()
+        try:
+            _vosk_model = Model(str(model_path))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("The local speech model couldn't be loaded", exc_info=True)
+            raise ChatMediaError(
+                f"The local speech model couldn't be loaded ({type(exc).__name__})."
+            ) from exc
         _vosk_model_path = model_path
+        log.info("Loaded the local speech model in %.1f s", time.monotonic() - started)
         return _vosk_model
 
 
@@ -567,11 +760,50 @@ def _valid_vosk_model(model_path: Path) -> bool:
     return True
 
 
-def _ensure_vosk_model(model_path: Path) -> None:
+def _require_vosk_model(model_path: Path) -> None:
+    """The model must already be installed: a dictation never starts a 130 MB download.
+
+    Settings > Devices downloads it, with progress (start_offline_model_download).
+    """
     if _valid_vosk_model(model_path):
         return
+    job = _download_for(model_path)
+    if job is not None and job.active:
+        share = f", {job.received * 100 // job.total}% done" if job.total else ""
+        log.warning("Dictation can't use %s yet: it is still downloading", OFFLINE_ENGINE_NAME)
+        raise ChatMediaError(
+            f"{OFFLINE_ENGINE_NAME} is still downloading{share}. Try again when "
+            "Settings > Devices says it's installed."
+        )
+    damaged = model_path.exists()
+    log.warning(
+        "Dictation can't use %s: it is %s",
+        OFFLINE_ENGINE_NAME,
+        "damaged or out of date" if damaged else "not downloaded",
+    )
+    raise ChatMediaError(OFFLINE_MODEL_DAMAGED if damaged else OFFLINE_MODEL_MISSING)
+
+
+ModelProgress = Callable[[str, int, int], None]
+
+
+def _ensure_vosk_model(model_path: Path, *, progress: ModelProgress | None = None) -> None:
+    def report(state: str, received: int = 0, total: int = 0) -> None:
+        if progress is not None:
+            progress(state, received, total)
+
+    report("installing")
+    if _valid_vosk_model(model_path):
+        return
+    log.info(
+        "The local speech model is %s; downloading it (about %d MB)",
+        "damaged or out of date" if model_path.exists() else "not installed",
+        VOSK_MODEL_DOWNLOAD_MB,
+    )
+    started = time.monotonic()
     model_root = model_path.parent
     model_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    context, ca_source = _download_tls_context()
     try:
         # A private staging directory prevents partial downloads or extraction
         # failures from becoming a model that the native loader can consume.
@@ -579,11 +811,28 @@ def _ensure_vosk_model(model_path: Path) -> None:
             stage = Path(staging)
             archive_path = stage / "model.zip"
             request = Request(VOSK_MODEL_URL, headers={"User-Agent": "Raticode local speech/1"})
-            with urlopen(request, timeout=60) as response, archive_path.open("xb") as target:
-                _copy_limited(response, target, VOSK_MODEL_DOWNLOAD_MAX_BYTES)
+            with (
+                urlopen(request, timeout=60, context=context) as response,
+                archive_path.open("xb") as target,
+            ):
+                total = _content_length(response)
+                report("downloading", 0, total)
+                _copy_limited(
+                    response,
+                    target,
+                    VOSK_MODEL_DOWNLOAD_MAX_BYTES,
+                    progress=lambda received: report("downloading", received, total),
+                )
+            size = archive_path.stat().st_size
+            report("installing", size, total or size)
             with archive_path.open("rb") as downloaded:
                 digest = hashlib.file_digest(downloaded, "sha256").hexdigest()
             if digest != VOSK_MODEL_SHA256:
+                log.warning(
+                    "The downloaded speech model (%d bytes) has the wrong checksum, "
+                    "so it was discarded",
+                    size,
+                )
                 raise ChatMediaError("The local speech model checksum does not match.")
             with zipfile.ZipFile(archive_path) as archive:
                 _safe_extract_zip(archive, stage)
@@ -595,15 +844,160 @@ def _ensure_vosk_model(model_path: Path) -> None:
             if model_path.exists():
                 shutil.rmtree(model_path)
             extracted.replace(model_path)
-    except ChatMediaError:
+    except ChatMediaError as exc:
+        log.warning("The local speech model could not be installed: %s", exc)
         raise
     except Exception as exc:  # noqa: BLE001
-        raise ChatMediaError(
-            "The local speech model could not be installed. Check the connection and try again."
-        ) from exc
+        # Name the underlying error type explicitly: Python 3.11 tracebacks don't
+        # print the type of a URLError's reason, and the Mac certificate diagnosis
+        # depends on seeing it (for example SSLCertVerificationError).
+        reason = getattr(exc, "reason", None)
+        cause = reason if isinstance(reason, BaseException) else exc
+        log.warning(
+            "The local speech model could not be installed from %s "
+            "(certificates: %s; error: %s: %s)",
+            VOSK_MODEL_URL,
+            ca_source,
+            type(cause).__name__,
+            cause,
+            exc_info=True,
+        )
+        raise ChatMediaError(_download_failure_message(exc)) from exc
+    log.info(
+        "Installed the local speech model (%d bytes) in %.0f s",
+        size,
+        time.monotonic() - started,
+    )
 
 
-def _copy_limited(source: Any, target: Any, limit: int) -> None:
+def _download_tls_context(
+    platform: str | None = None,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[ssl.SSLContext, str]:
+    """A verifying TLS context for the model download, and where its CAs came from.
+
+    The frozen macOS backend's OpenSSL looks for certificates in the build machine's
+    Python.framework folder, which a user's Mac doesn't have, so every certificate
+    would fail to verify. On a Mac the context trusts the Mac's own keychains first,
+    which also hold a company's root certificate when its network inspects secure
+    connections, and then the certifi bundle shipped inside Raticode. Elsewhere certifi
+    is used only when OpenSSL's own locations are empty. Verification is never turned
+    off, and the downloaded archive must still match its pinned checksum.
+    """
+    platform = platform or sys.platform
+    context = ssl.create_default_context()
+    paths = ssl.get_default_verify_paths()
+    sources: list[str] = []
+    if _has_system_cas(paths):
+        sources.append(f"system ({paths.cafile or paths.capath})")
+    if platform == "darwin":
+        loaded = skipped = 0
+        for certificate in _macos_keychain_certificates(run):
+            try:
+                context.load_verify_locations(cadata=certificate)
+                loaded += 1
+            except (ssl.SSLError, ValueError):
+                skipped += 1
+        if loaded:
+            sources.append(
+                f"macOS keychains ({loaded} certificates"
+                + (f", {skipped} unreadable" if skipped else "")
+                + ")"
+            )
+    if platform == "darwin" or not sources:
+        try:
+            import certifi
+
+            bundle = certifi.where()
+            context.load_verify_locations(cafile=bundle)
+        except (ImportError, OSError, ssl.SSLError):
+            log.warning(
+                "The bundled CA certificates couldn't be loaded for downloads "
+                "(OpenSSL looks in %s and %s)",
+                paths.openssl_cafile,
+                paths.openssl_capath,
+                exc_info=True,
+            )
+        else:
+            sources.append(
+                "bundled certifi"
+                if platform == "darwin" and sources
+                else f"bundled certifi ({paths.openssl_cafile} is missing)"
+            )
+    return context, ", then ".join(sources) or "none found"
+
+
+def _macos_keychain_certificates(
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> list[str]:
+    """The certificates in the Mac's root and System keychains, as PEM blocks."""
+    found: list[str] = []
+    for keychain in MACOS_KEYCHAINS:
+        try:
+            completed = run(
+                [MACOS_SECURITY_TOOL, "find-certificate", "-a", "-p", keychain],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=MACOS_KEYCHAIN_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.warning("Couldn't read certificates from %s: %s", keychain, exc)
+            continue
+        if completed.returncode != 0:
+            log.warning(
+                "Couldn't read certificates from %s (security exited with code %s)",
+                keychain,
+                completed.returncode,
+            )
+            continue
+        found.extend(_PEM_CERTIFICATE.findall(completed.stdout or ""))
+    return found
+
+
+def _has_system_cas(paths: ssl.DefaultVerifyPaths) -> bool:
+    if paths.cafile:
+        return True
+    try:
+        return bool(paths.capath) and any(Path(paths.capath).iterdir())
+    except OSError:
+        return False
+
+
+def _download_failure_message(exc: BaseException) -> str:
+    """What went wrong with the model download, in words the user can act on."""
+    cause: BaseException = exc
+    if isinstance(exc, URLError) and not isinstance(exc, HTTPError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            cause = reason
+    prefix = "The local speech model couldn't be downloaded"
+    if isinstance(cause, ssl.SSLCertVerificationError):
+        return (
+            f"{prefix}: the download server's security certificate couldn't be verified. "
+            "A proxy or filter that inspects secure connections can cause this; "
+            "try another network."
+        )
+    if isinstance(exc, HTTPError):
+        return f"{prefix}: the server answered HTTP {exc.code}. Try again later."
+    if isinstance(cause, TimeoutError | socket.timeout):
+        return f"{prefix}: the connection timed out. Check the connection and try again."
+    if isinstance(exc, URLError) or isinstance(
+        cause, ConnectionError | socket.gaierror | ssl.SSLError
+    ):
+        return f"{prefix}. Check the connection and try again."
+    if isinstance(exc, OSError):
+        detail = exc.strerror or type(exc).__name__
+        return f"The local speech model couldn't be saved: {detail}."
+    return "The local speech model could not be installed. Check the connection and try again."
+
+
+def _copy_limited(
+    source: Any, target: Any, limit: int, *, progress: Callable[[int], None] | None = None
+) -> None:
     total = 0
     while chunk := source.read(1024 * 1024):
         total += len(chunk)
@@ -611,6 +1005,18 @@ def _copy_limited(source: Any, target: Any, limit: int) -> None:
             limit_mib = limit // (1024 * 1024)
             raise ChatMediaError(f"The local speech model download exceeded {limit_mib} MiB.")
         target.write(chunk)
+        if progress is not None:
+            progress(total)
+
+
+def _content_length(response: Any) -> int:
+    """The download's announced size, for its progress bar; 0 when the server doesn't say."""
+    headers = getattr(response, "headers", None)
+    try:
+        value = int(headers.get("Content-Length") or 0) if headers is not None else 0
+    except (TypeError, ValueError):
+        return 0
+    return value if 0 < value <= VOSK_MODEL_DOWNLOAD_MAX_BYTES else 0
 
 
 def _safe_extract_zip(archive: zipfile.ZipFile, target: Path) -> None:

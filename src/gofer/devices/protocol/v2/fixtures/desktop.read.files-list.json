@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000171",
+  "id": "10000000-0000-4000-8000-000000000171",
+  "sequence": 171,
+  "type": "desktop.read",
+  "payload": {
+    "op": "files.list",
+    "params": {
+      "project_id": "project-1",
+      "path": "docs/notes"
+    }
+  }
+}

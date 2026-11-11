@@ -3,8 +3,8 @@
 > **October 26, 2026:** The ntfy relay was removed. Phones and desktops connect
 > only over the local network. Relay, topic and quota material below is historical.
 > Invitation `relay` and topic fields remain only for wire compatibility and name the
-> unresolvable `https://relay.invalid`. See the mobile repository's
-> `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
+> unresolvable `https://relay.invalid`. See the Wi-Fi-only amendment in
+> `mobile/android/docs/mobile-desktop-v2.md`.
 
 The desktop and Android source are ready for controlled acceptance testing.
 Public release is blocked on independent security review, physical devices,

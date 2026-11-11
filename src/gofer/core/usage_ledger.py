@@ -173,9 +173,9 @@ def record_invocation(
                             json.dumps(windows),
                         ),
                     )
-    except (OSError, sqlite3.Error, ValueError, TypeError):
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         # Accounting must never fail the user's model invocation.
-        logger.warning("Could not save provider usage", exc_info=False)
+        logger.warning("Could not save provider usage (%s)", type(exc).__name__)
     from gofer.core.usage_service import notify_usage_activity
 
     notify_usage_activity(provider, data_dir)

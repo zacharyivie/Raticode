@@ -31,6 +31,9 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from gofer.utils.atomic_output import open_binary_input, scandir_without_links
+from gofer.utils.logging import RepeatingFailure, get_logger
+
+log = get_logger(__name__)
 
 MAX_NOTE_BYTES = 2 * 1024 * 1024
 MAX_NOTES = 10_000
@@ -299,6 +302,7 @@ class NoteIndex:
                 raise ValueError("The Second Brain index is closed. Retry the search.")
 
     def _run(self, database: Path) -> None:
+        failure = RepeatingFailure(log, "Second Brain search index update")
         try:
             while True:
                 self.wake.clear()
@@ -313,13 +317,17 @@ class NoteIndex:
                             # cannot leave a worker writing to an unlinked SQLite database.
                             with closing(sqlite3.connect(database, timeout=5)) as connection:
                                 self.reconcile(connection)
+                            failure.succeeded()
                         except Exception as exc:
+                            # Searches report it too, but only while one is waiting.
+                            failure.failed(exc)
                             self.error = exc
                         self.condition.notify_all()
                         delay = 0.001
                 # Release the lock and SQLite transaction between bounded passes.
                 self.wake.wait(timeout=delay)
         except Exception as exc:
+            log.exception("Second Brain search index worker stopped")
             with self.condition:
                 self.error = exc
         finally:

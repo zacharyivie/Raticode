@@ -163,37 +163,60 @@ under the test host. Windows/macOS verification remains separate.
 
 ## Release signing setup
 
-Stage preparation defaults to unsigned releases and needs no signing credentials.
-Set the repository variable `RELEASE_SIGNING=true` to opt into signed candidates,
-which require five secrets and three variables in the `release-signing` environment. See [the release guide](../releasing.md) for every setting, its purpose,
-how to obtain it, and the Windows hardware/cloud signing limitation. Both the early
-credential check and native build jobs select that environment only for signed
-preparation. Unsigned jobs use `release-unsigned` with no secrets required. Restrict
-the signing environment to the `stage` branch.
+Mac and Windows signing are separate policies. Every stage candidate of
+`zacharyivie/Raticode` signs its Mac packages with Developer ID, notarizes them and
+staples the tickets; there is no variable that turns this off. A fork has no Apple
+secrets, so it builds an explicitly unsigned candidate that publication refuses.
+Windows signing stays optional behind the repository variable
+`WINDOWS_RELEASE_SIGNING=true`. See [the release guide](../releasing.md) for every
+setting, its purpose, how to obtain and rotate it, and the Windows hardware/cloud
+signing limitation. The credential check and the build job of a platform that signs
+select the `release-signing` environment; Linux and an unsigned Windows build use
+`release-unsigned`. Restrict the signing environment to the `stage` branch.
 
 Stage builds the candidate and verifies it before uploading a draft. Its manifest
-records `signed: true` or `signed: false`, and release notes disclose the mode. Tag pushes
-only publish a matching successful candidate. Signing values are passed to scoped
-signing/packaging steps, after dependency installation. Source validation on pull
-requests needs no signing credentials.
+(schema 2) records `macos_signed` and `windows_signed`, and release notes disclose
+each. Tag pushes only publish a matching successful candidate whose Mac packages are
+signed. Pull requests run source validation only, which reads no secrets.
 
-When signing is enabled, the Windows backend is timestamped and signed before it
-enters the installer.
-Electron Builder signs the application and NSIS installer with signing required.
-Verification rejects an invalid or untimestamped installer or standalone CLI.
+Only the "Prepare macOS signing keychain" step receives the Apple secrets. It checks
+that the certificate is a Developer ID Application identity with its private key,
+re-encodes it under a random password (so the export password never reaches a
+command line), imports it into a temporary keychain with Apple's intermediate
+certificates, and stores notarytool's credentials in that keychain, which also checks
+them with Apple. Later steps get only the identity's SHA-1 hash, team ID, keychain
+path and profile name. Electron Builder never sees the Apple ID or password.
 
-For signed macOS releases, a temporary keychain supplies the PyInstaller and Electron signing
-identity. Electron Builder signs and notarizes the app. Verification checks its
-signature, stapled ticket, and Gatekeeper assessment. The outer DMG and standalone
-CLI receive their own notarization submissions and Gatekeeper checks. The DMG is
-not modified after its update hashes/blockmaps are generated; its enclosed app
-has a stapled ticket and the outer DMG has an online ticket. Accepted notarization
-receipts are release artifacts. The temporary certificate and keychain are removed.
+When Windows signing is enabled, the Windows backend is timestamped and signed before
+it enters the installer. Electron Builder signs the application and NSIS installer
+with signing required. Verification rejects an invalid or untimestamped installer or
+standalone CLI.
 
-Unsigned preparation skips signature/notarization checks and omits their receipts.
-macOS uses ad-hoc signing for local execution and manual update downloads. This
-does not establish publisher identity or notarization. Tests, dependency audits,
-checksums and provenance remain mandatory in either mode.
+For Mac releases, PyInstaller signs the backend and standalone CLI with the identity,
+the hardened runtime, a secure timestamp and the app's entitlements. Electron Builder
+then signs every Mach-O file in the app bundle, including the backend copy and the
+speech helper, with the hardened runtime and `entitlementsInherit`, and notarizes and
+staples the app. `scripts/macos-release-signing.py verify` checks the app, backend and
+speech helper for this team's Developer ID, a timestamp and the hardened runtime, the
+app's entitlements (audio input, no `get-task-allow`), `codesign --verify --deep
+--strict`, the stapled ticket and `spctl --assess`. It signs the DMG with a timestamp,
+notarizes and staples it, then rebuilds the DMG's blockmap and its `latest-mac.yml`
+entry, because stapling changes the DMG's bytes. The standalone CLI gets its own
+notarization; a bare executable can't hold a stapled ticket, so Gatekeeper checks it
+online. Accepted notarization receipts are release artifacts. The temporary keychain
+is deleted even when the build fails.
+
+The package check then repeats the signature, staple and Gatekeeper checks on the app
+extracted from the ZIP (which the updater installs) and from the DMG, checks that the
+app's updater label says `signed`, and records the signing mode and team in
+`package-tests-macos.json`. The manifest step refuses Mac evidence that doesn't match
+the policy. The final updater check compares every `latest-*.yml` hash and every
+blockmap with the final files.
+
+An unsigned Mac build (forks only) is ad-hoc signed so it runs, labelled unsigned in
+the workflow log and in its updater metadata, and checked as ad-hoc. It has no
+notarization receipts. Tests, dependency audits, checksums and provenance remain
+mandatory in either mode.
 
 The staging job attests every candidate artifact, including Linux and standalone
 CLI binaries, checksum files and dependency evidence, using GitHub's OIDC build
@@ -208,7 +231,8 @@ gh attestation verify ./ARTIFACT --repo zacharyivie/Raticode
 Repository administrators must restrict `v*` tag creation and protect release
 workflow/lockfile changes with review. Those GitHub settings are external to this checkout and require authenticated
 repository administration to change. Platform signatures and notarization still need
-the first credentialed Windows/macOS CI run; Linux checks do not prove them.
+the first credentialed Windows/macOS CI run; Linux checks and fake-tool tests do not
+prove them.
 
 ## Second Brain indexing
 

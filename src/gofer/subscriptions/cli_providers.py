@@ -788,6 +788,7 @@ class CliSubscription(Subscription):
         resources: AgentResources | None = None,
         read_only: bool = False,
         tool_free: bool = False,
+        image_paths: list[Path] | None = None,
     ) -> None:
         if provider not in ADDITIONAL_PROVIDERS:
             raise ValueError(f"Unknown CLI provider '{provider}'")
@@ -795,6 +796,8 @@ class CliSubscription(Subscription):
         self.resources = resources
         self.read_only = read_only
         self.tool_free = tool_free
+        # Images the CLI itself attaches to the prompt, read before the model runs.
+        self.image_paths = list(image_paths or [])
 
     def _build_command(
         self,
@@ -819,6 +822,7 @@ class CliSubscription(Subscription):
             model=provider_settings.model if provider_settings else None,
             effort=provider_settings.effort if provider_settings else None,
             extra_paths=extra_paths,
+            image_paths=self.image_paths,
         )
 
     def is_available(self) -> bool:

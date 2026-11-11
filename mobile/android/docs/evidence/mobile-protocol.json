@@ -1,0 +1,183 @@
+{
+  "scope": "m-protocol feasibility, not complete live pairing/sync",
+  "base_revision": "7012f3b6af5d172ec14553ba4af11c576224edb9",
+  "candidate_revision": "The commit containing this evidence; exact SHA is recorded by the managed submission.",
+  "desktop_peer_revision": "d39227d4ae607f57272097399402be9c0417ee58",
+  "desktop_tls_probe_sha256": {
+    "src/gofer/devices/tls.py": "81a533ae8cf863de2ff79bec5e581b499ed9a22f92777d3a8079bc858b65950c",
+    "scripts/device_tls_probe.py": "783f782acd4bc9bc1912113f64f0c044caceb337e58bd9a2fb8db4277d81a0df"
+  },
+  "environment": {
+    "java": "Temurin 21.0.12.1+1-LTS",
+    "gradle": "9.1.0 committed wrapper",
+    "android_api": 36,
+    "android_provider": "AndroidOpenSSL",
+    "system_image": "google_apis x86_64 revision7 API36 extension17",
+    "emulator_serial": "emulator-5582",
+    "avd": "Swarm_Mobile_Protocol_API36",
+    "tink_android": "1.23.0",
+    "python_tink": "1.16.1",
+    "managed_runner_setup": "local.properties sdk.dir and ignored .jdk21 link; portable Gradle daemon criteria require21; launcher may use system Java before starting21 daemon"
+  },
+  "checks": [
+    {
+      "command": "RATICODE_DESKTOP_PROBE_ROOT=<desktop-attempt> ./gradlew assembleDebug testDebugUnitTest lintDebug --console=plain",
+      "exit_code": 0,
+      "log": "artifacts/protocol/build-unit-lint.log"
+    },
+    {
+      "command": ".venv-contract/bin/python scripts/check-contract.py",
+      "exit_code": 0,
+      "v1_positive": 15,
+      "v1_negative": 5,
+      "v2_positive": 27,
+      "v2_negative": 14,
+      "log": "artifacts/protocol/schema.log"
+    },
+    {
+      "command": "ANDROID_SERIAL=emulator-5582 ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.package=dev.raticode.mobile.protocol.v2 -Pandroid.testInstrumentationRunnerArguments.interop=true --console=plain",
+      "exit_code": 0,
+      "result": {
+        "tests": 13,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log": "artifacts/protocol/protocol-device.log"
+    },
+    {
+      "command": "ANDROID_SERIAL=emulator-5582 ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.interop=true --console=plain",
+      "exit_code": 1,
+      "result": {
+        "tests": 29,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log": "artifacts/protocol/full-device-initial-failure.log"
+    },
+    {
+      "command": "ANDROID_SERIAL=emulator-5582 ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=dev.raticode.mobile.AppFlowTest#landscapeLeavesRoomForChatAndThreads --console=plain",
+      "exit_code": 1,
+      "result": {
+        "tests": 1,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log": "artifacts/protocol/landscape-rerun.log"
+    }
+  ],
+  "unit_suites": {
+    "TEST-dev.raticode.mobile.ProtocolTest.xml": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "TEST-dev.raticode.mobile.WorkspaceTest.xml": {
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml": {
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml": {
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml": {
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "unit_totals": {
+    "tests": 44,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "unresolved_device_failure": "Unchanged AppFlowTest landscape Back/IME: full run selected Threads after Back instead of Chat at line151; isolated rerun waited for IME at line134. No UI source edits in m-protocol. Sent coordinator recommendation to fix in m-security before user testing.",
+  "source_sha256": {
+    "app/build.gradle.kts": "d3afbc00b342d05e733cb74a7a879e784642a2f3f9c7806e2b299f24df448405",
+    "app/src/androidTest/java/dev/raticode/mobile/protocol/v2/PinnedTlsEngineDeviceTest.kt": "f3d2f811e14fd3f8adfb580e1b35ab264dc1215697568c89d064350db063f6c1",
+    "app/src/androidTest/java/dev/raticode/mobile/protocol/v2/PythonTlsDeviceTest.kt": "0d3ea11a4c9108a92499248eec8533ea8c25ba239d9e4e30649da3fb4cc620dc",
+    "app/src/androidTest/java/dev/raticode/mobile/protocol/v2/StreamingDeviceTest.kt": "8e9d252c0a5fdfb32e5b734afbf3bb68552ec5c4eb4f6198bb1d3a3e03b0faee",
+    "app/src/debug/AndroidManifest.xml": "4b03b6015a76bf01fe4833238b7fd89a85ebe25439d51fc11c998b29c9c847ca",
+    "app/src/main/java/dev/raticode/mobile/protocol/StrictJson.kt": "047149a3aaa83736f264de6e3671b2c9142f74ec5a21951a14cb25e7b561ba0f",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/MobileCapabilities.kt": "4448fc10df8e286e966e2ea052ca26bc4b9daccb9e474d9929355f164a6db6d3",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/OpaqueTlsFrames.kt": "3d07879947d29932eb877fff6ff9dbf5f5d55e88fd9aaf97d2dbd7f9a676d462",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/PinnedTlsEngine.kt": "f07169ae79ba551915e19de098adc88bdeb88b2031238c8d178bcc81595ee2cc",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/SessionBinding.kt": "e0b14c8d250ee7fb277e8239955857f50dc1e49f805a41e81c0034ab35a474bf",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/MobileCapabilitiesTest.kt": "c4af42e820498139e91aa38e5fc08aa272187b1b75ae7dffb1cf7e7f5c450f65",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/OpaqueTlsFramesTest.kt": "a0b3dd1e4dd9a0d9f4dd7b1e2851aebccd5554803a124ef184e85b04f30c2b94",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/PinnedTlsEngineTest.kt": "af56fef2e3cd7d78376cb23053b79a6f4c6a139f0364296657aca07642caaa53",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/PythonTlsInteropTest.kt": "c160da135f4c4207650ead0e93c4bbf00dead3d7e245714cf27ba70f79c50c95",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/SessionBindingTest.kt": "78858c1e8f4eb6e2a66e67b4b9cf7255c2764473d2a647f7a86b1ee9f0bb8923",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/StreamingInteropTest.kt": "fb889dca2d7a9edb4ee44b134619bdbefd836ca0830ac05f26ca74ac95852c6e",
+    "app/src/testShared/java/dev/raticode/mobile/protocol/v2/StreamingProbeChecks.kt": "93e9a4f35239e06ed07b4d227c8cb2a53796d3f34df5d567c92e7a2111bde4ec",
+    "app/src/testShared/java/dev/raticode/mobile/protocol/v2/TlsProbeChecks.kt": "f13c454bc9d77cc0a0a13052a1574521a0abe6dfe21c3ca7c206d5e6769cea69",
+    "gradle/libs.versions.toml": "d230d6036e472db71a0ea374cf01d06288dd98693af734affd521b790373c18f",
+    "scripts/check-contract.py": "a130cd2ca44e12bc36d9fd98156bcef4bfa6f3cb43c96318d4e1e86728dd7c48",
+    "scripts/probes/tls-peer-bridge.py": "d94e2b868e318f7364f650c3e9b764c2cc057672280a7d0314381ce2912ea87a",
+    "gradle.properties": "401e4d1e7e9ebfa78b24a116751571d9d5bdce7d0adcab3b3abf5f12fb112618",
+    "gradle/gradle-daemon-jvm.properties": "a8c0c4a70c41ba866876380ec8ae5fc448087ad45f7bf096c4fc323c8ae31760"
+  },
+  "contract_manifest_sha256": "f3faf4bb173b6fe4238530cf271c9fbe647025ce7587195cb1e7401ac9ba8e60",
+  "public_fixture_manifest_sha256": "ca13963601a6c63c4beaadf8d1b11c255aa2c69a44fed3388efa89db76c98e04",
+  "artifact_sha256": {
+    "artifacts/protocol/build-unit-lint.log": "982fa16f1098b4ee97b8ba5fa184ff0d27d2c8f2f5a81a838a3bc9243c8d5307",
+    "artifacts/protocol/full-device-initial-failure.log": "ef83c4abfa0960fb500b6092c0aaa837cc1009d7660e0f7cf6dfec6d51fd8ebf",
+    "artifacts/protocol/full-device-initial-failure.xml": "94e0324b0bfbcfb3695dc2fd3311e3378363012ef94bc2981bd65119b9fd056f",
+    "artifacts/protocol/landscape-rerun.log": "36fa426a4ebda4231816a31e6f4fa75f69295e55fd7eb01d770830156b9e9b4a",
+    "artifacts/protocol/landscape-rerun.xml": "c5cd331455a61039f5869e44013da377f40640a7fadb91574909dada8b0be773",
+    "artifacts/protocol/protocol-device.log": "4dfee1d5936fa33ca3a83d31ccbce9cbdc62ae1abf321ec279793e3adda56584",
+    "artifacts/protocol/protocol-device.xml": "926f865f6423df0364eea48274d795a1e7fd8afbcc0067c8d8c02f8f994d3223",
+    "artifacts/protocol/schema.log": "ec1c953e73575e86dbad78861abc3e45ae94f1922c8f5a4e8178602194a317f0",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.ProtocolTest.xml": "33bffe1ccca3a54b9a0b4beb7ebf694aeda98cf116ddcd4576c166efcf58b065",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.WorkspaceTest.xml": "104187d5fdf0887d3f31760f266a70a39b3faf121cec4be3376ca9278a866bac",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml": "741b1903fe616a3e47166fab840bfe678376be3972366c1dc2c32a4bf5559f0f",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml": "d82a06c0e46d7b2140340d216aa80d44fcd7e2a43badbbcd60af1d54d89d03e0",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml": "69af493def547d9cde12e8d3aa26bfed5ec8d3685d667eb6a487eca5c0518383",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml": "59d75bd3a3aa7e6f743bd1e049604598df3caabea475c0a9fdd8c4784d9c127d",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml": "9f7471f52234be0c84fc534ca009d0d3a2696adc41f91181bf3f67e6e4ebf809",
+    "artifacts/protocol/unit/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml": "9cd1a9539006aae17566be0eea2c38cdcc85a12f10328a3480bdc0681f63c175"
+  },
+  "gaps": [
+    "Independent cryptographic review",
+    "Physical device and API29 vendor coverage",
+    "Public ntfy and external network behavior",
+    "Enrollment/Keystore/revocation/state-machine integration belongs to pairing",
+    "Durable transport/work/files/lifecycle implementations remain later milestones",
+    "Full existing emulator suite has documented landscape failure",
+    "Security report patches assigned to m-security"
+  ],
+  "managed_initial_failure": "SDK environment absent in non-login runner; failed before compilation. Corrected with ignored SDK config and portable JDK21 daemon criteria. Managed resubmission records final result."
+}

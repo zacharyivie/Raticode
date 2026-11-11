@@ -27,24 +27,31 @@ def candidate() -> Any:
     return module
 
 
-@pytest.fixture(params=[False, True], ids=["unsigned", "signed"])
-def prepared(
-    candidate: Any, tmp_path: Path, request: pytest.FixtureRequest
-) -> tuple[Path, dict[str, Any]]:
-    signed = request.param
-    source = tmp_path / "input"
+TEAM = "ABCDE12345"
+FORK = "someone/Raticode"
+
+
+def write_candidate_input(
+    candidate: Any, source: Path, windows_signed: bool, macos_signed: bool
+) -> list[dict[str, Any]]:
+    """Platform artifacts as the build jobs upload them, with matching evidence."""
     source.mkdir()
     version = candidate.versions()
     artifacts = []
-    for index, (group, expected) in enumerate(candidate.required_files(version, signed).items(), 1):
+    groups = candidate.required_files(version, windows_signed, macos_signed)
+    for index, (group, expected) in enumerate(groups.items(), 1):
         folder = source / f"raticode-{group}"
         folder.mkdir()
         for name in expected:
             (folder / name).write_text(f"fixture {name}")
         if group != "audit-evidence":
-            (folder / f"package-tests-{group}.json").write_text(
-                json.dumps({"status": "passed", "version": version})
-            )
+            smoke: dict[str, Any] = {"status": "passed", "version": version}
+            if group == "macos":
+                smoke["signing"] = "developer-id" if macos_signed else "unsigned"
+                if macos_signed:
+                    smoke["team_id"] = TEAM
+            (folder / f"package-tests-{group}.json").write_text(json.dumps(smoke))
+        signed = windows_signed if group == "windows" else macos_signed
         if signed and group == "windows":
             (folder / "signatures-windows.json").write_text(
                 json.dumps(
@@ -70,8 +77,28 @@ def prepared(
         artifacts.append(
             {"id": index, "name": folder.name, "expired": False, "digest": f"sha256:{'b' * 64}"}
         )
+    return artifacts
+
+
+# Releases sign the Mac packages; Windows signing is optional and still unconfigured.
+@pytest.fixture(params=[(False, True), (True, True)], ids=["mac-signed", "all-signed"])
+def prepared(
+    candidate: Any, tmp_path: Path, request: pytest.FixtureRequest
+) -> tuple[Path, dict[str, Any]]:
+    windows_signed, macos_signed = request.param
+    artifacts = write_candidate_input(candidate, tmp_path / "input", windows_signed, macos_signed)
     output = tmp_path / "release"
-    manifest = candidate.create_manifest(source, output, REPO, SHA, 42, 1, artifacts, signed=signed)
+    manifest = candidate.create_manifest(
+        tmp_path / "input",
+        output,
+        REPO,
+        SHA,
+        42,
+        1,
+        artifacts,
+        windows_signed=windows_signed,
+        macos_signed=macos_signed,
+    )
     return output, manifest
 
 
@@ -95,6 +122,7 @@ class GitHub:
         # The checked-out tag commit, and each commit's file tree.
         self.head = SHA
         self.trees: dict[str, str] = {}
+        self.notes_request: dict[str, Any] | None = None
         self.run: dict[str, Any] = {
             "conclusion": "success",
             "status": "completed",
@@ -123,10 +151,14 @@ class GitHub:
         if route.startswith("git/commits/"):
             commit = route.rsplit("/", 1)[1]
             return {"sha": commit, "tree": {"sha": self.trees.get(commit, f"tree-{commit}")}}
+        if route.startswith("git/trees/"):
+            tree = route.removeprefix("git/trees/")
+            return {"tree": [{"path": "src", "sha": tree}, {"path": "mobile", "sha": "any"}]}
         if route.startswith("actions/runs/"):
             run_id = int(route.split("/")[2])
             return copy.deepcopy(self.runs.get(run_id, self.run))
         if route == "releases/generate-notes":
+            self.notes_request = payload
             return {"body": "Release notes"}
         if route == "releases":
             if method == "POST":
@@ -194,9 +226,9 @@ def test_invalid_manifest_is_rejected(candidate: Any, prepared: Any, change: str
     if change == "missing-platform":
         manifest["files"] = {k: v for k, v in manifest["files"].items() if v["group"] != "windows"}
     elif change == "signing-type":
-        manifest["signed"] = "false"
+        manifest["macos_signed"] = "true"
     elif change == "signing-mismatch":
-        manifest["signed"] = not manifest["signed"]
+        manifest["windows_signed"] = not manifest["windows_signed"]
     elif change == "path":
         manifest["files"]["../escape"] = next(iter(manifest["files"].values()))
     else:
@@ -386,24 +418,25 @@ def test_tag_without_candidate_never_creates_a_release(
     assert not github.releases
 
 
+@pytest.mark.parametrize("name", ["MACOS_SIGNED", "WINDOWS_SIGNED"])
 @pytest.mark.parametrize("value, expected", [(None, False), ("false", False), ("true", True)])
 def test_signing_policy_is_explicit(
-    candidate: Any, monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool
+    candidate: Any, monkeypatch: pytest.MonkeyPatch, name: str, value: str | None, expected: bool
 ) -> None:
     if value is None:
-        monkeypatch.delenv("SIGNED_RELEASE", raising=False)
+        monkeypatch.delenv(name, raising=False)
     else:
-        monkeypatch.setenv("SIGNED_RELEASE", value)
-    assert candidate.signing_policy() is expected
+        monkeypatch.setenv(name, value)
+    assert candidate.signing_policy(name) is expected
 
 
 @pytest.mark.parametrize("value", ["", "True", "0", "signed"])
 def test_unknown_signing_policy_is_rejected(
     candidate: Any, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    monkeypatch.setenv("SIGNED_RELEASE", value)
-    with pytest.raises(ValueError, match="SIGNED_RELEASE"):
-        candidate.signing_policy()
+    monkeypatch.setenv("MACOS_SIGNED", value)
+    with pytest.raises(ValueError, match="MACOS_SIGNED"):
+        candidate.signing_policy("MACOS_SIGNED")
 
 
 def test_release_notes_disclose_signing_and_manual_updates(
@@ -413,28 +446,33 @@ def test_release_notes_disclose_signing_and_manual_updates(
     github = GitHub(candidate, monkeypatch)
     candidate.stage(REPO, output)
     body = github.releases[0]["body"]
-    if manifest["signed"]:
-        assert "Developer ID signed and notarized" in body
+    assert "macOS packages are Developer ID signed, notarized by Apple and stapled" in body
+    # Copies from unsigned releases can't install a signed update themselves.
+    assert "download the DMG once" in body
+    if manifest["windows_signed"]:
+        assert "Windows packages are signed." in body
     else:
-        assert "no verified publisher signature" in body
-        assert "macOS updates use manual downloads" in body
+        assert "Windows packages have no verified publisher signature" in body
 
 
-def test_signed_policy_cannot_accept_unsigned_artifacts(
+def test_signed_policy_cannot_accept_differently_signed_artifacts(
     candidate: Any, prepared: Any, tmp_path: Path
 ) -> None:
     _, manifest = prepared
-    for group in ("windows", "macos"):
-        with pytest.raises(ValueError, match="missing|unexpected"):
-            candidate.verify_group(
-                tmp_path / f"input/raticode-{group}",
-                group,
-                candidate.versions(),
-                not manifest["signed"],
-            )
+    version = candidate.versions()
+    folder = tmp_path / "input/raticode-macos"
+    with pytest.raises(ValueError, match="missing|unexpected"):
+        candidate.verify_group(folder, "macos", version, macos_signed=False)
+    with pytest.raises(ValueError, match="missing|unexpected"):
+        candidate.verify_group(
+            tmp_path / "input/raticode-windows",
+            "windows",
+            version,
+            windows_signed=not manifest["windows_signed"],
+        )
 
 
-@pytest.mark.parametrize("prepared", [True], indirect=True)
+@pytest.mark.parametrize("prepared", [(True, True)], indirect=True)
 @pytest.mark.parametrize("group", ["windows", "macos"])
 def test_signed_candidate_still_rejects_failed_platform_verification(
     candidate: Any, prepared: Any, tmp_path: Path, group: str
@@ -448,14 +486,77 @@ def test_signed_candidate_still_rejects_failed_platform_verification(
         path = folder / "notarization-macos-dmg.json"
         evidence = {"status": "Invalid"}
     path.write_text(json.dumps(evidence))
+    _rewrite_checksums(candidate, folder, group)
+    with pytest.raises(ValueError, match="Invalid Windows signature|notarization not accepted"):
+        candidate.verify_group(
+            folder, group, candidate.versions(), windows_signed=True, macos_signed=True
+        )
+
+
+def _rewrite_checksums(candidate: Any, folder: Path, group: str) -> None:
     checksum = folder / f"checksums-{group}.txt"
     checksum.write_text(
         "".join(
             f"{candidate.digest(p)}  {p.name}\n" for p in sorted(folder.iterdir()) if p != checksum
         )
     )
-    with pytest.raises(ValueError, match="Invalid Windows signature|notarization not accepted"):
-        candidate.verify_group(folder, group, candidate.versions(), signed=True)
+
+
+@pytest.mark.parametrize("change", ["unsigned-app", "no-record", "no-team"])
+def test_mac_packages_must_have_been_checked_as_developer_id_signed(
+    candidate: Any, prepared: Any, tmp_path: Path, change: str
+) -> None:
+    folder = tmp_path / "input/raticode-macos"
+    path = folder / "package-tests-macos.json"
+    smoke = json.loads(path.read_text())
+    if change == "unsigned-app":
+        smoke["signing"] = "unsigned"
+    elif change == "no-record":
+        del smoke["signing"]
+    else:
+        del smoke["team_id"]
+    path.write_text(json.dumps(smoke))
+    _rewrite_checksums(candidate, folder, "macos")
+    with pytest.raises(ValueError, match="did not confirm developer-id|did not record the signing"):
+        candidate.verify_group(folder, "macos", candidate.versions(), macos_signed=True)
+
+
+def test_this_repository_cannot_prepare_unsigned_mac_packages(
+    candidate: Any, tmp_path: Path
+) -> None:
+    artifacts = write_candidate_input(candidate, tmp_path / "input", False, False)
+    with pytest.raises(ValueError, match="must be Developer ID signed"):
+        candidate.create_manifest(
+            tmp_path / "input", tmp_path / "release", REPO, SHA, 42, 1, artifacts
+        )
+    assert not (tmp_path / "release").exists()
+
+
+def test_an_unsigned_mac_candidate_is_never_published(
+    candidate: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fork's explicitly unsigned candidate stages, but no tag can publish it.
+    monkeypatch.setattr(candidate, "CANONICAL_REPOSITORY", FORK)
+    artifacts = write_candidate_input(candidate, tmp_path / "input", False, False)
+    output = tmp_path / "release"
+    manifest = candidate.create_manifest(tmp_path / "input", output, REPO, SHA, 42, 1, artifacts)
+    assert manifest["macos_signed"] is False
+    assert "macos-notarization" not in manifest["checks"]
+    github = GitHub(candidate, monkeypatch)
+    candidate.stage(REPO, output)
+    assert "macOS packages have no Developer ID signature" in github.releases[0]["body"]
+    with pytest.raises(ValueError, match="Expected exactly one verified"):
+        candidate.publish(REPO)
+    assert github.publish_calls == 0
+    assert all(r["draft"] for r in github.releases)
+
+
+def test_candidates_from_before_mac_signing_are_refused(candidate: Any, prepared: Any) -> None:
+    _, manifest = prepared
+    old = {k: v for k, v in manifest.items() if k not in {"windows_signed", "macos_signed"}}
+    old.update(schema=1, signed=False)
+    with pytest.raises(ValueError, match="schema 2"):
+        candidate.validate_manifest(old, REPO, SHA, candidate.versions())
 
 
 SQUASH = "c" * 40
@@ -480,6 +581,59 @@ def test_tag_on_the_squash_merge_into_main_publishes_the_staged_candidate(
     assert release["target_commitish"] == SQUASH
     # Provenance is still checked against the staged commit the files were built from.
     assert set(github.verified) == {SHA}
+
+
+def test_published_desktop_release_is_the_repositorys_latest(
+    candidate: Any, prepared: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, _ = prepared
+    github = GitHub(candidate, monkeypatch)
+    candidate.stage(REPO, output)
+
+    candidate.publish(REPO)
+
+    assert github.releases[0]["make_latest"] == "true"
+
+
+def test_phone_app_changes_do_not_change_the_desktop_files(
+    candidate: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trees = {
+        "root-a": [("src", "same"), ("mobile", "one")],
+        "root-b": [("src", "same"), ("mobile", "two")],
+        "root-c": [("src", "other"), ("mobile", "one")],
+    }
+
+    def api(endpoint: str) -> dict[str, Any]:
+        route = endpoint.split(f"repos/{REPO}/", 1)[1]
+        if route.startswith("git/commits/"):
+            return {"tree": {"sha": "root-" + route[-1]}}
+        entries = trees[route.removeprefix("git/trees/")]
+        return {"tree": [{"path": path, "sha": sha} for path, sha in entries]}
+
+    monkeypatch.setattr(candidate, "api", api)
+    assert candidate.same_source(REPO, "commit-a", "commit-b")
+    assert not candidate.same_source(REPO, "commit-a", "commit-c")
+
+
+def test_release_notes_start_at_the_previous_desktop_release(
+    candidate: Any, prepared: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output, _ = prepared
+    github = GitHub(candidate, monkeypatch)
+    for release_id, tag, published in (
+        (1, "v0.0.1", "2026-11-01T00:00:00Z"),
+        (2, "mobile-v9.9.9", "2026-11-02T00:00:00Z"),
+    ):
+        github.releases.append(
+            {"id": release_id, "tag_name": tag, "draft": False, "published_at": published}
+        )
+        github.files[release_id] = {}
+
+    candidate.stage(REPO, output)
+
+    assert github.notes_request is not None
+    assert github.notes_request["previous_tag_name"] == "v0.0.1"
 
 
 def test_tag_on_a_main_commit_with_different_files_is_refused(

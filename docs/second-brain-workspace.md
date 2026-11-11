@@ -1,5 +1,7 @@
 # Second Brain workspace
 
+> User documentation for this feature is on the website: [Second Brain](../website/docs/knowledge/second-brain.md). The website is the single source of truth for how Raticode works; this file is developer and design detail.
+
 The activity rail opens a persistent library of local folders. Production never loads
 sample documents or simulates operations. `secondBrainSample.js` is an explicit fixture
 for unit tests and the screenshot runner.

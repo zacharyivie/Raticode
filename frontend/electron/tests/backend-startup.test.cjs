@@ -24,7 +24,7 @@ function harness(t) {
     applicationLog: { write: (...args) => entries.push(args) },
     createBackendOutput, path, Date,
     reportPdfService: { env: { RATICODE_REPORT_PDF_URL: 'http://127.0.0.1:1234/pdf', RATICODE_REPORT_PDF_TOKEN: 'pdf-test-token' } },
-    backendPathGrants: { reset() {} },
+    backendPathGrants: { reset() {} }, loggedPathGrants: new Set(),
     process: { env: { RATICODE_EXPERIMENTAL_ORGANIZATIONS: '1' }, stderr: { write() {} } },
     featureEnv,
     // Settings turned pairing on and Organizations off.

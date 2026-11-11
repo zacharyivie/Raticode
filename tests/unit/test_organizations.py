@@ -1142,7 +1142,9 @@ def test_audit_setup_and_thread_start_failure_release_capacity(
     assert not manager._active
     task = call(manager, org, "read")["runtime"]["tasks"][0]
     assert task["claim"] is None and task["status"] == "blocked"
-    assert "start failed" in task["comments"][-1]["body"]
+    said = [c for c in task["comments"] if c.get("kind") != "status"]
+    assert "start failed" in said[-1]["body"]
+    assert task["comments"][-1]["title"] == "Blocked: task failed"
 
 
 def test_audit_followup_preserves_nondefault_workspace(manager, tmp_path) -> Any:

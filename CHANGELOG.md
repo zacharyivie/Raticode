@@ -3,6 +3,184 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used an earlier product name.
 
+## 0.5.3 - 2026-11-11
+
+Changes since the `v0.5.2` tag.
+
+### Added
+
+- The Mac app and its DMG are signed with Raticode's Apple Developer ID,
+  notarized by Apple and stapled, so they open without a Privacy & Security
+  exception. Copies of 0.5.2 or earlier can't update themselves to a signed
+  release: install this one by hand once (quit Raticode, open the DMG and drag
+  Raticode into Applications). Your projects, settings and conversations stay.
+  After that, Mac updates install themselves.
+- Workflows can start on their own with triggers: a cron schedule, file
+  changes in a folder, or a local webhook that a program on this computer
+  calls with its own token. Triggers belong to the computer, not the workflow
+  file. Set them in the workflow's **Triggers** section or with
+  `Raticode rattish triggers`, and turn on **Start at login** so they keep
+  firing after a reboot.
+- `Raticode serve --headless` runs the backend without the desktop window, on
+  this computer only, with its token in private files that are never printed.
+  `Raticode api` and the new resource commands let scripts use Rem's chat,
+  tasks and memories, the global board, workflows and their approvals,
+  Organizations, swarms, Second Brain, providers and usage, with stable JSON
+  results and exit codes.
+- Agent tokens: `Raticode tokens create` makes a limited token for a script, a
+  CI job or an agent. It can read most things, but it can't act as you: no
+  consent decisions, Rem settings, pairing, workflow runs or the owner token.
+- **Browser** is its own plugin with one tab bar for every browser. The
+  built-in browsers are now called Raticode (chromium) and Raticode (gecko),
+  and each tab names its browser.
+- **Let this phone wake this computer** in Paired devices shows **Wake
+  computer** on the phone, which sends a Wake-on-LAN signal to a Linux
+  computer on the same Wi-Fi.
+- Rem's chat sends attached screenshots and pictures to the model when it runs
+  on Claude Code (any Claude model), Codex, Cursor, Copilot or OpenCode. Before,
+  Rem only saw the file's name. When it can't see an image, it says why.
+- A Rem task can start after other tasks: say "after the audit finishes, start
+  four fix threads", or pick tasks under **Start after**. It waits, then starts
+  by itself once they all succeed, told what they found. If one fails, is
+  stopped or deleted, it goes on hold with the reason, and you can retry that
+  task or start it now. When the follow-up depends on the findings, Rem keeps
+  your request and answers it once the first task is done. Waiting tasks show
+  on the computer, the phone and the CLI (`rem tasks create --after`).
+- Organization workers run like small Rems: blocked tickets first, then To do,
+  then proposals in Backlog that fit the current focus, with an hourly check-in
+  when idle. A worker you gave projects to stays inside them for everything,
+  hands a ticket on only within its organization and with a reason, and can't
+  change organizations, swarms, workers, schedules or limits.
+- Organizations have a work schedule: named focus blocks that repeat daily,
+  weekly, monthly or quarterly, such as feature work by day, hardening in the
+  evening and a nightly release. Workers favor tickets that fit the current
+  block, and a block change never stops running work. Edit it on the computer
+  or the phone; existing organizations have none until you save one.
+- Raticode Mobile now lives in this repository under `mobile/android`, with its
+  full history. A change to the desktop and phone protocol is one commit, the
+  phone's interoperability tests run against the desktop code beside it, and
+  each app's checks and releases run only for that app's changes.
+- A Kanban board shows Rem's tickets beside every organization's. Rem can add
+  and assign tickets for itself or an organization when asked. After 15
+  minutes without a prompt Rem fills the threads you allow: to-dos first,
+  then, if you turn it on, the highest-impact backlog tickets, leaving out
+  ones that no longer make sense. Spare threads research new tickets that wait
+  in the backlog until you approve them into To do. The board shows what Rem
+  is working on, and a running report of what it added and did waits for you
+  on the desktop and phone.
+- The Kanban board has People: Rem and every organization worker appear like
+  users in ticket software, and you assign each to projects. Working on their
+  own, they stay inside those projects; with none assigned they don't work on
+  their own. Work you ask Rem for directly isn't limited.
+- The phone can browse the projects open in Raticode and open their files:
+  code and text with highlighting, Markdown, HTML and SVG previews, PDFs,
+  pictures, video and sound. It only reads, files that may hold passwords stay
+  on the computer, and files over 10 MB can't be downloaded to the phone. It is
+  part of **Use Raticode from this phone** in Paired devices.
+- Google Chrome can be the web browser (Settings > Browser). Raticode runs
+  Chrome without a window in its own profile and shows its pages in tabs; Rem
+  can use it too. Chrome's own settings, extensions, Chrome Sync and Google
+  sign-in open in a regular Chrome window on that profile.
+- Microsoft Edge can be the web browser too, on the same engine as Chrome, in
+  its own Edge profile. Microsoft and Google sign-in, Edge settings,
+  extensions, Edge Add-ons, sync and import open in a regular Edge window on
+  that profile, and the phone can switch the computer to Edge.
+
+### Changed
+
+- The landing check that holds a Rem task until its branch reaches local `dev`
+  now applies only under a worktree skill whose description says its branches
+  land on `dev`. A general worktree skill in a repository with a `dev` branch
+  no longer turns it on.
+- The website deploys to GitHub Pages from `main` once its checks pass, and
+  gains privacy and support pages.
+- The Arch packages are ready for the AUR as `raticode-bin` (desktop) and
+  `raticode-cli-bin` (command line). They carry the real 0.5.2 checksums, a 0BSD
+  package license and a real maintainer, and a release workflow can refresh and
+  push them after each release once an AUR key is added. They are not published yet.
+- A desktop app installed by pacman no longer tries to update itself. Its update
+  button says to update with pacman, for example `yay -Syu`.
+- Source control opens to History each time you open it, showing the commits
+  without waiting for the worktree list. Changes and Branches are a tab away.
+
+### Fixed
+
+- A finished Rem task no longer shows **Plan** or slips back to an earlier
+  state, on the desktop or the phone.
+- Agents running inside Raticode can no longer act with your authority through
+  the CLI or a limited token, and agent tokens can no longer read Rem's tool
+  server list, whose addresses can carry keys.
+- Webhook trigger tokens no longer have to go on the command line.
+- When a webhook or file trigger starts a workflow, its Rem prompt nodes tell
+  Rem that the text may come from someone else, so Rem doesn't start work
+  because the incoming text asks for it. The log warns when such a prompt may
+  start work.
+- Rem won't open projects in, or send files from, macOS keychains and
+  browser profiles, Windows saved credentials and browser profiles, or Edge,
+  Vivaldi and Opera profiles on Linux, as it already didn't for Chrome,
+  Firefox and SSH keys.
+- When the offline speech model can't download, the log names the error type,
+  such as a certificate failure, on every Python version.
+- Music playing in a Firefox, Chrome or Edge tab no longer stops when the tab
+  sits in the background: those tabs now say when they play sound, so they show
+  the speaker (with its mute) and stay loaded like Raticode's own tabs instead
+  of pausing after 30 minutes to free memory.
+- Rem can no longer click past Firefox's certificate warning ("Accept the Risk
+  and Continue") or its other error pages, in its own tabs or tabs you shared,
+  matching Chrome, Edge and Raticode's own tabs. You can still decide in your
+  own tab.
+
+- Clicking **File explorer** in the activity bar always brings your open files
+  and browser tabs back into view, even when it is already selected, so it's
+  the quick way back to a page from Rem's chat, Second Brain, a swarm or an
+  organization. Tabs stay open as they were, and pages aren't reloaded. Other
+  plugins still change only the sidebar.
+- Writing in one of Rem's work threads after it ended, stopped or failed, or
+  steering it while it runs, no longer adds a "Please continue with the user's
+  latest instruction." message from Rem: the worker answers your message as
+  written. The thread now labels each instruction **Rem** or **You**, on the
+  desktop and in the phone's work-thread view, and Rem can tell them apart
+  when it reads the thread. The worker still receives both as user messages.
+- Failures that used to vanish now appear in Settings > Developer: unexpected
+  errors in the desktop's API (which also now return an error instead of no
+  answer), Rem requests and worker turns that fail, phone requests to Rem,
+  Second Brain and swarm background work, generation and chat jobs, workflow
+  runs, provider CLIs that can't start, updater errors, git commands that fail
+  for reasons other than "not a repository", and startup failures shown only
+  in the error window.
+- Routine events no longer look like problems: `uv`'s startup output, path
+  access renewals, retried model replies, user mistakes in requests, terminals
+  that already closed, cancelled requests and clean page exits are info or
+  debug. Background loops log a lasting failure once and say when it recovers.
+- A damaged browser history, bookmarks, sites or downloads file is kept aside
+  instead of being overwritten with an empty one.
+- Rem's logs no longer quote the model's raw reply.
+- Organizations safeguards: workers, Rem and routines can no longer set the
+  fields Raticode keeps for itself, such as a ticket's worktree, which could
+  have given a run a writable folder outside its project. A rerun needs a new
+  review, workers can't lift or reword blocks set by you, Rem or a reviewer,
+  and work created during a run keeps that run's review rules and delegation
+  depth.
+- Rem now asks before changing the work a routine creates, changing who a
+  worker reports to, or pointing a tool server at a different command, and a
+  request to start an organization names its risky settings.
+- Organization runs that hit their time limit say so. A stop that arrives
+  just after a run finished no longer reruns it, a result the worker already
+  set survives a failing run, and reaching the monthly run limit lets running
+  work finish before pausing. Work stopped at closing time goes first when
+  hours open, and a worker's pull no longer skips a ticket's start date.
+- Routines create their tickets on time while every worker is busy or hours
+  are closed. Each worker keeps one check-in ticket instead of adding a new
+  one every time.
+- The shared repository only merges into `main`, keeps a ticket's checkout
+  while its run is still stopping, and keeps the record when finishing fails.
+- On the Organizations board, Done work dragged to Backlog reopens straight
+  into Backlog, Undo after moving a ticket to In progress works, and Review
+  work goes back through Request changes. Editing a ticket, plan item, note,
+  worker or working hours no longer overwrites changes made elsewhere, linking
+  a note keeps the plan's approval, and a removed worker's tickets can be
+  reassigned or cancelled.
+
 ## 0.5.2 - 2026-11-06
 
 Changes since the `v0.5.1` tag.

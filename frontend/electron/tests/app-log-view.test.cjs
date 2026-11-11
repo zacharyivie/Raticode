@@ -143,3 +143,19 @@ test("main.js hands backend output to the parser and asks for desktop-format log
   const preload = fs.readFileSync(path.join(__dirname, "../preload.cjs"), "utf8");
   assert.match(preload, /entries: \(options = \{\}\) => invokeDesktop\("gofer:developer-log", options\)/);
 });
+
+test("uv's routine startup output is info, while its warnings and real errors keep their level", () => {
+  const written = [];
+  const output = createBackendOutput({ write: (...args) => written.push(args) });
+  // The exact lines from a development start that used to appear as warnings.
+  output.stderr("   Building raticode @ file:///home/user/Projects/Raticode/Raticode\n      Built raticode @ file:///home/user/Projects/Raticode/Raticode\nInstalled 1 package in 7ms\n");
+  output.stderr("Resolved 120 packages in 3ms\nUninstalled 1 package in 2ms\n - raticode==0.5.1 (from file:///x)\n + raticode==0.5.2 (from file:///x)\n");
+  output.stderr("warning: `VIRTUAL_ENV=/tmp/x` does not match the project environment path `.venv`\n");
+  output.stderr("Built raticode @ file:///x\nTraceback (most recent call last):\nValueError: broken\n");
+  assert.deepEqual(written.map(([level, , , component]) => [level, component]), [
+    ["info", "uv"],
+    ["info", "uv"],
+    ["warn", "stderr"],
+    ["error", "stderr"],
+  ]);
+});

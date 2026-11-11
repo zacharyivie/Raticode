@@ -9,6 +9,7 @@ import pytest
 from gofer.ui.rem_home import RemHome
 from gofer.ui.rem_home_store import RUN_INTERNALS
 from tests.unit import test_ui_server as harness
+from tests.unit.test_rem_home import force_run
 
 
 @pytest.fixture
@@ -104,7 +105,7 @@ def test_rem_api_task_controls_and_conflicts(api):
     )
     service.tick()
     assert request("GET", f"/api/rem/runs/{run['id']}").json()["run"]["state"] == "cancelled"
-    service._update(run["id"], state="blocked")
+    force_run(service, run["id"], state="blocked")
     assert request(
         "POST", f"/api/rem/runs/{run['id']}/acknowledge", body={"request_id": "ack"}
     ).json()["run"]["acknowledged"]
@@ -352,7 +353,8 @@ def test_rem_api_retries_only_an_interrupted_review(api):
     )
     assert refused.status == 409
     # The implementation finished but its review stopped: Retry review is offered and works once.
-    service._update(
+    force_run(
+        service,
         run["id"],
         state="blocked",
         blocked_phase="verifying",
@@ -475,3 +477,134 @@ def test_rem_polls_can_send_their_version_in_a_header(api):
     assert unchanged["unchanged"] is True and "messages" not in unchanged
     # A stale version still gets the full view.
     assert "tasks" in request("GET", "/api/rem/tasks", headers={"X-Gofer-Known": "old"}).json()
+
+
+def test_a_deleted_open_project_only_stops_tasks_that_work_in_it(api):
+    """Removing a worktree that was open as a project used to stop every Rem task."""
+    _request, service = api
+    root = service.data_dir / "projects"
+    task_folder, removed = root / "repo", root / "repo-worktree"
+    task_folder.mkdir(parents=True)
+    projects = [{"root": str(task_folder)}, {"root": str(removed)}]
+    # The removed folder is skipped; the task's own folder is still checked.
+    service.authorize({"projects": projects}, {"type": "develop", "project_dir": str(task_folder)})
+    service.authorize({"projects": projects}, {})
+    with pytest.raises(ValueError, match="project folder no longer exists"):
+        service.authorize({"projects": projects}, {"type": "develop", "project_dir": str(removed)})
+    # Folders that exist but aren't canonical are still refused, including links.
+    removed.symlink_to(task_folder)
+    with pytest.raises(ValueError, match="canonical existing directories"):
+        service.authorize({"projects": projects}, {})
+    removed.unlink()
+    removed.symlink_to(root / "missing")
+    with pytest.raises(ValueError, match="canonical existing directories"):
+        service.authorize({"projects": projects}, {})
+    with pytest.raises(ValueError, match="canonical existing directories"):
+        service.authorize({"projects": [{"root": "relative/path"}]}, {})
+
+
+def test_projects_rem_opens_stay_usable_until_the_window_lists_them(
+    api, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A folder Rem opens gets the backend's own grant and is reported to the window."""
+    import gofer.ui.server as server_module
+    from gofer.ui.rem_projects import ProjectOpen
+
+    request, service = api
+    server = service.authorize.__self__  # type: ignore[attr-defined]
+    service.grant = lambda root, grant_id: server.path_grants.register(
+        root, grant_id, persistent=True
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    demo = tmp_path / "user" / "Projects" / "demo"
+    service.open_projects([ProjectOpen(path=str(demo), create=True)])
+    task = {"type": "develop", "project_dir": str(demo)}
+    service.authorize(service._current_config(), task)
+
+    # A window context without the folder keeps it, with a grant that doesn't lapse.
+    assert request("POST", "/api/rem/context", body={"provider": "codex"}).status == 200
+    later = server_module.time.monotonic() + 24 * 3600
+    monkeypatch.setattr(server_module.time, "monotonic", lambda: later)
+    service.authorize(service._current_config(), task)
+
+    first = request("GET", "/api/rem/conversation").json()
+    assert first["opened_projects"] == [{"root": str(demo), "name": "demo"}]
+    unchanged = request(
+        "GET", "/api/rem/conversation", headers={"X-Gofer-Known": first["version"]}
+    ).json()
+    assert unchanged["unchanged"] is True
+    assert unchanged["opened_projects"] == first["opened_projects"]
+
+    # The window lists it with its own grant; Rem stops reporting it.
+    window_grant = server.path_grants.register(demo)
+    context = {"provider": "codex", "projects": [{"root": str(demo), "grantId": window_grant}]}
+    assert request("POST", "/api/rem/context", body=context).status == 200
+    assert "opened_projects" not in request("GET", "/api/rem/conversation").json()
+    assert [(p["root"], p["grantId"]) for p in service._current_config()["projects"]] == [
+        (str(demo), window_grant)
+    ]
+
+
+def test_polled_runs_name_each_check_they_answer(api):
+    """Task lists leave out run recipes, so each check result carries its own description."""
+    request, service = api
+    task = request(
+        "POST",
+        "/api/rem/tasks",
+        body={
+            "request_id": "create-checks",
+            "title": "Export",
+            "type": "errand",
+            "prompt": "Export the runs",
+            "schedule": {"kind": "daily", "local_time": "09:00"},
+            "acceptance_criteria": [
+                {"description": "Rows match the filter", "authored_by": "user"},
+                {"description": "Empty lists export a header", "authored_by": "user"},
+            ],
+        },
+    ).json()["task"]
+    first, second = (c["id"] for c in task["acceptance_criteria"])
+    run = request(
+        "POST", f"/api/rem/tasks/{task['id']}/run", body={"request_id": "run-checks"}
+    ).json()["run"]
+    service._update(
+        run["id"],
+        criteria=[
+            {"id": first, "result": "fail", "evidence": "All 48 rows were exported."},
+            {"id": second, "result": "unknown", "evidence": "Not accepted: no receipts."},
+            {"id": "gone", "result": "pass", "evidence": "A check from nowhere."},
+        ],
+    )
+    shown = request("GET", "/api/rem/tasks").json()["tasks"][0]["active_run"]
+    assert "recipe" not in shown
+    assert shown["criteria"] == [
+        {
+            "id": first,
+            "result": "fail",
+            "evidence": "All 48 rows were exported.",
+            "description": "Rows match the filter",
+        },
+        {
+            "id": second,
+            "result": "unknown",
+            "evidence": "Not accepted: no receipts.",
+            "description": "Empty lists export a header",
+        },
+        # A check found nowhere keeps its result without a description.
+        {"id": "gone", "result": "pass", "evidence": "A check from nowhere."},
+    ]
+
+    # Editing the checks mid-run resets them to the new ones, named from the waiting edit.
+    edited = request(
+        "PATCH",
+        f"/api/rem/tasks/{task['id']}",
+        body={
+            "request_id": "edit-checks",
+            "expected_revision": task["revision"],
+            "acceptance_criteria": [{"description": "Opens in a spreadsheet"}],
+        },
+    ).json()["task"]
+    [(new, words)] = [(c["id"], c["description"]) for c in edited["acceptance_criteria"]]
+    assert words == "Opens in a spreadsheet"
+    shown = request("GET", "/api/rem/tasks").json()["tasks"][0]["active_run"]
+    assert shown["criteria"] == [{"id": new, "result": "unknown", "description": words}]

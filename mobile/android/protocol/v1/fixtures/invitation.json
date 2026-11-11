@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "invitation_id": "00000000-0000-4000-8000-000000000001",
+  "desktop_id": "00000000-0000-4000-8000-000000000002",
+  "desktop_name": "Fixture desktop",
+  "relay": "https://ntfy.sh",
+  "expires_at": 2000000300,
+  "desktop_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+  "secret": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+}

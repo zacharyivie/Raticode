@@ -3,8 +3,8 @@
 > **October 26, 2026:** The ntfy relay was removed. Phones and desktops connect
 > only over the local network. Relay, topic and quota material below is historical.
 > Invitation `relay` and topic fields remain only for wire compatibility and name the
-> unresolvable `https://relay.invalid`. See the mobile repository's
-> `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
+> unresolvable `https://relay.invalid`. See the Wi-Fi-only amendment in
+> `mobile/android/docs/mobile-desktop-v2.md`.
 
 This is the retained protocol-milestone report. The subsequent
 [desktop enrollment implementation and setup](device-pairing.md) has separate
@@ -18,7 +18,9 @@ satisfy that gate. Physical-device and public-network reliability remain unteste
 
 ## Joint choice and rejected Noise profile
 
-Mobile owns the canonical `protocol/v2` application schemas. The shared board
+`src/gofer/devices/protocol/v2` is the one copy of the v2 application schemas. The
+desktop loads it at run time and `mobile/android/scripts/check-contract.py` validates
+it for the phone. The shared board
 records both developers' agreement to an explicit TLS 1.3 v2 profile. V1's
 proposed Noise semantics remain unchanged and are not a fallback. Signal's
 legacy Java NoisePSK handling does not implement the proposed XXpsk3 modifier.

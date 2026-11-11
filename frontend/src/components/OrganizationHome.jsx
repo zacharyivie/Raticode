@@ -10,6 +10,7 @@ import { IssuesView, OverviewView, ProjectsView, WorkersView } from "./Organizat
 import "./OrganizationHome.css";
 
 const TABS = [["org", "Organization", Building2], ["projects", "Projects", Folder], ["issues", "Issues", SquareKanban], ["workers", "Workers", Users], ["knowledge", "Knowledge", Network]];
+const POLL_ERROR = "Couldn't refresh: ";
 const BOARD = { board: "tickets", group: false, fProject: "all", fWorker: "all", fEpic: "all", mine: false };
 const KNOWLEDGE = () => ({ view: "graph", project: "all", kinds: new Set(Object.keys(KINDS)), suggested: true, tickets: false, query: "" });
 
@@ -80,7 +81,9 @@ function Home({ organizationId, onClose, openSettings }) {
   useEffect(() => {
     version.current = ""; setOrganization(null); setTrail([]);
     let cancelled = false;
-    const stop = startPolling(async () => { try { if (!cancelled) await refresh(); } catch (failure) { if (!cancelled) setError(failure.message); } }, { interval: 3000, immediate: true });
+    const stop = startPolling(async () => {
+      try { if (!cancelled) { await refresh(); setError(current => (current.startsWith(POLL_ERROR) ? "" : current)); } } catch (failure) { if (!cancelled) setError(`${POLL_ERROR}${failure.message}`); }
+    }, { interval: 3000, immediate: true });
     return () => { cancelled = true; stop(); };
   }, [refresh]);
 
@@ -149,9 +152,8 @@ function Home({ organizationId, onClose, openSettings }) {
       return;
     }
     if (rule.reopen) {
-      const reopened = await act("reopen", { taskId: ticket.id, expectedRevision: ticket.revision });
-      if (reopened && column === "backlog") await act("task_update", { taskId: ticket.id, expectedRevision: reopened.revision, changes: { status: "backlog" } });
-      toast(`${ticket.key} reopened in ${column === "backlog" ? "Backlog" : "To do"}`);
+      // One call, straight into the chosen column: a ticket reopened for Backlog never sits in To do where a worker could start it.
+      await act("reopen", { taskId: ticket.id, expectedRevision: ticket.revision, status: column }, `${ticket.key} reopened in ${column === "backlog" ? "Backlog" : "To do"}`);
       return;
     }
     if (rule.pull) {
@@ -185,6 +187,7 @@ function Home({ organizationId, onClose, openSettings }) {
   const tabLabel = TABS.find(([id]) => id === tab)[1];
   const detail = trail.length > 0;
   const hours = hoursStatus(model);
+  const focusBlock = organization.diagnostics?.schedule?.current;
 
   return <section className="oh" aria-label={`${config.name} organization`}>
     <div className="oh-main">
@@ -194,6 +197,7 @@ function Home({ organizationId, onClose, openSettings }) {
         <h1>{config.name}</h1>
         <span className={`oh-pill st-${archived ? "paused" : running ? "running" : "paused"}`}><i className="oh-dot" />{archived ? "Archived" : running ? "Running" : "Paused"}</span>
         {hours && !archived && <button className={`oh-pill oh-hours-pill ${hours.open ? "open" : "closed"}`} type="button" title="Working hours. Click to change them." onClick={() => open("new:hours", true)}><Clock size={13} />{hours.text}</button>}
+        {focusBlock && !archived && <button className="oh-pill oh-block-pill" type="button" title={`${focusBlock.label}: ${focusBlock.focus || "the current schedule block"}. Click to change the schedule.`} onClick={() => open("new:schedule", true)}>{focusBlock.label}</button>}
         <span className="grow" />
         <button className="oh-search" type="button" onClick={() => setPalette(true)} aria-label="Find anything (Ctrl K)"><Search size={15} /><span className="lbl">Find a ticket, note, worker…</span><kbd>Ctrl K</kbd></button>
         {!archived && (running

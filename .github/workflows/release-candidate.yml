@@ -6,6 +6,10 @@ on:
   push:
     branches:
       - stage
+    paths-ignore:
+      - 'mobile/android/**'
+      - '.github/workflows/mobile-*.yml'
+      - 'website/**'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +25,11 @@ jobs:
     if: github.ref == 'refs/heads/stage'
     uses: ./.github/workflows/release-build.yml
     with:
-      signed_release: ${{ vars.RELEASE_SIGNING == 'true' }}
+      # Every Mac candidate of this repository is Developer ID signed, notarized and
+      # stapled; there is no switch to turn that off. A fork has no Apple secrets, so it
+      # builds an explicitly unsigned candidate, which publication refuses.
+      macos_signing: ${{ github.repository == 'zacharyivie/Raticode' }}
+      windows_signing: ${{ vars.WINDOWS_RELEASE_SIGNING == 'true' }}
     secrets: inherit
 
   stage:
@@ -50,7 +58,8 @@ jobs:
           path: candidate-input
       - name: Create candidate manifest and verify completeness
         env:
-          SIGNED_RELEASE: ${{ needs.prepare.outputs.signed_release }}
+          MACOS_SIGNED: ${{ needs.prepare.outputs.macos_signed }}
+          WINDOWS_SIGNED: ${{ needs.prepare.outputs.windows_signed }}
           GH_TOKEN: ${{ github.token }}
         run: python scripts/release-candidate.py manifest
       - name: Attest all desktop, CLI, checksum and audit artifacts

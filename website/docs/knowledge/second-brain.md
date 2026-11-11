@@ -6,6 +6,10 @@ pageClass: docs-layout
 
 # Second Brain
 
+::: warning Experimental
+Second Brain is off by default. Turn it on in **Settings > Developer > Feature Preview** to show it in the sidebar.
+:::
+
 Open **Second Brain** below Organizations in the activity rail. Each brain is an ordinary local folder, independent of projects. Open an existing knowledge folder or create one, then switch between registered brains with the sidebar picker. Removing a brain from the app keeps its files.
 
 ## Find and read evidence
@@ -16,7 +20,7 @@ Search Markdown, HTML, text and PDFs with words, phrases and filters. For exampl
 "exact evidence" tag:research published:2025..2026
 ```
 
-Filter by folders, collections, document type, author, tags, dates, reading state and citation status. Saved searches preserve the query, filters, search location and matching mode. Exact search works immediately after indexing. Enable **Related meaning** in Brain settings for local semantic search; the first use downloads model weights. **Combined** ranks each document by both lists with reciprocal rank fusion, so a document found by its words and its meaning moves up. Rem's search tool uses combined search when a selected brain has related meaning on. Cloud embeddings require a configured API profile and explicit cloud permission.
+Filter by folders, collections, document type, author, tags, dates, reading state and citation status. Saved searches preserve the query, filters, search location and matching mode. Exact search works immediately after indexing. Turn on **Enable related-meaning search** in Brain settings for local semantic search; the first use downloads model weights. **Combined** ranks each document by both lists with reciprocal rank fusion, so a document found by its words and its meaning moves up. Rem's search tool uses combined search when a selected brain has related meaning on. Cloud embeddings require a configured API profile and explicit cloud permission.
 
 Open results at their matching passages. Reading shows extracted text, Original preserves the file's presentation, and Details shows metadata, versions and links. HTML originals use a sandbox that blocks scripts and remote assets. Scanned PDFs need OCR; install Tesseract and Poppler with the selected language data.
 
@@ -38,7 +42,7 @@ External file edits are reconciled while Raticode runs. Renames preserve source 
 
 ## Work with Rem
 
-Turn on **Settings > Memory > Second Brain** first, then choose brains in **Thread tools > Second Brains**. Every brain starts on, including brains you register later, so turn off the ones a thread should not use. Rem receives tools to search, read and save notes within that scope. Turning every brain off removes Second Brain from the thread. Ask Rem, Explain and Summarize prepare evidence and a prompt for the existing chat pane without sending it automatically. Cloud chat requires permission for every attached brain.
+Turn on **Settings > Memory > Second Brain** first (choose its folder before the switch can be turned on), then choose brains in **Thread tools > Second Brains**. Brains are on in a thread unless you turn them off, but a registered brain reaches Rem only when **Allow cloud processing** is on in its Brain settings; the Settings > Memory folder is already approved. Brains without that permission show as unavailable in the thread menu. Rem receives tools to search, read and save notes within that scope. Turning every brain off removes Second Brain from the thread. Ask Rem, Explain and Summarize prepare evidence and a prompt for the existing chat pane without sending it automatically. Cloud chat requires permission for every attached brain.
 
 | Tool | Purpose |
 | --- | --- |
@@ -51,11 +55,11 @@ Stored text is reference material and does not override your request. Tools rema
 
 ## Create cited reports
 
-Create a report from search results, a collection or the Reports page. Choose sources, question, scope, output format and coverage. Generation uses the current supported Rem provider or the brain's research API profile. A localhost API profile can process private brains; remote providers require cloud permission on all source brains.
+Create a report from search results, a collection or the Reports page. Choose sources, question, scope, output format and coverage. Generation uses the research **Provider and model** and optional **Provider profile** chosen for the report. A localhost API profile can process private brains; remote providers require cloud permission on all source brains.
 
 Reports record source versions, generation details and checkable citations. Review claims and citation support before publishing a draft. Regeneration creates a new artifact. HTML and Markdown output are ordinary files; PDF output requires the desktop renderer. Rem-authored files also appear in Reports, retaining their authored styling.
 
-Source-only research supports Codex, Claude Code, Cursor, Copilot, OpenCode and API profiles. With Grok or Antigravity chat, choose a research API profile in Brain settings.
+Source-only research runs with Codex, Claude Code, Cursor, Copilot, OpenCode, Grok, Antigravity, or an OpenAI or Anthropic API profile (which also accepts a custom model ID). Grok and Antigravity research uses that CLI's own permissions.
 
 ## Manage the library
 

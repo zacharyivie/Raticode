@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changesActiveWork, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus } from "./remHome.js";
+import { changesActiveWork, checkGroups, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus, prerequisites, afterChoices, afterEditable, startsWhen } from "./remHome.js";
 
 const NOW = new Date(2026, 9, 7, 10, 0); // Wednesday, 7 October 2026, 10:00 local
 const at = (days, hour, minute = 0) => new Date(2026, 9, 7 + days, hour, minute).toISOString();
@@ -181,6 +181,36 @@ test("check counts separate failures from checks that never ran", () => {
   assert.equal(criteriaSummary(criteria(["pass", "pass"])), "2 of 2 checks passed");
   assert.equal(criteriaSummary(criteria(["pass", "fail", "unknown"])), "1 of 3 passed, 1 failed, 1 not checked");
   assert.equal(criteriaSummary(criteria(["fail", "fail"])), "0 of 2 passed, 2 failed");
+  // A reviewed check the review couldn't confirm is unresolved, not unchecked.
+  assert.equal(criteriaSummary([{ id: "a", result: "pass" }, { id: "b", result: "unknown", evidence: "Not accepted: no receipts." }]), "1 of 2 passed, 1 unresolved");
+  assert.equal(criteriaSummary([null, "x"]), "");
+});
+
+test("check groups list each failed or unresolved check with its reason", () => {
+  const groups = checkGroups([
+    { id: "a", description: "Tests pass", result: "fail", evidence: "`test_export` failed: **3** rows missing." },
+    { id: "b", description: "Docs updated", result: "unknown", evidence: "Not accepted: no project check receipts. Looked fine." },
+    { id: "c", description: "Lint clean", result: "pass", evidence: "ruff passed." },
+    { id: "d", description: "Not reviewed", result: "unknown" },
+    { id: "e", result: "fail" },
+    null,
+  ]);
+  const view = list => list.map(item => [item.key, item.title, item.reason]);
+  assert.deepEqual(view(groups.failed), [["a", "Tests pass", "test_export failed: 3 rows missing."], ["e", "Check 5", ""]]);
+  assert.deepEqual(view(groups.unresolved), [["b", "Docs updated", "Not accepted: no project check receipts. Looked fine."]]);
+  assert.deepEqual(view(groups.passed), [["c", "Lint clean", "ruff passed."]]);
+  assert.deepEqual(view(groups.unchecked), [["d", "Not reviewed", ""]]);
+  assert.equal(groups.reviewed, true);
+});
+
+test("check groups stay quiet until a review looked at a check", () => {
+  for (const criteria of [undefined, null, [], [{ id: "a", result: "unknown" }, { id: "b", result: "unknown", evidence: "  " }]]) {
+    const groups = checkGroups(criteria);
+    assert.equal(groups.reviewed, false);
+    assert.equal(groups.failed.length + groups.unresolved.length + groups.passed.length, 0);
+  }
+  // An older backend sends no descriptions or IDs: checks are numbered.
+  assert.deepEqual(checkGroups([{ result: "pass" }, { result: "fail", evidence: "Broke." }]).failed.map(item => [item.key, item.title]), [["check-1", "Check 2"]]);
 });
 
 test("one-line recaps show Rem's link labels instead of Markdown", () => {
@@ -214,4 +244,82 @@ test("only runs seen working before notify when they finish", () => {
   assert.deepEqual(finishedRunNotifications([running], [cancelled]), []);
   const waiting = { ...running, active_run: { id: "r1", state: "queued", waiting_reason: "Waiting for the 03:00 run before checking again" }, last_run: { id: "r1", state: "queued" } };
   assert.deepEqual(finishedRunNotifications([running], [waiting]), []);
+});
+
+test("a card whose run left the task list shows the state chat last served, not its first snapshot", () => {
+  // The desktop serves each card with its run's current state and step.
+  const done = workStatus({ task_id: "gone", run_id: "r", state: "succeeded", step: "report" }, []);
+  assert.equal(done.state, "succeeded");
+  assert.equal(done.label, "Done");
+  // A listed run's own step wins over the card's.
+  const tasks = [{ id: "t", active_run: { id: "r", state: "queued", step: "check", resume_review: true } }];
+  assert.equal(workStatus({ task_id: "t", run_id: "r", state: "queued", step: "plan" }, tasks).step, "check");
+});
+
+test("a task waiting for others reads as coming up, and a held one needs the user", () => {
+  const waiting = { id: "fix", title: "Fix", state: "enabled", schedule: { kind: "once" }, active_run: null, last_run: null,
+    dependency: { state: "waiting", reason: "Waiting for “Audit” to finish", prerequisites: [{ task_id: "audit", title: "Audit", state: "waiting", run_state: "executing", retryable: false }] } };
+  const activity = taskActivity(waiting, NOW);
+  assert.equal(activity.kind, "waiting");
+  assert.equal(activity.label, "Waiting for “Audit” to finish");
+  assert.deepEqual(groupTasks([waiting], NOW).map(group => [group.id, group.items.length]), [["scheduled", 1]]);
+  assert.equal(prerequisites(waiting)[0].label, "Running");
+
+  const held = { ...waiting, dependency: { state: "held", reason: "On hold: “Audit” was blocked. Retry it, or start this task now.",
+    prerequisites: [{ task_id: "audit", title: "Audit", state: "held", reason: "“Audit” was blocked", run_state: "blocked", retryable: true }] } };
+  const attention = taskActivity(held, NOW);
+  assert.equal(attention.kind, "attention");
+  assert.equal(attention.held, true);
+  assert.match(attention.label, /^On hold/);
+  assert.equal(statusLine([held], NOW), "1 thing needs you");
+  assert.deepEqual(groupTasks([held], NOW).map(group => group.label), ["Needs you"]);
+  assert.equal(prerequisites(held)[0].label, "Needs you");
+  assert.equal(prerequisites({ dependency: { prerequisites: [{ task_id: "x", title: "X", state: "held", reason: "“X” was deleted" }] } })[0].label, "“X” was deleted");
+  assert.equal(prerequisites(held)[0].tone, "attention");
+  // Paused waiting tasks read as paused, and a met condition is about to start.
+  assert.equal(taskActivity({ ...held, state: "paused" }, NOW).kind, "paused");
+  assert.equal(taskActivity({ ...waiting, dependency: { state: "met", prerequisites: [] } }, NOW).label, "Starting soon");
+});
+
+test("a held card in chat follows its task until the task runs", () => {
+  const work = { task_id: "fix", run_id: "", thread_id: "", title: "Fix", type: "develop", state: "held", needs_user: true };
+  const held = { id: "fix", title: "Fix", dependency: { state: "held", prerequisites: [] } };
+  assert.equal(workStatus(work, [held]).label, "On hold");
+  assert.equal(workStatus(work, [{ ...held, dependency: { state: "waiting", prerequisites: [] } }]).label, "Waiting for another task");
+  const started = { id: "fix", title: "Fix", active_run: { id: "r1", state: "executing", thread_id: "t1" }, last_run: null };
+  const status = workStatus(work, [started]);
+  assert.equal(status.state, "executing");
+  assert.equal(status.threadId, "t1");
+});
+
+test("start after is part of new one-time tasks and only sent when it changes", () => {
+  const draft = { ...newTaskDraft({ timezone: "UTC" }), prompt: "Fix it", after: ["audit"] };
+  assert.deepEqual(draftToRequest(draft).after, ["audit"]);
+  assert.equal(startsWhen(draft, true), "Starts by itself once every task above finishes successfully.");
+  assert.equal(startsWhen({ ...draft, after: [] }, true), "Starts as soon as you save.");
+  // An empty field is left out of new tasks; repeating tasks never wait.
+  assert.equal("after" in draftToRequest({ ...draft, after: [] }), false);
+  assert.equal("after" in draftToRequest({ ...draft, schedule: { kind: "daily", local_time: "09:00", timezone: "UTC" } }), false);
+
+  const task = { id: "fix", title: "Fix it", type: "research", prompt: "Fix it", schedule: { kind: "once", timezone: "UTC" }, acceptance_criteria: [], revision: 2, after: ["audit"] };
+  assert.deepEqual(draftToRequest(taskToDraft(task), task), {});
+  assert.deepEqual(draftToRequest({ ...taskToDraft(task), after: [] }, task), { after: [] });
+  // Tasks saved before this feature have no after; editing them never sends one.
+  const old = { ...task, after: undefined };
+  assert.deepEqual(draftToRequest({ ...taskToDraft(old), prompt: "Fix it now" }, old), { prompt: "Fix it now" });
+
+  assert.equal(afterEditable(null, draft), true);
+  assert.equal(afterEditable(task, taskToDraft(task)), true);
+  assert.equal(afterEditable({ ...task, after_started: { how: "prerequisites" } }, taskToDraft(task)), false);
+  assert.equal(afterEditable({ ...task, last_run: { id: "r", state: "succeeded" } }, taskToDraft(task)), false);
+  assert.equal(afterEditable(null, { ...draft, schedule: { kind: "weekly" } }), false);
+  assert.deepEqual(afterChoices([task, { id: "audit", title: "Audit" }, { id: "gone", title: "Gone", deleted_at: "x" }], task), [{ id: "audit", title: "Audit" }]);
+});
+
+test("a hold card stays live until a card for the task's run follows it", () => {
+  const held = { id: "h", work: { task_id: "fix", run_id: "", state: "held" } };
+  const other = { id: "o", work: { task_id: "audit", run_id: "r0" } };
+  assert.deepEqual([...latestWorkMessageIds([held, other])].sort(), ["h", "o"]);
+  const started = { id: "s", work: { task_id: "fix", run_id: "r1" } };
+  assert.deepEqual([...latestWorkMessageIds([held, other, started])].sort(), ["o", "s"]);
 });

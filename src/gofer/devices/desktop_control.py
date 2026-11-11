@@ -9,7 +9,11 @@ and approval policies, so the phone gains no authority the desktop UI lacks.
 The phone never sends paths. Projects are named by the IDs in the phone's
 catalog; Rem tasks, runs, threads, organizations, swarms and workflows by their
 desktop IDs. Workflows are viewed and run, never edited (see ``workflows.py``).
-Source control is a read-only status view of open projects (``source_control.py``).
+Source control is a read-only status view of open projects (``source_control.py``),
+and the file explorer browses their folders and opens files read-only
+(``file_explorer.py``). The phone's own browser sees the window's open web tabs and
+can send a page to a new background tab there (``phone_browser.py``); Rem's browser
+tools stay desktop-only.
 Results are projections for the phone screens, without paths, credentials,
 grants or provider configuration.
 
@@ -22,17 +26,24 @@ Files attached to the user's messages, from the desktop window or any phone, are
 offered on the same channel when the phone asks for one by message and
 attachment ID (``rem.attachment``), so each device can show every attachment.
 Phones that opted in to Rem chat alerts poll ``rem.notices`` for Rem's replies and
-task updates to their own requests; the phone decides what an alert shows.
+task updates to their own requests; the phone decides what an alert shows. A phone
+that turned on further alert switches names them in ``include``, and the desktop
+decides which tasks count, from Rem's chat, self-work and organizations.
+
+"Let this phone wake this computer" is a second opt-in on top of this one (``wake.py``).
+While it is on, ``overview`` adds this computer's network card hardware address as
+``wake_mac``, so the phone can send a Wake-on-LAN packet when the desktop is asleep.
 
 ``rem.tidy`` tidies a dictation with the model chosen in desktop Settings. It
 answers ``pending`` at once, so the request leaves the phone's queue, and the
 tidied words follow as a second result for the same request when the model is
 done. Neither device stores the words; a failure answers with the heard text.
 
-Excluded on purpose: browsing files and the code editor, terminals, the browser,
-pairing, provider credentials, skill and MCP server definitions, organization
-configuration and imports, workflow editing and run inputs, and settings that
-widen what agents may do.
+Excluded on purpose: editing, renaming or deleting files, terminals, driving the
+browser (pages, input, Rem's browser tools and its profiles), pairing, provider
+credentials, skill and MCP server definitions, organization configuration and
+imports, workflow editing and run inputs, and settings that widen what agents
+may do.
 """
 
 from __future__ import annotations
@@ -54,23 +65,36 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from gofer.devices import app_log, organization_view
 from gofer.devices.files import MAX_FILE
 from gofer.devices.registry import PairingError
+from gofer.devices.tailnet import is_tailnet_address
+from gofer.devices.wake import clean_address, hardware_address, private_ipv4
 from gofer.ui.file_mentions import file_mentions
 
 READ_OPS = frozenset(
     {
         "overview",
+        "browser.tabs",
+        "developer.log",
+        "files.list",
+        "files.text",
+        "kanban.board",
+        "kanban.timeline",
         "media.image",
         "media.preview",
         "rem.draft",
+        "rem.history",
         "rem.home",
         "rem.memories",
         "rem.notices",
+        "rem.search",
         "rem.task",
         "rem.thread",
         "organizations.list",
         "organizations.read",
+        "organizations.note",
+        "selfwork.read",
         "settings.get",
         "source_control.commit",
         "source_control.diff",
@@ -84,7 +108,13 @@ READ_OPS = frozenset(
 )
 ACTION_OPS = frozenset(
     {
+        "browser.open",
         "files.link",
+        "files.open",
+        "kanban.participant",
+        "kanban.ticket",
+        "selfwork.settings",
+        "selfwork.report.seen",
         "rem.attachment",
         "rem.message",
         "rem.instruct",
@@ -104,6 +134,9 @@ ACTION_OPS = frozenset(
         "rem.run.retry_review",
         "organizations.control",
         "organizations.task",
+        "organizations.knowledge",
+        "organizations.worker",
+        "organizations.schedule",
         "swarms.start",
         "settings.update",
         "workflows.run",
@@ -160,10 +193,22 @@ SENSITIVE = (
 _CANONICAL_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # Files on one Rem chat message, in either direction.
 REM_FILES = 8
+# The longest Rem chat search a phone may send, in characters.
+REM_SEARCH_QUERY = 200
 # Full file paths found in one Rem message's text, sent so the phone can link them.
 MENTIONS = 32
 # Phone alerts per read; older ones are counted, not sent.
 REM_NOTICES = 8
+# The alert switches a phone can name in rem.notices; the desktop decides what counts.
+REM_NOTICE_FILTERS = ("needs_you", "finished", "proposals")
+# Report position, then organization event position, or "-" with no organizations here.
+_REM_NOTICE_MARK = re.compile(r"n1\.([0-9]{1,16})\.([0-9]{1,16}|-)")
+# Rem run states that end a task; a cancelled one was stopped by the person being told.
+_REM_FINISHED = {"succeeded", "failed", "blocked", "outcome_unknown"}
+_LOCAL_LINK = re.compile(r"\[([^\]]*)\]\(<?(?:file:|/|~/|[A-Za-z]:[\\/])[^)]*\)")
+_LOCAL_PATH = re.compile(
+    r"(?<![\w.:/])(?:~/|/|[A-Za-z]:[\\/])[^\s)\]>\"'`]*[/\\]([^\s)\]>\"'`/\\]+)"
+)
 # Where a tapped file link came from: Rem's chat, a Rem task thread, a shared thread.
 LINK_SOURCES = frozenset({"rem", "rem_thread", "thread"})
 LINK_LIMIT = 2048
@@ -274,6 +319,21 @@ SETTINGS: list[dict[str, Any]] = [
         "options": [["md", "Markdown"], ["html", "HTML"], ["slides", "Slides"], ["pdf", "PDF"]],
     },
     {
+        # The browser new web tabs and Rem's tabs open in. Rem's site rules, sign-in
+        # sharing and approvals are browser settings the phone never sees or changes.
+        # Values never change; older phones show whatever labels the desktop sends.
+        "key": "browser.engine",
+        "group": "Browser",
+        "label": "Default browser for new tabs",
+        "kind": "enum",
+        "options": [
+            ["raticode", "Raticode (chromium)"],
+            ["firefox", "Firefox"],
+            ["chrome", "Chrome"],
+            ["edge", "Edge"],
+        ],
+    },
+    {
         "key": "editor.fontSize",
         "group": "Editor",
         "label": "Font size",
@@ -366,6 +426,105 @@ def _draft_delta(
     }
 
 
+_TICKET_ROLES = {"created", "worked", "updated"}
+_TICKET_SCOPES = {"rem", "organization"}
+
+
+def _ticket_key(value: Any) -> str:
+    from gofer.ui.rem_kanban import TICKET_KEY
+
+    return value if isinstance(value, str) and TICKET_KEY.fullmatch(value) else ""
+
+
+def _ticket_refs(value: Any) -> list[dict[str, str]]:
+    """The board tickets a task card lists: what a run created, worked on or changed."""
+    refs = []
+    for ref in value if isinstance(value, list) else []:
+        if not isinstance(ref, dict) or not _ticket_key(ref.get("key")):
+            continue
+        refs.append(
+            {
+                "ticket_id": _text(ref.get("ticket_id"), 128),
+                "key": ref["key"],
+                "title": _text(ref.get("title"), 200),
+                "scope": ref.get("scope") if ref.get("scope") in _TICKET_SCOPES else "rem",
+                "organization_id": _text(ref.get("organization_id"), 100),
+                "role": ref.get("role") if ref.get("role") in _TICKET_ROLES else "updated",
+            }
+        )
+    return refs[:40]
+
+
+def _ticket_index(index: Any, keys: set[str]) -> dict[str, dict[str, Any]]:
+    """Board tickets by key, as they are now, for the ``keys`` this answer shows."""
+    found: dict[str, dict[str, Any]] = {}
+    for key, ticket in (index if isinstance(index, dict) else {}).items():
+        if key not in keys or not _ticket_key(key) or not isinstance(ticket, dict):
+            continue
+        found[key] = {
+            "ticket_id": _text(ticket.get("ticket_id"), 128),
+            "key": key,
+            "title": _text(ticket.get("title"), 200),
+            "status": _text(ticket.get("status"), 20),
+            "scope": ticket.get("scope") if ticket.get("scope") in _TICKET_SCOPES else "rem",
+            "organization_id": _text(ticket.get("organization_id"), 100),
+            "proposed": ticket.get("proposed") is True,
+        }
+    return found
+
+
+def _search_parts(parts: Any, limit: int) -> list[dict[str, Any]]:
+    """Plain and matched parts of a search snippet, at most ``limit`` characters in all."""
+    kept: list[dict[str, Any]] = []
+    for part in parts if isinstance(parts, list) else []:
+        if not isinstance(part, dict) or limit <= 0:
+            continue
+        text = _text(part.get("text"), limit)
+        limit -= len(text)
+        kept.append({"text": text, "match": bool(part.get("match"))})
+    return kept
+
+
+def _search_view(found: dict[str, Any]) -> dict[str, Any]:
+    """Rem chat search results for a phone: where each match is and a short snippet."""
+    results = []
+    for item in found.get("results") or []:
+        result: dict[str, Any] = {
+            "id": _text(item.get("id"), 128),
+            "seq": int(item.get("seq") or 0),
+            "role": "user" if item.get("role") == "user" else "rem",
+            "created_at": _text(item.get("created_at"), 80),
+            "where": _text(item.get("where"), 20),
+            "snippet": _search_parts(item.get("snippet"), 400),
+        }
+        if item.get("kind") == "task_update":
+            result["kind"] = "task_update"
+        if item.get("title"):
+            result["title"] = _search_parts(item["title"], 160)
+        results.append(result)
+    return {
+        "query": _text(found.get("query"), REM_SEARCH_QUERY),
+        "total": int(found.get("total") or 0),
+        "results": results,
+        "next": found.get("next") if type(found.get("next")) is int else None,
+    }
+
+
+def _shown_keys(messages: list[dict[str, Any]], tasks: list[dict[str, Any]]) -> set[str]:
+    """Ticket keys in the messages and task summaries an answer carries."""
+    from gofer.ui.rem_kanban import ticket_keys
+
+    keys: set[str] = set()
+    for message in messages:
+        keys.update(ticket_keys(message.get("body")))
+        keys.update(ticket_keys(message.get("details")))
+        keys.update(r["key"] for r in (message.get("work") or {}).get("tickets") or [])
+    for task in tasks:
+        for run in (task.get("active_run"), task.get("last_run"), *(task.get("runs") or [])):
+            keys.update(r["key"] for r in (run or {}).get("tickets") or [])
+    return keys
+
+
 def _checks(criteria: Any) -> dict[str, int]:
     items = [c for c in criteria or [] if isinstance(c, dict)]
     return {
@@ -373,6 +532,31 @@ def _checks(criteria: Any) -> dict[str, int]:
         "failed": sum(1 for c in items if c.get("result") == "fail"),
         "total": len(items),
     }
+
+
+CHECK_LIMIT = 40
+CHECK_TEXT = 600
+CHECK_EVIDENCE = 1500
+
+
+def _check_details(criteria: Any) -> list[dict[str, str]]:
+    """Each check of one run with its outcome and the reviewer's reason, bounded for phones.
+
+    ``result`` is pass, fail or unknown. An unknown check with a reason was reviewed
+    but left unresolved; one without a reason hasn't been checked yet.
+    """
+    details = []
+    for item in [c for c in criteria or [] if isinstance(c, dict)][:CHECK_LIMIT]:
+        result = item.get("result")
+        details.append(
+            {
+                "id": _text(item.get("id"), 128),
+                "description": _text(item.get("description"), CHECK_TEXT),
+                "result": result if result in {"pass", "fail"} else "unknown",
+                "evidence": _text(item.get("evidence"), CHECK_EVIDENCE),
+            }
+        )
+    return details
 
 
 def _rich_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -523,14 +707,17 @@ def _thread_entries(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             run.append(message)
             continue
         close()
-        entries.append(
-            {
-                "id": _text(message.get("id"), 128),
-                "role": _text(message.get("role"), 20),
-                "body": _text(message.get("body"), 16000),
-                "kind": _text(message.get("kind"), 40),
-            }
-        )
+        entry = {
+            "id": _text(message.get("id"), 128),
+            "role": _text(message.get("role"), 20),
+            "body": _text(message.get("body"), 16000),
+            "kind": _text(message.get("kind"), 40),
+        }
+        if message.get("role") == "user":
+            # Who wrote an instruction: Rem's prompts say "rem", the human's "user".
+            # Older phones ignore the field.
+            entry["sender"] = "rem" if message.get("sender") == "rem" else "user"
+        entries.append(entry)
     close()
     return entries
 
@@ -704,6 +891,123 @@ def _snapshot_refused(exc: PairingError) -> Refused:
     return Refused("unauthorized", "The desktop couldn't send this file safely.")
 
 
+def _notice_filter(params: dict[str, Any]) -> tuple[list[str], tuple[int, int | None] | None]:
+    """The checked ``include`` and ``mark`` of a ``rem.notices`` read that names a filter."""
+    include = params["include"]
+    if set(params) - {"after", "include", "mark"}:
+        raise Refused("invalid", "Unknown alert read field.")
+    if (
+        type(include) is not list
+        or not include
+        or any(type(item) is not str or item not in REM_NOTICE_FILTERS for item in include)
+        or len(set(include)) != len(include)
+    ):
+        raise Refused("invalid", "Unknown alert switches.")
+    if "mark" not in params:
+        return include, None
+    mark = params["mark"]
+    match = _REM_NOTICE_MARK.fullmatch(mark) if type(mark) is str and len(mark) <= 256 else None
+    if match is None:
+        raise Refused("invalid", "Unknown alert position.")
+    return include, (int(match[1]), None if match[2] == "-" else int(match[2]))
+
+
+def _task_reason(work: dict[str, Any], include: list[str]) -> str:
+    """The alert switch a Rem task update counts under, or an empty string."""
+    if work.get("needs_user") is True:
+        return "needs_you" if "needs_you" in include else ""
+    finished = "finished" in include and work.get("state") in _REM_FINISHED
+    return "finished" if finished else ""
+
+
+def _dependency(value: Any) -> dict[str, Any]:
+    """A waiting task's start condition: waiting, held or met, why, and each prerequisite."""
+    value = value if isinstance(value, dict) else {}
+    return {
+        "state": _text(value.get("state"), 20),
+        "reason": _text(value.get("reason"), 600),
+        "prerequisites": [
+            {
+                "task_id": _text(item.get("task_id"), 128),
+                "title": _text(item.get("title"), 160),
+                "state": _text(item.get("state"), 20),
+                "reason": _text(item.get("reason"), 300),
+                "run_id": _text(item.get("run_id"), 128),
+                "run_state": _text(item.get("run_state"), 40),
+                # Whether "Retry" can run it again: false once it is deleted or itself waits.
+                "retryable": item.get("retryable") is True,
+            }
+            for item in value.get("prerequisites") or []
+            if isinstance(item, dict)
+        ][:10],
+    }
+
+
+def _alert_text(value: Any, limit: int) -> str:
+    """Text for an alert about work this phone didn't ask for, with no local paths in it."""
+    if not isinstance(value, str):
+        return ""
+    without_links = _LOCAL_LINK.sub(r"\1", value)
+    return _text(_LOCAL_PATH.sub(r"\1", without_links), limit)
+
+
+def _source_notice(alert: dict[str, Any]) -> dict[str, Any]:
+    """A self-work or organization alert as a notice. Neither kind is in Rem's chat."""
+    reason = alert["reason"]
+    if reason == "proposals":
+        count = int(alert["count"])
+        body = f"{count} proposal{'' if count == 1 else 's'} waiting for your approval."
+        title = "Self-work proposals"
+    else:
+        name = _alert_text(alert.get("title"), 160)
+        where = _alert_text(alert.get("organization"), 160)
+        subject = f"“{name}”" if name else "A change"
+        state = "needs you" if reason == "needs_you" else "finished"
+        body = f"{where + ': ' if where else ''}{subject} {state}."
+        title = name or where
+    return {
+        "id": _text(alert["id"], 128),
+        "kind": "proposals" if reason == "proposals" else "organization",
+        "body": body,
+        "created_at": _text(alert.get("at"), 80),
+        "title": title,
+        "needs_user": reason == "needs_you",
+        "reason": reason,
+    }
+
+
+def _notice_when(notice: dict[str, Any]) -> float:
+    try:
+        return datetime.fromisoformat(notice["created_at"]).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _notice_answer(
+    found: list[dict[str, Any]], cursor: int, latest: int, sources: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The answer to a ``rem.notices`` read, newest ``REM_NOTICES`` kept, oldest first."""
+    more = cursor < latest
+    mark: dict[str, str] = {}
+    if sources is not None:
+        found = sorted([*found, *map(_source_notice, sources["alerts"])], key=_notice_when)
+        more = more or sources["more"]
+        mark["mark"] = sources["mark"]
+    return {
+        "cursor": cursor,
+        "notices": found[-REM_NOTICES:],
+        "skipped": max(0, len(found) - REM_NOTICES),
+        # More is stored after these positions; the phone reads again at once.
+        "more": more,
+        **mark,
+    }
+
+
+def _project_scoped(op: str) -> bool:
+    """Reads that need the phone's open projects, read under the device lock."""
+    return op.startswith("source_control.") or op in {"files.list", "files.text"}
+
+
 def _phone_name(name: str) -> bool:
     return (
         bool(name)
@@ -735,11 +1039,60 @@ def _service_error(exc: BaseException) -> Refused:
         except (IndexError, TypeError, AttributeError):
             pass
     name = type(exc).__name__
+    if name == "KanbanRefused":
+        return Refused(getattr(exc, "code", "invalid"), str(exc)[:1000])
     if name in {"RemConflict", "OrganizationConflict"}:
         return Refused("conflict", str(exc)[:1000] or "This changed on desktop. Refresh first.")
     if isinstance(exc, KeyError):
         return Refused("not_found", "This item no longer exists on desktop.")
     return Refused("invalid", str(exc)[:1000] or "The desktop could not apply this action.")
+
+
+class WakeSetting:
+    """Per-phone choice to send the hardware address. Off unless a row exists."""
+
+    def __init__(self, desktop: DesktopControl) -> None:
+        self.desktop = desktop
+        self.db = desktop.db
+
+    # Local authenticated settings API only.
+    def enable(self, peer: str, enabled: bool) -> None:
+        app = self.desktop.app
+        with app.registry.transaction():
+            app._trusted(peer)
+            if app.registry._row(peer)["role"] != "controller":
+                raise PairingError("phone_required")
+            if enabled:
+                self.db.execute("INSERT OR IGNORE INTO device_wake VALUES (?)", (peer,))
+            else:
+                self.db.execute("DELETE FROM device_wake WHERE peer=?", (peer,))
+        logger.info("Wake this computer turned %s for %s", "on" if enabled else "off", peer)
+
+    def enabled(self) -> list[str]:
+        return [r[0] for r in self.db.execute("SELECT peer FROM device_wake")]
+
+    def allowed(self, peer: str) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM device_wake WHERE peer=?", (peer,)
+        ).fetchone() is not None and self.desktop.allowed(peer)
+
+    def remember_answer(self, peer: str, events: list[dict[str, Any]]) -> None:
+        """Note the outbox rows holding the address, so they go once the phone has them."""
+        self.db.executemany(
+            "INSERT OR IGNORE INTO device_wake_answers VALUES (?,?)",
+            [(peer, event["sequence"]) for event in events],
+        )
+
+    def forget_delivered(self, peer: str, cursor: int) -> None:
+        """Drop answers holding the address as soon as the phone has acknowledged them."""
+        self.db.execute(
+            "DELETE FROM device_outbox WHERE peer=? AND sequence<=? AND sequence IN "
+            "(SELECT sequence FROM device_wake_answers WHERE peer=?)",
+            (peer, cursor, peer),
+        )
+        self.db.execute(
+            "DELETE FROM device_wake_answers WHERE peer=? AND sequence<=?", (peer, cursor)
+        )
 
 
 class DesktopControl:
@@ -748,6 +1101,10 @@ class DesktopControl:
         self.db = application.registry.db
         self.db.executescript(
             "CREATE TABLE IF NOT EXISTS device_desktop_control (peer TEXT PRIMARY KEY);"
+            "CREATE TABLE IF NOT EXISTS device_wake (peer TEXT PRIMARY KEY);"
+            # Outbox positions of answers holding the address, never the address itself.
+            "CREATE TABLE IF NOT EXISTS device_wake_answers "
+            "(peer TEXT NOT NULL, sequence INTEGER NOT NULL, PRIMARY KEY(peer,sequence));"
             "CREATE TABLE IF NOT EXISTS device_desktop_settings "
             "(key TEXT PRIMARY KEY, value BLOB NOT NULL);"
             # Rem chat messages a phone sent; only their replies' files go to it.
@@ -767,11 +1124,19 @@ class DesktopControl:
         self.usage: Callable[[], dict[str, Any]] | None = None
         self.fetch_image: Callable[[str], dict[str, Any]] = fetch_image
         self.fetch_preview: Callable[[str], dict[str, Any]] = fetch_preview
+        self.wake = WakeSetting(self)
+        self.hardware_address: Callable[[str], str | None] = hardware_address
+        # The window's app log file (Settings > Developer), when the window started this backend.
+        self.app_log_path: str | None = app_log.configured_path()
         # The reply attempt each phone last read Rem's draft from (_draft_delta).
         self.draft_attempts: dict[str, Any] = {}
         from gofer.devices.workflows import PhoneWorkflows
 
         self.workflows = PhoneWorkflows(self)
+        from gofer.devices.phone_browser import PhoneBrowser
+
+        # The window's browser tabs and pages phones sent to it, in memory only.
+        self.browser = PhoneBrowser()
 
     # Local authenticated settings API only.
     def enable(self, peer: str, enabled: bool) -> None:
@@ -852,35 +1217,115 @@ class DesktopControl:
             return {"image": self.fetch_image(str(params.get("url") or ""))}
         if op == "media.preview":
             return {"preview": self.fetch_preview(str(params.get("url") or ""))}
+        if op == "kanban.board":
+            return {"board": self._need(self.rem, "Rem").kanban.board()}
+        if op == "kanban.timeline":
+            scope = params.get("scope")
+            if scope not in {"rem", "organization"}:
+                raise Refused("invalid", "Choose a ticket.")
+            return {
+                "timeline": self._need(self.rem, "Rem").kanban.timeline(
+                    {
+                        "ticket_id": _text(params.get("ticket_id"), 128),
+                        "scope": scope,
+                        "organization_id": _text(params.get("organization_id"), 100),
+                    }
+                )
+            }
+        if op == "selfwork.read":
+            return {"view": self._need(self.rem, "Rem").self_work.view()}
         if op == "rem.draft":
             store = self._need(self.rem, "Rem").store
             with store.read() as db:
                 return {"conversation": store.setting(db, "conversation")}
-        if op == "rem.home":
-            store = self._need(self.rem, "Rem").store
-            with store.read() as db:
-                config = store.setting(db, "config")
-            # Folders Rem may send files from: its open projects and the Second Brain.
-            roots = [p["root"] for p in config.get("projects") or [] if p.get("root")]
-            if (config.get("brain") or {}).get("root"):
-                roots.append(config["brain"]["root"])
+        if op == "rem.search":
+            before = params.get("before")
+            if before is not None and (type(before) is not int or not 0 < before < 2**53):
+                raise Refused("invalid", "Unknown search position.")
+            # Words only, matched in the desktop's whole saved chat; no model reads them.
             return {
-                "conversation": store.conversation(),
-                # The phone reads run summaries only, never traces or worker config.
+                "search": self._need(self.rem, "Rem").store.search(
+                    _text(params.get("query"), REM_SEARCH_QUERY), before=before, limit=50
+                )
+            }
+        if op == "rem.history":
+            from gofer.ui.rem_kanban import message_ticket_keys
+
+            store = self._need(self.rem, "Rem").store
+            before = _text(params.get("before"), 128)
+            through = _text(params.get("through"), 128)
+            if not before:
+                raise Refused("invalid", "Choose where the earlier messages end.")
+            try:
+                page = store.page(before, through=through or None)
+            except KeyError:
+                raise Refused(
+                    "not_found", "That part of Rem's chat is no longer on your desktop."
+                ) from None
+            kanban = getattr(self.rem, "kanban", None)
+            return {
+                "page": page,
                 "tasks": store.tasks(summary=True),
                 "threads": store.thread_ids(),
+                "roots": self._rem_config_roots(store),
+                "tickets": kanban.resolve(message_ticket_keys(page["messages"]))
+                if kanban is not None
+                else {},
+            }
+        if op == "rem.home":
+            store = self._need(self.rem, "Rem").store
+            roots = self._rem_config_roots(store)
+            from gofer.ui.rem_kanban import message_ticket_keys, task_ticket_keys
+
+            conversation = store.conversation()
+            # The phone reads run summaries only, never traces or worker config.
+            tasks = store.tasks(summary=True)
+            kanban = getattr(self.rem, "kanban", None)
+            return {
+                "conversation": conversation,
+                "tasks": tasks,
+                "threads": store.thread_ids(),
                 "roots": roots,
+                # Board tickets named in chat and on task cards, as they are now. The
+                # phone shows these keys as pills; any other key stays plain text.
+                "tickets": kanban.resolve(
+                    [
+                        *message_ticket_keys(conversation["messages"]),
+                        *task_ticket_keys(tasks),
+                    ]
+                )
+                if kanban is not None
+                else {},
             }
         if op == "rem.notices":
-            store = self._need(self.rem, "Rem").store
+            rem = self._need(self.rem, "Rem")
+            store = rem.store
+            wanted = _notice_filter(params) if "include" in params else None
             after = params.get("after")
             if after is None:
-                return {"after": None, "stored": store.messages_after(0, 0)}
+                return {
+                    "after": None,
+                    "stored": store.messages_after(0, 0),
+                    # No message position yet, so this read only sets the other positions.
+                    "sources": wanted and self._notice_sources(rem, wanted[0], None),
+                }
             if type(after) is not int or not 0 <= after < 2**53:
                 raise Refused("invalid", "Unknown message position.")
-            return {"after": after, "stored": store.messages_after(after)}
+            return {
+                "after": after,
+                "stored": store.messages_after(after),
+                "sources": wanted and self._notice_sources(rem, *wanted),
+            }
         if op == "rem.task":
-            return {"tasks": self._need(self.rem, "Rem").store.tasks(summary=True)}
+            from gofer.ui.rem_kanban import task_ticket_keys
+
+            rem = self._need(self.rem, "Rem")
+            tasks = rem.store.tasks(summary=True)
+            kanban = getattr(rem, "kanban", None)
+            return {
+                "tasks": tasks,
+                "tickets": kanban.resolve(task_ticket_keys(tasks)) if kanban is not None else {},
+            }
         if op == "rem.memories":
             return {"memories": self._need(self.rem, "Rem").memories()}
         if op == "rem.thread":
@@ -889,14 +1334,48 @@ class DesktopControl:
         if op == "organizations.list":
             manager = self._organizations_manager()
             return {"listed": manager.call("", "user", {"action": "list", "params": {}})}
+        if op == "developer.log":
+            return {
+                "log": app_log.read(self.app_log_path, params.get("after"), params.get("levels"))
+            }
         if op == "organizations.read":
             identifier = _text(params.get("organization_id"), 100)
             manager = self._organizations_manager()
-            return {
-                "org": manager.call(
-                    "", "user", {"action": "read", "organizationId": identifier, "params": {}}
-                )
-            }
+            org = manager.call(
+                "", "user", {"action": "read", "organizationId": identifier, "params": {}}
+            )
+            repository = None
+            if (org.get("config") or {}).get("sharedRepository"):
+                try:
+                    repository = manager.call(
+                        "",
+                        "user",
+                        {"action": "repository", "organizationId": identifier, "params": {}},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # The phone shows the organization without its repository summary.
+                    logger.info(
+                        "Phone organization view left out the shared repository: %s",
+                        type(exc).__name__,
+                    )
+            return {"org": org, "repository": repository}
+        if op == "organizations.note":
+            identifier = _text(params.get("organization_id"), 100)
+            note_id = _text(params.get("note_id"), 100)
+            manager = self._organizations_manager()
+            org = manager.call(
+                "", "user", {"action": "read", "organizationId": identifier, "params": {}}
+            )
+            entry = manager.call(
+                "",
+                "user",
+                {
+                    "action": "knowledge_read",
+                    "organizationId": identifier,
+                    "params": {"id": note_id},
+                },
+            )
+            return {"org": org, "entry": entry}
         if op == "usage.overview":
             return {"overview": self._need(self.usage, "Usage")()}
         if op.startswith("workflows."):
@@ -908,6 +1387,13 @@ class DesktopControl:
 
             data_dir = getattr(self.rem, "data_dir", None)
             return source_control.gather(
+                op, params, projects or {}, Path(data_dir) if data_dir else None
+            )
+        if op in {"files.list", "files.text"}:
+            from gofer.devices import file_explorer
+
+            data_dir = getattr(self.rem, "data_dir", None)
+            return file_explorer.gather(
                 op, params, projects or {}, Path(data_dir) if data_dir else None
             )
         return {}
@@ -950,7 +1436,10 @@ class DesktopControl:
                 )
             ]
         known = payload["params"].get("known") if kind == "desktop.read" else None
-        return self._answer(peer, event, op, result, known)
+        answered = self._answer(peer, event, op, result, known)
+        if isinstance(result, dict) and "wake_mac" in result:
+            self.wake.remember_answer(peer, answered)
+        return answered
 
     def _answer(
         self, peer: str, event: dict[str, Any], op: str, result: Any, known: Any = None
@@ -997,6 +1486,24 @@ class DesktopControl:
         )
         return result
 
+    def _wake_field(self, peer: str) -> dict[str, str]:
+        """``wake_mac`` for this phone's ``overview``, or nothing at all.
+
+        Read fresh for every answer so it follows network changes. The exception text
+        is dropped on purpose: it could hold the address, and ``overview`` must answer.
+        """
+        endpoint = self.app.lan_endpoint
+        if not self.wake.allowed(peer) or endpoint is None:
+            return {}
+        host = endpoint["host"]
+        if not private_ipv4(host) or is_tailnet_address(host):
+            return {}
+        try:
+            address = clean_address(self.hardware_address(host))
+        except Exception:  # noqa: BLE001
+            return {}
+        return {"wake_mac": address} if address else {}
+
     def _need(self, service: Any, label: str) -> Any:
         if service is None:
             raise Refused("unavailable", f"{label} is not available on this desktop.")
@@ -1008,7 +1515,7 @@ class DesktopControl:
         self, peer: str, op: str, params: dict[str, Any], services: dict[str, Any] | None = None
     ) -> Any:
         if services is None:
-            scope = self.projects(peer) if op.startswith("source_control.") else None
+            scope = self.projects(peer) if _project_scoped(op) else None
             data = self._services(op, params, scope)
         else:
             data = services
@@ -1035,14 +1542,46 @@ class DesktopControl:
                 "thread_read": True,
                 # Phones read rem.notices for Rem chat alerts only from desktops that say so.
                 "rem_notices": self.rem is not None,
+                # Phones send rem.notices include and mark only to desktops that say so.
+                "rem_notices_filter": self.rem is not None,
                 "workflows": self.workflows.available(),
                 # Phones read source_control.* only from desktops that say so here;
                 # history, commit and diff came later, with their own flag.
                 "source_control": True,
+                # Phones browse project files (files.list, files.text, files.open) only
+                # on desktops that say so here.
+                "file_explorer": True,
                 "source_control_history": True,
                 # Phones send rem.tidy only while this is on; see _tidy.
                 "voice_tidy": self._voice_tidy_on(),
+                # Phones read developer.log only from desktops that say so here.
+                "developer_log": True,
+                # Phones send organizations.note, .knowledge and .worker, and the task
+                # actions move and backlog create, only to desktops that say so here.
+                "organizations_v2": True,
+                # organizations.read carries the work schedule, and phones send
+                # organizations.schedule, only with desktops that say so here.
+                "organization_schedule": True,
+                # Phones read browser.tabs and send browser.open only to desktops that
+                # say so here.
+                "browser": True,
+                # Phones send kanban.* and selfwork.* only to desktops that say so here.
+                "kanban": self.rem is not None,
+                # kanban.board carries participants and kanban.participant changes them.
+                "kanban_participants": self.rem is not None,
+                # Phones read kanban.timeline and send kanban.ticket's comment action only
+                # to desktops that say so here.
+                "kanban_comments": self.rem is not None,
+                **self._wake_field(peer),
             }
+        if op == "kanban.board":
+            return self._kanban_board(data["board"], self.projects(peer))
+        if op == "kanban.timeline":
+            return self._kanban_timeline(data["timeline"], self.projects(peer))
+        if op == "selfwork.read":
+            return data["view"]
+        if op == "browser.tabs":
+            return self.browser.view()
         if op == "media.image":
             return data["image"]
         if op == "media.preview":
@@ -1062,8 +1601,12 @@ class DesktopControl:
             return _draft_delta(data["conversation"], params.get("since"), same_attempt=same)
         if op == "rem.home":
             return self._rem_home(peer, data)
+        if op == "rem.search":
+            return _search_view(data["search"])
+        if op == "rem.history":
+            return self._rem_history(peer, data)
         if op == "rem.notices":
-            return self._rem_notices(peer, data["after"], data["stored"])
+            return self._rem_notices(peer, data["after"], data["stored"], data["sources"])
         if op == "rem.task":
             return self._rem_task(peer, _text(params.get("task_id"), 128), data)
         if op == "rem.memories":
@@ -1074,6 +1617,15 @@ class DesktopControl:
             return self._organizations(peer, data)
         if op == "organizations.read":
             return self._organization(peer, _text(params.get("organization_id"), 100), data)
+        if op == "organizations.note":
+            if data["entry"].get("archived"):
+                raise Refused("not_found", "This note was archived on the desktop.")
+            return organization_view.note(data["org"], data["entry"])
+        if op == "developer.log":
+            log = data["log"]
+            if not log.pop("available"):
+                raise Refused("unavailable", log["detail"])
+            return log
         if op == "settings.get":
             return self._settings_view()
         if op == "usage.overview":
@@ -1084,7 +1636,21 @@ class DesktopControl:
             from gofer.devices import source_control
 
             return source_control.read(op, data, self.projects(peer))
+        if op in {"files.list", "files.text"}:
+            from gofer.devices import file_explorer
+
+            return file_explorer.read(op, data, self.projects(peer))
         raise Refused("invalid", "Unknown desktop request.")
+
+    @staticmethod
+    def _rem_config_roots(store: Any) -> list[str]:
+        """Folders Rem may send files from: its open projects and the Second Brain."""
+        with store.read() as db:
+            config = store.setting(db, "config")
+        roots = [p["root"] for p in config.get("projects") or [] if p.get("root")]
+        if (config.get("brain") or {}).get("root"):
+            roots.append(config["brain"]["root"])
+        return roots
 
     def _rem_home(self, peer: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         from gofer.ui.rem_home_store import ran_at, retention
@@ -1099,12 +1665,67 @@ class DesktopControl:
         ]
         # Decrypt the project catalog once, not once per task.
         catalog = self.projects(peer)
+        shown = _newest(self._phone_messages(peer, messages[-80:], data, catalog))
+        listed = [
+            self._task_summary(peer, task, catalog)
+            for task in sorted(
+                (task for task in data["tasks"] if retention(task)["listed"]),
+                key=lambda task: (ran_at(task), task.get("created_at") or ""),
+                reverse=True,
+            )
+        ][:100]
+        return {
+            "turn_state": _text(conversation.get("turn_state") or "idle", 40),
+            # What Rem is doing while it replies, such as "Reading earlier messages".
+            "turn_label": _text(conversation.get("turn_label"), 120)
+            if conversation.get("turn_state") == "replying"
+            else "",
+            # Rem's reply as it is being written; the finished message replaces it.
+            "draft_reply": _text(conversation.get("draft_reply"), 4000)
+            if conversation.get("turn_state") == "replying"
+            else "",
+            "provider": _text(conversation.get("provider"), 80),
+            "model": _text(conversation.get("model"), 160),
+            "earlier": len(messages) - len(shown),
+            "messages": shown,
+            # Finished one-time tasks leave the list; the most recently run comes first.
+            "tasks": listed,
+            # Board tickets named in these messages and on these tasks, by key, as they
+            # are now. Only these keys show as ticket pills; any other stays plain text.
+            "tickets": _ticket_index(data.get("tickets"), _shown_keys(shown, listed)),
+            "files_thread": self.files_thread(peer),
+            "media": True,
+            "file_links": True,
+            "attachment_files": True,
+            "task_retention": True,
+            "rich_results": True,
+            "draft_deltas": True,
+            "review_retry": True,
+            "memories": True,
+            "phone_actions": True,
+            "screen_context": True,
+            # rem.message accepts refers_to, and messages carry what they reply to.
+            "replies": True,
+            "voice_tidy": self._voice_tidy_on(),
+            # rem.search finds words in the whole saved chat, and rem.history pages back
+            # through what the phone doesn't hold. Phones send them only when this is on.
+            "search": True,
+        }
+
+    def _phone_messages(
+        self,
+        peer: str,
+        messages: list[dict[str, Any]],
+        data: dict[str, Any],
+        catalog: dict[str, dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        """Chat messages shaped for a phone: links, files and actions it may use."""
         roots = [p["root"] for p in catalog.values()] + list(data.get("roots") or [])
         # Links in the conversation outlive a finished one-time task; say which still open.
         tasks = {task["id"] for task in data["tasks"]}
         threads = set(data.get("threads") or [])
         items = []
-        for message in messages[-80:]:
+        for message in messages:
             item = self._rem_message(message)
             if "work" in item:
                 item["work"].update(
@@ -1132,44 +1753,21 @@ class DesktopControl:
             if mentions:
                 item["file_mentions"] = mentions
             items.append(item)
+        return items
+
+    def _rem_history(self, peer: str, data: dict[str, Any]) -> dict[str, Any]:
+        """A page of Rem's chat from before what the phone holds, oldest first.
+
+        Each message is shaped as in ``rem.home``. When the page would be too long for one
+        reply, the messages nearest the phone's are kept and the rest counted in ``earlier``.
+        """
+        page = data["page"]
+        items = self._phone_messages(peer, page["messages"], data, self.projects(peer))
         shown = _newest(items)
         return {
-            "turn_state": _text(conversation.get("turn_state") or "idle", 40),
-            # What Rem is doing while it replies, such as "Reading earlier messages".
-            "turn_label": _text(conversation.get("turn_label"), 120)
-            if conversation.get("turn_state") == "replying"
-            else "",
-            # Rem's reply as it is being written; the finished message replaces it.
-            "draft_reply": _text(conversation.get("draft_reply"), 4000)
-            if conversation.get("turn_state") == "replying"
-            else "",
-            "provider": _text(conversation.get("provider"), 80),
-            "model": _text(conversation.get("model"), 160),
-            "earlier": len(messages) - len(shown),
             "messages": shown,
-            # Finished one-time tasks leave the list; the most recently run comes first.
-            "tasks": [
-                self._task_summary(peer, task, catalog)
-                for task in sorted(
-                    (task for task in data["tasks"] if retention(task)["listed"]),
-                    key=lambda task: (ran_at(task), task.get("created_at") or ""),
-                    reverse=True,
-                )
-            ][:100],
-            "files_thread": self.files_thread(peer),
-            "media": True,
-            "file_links": True,
-            "attachment_files": True,
-            "task_retention": True,
-            "rich_results": True,
-            "draft_deltas": True,
-            "review_retry": True,
-            "memories": True,
-            "phone_actions": True,
-            "screen_context": True,
-            # rem.message accepts refers_to, and messages carry what they reply to.
-            "replies": True,
-            "voice_tidy": self._voice_tidy_on(),
+            "earlier": int(page.get("earlier") or 0) + len(items) - len(shown),
+            "tickets": _ticket_index(data.get("tickets"), _shown_keys(shown, [])),
         }
 
     def _asked_by(self, peer: str, message: dict[str, Any]) -> bool:
@@ -1191,16 +1789,50 @@ class DesktopControl:
             return []
         return clean_phone_actions(raw)
 
-    def _rem_notices(self, peer: str, after: int | None, stored: dict[str, Any]) -> dict[str, Any]:
-        """Rem's new messages for this phone's alerts: replies and updates for its own requests.
+    def _notice_sources(
+        self, rem: Any, include: list[str], positions: tuple[int, int | None] | None
+    ) -> dict[str, Any]:
+        """Self-work and organization alerts after ``positions``, and the position after them.
 
-        Answers to questions typed on the desktop, and updates for tasks started there, stay
-        on the desktop. ``cursor`` is the last message position read; with no ``after``, or one
-        past the end of a reset conversation, it only returns the current position.
+        Every source's position moves on whichever switches are on, so a switch turned on
+        later starts from now instead of from when the first one went on. A phone with no
+        saved ``mark`` passes ``None`` and only learns the current positions.
+        """
+        report, organization = positions or (None, None)
+        reports = rem.self_work.alerts_after(report)
+        manager = self.organizations
+        organizations = (
+            None
+            if manager is None
+            else manager.alerts_after(None if not manager.enabled else organization)
+        )
+        last = "-" if organizations is None else str(organizations["last"])
+        alerts = [*reports["alerts"], *(organizations["alerts"] if organizations else [])]
+        return {
+            "include": include,
+            "mark": f"n1.{reports['last']}.{last}",
+            "more": reports["more"] or bool(organizations and organizations["more"]),
+            "alerts": [a for a in alerts if a["reason"] in include],
+        }
+
+    def _rem_notices(
+        self,
+        peer: str,
+        after: int | None,
+        stored: dict[str, Any],
+        sources: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Rem's new messages for this phone's alerts.
+
+        A phone hears about replies and updates for its own requests. Answers to questions
+        typed on the desktop, and updates for tasks started there, stay on the desktop
+        unless ``sources`` is set, when the phone also hears about the tasks it asked for.
+        ``cursor`` is the last message position read; with no ``after``, or one past the
+        end of a reset conversation, it only returns the current position.
         """
         latest = int(stored["latest"])
         if after is None or after > latest:
-            return {"cursor": latest, "notices": [], "skipped": 0, "more": False}
+            return _notice_answer([], latest, latest, sources)
         messages = stored["messages"]
         candidates = {str(m.get("id")) for m in messages if m.get("role") == "user"}
         candidates.update(str(v) for v in stored["sources"].values() if v)
@@ -1217,26 +1849,30 @@ class DesktopControl:
                 continue
             work = message.get("work") if isinstance(message.get("work"), dict) else {}
             update = message.get("kind") == "task_update"
+            reason = ""
             if not (stored["sources"].get(work.get("task_id")) in mine if update else asked):
-                continue
+                # Self-work's own alerts (``sources``) already cover the work it started,
+                # so its updates in chat don't alert a second time.
+                reason = (
+                    _task_reason(work, sources["include"])
+                    if sources and update and not work.get("self_work")
+                    else ""
+                )
+                if not reason:
+                    continue
+            clean = _alert_text if reason else _text
             found.append(
                 {
                     "id": _text(message.get("id"), 128),
                     "kind": "task_update" if update else "reply",
-                    "body": _text(message.get("body"), 1500),
+                    "body": clean(message.get("body"), 1500),
                     "created_at": _text(message.get("created_at"), 80),
-                    "title": _text(work.get("title"), 160),
+                    "title": clean(work.get("title"), 160),
                     "needs_user": work.get("needs_user") is True,
+                    **({"reason": reason} if reason else {}),
                 }
             )
-        cursor = int(stored["last"])
-        return {
-            "cursor": cursor,
-            "notices": found[-REM_NOTICES:],
-            "skipped": max(0, len(found) - REM_NOTICES),
-            # More messages are stored after cursor; the phone reads again at once.
-            "more": cursor < latest,
-        }
+        return _notice_answer(found, int(stored["last"]), latest, sources)
 
     def _phone_requests(self, peer: str, candidates: set[str]) -> set[str]:
         """The Rem chat messages among ``candidates`` that this phone sent."""
@@ -1442,6 +2078,54 @@ class DesktopControl:
             "thread_id": channel,
         }
 
+    def _file_open(self, peer: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Offer a file the phone's file explorer opened, from an open project only.
+
+        The phone names the project by catalog ID and the file by its path in it. The
+        explorer's checks (no links, no secret-looking files, at most 10 MiB) run first,
+        then the scoped snapshot reads the file without following links, as for every
+        file the desktop sends. Opening the same file again replaces the earlier copy
+        unless the phone is downloading it.
+        """
+        from gofer.devices import file_explorer
+
+        data_dir = getattr(self.rem, "data_dir", None)
+        _, root, path, info = file_explorer.offer_target(
+            self.projects(peer), params, Path(data_dir) if data_dir else None
+        )
+        channel = self.files_thread(peer)
+        key = hashlib.sha256(str(path).encode("utf-8", "surrogatepass")).hexdigest()
+        previous = self.db.execute(
+            "SELECT file FROM device_link_files WHERE peer=? AND thread=? AND path=?",
+            (peer, channel, key),
+        ).fetchone()
+        try:
+            offer: dict[str, Any] = self.app.files.snapshot(peer, channel, root, path)
+        except PairingError as exc:
+            raise _snapshot_refused(exc) from None
+        self.app._emit(
+            peer, {"thread_id": channel, "request_id": str(uuid4())}, "file.offer", offer
+        )
+        if (
+            previous is not None
+            and not self.db.execute(
+                "SELECT 1 FROM device_file_sends WHERE peer=? AND id=?", (peer, previous[0])
+            ).fetchone()
+        ):
+            self.app.files.cancel(peer, channel, previous[0])
+        self.db.execute(
+            "INSERT OR REPLACE INTO device_link_files VALUES (?,?,?,?)",
+            (peer, channel, key, offer["file_id"]),
+        )
+        return {
+            "file_id": offer["file_id"],
+            "name": offer["name"],
+            "size": offer["size"],
+            "thread_id": channel,
+            "path": str(params.get("path") or ""),
+            "modified": file_explorer.when(info.st_mtime),
+        }
+
     def _shared_link_message(
         self, peer: str, thread: str, message_id: str
     ) -> tuple[dict[str, Any], str | None]:
@@ -1480,10 +2164,28 @@ class DesktopControl:
                 key: _text(work.get(key), 160)
                 for key in ("task_id", "run_id", "thread_id", "title", "type", "state")
             }
+            tickets = _ticket_refs(work.get("tickets"))
+            if tickets:
+                item["work"]["tickets"] = tickets
+            if work.get("self_work"):
+                item["work"]["self_work"] = _text(work["self_work"], 20)
+        started = message.get("self_work")
+        if isinstance(started, dict):
+            # Cards one self-work pass started share a batch; the phone shows them together.
+            item["self_work"] = {
+                "kind": _text(started.get("kind"), 20),
+                "batch": _text(started.get("batch"), 64),
+            }
         if isinstance(message.get("state"), str):
             item["state"] = _text(message["state"], 40)
         if message.get("kind") == "task_update":
             item["kind"] = "task_update"
+        queued = message.get("queued_after")
+        if message.get("role") == "user" and isinstance(queued, list):
+            # A request the user queued behind these tasks; Rem got it once they succeeded.
+            item["queued_after"] = [
+                _text(entry.get("title"), 160) for entry in queued if isinstance(entry, dict)
+            ][:10]
         referenced = message.get("referenced")
         if isinstance(referenced, dict) and isinstance(message.get("refers_to"), str):
             # Only a preview of the message replied to: its files and cards stay with it.
@@ -1513,9 +2215,13 @@ class DesktopControl:
     def _run(run: dict[str, Any] | None) -> dict[str, Any] | None:
         if not run:
             return None
+        from gofer.ui.rem_home_store import progress_step
+
         return {
             "run_id": _text(run.get("id"), 128),
             "state": _text(run.get("state"), 40),
+            # Plan, Work, Check or Report: a queued run whose work is done is at Check.
+            "step": progress_step(run),
             "created_at": _text(run.get("created_at"), 80),
             "finished_at": _text(run.get("finished_at"), 80),
             "summary": _text(run.get("summary_short") or run.get("summary"), 700),
@@ -1529,6 +2235,8 @@ class DesktopControl:
             "checks": _checks(run.get("criteria")),
             # Whether Retry review would be accepted for this run right now.
             "review_retryable": run.get("review_retryable") is True,
+            # Board tickets the run created, worked on or changed.
+            "tickets": _ticket_refs(run.get("tickets")),
         }
 
     def _task_summary(
@@ -1562,6 +2270,8 @@ class DesktopControl:
             "last_run": self._run(task.get("last_run")),
             "ran_at": _text(ran_at(task), 80),
             **{key: value if key == "listed" else _text(value, 80) for key, value in kept.items()},
+            # Only while the task waits for other tasks to succeed; older desktops never send it.
+            **({"dependency": _dependency(task["dependency"])} if task.get("dependency") else {}),
         }
 
     def _rem_task(
@@ -1571,8 +2281,19 @@ class DesktopControl:
         task = next((t for t in data["tasks"] if t.get("id") == identifier), None)
         if task is None:
             raise Refused("not_found", "This Rem task no longer exists.")
+        summary = self._task_summary(peer, task)
+        # The newest run's checks one by one, with each reason. Only on this read:
+        # task lists and older runs keep their counts.
+        for key in ("active_run", "last_run"):
+            if summary[key] is not None:
+                summary[key]["criteria"] = _check_details(task[key].get("criteria"))
+        runs = [self._run(run) for run in (task.get("recent_runs") or [])[:20]]
         return {
-            **self._task_summary(peer, task),
+            **summary,
+            "tickets": _ticket_index(
+                data.get("tickets"),
+                _shown_keys([], [{**summary, "runs": runs}]),
+            ),
             "prompt": _text(task.get("prompt"), 8000),
             "provider": _text(task.get("provider"), 80),
             "model": _text(task.get("model"), 160),
@@ -1580,7 +2301,7 @@ class DesktopControl:
             "criteria": [
                 _text(c.get("description"), 600) for c in task.get("acceptance_criteria") or []
             ][:40],
-            "runs": [self._run(run) for run in (task.get("recent_runs") or [])[:20]],
+            "runs": runs,
         }
 
     def _rem_thread(self, identifier: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1642,15 +2363,20 @@ class DesktopControl:
         org = data["org"]
         config = org.get("config") or {}
         runtime = org.get("runtime") or {}
+        diagnostics = org.get("diagnostics") or {}
         employees = {e.get("id"): e for e in config.get("employees") or []}
-        attention = set((org.get("diagnostics") or {}).get("attention") or [])
+        attention = set(diagnostics.get("attention") or [])
+        claims = organization_view.claims_by_task(runtime)
+        reads = organization_view.note_reads(runtime)
+        catalog = self.projects(peer)
         tasks = []
         for task in (runtime.get("tasks") or [])[-200:]:
             tasks.append(
                 {
+                    **organization_view.task_extras(task, diagnostics, claims, reads),
                     "task_id": _text(task.get("id"), 100),
                     "title": _text(task.get("title"), 500),
-                    "description": _text(task.get("description"), 1500),
+                    "description": _text(task.get("description"), 4000),
                     "status": _text(task.get("status"), 20),
                     "priority": _text(task.get("priority"), 20),
                     "assignee": _text(
@@ -1705,6 +2431,12 @@ class DesktopControl:
                 for e in employees.values()
             ][:100],
             "tasks": _newest(tasks),
+            "revision": int(org.get("revision") or 0),
+            **organization_view.extend(
+                org,
+                lambda root: self._project_name(peer, root, catalog),
+                data.get("repository"),
+            ),
         }
 
     def _usage(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1756,8 +2488,17 @@ class DesktopControl:
     # Actions ---------------------------------------------------------------
 
     def _act(self, peer: str, op: str, params: dict[str, Any], request: str) -> Any:
+        if op == "browser.open":
+            from gofer.devices.phone_browser import BrowserRefused
+
+            try:
+                return self.browser.open(params, request)
+            except BrowserRefused as exc:
+                raise Refused(exc.code, str(exc)) from None
         if op == "files.link":
             return self._file_link(peer, params)
+        if op == "files.open":
+            return self._file_open(peer, params)
         if op == "rem.attachment":
             return self._rem_attachment(peer, params)
         if op.startswith("rem."):
@@ -1793,8 +2534,22 @@ class DesktopControl:
                 },
             )
             return self._organization(peer, identifier)
+        if op == "kanban.participant":
+            return self._kanban_participant(peer, params)
+        if op == "kanban.ticket":
+            return self._kanban_ticket(peer, params, request)
+        if op == "selfwork.settings":
+            return self._need(self.rem, "Rem").self_work.update_settings(dict(params))
+        if op == "selfwork.report.seen":
+            return self._need(self.rem, "Rem").self_work.mark_seen(params.get("updated_at"))
         if op == "organizations.task":
             return self._organization_task(peer, params, request)
+        if op == "organizations.knowledge":
+            return self._organization_note(peer, params)
+        if op == "organizations.worker":
+            return self._organization_worker(peer, params)
+        if op == "organizations.schedule":
+            return self._organization_schedule(peer, params)
         if op == "swarms.start":
             remote = self.app.remote
             self._need(remote.swarms, "Swarms")
@@ -2134,6 +2889,120 @@ class DesktopControl:
             except OSError:
                 pass
 
+    @staticmethod
+    def _kanban_board(board: dict[str, Any], catalog: dict[str, dict[str, str]]) -> dict[str, Any]:
+        """The global board for a phone: project IDs instead of folder paths."""
+        known = {project["root"]: key for key, project in catalog.items()}
+
+        def ids(roots: list[str]) -> list[str]:
+            return [known[root] for root in roots if root in known]
+
+        return {
+            **board,
+            "tickets": [
+                {
+                    **{k: v for k, v in ticket.items() if k != "project_dir"},
+                    "priority": "urgent"
+                    if ticket["priority"] == "critical"
+                    else ticket["priority"],
+                    "project_id": known.get(ticket.get("project_dir") or "", ""),
+                }
+                for ticket in board["tickets"]
+            ],
+            "participants": [
+                {
+                    **participant,
+                    "projects": ids(participant["projects"]),
+                    "assignable": ids(participant["assignable"]),
+                    "unavailable": ids(participant["unavailable"]),
+                    "hidden_projects": sum(r not in known for r in participant["projects"]),
+                }
+                for participant in board["participants"]
+            ],
+            "projects": [
+                {
+                    "project_id": known[project["root"]],
+                    "name": project["name"],
+                    "available": project["available"],
+                    "organization_name": project["organization_name"],
+                }
+                for project in board["projects"]
+                if project["root"] in known
+            ],
+        }
+
+    @classmethod
+    def _kanban_timeline(
+        cls, timeline: dict[str, Any], catalog: dict[str, dict[str, str]]
+    ) -> dict[str, Any]:
+        """One ticket and its timeline for a phone, small enough for one reply.
+
+        The newest entries come first to go when the reply would be too long; how many
+        were left out is counted in ``earlier``.
+        """
+        ticket = cls._kanban_board(
+            {"tickets": [timeline["ticket"]], "participants": [], "projects": []}, catalog
+        )["tickets"][0]
+        comments = list(timeline["comments"])
+        earlier = int(timeline.get("earlier") or 0)
+        budget = 400_000
+        kept: list[dict[str, Any]] = []
+        for entry in reversed(comments):
+            budget -= len(json.dumps(entry))
+            if budget < 0:
+                break
+            kept.append(entry)
+        earlier += len(comments) - len(kept)
+        return {
+            "ticket": ticket,
+            "comments": list(reversed(kept)),
+            "earlier": earlier,
+            "can_comment": bool(timeline.get("can_comment")),
+        }
+
+    def _kanban_participant(self, peer: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Set a participant's projects from a phone, keeping ones this phone can't see."""
+        rem = self._need(self.rem, "Rem")
+        catalog = self.projects(peer)
+        wanted = params.get("projects")
+        if not isinstance(wanted, list) or not all(isinstance(p, str) for p in wanted):
+            raise Refused("invalid", "Choose projects.")
+        if any(p not in catalog for p in wanted):
+            raise Refused("invalid", "That project is no longer open on desktop.")
+        identity = _text(params.get("participant_id"), 300)
+        participant = next(
+            (p for p in rem.kanban.board()["participants"] if p["participant_id"] == identity),
+            None,
+        )
+        if participant is None:
+            raise Refused("not_found", "That participant isn't available.")
+        visible = {project["root"] for project in catalog.values()}
+        rem.kanban.set_participant_projects(
+            "user",
+            {
+                "participant_id": identity,
+                "projects": [
+                    *(catalog[p]["root"] for p in wanted),
+                    *(r for r in participant["projects"] if r not in visible),
+                ],
+                "expected_revision": params.get("expected_revision"),
+            },
+        )
+        return self._kanban_board(rem.kanban.board(), catalog)
+
+    def _kanban_ticket(self, peer: str, params: dict[str, Any], request: str) -> dict[str, Any]:
+        """One board change from a phone; the desktop checks and applies it as the user's."""
+        rem = self._need(self.rem, "Rem")
+        payload = {k: v for k, v in params.items() if k != "project_dir"}
+        project = payload.pop("project_id", None)
+        if project:
+            known = self.projects(peer).get(str(project))
+            if known is None:
+                raise Refused("invalid", "That project is no longer open on desktop.")
+            payload["project_dir"] = known["root"]
+        rem.kanban.act("user", payload, request)
+        return self._kanban_board(rem.kanban.board(), self.projects(peer))
+
     def _organization_task(self, peer: str, params: dict[str, Any], request: str) -> Any:
         manager = self._organizations_manager()
         identifier = _text(params.get("organization_id"), 100)
@@ -2141,6 +3010,9 @@ class DesktopControl:
         task = _text(params.get("task_id"), 100)
         revision = params.get("expected_revision")
         if action == "create":
+            status = params.get("status", "todo")
+            if status not in {"backlog", "todo"}:
+                raise Refused("invalid", "New tickets start in Backlog or To do.")
             arguments: dict[str, Any] = {
                 "action": "task_create",
                 "params": {
@@ -2148,9 +3020,20 @@ class DesktopControl:
                     "description": _text(params.get("description"), 100000),
                     "priority": params.get("priority", "medium"),
                     "idempotencyKey": request,
+                    **({"status": status} if status != "todo" else {}),
                     **({"assignee": params["assignee"]} if params.get("assignee") else {}),
+                    **({"epicId": _text(params["epic_id"], 100)} if params.get("epic_id") else {}),
+                    **(
+                        {"project": _text(params["project_id"], 100)}
+                        if params.get("project_id")
+                        else {}
+                    ),
                 },
             }
+        elif action == "move":
+            return self._move_ticket(
+                peer, manager, identifier, task, revision, params.get("column")
+            )
         elif action == "comment":
             arguments = {
                 "action": "comment",
@@ -2193,6 +3076,154 @@ class DesktopControl:
         else:
             raise Refused("invalid", "Unknown organization task action.")
         manager.call("", "user", {**arguments, "organizationId": identifier})
+        return self._organization(peer, identifier)
+
+    def _move_ticket(
+        self, peer: str, manager: Any, identifier: str, task_id: str, revision: Any, column: Any
+    ) -> Any:
+        """Moves a ticket between Backlog, To do and In progress, as the desktop board does."""
+        from gofer.ui.rem_kanban import move_organization_ticket
+
+        def call(organization: str, action: str, arguments: dict[str, Any]) -> Any:
+            return manager.call(
+                "", "user", {"action": action, "organizationId": organization, "params": arguments}
+            )
+
+        move_organization_ticket(identifier, task_id, revision, column, call)
+        return self._organization(peer, identifier)
+
+    def _organization_note(self, peer: str, params: dict[str, Any]) -> Any:
+        """A new note in the organization's knowledge base. Edits stay on the desktop."""
+        manager = self._organizations_manager()
+        identifier = _text(params.get("organization_id"), 100)
+        if params.get("action") != "create":
+            raise Refused("invalid", "Unknown knowledge action.")
+        kind = params.get("kind", "note")
+        if kind not in organization_view.KINDS:
+            raise Refused("invalid", "Choose a decision, note, report, spec or finding.")
+        title = _text(params.get("title"), 300).strip()
+        if not title:
+            raise Refused("invalid", "Give the note a title.")
+        entry: dict[str, Any] = {
+            "kind": kind,
+            "title": title,
+            "topic": _text(params.get("topic"), 120).strip() or "General",
+            "summary": _text(params.get("summary"), 1000),
+            "body": _text(params.get("body"), 50000),
+        }
+        if params.get("project_id"):
+            entry["projectId"] = _text(params.get("project_id"), 100)
+        # A resent request is answered from the device inbox, so this runs once per request.
+        manager.call(
+            "",
+            "user",
+            {"action": "knowledge_save", "organizationId": identifier, "params": {"entry": entry}},
+        )
+        return self._organization(peer, identifier)
+
+    def _organization_worker(self, peer: str, params: dict[str, Any]) -> Any:
+        """Holds a worker, or releases the hold of one that runs in a sandbox."""
+        manager = self._organizations_manager()
+        identifier = _text(params.get("organization_id"), 100)
+        employee = _text(params.get("employee_id"), 100)
+        paused = params.get("paused")
+        if type(paused) is not bool:
+            raise Refused("invalid", "Choose hold or release.")
+        from gofer.ui.organization_store import DANGEROUS_PERMISSION_MODES
+
+        current = manager.store.get("", identifier)
+        config = current["config"]
+        employees = config.get("employees") or []
+        found = next((e for e in employees if e.get("id") == employee), None)
+        if found is None:
+            raise Refused("not_found", "This worker is no longer in the organization.")
+        if found.get("paused") is paused:
+            return self._organization(peer, identifier)
+        if not paused and found.get("permissionMode") in DANGEROUS_PERMISSION_MODES:
+            # The phone can't show the worker's access for review, so it can't confirm this.
+            raise Refused(
+                "unauthorized",
+                "This worker runs without a sandbox. Release the hold from the desktop, where "
+                "you can review and confirm its access.",
+            )
+        name = found.get("name") or employee
+        manager.call(
+            "",
+            "user",
+            {
+                "action": "configure",
+                "organizationId": identifier,
+                "params": {
+                    "config": {
+                        **config,
+                        "employees": [
+                            {**e, "paused": paused} if e.get("id") == employee else e
+                            for e in employees
+                        ],
+                    },
+                    "expectedRevision": current["revision"],
+                    "reason": f"{'Held' if paused else 'Released'} {name} from the phone",
+                },
+            },
+        )
+        return self._organization(peer, identifier)
+
+    def _organization_schedule(self, peer: str, params: dict[str, Any]) -> Any:
+        """Saves the organization's work schedule, and its time zone, from the phone."""
+        manager = self._organizations_manager()
+        identifier = _text(params.get("organization_id"), 100)
+        revision = params.get("expected_revision")
+        blocks = params.get("blocks")
+        if type(revision) is not int:
+            raise Refused("invalid", "Refresh the organization, then save again.")
+        if not isinstance(blocks, list) or len(blocks) > 40:
+            raise Refused("invalid", "A work schedule has at most 40 blocks.")
+        fields = {
+            "block_id": "id",
+            "label": "label",
+            "focus": "focus",
+            "cadence": "cadence",
+            "start": "start",
+            "end": "end",
+            "days": "days",
+            "month_day": "monthDay",
+            "nth_week": "nthWeek",
+            "weekday": "weekday",
+            "quarter_month": "quarterMonth",
+            "keywords": "keywords",
+        }
+        converted = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                raise Refused("invalid", "Each block needs a name, times and how often it repeats.")
+            converted.append(
+                {
+                    name: block[key]
+                    for key, name in fields.items()
+                    if key in block and block[key] is not None
+                }
+            )
+        current = manager.store.get("", identifier)
+        item: dict[str, Any] = {"workSchedule": {"blocks": converted}}
+        hours = current["config"].get("operatingHours") or {"mode": "always"}
+        zone = params.get("timezone")
+        if isinstance(zone, str) and zone and zone != hours.get("timezone", "UTC"):
+            # One time zone serves working hours and the schedule.
+            item["operatingHours"] = {**hours, "timezone": _text(zone, 80)}
+        manager.call(
+            "",
+            "user",
+            {
+                "action": "plan_save",
+                "organizationId": identifier,
+                "params": {
+                    "kind": "operations",
+                    "item": item,
+                    "expectedRevision": revision,
+                    "reason": "Changed the work schedule from the phone",
+                },
+            },
+        )
         return self._organization(peer, identifier)
 
     # Settings --------------------------------------------------------------
@@ -2300,6 +3331,12 @@ class DesktopControl:
         pending.append({"id": request, "values": changes})
         self._store("pending", pending)
         return self._settings_view()
+
+    def exchange_browser(
+        self, tabs: Any, search_url: Any, opened: Any, engine: Any = None
+    ) -> dict[str, Any]:
+        """Local window only: publish browser tabs, collect pages phones sent."""
+        return self.browser.exchange(tabs, search_url, opened, engine)
 
     def exchange_settings(self, settings: Any, applied: Any) -> dict[str, Any]:
         """Local window only: publish allowed values, receive queued phone changes."""

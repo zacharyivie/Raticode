@@ -7,12 +7,20 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.output import emit_json, format_option, wants_json
 from gofer.core.watcher import WorkflowWatcher
 from gofer.core.workflow import AgenticWorkflow
 from gofer.utils.paths import get_data_dir
 
-app = typer.Typer(help="Run workflow file/folder watchers", no_args_is_help=True)
+app = typer.Typer(
+    help=(
+        "[Legacy TOML] Run workflow file/folder watchers. "
+        "For Rattish, use Raticode rattish triggers add file."
+    ),
+    no_args_is_help=True,
+)
 console = Console()
+err_console = Console(stderr=True)
 
 
 def _workflow_files(data_dir: Path) -> list[Path]:
@@ -25,20 +33,20 @@ def _sync_watchers(data_dir: Path, watcher: WorkflowWatcher) -> int:
         try:
             workflow = AgenticWorkflow.from_file(path)
         except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]Skipping invalid workflow[/yellow] {path}: {exc}")
+            err_console.print(f"[yellow]Skipping invalid workflow[/yellow] {path}: {exc}")
             continue
         if workflow.config.watch is None:
             continue
         try:
             workflow.validate()
         except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]Skipping invalid workflow[/yellow] {path}: {exc}")
+            err_console.print(f"[yellow]Skipping invalid workflow[/yellow] {path}: {exc}")
             continue
         _print_agent_access_summary(workflow)
         try:
             watcher.add_workflow(workflow, path)
         except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]Skipping invalid watcher[/yellow] {path}: {exc}")
+            err_console.print(f"[yellow]Skipping invalid watcher[/yellow] {path}: {exc}")
             continue
         count += 1
     return count
@@ -52,19 +60,21 @@ def _print_agent_access_summary(wf: AgenticWorkflow) -> None:
     ]
     if not warnings:
         return
-    console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
+    err_console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
     for warning in warnings:
-        console.print(f"[yellow]- {warning}[/yellow]")
+        err_console.print(f"[yellow]- {warning}[/yellow]")
 
 
 @app.command("list")
 def list_watchers(
+    output_format: str = format_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", help="Raticode data directory"),
 ) -> None:
     """List workflows in the data directory that have file/folder watchers."""
+    as_json = wants_json(output_format)
     base = data_dir or get_data_dir()
     table = Table("ID", "Path", "Glob", "Mode", "Concurrency", "Recursive", "Debounce")
-    found = False
+    rows: list[dict[str, object]] = []
     for path in _workflow_files(base):
         try:
             workflow = AgenticWorkflow.from_file(path)
@@ -73,7 +83,18 @@ def list_watchers(
         watch = workflow.config.watch
         if watch is None:
             continue
-        found = True
+        rows.append(
+            {
+                "id": workflow.config.id,
+                "workflowPath": str(path),
+                "path": str(watch.path),
+                "glob": watch.glob,
+                "mode": watch.mode,
+                "maxConcurrency": watch.max_concurrency,
+                "recursive": watch.recursive,
+                "debounceSeconds": watch.debounce_seconds,
+            }
+        )
         table.add_row(
             workflow.config.id,
             str(watch.path),
@@ -83,7 +104,10 @@ def list_watchers(
             str(watch.recursive),
             f"{watch.debounce_seconds:g}s",
         )
-    if not found:
+    if as_json:
+        emit_json(rows)
+        return
+    if not rows:
         console.print("No watched workflows.")
         return
     console.print(table)

@@ -65,7 +65,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         <article class="tile tile-schedule rc-reveal" style="--rc-delay: 60ms">
           <span class="kicker">Automation</span>
           <h3>Runs while you sleep</h3>
-          <p>Cron schedules and file watchers start workflows without you.</p>
+          <p>Cron schedules, file changes and local webhooks start workflows while Raticode or its background scheduler runs.</p>
           <div class="cron" aria-hidden="true"><span>0 2 * * *</span><small>next run 02:00</small></div>
         </article>
 
@@ -79,7 +79,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         </article>
 
         <article class="tile tile-swarm rc-reveal" style="--rc-delay: 140ms">
-          <span class="kicker">Swarms</span>
+          <span class="kicker">Swarms · Experimental</span>
           <h3>A team of agents</h3>
           <p>Split a job into tasks, give each agent its own workspace, then review what came back.</p>
           <div class="swarm" aria-hidden="true">
@@ -88,7 +88,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         </article>
 
         <article class="tile tile-brain rc-reveal" style="--rc-delay: 80ms">
-          <span class="kicker">Second Brain</span>
+          <span class="kicker">Second Brain · Experimental</span>
           <h3>Knowledge that sticks</h3>
           <p>Point Rem at a notes folder. It searches what you know and saves reports back as notes.</p>
           <ul class="notes" aria-hidden="true">
@@ -102,7 +102,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
           <span class="kicker">Headless</span>
           <h3>The same engine, no UI</h3>
           <p>Ship workflows to a server and run them with the standalone Raticode CLI on Linux, macOS or Windows.</p>
-          <pre aria-hidden="true"><span>$</span> Raticode rattish run nightly-triage</pre>
+          <pre aria-hidden="true"><span>$</span> Raticode rattish run triage/workflow.rattish</pre>
         </article>
       </div>
     </div>
@@ -521,7 +521,8 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
   font-family: var(--rc-font-mono);
   font-size: 13px;
   color: var(--rc-ivory);
-  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .tile-cli pre span {

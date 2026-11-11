@@ -17,6 +17,8 @@ Go to **Settings > Usage**. The dashboard has two views:
 | Remaining allowance | Provider account quota, credits, or reset windows when available |
 | Tokens in Raticode | Recorded invocation activity across projects on this device |
 
+Some providers report allowances only with a usage-reporting key. **Configure usage reporting** stores that usage-only key in the operating system's secret store.
+
 Use **Refresh usage** to request a new observation. A timestamp shows when account data was checked. A failed refresh can leave the last loaded result visible, so read the status and freshness together.
 
 ## Account allowances

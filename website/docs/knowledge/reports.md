@@ -10,7 +10,7 @@ Turn an investigation into a document you can keep, share, and read outside the 
 
 ## Choose an output
 
-Open **Settings > Memory > Report output** to choose the default. An explicit request in your message takes precedence.
+Open **Settings > Memory > Report output** to choose the default; it starts as Markdown. An explicit request in your message takes precedence.
 
 | Format | Saved result | Use it for |
 | --- | --- | --- |
@@ -45,4 +45,4 @@ PDF rendering requires a running desktop app. A failed render does not produce a
 
 ## Find it again
 
-Project documents appear in the file editor and [integrated browser](../studio/browser.md). Documents saved in Second Brain become searchable as supported text is indexed. Keep related notes in topic folders and use titles that describe their contents.
+Project documents appear in the file editor, where HTML opens in [Browse mode](../studio/browser.md#read-project-reports). Documents saved in Second Brain become searchable as supported text is indexed. Keep related notes in topic folders and use titles that describe their contents.

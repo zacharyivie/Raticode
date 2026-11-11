@@ -1,6 +1,10 @@
 // Integrated browser sessions: user tabs, local previews and Rem's tabs.
 // The studio renders each tab as a <webview>; this module owns the guest
 // web contents, their profiles and every browser policy applied to them.
+// When Firefox or Chrome is the chosen web browser, web tabs and Rem's tabs
+// run in that browser without a window instead (firefox-contents.cjs,
+// chromium-contents.cjs) and the studio draws the frames they stream. Local
+// previews always stay on Raticode's own engine.
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -15,6 +19,10 @@ const {
   normalizeBrowserUrl,
 } = require("./browser-utils.cjs");
 const policyRules = require("./browser-policy.cjs");
+const { FirefoxContents } = require("./firefox-contents.cjs");
+const { ChromiumContents, isInternalPage: isChromiumInternalPage } = require("./chromium-contents.cjs");
+const { addonSlugFromUrl, createFirefoxManager } = require("./firefox-manager.cjs");
+const { watchMedia } = require("./browser-media.cjs");
 const {
   acceptLanguageList,
   createClientHints,
@@ -49,6 +57,8 @@ const {
 } = policyRules;
 
 const PROMPT_TIMEOUT_MS = 2 * 60 * 1000;
+// Google's "Couldn't sign you in · This browser or app may not be secure" page.
+const GOOGLE_REJECTED = /^https:\/\/accounts\.google\.com\/(?:v\d+\/)?signin\/rejected/i;
 const PDF_TIMEOUT_MS = 60 * 1000;
 const SAVE_AS_TIMEOUT_MS = 30 * 1000;
 const PAGE_CONTEXT_WORLD_ID = 1918;
@@ -73,6 +83,8 @@ function remOwnerForThread(threadId) {
   return crypto.createHash("sha256").update(String(threadId)).digest("hex").slice(0, 32);
 }
 
+const PRIVATE_CLEANUP_DELAY_MS = 3000;
+
 function createBrowserSessions({
   app,
   Menu,
@@ -89,6 +101,12 @@ function createBrowserSessions({
   quarantineDir,
   platform = process.platform,
   chromeVersion = process.versions.chrome,
+  firefox = null,
+  chrome = null,
+  // Other Chromium-based browsers from chromium-engine.cjs, by engine name.
+  chromium = {},
+  nativeImage = null,
+  privateCleanupDelayMs = PRIVATE_CLEANUP_DELAY_MS,
 }) {
   const sessions = new Map();
   const ownersWithCleanup = new WeakSet();
@@ -99,10 +117,39 @@ function createBrowserSessions({
   const clientCertificateChoices = new Map();
   const childWindows = new Map();
   const clientHints = new Map();
+  const firefoxDownloads = new Map();
+  const lastMedia = new WeakMap();
   let policy = sanitizeBrowserPolicy({});
+  // Browsers that run without a window and stream their tabs, by engine name.
+  const streamEngines = Object.fromEntries(Object.entries({ ...chromium, firefox, chrome }).filter(([, engine]) => engine));
+  // Firefox settings, extensions and importing (Settings > Browser).
+  const firefoxManager = firefox ? createFirefoxManager({
+    engine: firefox,
+    dataDir: app.getPath("userData"),
+    dialog,
+    getMainWindow,
+    log,
+    hooks: {
+      stopFirefox: () => firefoxStopped("Raticode is restarting Firefox"),
+      reviveFirefoxTabs,
+      restartFirefox: async () => {
+        firefoxStopped("Raticode is restarting Firefox");
+        await firefox.stopAndWait();
+        await reviveFirefoxTabs();
+      },
+      openTab: (url) => {
+        const owner = getMainWindow();
+        if (owner && !owner.isDestroyed()) owner.webContents.send("gofer:browser-open-tab", { url, background: false, engine: "firefox" });
+      },
+    },
+  }) : null;
   let installed = false;
 
   const profile = (kind) => electronSession.fromPartition(PARTITIONS[kind]);
+  const privateSites = new Map();
+  let installedIdentity = null;
+  let privateProfileInstalled = false;
+  let privateCleanupTimer = null;
 
   // ---------------------------------------------------------------------------
   // Profiles
@@ -115,20 +162,9 @@ function createBrowserSessions({
     // agent and use this app-wide fallback, which would otherwise announce
     // Electron and Raticode. Windows that already exist keep theirs.
     app.userAgentFallback = identity.userAgent;
-    for (const kind of ["user", "rem"]) {
-      const ses = profile(kind);
-      installIdentity(kind, ses, identity);
-      ses.setPermissionRequestHandler((contents, permission, callback, details) => {
-        void requestPermission(contents, permission, details || {}, kind).then(callback, () => callback(false));
-      });
-      ses.setPermissionCheckHandler((contents, permission, _origin, details) => checkPermission(contents, permission, details || {}, kind));
-      ses.setDevicePermissionHandler(() => false);
-      ses.on("will-download", (event, item, contents) => handleDownload(event, item, contents, kind));
-      ses.setCertificateVerifyProc((request, callback) => {
-        if (request.errorCode === 0 && request.certificate) verifiedCertificates.set(request.hostname, certificateSummary(request.certificate));
-        callback(-3);
-      });
-    }
+    installedIdentity = identity;
+    for (const kind of ["user", "rem"]) installProfile(kind, identity);
+    removeStrayQuarantine();
     sampleUserAgentMetadata();
     const user = profile("user");
     try {
@@ -146,7 +182,7 @@ function createBrowserSessions({
     // Shared sign-ins: mirror cookies for granted sites into Rem's profile.
     user.cookies.on("changed", (_event, cookie, _cause, removed) => {
       if (!policy.remSignInSites.some((site) => cookieMatchesSite(cookie.domain, site))) return;
-      void mirrorCookie(cookie, removed).catch(() => {});
+      void mirrorCookie(cookie, removed).catch((error) => noteMirrorFailure(cookie.domain, error));
     });
   }
 
@@ -161,6 +197,106 @@ function createBrowserSessions({
       embedderUserAgent: userAgentWithoutEmbedderTokens(original, { keepElectron: true }),
       languages: acceptLanguageList(preferred.length ? preferred : [app.getLocale()]),
     };
+  }
+
+  function installProfile(kind, identity) {
+    const ses = profile(kind);
+    // A private tab has the same abilities as one of the user's own tabs.
+    const access = kind === "private" ? "user" : kind;
+    installIdentity(kind, ses, identity);
+    ses.setPermissionRequestHandler((contents, permission, callback, details) => {
+      void requestPermission(contents, permission, details || {}, access).then(callback, () => callback(false));
+    });
+    ses.setPermissionCheckHandler((contents, permission, _origin, details) => checkPermission(contents, permission, details || {}, access));
+    ses.setDevicePermissionHandler(() => false);
+    ses.on("will-download", (event, item, contents) => handleDownload(event, item, contents, access));
+    ses.setCertificateVerifyProc((request, callback) => {
+      if (request.errorCode === 0 && request.certificate) verifiedCertificates.set(request.hostname, certificateSummary(request.certificate));
+      callback(-3);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private tabs
+
+  function installPrivateProfile() {
+    if (privateProfileInstalled) return;
+    privateProfileInstalled = true;
+    installProfile("private", installedIdentity);
+  }
+
+  // Which profile a tab's cookies and storage live in. Private tabs are the
+  // user's own tabs in every other respect.
+  function profileKind(session) {
+    return session.privateBrowsing ? "private" : session.kind;
+  }
+
+  // Private tabs neither read nor write the user's saved site settings.
+  function siteOf(session, origin) {
+    return session?.privateBrowsing ? (privateSites.get(origin) || {}) : store.site(origin);
+  }
+
+  function updateSiteOf(session, origin, patch) {
+    if (!session?.privateBrowsing) return store.updateSite(origin, patch);
+    privateSites.set(origin, { ...siteOf(session, origin), ...patch });
+    return undefined;
+  }
+
+  function setPermissionOf(session, origin, key, value) {
+    if (!session?.privateBrowsing) return store.setPermission(origin, key, value);
+    const permissions = { ...(siteOf(session, origin).permissions || {}) };
+    if (value) permissions[key] = value;
+    else delete permissions[key];
+    updateSiteOf(session, origin, { permissions });
+    return undefined;
+  }
+
+  // Nothing lists a private download after this, so an unfinished one stops
+  // and a dangerous one still waiting for review doesn't stay on disk.
+  function forgetPrivateDownloads() {
+    for (const [id, live] of downloads) {
+      if (!live.entry.private) continue;
+      live.entry.forgotten = true;
+      downloads.delete(id);
+      if (live.entry.state === "progressing") {
+        try { live.item.cancel(); } catch { /* It has just finished. */ }
+      }
+    }
+    for (const entry of store.listDownloads()) {
+      if (entry.private && entry.quarantinePath) fs.rmSync(entry.quarantinePath, { force: true });
+    }
+    store.forgetPrivateDownloads();
+    emitDownloads();
+  }
+
+  // A private download left waiting for review when Raticode last stopped has
+  // no list entry to review it from.
+  function removeStrayQuarantine() {
+    try {
+      const listed = new Set(store.listDownloads().map((item) => item.quarantinePath).filter(Boolean));
+      for (const name of fs.readdirSync(quarantineDir)) {
+        const file = path.join(quarantineDir, name);
+        if (name.endsWith(".download") && !listed.has(file)) fs.rmSync(file, { force: true });
+      }
+    } catch { /* No quarantine folder yet. */ }
+  }
+
+  // A tab that is moved between panes closes and reopens at once, so the data
+  // goes only if no private tab comes back.
+  function forgetPrivateDataSoon() {
+    clearTimeout(privateCleanupTimer);
+    privateCleanupTimer = setTimeout(() => {
+      if ([...sessions.values()].some((item) => item.privateBrowsing)) return;
+      privateSites.clear();
+      for (const key of [...certificateExceptions]) if (key.startsWith("private|")) certificateExceptions.delete(key);
+      clientHints.get("private")?.clear();
+      forgetPrivateDownloads();
+      const ses = profile("private");
+      void Promise.all([ses.clearStorageData(), ses.clearCache(), ses.clearAuthCache()]).catch((error) => {
+        log("warn", `Could not clear private browsing data: ${error.message}`);
+      });
+    }, privateCleanupDelayMs);
+    privateCleanupTimer.unref?.();
   }
 
   function installIdentity(kind, ses, identity) {
@@ -232,10 +368,17 @@ function createBrowserSessions({
 
   function setPolicy(_event, value = {}) {
     const previous = policy.remSignInSites;
+    const previousDownloads = policy.remDownloads;
     policy = sanitizeBrowserPolicy(value);
     const added = policy.remSignInSites.filter((site) => !previous.includes(site));
     const removed = previous.filter((site) => !policy.remSignInSites.includes(site));
     if (added.length || removed.length) void syncRemSignIns(added, removed).catch((error) => log("warn", `Sign-in sharing failed: ${error.message}`));
+    for (const [name, engine] of Object.entries(streamEngines)) {
+      if (added.length || removed.length) {
+        void engine.mirrorSignIns(added, removed).catch((error) => log("warn", `Sign-in sharing with Rem's ${engineLabel(name)} tabs failed: ${error.message}`));
+      }
+      if (previousDownloads !== policy.remDownloads) void engine.setRemDownloads(policy.remDownloads === "allow");
+    }
     return { ok: true };
   }
 
@@ -248,12 +391,24 @@ function createBrowserSessions({
     }
     if (removed.length) {
       const remCookies = await rem.cookies.get({});
+      let failed = 0;
       for (const cookie of remCookies) {
         if (!removed.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
         if (policy.remSignInSites.some((site) => cookieMatchesSite(cookie.domain, site))) continue;
-        await rem.cookies.remove(cookieUrl(cookie), cookie.name).catch(() => {});
+        await rem.cookies.remove(cookieUrl(cookie), cookie.name).catch(() => { failed += 1; });
       }
+      // Revoking sharing must not silently leave Rem signed in. Cookie names and values stay out of the log.
+      if (failed) log("warn", `Could not remove ${failed} of Rem's shared sign-in cookies for ${removed.join(", ")}; Rem may stay signed in there. Clear that site's data in Rem's browser.`);
     }
+  }
+
+  // Mirroring runs on every cookie change; report each site and reason once.
+  const mirrorFailures = new Set();
+  function noteMirrorFailure(domain, error) {
+    const key = `${domain}:${error?.message || error}`;
+    if (mirrorFailures.has(key)) return;
+    mirrorFailures.add(key);
+    log("warn", `Could not update Rem's shared sign-in for ${String(domain || "").replace(/^\./, "")}: ${error?.message || error}`);
   }
 
   async function mirrorCookie(cookie, removed) {
@@ -301,6 +456,29 @@ function createBrowserSessions({
     }
     const history = sanitizeHistory(options.history);
     const id = crypto.randomUUID();
+    const privateTab = kind === "user" && options.private === true;
+    // Each tab names its browser; older windows that don't get the default.
+    const streamed = kind === "user" && !privateTab ? tabStreamEngine(options.engine) : "";
+    if (streamed) {
+      // Firefox and Chrome cannot restore another browser's back-forward
+      // list, so a restored tab reopens the page it was showing.
+      const target = history ? history.entries[history.index].url : String(options.url || "");
+      const session = baseSession({
+        id,
+        owner: event.sender,
+        kind,
+        url: "about:blank",
+        initialUrl: target || "about:blank",
+        clientId: typeof options.clientId === "string" ? options.clientId : "",
+        applicationKeybindings: sanitizeBrowserKeybindings(options.applicationKeybindings),
+        openBrowserBinding: typeof options.openBrowserBinding === "string" ? options.openBrowserBinding.slice(0, 120) : "Mod+Alt+Slash",
+      });
+      sessions.set(id, session);
+      registerOwnerCleanup(event.sender);
+      createStreamContents(session, streamed);
+      if (target && target !== "about:blank") void navigate(session, target).catch((error) => { session.error = error.message; emitState(session); });
+      return sessionState(session);
+    }
     const session = baseSession({
       id,
       owner: event.sender,
@@ -313,9 +491,14 @@ function createBrowserSessions({
       openBrowserBinding: typeof options.openBrowserBinding === "string" ? options.openBrowserBinding.slice(0, 120) : "Mod+Alt+Slash",
     });
     session.pendingHistory = history;
+    if (privateTab) {
+      installPrivateProfile();
+      session.privateBrowsing = true;
+      clearTimeout(privateCleanupTimer);
+    }
     sessions.set(id, session);
     registerOwnerCleanup(event.sender);
-    return { ...sessionState(session), src: session.pendingSrc, partition: PARTITIONS[kind] };
+    return { ...sessionState(session), src: session.pendingSrc, partition: PARTITIONS[profileKind(session)] };
   }
 
   function baseSession({ id, owner, kind, url, initialUrl = url, grantId = "", clientId = "", applicationKeybindings = {}, openBrowserBinding = "Mod+Alt+Slash", agent = null }) {
@@ -379,7 +562,7 @@ function createBrowserSessions({
     const requested = String(params.src ?? "");
     for (const session of sessions.values()) {
       if (session.ownerId === ownerId && session.pendingSrc && session.pendingSrc === requested
-          && PARTITIONS[session.kind] === params.partition) return true;
+          && PARTITIONS[profileKind(session)] === params.partition) return true;
     }
     return requested === "about:blank";
   }
@@ -394,7 +577,7 @@ function createBrowserSessions({
     if (!guest || guest.isDestroyed() || guest.hostWebContents !== event.sender || guest.getType() !== "webview") {
       throw new Error("Browser view is unavailable.");
     }
-    if (!sameProfile(guest.session, profile(session.kind))) throw new Error("Browser view uses the wrong profile.");
+    if (!sameProfile(guest.session, profile(profileKind(session)))) throw new Error("Browser view uses the wrong profile.");
     if (session.contents === guest) return;
     if (session.contents) throw new Error("Browser session already has a view.");
     session.contents = guest;
@@ -442,8 +625,14 @@ function createBrowserSessions({
     const contents = liveContents(session);
     const restoreOwnerFocus = contents?.isFocused() === true;
     sessions.delete(session.id);
+    if (session.privateBrowsing && ![...sessions.values()].some((item) => item.privateBrowsing)) forgetPrivateDataSoon();
     session.closed = true;
     session.contents = null;
+    clearTimeout(session.detachTimer);
+    session.mediaWatch?.stop();
+    session.mediaWatch = null;
+    emitMedia(session.owner);
+    if (isStreamed(contents)) contents.close();
     for (const [requestId, prompt] of prompts) {
       if (prompt.session === session) settlePrompt(requestId, null);
     }
@@ -466,6 +655,8 @@ function createBrowserSessions({
 
   function closeAll() {
     for (const session of [...sessions.values()]) closeSession(session);
+    // Raticode is quitting: Firefox and Chrome go with it.
+    for (const engine of Object.values(streamEngines)) engine.stop();
     store.flush();
   }
 
@@ -534,7 +725,7 @@ function createBrowserSessions({
       update();
     });
     contents.on("page-title-updated", (_event, title) => {
-      if (session.kind === "user") store.updateTitle(contents.getURL(), title);
+      if (session.kind === "user" && !session.privateBrowsing) store.updateTitle(contents.getURL(), title);
       update();
     });
     contents.on("page-favicon-updated", (_event, favicons) => {
@@ -560,6 +751,11 @@ function createBrowserSessions({
     contents.on("audio-state-changed", (event) => {
       session.audible = typeof event?.audible === "boolean" ? event.audible : contents.isCurrentlyAudible();
       update();
+    });
+    session.mediaWatch = watchMedia(contents, {
+      audible: () => session.audible === true,
+      muted: () => session.muted === true,
+      onChange: () => emitMedia(session.owner),
     });
     // Pages with unsaved work ask before leaving, as in any browser.
     contents.on("will-prevent-unload", (event) => {
@@ -649,7 +845,7 @@ function createBrowserSessions({
 
   function toggleDevTools(session) {
     const contents = liveContents(session);
-    if (!contents) return;
+    if (!contents || isStreamed(contents)) return;
     if (contents.isDevToolsOpened()) contents.closeDevTools();
     else contents.openDevTools({ mode: "detach" });
   }
@@ -659,6 +855,11 @@ function createBrowserSessions({
   async function print(session) {
     const contents = liveContents(session);
     if (!contents) return;
+    // A headless Firefox or Chrome cannot show a print dialog; a PDF is the closest.
+    if (isStreamed(contents)) {
+      await saveAsPdf(session);
+      return;
+    }
     let printers = [];
     try {
       printers = typeof contents.getPrintersAsync === "function" ? await contents.getPrintersAsync() : [];
@@ -748,7 +949,7 @@ function createBrowserSessions({
     }
     // Pages and Rem never take the user's view; only user clicks may.
     const foreground = !background && !session.agent && Date.now() - session.lastUserInputAt <= policyRules.USER_ACTIVATION_MS;
-    session.owner.send("gofer:browser-open-tab", { url: url.toString(), background: !foreground });
+    session.owner.send("gofer:browser-open-tab", { url: url.toString(), background: !foreground, engine: session.engine || "raticode", ...(session.privateBrowsing ? { private: true } : {}) });
   }
 
   function openWindow(session, details = {}) {
@@ -766,7 +967,7 @@ function createBrowserSessions({
       postBody: details.postBody,
       agent: Boolean(session.agent && !session.agent.shared),
       lastUserInputAt: session.lastUserInputAt,
-      popupsAllowed: store.site(origin).popups === "allow",
+      popupsAllowed: siteOf(session, origin).popups === "allow",
     });
     if (decision.kind === "same-tab") {
       void run(session, () => contents.loadURL(details.url));
@@ -834,7 +1035,7 @@ function createBrowserSessions({
     const popup = session.blockedPopups[Number(index)];
     if (!popup) return;
     session.blockedPopups = session.blockedPopups.filter((_item, position) => position !== Number(index));
-    if (/^https?:/i.test(popup.url)) session.owner.send("gofer:browser-open-tab", { url: popup.url, background: false });
+    if (/^https?:/i.test(popup.url)) session.owner.send("gofer:browser-open-tab", { url: popup.url, background: false, engine: session.engine || "raticode", ...(session.privateBrowsing ? { private: true } : {}) });
     emitState(session);
   }
 
@@ -843,7 +1044,7 @@ function createBrowserSessions({
 
   function applySiteZoom(session, url) {
     const origin = siteKey(url);
-    session.pageZoomFactor = clampZoom(origin ? store.site(origin).zoom || 1 : 1);
+    session.pageZoomFactor = clampZoom(origin ? siteOf(session, origin).zoom || 1 : 1);
     syncZoom(session);
   }
 
@@ -852,7 +1053,7 @@ function createBrowserSessions({
     if (!contents) return;
     session.pageZoomFactor = direction === 0 ? 1 : nextZoomLevel(session.pageZoomFactor, direction);
     const origin = siteKey(contents.getURL());
-    if (origin && session.kind !== "rem") store.updateSite(origin, { zoom: session.pageZoomFactor === 1 ? null : session.pageZoomFactor });
+    if (origin && session.kind !== "rem") updateSiteOf(session, origin, { zoom: session.pageZoomFactor === 1 ? null : session.pageZoomFactor });
     syncZoom(session);
     emitState(session);
   }
@@ -870,6 +1071,12 @@ function createBrowserSessions({
   function syncZoom(session) {
     const contents = liveContents(session);
     if (!contents) return;
+    // Firefox and Chrome lay the page out smaller instead; the studio's own
+    // zoom already reaches them through the view's pixel ratio.
+    if (isStreamed(contents)) {
+      contents.setPageZoom(session.pageZoomFactor);
+      return;
+    }
     contents.setZoomFactor(browserContentZoomFactor(session.ownerZoomFactor, session.pageZoomFactor));
   }
 
@@ -877,7 +1084,7 @@ function createBrowserSessions({
   // History
 
   function recordHistory(session, url) {
-    if (session.kind !== "user" || !/^https?:/i.test(String(url))) return;
+    if (session.kind !== "user" || session.privateBrowsing || !/^https?:/i.test(String(url))) return;
     const key = String(url).split("#", 1)[0];
     if (key === session.lastRecordedUrl) return;
     session.lastRecordedUrl = key;
@@ -910,7 +1117,7 @@ function createBrowserSessions({
     const agent = kind === "rem" || Boolean(session?.agent && !session.agent.shared);
     if (!session) return policyRules.AUTO_ALLOWED_PERMISSIONS.has(permission) && kind === "user" && permission !== "pointerLock";
     const origin = siteKey(details.requestingUrl || contents.getURL());
-    const stored = store.site(origin).permissions || {};
+    const stored = siteOf(session, origin).permissions || {};
     const decision = permissionDecision({ permission, details, stored, agent });
     if (decision !== "prompt") return decision === "allow";
     const keys = permission === "openExternal"
@@ -924,7 +1131,7 @@ function createBrowserSessions({
       })),
     });
     if (response === "allow" || response === "block") {
-      for (const key of keys) store.setPermission(origin, key, response);
+      for (const key of keys) setPermissionOf(session, origin, key, response);
     }
     return response === "allow" || response === "allow-once";
   }
@@ -935,7 +1142,7 @@ function createBrowserSessions({
     const session = sessionForContents(contents);
     if (!session) return false;
     const origin = siteKey(details.requestingUrl || details.securityOrigin || contents?.getURL?.() || "");
-    const stored = store.site(origin).permissions || {};
+    const stored = siteOf(session, origin).permissions || {};
     const keys = permission === "media" ? permissionKeys("media", { mediaType: details.mediaType }) : [permission];
     return keys.length > 0 && keys.every((key) => stored[key] === "allow");
   }
@@ -984,7 +1191,7 @@ function createBrowserSessions({
     const session = sessionForContents(contents);
     if (!session) return false;
     event.preventDefault();
-    const key = `${hostOf(url)}|${certificate?.fingerprint || ""}`;
+    const key = `${session.privateBrowsing ? "private|" : ""}${hostOf(url)}|${certificate?.fingerprint || ""}`;
     if (session.kind === "user" && certificateExceptions.has(key)) {
       session.certificateException = true;
       callback(true);
@@ -1008,7 +1215,7 @@ function createBrowserSessions({
   function allowCertificate(session) {
     const failure = session.certificateError;
     if (!failure || session.kind !== "user" || !failure.fingerprint) throw new Error("There is no certificate to accept for this page.");
-    certificateExceptions.add(`${failure.host}|${failure.fingerprint}`);
+    certificateExceptions.add(`${session.privateBrowsing ? "private|" : ""}${failure.host}|${failure.fingerprint}`);
     session.certificateError = null;
     session.certificateException = true;
     const contents = liveContents(session);
@@ -1081,13 +1288,13 @@ function createBrowserSessions({
     const dangerous = isDangerousDownload(filename);
     const directory = app.getPath("downloads");
     const saveAs = takePendingSaveAs(session, item);
-    const askWhere = !dangerous && !byRem && (policy.askWhereToSave || saveAs);
+    const askWhere = !dangerous && !byRem && (policy.askWhereToSave || Boolean(saveAs));
     let finalPath = "";
     if (dangerous) {
       fs.mkdirSync(quarantineDir, { recursive: true, mode: 0o700 });
       item.setSavePath(path.join(quarantineDir, `${id}.download`));
     } else if (askWhere) {
-      item.setSaveDialogOptions({ defaultPath: path.join(directory, filename), title: saveAs ? "Save image" : "Save download" });
+      item.setSaveDialogOptions({ defaultPath: path.join(directory, filename), title: saveAs || "Save download" });
     } else {
       finalPath = uniqueDownloadPath(directory, filename, (candidate) => fs.existsSync(candidate) || [...downloads.values()].some((value) => value.entry.path === candidate));
       item.setSavePath(finalPath);
@@ -1105,12 +1312,14 @@ function createBrowserSessions({
       startedAt: Date.now(),
       dangerous,
       byRem,
+      ...(session?.privateBrowsing ? { private: true } : {}),
     };
     downloads.set(id, { item, entry });
     store.upsertDownload(entry);
     emitDownloads();
     let lastEmit = 0;
     item.on("updated", (_event, state) => {
+      if (entry.forgotten) return;
       entry.state = state === "interrupted" ? "interrupted" : "progressing";
       entry.paused = item.isPaused();
       entry.receivedBytes = item.getReceivedBytes();
@@ -1124,6 +1333,7 @@ function createBrowserSessions({
       }
     });
     item.once("done", (_event, state) => {
+      if (entry.forgotten) return;
       // Cancelling the save dialog is not a download worth listing.
       if (askWhere && state === "cancelled" && !item.getSavePath()) {
         downloads.delete(id);
@@ -1201,7 +1411,7 @@ function createBrowserSessions({
       case "retry": {
         const owner = getMainWindow();
         if (!/^https?:/i.test(entry.url) || !owner) throw new Error("This download cannot be retried.");
-        const userTab = [...sessions.values()].find((item) => item.kind === "user" && liveContents(item));
+        const userTab = [...sessions.values()].find((item) => item.kind === "user" && Boolean(item.privateBrowsing) === Boolean(entry.private) && liveContents(item));
         if (!userTab) throw new Error("Open a browser tab to retry this download.");
         liveContents(userTab).downloadURL(entry.url);
         store.removeDownload(id);
@@ -1241,6 +1451,13 @@ function createBrowserSessions({
     // Frames other than the main one do not report the element they show.
     if (params.frame && params.frame !== contents.mainFrame) session.contextElement = null;
     const element = session.contextElement || null;
+    // Chrome and Edge tabs report the right-click themselves; their page,
+    // clipboard and editing live in a browser without a window.
+    const streamed = isStreamed(contents);
+    const edit = (command) => () => {
+      const text = command === "paste" ? clipboard.readText() : "";
+      void contents.editCommand(command, text).catch((error) => log("warn", `${engineLabel(contents.engine)} could not ${command}: ${error.message}`));
+    };
     const template = [];
     const separator = () => { if (template.length && template.at(-1).type !== "separator") template.push({ type: "separator" }); };
     if (params.misspelledWord) {
@@ -1255,11 +1472,23 @@ function createBrowserSessions({
       template.push(
         { label: "Open link in new tab", click: () => openPageLink(session, params.linkURL, { background: true }) },
         { label: "Open link in default browser", click: () => void shell.openExternal(params.linkURL) },
+        ...(streamed ? [] : [{ label: "Save link as…", click: () => saveLinkAs(session, params.linkURL) }]),
         { label: "Copy link address", click: () => copyText(params.linkURL) },
       );
       separator();
+    } else if (!streamed && params.linkURL && /^(?:blob|data):/i.test(params.linkURL)) {
+      // A file the page built itself, such as an exported chat. It only
+      // exists inside this page, so it can be saved but not opened elsewhere.
+      template.push({ label: "Save link as…", click: () => saveLinkAs(session, params.linkURL) });
+      separator();
     }
-    if (params.mediaType === "image" && params.srcURL) {
+    if (streamed && params.mediaType === "image" && params.srcURL) {
+      template.push(
+        { label: "Open image in new tab", click: () => openPageLink(session, params.srcURL, { background: true }) },
+        { label: "Copy image address", click: () => copyText(params.srcURL) },
+      );
+      separator();
+    } else if (params.mediaType === "image" && params.srcURL) {
       template.push(
         { label: "Save image as…", click: () => saveImageAs(session, params.srcURL) },
         { label: "Copy image", click: () => contents.copyImageAt(params.x, params.y) },
@@ -1267,19 +1496,30 @@ function createBrowserSessions({
       );
       separator();
     }
-    if (params.isEditable) {
+    if (streamed && params.isEditable) {
+      template.push(
+        { label: "Undo", click: edit("undo") },
+        { label: "Redo", click: edit("redo") },
+        { type: "separator" },
+        { label: "Cut", enabled: Boolean(params.selectionText), click: edit("cut") },
+        { label: "Copy", enabled: Boolean(params.selectionText), click: edit("copy") },
+        { label: "Paste", click: edit("paste") },
+        { label: "Select all", click: edit("selectAll") },
+      );
+      separator();
+    } else if (params.isEditable) {
       template.push({ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" });
       separator();
     } else if (params.selectionText) {
       const text = params.selectionText.trim().replace(/\s+/g, " ");
       template.push(
-        { role: "copy" },
+        streamed ? { label: "Copy", click: edit("copy") } : { role: "copy" },
         { label: `Search for “${text.length > 30 ? `${text.slice(0, 29)}…` : text}”`, click: () => openPageLink(session, policy.searchUrl.replace("{query}", encodeURIComponent(text.slice(0, 500))), { background: false }) },
       );
       separator();
     }
     // Local files ask about the open page only; Rem gets no further file access.
-    if (session.kind !== "preview" || /^file:/i.test(contents.getURL())) {
+    if (!session.privateBrowsing && (session.kind !== "preview" || /^file:/i.test(contents.getURL()))) {
       template.push({ label: "Ask Rem about this", click: () => emitCommand(session, "ask-rem", { selection: String(params.selectionText || "").slice(0, 20000), element }) });
       separator();
     }
@@ -1289,11 +1529,11 @@ function createBrowserSessions({
       { label: "Reload", click: () => reload(session, false) },
       { type: "separator" },
       ...(session.kind === "user" ? [{ label: store.bookmarkFor(contents.getURL()) ? "Remove bookmark" : "Bookmark this page", click: () => toggleBookmark(session) }] : []),
-      { label: "Save page as…", click: () => void savePage(session) },
-      { label: "Print…", click: () => void print(session) },
+      ...(!streamed || contents.savePageFormat ? [{ label: "Save page as…", click: () => void savePage(session) }] : []),
+      // A browser without a window prints only to PDF.
+      ...(streamed ? [] : [{ label: "Print…", click: () => void print(session) }]),
       { label: "Save as PDF…", click: () => void saveAsPdf(session) },
-      { type: "separator" },
-      { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) },
+      ...(streamed ? [] : [{ type: "separator" }, { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) }]),
     );
     const owner = getMainWindow();
     Menu.buildFromTemplate(template).popup(owner && !owner.isDestroyed() ? { window: owner } : {});
@@ -1301,28 +1541,39 @@ function createBrowserSessions({
 
   // The download that follows asks where to save, like Save page as….
   function saveImageAs(session, url) {
+    startSaveAs(session, url, "Save image");
+  }
+
+  function saveLinkAs(session, url) {
+    startSaveAs(session, url, "Save link");
+  }
+
+  function startSaveAs(session, url, title) {
     const contents = liveContents(session);
     if (!contents) return;
-    session.pendingSaveAs = { url, at: Date.now() };
+    session.pendingSaveAs = { url, title, at: Date.now() };
     contents.downloadURL(url);
   }
 
+  // The save dialog's title when this download is the one Save … as asked for.
   function takePendingSaveAs(session, item) {
     const pending = session?.pendingSaveAs;
-    if (!pending) return false;
+    if (!pending) return "";
     session.pendingSaveAs = null;
     const original = item.getURLChain?.()[0] || item.getURL();
-    return pending.url === original && Date.now() - pending.at < SAVE_AS_TIMEOUT_MS;
+    return pending.url === original && Date.now() - pending.at < SAVE_AS_TIMEOUT_MS ? pending.title || "Save download" : "";
   }
 
   async function savePage(session) {
     const contents = liveContents(session);
     if (!contents) return;
     try {
+      // Chrome and Edge tabs save the page as one file with its pictures.
+      const single = contents.savePageFormat === "mhtml";
       const filePath = await chooseSavePath({
         title: "Save page",
-        defaultPath: path.join(app.getPath("downloads"), `${sanitizeFilename(contents.getTitle() || "page")}.html`),
-        filters: [{ name: "Web page", extensions: ["html", "htm"] }],
+        defaultPath: path.join(app.getPath("downloads"), `${sanitizeFilename(contents.getTitle() || "page")}.${single ? "mhtml" : "html"}`),
+        filters: single ? [{ name: "Web page, single file", extensions: ["mhtml", "mht"] }] : [{ name: "Web page", extensions: ["html", "htm"] }],
       });
       if (!filePath || !liveContents(session)) return;
       await contents.savePage(filePath, "HTMLComplete");
@@ -1371,10 +1622,16 @@ function createBrowserSessions({
       throw new Error("The Raticode window is closed. Open Raticode and retry.");
     }
     const owner = mainWindow.webContents;
+    const streamed = streamEngine();
+    if (streamed && !streamEngines[streamed].status().available) {
+      const name = engineLabel(streamed);
+      throw new Error(`${name} is the default browser in Settings > Browser, but it is not installed. Ask the user to install ${name} or choose Raticode (chromium) as the default browser.`);
+    }
     const session = baseSession({ id: crypto.randomUUID(), owner, kind: "rem", url: "about:blank", agent: { id: agent, label, shared: false } });
     sessions.set(session.id, session);
     registerOwnerCleanup(owner);
-    owner.send("gofer:browser-agent-open", { id: session.id, label, partition: PARTITIONS.rem });
+    if (streamed) createStreamContents(session, streamed);
+    owner.send("gofer:browser-agent-open", { id: session.id, label, partition: PARTITIONS.rem, engine: streamed || "raticode" });
     return session;
   }
 
@@ -1423,7 +1680,7 @@ function createBrowserSessions({
   }
 
   function shareWithRem(session, threadId, label = "Rem") {
-    if (session.kind !== "user") throw new Error("Only web tabs can be shared with Rem.");
+    if (session.kind !== "user" || session.privateBrowsing) throw new Error("Only your regular web tabs can be shared with Rem.");
     if (typeof threadId !== "string" || !threadId.trim()) throw new Error("Choose a Rem thread to share this tab with.");
     if (session.agent) throw new Error("This tab is already shared with Rem.");
     session.agent = { id: remOwnerForThread(threadId.trim()), label: String(label || "Rem").slice(0, 60), shared: true };
@@ -1458,6 +1715,276 @@ function createBrowserSessions({
   }
 
   // ---------------------------------------------------------------------------
+  // Firefox and Chrome modes: tabs streamed from a browser without a window
+
+  // The chosen web browser when it is one that streams, otherwise "".
+  function streamEngine() {
+    const name = policy.engine;
+    return name !== "raticode" && streamEngines[name] ? name : "";
+  }
+
+  // The streamed browser a new tab asked for: "" for Raticode (chromium) and
+  // for Raticode (gecko), whose window the studio places itself. A request
+  // without a browser, from a window older than per-tab browsers, gets the
+  // default from Settings > Browser.
+  function tabStreamEngine(requested) {
+    if (typeof requested !== "string" || !requested) return streamEngine();
+    if (requested === "raticode" || requested === "gecko") return "";
+    if (streamEngines[requested]) return requested;
+    throw new Error(`${engineLabel(requested)} is not available in this version of Raticode.`);
+  }
+
+  // A session or tab contents that streams from Firefox or Chrome.
+  function isStreamed(item) {
+    const name = item?.engine;
+    return Boolean(name && name !== "raticode" && streamEngines[name]);
+  }
+
+  function engineLabel(name) {
+    if (name === "firefox") return "Firefox";
+    if (!name || name === "raticode") return "Raticode (chromium)";
+    if (name === "gecko") return "Raticode (gecko)";
+    return streamEngines[name]?.browser?.name || String(name);
+  }
+
+  // Whether each browser that can stream tabs is installed, by engine name.
+  function engineStatus() {
+    const missing = { available: false, executable: "", running: false };
+    const status = { firefox: missing, chrome: missing, edge: missing };
+    for (const [name, engine] of Object.entries(streamEngines)) status[name] = engine.status();
+    return status;
+  }
+
+  function createStreamContents(session, name) {
+    const engine = streamEngines[name];
+    const Contents = name === "firefox" ? FirefoxContents : ChromiumContents;
+    const contents = new Contents({
+      engine,
+      kind: session.kind === "rem" ? "rem" : "user",
+      nativeImage,
+      clipboard: { writeText: (text) => clipboard.writeText(text) },
+      log,
+      platform,
+    });
+    if (session.agent && !session.agent.shared) {
+      // Rem's own tabs check page navigations against its site rules, and
+      // start with copies of the sign-ins the user shares.
+      contents.guardNavigation = true;
+      const sites = [...policy.remSignInSites];
+      contents.ready = contents.ready.then(() => engine.mirrorSignIns(sites).catch((error) => {
+        log("warn", `Could not share sign-ins with Rem's ${engineLabel(name)} tabs: ${error.message}`);
+      }));
+      contents.ready.catch(() => {});
+    }
+    session.engine = name;
+    session.contents = contents;
+    session.pendingSrc = "";
+    contents.once("destroyed", () => closeSession(session));
+    configure(session);
+    configureStream(session);
+    syncZoom(session);
+    return contents;
+  }
+
+  // Firefox tabs name their events firefox-*, Chrome tabs stream-*.
+  function configureStream(session) {
+    const contents = session.contents;
+    const prefix = contents.eventPrefix || "firefox";
+    const send = (channel, payload) => {
+      if (sessions.get(session.id) === session && !session.owner.isDestroyed()) session.owner.send(channel, { ...payload, id: session.id });
+    };
+    contents.on(`${prefix}-frame`, (frame) => send("gofer:browser-frame", frame));
+    for (const kind of ["cursor", "select", "highlight", "focus"]) {
+      contents.on(`${prefix}-${kind}`, (details = {}) => send("gofer:browser-firefox", { ...details, kind }));
+    }
+    contents.on(`${prefix}-ready`, () => emitState(session));
+    contents.on(`${prefix}-open-tab`, ({ url }) => openPageLink(session, url));
+    contents.on(`${prefix}-dialog`, (details) => void answerFirefoxDialog(session, contents, details));
+    contents.on(`${prefix}-file-dialog`, (details) => void chooseFirefoxFiles(session, contents, details));
+    contents.on(`${prefix}-download-begin`, (details) => firefoxDownloadBegan(session, details));
+    contents.on(`${prefix}-download-end`, (details) => firefoxDownloadEnded(details, session));
+  }
+
+  function firefoxViewAction(session, contents, options) {
+    if (!isStreamed(contents)) throw new Error("This tab does not stream.");
+    switch (options.action) {
+      case "firefox-view":
+        clearTimeout(session.detachTimer);
+        contents.setView({ width: options.width, height: options.height, scale: options.scale }, options.visible === true);
+        return { ok: true };
+      case "firefox-input":
+        contents.handleInput(options.events);
+        return { ok: true };
+      case "frame-ack":
+        contents.ackFrame(options.seq);
+        return { ok: true };
+      case "view-detached":
+        contents.setView(null, false);
+        // Closing Rem's tab in the studio removes its view. A remount
+        // attaches again within moments; otherwise the tab is gone.
+        if (session.agent && !session.agent.shared) {
+          clearTimeout(session.detachTimer);
+          session.detachTimer = setTimeout(() => { if (sessions.get(session.id) === session) closeAgentTab(session); }, 3000);
+          session.detachTimer.unref?.();
+        }
+        return { ok: true };
+      default:
+        throw new Error(`Unknown browser action: ${options.action}`);
+    }
+  }
+
+  // Firefox shows no dialogs of its own without a window, so Raticode asks.
+  async function answerFirefoxDialog(session, contents, details) {
+    // Rem answers dialogs in its own tabs with browser_handle_dialog.
+    if (session.agent && !session.agent.shared) return;
+    const host = hostOf(contents.getURL()) || "This page";
+    let accept = true;
+    let text;
+    if (details.type === "alert") {
+      await showMessage({ type: "info", message: `${host} says`, detail: details.message, buttons: ["OK"] });
+    } else if (details.type === "beforeunload") {
+      accept = await showMessage({ type: "question", buttons: ["Leave", "Stay"], defaultId: 1, cancelId: 1, message: "Leave this site?", detail: "Changes you made may not be saved." }) === 0;
+    } else {
+      const prompt = details.type === "prompt";
+      const detail = prompt
+        ? `${details.message}\n\n${engineLabel(session.engine)} tabs cannot type an answer here. OK sends ${details.defaultValue ? `the suggested answer "${details.defaultValue}"` : "an empty answer"}.`
+        : details.message;
+      accept = await showMessage({ type: "question", message: `${host} says`, detail, buttons: ["OK", "Cancel"], defaultId: 0, cancelId: 1 }) === 0;
+      if (prompt) text = details.defaultValue || "";
+    }
+    if (liveContents(session) === contents) await contents.answerDialog(accept, text).catch(() => {});
+  }
+
+  async function chooseFirefoxFiles(session, contents, details) {
+    // Rem attaches files with browser_file_upload, which checks its folders.
+    if (!details.element || session.agent && !session.agent.shared) return;
+    const owner = getMainWindow();
+    const options = { title: "Choose files to upload", properties: details.multiple ? ["openFile", "multiSelections"] : ["openFile"] };
+    try {
+      const result = owner && !owner.isDestroyed() ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+      if (result.canceled || !result.filePaths?.length || liveContents(session) !== contents) return;
+      await contents.setFiles(details.element, result.filePaths);
+    } catch (error) {
+      log("warn", `Could not attach files in ${/^[aeiou]/i.test(engineLabel(session.engine)) ? "an" : "a"} ${engineLabel(session.engine)} tab: ${error.message}`);
+    }
+  }
+
+  // Firefox and Chrome save into Raticode's staging folders. Finished files
+  // move to Downloads, or to quarantine when their type can run code.
+  function firefoxDownloadBegan(session, details) {
+    const byRem = Boolean(session.agent && !session.agent.shared);
+    const filename = sanitizeFilename(details.filename || "download");
+    if (byRem && policy.remDownloads !== "allow") {
+      session.lastBlockedDownload = filename;
+      recordAgentActivity(session, { action: "download blocked", detail: filename, at: Date.now() });
+      return;
+    }
+    const entry = {
+      id: crypto.randomUUID(),
+      url: String(details.url || "").slice(0, 4096),
+      filename,
+      path: "",
+      mimeType: "",
+      state: "progressing",
+      paused: false,
+      receivedBytes: 0,
+      totalBytes: 0,
+      startedAt: Date.now(),
+      dangerous: isDangerousDownload(filename),
+      byRem,
+    };
+    firefoxDownloads.set(details.navigation || entry.id, entry);
+    store.upsertDownload(entry);
+    emitDownloads();
+  }
+
+  function firefoxDownloadEnded(details, session = null) {
+    const key = details.navigation || "";
+    const entry = firefoxDownloads.get(key);
+    if (!entry) {
+      if (details.filepath) fs.rmSync(details.filepath, { force: true });
+      return;
+    }
+    firefoxDownloads.delete(key);
+    entry.finishedAt = Date.now();
+    try {
+      if (details.status !== "complete" || !details.filepath) {
+        entry.state = "cancelled";
+      } else if (entry.dangerous) {
+        fs.mkdirSync(quarantineDir, { recursive: true, mode: 0o700 });
+        const target = path.join(quarantineDir, `${entry.id}.download`);
+        moveFile(details.filepath, target);
+        Object.assign(entry, { state: "quarantined", quarantinePath: target, receivedBytes: fs.statSync(target).size });
+      } else {
+        const target = uniqueDownloadPath(app.getPath("downloads"), entry.filename, (candidate) => fs.existsSync(candidate));
+        moveFile(details.filepath, target);
+        Object.assign(entry, { state: "completed", path: target, receivedBytes: fs.statSync(target).size });
+      }
+      entry.totalBytes = entry.receivedBytes;
+    } catch (error) {
+      entry.state = "interrupted";
+      log("warn", `Could not finish a download from ${/^[aeiou]/i.test(engineLabel(session?.engine)) ? "an" : "a"} ${engineLabel(session?.engine)} tab: ${error.message}`);
+    }
+    store.upsertDownload(entry);
+    emitDownloads();
+  }
+
+  // Firefox or Chrome stopped. Its tabs stay open and start it again when reloaded.
+  function streamStopped(name, reason = `${engineLabel(name)} stopped`) {
+    for (const session of sessions.values()) {
+      if (session.engine === name) liveContents(session)?.markDead(reason);
+    }
+  }
+
+  function firefoxStopped(reason = "Firefox stopped") {
+    streamStopped("firefox", reason);
+  }
+
+  // Google, and some other sites, refuse to sign in while Firefox or Chrome
+  // is under remote control. Both tell every page they are automated while
+  // Raticode controls them, so the user signs in in a normal window on the
+  // same profile instead. The tabs come back when that window closes.
+  async function streamSignInWindow(name, url) {
+    const engine = streamEngines[name];
+    if (!engine) throw new Error(`${engineLabel(name)} is not available in this version of Raticode.`);
+    if (engine.signingIn) return { alreadyOpen: true };
+    streamStopped(name, `${engineLabel(name)} is open in a window for signing in. Close that window to come back here`);
+    return engine.openSignInWindow(url);
+  }
+
+  function firefoxSignInWindow(url) {
+    return streamSignInWindow("firefox", url);
+  }
+
+  // Where to sign in from a tab: Google's sign-in page after its refusal,
+  // otherwise the page the tab shows.
+  function signInAddress(contents) {
+    const current = contents.getURL();
+    if (!GOOGLE_REJECTED.test(current)) return /^https?:/i.test(current) ? current : "https://accounts.google.com/";
+    const earlier = contents.navigationHistory.getAllEntries().map((entry) => entry.url).reverse().find((url) => /^https?:/i.test(url) && hostOf(url) !== "accounts.google.com");
+    return earlier && /(?:^|\.)(?:google\.[a-z.]+|youtube\.com)$/i.test(hostOf(earlier))
+      ? `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(earlier)}`
+      : "https://accounts.google.com/";
+  }
+
+  // After Raticode restarts Firefox or Chrome, its tabs reopen their pages.
+  async function reviveStreamTabs(name) {
+    const engine = streamEngines[name];
+    if (!engine) return;
+    const waiting = [];
+    for (const session of sessions.values()) {
+      const contents = liveContents(session);
+      if (session.engine === name && contents?.dead) waiting.push(contents.reloadPage(false).catch(() => {}));
+    }
+    if (!waiting.length && streamEngine() === name) await engine.ensure().catch((error) => log("warn", `${engineLabel(name)} did not start again: ${error.message}`));
+    await Promise.all(waiting);
+  }
+
+  function reviveFirefoxTabs() {
+    return reviveStreamTabs("firefox");
+  }
+
+  // ---------------------------------------------------------------------------
   // State
 
   function sessionState(session, fallbackUrl = "") {
@@ -1477,6 +2004,13 @@ function createBrowserSessions({
       certificateError: session.certificateError ? { ...session.certificateError } : null,
       clientId: session.clientId,
       crashed: session.crashed,
+      engine: session.engine || "raticode",
+      // Firefox's own install prompt can't appear, so the studio offers one.
+      firefoxAddon: session.engine === "firefox" && contents ? addonSlugFromUrl(contents.getURL()) : "",
+      // Google refused to sign in because Firefox is under remote control.
+      firefoxSignInBlocked: session.engine === "firefox" && session.kind === "user" && Boolean(contents && GOOGLE_REJECTED.test(contents.getURL())),
+      // The same refusal in any browser that streams its tabs.
+      signInBlocked: isStreamed(session) && session.kind === "user" && Boolean(contents && GOOGLE_REJECTED.test(contents.getURL())),
       error: session.error,
       favicon: session.favicon || "",
       id: session.id,
@@ -1532,6 +2066,24 @@ function createBrowserSessions({
     }
   }
 
+  // What the owner's tabs are playing: playing first, then the newest to start.
+  // clientId names the owner's tab, so the bar can skip the tab on screen.
+  function mediaSnapshots(ownerId) {
+    return [...sessions.values()].filter((session) => session.ownerId === ownerId).flatMap((session) => {
+      const media = session.mediaWatch?.snapshot();
+      return media ? [{ ...media, id: session.id, clientId: session.clientId || "" }] : [];
+    }).sort((a, b) => Number(b.playing) - Number(a.playing) || b.startedAt - a.startedAt);
+  }
+
+  function emitMedia(owner) {
+    if (owner.isDestroyed()) return;
+    const snapshots = mediaSnapshots(owner.id);
+    const key = JSON.stringify(snapshots);
+    if ((lastMedia.get(owner) ?? "[]") === key) return;
+    lastMedia.set(owner, key);
+    owner.send("gofer:browser-media", { sessions: snapshots });
+  }
+
   function emitCommand(session, action, details = {}) {
     if (session.owner.isDestroyed()) return;
     if (browserCommandRequiresOwnerFocus(action)) session.owner.focus();
@@ -1556,6 +2108,17 @@ function createBrowserSessions({
   function navigate(session, value, { typed = false } = {}) {
     const contents = liveContents(session);
     if (!contents) throw new Error("Browser view is unavailable.");
+    // Firefox shows its own pages, such as about:preferences, only to remote
+    // control that is also allowed to run programs; Raticode never asks for that.
+    if (session.engine === "firefox" && /^\s*(?:about:(?!blank\s*$)|moz-extension:|chrome:|resource:)/i.test(String(value ?? ""))) {
+      throw new Error("Firefox's own pages, such as about:preferences, can't be shown in Raticode. Change Firefox settings and extensions in Settings > Browser > Firefox.");
+    }
+    // Chrome's own pages, such as chrome://settings, can change how Chrome
+    // runs; they open only in a normal Chrome window the user controls.
+    if (isStreamed(session) && session.engine !== "firefox" && isChromiumInternalPage(value)) {
+      const name = engineLabel(session.engine);
+      throw new Error(`${name}'s own pages, such as ${session.engine}://settings, can't be shown in Raticode tabs. Open them from Settings > Browser > ${name}, which opens ${/^[aeiou]/i.test(name) ? "an" : "a"} ${name} window.`);
+    }
     const normalizedUrl = normalizeBrowserUrl(value, policy.searchUrl);
     // Typed local paths open as previews in their own profile.
     if (normalizedUrl.startsWith("file:") && session.kind !== "preview") {
@@ -1579,7 +2142,7 @@ function createBrowserSessions({
 
   function browserAction(event, options = {}) {
     // Destruction of a guest can precede the renderer's cleanup IPC.
-    if (["close", "adopt", "focus", "set-preferences", "viewport", "prompt-response"].includes(options.action) && !sessions.has(options.id)) {
+    if (["close", "adopt", "focus", "set-preferences", "viewport", "prompt-response", "firefox-view", "firefox-input", "frame-ack", "view-detached", "media-control"].includes(options.action) && !sessions.has(options.id)) {
       return { closed: true, ready: false };
     }
     const session = ownedSession(event, options.id);
@@ -1587,6 +2150,11 @@ function createBrowserSessions({
       case "adopt":
         // Rem's tabs are created before the studio picks their tab identity.
         if (session.agent && !session.clientId && typeof options.clientId === "string") session.clientId = options.clientId.slice(0, 200);
+        // A Firefox or Chrome tab has no view to adopt; the studio only draws its frames.
+        if (isStreamed(session)) {
+          clearTimeout(session.detachTimer);
+          return sessionState(session);
+        }
         adopt(event, session, options.webContentsId);
         return sessionState(session);
       case "viewport": {
@@ -1618,6 +2186,7 @@ function createBrowserSessions({
     const contents = liveContents(session);
     if (!contents && options.action === "focus") return sessionState(session);
     if (!contents) throw new Error("Browser view is unavailable.");
+    if (["firefox-view", "firefox-input", "frame-ack", "view-detached"].includes(options.action)) return firefoxViewAction(session, contents, options);
     switch (options.action) {
       case "back":
         if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
@@ -1677,6 +2246,8 @@ function createBrowserSessions({
         session.muted = options.muted === true;
         contents.setAudioMuted(session.muted);
         break;
+      case "media-control":
+        return session.mediaWatch ? session.mediaWatch.control(options.command) : { handled: false };
       case "toggle-devtools":
         toggleDevTools(session);
         break;
@@ -1699,9 +2270,9 @@ function createBrowserSessions({
         break;
       case "allow-popups": {
         const origin = siteKey(contents.getURL());
-        if (origin) store.updateSite(origin, { popups: "allow" });
+        if (origin) updateSiteOf(session, origin, { popups: "allow" });
         for (const popup of session.blockedPopups) {
-          if (/^https?:/i.test(popup.url)) session.owner.send("gofer:browser-open-tab", { url: popup.url, background: false });
+          if (/^https?:/i.test(popup.url)) session.owner.send("gofer:browser-open-tab", { url: popup.url, background: false, engine: session.engine || "raticode", ...(session.privateBrowsing ? { private: true } : {}) });
         }
         session.blockedPopups = [];
         break;
@@ -1714,12 +2285,21 @@ function createBrowserSessions({
       case "site-permission": {
         const origin = siteKey(contents.getURL());
         if (!origin || typeof options.key !== "string") throw new Error("This page has no site settings.");
-        if (options.key === "popups") store.updateSite(origin, { popups: options.value === "allow" ? "allow" : null });
-        else store.setPermission(origin, options.key.slice(0, 80), ["allow", "block"].includes(options.value) ? options.value : null);
+        if (options.key === "popups") updateSiteOf(session, origin, { popups: options.value === "allow" ? "allow" : null });
+        else setPermissionOf(session, origin, options.key.slice(0, 80), ["allow", "block"].includes(options.value) ? options.value : null);
         return siteInfo(session);
       }
+      case "firefox-sign-in-window":
+      case "sign-in-window":
+        if (!isStreamed(session)) throw new Error("This tab doesn't run in Firefox, Chrome or Edge.");
+        // Rem's tabs keep their own sign-ins, which the window doesn't share.
+        if (session.kind !== "user") throw new Error(`Sign in from one of your own ${engineLabel(session.engine)} tabs; Rem's tabs keep separate sign-ins.`);
+        return streamSignInWindow(session.engine, signInAddress(contents));
       case "clear-site-data":
-        return clearSiteData(siteKey(contents.getURL()), session.kind).then(() => siteInfo(session));
+        if (isStreamed(session)) {
+          return streamEngines[session.engine].clearSiteCookies(session.kind, hostOf(contents.getURL())).then(() => siteInfo(session));
+        }
+        return clearSiteData(siteKey(contents.getURL()), profileKind(session)).then(() => siteInfo(session));
       case "page-context":
         return pageContext(session, typeof options.selection === "string" ? options.selection : "");
       case "share-with-rem":
@@ -1753,11 +2333,12 @@ function createBrowserSessions({
     const url = contents?.getURL() || "";
     const origin = siteKey(url);
     const host = hostOf(url);
-    const settings = origin ? store.site(origin) : {};
+    const settings = origin ? siteOf(session, origin) : {};
     return {
       origin,
       host,
       profile: session.kind,
+      privateBrowsing: session.privateBrowsing === true,
       security: securityState({ url, certificateException: session.certificateException, certificateError: session.certificateError }),
       certificate: url.startsWith("https:") ? verifiedCertificates.get(host) || null : null,
       permissions: Object.entries(settings.permissions || {}).map(([key, value]) => ({
@@ -1773,15 +2354,18 @@ function createBrowserSessions({
 
   async function clearSiteData(origin, kind = "user", cookieHost = "") {
     if (!origin || origin === "file://") return;
-    const ses = profile(kind === "rem" ? "rem" : "user");
+    const ses = profile(kind === "rem" || kind === "private" ? kind : "user");
     const host = cookieHost || hostOf(origin);
     await ses.clearStorageData({ origin });
-    clientHints.get(kind === "rem" ? "rem" : "user")?.clear(origin);
+    clientHints.get(kind === "rem" || kind === "private" ? kind : "user")?.clear(origin);
     const cookies = await ses.cookies.get({});
+    let failed = 0;
     for (const cookie of cookies) {
-      if (cookieMatchesSite(cookie.domain, host)) await ses.cookies.remove(cookieUrl(cookie), cookie.name).catch(() => {});
+      if (cookieMatchesSite(cookie.domain, host)) await ses.cookies.remove(cookieUrl(cookie), cookie.name).catch(() => { failed += 1; });
     }
-    if (kind !== "rem") store.clearSite(origin);
+    if (failed) log("warn", `Could not remove ${failed} cookies while clearing ${host}; some sign-ins may remain.`);
+    if (kind === "private") privateSites.delete(origin);
+    else if (kind !== "rem") store.clearSite(origin);
   }
 
   async function sitesWithData(kind = "user") {
@@ -1813,6 +2397,9 @@ function createBrowserSessions({
     if (options.cookies) {
       // Electron cannot clear cookies and site storage by age, so these are
       // always cleared for all time; the UI says so.
+      for (const [name, engine] of Object.entries(streamEngines)) {
+        await engine.clearSiteCookies(kind, "").catch((error) => log("warn", `Could not clear ${engineLabel(name)} cookies: ${error.message}`));
+      }
       await ses.clearStorageData();
       clientHints.get(kind)?.clear();
       if (kind === "rem" && policy.remSignInSites.length) await syncRemSignIns(policy.remSignInSites, []);
@@ -1823,7 +2410,7 @@ function createBrowserSessions({
     return { cleared: true };
   }
 
-  async function browserLibrary(_event, options = {}) {
+  async function browserLibrary(event, options = {}) {
     const text = typeof options.text === "string" ? options.text.slice(0, 500) : "";
     switch (options.action) {
       case "suggest":
@@ -1874,8 +2461,40 @@ function createBrowserSessions({
       }
       case "clear-data":
         return clearBrowsingData(options);
-      default:
+      case "firefox-settings":
+      case "firefox-settings-save":
+      case "firefox-restart":
+      case "firefox-extensions":
+      case "firefox-addon-search":
+      case "firefox-addon-install":
+      case "firefox-addon-install-file":
+      case "firefox-addon-remove":
+      case "firefox-profiles":
+      case "firefox-profile-choose":
+      case "firefox-profile-inspect":
+      case "firefox-import":
+      case "firefox-reset":
+      case "firefox-sync":
+        if (!firefoxManager) throw new Error("Firefox is not available in this version of Raticode.");
+        return firefoxManager.handle(options.action, options);
+      case "firefox-sign-in-window":
+        return firefoxSignInWindow(typeof options.url === "string" && options.url ? options.url : "https://accounts.google.com/");
+      case "engine-status":
+        return engineStatus();
+      case "media-sessions":
+        return { sessions: mediaSnapshots(event.sender.id) };
+      default: {
+        // Chromium-based browsers share "<engine>-sign-in-window" and "<engine>-restart".
+        const [, name, verb] = /^([a-z]+)-(sign-in-window|restart)$/.exec(String(options.action || "")) || [];
+        if (name && name !== "firefox" && streamEngines[name]) {
+          if (verb === "sign-in-window") return streamSignInWindow(name, typeof options.url === "string" && options.url ? options.url : "https://accounts.google.com/");
+          streamStopped(name, `Raticode is restarting ${engineLabel(name)}`);
+          await streamEngines[name].stopAndWait();
+          await reviveStreamTabs(name);
+          return engineStatus();
+        }
         throw new Error(`Unknown browser library action: ${options.action || "missing"}`);
+      }
     }
   }
 
@@ -1913,6 +2532,10 @@ function createBrowserSessions({
     setPolicy,
     setViewportListener: (listener) => { onViewportChanged = listener; },
     emitState,
+    firefoxStopped,
+    reviveFirefoxTabs,
+    reviveStreamTabs,
+    streamStopped,
   };
 }
 

@@ -63,6 +63,6 @@ Raticode rattish check WORKFLOW_PATH --format json
 Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
-Installed docs and machine contracts match the CLI doing the compilation. Its diagnostics take precedence over an example for a different version. The [node reference](../nodes/index.md) lists all 22 built-in types.
+Installed docs and machine contracts match the CLI doing the compilation. Its diagnostics take precedence over an example for a different version. The [node reference](../nodes/index.md) lists all 24 built-in types.
 
 Current authoring uses Rattish. Older TOML workflow commands are compatibility features and should not be used to create new workflows for these guides.

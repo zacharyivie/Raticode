@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
+from gofer.ui import rem_task_after as after_tasks
 from gofer.ui.rem_home_models import (
     ACTIVE,
     NEEDS_ATTENTION,
@@ -23,10 +24,23 @@ from gofer.ui.rem_home_models import (
     now,
     worker_config,
 )
+from gofer.ui.rem_ticket_activity import SCHEMA as TICKET_TIMELINE_SCHEMA
 
 
 def encode(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def with_author(message: dict[str, Any]) -> dict[str, Any]:
+    """Name who wrote a user-role thread message: ``sender`` is "rem" or "user".
+
+    Rem's prompts to a worker have always been saved with ``sender: "rem"``.
+    Every other user-role message in a work thread was typed by the human, but
+    older ones were saved without a sender, which left readers to infer it.
+    """
+    if message.get("role") != "user" or message.get("sender") in {"rem", "user"}:
+        return message
+    return {**message, "sender": "user"}
 
 
 RUN_STATES = ACTIVE | {"succeeded", "blocked", "cancelled", "failed", "outcome_unknown"}
@@ -85,6 +99,28 @@ def retention(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def labelled_criteria(criteria: Any, *sources: Any) -> list[dict[str, Any]]:
+    """A run's check results, each with the description of the check it answers.
+
+    Runs store only criterion IDs with their results; the words live in the run's
+    recipe, which task lists leave out. ``sources`` are criterion lists to look the
+    IDs up in, first match first: the run's recipe, an edit waiting to apply, then
+    the task's current checks. A check found in none of them keeps no description.
+    """
+    words: dict[str, str] = {}
+    for source in sources:
+        for item in source if isinstance(source, list) else []:
+            if isinstance(item, dict) and isinstance(item.get("description"), str):
+                words.setdefault(str(item.get("id")), item["description"])
+    labelled = []
+    for item in criteria if isinstance(criteria, list) else []:
+        if not isinstance(item, dict):
+            continue
+        description = words.get(str(item.get("id")))
+        labelled.append({**item, "description": description} if description else item)
+    return labelled
+
+
 def duplicate_notices(messages: list[dict[str, Any]]) -> set[str]:
     """Legacy "Started <task>." notices that repeat a reply written with them.
 
@@ -113,6 +149,11 @@ def duplicate_notices(messages: list[dict[str, Any]]) -> set[str]:
             duplicates.add(str(message["id"]))
     return duplicates
 
+
+# A phone's page of earlier chat history: at most this many messages, and this many
+# before a search result it opens at.
+MAX_PAGE = 400
+LEAD_IN = 10
 
 PREVIEW_LENGTH = 280
 _LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
@@ -158,6 +199,71 @@ def with_references(
         else m
         for m in messages
     ]
+
+
+def progress_step(run: dict[str, Any]) -> str:
+    """Which of Plan, Work, Check and Report a run is on, or stopped at.
+
+    The state alone can't say: a run goes back to ``queued`` whenever its work is
+    already done but has to wait, such as a review retried after a provider
+    failure, Retry review, a restart's recovery check or waiting for a proof
+    event. Those runs are at Check, not Plan; only a run that never started is.
+    Both apps draw their progress steps from this, so they agree.
+    """
+    state = run.get("state")
+    if state == "succeeded":
+        return "report"
+    if state == "queued":
+        if run.get("resume_review"):
+            return "check"
+        return "work" if run.get("started_at") else "plan"
+    if state in {"verifying", "repairing"}:
+        return "check"
+    if state in {"executing", "cancelling"}:
+        return "work"
+    return "check" if run.get("verification_thread_id") else "work"
+
+
+def current_cards(db: sqlite3.Connection, messages: list[dict[str, Any]]) -> None:
+    """Give each message's task card its run's current state, in place.
+
+    A card is written with the run as it was then, so a "Started" card says
+    ``queued``. The apps look the run up in the task list for its live state,
+    but a run can be missing from it (a deleted or cleaned-up task, an older run
+    of a repeating task), and the card then fell back to its first snapshot and
+    showed a finished run as waiting to start. A card whose run is gone keeps
+    what it had.
+    """
+    wanted = {
+        str(work["run_id"])
+        for message in messages
+        if isinstance(work := message.get("work"), dict) and work.get("run_id")
+    }
+    if not wanted:
+        return
+    marks = ",".join("?" * len(wanted))
+    current = {
+        row[0]: json.loads(row[1])
+        for row in db.execute(
+            "SELECT id, json_object('state', state, 'needs_user', "
+            "json_extract(body, '$.needs_user'), 'resume_review', "
+            "json_extract(body, '$.resume_review'), 'started_at', "
+            "json_extract(body, '$.started_at'), 'verification_thread_id', "
+            f"json_extract(body, '$.verification_thread_id')) FROM runs WHERE id IN ({marks})",
+            sorted(wanted),
+        )
+    }
+    for message in messages:
+        work = message.get("work")
+        run = current.get(str((work or {}).get("run_id") or ""))
+        if run is None or not isinstance(work, dict):
+            continue
+        message["work"] = {
+            **work,
+            "state": run["state"],
+            "needs_user": bool(run.get("needs_user")),
+            "step": progress_step(run),
+        }
 
 
 def ran_at(task: dict[str, Any]) -> str:
@@ -275,8 +381,15 @@ class RemHomeStore:
                     owner TEXT, expires REAL);
                 CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, run TEXT NOT NULL,
                     body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS kanban_tickets(id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS kanban_status ON kanban_tickets(status);
+                CREATE TABLE IF NOT EXISTS self_work_report(
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL);
                 PRAGMA user_version=1;
             """)
+            # Each board ticket's timeline of status changes and comments.
+            db.executescript(TICKET_TIMELINE_SCHEMA)
             if not self.setting(db, "conversation"):
                 self.set_setting(db, "conversation", {"id": str(uuid4()), "turn_state": "idle"})
             self.restore_completed_threads(db)
@@ -409,10 +522,20 @@ class RemHomeStore:
         }
         if context:
             task["delegation_context"] = context
-        task["next_occurrence_at"] = recipe.schedule.next(datetime.now(UTC), initial=True)
+        clock = datetime.now(UTC)
+        task["next_occurrence_at"] = recipe.schedule.next(clock, initial=True)
+        if recipe.after:
+            task["prerequisites"] = after_tasks.resolve(db, task["id"], recipe.after, clock)
+            # The gate in due() starts it; a requested time only delays that further.
+            task["next_occurrence_at"] = None
         self.put(db, "tasks", task)
         db.execute("INSERT INTO revisions VALUES(?,?,?)", (task["id"], 1, encode(task)))
         return task
+
+    @staticmethod
+    def starts_now(recipe: Recipe) -> bool:
+        """A one-time task for now with nothing to wait for starts as it is created."""
+        return recipe.schedule.kind == "once" and not recipe.schedule.at and not recipe.after
 
     def add_run(
         self,
@@ -512,7 +635,8 @@ class RemHomeStore:
 
     @staticmethod
     def work(run: dict[str, Any]) -> dict[str, Any]:
-        return {
+        """A message's task card. It keeps the run's tickets so history outlives the task."""
+        card = {
             "task_id": run["task_id"],
             "run_id": run["id"],
             "thread_id": run["thread_id"],
@@ -520,7 +644,15 @@ class RemHomeStore:
             "type": run["recipe"]["type"],
             "state": run["state"],
             "needs_user": run.get("needs_user", False),
+            "step": progress_step(run),
         }
+        if run.get("tickets"):
+            card["tickets"] = run["tickets"]
+        # Work Rem started on its own (or for a ticket moved to In progress). Its phone
+        # alerts come from the self-work report, so chat updates don't alert twice.
+        if run.get("self_work"):
+            card["self_work"] = str(run["self_work"].get("kind") or "ticket")
+        return card
 
     def provision_thread(self, db: sqlite3.Connection, run: dict[str, Any], role: str) -> str:
         identity = run["thread_id"]
@@ -572,14 +704,23 @@ class RemHomeStore:
     def task_view(
         self, db: sqlite3.Connection, task: dict[str, Any], *, summary: bool = False
     ) -> dict[str, Any]:
-        runs = [
-            json.loads(row[0])
-            for row in db.execute(
-                f"SELECT {SUMMARY_RUN if summary else 'body'} FROM runs WHERE task=? "
-                "ORDER BY " + NEWEST_RUN + " LIMIT 20",
-                (task["id"],),
-            )
-        ]
+        runs = []
+        for body, checked in db.execute(
+            f"SELECT {SUMMARY_RUN if summary else 'body'}, "
+            "json_extract(body, '$.recipe.acceptance_criteria') FROM runs WHERE task=? "
+            "ORDER BY " + NEWEST_RUN + " LIMIT 20",
+            (task["id"],),
+        ):
+            run = json.loads(body)
+            if "criteria" in run:
+                run["criteria"] = labelled_criteria(
+                    run["criteria"],
+                    json.loads(checked) if checked else None,
+                    (run.get("pending_recipe") or {}).get("acceptance_criteria"),
+                    task.get("acceptance_criteria"),
+                )
+            run["step"] = progress_step(run)
+            runs.append(run)
         active = next((r for r in runs if r["state"] in ACTIVE), None)
         if runs and not active:
             # Retry review is offered only where retry_review would accept it.
@@ -592,12 +733,16 @@ class RemHomeStore:
                 and latest["recipe"].get("revision") == task.get("revision")
                 and not task.get("deleted_at")
             )
-        return {
+        view = {
             **task,
             "active_run": active,
             "last_run": runs[0] if runs else None,
             "recent_runs": runs,
         }
+        if after_tasks.pending(task) and not task.get("deleted_at"):
+            # Waiting for other tasks: why, and where each of them stands.
+            view["dependency"] = after_tasks.evaluate(db, task)
+        return view
 
     def conversation(self) -> dict[str, Any]:
         with self.read() as db:
@@ -610,6 +755,8 @@ class RemHomeStore:
                 message.pop("diagnostic", None)
             hidden = duplicate_notices(messages)
             known = {m["id"]: m for m in messages}
+            # After duplicate_notices: it matches cards by their stored text, not state.
+            current_cards(db, messages)
             conversation = self.setting(db, "conversation")
             return {
                 # Waiting messages are listed below, once.
@@ -665,6 +812,65 @@ class RemHomeStore:
             "sources": sources,
         }
 
+    def search(self, query: Any, *, before: int | None = None, limit: int = 50) -> dict[str, Any]:
+        """Messages in the whole saved chat matching ``query``; see ``rem_chat_search``."""
+        from gofer.ui.rem_chat_search import search_messages
+
+        with self.read() as db:
+            return search_messages(db, query, before=before, limit=limit)
+
+    def page(self, before: str, *, through: str | None = None, limit: int = 40) -> dict[str, Any]:
+        """Messages stored just before message ``before``, oldest first, for a phone's history.
+
+        With ``through``, the page reaches back to that message and ``LEAD_IN`` more, so a
+        search result opens with what led up to it, up to ``MAX_PAGE`` messages. ``earlier``
+        counts the messages still before the page. Legacy duplicate notices are left out,
+        as in ``conversation()``, and replies carry their ``referenced`` preview.
+        Raises ``KeyError`` for a message that is no longer stored, such as after a clear.
+        """
+        with self.read() as db:
+            start = db.execute("SELECT seq FROM messages WHERE id=?", (before,)).fetchone()
+            if start is None:
+                raise KeyError(before)
+            count = max(1, min(limit, MAX_PAGE))
+            if through:
+                target = db.execute("SELECT seq FROM messages WHERE id=?", (through,)).fetchone()
+                if target is None:
+                    raise KeyError(through)
+                between = db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE seq >= ? AND seq < ?",
+                    (target[0], start[0]),
+                ).fetchone()[0]
+                count = max(count, min(int(between) + LEAD_IN, MAX_PAGE))
+            rows = db.execute(
+                "SELECT seq, body FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?",
+                (start[0], count),
+            ).fetchall()
+            messages = [json.loads(body) for _, body in reversed(rows)]
+            oldest = rows[-1][0] if rows else start[0]
+            earlier = int(
+                db.execute("SELECT COUNT(*) FROM messages WHERE seq < ?", (oldest,)).fetchone()[0]
+            )
+            wanted = {
+                m["refers_to"]
+                for m in messages
+                if isinstance(m.get("refers_to"), str)
+                and m["refers_to"] not in {n.get("id") for n in messages}
+            }
+            known = {m["id"]: m for m in messages}
+            for identity in wanted:
+                row = db.execute("SELECT body FROM messages WHERE id=?", (identity,)).fetchone()
+                if row:
+                    known[identity] = json.loads(row[0])
+            current_cards(db, messages)
+        for message in messages:
+            message.pop("diagnostic", None)
+        hidden = duplicate_notices(messages)
+        return {
+            "messages": with_references([m for m in messages if m["id"] not in hidden], known),
+            "earlier": earlier,
+        }
+
     def transcript(self, identity: str, limit: int = 600) -> list[dict[str, Any]]:
         """A task thread's latest transcript entries, oldest first."""
         if not identity:
@@ -674,7 +880,7 @@ class RemHomeStore:
                 "SELECT body FROM thread_messages WHERE thread=? ORDER BY seq DESC LIMIT ?",
                 (identity, limit),
             ).fetchall()
-        return [json.loads(row[0]) for row in reversed(rows)]
+        return [with_author(json.loads(row[0])) for row in reversed(rows)]
 
     def thread_ids(self) -> list[str]:
         with self.read() as db:
@@ -746,6 +952,21 @@ class RemHomeStore:
                     continue
                 db.execute(f"DELETE FROM thread_messages WHERE thread IN ({shared})", threads)
                 db.execute(f"DELETE FROM threads WHERE id IN ({shared})", threads)
+                # Chat cards read their run's state when served. The run is going, so
+                # each card keeps its final state; otherwise it would fall back to the
+                # "Started" snapshot and show finished work as waiting to start.
+                for run in runs:
+                    db.execute(
+                        "UPDATE messages SET body=json_set(body, '$.work.state', ?, "
+                        "'$.work.needs_user', json(?), '$.work.step', ?) "
+                        "WHERE json_extract(body, '$.work.run_id')=?",
+                        (
+                            run["state"],
+                            "true" if run.get("needs_user") else "false",
+                            progress_step(run),
+                            run["id"],
+                        ),
+                    )
                 db.execute(f"DELETE FROM runs WHERE id IN ({marks})", run_ids)
                 db.execute("DELETE FROM revisions WHERE task=?", (task["id"],))
                 db.execute("DELETE FROM tasks WHERE id=?", (task["id"],))
@@ -783,6 +1004,11 @@ class RemHomeStore:
                     and old_run["recipe"].get("revision") == task["revision"]
                     else self.add_run(db, task, f"manual:{payload['request_id']}", config)
                 )
+                if after_tasks.pending(task):
+                    # Starting it by hand settles the start condition for good.
+                    after_tasks.release(task, "started_by_user", run["id"])
+                    self.put(db, "tasks", task)
+                    self.event(db, "task.after_released", {"task_id": identity})
                 return {"task": self.task_view(db, task), "run": run}
             if action == "edit":
                 if payload.get("expected_revision") != task["revision"]:
@@ -817,11 +1043,30 @@ class RemHomeStore:
                         raise ValueError("enabled must be boolean")
                     task["enabled"] = payload["enabled"]
                     task["state"] = "enabled" if task["enabled"] else "paused"
-                if "schedule" in payload or payload.get("enabled") is True:
+                if "after" in payload:
+                    if task.get("after_started"):
+                        raise RemConflict(
+                            "This task already started, so what it waits for is fixed"
+                        )
+                    if (
+                        not task.get("prerequisites")
+                        and db.execute("SELECT 1 FROM runs WHERE task=?", (identity,)).fetchone()
+                    ):
+                        raise RemConflict("This task already ran, so it can't wait for another")
+                    task["prerequisites"] = after_tasks.resolve(
+                        db, identity, task["after"], datetime.now(UTC)
+                    )
+                if (
+                    "schedule" in payload
+                    or payload.get("enabled") is True
+                    or ("after" in payload and not task["prerequisites"])
+                ):
                     task["schedule_revision"] += 1
                     task["next_occurrence_at"] = Schedule.model_validate(task["schedule"]).next(
                         datetime.now(UTC), initial=True
                     )
+                if after_tasks.pending(task):
+                    task["next_occurrence_at"] = None
             elif action == "pause":
                 if not isinstance(payload.get("cancel_current", False), bool):
                     raise ValueError("cancel_current must be boolean")
@@ -922,6 +1167,9 @@ class RemHomeStore:
             config = self.setting(db, "config")
             for row in db.execute("SELECT body FROM tasks").fetchall():
                 task = json.loads(row[0])
+                if after_tasks.pending(task):
+                    self.start_after(db, task, clock, config)
+                    continue
                 at = task.get("next_occurrence_at")
                 if not task["enabled"] or not at or datetime.fromisoformat(at) > clock:
                     continue
@@ -941,11 +1189,68 @@ class RemHomeStore:
                 task["next_occurrence_at"] = Schedule.model_validate(task["schedule"]).next(clock)
                 self.put(db, "tasks", task)
 
+    def start_after(
+        self, db: sqlite3.Connection, task: dict[str, Any], clock: datetime, config: dict[str, Any]
+    ) -> None:
+        """Start a waiting task once its prerequisites succeeded, or say once why it is held.
+
+        Runs under Rem's lease inside ``due``'s transaction. The run's occurrence is
+        fixed per task and the task is marked started in the same commit, so a restart
+        or a second backend never starts it twice.
+        """
+        if not task.get("enabled", True) or task.get("deleted_at"):
+            return
+        status = after_tasks.evaluate(db, task)
+        if status["state"] == "held":
+            body, identity = after_tasks.hold_notice(task, status)
+            if not db.execute("SELECT 1 FROM messages WHERE id=?", (identity,)).fetchone():
+                # A task card with no run yet: "held" alerts like work that needs you.
+                self.message(
+                    db,
+                    body,
+                    identity=identity,
+                    kind="task_update",
+                    work={
+                        "task_id": task["id"],
+                        "run_id": "",
+                        "thread_id": "",
+                        "title": task["title"],
+                        "type": task["type"],
+                        "state": "held",
+                        "needs_user": True,
+                    },
+                )
+                self.event(db, "task.after_held", {"task_id": task["id"]})
+            return
+        if status["state"] != "met":
+            return
+        not_before = (task.get("schedule") or {}).get("at")
+        if not_before and datetime.fromisoformat(not_before.replace("Z", "+00:00")) > clock:
+            return
+        occurrence = f"after:{task['id']}"
+        run = self.add_run(
+            db,
+            task,
+            occurrence,
+            config,
+            acknowledgement=after_tasks.started_text(task, status),
+        )
+        if run["occurrence"] == occurrence and "after_results" not in run:
+            run["after_results"] = after_tasks.results(db, status)
+            source = (task.get("delegation_context") or {}).get("source_message_id")
+            if task.get("send_files") and source:
+                run["deliver_files_to"] = source
+            self.put(db, "runs", run)
+        after_tasks.release(task, "prerequisites", run["id"])
+        task["next_occurrence_at"] = None
+        self.put(db, "tasks", task)
+        self.event(db, "task.after_started", {"task_id": task["id"], "run_id": run["id"]})
+
     def thread(self, identity: str) -> dict[str, Any]:
         with self.read() as db:
             thread = self.get(db, "threads", identity)
             messages = [
-                json.loads(r[0])
+                with_author(json.loads(r[0]))
                 for r in db.execute(
                     "SELECT body FROM thread_messages WHERE thread=? ORDER BY seq", (identity,)
                 )

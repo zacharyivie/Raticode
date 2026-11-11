@@ -26,8 +26,11 @@ from gofer.subscriptions.claude_code import ClaudeCodeSubscription
 from gofer.subscriptions.cli_providers import CliSubscription
 from gofer.subscriptions.codex import CodexSubscription
 from gofer.subscriptions.direct_api import AnthropicApiSubscription, OpenAiApiSubscription
+from gofer.utils.logging import get_logger
 from gofer.utils.paths import get_data_dir
 from gofer.utils.run_state import workflow_run_stop_path
+
+log = get_logger(__name__)
 
 RunStatus = Literal[
     "queued",
@@ -594,6 +597,7 @@ async def execute_queued_run(
             run_log_path=result.log_path,
         )
     except Exception as exc:  # noqa: BLE001
+        log.warning("Queued run %s failed", queued_run.id, exc_info=True)
         return store.finish_run(queued_run.id, "failed", message=str(exc))
     finally:
         stop_monitor.set()

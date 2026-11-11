@@ -91,6 +91,7 @@ test('main registration preserves timeout diagnostics, retries, and rejects mism
   const context = vm.createContext({
     backendReady: Promise.resolve(),
     backendPathGrants: createPathGrantQueue(),
+    loggedPathGrants: new Set(),
     getIpcSecurity: () => ({ isUserGrant: id => id === 'user' }),
     activeApiBaseUrl: 'http://localhost:1234', desktopGrantSecret: 'secret', activeUiApiToken: 'token',
     AbortSignal, Date,
@@ -107,7 +108,7 @@ test('main registration preserves timeout diagnostics, retries, and rejects mism
   await assert.rejects(context.registerBackendPathGrant({ path: '/user', grantId: 'user' }), /does not grant agent access/);
   assert.equal(calls, 0);
   await assert.rejects(context.registerBackendPathGrant(handle(1)), /backend timed out/);
-  assert.match(logs[0], /"reason":"timeout"/);
+  assert.match(logs[0], /: timeout after \d+ ms$/);
   assert.doesNotMatch(logs.join(''), /private details|secret|token|grant-1/);
   mode = 'mismatch';
   await assert.rejects(context.registerBackendPathGrant(handle(1)), /could not confirm folder access/);
@@ -115,4 +116,6 @@ test('main registration preserves timeout diagnostics, retries, and rejects mism
   await context.registerBackendPathGrant(handle(1));
   await context.registerBackendPathGrant(handle(1));
   assert.equal(calls, 3);
+  // Renewals are routine: the folder is noted once per backend.
+  assert.equal(logs.filter(line => line.startsWith('Gave the backend access to')).length, 1);
 });

@@ -1,0 +1,185 @@
+{
+  "retained_revision": "96f853b3401665069ea82ed1b6faf0d3259e94f3",
+  "restored_files": {
+    ".gitignore": "3abd93f51f195096092ec08cde741df157354293e7592ded9aea659c0c05788a",
+    "README.md": "3d02e4843e2a32bdcc40ccfee9061e1b1f68527bc7ea817742907a7b82ea6a2b",
+    "app/build.gradle.kts": "d3afbc00b342d05e733cb74a7a879e784642a2f3f9c7806e2b299f24df448405",
+    "app/src/androidTest/java/dev/raticode/mobile/protocol/v2/PinnedTlsEngineDeviceTest.kt": "f3d2f811e14fd3f8adfb580e1b35ab264dc1215697568c89d064350db063f6c1",
+    "app/src/androidTest/java/dev/raticode/mobile/protocol/v2/PythonTlsDeviceTest.kt": "0d3ea11a4c9108a92499248eec8533ea8c25ba239d9e4e30649da3fb4cc620dc",
+    "app/src/androidTest/java/dev/raticode/mobile/protocol/v2/StreamingDeviceTest.kt": "8e9d252c0a5fdfb32e5b734afbf3bb68552ec5c4eb4f6198bb1d3a3e03b0faee",
+    "app/src/debug/AndroidManifest.xml": "4b03b6015a76bf01fe4833238b7fd89a85ebe25439d51fc11c998b29c9c847ca",
+    "app/src/main/java/dev/raticode/mobile/protocol/StrictJson.kt": "047149a3aaa83736f264de6e3671b2c9142f74ec5a21951a14cb25e7b561ba0f",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/MobileCapabilities.kt": "4448fc10df8e286e966e2ea052ca26bc4b9daccb9e474d9929355f164a6db6d3",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/OpaqueTlsFrames.kt": "3d07879947d29932eb877fff6ff9dbf5f5d55e88fd9aaf97d2dbd7f9a676d462",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/PinnedTlsEngine.kt": "f07169ae79ba551915e19de098adc88bdeb88b2031238c8d178bcc81595ee2cc",
+    "app/src/main/java/dev/raticode/mobile/protocol/v2/SessionBinding.kt": "e0b14c8d250ee7fb277e8239955857f50dc1e49f805a41e81c0034ab35a474bf",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/MobileCapabilitiesTest.kt": "c4af42e820498139e91aa38e5fc08aa272187b1b75ae7dffb1cf7e7f5c450f65",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/OpaqueTlsFramesTest.kt": "a0b3dd1e4dd9a0d9f4dd7b1e2851aebccd5554803a124ef184e85b04f30c2b94",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/PinnedTlsEngineTest.kt": "af56fef2e3cd7d78376cb23053b79a6f4c6a139f0364296657aca07642caaa53",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/PythonTlsInteropTest.kt": "c160da135f4c4207650ead0e93c4bbf00dead3d7e245714cf27ba70f79c50c95",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/SessionBindingTest.kt": "78858c1e8f4eb6e2a66e67b4b9cf7255c2764473d2a647f7a86b1ee9f0bb8923",
+    "app/src/test/java/dev/raticode/mobile/protocol/v2/StreamingInteropTest.kt": "fb889dca2d7a9edb4ee44b134619bdbefd836ca0830ac05f26ca74ac95852c6e",
+    "app/src/testShared/java/dev/raticode/mobile/protocol/v2/StreamingProbeChecks.kt": "93e9a4f35239e06ed07b4d227c8cb2a53796d3f34df5d567c92e7a2111bde4ec",
+    "app/src/testShared/java/dev/raticode/mobile/protocol/v2/TlsProbeChecks.kt": "f13c454bc9d77cc0a0a13052a1574521a0abe6dfe21c3ca7c206d5e6769cea69",
+    "docs/architecture.md": "c4ab67b94ec4ab0731ee403fdcef248dcbccb2f6429baef04dcb0ba942d3c9c9",
+    "docs/desktop-handoff.md": "ac7b83030dddd455ce25733b783bf7c7939f1c9ffc4adb9339753878acf6df56",
+    "docs/evidence/mobile-protocol.json": "58f87635f1379620e257910cd698fbf5415ab8a372356c6c471de8d0dbfb50f9",
+    "docs/mobile-desktop-contract.md": "54c865144ebc5eaf34fe23146b8d51874ab1be786adf9602b7f70d2340f2b036",
+    "docs/mobile-desktop-v2.md": "755b40cfdecbcd9d7c76d2af470e91b81db20e1546042b9b0f77de1cd0dfdd88",
+    "docs/protocol-probes.md": "6a328a579fab12be7a515f9ce149cb080618bcc24e4afec7559d8db5be1a221a",
+    "gradle.properties": "401e4d1e7e9ebfa78b24a116751571d9d5bdce7d0adcab3b3abf5f12fb112618",
+    "gradle/gradle-daemon-jvm.properties": "a8c0c4a70c41ba866876380ec8ae5fc448087ad45f7bf096c4fc323c8ae31760",
+    "gradle/libs.versions.toml": "d230d6036e472db71a0ea374cf01d06288dd98693af734affd521b790373c18f",
+    "protocol/probes/README.md": "dc7c31e7664954c679f3671b4f11f309b9278285aec0b30e54fe63b8d2b9c8aa",
+    "protocol/probes/public-test-identities/SHA256SUMS": "ca13963601a6c63c4beaadf8d1b11c255aa2c69a44fed3388efa89db76c98e04",
+    "protocol/probes/public-test-identities/desktop.cert.pem": "a5a1e2fc14c09737b1e79ce2a78a78ab451991619e4a7979e2797b0abc555e0e",
+    "protocol/probes/public-test-identities/desktop.test-key.pem": "e6d268f1c830a0c3e5b69fc3433f42406aebd38af2753e864002050817ab877a",
+    "protocol/probes/public-test-identities/expired.cert.pem": "5f1e8534a413052e533e94681914f02a3fe895d9870647e4ac83a30e1b62d1cf",
+    "protocol/probes/public-test-identities/expired.test-key.pem": "0874d2e6a72821e4974755d7d40fd88900623db608ecc26269361cdfa5b0fa12",
+    "protocol/probes/public-test-identities/java-streaming.ciphertext": "1a3851f3c8453ec2b843197fdd96bee22e21e7a55e2b81b2017c5ba7d0bc6933",
+    "protocol/probes/public-test-identities/mobile.cert.pem": "2bd471db8311785448a7f43b73ae6e9470e3b2cddd67a9f797e1bbd5038271fa",
+    "protocol/probes/public-test-identities/mobile.test-key.pem": "814eead9f8934c57bd62ed96c9071f88ff1661dc84c506dfcd30f441d41aa179",
+    "protocol/probes/public-test-identities/other.cert.pem": "c292431d8d40020de2a6996df69ead5c46996c17991dc64b7a11ccac7be0c9bd",
+    "protocol/probes/public-test-identities/other.test-key.pem": "239c8f3ae82a5a45d21d39731bc357a431446006a1b8c45cb59aac824e896259",
+    "protocol/probes/public-test-identities/p384.cert.pem": "468dc2670935a0d9b4b27ac2d71e84c3aea28dd28059e97c67274f9fac117298",
+    "protocol/probes/public-test-identities/p384.test-key.pem": "94c93d82688a6455cba37e5ed30baeba2f1612640f2d56d500aff0a8e4c3397c",
+    "protocol/probes/public-test-identities/python-streaming.ciphertext": "42ddbe9aca9c5e3e2e632368a93ed2ed96348e006f9d48a62e2febf266655a27",
+    "protocol/probes/public-test-identities/streaming-test-only.keyset.json": "e97dc66524ea93119fe16a64eb7673140314bdd8a6ec1b89331ce7e0804c338e",
+    "protocol/probes/public-test-identities/streaming.json": "f32815df11e24c37c20f515875a249215e3fdbe7f93013956ce1511a23539924",
+    "protocol/v2/SHA256SUMS": "f3faf4bb173b6fe4238530cf271c9fbe647025ce7587195cb1e7401ac9ba8e60",
+    "protocol/v2/event.schema.json": "f4d5d824bd2643fb978e99b3d990234199bda86768fa7dccb97a467ce5655bc1",
+    "protocol/v2/fixtures/approval.required.json": "495c23124b9a55756e0508a0e3e09b76ae3f2b01a0f932a2d6021069a06cd817",
+    "protocol/v2/fixtures/approval.resolve.json": "4d02cee9cf48771c3d45a0dd27f327814b02eed43e52f2a41497ec5c460de5e0",
+    "protocol/v2/fixtures/catalog.request.json": "0ce3a932af54af26af7bd688a4b065534aeb0101061b4c9f7020ce584b2e9670",
+    "protocol/v2/fixtures/catalog.snapshot.json": "34e4d4890ca904cd4fcd340b4f9561651a9ddc393b967e89092c15fcc011888e",
+    "protocol/v2/fixtures/chat.accepted.json": "5dfa385fff1f40c15edb44291cddcc62180ecb4d4d22fd8d20f18017a895802e",
+    "protocol/v2/fixtures/chat.message.json": "09add34e74b623623b6df84ff5bb2e78b63975117f73927b39507604fe16582b",
+    "protocol/v2/fixtures/chat.submit.json": "da79277f89028d07237f01c45bb52354584623c352c51f3183e83200c72bd453",
+    "protocol/v2/fixtures/error.json": "79a69090401559b2578b8d78d8d712c03984c2b60887361acb49c945fbc4edee",
+    "protocol/v2/fixtures/file.offer.json": "724905ba78bd5b2cfa7dbb8106536270e4f223e6923922c899134e0da71bfa05",
+    "protocol/v2/fixtures/file.request.json": "1e426576e0f772fac7494c912bd868ea82d695860e3a31f052aebfabf4819499",
+    "protocol/v2/fixtures/fleet.request.json": "f112e0fde37b1a4b15e1c4a63f656235dc863c8d7e8518c7b745797ca06c8901",
+    "protocol/v2/fixtures/fleet.snapshot.json": "6599988c49a467defd5c1484747f45ffd1e85899c8a1b6ba3b81839b965b905e",
+    "protocol/v2/fixtures/frame.json": "c8a3eba13b94448fa52881d1add67aa664aa262eea12277d7efdf6589447e9b2",
+    "protocol/v2/fixtures/invitation.json": "feaccc5c7d5861d837633ed901bb5f1ae3326403795d9c621c72a485e6556ee0",
+    "protocol/v2/fixtures/job.cancel.json": "d86f81288671c397ef2e1b600619815ef087e8ebcb08dc449f0a20c3b540de42",
+    "protocol/v2/fixtures/job.get.json": "01c472417917fb8e5a891fe4170aa77ef149db4ed0c86ce028d4a53c5ca0eb8c",
+    "protocol/v2/fixtures/job.status.json": "448e1f127447766df748f065999d63a91540e2e9877b27d2151bb6e4c9ae95f2",
+    "protocol/v2/fixtures/job.submit.json": "0fd08ab7c7ff375e525e2ba89279e5f51bdee96878c434312172616ea7533e02",
+    "protocol/v2/fixtures/request.cancel.json": "4e6164e8e7131085ed9bba925bc8c0d0dbad864cab36c87cc4690b353c51c7e2",
+    "protocol/v2/fixtures/request.status.json": "5394623efb7f5f3ce43e8fee9a04eab65ffd9d81e552ed2c191f79285e051425",
+    "protocol/v2/fixtures/session.json": "48fcb4d21148cfaf7cbf840d770779561ae34f6635a76df7eb818f5c589fb2ad",
+    "protocol/v2/fixtures/swarm.snapshot.json": "d116a7893e91d75b26cdbb381757a91fed14d70eb02f0da0f88b0fbe7a2c8327",
+    "protocol/v2/fixtures/sync.request.json": "cf1ccdc2113027a55611d3a526ef98b60c97339c7d7d155f0ee45451a67d742a",
+    "protocol/v2/fixtures/sync.snapshot.json": "52ee8739d782b4f6f61e742fdf8ded21c3e78ace5c0bdb310c102c8774fd8199",
+    "protocol/v2/fixtures/thread.context.update.json": "c81913d26fa37f37a82c7323b6686fe7e393f89b224c6721e9d9f81d0f16c3fc",
+    "protocol/v2/fixtures/thread.create.json": "b8c1719ba59539641a20ed12d4817c0115b51804fdf094a9b30e63ec0978868c",
+    "protocol/v2/fixtures/thread.snapshot.json": "0783552a4f584a1248dfbaa01b0ea5c63f4f2030e80696479066e55fd8b56585",
+    "protocol/v2/frame.schema.json": "2a3235efb8e005cdb1e56a8d196baacb9c072b1bad4e196a3d98785722e7a7e7",
+    "protocol/v2/invitation.schema.json": "31a00f035852dd9651d986cb181922b2e31f7a7c84ac0bf57d8951aaa67f4215",
+    "protocol/v2/session.schema.json": "7bc4e77251d50379ec459cf33aad4c4354e7aa561e08d5e61cdc6e21c8526210",
+    "scripts/check-contract.py": "a130cd2ca44e12bc36d9fd98156bcef4bfa6f3cb43c96318d4e1e86728dd7c48",
+    "scripts/probes/tls-peer-bridge.py": "d94e2b868e318f7364f650c3e9b764c2cc057672280a7d0314381ce2912ea87a"
+  },
+  "historical_evidence": "artifacts/protocol and mobile-protocol.json describe retained runs, including the failed full emulator suite. Recovery checks are recorded separately.",
+  "desktop_recovery_revision": "2c5f89392942207080330d46bb0736d5bba33899",
+  "source_hashes_verified": 23,
+  "artifact_hashes_verified": 16,
+  "fresh_checks": {
+    "build_unit_lint": {
+      "exit_code": 0,
+      "command": "RATICODE_DESKTOP_PROBE_ROOT=<desktop recovery worktree> ./gradlew assembleDebug testDebugUnitTest lintDebug --console=plain"
+    },
+    "schema": {
+      "exit_code": 0,
+      "command": ".venv-contract/bin/python scripts/check-contract.py"
+    },
+    "unit_suites": {
+      "dev.raticode.mobile.WorkspaceTest": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "dev.raticode.mobile.protocol.v2.SessionBindingTest": {
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "dev.raticode.mobile.ProtocolTest": {
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "dev.raticode.mobile.protocol.v2.PythonTlsInteropTest": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest": {
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest": {
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "dev.raticode.mobile.protocol.v2.StreamingInteropTest": {
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "unit_totals": {
+      "tests": 44,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "device_tests": "Not rerun during recovery. Historical 13 protocol passes and full-suite Back/IME failure preserved in artifacts/protocol."
+  },
+  "artifact_sha256": {
+    "artifacts/recovery/build-unit-lint.log": "4b31f095820321fd50c21bfa036c366328ec9b0b16b1494d343369a511c8670c",
+    "artifacts/recovery/schema.log": "ec1c953e73575e86dbad78861abc3e45ae94f1922c8f5a4e8178602194a317f0",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.ProtocolTest.xml": "ee4f67481630b75839148db92e7180a994f3f677ad7c34b17b9c5d581a3c3536",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.WorkspaceTest.xml": "f9fbc1a07527beff0815537a82e6c81f5cdfafb9476fe1a79e59528bae6da2cd",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml": "d28f8ff8283b81bf681dd7a5ea59775ee6d01331532602a1d09a293763ff3613",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml": "cf8838733fbc3961dca3b334395431bb49e97aa27c8ad472e50b7e95ab54aedd",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml": "d80992c554f028d46c0fd9e11212ef6a9b9efbbbfc1ad65951bf7c9f5d0e9d78",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml": "31509365d66038738ced65fb0d34fe16095c0f72c494c22e35ce430ba7f5a90a",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml": "8e6de5cdccee944b95daf063ebd96d2ae0fb65d9de4af856f7076392e7c4691b",
+    "artifacts/recovery/unit/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml": "cb0805f460a868fc80d8f4ffa357ab49ce43a2f679c1c06d67384c5e4745cf74",
+    "artifacts/recovery/system-launcher-build.log": "43211103bd983efef7471a0e5019d7f631410d4e89c7c9afea4cf6e860ba05d3",
+    "artifacts/recovery/managed-jdk-failure.log": "7f7816b5c1f2941f01fdb1605c64868a46d8024931059e98e9ecc00a890970a6"
+  },
+  "desktop_tls_probe_sha256": {
+    "src/gofer/devices/tls.py": "81a533ae8cf863de2ff79bec5e581b499ed9a22f92777d3a8079bc858b65950c",
+    "scripts/device_tls_probe.py": "783f782acd4bc9bc1912113f64f0c044caceb337e58bd9a2fb8db4277d81a0df"
+  },
+  "integration_setup": "Supply explicit installed JDK21 and SDK36 environment in managed command arrays for assignments and integration. Create assignment-local .venv-contract and install protocol/requirements.txt. Set RATICODE_DESKTOP_PROBE_ROOT for fresh cross-language tests. No host paths in committed build configuration.",
+  "setup_correction": {
+    "reason": "Managed system-Java run failed because Gradle 9.1 cannot convert relative installation path .jdk21. Removed that property. User selected explicit JDK21 and SDK36 environment in managed check arrays. No discovery helper retained.",
+    "managed_failed_log": "artifacts/recovery/managed-jdk-failure.log",
+    "required_managed_command": "env JAVA_HOME=<installed JDK21> ANDROID_HOME=<installed SDK36> ANDROID_SDK_ROOT=<installed SDK36> ./gradlew assembleDebug testDebugUnitTest lintDebug",
+    "historical_hash_scope": "mobile-protocol.json and restored_files describe retained inputs. Current build setup differs in setup_correction.final_file_sha256. Production/test protocol sources and fixtures are unchanged.",
+    "final_file_sha256": {
+      "gradle.properties": "e43a00491832254a35cf5a979ef6de17f78c4e159d446be39319d2e3d3e46325",
+      "README.md": "96acb1ced50ff1657af649985e5afc4a2be64ce7deaf3077a242d0d32477527f",
+      "docs/protocol-probes.md": "d6885a5e7c61703d1d417ac67efada9dda90e67343d6d14c2efe94ec638039d6"
+    }
+  }
+}

@@ -45,7 +45,11 @@ Review routes and `allow-fail` before adding retries. Retrying a write, network 
 
 ## Scheduling or queueing rejects Rattish
 
-The built-in scheduler, watcher, and runner queue still use legacy workflow-loading paths. Read their compatibility notes. For current Rattish source, an external trigger can invoke `Raticode rattish run`; validation remains a separate step.
+`Raticode schedule`, `Raticode watch`, and the runner queue still use legacy workflow-loading paths. For a `workflow.rattish`, use [triggers](../workflows/triggers.md) or call `Raticode rattish run` from an external tool.
+
+## A trigger didn't fire
+
+Run `Raticode rattish triggers status`. Triggers fire only while Raticode or its background scheduler is running, and the computer has to be awake. `Raticode rattish triggers history --problems` lists missed, failed, skipped, and interrupted runs with the reason.
 
 ## Knowledge is not found or a report did not save
 
@@ -56,6 +60,8 @@ Inspect the save tool's returned result. A collision, missing destination, permi
 ## Devices or managed work are uncertain
 
 Use matching device builds, check the experimental flag, compare paired identities, and request fresh status. A stale status is unknown. Do not replay a job merely because its reply was lost.
+
+For a phone that won't pair or connect, see [Pair and connect: troubleshooting](../mobile/pairing.md#troubleshooting): check **Phone and desktop pairing**, the computer's firewall, the same (non-guest) Wi-Fi network, **Set desktop address**, and the phone's 64 MB history share.
 
 Swarms and organizations remain paused after restart. Inspect interrupted changes and receipts before resuming. Managed remote stops require confirmation, not just a cancellation request.
 

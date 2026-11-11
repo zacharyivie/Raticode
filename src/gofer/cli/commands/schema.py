@@ -76,28 +76,38 @@ def mutation_command_contract(command_id: str) -> dict[str, object]:
 
 
 def schema_command(
-    output_format: str = typer.Option(
-        "json", "--format", help="Output format. Currently only 'json' is supported."
+    output_format: str = typer.Option("json", "--format", help="Output format: json."),
+    legacy_toml: bool = typer.Option(
+        False,
+        "--legacy-toml",
+        help="Print the legacy TOML authoring contract instead of the Rattish pointers.",
     ),
     operation: str | None = typer.Option(
-        None, "--operation", help="Return the contract for one operation type."
+        None, "--operation", help="Legacy TOML: the contract for one operation type."
     ),
     capability: str | None = typer.Option(
-        None, "--capability", help="Return one model capability schema."
+        None, "--capability", help="Legacy TOML: one model capability schema."
     ),
     command: str | None = typer.Option(
         None,
         "--command",
-        help="Return structured help for a mutation command, e.g. workflow.add-node.",
+        help="Legacy TOML: structured help for a mutation command, e.g. workflow.add-node.",
     ),
 ) -> None:
-    """Print the versioned, machine-readable workflow authoring contract."""
+    """Print where the machine-readable Rattish language contracts are installed.
+
+    Workflows are written in Rattish. The legacy TOML authoring contract is still
+    available with --legacy-toml, --operation, --capability or --command.
+    """
     if output_format != "json":
         typer.echo(f"Unsupported schema format: {output_format}", err=True)
         raise typer.Exit(2)
     if sum(item is not None for item in (operation, capability, command)) > 1:
         typer.echo("Use only one of --operation, --capability, or --command", err=True)
         raise typer.Exit(2)
+    if not (legacy_toml or operation or capability or command):
+        _emit(_rattish_pointer())
+        return
     try:
         payload = authoring_contract(operation=operation, capability=capability)
         if command is not None:
@@ -113,5 +123,45 @@ def schema_command(
     except KeyError as exc:
         typer.echo(str(exc).strip("'"), err=True)
         raise typer.Exit(2)
+    payload["legacy"] = True
+    _emit(payload)
+
+
+def _rattish_pointer() -> dict[str, object]:
+    from gofer.rattish.artifacts import (
+        RattishArtifactError,
+        rattish_asset_root,
+        rattish_docs_root,
+    )
+
+    try:
+        docs_root = rattish_docs_root()
+        asset_root = rattish_asset_root()
+    except RattishArtifactError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    return {
+        "command": "schema",
+        "ok": True,
+        "language": "rattish",
+        "source": "workflow.rattish",
+        "docsRoot": str(docs_root),
+        "overview": str(docs_root / "README.md"),
+        "grammar": str(docs_root / "grammar.ebnf"),
+        "staticSemantics": str(docs_root / "static-semantics.md"),
+        "nodeContractsGuide": str(docs_root / "node-contracts.md"),
+        "contractsRoot": str(asset_root / "contracts"),
+        "schemasRoot": str(asset_root / "schemas"),
+        "commands": {
+            "docs": "Raticode rattish docs --format json",
+            "create": "Raticode rattish create NAME --project PATH --format json",
+            "check": "Raticode rattish check PATH --format json",
+            "preflight": "Raticode rattish preflight PATH --format json",
+        },
+        "legacyToml": "Raticode schema --legacy-toml prints the old TOML authoring contract.",
+    }
+
+
+def _emit(payload: dict[str, object]) -> None:
     sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str))
     sys.stdout.write("\n")

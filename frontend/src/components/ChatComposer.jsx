@@ -17,6 +17,7 @@ import { loadVoiceTidy, tidyTranscript } from "../lib/voiceTidy.js";
 import { DictationText, QUIET_MS } from "../lib/dictation.js";
 import { ProgressiveTidy, TIDY_PAUSE_MS } from "../lib/progressiveTidy.js";
 import { DotMood, levelFromSamples } from "../lib/voiceDots.js";
+import { VoiceStage, atStage, reportQuietRecording, reportSilentInput, reportVoiceProblem, trackState } from "../lib/voiceDiagnostics.js";
 import { ariaKeyshortcuts, registerVoiceComposer, useDictationAutoSend, useDictationMode, useVoiceBinding, voiceShortcutLabel } from "../lib/voiceShortcut.js";
 
 const menuClass = "ml-1 h-8 min-w-0 max-w-40 rounded-md border border-line bg-transparent px-1.5 text-xs text-ink outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50";
@@ -173,6 +174,7 @@ export default function ChatComposer({
     dictation.words.interrupted();
     const heard = dictation.words.text;
     const message = error instanceof Error ? error.message : "Live transcription stopped.";
+    reportVoiceProblem(error?.voiceStage || VoiceStage.STREAM, error);
     endDictation(dictation);
     if (heard) {
       onDraftChange(appendTranscription(dictation.base, heard));
@@ -185,15 +187,20 @@ export default function ChatComposer({
   async function openSession(dictation) {
     const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
     if (!navigator.mediaDevices?.getUserMedia || !AudioContextConstructor) {
-      throw new Error("Audio recording is not available in this desktop build.");
+      throw atStage(new Error("Audio recording is not available in this desktop build."), VoiceStage.MICROPHONE);
     }
-    const stream = await navigator.mediaDevices.getUserMedia(audioInputConstraints(audioInputDeviceId));
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(audioInputConstraints(audioInputDeviceId));
+    } catch (error) {
+      throw atStage(error, VoiceStage.MICROPHONE);
+    }
     let started;
     try {
       started = await startStreamingTranscription();
     } catch (error) {
       stream.getTracks?.().forEach((track) => track.stop());
-      throw error;
+      throw atStage(error, VoiceStage.START);
     }
     if (started.notice) setVoiceNotice(started.notice);
     const transcriber = createStreamingTranscriber(
@@ -218,6 +225,7 @@ export default function ChatComposer({
     const inputLabel = stream.getAudioTracks?.()[0]?.label || "";
     const noSoundNotice = silentInputMessage(inputLabel);
     dictation.inputLabel = inputLabel;
+    let loggedSilence = false;
     let recorder;
     try {
       recorder = await createLocalPcmRecorder(
@@ -227,6 +235,10 @@ export default function ChatComposer({
         (level) => { levelRef.current = level; },
         (signal) => {
           if (dictationRef.current !== dictation) return;
+          if (signal === "silent" && !loggedSilence) {
+            loggedSilence = true;
+            reportSilentInput(inputLabel, stream);
+          }
           if (signal === "silent") setVoiceNotice(noSoundNotice);
           else setVoiceNotice((current) => (current === noSoundNotice ? "" : current));
         },
@@ -234,15 +246,17 @@ export default function ChatComposer({
     } catch (error) {
       stream.getTracks?.().forEach((track) => track.stop());
       transcriber.cancel();
-      throw error;
+      throw atStage(error, VoiceStage.RECORDER);
     }
     return {
       transcriber,
       // Resolves to the session's words; a session that heard nothing gives "".
       async stop() {
-        const { recorded, signal } = await recorder.stop();
+        const { recorded, signal, stats } = await recorder.stop();
         dictation.noSignal = !signal;
         if (!recorded) {
+          // A silent stretch was already reported while listening.
+          if (!loggedSilence || stats?.anySound) reportQuietRecording({ ...stats, label: inputLabel, track: trackState(stream) });
           transcriber.cancel();
           dictation.silent = true;
           return "";
@@ -251,7 +265,7 @@ export default function ChatComposer({
           return await transcriber.finish();
         } catch (error) {
           if (NO_SPEECH.test(error?.message || "")) return "";
-          throw error;
+          throw atStage(error, error?.voiceStage || VoiceStage.FINISH);
         }
       },
       cancel() {
@@ -326,6 +340,7 @@ export default function ChatComposer({
       if (dictation.stopRequested) void finishDictation();
     } catch (error) {
       if (dictationRef.current !== dictation) return;
+      reportVoiceProblem(error?.voiceStage, error);
       endDictation(dictation);
       setTranscriptionError(microphoneErrorMessage(error));
     }
@@ -366,6 +381,7 @@ export default function ChatComposer({
       setVoice({ phase: "listening", held: dictation.hold });
     } catch (error) {
       if (dictationRef.current !== dictation) return;
+      reportVoiceProblem(error?.voiceStage, error);
       setVoice({ phase: "paused", held: dictation.hold });
       setTranscriptionError(microphoneErrorMessage(error));
     } finally {
@@ -892,8 +908,8 @@ function createStreamingTranscriber(sessionId, onText, onError, onNotice = () =>
           if (payload.notice) onNotice(String(payload.notice));
           onText(String(payload.text || ""));
         } catch (error) {
-          failure = error;
-          onError(error);
+          failure = atStage(error, VoiceStage.STREAM);
+          onError(failure);
         }
       });
     },
@@ -985,6 +1001,8 @@ async function createLocalPcmRecorder(stream, AudioContextConstructor, onPcmChun
       // When stop comes, up to one buffer of audio (4096 samples, about 85 ms) is still on its
       // way to the processor, often the end of the last word, especially when letting go of a
       // held mic. Let it arrive before closing; a stuck or closed audio context never delays stop.
+      // For the log, should nothing usable have arrived: closing changes the state.
+      const contextState = context.state;
       if (!closed && context.state === "running") {
         await new Promise((resolve) => {
           tail = resolve;
@@ -994,7 +1012,10 @@ async function createLocalPcmRecorder(stream, AudioContextConstructor, onPcmChun
       }
       await close();
       // signal is false when the microphone sent only zeros: muted or switched off.
-      if (!recordedSamples || peakLevel < 0.003) return { recorded: false, signal: anySound || !recordedSamples };
+      if (!recordedSamples || peakLevel < 0.003) {
+        const stats = { samples: recordedSamples, sampleRate: context.sampleRate, peak: peakLevel, anySound, contextState };
+        return { recorded: false, signal: anySound || !recordedSamples, stats };
+      }
       flushChunks();
       return { recorded: true, signal: true };
     },

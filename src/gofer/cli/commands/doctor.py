@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from gofer.cli.output import format_option, json_alias_option, wants_json
 from gofer.core.health import HealthDiagnostic, run_health_checks
 
 console = Console()
@@ -19,14 +20,12 @@ def doctor(
         "-w",
         help="Workflow ID, file stem, or TOML path to include in diagnostics.",
     ),
-    json_output: bool = typer.Option(
-        False,
-        "--json",
-        help="Emit machine-readable JSON diagnostics.",
-    ),
+    output_format: str = format_option(),
+    json_output: bool = json_alias_option(),
     data_dir: Path | None = typer.Option(None, "--data-dir", hidden=True),
 ) -> None:
     """Inspect local Raticode readiness without making network calls."""
+    json_output = wants_json(output_format, json_output)
     report = run_health_checks(data_dir=data_dir, workflow=workflow)
     if json_output:
         sys.stdout.write(json.dumps(report.to_dict(), indent=2) + "\n")

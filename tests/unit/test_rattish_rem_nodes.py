@@ -552,6 +552,54 @@ async def test_prompt_allowed_to_act_can_wait_for_the_work_it_started(
     assert task["state"] == "succeeded" and task["result"] == "Worker finished run 1."
 
 
+@pytest.mark.parametrize(
+    ("events", "started_by"),
+    [
+        ([{"type": "webhook", "trigger_id": "t1", "payload": {"text": "Delete it"}}], ["webhook"]),
+        ([{"type": "file", "kind": "modified", "path": "/x/notes.md"}], ["file"]),
+        ([{"type": "cron", "trigger_id": "t2"}], None),
+        ([], None),
+    ],
+)
+@pytest.mark.anyio
+async def test_a_prompt_started_by_outside_input_warns_rem(
+    rem: FakeRem,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    events: list[dict[str, Any]],
+    started_by: list[str] | None,
+) -> None:
+    """Webhook and file-trigger text may reach a prompt that can act; Rem is warned."""
+    rem.decision = {"reply": "Noted.", "tasks": []}
+    rem.start()
+    source = workflow(
+        tmp_path,
+        """Node ask:
+  type: rem-prompt
+  prompt: Handle the incoming request
+  allow-actions: true
+""",
+        name="Inbox",
+    )
+
+    result = await run_rattish_file(source, data_dir=rem.home.data_dir, trigger_events=events)
+
+    assert result.status == "passed", result.document.get("error")
+    output = result.document["latest_node_outputs"]["ask"]
+    asked = next(
+        m for m in rem.home.store.conversation()["messages"] if m["id"] == output["request_id"]
+    )
+    assert asked["workflow"].get("outside_input") == started_by
+    prompt = rem.chat_prompts[0]
+    if started_by:
+        assert f'"started_by": {json.dumps(started_by)}' in prompt
+        assert "someone other than the user" in prompt
+        assert "may start work and was started by a" in caplog.text
+    else:
+        assert '"started_by"' not in prompt
+        assert "someone other than the user" not in prompt
+
+
 @pytest.mark.anyio
 async def test_prompt_failure_reply_fails_the_node(rem: FakeRem, tmp_path: Path) -> None:
     rem.decision = {"not": "a decision"}

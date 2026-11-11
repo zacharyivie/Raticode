@@ -1,11 +1,45 @@
 /* global window */
 
-const { ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 
 const LINK_CHANNEL = "gofer:browser-link-clicked";
 const NAVIGATION_CHANNEL = "gofer:browser-navigation";
 const ZOOM_CHANNEL = "gofer:browser-zoom";
 const CONTEXT_ELEMENT_CHANNEL = "gofer:browser-context-element";
+
+// Remembers the page's previous and next handlers for the media bar. An exact
+// copy of mediaPageHook in browser-media.cjs (a sandboxed preload cannot load
+// other files); read the explanation there. A test keeps the two equal.
+function mediaPageHook() {
+  const proto = globalThis.MediaSession?.prototype;
+  const descriptor = proto && Object.getOwnPropertyDescriptor(proto, "setActionHandler");
+  if (typeof descriptor?.value !== "function") return;
+  const handlers = new Map();
+  const wrapped = new Proxy(descriptor.value, {
+    apply(target, session, args) {
+      const result = Reflect.apply(target, session, args);
+      if (typeof args[1] === "function") handlers.set(args[0], args[1]);
+      else handlers.delete(args[0]);
+      return result;
+    },
+  });
+  Object.defineProperty(proto, "setActionHandler", { ...descriptor, value: wrapped });
+  for (const action of ["play", "pause", "previoustrack", "nexttrack"]) {
+    window.addEventListener(`raticode-media-has-${action}`, (event) => {
+      if (handlers.has(action)) event.preventDefault();
+    }, true);
+    window.addEventListener(`raticode-media-run-${action}`, (event) => {
+      const handler = handlers.get(action);
+      if (!handler) return;
+      event.preventDefault();
+      handler({ action });
+    }, true);
+  }
+}
+
+try {
+  contextBridge.executeInMainWorld({ func: mediaPageHook });
+} catch { /* The media bar then shows no previous or next button for this page. */ }
 
 // Every handler below ignores events a page script dispatched itself
 // (isTrusted is false). Only real user input may open tabs, zoom or go back.

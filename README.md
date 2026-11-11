@@ -2,6 +2,8 @@
 
 Raticode is a desktop studio and Python CLI for building and running AI coding workflows. Workflows use the Rattish language in `workflow.rattish` and connect shell commands, scripts, HTTP requests, and coding agents through explicit routes, joins, branches, and cycles.
 
+**Documentation:** the [Raticode website](https://zacharyivie.github.io/Raticode/docs/) (source in [`website/docs/`](website/docs/index.md)) is the single source of truth for using Raticode, desktop and mobile. This README covers development and the legacy TOML interface; the files in [`docs/`](docs/README.md) and [`mobile/android/docs/`](mobile/android/docs/README.md) are developer and design notes.
+
 For current workflow authoring, start with the [Rattish guide](rattish/spec/README.md).
 The TOML examples below document the legacy workflow interface.
 
@@ -18,14 +20,17 @@ The installed command is `Raticode`.
 - Edit agents and workflows in an interactive terminal editor.
 - Store named workflows and agents in the user data directory.
 - Run a single named agent outside a workflow.
-- Schedule workflows with cron expressions through APScheduler and a SQLite job store.
+- Start Rattish workflows on a cron schedule, a file change, or an authenticated local webhook with `Raticode rattish triggers`.
+- Schedule legacy workflows with cron expressions through APScheduler and a SQLite job store.
 - Fan out agent nodes across a fixed count, rows in tabular files, or files in a directory.
 - Pass outputs between nodes through prompt interpolation, explicit input mappings, or piped stdin.
 - Retry nodes, set timeouts, and conditionally traverse edges based on success, failure, or output regex matches.
 
 ## Phone access
 
-Settings > Paired devices lists paired phones and their thread-sync access. Use **Pair a device** for QR setup, **Project access** for individual grants, and **Connection and troubleshooting** for the LAN address and port. Use **Device details > Unpair** to remove pairing without blocking a device. **Revoked devices > Remove from revoked list** permits fresh QR pairing without restoring old access. Pairing does not grant execution authority. See [device setup](docs/security/device-pairing.md).
+The Android app's source and guides are in [`mobile/android`](mobile/android/README.md).
+
+Turn on **Settings > Developer > Feature Preview > Phone and desktop pairing**, then pair a phone from **Settings > Devices**. Each paired phone has its own switches for thread sync, approvals and swarm controls, using Raticode from the phone, and waking the computer. **Unpair** removes a pairing; **Revoke** also blocks the device until **Revoked devices > Remove from revoked list**. See [Raticode Mobile](website/docs/mobile/index.md) for the user guide and [device setup](docs/security/device-pairing.md) for developer details.
 
 ## Requirements
 
@@ -110,13 +115,15 @@ the backend process to adjust it. These limits do not alter CLI workflow runs.
 
 Linux and macOS desktop packages are built from the Electron app in
 `frontend/release`.
-Arch users will be able to install Raticode from AUR after publication:
+Arch users will be able to install Raticode from the AUR once `raticode-bin` is
+published (it isn't yet):
 
 ```bash
-yay -S raticode-desktop
+yay -S raticode-bin
 ```
 
-The AUR packaging files live in `packaging/arch`.
+The AUR packaging files live in `packaging/aur`; see the website's Installation >
+Arch Linux page and `docs/releasing.md`.
 
 On Windows, the normal installer includes the `Raticode.exe` CLI in its
 `resources\backend` folder, next to the desktop app's own `Raticode.exe`. During
@@ -155,7 +162,7 @@ Release builds also publish standalone CLI binaries:
 - macOS: `raticode-cli-macos-<arch>`
 - Debian/Ubuntu: `raticode-cli_<version>_amd64.deb`
 - Red Hat/Fedora: `raticode-cli-<version>-1.<dist>.x86_64.rpm`
-- Arch/AUR: `raticode-cli`
+- Arch/AUR: `raticode-cli-bin` (not published yet)
 
 These artifacts are intended for servers, CI, containers, and enterprise
 automation where the Electron frontend is unnecessary. A Linux container can
@@ -166,25 +173,32 @@ ADD raticode-cli-linux-x64 /usr/local/bin/Raticode
 RUN chmod +x /usr/local/bin/Raticode
 ```
 
-Arch users can install the CLI-only package after AUR publication:
+That gives the container the CLI only. To run the backend in a container, with
+Rem, workflows and triggers, see
+[Headless backend: in a container](website/docs/reference/headless.md#in-a-container).
+
+Arch users can install the CLI-only package once it is published to the AUR:
 
 ```bash
-yay -S raticode-cli
+yay -S raticode-cli-bin
 ```
 
 ## Release Builds
 
-Pushes to `stage` validate source and build unsigned Linux, Windows and macOS
-packages, and stage a verified draft through `.github/workflows/release-candidate.yml`.
+Pushes to `stage` validate source, build Linux, Windows and macOS packages, and
+stage a verified draft through `.github/workflows/release-candidate.yml`. macOS
+packages are always Developer ID signed, notarized and stapled; Windows packages are
+unsigned unless Windows signing is configured.
 Review that candidate, squash merge `stage` into `main`, then push a `v*` tag at the
 squash commit, which must have exactly the candidate's files, or at the staged commit.
 The tag workflow publishes the staged files without rebuilding. Pull requests run
 source validation.
 
-See [the release guide](docs/releasing.md) for signing setup, candidate review,
-tagging and retry behavior. Signing is optional. Leave `RELEASE_SIGNING` unset for
-unsigned releases; set the repository variable to `true` only after configuring
-Windows and Apple signing. Signed preparation fails if credentials are missing.
+See [the release guide](docs/releasing.md) for the Apple secrets, candidate review,
+tagging and retry behavior. Mac preparation fails if the Apple secrets are missing or
+signing or notarization fails; it never falls back to unsigned. Windows signing is
+optional: set the repository variable `WINDOWS_RELEASE_SIGNING` to `true` only after
+configuring it.
 
 Use the version bump script before tagging a release:
 
@@ -198,10 +212,11 @@ Release and packaging script behavior is covered by focused regression tests:
 python -m pytest tests/unit/test_release_scripts.py
 ```
 
-After building the release AppImage, update the Arch package checksum with:
+The AUR packages take their checksums from a published release's
+`checksums-linux.txt`, never from a local build:
 
 ```bash
-node scripts/bump-version.cjs 0.1.1 --appimage-sha256 <appimage-sha256> --cli-sha256 <cli-sha256>
+python3 scripts/aur-packages.py update --version 0.1.1 --checksums checksums-linux.txt
 ```
 
 ## Data Directory
@@ -320,7 +335,7 @@ Agent prompts can be inline text or a path to a Markdown file. Inline prompts ar
 
 ## Schedule Commands
 
-Workflows can include schedule metadata:
+For a `workflow.rattish`, use [triggers](website/docs/workflows/triggers.md). The commands below apply to legacy TOML workflows, which can include schedule metadata:
 
 ```toml
 [workflow.schedule]
@@ -1038,7 +1053,7 @@ Closing the Raticode window keeps it running in the tray, and phone threads keep
 
 **Sync desktop threads with this phone** is checked by default for new phone pairings in Paired devices. It shares current/future desktop thread metadata, text history and provider/model catalogs. Keep the desktop window open. Mobile keeps the thread list open, creates threads in your desktop projects, chooses models, attaches verified files and supports Android on-device dictation. Settings and replies return to the same renderer conversations. Sync activates only after desktop identity confirmation and the phone acknowledgment. Existing sync choices remain unchanged.
 
-Remote execution keeps Codex read-only/workspace-write, Claude plan/default and Cursor/Copilot/OpenCode default policies. Other provider catalogs and project-less histories are readable; their remote execution remains unavailable. Both peers need the updated v2 history/pagination extension. See [device messaging](docs/security/device-messaging.md) and the mobile repository's live setup guide.
+Remote execution keeps Codex read-only/workspace-write, Claude plan/default and Cursor/Copilot/OpenCode default policies. Other provider catalogs and project-less histories are readable; their remote execution remains unavailable. Both peers need the updated v2 history/pagination extension. See [device messaging](docs/security/device-messaging.md) and `mobile/android/docs/live-device-setup.md`.
 
 Phone-started turns now appear in the same desktop conversation with the normal thought trace, tool activity, reply and turn summary. A small phone icon marks the user message. The desktop reads its existing local Rem event journal during reconciliation, including turns completed while the window was closed. This requires the updated desktop backend and frontend; restarting an older packaged binary does not load source changes. The phone still receives the bounded text history over encrypted device sync.
 

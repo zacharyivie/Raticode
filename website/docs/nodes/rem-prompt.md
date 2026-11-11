@@ -49,6 +49,8 @@ By default Rem only answers. If its answer would start, change, cancel or delete
 
 Set `allow-actions: true` to let Rem act on the prompt as it would on a message you typed. Tasks it starts still go through Rem's own checks, such as the projects and folders you approved. With `wait-for-tasks: true` the node also waits for the work Rem started and fails if any of it doesn't succeed.
 
+Be careful with `allow-actions: true` in a workflow that a [webhook or file trigger](../workflows/triggers.md) starts: the webhook's body or the watched file can be written by someone else, and that text can reach the prompt. Raticode tells Rem when a webhook or file trigger started the run, and Rem then does only what the prompt plainly asks and describes, rather than acts on, any work that text inside it asks for. The backend log also records a warning for each such prompt. Keep these prompts answer-only when you can, and pass outside text through a step that checks it first.
+
 ## Waiting and stopping
 
 The node waits until Rem has answered. If Rem is replying to something else, the prompt waits in line like any message you send. Rem must be running: with no Raticode backend answering, the node fails with `RATTISH_REM_UNAVAILABLE` instead of waiting. If Rem stops for more than a minute while the node waits, the node fails the same way.

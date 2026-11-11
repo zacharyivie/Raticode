@@ -289,6 +289,28 @@ def test_select_project_accepts_worktree_created_after_the_turn_started(tmp_path
     assert actions.projects[str(worktree.resolve())]["grantId"] == "g1"
 
 
+def test_select_project_accepts_a_folder_inside_a_new_worktree(tmp_path: Path) -> None:
+    project = repository(tmp_path / "app")
+    actions = rem_threads.ThreadActions(
+        {"global": True, "projects": [{"root": str(project), "name": "app", "grantId": "g1"}]},
+        [],
+        worktrees=True,
+    )
+    worktree = project / ".worktrees" / "fix"
+    git(project, "worktree", "add", "-q", "-b", "fix", str(worktree))
+    phone = worktree / "mobile" / "android"
+    phone.mkdir(parents=True)
+    receipt = actions.call("select_project", {"projectRoot": str(phone)})
+    assert receipt["projectRoot"] == str(phone.resolve())
+    assert receipt["projectName"] == "fix/mobile/android"
+    assert actions.projects[str(phone.resolve())]["grantId"] == "g1"
+    # The same folder in the main checkout isn't a worktree, so it still needs opening.
+    plain = project / "mobile" / "android"
+    plain.mkdir(parents=True)
+    with pytest.raises(ValueError, match="open projects"):
+        actions.call("select_project", {"projectRoot": str(plain)})
+
+
 def test_worktree_discovery_is_off_unless_requested(tmp_path: Path) -> None:
     project = repository(tmp_path / "app")
     worktree = project / ".worktrees" / "fix"

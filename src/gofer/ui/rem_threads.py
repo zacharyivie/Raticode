@@ -139,10 +139,12 @@ class ThreadActions:
         self.lock = threading.Lock()
 
     def _worktree_project(self, value: str) -> dict[str, Any] | None:
-        """Admit a git worktree that appeared inside an open project during the turn.
+        """Admit a git worktree, or a folder in one, inside an open project.
 
         The open project's grant already covers every folder inside it, so the
         worktree reuses that grant. Worktrees elsewhere still need the user to open them.
+        A folder in a worktree covers projects that live below the repository root,
+        such as mobile/android.
         """
         target = Path(value)
         if not self.worktrees or not target.is_absolute():
@@ -160,10 +162,16 @@ class ThreadActions:
                 continue
             if canonical == parent or not canonical.is_relative_to(parent):
                 continue
-            if canonical in _git_worktrees(parent):
+            linked = (tree for tree in _git_worktrees(parent) if tree != parent)
+            worktree = next((tree for tree in linked if canonical.is_relative_to(tree)), None)
+            if worktree is not None:
                 found = {
                     "root": str(canonical),
-                    "name": canonical.name,
+                    "name": (
+                        canonical.name
+                        if canonical == worktree
+                        else f"{worktree.name}/{canonical.relative_to(worktree)}"
+                    ),
                     "grantId": project.get("grantId"),
                 }
                 self.projects[found["root"]] = found

@@ -12,7 +12,7 @@ Give new reports a consistent visual direction while allowing each document to f
 
 Open **Settings > Memory > Report themes**. The gallery includes System, Light, Dark, Sepia, Vaporwave, Steam, Carbon, Botanical, Blueprint, Arcade, Sakura, Deep Sea, Solarpunk, Noir, Candy Lab, and Cosmic.
 
-System asks Rem to coordinate light and dark palettes with device appearance. Other themes provide their own design instructions. Preview the document examples, then select the guidance you want future output to use.
+System asks Rem to coordinate light and dark palettes with device appearance. Other themes provide their own design instructions. Preview the document examples, then select the guidance you want future output to use. Clear **Use the selected report theme** to send no theme guidance at all.
 
 Theme guidance applies to subsequent HTML reports, slides, and PDFs wherever they are saved. It does not enable Second Brain, change an explicit format request, or rewrite existing documents.
 
@@ -26,7 +26,7 @@ Generation normally uses the current Rem provider, model, and effort. Expand **T
 
 ## Share a theme
 
-Select a saved custom theme and choose **Export theme**. Send the resulting `.raticode-theme.json` file to a teammate. They can choose **Import theme** in the same section.
+Select a saved custom theme and choose **Export theme**. Send the resulting `.raticode-theme.json` file to a teammate. They can choose **Import theme** in the same section. Theme files can be up to 2 MB.
 
 The file contains the name, design instructions, and HTML preview. It does not transfer provider choices or unrelated settings. An import creates a new custom theme even when its name matches an existing one. Invalid or unsupported files leave saved themes unchanged.
 

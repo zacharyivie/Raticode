@@ -13,7 +13,9 @@ import {
   normalizePluginSettings,
   pluginAvailable,
   pluginEnabled,
+  pluginHasPane,
   resolvePluginActivity,
+  sidebarPlugin,
   stepPlugin,
   withPluginEnabled,
   withPluginPreview,
@@ -26,7 +28,7 @@ const ids = (plugins) => plugins.map((plugin) => plugin.id);
 test("default plugins show everything except experimental ones", () => {
   const settings = normalizePluginSettings();
   assert.deepEqual(settings, { enabled: {}, locked: false, order: DEFAULT_PLUGIN_SETTINGS.order, preview: {} });
-  assert.deepEqual(ids(enabledPlugins(settings)), ["rem", "workflows", "files", "search", "source-control"]);
+  assert.deepEqual(ids(enabledPlugins(settings)), ["rem", "workflows", "files", "browser", "search", "source-control", "kanban"]);
   assert.deepEqual(ids(SIDEBAR_PLUGINS.filter((plugin) => plugin.experimental)), ["swarms", "organizations", "second-brain"]);
   for (const id of ["swarms", "organizations", "second-brain"]) assert.equal(pluginEnabled(settings, id), false);
   assert.equal(pluginEnabled(settings, "unknown"), false);
@@ -60,21 +62,21 @@ test("only choices that differ from the default are stored", () => {
 test("stored orders drop unknown plugins and restore missing ones near their defaults", () => {
   assert.deepEqual(
     normalizePluginOrder(["second-brain", "stale", "files", "files", "rem"]),
-    ["second-brain", "files", "search", "source-control", "swarms", "organizations", "rem", "workflows"],
+    ["second-brain", "files", "browser", "search", "source-control", "kanban", "swarms", "organizations", "rem", "workflows"],
   );
-  assert.deepEqual(normalizePluginOrder(["workflows"]), ["rem", "workflows", "files", "search", "source-control", "swarms", "organizations", "second-brain"]);
+  assert.deepEqual(normalizePluginOrder(["workflows"]), ["rem", "workflows", "files", "browser", "search", "source-control", "kanban", "swarms", "organizations", "second-brain"]);
   assert.deepEqual(normalizePluginOrder("invalid"), DEFAULT_PLUGIN_SETTINGS.order);
 });
 
 test("plugins move before or after a target and step past hidden plugins", () => {
   const order = DEFAULT_PLUGIN_SETTINGS.order;
-  assert.deepEqual(movePlugin(order, "second-brain", "rem"), ["second-brain", "rem", "workflows", "files", "search", "source-control", "swarms", "organizations"]);
-  assert.deepEqual(movePlugin(order, "rem", "files", "after"), ["workflows", "files", "rem", "search", "source-control", "swarms", "organizations", "second-brain"]);
+  assert.deepEqual(movePlugin(order, "second-brain", "rem"), ["second-brain", "rem", "workflows", "files", "browser", "search", "source-control", "kanban", "swarms", "organizations"]);
+  assert.deepEqual(movePlugin(order, "rem", "files", "after"), ["workflows", "files", "rem", "browser", "search", "source-control", "kanban", "swarms", "organizations", "second-brain"]);
   assert.deepEqual(movePlugin(order, "rem", "workflows", "before"), order);
   assert.deepEqual(movePlugin(order, "rem", "rem"), order);
   assert.deepEqual(movePlugin(order, "rem", "missing"), order);
   const visible = ["rem", "files", "search"];
-  assert.deepEqual(stepPlugin(order, "rem", 1, visible), ["workflows", "files", "rem", "search", "source-control", "swarms", "organizations", "second-brain"]);
+  assert.deepEqual(stepPlugin(order, "rem", 1, visible), ["workflows", "files", "rem", "browser", "search", "source-control", "kanban", "swarms", "organizations", "second-brain"]);
   assert.deepEqual(stepPlugin(order, "rem", -1, visible), order);
   assert.deepEqual(stepPlugin(order, "search", 1, visible), order);
 });
@@ -89,7 +91,7 @@ test("app settings keep plugin choices through updates", () => {
   assert.equal(settings.plugins.locked, true);
   assert.deepEqual(settings.plugins.enabled, { organizations: false });
   assert.deepEqual(settings.plugins.preview, { organizations: true });
-  assert.deepEqual(settings.plugins.order, ["files", "search", "source-control", "swarms", "organizations", "second-brain", "rem", "workflows"]);
+  assert.deepEqual(settings.plugins.order, ["files", "browser", "search", "source-control", "kanban", "swarms", "organizations", "second-brain", "rem", "workflows"]);
   assert.deepEqual(normalizeAppSettings(JSON.parse(JSON.stringify(settings))).plugins, settings.plugins);
 });
 
@@ -98,7 +100,7 @@ test("Feature Preview lists every experimental feature and hides the ones that a
   assert.deepEqual(FEATURE_PREVIEWS.filter((feature) => feature.backend).map((feature) => feature.id), ["organizations", "device-network"]);
   const settings = normalizePluginSettings({ enabled: { swarms: false, search: false }, preview: { swarms: true } });
   // Plugins that are off in Feature Preview are not listed in sidebar settings.
-  assert.deepEqual(ids(listedPlugins(settings)), ["rem", "workflows", "files", "search", "source-control", "swarms"]);
+  assert.deepEqual(ids(listedPlugins(settings)), ["rem", "workflows", "files", "browser", "search", "source-control", "kanban", "swarms"]);
   // Hiding a plugin from the sidebar keeps its feature on and its settings row.
   assert.equal(pluginAvailable(settings, "swarms"), true);
   assert.equal(pluginEnabled(settings, "swarms"), false);
@@ -152,4 +154,21 @@ test("the main content is chosen apart from the sidebar plugin", () => {
   assert.equal(initialMainContent("second-brain"), "second-brain");
   assert.equal(initialMainContent("source-control"), EDITOR_CONTENT);
   assert.equal(initialMainContent("swarms"), EDITOR_CONTENT);
+});
+
+test("Browser is its own plugin with no side pane, and its tabs stay reachable when hidden", () => {
+  const settings = normalizePluginSettings();
+  assert.equal(pluginEnabled(settings, "browser"), true);
+  assert.equal(pluginHasPane("browser"), false);
+  for (const id of ["files", "rem", "search", "source-control"]) assert.equal(pluginHasPane(id), true);
+  assert.equal(resolveMainContent(settings, "browser"), "browser");
+  assert.equal(initialMainContent("browser"), "browser");
+  // Hidden from the rail, web tabs still open: links, Rem's tabs and the shortcut need them.
+  const hidden = normalizePluginSettings({ enabled: { browser: false } });
+  assert.equal(pluginEnabled(hidden, "browser"), false);
+  assert.equal(resolveMainContent(hidden, "browser"), "browser");
+  assert.equal(resolvePluginActivity(hidden, "browser"), "files");
+  // Settings saved before the Browser plugin get it right after File explorer.
+  assert.deepEqual(normalizePluginOrder(["files", "rem", "search"]).slice(0, 3), ["files", "browser", "rem"]);
+  assert.equal(sidebarPlugin("browser").experimental, undefined);
 });

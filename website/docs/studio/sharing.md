@@ -16,7 +16,7 @@ Keep the original `workflow.rattish` and its referenced scripts in source contro
 
 ## Import a bundle
 
-Choose Import in Workflows, select a `.raticode` bundle, and choose its destination project. Raticode previews the workflow identity and destination before creating the imported workflow. Inspect that preview rather than assuming the bundle uses the same ID on every machine.
+Choose **Import** in Workflows, select a `.raticode` bundle, and choose its destination project. Raticode checks the bundle before adding it, then shows the imported workflow. Don't assume the bundle uses the same ID on every machine.
 
 After importing, open the source and graph. Read commands, agent prompts, child workflow references, file destinations, and network requests. Importing is not permission to run them.
 

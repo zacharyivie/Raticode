@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Raticode as the digital assistant: the overlay session and the required on-device recognizer. -->
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:targetApi="31"
+    android:sessionService="dev.raticode.mobile.voice.RemVoiceSessionService"
+    android:recognitionService="dev.raticode.mobile.voice.RemRecognitionService"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="false"
+    android:supportsLocalInteraction="false" />

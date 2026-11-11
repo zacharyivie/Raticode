@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000182",
+  "id": "10000000-0000-4000-8000-000000000182",
+  "sequence": 182,
+  "type": "desktop.read",
+  "payload": {
+    "op": "kanban.board",
+    "params": {
+      "known": "0123456789abcdef0123456789abcdef"
+    }
+  }
+}

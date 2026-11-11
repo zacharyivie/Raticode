@@ -27,6 +27,15 @@ test("log redaction covers token fields in JSON, environments and URL queries", 
   assert.ok(!fs.readFileSync(log.file, "utf8").includes("private-"));
 });
 
+test("log redaction removes bare tokens with well-known prefixes", () => {
+  for (const token of ["rtk_agent_" + "a1B2".repeat(8), "ghp_" + "Z9".repeat(18), "github_pat_" + "x".repeat(30),
+    "sk-ant-api03-" + "q".repeat(30), "xoxb-1234567890-abcdef", "AKIAABCDEFGHIJKLMNOP"]) {
+    const redacted = redactLog("request failed with " + token + " in the body");
+    assert.ok(!redacted.includes(token) && redacted.includes("[redacted]"), redacted);
+  }
+  for (const plain of ["task-123 failed", "sk-learn import", "ghost_town"]) assert.equal(redactLog(plain), plain);
+});
+
 test("log redaction removes complete HTTP credentials and quoted secrets", async () => {
   const messages = [
     "Authorization: Basic dXNlcjpwYXNz+/==",

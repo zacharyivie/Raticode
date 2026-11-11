@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000181",
+  "id": "10000000-0000-4000-8000-000000000181",
+  "sequence": 181,
+  "type": "desktop.action",
+  "payload": {
+    "op": "browser.open",
+    "params": {
+      "url": "https://example.com/docs/getting-started"
+    }
+  }
+}

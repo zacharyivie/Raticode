@@ -362,7 +362,8 @@ class DeviceWorkspace:
             if old and (old.get("delete_requested") or revision != old["revision"]):
                 return self.export(peer, thread)
             if len(messages) > 10000 or len(json.dumps(messages).encode()) > 8 * 1024 * 1024:
-                raise PairingError("workspace_history_quota")
+                # One thread over its own limit, which must not pause the phone's other threads.
+                raise PairingError("workspace_thread_too_large")
             clean = []
             for index, message in enumerate(messages):
                 if message.get("role") not in {"user", "assistant", "system"} or not isinstance(

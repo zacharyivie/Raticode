@@ -1,6 +1,6 @@
 {
   "name": "gofer-flow-ui",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Local workflow automation studio for Raticode.",
   "author": "Raticode",
   "license": "AGPL-3.0-only",
@@ -21,7 +21,7 @@
     "electron:smoke": "npm run check:build && node electron/smoke.cjs",
     "build": "vite build",
     "check:build": "vite build",
-    "test": "node --test --experimental-test-isolation=none --test-reporter=spec src/pages/App.test.mjs src/lib/*.test.mjs electron/tests/*.test.cjs electron/git-efficiency.test.cjs",
+    "test": "node --require ./electron/tests/test-tmp.cjs --test --experimental-test-isolation=none --test-reporter=spec src/pages/App.test.mjs src/lib/*.test.mjs electron/tests/*.test.cjs electron/git-efficiency.test.cjs",
     "test:file-media-browser": "node browser-tests/run-file-media.cjs",
     "test:mac-ui-browser": "node browser-tests/run-mac-ui-fixes.cjs",
     "test:editor-find-graph-browser": "node browser-tests/run-editor-find-graph.cjs",
@@ -37,6 +37,12 @@
     "lint": "eslint .",
     "test:platform": "node electron/tests/run-platform-smoke.cjs",
     "test:pairing-browser": "node browser-tests/run-paired-devices.cjs",
+    "test:media-bar-browser": "electron --no-sandbox electron/tests/media-bar.browser.cjs",
+    "test:gecko-media-bar-browser": "electron --no-sandbox electron/tests/gecko-media-bar.browser.cjs",
+    "test:browser-downloads-browser": "electron --no-sandbox electron/tests/browser-downloads.browser.cjs",
+    "test:firefox-browser": "node browser-tests/run-firefox-browser.cjs",
+    "test:chrome-browser": "node browser-tests/run-chrome-browser.cjs",
+    "test:edge-browser": "node browser-tests/run-edge-browser.cjs",
     "test:usage-browser": "node browser-tests/run-usage.cjs",
     "test:dictation-browser": "node browser-tests/run-dictation-modes.cjs",
     "test:organizations-browser": "node browser-tests/run-organizations.cjs",
@@ -45,7 +51,9 @@
     "test:second-brain-visual": "node browser-tests/run-second-brain-visual.cjs",
     "test:second-brain-browser": "node browser-tests/run-second-brain.cjs",
     "test:second-brain-graph-browser": "node browser-tests/run-second-brain-graph.cjs",
-    "test:rem-home-visual": "node browser-tests/run-rem-home-visual.cjs"
+    "test:rem-home-visual": "node browser-tests/run-rem-home-visual.cjs",
+    "test:rem-chat-scroll-browser": "node browser-tests/run-rem-chat-scroll.cjs",
+    "test:rem-chat-search-browser": "node browser-tests/run-rem-chat-search.cjs"
   },
   "build": {
     "appId": "com.goferflow.desktop",
@@ -168,6 +176,7 @@
         "NSMicrophoneUsageDescription": "Raticode uses your microphone to transcribe speech into Rem chat messages.",
         "NSSpeechRecognitionUsageDescription": "Raticode uses macOS speech recognition on this Mac to turn your dictation into text."
       },
+      "hardenedRuntime": true,
       "entitlements": "build-resources/entitlements.mac.plist",
       "entitlementsInherit": "build-resources/entitlements.mac.plist"
     },

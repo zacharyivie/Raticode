@@ -2,6 +2,10 @@ name: Validate source
 
 on:
   pull_request:
+    paths-ignore:
+      - 'mobile/android/**'
+      - '.github/workflows/mobile-*.yml'
+      - 'website/**'
   workflow_call:
 
 permissions:
@@ -51,6 +55,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb ffmpeg
+          # Ubuntu 24.04 lets only programs with an AppArmor profile create user
+          # namespaces. Chrome ships one; Edge doesn't, so its sandbox aborts on the
+          # runner ("SUID sandbox helper ... not configured correctly") and the real
+          # Edge tests fail. Allow user namespaces for this disposable runner.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

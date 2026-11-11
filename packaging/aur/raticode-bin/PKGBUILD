@@ -1,0 +1,52 @@
+# Maintainer: Zack Ivie <publisheddoonk at gmail dot com>
+#
+# Generated values: scripts/aur-packages.py in https://github.com/zacharyivie/Raticode
+# sets pkgver, pkgrel and sha256sums from the release's published checksums-linux.txt.
+pkgname=raticode-bin
+pkgver=0.5.2
+pkgrel=1
+pkgdesc="Local workflow automation studio with Rem, coding agents and Rattish workflows (prebuilt)"
+arch=('x86_64')
+url="https://github.com/zacharyivie/Raticode"
+license=('AGPL-3.0-only')
+# Libraries the bundled Electron, backend and node-pty link against (checked with namcap),
+# plus xdg-utils, which the app runs to open links and files.
+depends=('alsa-lib' 'at-spi2-core' 'cairo' 'dbus' 'expat' 'glib2' 'gtk3' 'hicolor-icon-theme'
+         'libcups' 'libx11' 'libxcb' 'libxcomposite' 'libxdamage' 'libxext' 'libxfixes'
+         'libxkbcommon' 'libxrandr' 'mesa' 'nspr' 'nss' 'pango' 'systemd-libs' 'xdg-utils' 'zlib')
+optdepends=('git: source control, worktrees and organization repositories')
+provides=('raticode')
+conflicts=('raticode')
+options=('!strip' '!debug')
+source=("raticode-$pkgver-amd64.deb::$url/releases/download/v$pkgver/Raticode-$pkgver-amd64.deb"
+        "raticode"
+        "raticode.desktop")
+noextract=("raticode-$pkgver-amd64.deb")
+sha256sums=('db5b8480b07d0fe98783426c9df680aab39476c4d64ac0d286801eda2f33e7b5'
+            'c8be08d2c098b6cbcbca695c9bf1e5bf3ac26872933430090c0ae7cb4a0fb0c6'
+            '6e036e7c7910af93b2071de6069b49c4a3b72a683a976a94a18b8ce0b4ee6263')
+
+package() {
+  # The upstream .deb holds the signed-off release build; unpack only its app folder and icons.
+  bsdtar -xOf "raticode-$pkgver-amd64.deb" data.tar.xz \
+    | bsdtar -xf - -C "$pkgdir" ./opt/Raticode ./usr/share/icons
+  mv "$pkgdir/opt/Raticode" "$pkgdir/opt/raticode"
+
+  # Pacman owns these files, so the app must not replace them with its own updater.
+  # Raticode reads this marker and sends updates to the package manager instead.
+  printf 'pacman\n' > "$pkgdir/opt/raticode/resources/package-type"
+  rm -f "$pkgdir/opt/raticode/resources/apparmor-profile"
+
+  # The .deb leaves some files writable by everyone; no installed file should be.
+  chmod -R u+rwX,go+rX,go-w "$pkgdir/opt/raticode"
+  # Chromium falls back to this setuid helper only when user namespaces are unavailable.
+  chmod 4755 "$pkgdir/opt/raticode/chrome-sandbox"
+
+  local icon
+  for icon in "$pkgdir"/usr/share/icons/hicolor/*/apps/gofer-flow.png; do
+    mv "$icon" "${icon%/gofer-flow.png}/raticode.png"
+  done
+
+  install -Dm755 raticode "$pkgdir/usr/bin/raticode"
+  install -Dm644 raticode.desktop "$pkgdir/usr/share/applications/raticode.desktop"
+}

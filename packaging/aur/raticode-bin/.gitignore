@@ -1,0 +1,11 @@
+# Track only the package's own files; makepkg downloads and output stay local.
+*
+!.gitignore
+!.SRCINFO
+!LICENSE
+!LICENSES/
+!LICENSES/0BSD.txt
+!PKGBUILD
+!REUSE.toml
+!raticode
+!raticode.desktop

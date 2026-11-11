@@ -151,9 +151,36 @@ def global_health_diagnostics(data_dir: Path) -> list[HealthDiagnostic]:
         _openpyxl_diagnostic(),
         _desktop_notification_diagnostic(),
         _workflow_assistant_cli_diagnostic(data_dir),
+        _organizations_preview_diagnostic(),
     ]
     diagnostics.extend(_configured_provider_diagnostics(data_dir))
     return diagnostics
+
+
+ORGANIZATIONS_PREVIEW_ENV = "RATICODE_EXPERIMENTAL_ORGANIZATIONS"
+
+
+def _organizations_preview_diagnostic() -> HealthDiagnostic:
+    """Report the Organizations Feature Preview switch this process sees.
+
+    The desktop turns it on from Settings by setting the variable for its own backend.
+    A headless backend reads only the environment it was started from.
+    """
+    enabled = os.environ.get(ORGANIZATIONS_PREVIEW_ENV) == "1"
+    if enabled:
+        message = f"Organizations (Feature Preview) are on: {ORGANIZATIONS_PREVIEW_ENV}=1."
+    else:
+        message = (
+            "Organizations (Feature Preview) are off. A backend started from this "
+            f"environment serves them only with {ORGANIZATIONS_PREVIEW_ENV}=1."
+        )
+    return HealthDiagnostic(
+        id="feature_preview.organizations",
+        severity="ok",
+        subject="Organizations",
+        message=message,
+        detail={"env": ORGANIZATIONS_PREVIEW_ENV, "enabled": enabled},
+    )
 
 
 def workflow_health_diagnostics(workflow_path: Path) -> list[HealthDiagnostic]:

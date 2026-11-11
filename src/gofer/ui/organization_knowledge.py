@@ -116,13 +116,24 @@ def _plan_config(org: dict[str, Any], params: dict[str, Any]) -> tuple[dict[str,
     if not isinstance(item, dict):
         raise ValueError("Supply the item to save")
     if kind == "operations":
-        allowed = {"operatingHours", "resumeAfterRestart"}
+        allowed = {"operatingHours", "resumeAfterRestart", "workSchedule"}
         if not item or set(item) - allowed:
-            raise ValueError("Operations use operatingHours and resumeAfterRestart")
+            raise ValueError("Operations use operatingHours, workSchedule and resumeAfterRestart")
+        if "workSchedule" in item:
+            from gofer.ui.organization_schedule import checked
+
+            # Checked alone first, so a refusal reads as a sentence, not a field path.
+            item = {**item, "workSchedule": checked(item["workSchedule"])}
         config.update({key: item[key] for key in allowed & set(item)})
-        return config, "Changed working hours" if "operatingHours" in item else (
-            "Changed what happens after a restart"
-        )
+        changed = [
+            label
+            for key, label in (
+                ("operatingHours", "working hours"),
+                ("workSchedule", "the work schedule"),
+            )
+            if key in item
+        ] or ["what happens after a restart"]
+        return config, "Changed " + " and ".join(changed)
     if kind == "repository":
         enabled = item.get("enabled")
         if not isinstance(enabled, bool):
@@ -256,6 +267,7 @@ def plan(
         )
     with manager._lock:
         result = manager.store.configure(project, org["id"], config, expected, actor, reason)
+    manager.stop_revoked(org["id"], result)
     manager.ensure_repository(result)
     return manager.public(result)
 
@@ -1175,4 +1187,9 @@ RUN_GUIDE = (
     "{kind: check, command} using one of projectChecks so Raticode reruns it, "
     "{kind: quote, entryId, quote} quoting a note exactly, {kind: commit, sha}, or "
     "{kind: file, path}. Claims without evidence are shown to the user as unverified.\n"
+    "Planning: create tickets for follow-up work with task_create, status=backlog for ideas "
+    "or status=todo to queue them. Raticode starts To do tickets for their assignee, one at a "
+    "time, within working hours. To work on a ticket next, task_update it to "
+    "status=in_progress; it goes to the front of its worker's queue and starts when that "
+    "worker is free. You can take an unassigned ticket by setting assignee to yourself.\n"
 )

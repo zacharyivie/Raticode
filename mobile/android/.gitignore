@@ -1,0 +1,28 @@
+.gradle/
+.kotlin/
+**/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+artifacts/
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+keystore.properties
+*.apk
+*.aab
+.cxx/
+.externalNativeBuild/
+
+# Local protocol validation environment
+.venv-contract/
+
+# Optional local JDK discovery link; never commit host paths.
+.jdk21
+
+# Python bytecode from scripts and their tests
+__pycache__/

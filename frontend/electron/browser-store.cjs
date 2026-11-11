@@ -35,9 +35,14 @@ function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 
     if (timers[kind]) return;
     timers[kind] = setTimeout(() => {
       timers[kind] = null;
-      writeJson(files[kind], data[kind]);
+      writeJson(files[kind], stored(kind));
     }, writeDelayMs);
     timers[kind].unref?.();
+  }
+
+  // Private tabs' downloads are listed while Raticode runs and never written down.
+  function stored(kind) {
+    return kind === "downloads" ? data.downloads.filter((item) => !item.private) : data[kind];
   }
 
   function flush() {
@@ -45,7 +50,7 @@ function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 
       if (!timers[kind]) continue;
       clearTimeout(timers[kind]);
       timers[kind] = null;
-      writeJson(files[kind], data[kind]);
+      writeJson(files[kind], stored(kind));
     }
   }
 
@@ -240,6 +245,11 @@ function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 
     return data.downloads[index >= 0 ? index : 0];
   }
 
+  function forgetPrivateDownloads() {
+    data.downloads = data.downloads.filter((item) => !item.private);
+    schedule("downloads");
+  }
+
   function removeDownload(id) {
     data.downloads = data.downloads.filter((item) => item.id !== id);
     schedule("downloads");
@@ -260,6 +270,7 @@ function createBrowserStore(directory, { now = () => Date.now(), writeDelayMs = 
     flush,
     inlineCompletion,
     listBookmarks,
+    forgetPrivateDownloads,
     listDownloads,
     listSites,
     recordVisit,
@@ -314,21 +325,42 @@ function clip(value, length) {
 }
 
 function readJson(file, fallback) {
+  let text;
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    text = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") console.warn(`Could not read browser data ${path.basename(file)} (${error.code || error.name}); starting it empty.`);
+    return fallback;
+  }
+  try {
+    return JSON.parse(text);
   } catch {
+    // Keep the damaged file instead of letting the next save overwrite it.
+    const kept = `${file}.corrupt-${Date.now()}`;
+    try { fs.renameSync(file, kept); } catch { /* The warning below still names the file. */ }
+    console.warn(`Browser data ${path.basename(file)} was damaged; kept it as ${path.basename(kept)} and started it empty.`);
     return fallback;
   }
 }
 
+// Saves run about every 400 ms; each failing file and reason is reported once.
+const writeFailures = new Map();
+
 function writeJson(file, value) {
+  const temporary = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const temporary = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
     fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
     fs.renameSync(temporary, file);
-  } catch {
+    writeFailures.delete(file);
+  } catch (error) {
     // A full disk or locked profile must not break browsing; the next write retries.
+    try { fs.unlinkSync(temporary); } catch { /* Never created. */ }
+    const reason = error.code || error.name;
+    if (writeFailures.get(file) !== reason) {
+      writeFailures.set(file, reason);
+      console.warn(`Could not save browser data ${path.basename(file)} (${error.code || error.name}); retrying with the next change.`);
+    }
   }
 }
 

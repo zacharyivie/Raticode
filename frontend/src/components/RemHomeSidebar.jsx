@@ -52,10 +52,11 @@ export default function RemHomeSidebar({ active, open, onOpen, projectOptions = 
   const now = useMinuteClock();
   useEffect(() => (active ? connectRemHome() : undefined), [active]);
   const groups = useMemo(() => groupTasks(store.tasks, now), [store.tasks, now]);
+  const tickets = useMemo(() => ({ ...store.taskTickets, ...store.chatTickets }), [store.taskTickets, store.chatTickets]);
   const panel = `rem-side min-h-0 min-w-0 flex-1 flex-col text-ink ${active ? "flex" : "hidden"}`;
   if (store.sheet) {
     return <section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" hidden={!active} className={`${panel} rem-side-task`}>
-      <TaskSheet key={store.sheet.mode === "task" ? store.sheet.taskId : "new"} sheet={store.sheet} tasks={store.tasks} projectOptions={projectOptions} now={now} messages={store.messages} onShowMessage={showRemMessage} active={active} />
+      <TaskSheet key={store.sheet.mode === "task" ? store.sheet.taskId : "new"} sheet={store.sheet} tasks={store.tasks} projectOptions={projectOptions} now={now} messages={store.messages} onShowMessage={showRemMessage} active={active} tickets={tickets} />
     </section>;
   }
   return <section id="sidebar-panel-rem" role="tabpanel" aria-labelledby="sidebar-tab-rem" hidden={!active} className={panel}>

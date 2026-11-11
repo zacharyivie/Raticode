@@ -11,13 +11,22 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from gofer.cli.commands._legacy import refuse_rattish
+from gofer.cli.output import emit_json, format_option, wants_json
 from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.workflow import AgenticWorkflow
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import build_subprocess_env
 
-app = typer.Typer(help="Manage workflow schedules", no_args_is_help=True)
+app = typer.Typer(
+    help=(
+        "[Legacy TOML] Manage workflow schedules. "
+        "For Rattish, use Raticode rattish triggers add cron."
+    ),
+    no_args_is_help=True,
+)
 console = Console()
+err_console = Console(stderr=True)
 
 
 def _data_dir() -> Path:
@@ -45,9 +54,9 @@ def _print_agent_access_summary(wf: AgenticWorkflow) -> None:
     ]
     if not warnings:
         return
-    console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
+    err_console.print("[yellow]Agent filesystem access outside working_dir:[/yellow]")
     for warning in warnings:
-        console.print(f"[yellow]- {warning}[/yellow]")
+        err_console.print(f"[yellow]- {warning}[/yellow]")
 
 
 @app.command("add")
@@ -56,6 +65,12 @@ def add(
     db: Path | None = typer.Option(None, "--db"),
 ) -> None:
     """Add a workflow to the schedule."""
+    refuse_rattish(
+        str(workflow_file),
+        None,
+        "schedule add",
+        "Raticode rattish triggers add cron {source} --help",
+    )
     try:
         wf = AgenticWorkflow.from_file(workflow_file)
         wf.validate()
@@ -63,7 +78,7 @@ def add(
         scheduler = _get_scheduler(db or _default_db())
         scheduler.add_workflow(wf, workflow_file)
     except Exception as exc:
-        console.print(f"[red]Schedule failed: {exc}[/red]")
+        err_console.print(f"[red]Schedule failed: {exc}[/red]")
         raise typer.Exit(1)
     else:
         console.print(f"[green]Scheduled[/green] '{wf.config.id}'")
@@ -81,10 +96,17 @@ def remove(
 
 
 @app.command("list")
-def list_schedules(db: Path | None = typer.Option(None, "--db")) -> None:
+def list_schedules(
+    db: Path | None = typer.Option(None, "--db"),
+    output_format: str = format_option(),
+) -> None:
     """List all scheduled workflows."""
+    as_json = wants_json(output_format)
     scheduler = _get_scheduler(db or _default_db())
     jobs = scheduler.list_workflows()
+    if as_json:
+        emit_json(jobs)
+        return
     if not jobs:
         console.print("No scheduled workflows.")
         return
@@ -111,7 +133,7 @@ def start(
         existing_pid = int(pid_path.read_text().strip())
         try:
             os.kill(existing_pid, 0)
-            console.print(f"[yellow]Scheduler already running (PID {existing_pid})[/yellow]")
+            err_console.print(f"[yellow]Scheduler already running (PID {existing_pid})[/yellow]")
             raise typer.Exit(1)
         except (ProcessLookupError, PermissionError):
             pid_path.unlink(missing_ok=True)
@@ -146,7 +168,7 @@ def stop() -> None:
     """Stop the background scheduler."""
     pid_path = _pid_file()
     if not pid_path.exists():
-        console.print("[yellow]No background scheduler found.[/yellow]")
+        err_console.print("[yellow]No background scheduler found.[/yellow]")
         raise typer.Exit(1)
 
     pid = int(pid_path.read_text().strip())
@@ -156,7 +178,7 @@ def stop() -> None:
         console.print(f"[green]Scheduler stopped[/green] (PID {pid})")
     except ProcessLookupError:
         pid_path.unlink(missing_ok=True)
-        console.print(f"[yellow]Scheduler (PID {pid}) was not running.[/yellow]")
+        err_console.print(f"[yellow]Scheduler (PID {pid}) was not running.[/yellow]")
 
 
 def _run_foreground(db_path: Path) -> None:

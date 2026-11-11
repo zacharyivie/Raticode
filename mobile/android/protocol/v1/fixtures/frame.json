@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "mode": "pair",
+  "direction": "phone_to_desktop",
+  "kind": "handshake",
+  "index": 0,
+  "body": "AQ"
+}

@@ -1,0 +1,37 @@
+{
+ "log_file": "app.jsonl",
+ "desktop": "Raticode 0.5.1 on linux",
+ "entries": [
+  {
+   "id": "39-8ef9a4:0",
+   "time": "2026-11-06T12:00:00.000Z",
+   "level": "info",
+   "source": "desktop",
+   "message": "Starting Raticode 0.5.2 on linux x64"
+  },
+  {
+   "id": "39-8ef9a4:126",
+   "time": "2026-11-06T12:00:01.250Z",
+   "level": "warn",
+   "source": "devices",
+   "message": "Phone request rem.home refused: unauthorized",
+   "component": "gofer.devices.application"
+  },
+  {
+   "id": "39-8ef9a4:305",
+   "time": "2026-11-06T12:00:02.000Z",
+   "level": "error",
+   "source": "backend",
+   "message": "Traceback (most recent call last):\n  File \"x.py\", line 1\nValueError: token=[redacted]",
+   "component": "gofer.ui.server"
+  }
+ ],
+ "cursor": {
+  "file": "39-8ef9a4",
+  "offset": 513
+ },
+ "reset": true,
+ "skipped": false,
+ "more": false,
+ "digest": "b350a14a761050620f4795b5cbd01ef9"
+}

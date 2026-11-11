@@ -1,0 +1,21 @@
+// Usage: ./gradlew -I scripts/dependency-inventory.init.gradle dependencyInventory
+// Inventories resolved build plugins and release runtime separately. Does not upload data.
+gradle.projectsEvaluated {
+    def root = gradle.rootProject
+    root.tasks.register('dependencyInventory') {
+        doLast {
+            def coordinates = { configuration ->
+                configuration.incoming.resolutionResult.allComponents.collect { component ->
+                    def id = component.id
+                    id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier ?
+                        [group: id.group, name: id.module, version: id.version] : null
+                }.findAll { it != null }.unique().sort { a, b -> "${a.group}:${a.name}:${a.version}" <=> "${b.group}:${b.name}:${b.version}" }
+            }
+            def result = [build: coordinates(root.buildscript.configurations.classpath),
+                releaseRuntime: coordinates(root.project(':app').configurations.releaseRuntimeClasspath)]
+            def output = new File(root.projectDir, 'artifacts/security/resolved-inventory.json')
+            output.parentFile.mkdirs()
+            output.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(result)) + '\n'
+        }
+    }
+}

@@ -13,6 +13,7 @@ function launch(env, args = [], alive = () => true) {
     require(name) {
       if (name === 'electron') return '/electron';
       if (name === './chromium-stderr.cjs') return { createChromiumStderrFilter: () => ({}) };
+      if (name === './gecko-display.cjs') return require('../gecko-display.cjs');
       if (name === 'node:child_process') return { spawn(command, argv, options) {
         spawned = { command, argv, options };
         return { stderr: { pipe: () => ({ pipe() {} }) }, on() {} };

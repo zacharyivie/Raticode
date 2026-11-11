@@ -9,6 +9,7 @@ from typing import Any
 
 import typer
 
+from gofer.cli.commands import rattish_triggers
 from gofer.rattish.artifacts import (
     CompiledArtifact,
     RattishArtifactError,
@@ -34,7 +35,14 @@ from gofer.rattish.workspaces import (
     list_registered_workflows,
 )
 
-app = typer.Typer(help="Check Rattish workflows and deployment readiness", no_args_is_help=True)
+app = typer.Typer(
+    help=(
+        "Write, check, compile and run Rattish workflows. Commands marked (Backend) "
+        "start, stop, inspect and approve runs through a running backend."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(rattish_triggers.app, name="triggers")
 
 
 @app.command("docs")

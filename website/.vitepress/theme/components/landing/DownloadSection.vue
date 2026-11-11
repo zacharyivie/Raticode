@@ -7,6 +7,10 @@ import {
   cliBinaries,
   desktopPlatforms,
   desktopRelease,
+  mobileApk,
+  mobileAssetUrl,
+  mobileRelease,
+  mobileReleaseUrl,
   releaseUrl,
 } from '../../../../data/releases'
 
@@ -86,12 +90,30 @@ const published = new Date(`${desktopRelease.publishedAt}T12:00:00Z`).toLocaleDa
         </article>
 
         <article class="mobile rc-reveal" style="--rc-delay: 100ms">
-          <div class="mobile-copy">
+          <div v-if="mobileRelease.published" class="mobile-copy">
+            <span class="soon">Android {{ mobileRelease.version }}</span>
+            <h3>Raticode Mobile</h3>
+            <p>
+              Talk to Rem, follow tasks and threads, read files and Git history, and run workflows from your
+              Android phone while your computer does the work. Android 10 or newer; signed APK, installed by hand.
+            </p>
+            <a class="rc-btn rc-btn-primary" :href="mobileAssetUrl(mobileApk.assetName)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14" /></svg>
+              {{ mobileApk.label }}
+              <span class="rc-sr-only">for Android</span>
+            </a>
+            <p class="mobile-links">
+              <a :href="mobileAssetUrl(mobileApk.checksums)">SHA-256 checksums</a> ·
+              <a :href="mobileReleaseUrl">release notes</a> ·
+              <a :href="withBase('/docs/mobile/')">install guide</a>
+            </p>
+          </div>
+          <div v-else class="mobile-copy">
             <span class="soon">Coming soon</span>
             <h3>Raticode Mobile</h3>
             <p>
-              Follow your threads and keep Rem moving from your phone while your desktop does the heavy lifting.
-              Rem is resting up for launch.
+              Talk to Rem, follow tasks and threads, read files and Git history, and run workflows from your
+              Android phone while your computer does the work. It's in testing and not published yet.
             </p>
             <a class="rc-btn rc-btn-ghost" :href="allReleasesUrl">
               <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.08.63-1.33-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.56 9.56 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2Z" /></svg>
@@ -357,6 +379,17 @@ h3 {
   margin-top: 24px;
   min-height: 46px;
   font-size: 14.5px;
+}
+
+.mobile .mobile-links {
+  margin-top: 14px;
+  font-size: 13.5px;
+}
+
+.mobile .mobile-links a {
+  color: var(--rc-periwinkle);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .phone {

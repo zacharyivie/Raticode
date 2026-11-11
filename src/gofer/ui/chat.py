@@ -50,6 +50,7 @@ from gofer.core.prompt_envelope import (
 from gofer.core.provider_capabilities import (
     IMAGE_ATTACHMENT_PROVIDERS,
     ProviderCapabilityError,
+    image_attachment_refusal,
     provider_capabilities_payload,
     resolve_provider_executable,
     validate_provider_selection_async,
@@ -1241,6 +1242,8 @@ async def run_workflow_chat(
     except ProtocolRecordLimitError as exc:
         raise ChatProviderError(str(exc)) from exc
     except OSError as exc:
+        # The chat shows this to the user; the app log keeps it for diagnosis.
+        log.warning("Could not start the %s CLI (%s)", binary, type(exc).__name__, exc_info=True)
         raise ChatProviderError(f"Could not start '{binary}' CLI: {exc}") from exc
     finally:
         if private_config is not None:
@@ -2002,6 +2005,8 @@ async def stream_workflow_chat(
     except ProtocolRecordLimitError as exc:
         yield {"type": "error", "error": str(exc), "errorKind": "protocol_limit", **turn_metadata()}
     except OSError as exc:
+        # The chat shows this to the user; the app log keeps it for diagnosis.
+        log.warning("Could not start the %s CLI (%s)", binary, type(exc).__name__, exc_info=True)
         raise ChatProviderError(f"Could not start '{binary}' CLI: {exc}") from exc
     finally:
         close_stream = getattr(provider_stream, "aclose", None)
@@ -2613,20 +2618,35 @@ def ensure_local_gofer_cli(data_dir: Path) -> Path | None:
     return helper
 
 
+# Each chat turn prepares the helper again; say why it is missing once per backend.
+_helper_warnings: set[str] = set()
+
+
+def _warn_helper_once(message: str, *args: object) -> None:
+    text = message % args if args else message
+    if text in _helper_warnings:
+        log.debug(text)
+        return
+    _helper_warnings.add(text)
+    log.warning(text)
+
+
 def _prepare_local_gofer_cli(data_dir: Path) -> Path | None:
     source = _gofer_cli_source_path()
     destination = local_gofer_cli_path(data_dir, source)
     if source is None:
-        log.warning("Raticode CLI helper unavailable: no authoritative Raticode executable found")
+        _warn_helper_once(
+            "Raticode CLI helper unavailable: no authoritative Raticode executable found"
+        )
         return None
     if not source.exists():
-        log.warning(
+        _warn_helper_once(
             "Raticode CLI helper unavailable: source executable does not exist: %s",
             source,
         )
         return None
     if _is_relative_to(source, data_dir):
-        log.warning(
+        _warn_helper_once(
             "Raticode CLI helper unavailable: source executable is inside "
             "mutable data directory: %s",
             source,
@@ -2634,7 +2654,7 @@ def _prepare_local_gofer_cli(data_dir: Path) -> Path | None:
         return None
 
     if not _ensure_owner_only_dir(destination.parent):
-        log.warning(
+        _warn_helper_once(
             "Raticode CLI helper unavailable: could not restrict helper directory permissions: %s",
             destination.parent,
         )
@@ -2644,7 +2664,7 @@ def _prepare_local_gofer_cli(data_dir: Path) -> Path | None:
         if source.samefile(destination):
             if _make_owner_executable(destination):
                 return destination
-            log.warning(
+            _warn_helper_once(
                 "Raticode CLI helper unavailable: could not restrict helper file permissions: %s",
                 destination,
             )
@@ -2655,7 +2675,7 @@ def _prepare_local_gofer_cli(data_dir: Path) -> Path | None:
     if destination.exists() and _same_file_hash(source, destination):
         if _make_owner_executable(destination):
             return destination
-        log.warning(
+        _warn_helper_once(
             "Raticode CLI helper unavailable: could not restrict helper file permissions: %s",
             destination,
         )
@@ -2670,7 +2690,7 @@ def _prepare_local_gofer_cli(data_dir: Path) -> Path | None:
         if not _make_owner_executable(destination):
             raise OSError("could not restrict helper file permissions")
     except OSError as exc:
-        log.warning(
+        _warn_helper_once(
             "Raticode CLI helper unavailable: could not prepare trusted helper at %s: %s",
             destination,
             exc,
@@ -2859,7 +2879,7 @@ def _build_chat_command(
     other agents' worktrees.
     """
     if image_paths and provider not in IMAGE_ATTACHMENT_PROVIDERS:
-        raise ChatProviderError(f"{provider} image attachments are not supported by this adapter")
+        raise ChatProviderError(image_attachment_refusal(provider))
     if provider == "antigravity":
         return antigravity_command(
             binary_path,

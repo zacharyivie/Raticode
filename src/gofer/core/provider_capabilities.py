@@ -16,10 +16,11 @@ import re
 import shutil
 import threading
 import time
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -52,6 +53,19 @@ PROVIDER_BINARIES = {
 IMAGE_ATTACHMENT_PROVIDERS = frozenset(
     {"codex", "claude_code", "cursor", "copilot", "opencode", "grok"}
 )
+# Checked against agy 1.5.4, which answers 'stream input content block type "image" is
+# not supported (only "text")' to the input stream Raticode uses.
+NO_IMAGE_ATTACHMENTS = {
+    "antigravity": "Antigravity's command line only accepts text in the way Raticode talks to it"
+}
+
+
+def image_attachment_refusal(provider: str) -> str:
+    """The message for an image sent to a thread whose provider can't receive it."""
+    reason = NO_IMAGE_ATTACHMENTS.get(provider, f"{provider} can't receive images in Raticode")
+    return f"{reason}, so it can't see attached images. Remove the image or switch provider."
+
+
 BROWSER_LOGIN_COMMANDS = {
     "cursor": ("login",),
     "codex": ("login",),
@@ -61,6 +75,24 @@ BROWSER_LOGIN_COMMANDS = {
 DISCOVERY_TIMEOUT_SECONDS = 10
 DISCOVERY_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 CAPABILITY_CACHE_SECONDS = 300
+CLAUDE_CATALOG_REQUEST_ID = "raticode-model-catalog"
+# The one message the catalog probe sends. It asks Claude Code to describe itself
+# and never contains a user turn, so no model runs and no usage is spent.
+CLAUDE_CATALOG_REQUEST = (
+    json.dumps(
+        {
+            "type": "control_request",
+            "request_id": CLAUDE_CATALOG_REQUEST_ID,
+            "request": {"subtype": "initialize"},
+        }
+    )
+    + "\n"
+)
+CLAUDE_ONE_MILLION_SUFFIX = "[1m]"
+MAX_CLAUDE_MODELS = 100
+# IDs reach the CLI as a --model value and the phone caps them at 160 characters.
+_CLAUDE_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,159}")
+_EFFORT_ID = re.compile(r"[a-z][a-z0-9_-]*")
 
 
 class EffortCapability(BaseModel):
@@ -77,6 +109,10 @@ class ModelCapability(BaseModel):
     efforts: list[EffortCapability] = Field(default_factory=list)
     is_default: bool = False
     supports_images: bool | None = None
+    # False for an alias of a model that is listed under its full ID. It still
+    # validates and shows where it is already selected, but stays out of menus.
+    listed: bool = True
+    alias_of: str | None = None
 
 
 class ProviderCapability(BaseModel):
@@ -109,12 +145,13 @@ class ProviderCapability(BaseModel):
         override_model = preference.get("defaultModel", "")
         override_effort = preference.get("defaultEffort", "")
         denied_models = preference.get("deniedModels", [])
-        allowed_models = [model for model in self.models if model.id not in denied_models]
+        blocked_models = {*denied_models, *self._blocked_model_ids(denied_models)}
+        allowed_models = [model for model in self.models if model.id not in blocked_models]
         default_model = next(
             (model.id for model in allowed_models if model.id == override_model),
             self.default_model
-            if self.default_model not in denied_models
-            else next((model.id for model in allowed_models), None),
+            if self.default_model not in blocked_models
+            else next((model.id for model in allowed_models if model.listed), None),
         )
         # Apply preferences to the response, never to the cached discovery result.
         # Stale overrides remain saved but cannot select an unavailable model/effort.
@@ -194,6 +231,8 @@ class ProviderCapability(BaseModel):
                     ],
                     "isDefault": model.id == default_model,
                     "supportsImages": model.supports_images,
+                    "listed": model.listed,
+                    "aliasOf": model.alias_of,
                 }
                 for model in self.models
             ],
@@ -202,13 +241,74 @@ class ProviderCapability(BaseModel):
         }
         payload["discoveredModels"] = payload["models"]
         payload["models"] = [
-            model for model in payload["models"] if model["id"] not in denied_models
+            model for model in payload["models"] if model["id"] not in blocked_models
         ]
         return payload
+
+    def alias_targets(self) -> dict[str, str]:
+        return {model.id: model.alias_of for model in self.models if model.alias_of}
+
+    def _blocked_model_ids(self, denied: list[str]) -> list[str]:
+        aliases = self.alias_targets()
+        return [
+            model.id
+            for model in self.models
+            if model_block_applies(self.id, model.id, denied, aliases)
+        ]
 
 
 class ProviderCapabilityError(ValueError):
     pass
+
+
+def model_block_applies(
+    provider_id: str, model: str, denied: Collection[str], aliases: Mapping[str, str]
+) -> bool:
+    """Whether a saved block covers this model, directly or through its alias.
+
+    Blocks match the exact ID saved. A hidden alias can't be blocked on its own,
+    so it follows the full model it stands for. Without a catalog that names the
+    aliases, one that may mean a blocked model's family is refused rather than run.
+    """
+    if model in denied:
+        return True
+    if provider_id != "claude_code":
+        return False
+    if model in aliases:
+        return aliases[model] in denied
+    if aliases or not re.fullmatch(r"[a-z]+", model):
+        return False
+    return any(item.startswith(f"claude-{model}-") for item in denied)
+
+
+def _block_verdict_without_catalog(
+    provider_id: str, model: str | None
+) -> tuple[bool | None, list[str]]:
+    denied = list(provider_preference(provider_id).get("deniedModels", []))
+    if not model:
+        return False, denied
+    if model in denied:
+        return True, denied
+    # Only Claude Code has aliases, and with no blocks there is nothing to resolve.
+    return (False if provider_id != "claude_code" or not denied else None), denied
+
+
+def model_is_blocked(provider_id: str, model: str | None) -> bool:
+    """Check a model against the saved blocks, discovering aliases only if needed."""
+    verdict, denied = _block_verdict_without_catalog(provider_id, model)
+    if verdict is not None:
+        return verdict
+    capability = provider_capability_service().provider(cast(ProviderId, provider_id))
+    return model_block_applies(provider_id, str(model), denied, capability.alias_targets())
+
+
+async def model_is_blocked_async(provider_id: str, model: str | None) -> bool:
+    """model_is_blocked for callers already inside an event loop."""
+    verdict, denied = _block_verdict_without_catalog(provider_id, model)
+    if verdict is not None:
+        return verdict
+    capability = await provider_capability_service().provider_async(cast(ProviderId, provider_id))
+    return model_block_applies(provider_id, str(model), denied, capability.alias_targets())
 
 
 @dataclass(frozen=True)
@@ -379,7 +479,12 @@ class CodexCapabilityProbe(ProviderCapabilityProbe):
 
 
 class ClaudeCodeCapabilityProbe(ProviderCapabilityProbe):
-    """Discover Claude Code's account-scoped aliases with its slash commands."""
+    """Discover the models Claude Code offers this account, by asking Claude Code.
+
+    Its SDK handshake reports the same catalog as the interactive /model picker,
+    with full model IDs. When that fails, the aliases printed by /model still
+    give a usable list.
+    """
 
     provider_id: ProviderId = "claude_code"
     display_name = "Claude Code"
@@ -390,15 +495,69 @@ class ClaudeCodeCapabilityProbe(ProviderCapabilityProbe):
         executable: str,
         version: str | None,
     ) -> ProviderCapability:
+        reported = await self._reported_models(executable)
+        command = [executable, "--print", "--output-format", "stream-json", "--verbose"]
+        current_model: str | None = None
+        aliases: list[str] = []
+        efforts: list[EffortCapability] = []
+        try:
+            current_model, aliases = await self._slash_models(command)
+            efforts = await self._slash_efforts(command)
+        except _UnauthenticatedError:
+            raise
+        except (TimeoutError, OSError, _UnsupportedCliError, _InvalidCatalogError):
+            if not reported:
+                raise
+
+        default_model: str | None = current_model
+        if reported:
+            models, default_model = _claude_catalog(reported, current_model, aliases, efforts)
+        else:
+            models = [
+                ModelCapability(
+                    id=model_id,
+                    display_name=_claude_alias_name(model_id),
+                    default_effort="high" if model_id == current_model else None,
+                    efforts=efforts,
+                    is_default=model_id == current_model,
+                )
+                for model_id in [current_model, *[a for a in aliases if a != current_model]]
+                if model_id is not None
+            ]
+        return ProviderCapability(
+            id=self.provider_id,
+            display_name=self.display_name,
+            available=True,
+            discovery_status="ready",
+            # The alias list can't name every model, and the CLI accepts a full ID.
+            supports_custom_model=not reported,
+            version=version,
+            default_model=default_model,
+            models=models,
+        )
+
+    async def _reported_models(self, executable: str) -> list[_ClaudeReportedModel]:
+        """Claude Code's own catalog, or [] so the caller can use the alias list."""
         command = [
             executable,
             "--print",
+            "--input-format",
+            "stream-json",
             "--output-format",
             "stream-json",
             "--verbose",
-            "/model",
+            "--no-session-persistence",
         ]
-        returncode, stdout, stderr = await _run_probe(command)
+        try:
+            returncode, stdout, _stderr = await _run_probe(
+                command, stdin=CLAUDE_CATALOG_REQUEST.encode()
+            )
+        except Exception:  # noqa: BLE001 - any failure here falls back to the alias list
+            return []
+        return _claude_reported_models(stdout) if returncode == 0 else []
+
+    async def _slash_models(self, command: list[str]) -> tuple[str, list[str]]:
+        returncode, stdout, stderr = await _run_probe([*command, "/model"])
         if returncode != 0:
             if _looks_unsupported(stdout, stderr):
                 raise _UnsupportedCliError
@@ -410,37 +569,18 @@ class ClaudeCodeCapabilityProbe(ProviderCapabilityProbe):
             if _looks_unauthenticated(stdout, stderr):
                 raise _UnauthenticatedError
             raise _InvalidCatalogError
+        return current_model, aliases
 
-        effort_command = [*command[:-1], "/effort"]
-        returncode, effort_stdout, effort_stderr = await _run_probe(effort_command)
+    async def _slash_efforts(self, command: list[str]) -> list[EffortCapability]:
+        returncode, stdout, stderr = await _run_probe([*command, "/effort"])
         if returncode != 0:
-            if _looks_unauthenticated(effort_stdout, effort_stderr):
+            if _looks_unauthenticated(stdout, stderr):
                 raise _UnauthenticatedError
             raise _InvalidCatalogError
-        efforts = _claude_efforts_from_slash_command(effort_stdout)
+        efforts = _claude_efforts_from_slash_command(stdout)
         if not efforts:
             raise _InvalidCatalogError
-
-        model_ids = [current_model, *[alias for alias in aliases if alias != current_model]]
-        models = [
-            ModelCapability(
-                id=model_id,
-                display_name=_display_name(model_id),
-                default_effort="high" if model_id == current_model else None,
-                efforts=efforts,
-                is_default=model_id == current_model,
-            )
-            for model_id in model_ids
-        ]
-        return ProviderCapability(
-            id=self.provider_id,
-            display_name=self.display_name,
-            available=True,
-            discovery_status="ready",
-            version=version,
-            default_model=current_model,
-            models=models,
-        )
+        return efforts
 
 
 class ProviderCapabilityService:
@@ -634,7 +774,11 @@ def _validate_capability_selection(
             ),
             None,
         )
-    if selected is None and capability.supports_custom_model and not effort:
+    if (
+        selected is None
+        and capability.supports_custom_model
+        and (not effort or capability.id == "claude_code")
+    ):
         return
     if selected is None:
         raise ProviderCapabilityError(
@@ -838,11 +982,160 @@ def _claude_efforts_from_slash_command(stdout: str) -> list[EffortCapability]:
     match = re.search(r"Usage:\s*/effort\s*<([^>]+)>", text)
     if match is None:
         return []
+    # The usage text also lists switches such as "ultracode [on|off]", which aren't efforts.
     return [
         EffortCapability(id=effort, display_name=_display_name(effort))
         for item in match.group(1).split("|")
-        if (effort := _nonempty_string(item)) is not None
+        if _EFFORT_ID.fullmatch(effort := item.strip())
     ]
+
+
+@dataclass(frozen=True)
+class _ClaudeReportedModel:
+    value: str
+    model_id: str
+    name: str
+    description: str | None
+    efforts: tuple[str, ...]
+    supports_effort: bool
+
+
+def _claude_model_id(value: Any) -> str | None:
+    text = _nonempty_string(value)
+    return text if text is not None and _CLAUDE_MODEL_ID.fullmatch(text) else None
+
+
+def _claude_reported_models(stdout: str) -> list[_ClaudeReportedModel]:
+    """Read the model list from the handshake reply, and nothing else in it.
+
+    The same reply carries the signed-in account, which is deliberately ignored.
+    """
+    for line in stdout.splitlines():
+        payload = _json_object(line)
+        response = payload.get("response") if payload is not None else None
+        if (
+            payload is None
+            or payload.get("type") != "control_response"
+            or not isinstance(response, dict)
+            or response.get("request_id") != CLAUDE_CATALOG_REQUEST_ID
+            or response.get("subtype") != "success"
+        ):
+            continue
+        body = response.get("response")
+        raw_models = body.get("models") if isinstance(body, dict) else None
+        if not isinstance(raw_models, list):
+            return []
+        models: list[_ClaudeReportedModel] = []
+        for raw in raw_models[:MAX_CLAUDE_MODELS]:
+            if not isinstance(raw, dict) or (value := _claude_model_id(raw.get("value"))) is None:
+                continue
+            levels = raw.get("supportedEffortLevels")
+            description = _nonempty_string(raw.get("description"))
+            name = _nonempty_string(raw.get("displayName")) or _claude_alias_name(value)
+            # "Default (recommended)" names a slot, and its description names the model.
+            if value == "default" and description and " · " in description:
+                name = description.split(" · ", 1)[0]
+            models.append(
+                _ClaudeReportedModel(
+                    value=value,
+                    model_id=_claude_model_id(raw.get("resolvedModel")) or value,
+                    name=name[:160],
+                    description=description[:500] if description else None,
+                    efforts=tuple(
+                        level
+                        for level in (levels if isinstance(levels, list) else [])
+                        if isinstance(level, str) and _EFFORT_ID.fullmatch(level)
+                    ),
+                    supports_effort=raw.get("supportsEffort") is True,
+                )
+            )
+        return models
+    return []
+
+
+def _claude_catalog(
+    reported: list[_ClaudeReportedModel],
+    current_model: str | None,
+    aliases: list[str],
+    slash_efforts: list[EffortCapability],
+) -> tuple[list[ModelCapability], str]:
+    """One entry per real model, full IDs first.
+
+    Aliases that only restate a full ID ("haiku") become hidden entries, because
+    saved work and blocked-model settings may still name them. Ones with no full
+    ID of their own ("sonnet[1m]", "best") stay listed under the name the CLI takes.
+    """
+    known_levels = {level for item in reported for level in item.efforts}
+    session_efforts = [effort for effort in slash_efforts if effort.id not in known_levels]
+
+    def efforts_for(item: _ClaudeReportedModel) -> list[EffortCapability]:
+        if item.efforts:
+            named = [EffortCapability(id=e, display_name=_display_name(e)) for e in item.efforts]
+            return [*named, *session_efforts]
+        return list(slash_efforts) if item.supports_effort else []
+
+    by_id: dict[str, ModelCapability] = {}
+    targets: dict[str, str] = {}
+    # "default" goes last so a model takes its name from its own entry.
+    for item in sorted(reported, key=lambda entry: entry.value == "default"):
+        if item.model_id not in by_id:
+            by_id[item.model_id] = ModelCapability(
+                id=item.model_id,
+                display_name=item.name,
+                description=item.description,
+                efforts=efforts_for(item),
+            )
+        if item.value != item.model_id:
+            targets[item.value] = item.model_id
+    first = next(iter(by_id.values()))
+
+    def variant(alias: str) -> ModelCapability:
+        stem = alias.removesuffix(CLAUDE_ONE_MILLION_SUFFIX)
+        base = by_id.get(targets.get(stem, stem))
+        if base is None:
+            return ModelCapability(
+                id=alias, display_name=_claude_alias_name(alias), efforts=first.efforts
+            )
+        return ModelCapability(
+            id=alias,
+            display_name=f"{base.display_name} (1M context)",
+            description=f"{base.id} with the 1M context window",
+            efforts=base.efforts,
+        )
+
+    variants: dict[str, ModelCapability] = {}
+    for alias in aliases:
+        valid = _claude_model_id(alias)
+        if valid is not None and valid not in targets and valid not in by_id:
+            variants[valid] = variant(valid)
+    current = _claude_model_id(current_model)
+    default_model = targets.get(current, current) if current else targets.get("default", first.id)
+    if default_model not in by_id and default_model not in variants:
+        variants[default_model] = variant(default_model)
+
+    default_entry = by_id.get(default_model) or variants[default_model]
+    default_entry.is_default = True
+    default_entry.default_effort = "high"
+    hidden = [
+        ModelCapability(
+            id=alias,
+            display_name=f"{_display_name(alias)} alias ({by_id[target].display_name})",
+            description=f"Claude Code alias for {target}",
+            efforts=by_id[target].efforts,
+            listed=False,
+            alias_of=target,
+        )
+        for alias, target in targets.items()
+    ]
+    ordered = [default_entry]
+    ordered.extend(m for m in [*by_id.values(), *variants.values()] if m.id != default_model)
+    return [*ordered, *hidden], default_model
+
+
+def _claude_alias_name(alias: str) -> str:
+    if alias.endswith(CLAUDE_ONE_MILLION_SUFFIX):
+        return f"{_display_name(alias.removesuffix(CLAUDE_ONE_MILLION_SUFFIX))} (1M context)"
+    return _display_name(alias)
 
 
 def _json_object(line: str) -> dict[str, Any] | None:

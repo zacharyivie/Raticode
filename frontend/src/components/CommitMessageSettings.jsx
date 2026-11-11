@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiUrl } from "../lib/api";
+import { menuModels } from "../lib/providerModels.js";
 
 export default function CommitMessageSettings({ capabilities }) {
   const [selection, setSelection] = useState({ provider: "", model: "" });
@@ -72,7 +73,7 @@ export default function CommitMessageSettings({ capabilities }) {
         className="mt-1 w-full rounded border border-line bg-white px-2 py-1.5 text-xs text-ink"
         onChange={event => save({ provider: selection.provider, model: event.target.value })}>
         {!available ? <option value="" disabled>Choose an allowed model</option> : null}
-        {models.map(model => <option key={model.id} value={model.id}>{model.displayName || model.id}</option>)}
+        {menuModels(selectedProvider, selection.model).map(model => <option key={model.id} value={model.id}>{model.displayName || model.id}</option>)}
       </select>
     </label> : null}
     {selection.provider && !available && selectedProvider?.discoveryStatus === "ready" ? <p role="status" className="text-xs text-muted">The saved commit model is unavailable or denied. Choose an allowed model before drafting a commit.</p> : null}

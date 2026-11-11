@@ -29,6 +29,9 @@ export const RUN_STATES = Object.freeze({
   failed: { label: "Didn't finish", tone: "danger", active: false, spinning: false },
   cancelled: { label: "Stopped", tone: "neutral", active: false, spinning: false },
   succeeded: { label: "Done", tone: "success", active: false, spinning: false },
+  // Not run states: a task card for a task that waits for other tasks (task.dependency).
+  waiting: { label: "Waiting for another task", tone: "neutral", active: false, spinning: false },
+  held: { label: "On hold", tone: "attention", active: false, spinning: false },
 });
 export const runState = (state, needsUser) => state === "blocked" && needsUser === false
   ? { ...RUN_STATES.blocked, label: "Couldn't finish", tone: "danger" }
@@ -44,6 +47,12 @@ export function taskActivity(task, now = new Date()) {
   if (run && runState(run.state).active) {
     const info = runState(run.state);
     return { kind: run.state === "queued" ? "queued" : "running", label: activeLabel(run) || info.label, spinning: info.spinning, tone: info.tone };
+  }
+  // A task that starts after other tasks: waiting, or held because one of them didn't succeed.
+  const dependency = task?.dependency;
+  if (dependency && task.state !== "paused") {
+    if (dependency.state === "held") return { kind: "attention", label: dependency.reason || RUN_STATES.held.label, spinning: false, tone: "attention", held: true };
+    return { kind: "waiting", label: dependency.state === "met" ? "Starting soon" : dependency.reason || RUN_STATES.waiting.label, spinning: false, tone: "neutral" };
   }
   const last = task?.last_run;
   if (last && ["blocked", "outcome_unknown", "failed"].includes(last.state) && !last.acknowledged) {
@@ -63,7 +72,7 @@ export function taskActivity(task, now = new Date()) {
 const GROUPS = [
   { id: "now", label: "Working on", kinds: ["running", "queued"] },
   { id: "attention", label: "Needs you", kinds: ["attention"] },
-  { id: "scheduled", label: "Coming up", kinds: ["scheduled", "idle"] },
+  { id: "scheduled", label: "Coming up", kinds: ["waiting", "scheduled", "idle"] },
   { id: "paused", label: "Paused", kinds: ["paused"] },
   { id: "done", label: "Done", kinds: ["done"] },
 ];
@@ -225,17 +234,45 @@ export function messagesByDay(messages = [], now = new Date()) {
 
 // The live state of work a message refers to, preferring current task data
 // over the snapshot stored with the message.
+// What a waiting task waits for, as the card and the task sheet list it.
+export function prerequisites(task) {
+  return (task?.dependency?.prerequisites || []).map(item => ({
+    ...item,
+    label: item.state === "met" ? "Done"
+      : item.state === "held" ? (item.run_state ? runState(item.run_state).label : item.reason || "On hold")
+        : item.run_state && RUN_STATES[item.run_state]?.active ? "Running" : "Not started",
+    tone: item.state === "met" ? "success" : item.state === "held" ? "attention" : "neutral",
+  }));
+}
+
+// The tasks a new or waiting task may wait for: one-time or repeating, never itself or deleted.
+export function afterChoices(tasks = [], task = null) {
+  return tasks.filter(item => !item.deleted_at && item.id !== task?.id).map(item => ({ id: item.id, title: item.title }));
+}
+
+// Whether the "Start after" field can change: new one-time tasks, and waiting tasks before they start.
+export function afterEditable(task, draft) {
+  if ((draft?.schedule?.kind || "once") !== "once" && (draft?.schedule?.kind || "once") !== "now") return false;
+  if (!task) return true;
+  return !task.after_started && !task.last_run && !task.active_run;
+}
+
 export function workStatus(work, tasks = []) {
   if (!work) return null;
   const task = tasks.find(item => item.id === work.task_id);
-  const run = task?.active_run && task.active_run.id === work.run_id ? task.active_run
-    : task?.last_run && task.last_run.id === work.run_id ? task.last_run
-      : (task?.recent_runs || []).find(item => item.id === work.run_id);
-  const state = run?.state || work.state;
+  // A card without a run (a task on hold) follows the task: waiting, held, then its first run.
+  const run = !work.run_id ? task?.active_run || task?.last_run || undefined
+    : task?.active_run && task.active_run.id === work.run_id ? task.active_run
+      : task?.last_run && task.last_run.id === work.run_id ? task.last_run
+        : (task?.recent_runs || []).find(item => item.id === work.run_id);
+  // The card's own state is the run's as the desktop last served the chat; it covers
+  // a run the task list no longer has, such as one of a deleted task.
+  const state = run?.state || (!work.run_id && task?.dependency ? (task.dependency.state === "held" ? "held" : "waiting") : work.state);
   return {
     task,
     run,
     state,
+    step: run ? run.step : work.step,
     title: task?.title || work.title || "Task",
     type: task?.type || work.type,
     threadId: run?.thread_id || work.thread_id,
@@ -247,30 +284,82 @@ export function workStatus(work, tasks = []) {
   };
 }
 
+// Chat rows: cards one self-work pass started together (same self_work.batch, one after
+// another) form one row, so a pass that starts several jobs is one message, not several.
+// Everything else is its own row.
+export function chatRows(messages = []) {
+  const rows = [];
+  for (const message of messages) {
+    const batch = message.role === "rem" && message.kind !== "task_update" && message.work ? message.self_work?.batch || "" : "";
+    const last = rows.at(-1);
+    if (batch && last?.batch === batch) last.messages.push(message);
+    else rows.push(batch ? { key: message.id, batch, messages: [message] } : { key: message.id, message });
+  }
+  return rows.map(row => (row.batch && row.messages.length === 1 ? { key: row.key, message: row.messages[0] } : row));
+}
+
+const SELF_WORK_KINDS = [["ticket", "ticket", "tickets"], ["triage", "backlog ranking", "backlog rankings"], ["research", "research run", "research runs"]];
+
+// The line above a self-work batch: "Started 3 things while you were away: 2 tickets and 1 research run."
+export function selfWorkBatchLine(messages = []) {
+  const counts = new Map();
+  for (const message of messages) {
+    const kind = message.self_work?.kind || message.work?.self_work || "ticket";
+    counts.set(kind, (counts.get(kind) || 0) + 1);
+  }
+  const parts = SELF_WORK_KINDS.filter(([kind]) => counts.get(kind)).map(([kind, one, many]) => `${counts.get(kind)} ${counts.get(kind) === 1 ? one : many}`);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0] || `${messages.length} tasks`;
+  return `Started ${messages.length} things while you were away: ${list}.`;
+}
+
 // Several messages can refer to one run: its start, an acknowledgement and its
 // result. Only the newest shows live status so the same state isn't repeated.
 export function latestWorkMessageIds(messages = []) {
   const latest = new Map();
-  for (const message of messages) if (message.work?.run_id) latest.set(message.work.run_id, message.id);
+  for (const message of messages) {
+    const work = message.work;
+    if (work?.run_id) {
+      latest.set(work.run_id, message.id);
+      // A card from before the task had a run (on hold) gives way to the run's own card.
+      latest.delete(`task:${work.task_id}`);
+    } else if (work?.task_id) latest.set(`task:${work.task_id}`, message.id);
+  }
   return new Set(latest.values());
 }
 
 // Unchecked criteria are not failures, so "0 of 5 passed" would mislead when
 // the review never ran. Counts are split by outcome and empty parts omitted.
 export function criteriaSummary(criteria) {
-  if (!Array.isArray(criteria) || !criteria.length) return "";
-  const total = criteria.length;
-  const count = result => criteria.filter(item => item.result === result).length;
-  const passed = count("pass");
-  const failed = count("fail");
-  const unchecked = total - passed - failed;
-  if (unchecked === total) return total === 1 ? "Not checked yet" : `${total} checks not run yet`;
-  if (!failed && !unchecked) return `${passed} of ${total} checks passed`;
+  const { failed, unresolved, passed, unchecked } = checkGroups(criteria);
+  const total = failed.length + unresolved.length + passed.length + unchecked.length;
+  if (!total) return "";
+  if (unchecked.length === total) return total === 1 ? "Not checked yet" : `${total} checks not run yet`;
+  if (passed.length === total) return `${total} of ${total} checks passed`;
   return [
-    `${passed} of ${total} passed`,
-    failed ? `${failed} failed` : "",
-    unchecked ? `${unchecked} not checked` : "",
+    `${passed.length} of ${total} passed`,
+    failed.length ? `${failed.length} failed` : "",
+    unresolved.length ? `${unresolved.length} unresolved` : "",
+    unchecked.length ? `${unchecked.length} not checked` : "",
   ].filter(Boolean).join(", ");
+}
+
+// A run's checks by outcome, for the task pane. The review answers pass, fail or
+// unknown with its reason; an unknown check with a reason was looked at but not
+// confirmed (unresolved), one without a reason hasn't been checked. A check whose
+// description is missing, as from an older backend, is numbered instead.
+export function checkGroups(criteria) {
+  const items = (Array.isArray(criteria) ? criteria : [])
+    .map((item, index) => [item, index])
+    .filter(([item]) => item && typeof item === "object")
+    .map(([item, index]) => {
+      const reason = typeof item.evidence === "string" ? plainMarkdown(item.evidence).trim() : "";
+      const title = typeof item.description === "string" ? plainMarkdown(item.description).trim() : "";
+      const outcome = item.result === "pass" ? "passed" : item.result === "fail" ? "failed" : reason ? "unresolved" : "unchecked";
+      return { key: item.id ? String(item.id) : `check-${index}`, title: title || `Check ${index + 1}`, reason, outcome };
+    });
+  const by = outcome => items.filter(item => item.outcome === outcome);
+  const groups = { failed: by("failed"), unresolved: by("unresolved"), passed: by("passed"), unchecked: by("unchecked") };
+  return { ...groups, reviewed: items.length > groups.unchecked.length };
 }
 
 // Desktop notifications for runs that finished since the previous poll. Only a
@@ -295,7 +384,7 @@ export function finishedRunNotifications(previous, tasks) {
 
 // Editor drafts keep raw strings; they only become a request on save.
 export function newTaskDraft({ type = "research", project_dir = "", timezone = localTimezone() } = {}) {
-  return { title: "", type, prompt: "", project_dir, schedule: { kind: "once", local_time: "09:00", weekdays: ["monday"], cron: "", timezone }, criteria: [] };
+  return { title: "", type, prompt: "", project_dir, schedule: { kind: "once", local_time: "09:00", weekdays: ["monday"], cron: "", timezone }, criteria: [], after: [] };
 }
 export function taskToDraft(task) {
   const schedule = task.schedule || { kind: "once" };
@@ -306,6 +395,7 @@ export function taskToDraft(task) {
     project_dir: task.project_dir || "",
     schedule: { local_time: "09:00", weekdays: ["monday"], cron: "", timezone: localTimezone(), ...schedule },
     criteria: (task.acceptance_criteria || []).map(item => ({ id: item.id, description: item.description, authored_by: item.authored_by })),
+    after: [...(task.after || [])],
   };
 }
 
@@ -351,12 +441,21 @@ export function draftToRequest(draft, task = null) {
       .filter(item => item.description.trim())
       .map(item => ({ ...(item.id ? { id: item.id } : {}), description: item.description.trim(), authored_by: item.authored_by || "user" })),
   };
+  // Only one-time tasks can wait for others; a new task leaves the field out when empty.
+  const after = request.schedule.kind === "once" ? [...(draft.after || [])] : [];
+  if (task || after.length) request.after = after;
   if (!task) return request;
-  const before = draftToRequest(taskToDraft(task));
+  const before = { ...draftToRequest(taskToDraft(task)), after: [...(task.after || [])] };
   return Object.fromEntries(Object.entries(request).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(before[key])));
 }
 
 // Changes that alter the work itself; Rem steers the running thread for these.
+// The draft's "When" summary: a task that waits starts once those tasks succeed.
+export function startsWhen(draft, isNew) {
+  if ((draft.after || []).length && (draft.schedule.kind === "once" || draft.schedule.kind === "now")) return "Starts by itself once every task above finishes successfully.";
+  return isNew ? "Starts as soon as you save." : "Runs once. Run it again any time.";
+}
+
 export function changesActiveWork(patch) { return ["type", "prompt", "project_dir", "acceptance_criteria"].some(key => key in patch); }
 
 export function localTimezone() {

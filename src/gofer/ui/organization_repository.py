@@ -72,23 +72,29 @@ def _env() -> dict[str, str]:
 
 def git(cwd: Path | str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run git with no hooks, no signing and push blocked."""
-    result = subprocess.run(
-        [
-            "git",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-C",
-            str(cwd),
-            *args,
-        ],
-        env=_env(),
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                str(cwd),
+                *args,
+            ],
+            env=_env(),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Callers handle RepositoryError; a hung git must not escape as another error.
+        raise RepositoryError(f"git {args[0] if args else ''} took over 60 seconds") from exc
+    except OSError as exc:
+        raise RepositoryError(f"Couldn't run git: {exc}") from exc
     if check and result.returncode:
         raise RepositoryError(result.stderr.strip() or result.stdout.strip() or "git failed")
     return result
@@ -288,6 +294,13 @@ def finish(worktree: dict[str, str], oid: str, title: str, merge: bool) -> str:
             return (
                 f"Shared repository changes stay on branch {branch}; they were not merged "
                 "because the ticket wasn't accepted."
+            )
+        head = git(repository, "symbolic-ref", "--short", "-q", "HEAD", check=False)
+        if head.stdout.strip() != MAIN:
+            # Never merge into whatever someone checked out by hand.
+            return (
+                f"Shared repository changes stay on branch {branch}: the shared repository "
+                f"isn't on {MAIN}. Switch it back to {MAIN}, then merge the branch yourself."
             )
         merged = git(
             repository,

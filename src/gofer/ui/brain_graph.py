@@ -63,13 +63,17 @@ def project_key(name: str) -> str:
     return re.sub(r"[^0-9a-z]+", "", str(name).casefold())
 
 
+# The phone app is its own project inside the Raticode repository.
+PHONE_APP_FOLDER = "mobile/android"
+
+
 @functools.lru_cache(maxsize=512)
 def project_root(path: str) -> str:
     """A git worktree belongs to the repository it was created from."""
     text = str(path).rstrip("/")
     match = re.match(r"(.+?)/\.worktrees/[^/]+", text)
     if match:
-        return match.group(1)
+        return match.group(1) + ("/" + PHONE_APP_FOLDER if text.endswith(PHONE_APP_FOLDER) else "")
     try:
         # A linked worktree's .git is a file: "gitdir: <repo>/.git/worktrees/<name>".
         pointer = Path(text) / ".git"
@@ -85,6 +89,8 @@ def project_root(path: str) -> str:
 def root_name(root: str) -> str:
     """A readable project name for a folder: /Raticode Mobile/raticode-mobile -> Raticode Mobile."""
     path = Path(project_root(root))
+    if path.as_posix().endswith(PHONE_APP_FOLDER):
+        return "Raticode Mobile"
     name = path.name or str(path)
     parent = path.parent.name
     if parent and project_key(parent) == project_key(name):

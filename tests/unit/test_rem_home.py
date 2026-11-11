@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -27,6 +28,20 @@ from gofer.ui.rem_home_models import (
 from gofer.ui.rem_home_provider import MalformedDecision
 from gofer.ui.rem_home_store import RemHomeStore
 
+# Task card fields the conversation fills in from the run as it is now.
+LIVE_CARD = {"state", "needs_user", "step"}
+
+
+def force_run(home: RemHome, identity: str, **patch: Any) -> None:
+    """Test setup: write a run's fields directly, as recovery or a resume would.
+
+    ``RemHome._update`` refuses to change the state of a finished run.
+    """
+    with home.store.connect() as db:
+        run = home.store.get(db, "runs", identity)
+        run.update(patch)
+        home.store.put(db, "runs", run)
+
 
 def recipe(project: Path | None = None, **patch: Any) -> dict[str, Any]:
     return {
@@ -41,7 +56,7 @@ def recipe(project: Path | None = None, **patch: Any) -> dict[str, Any]:
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def home(tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
     import gofer.ui.rem_home as rem_home_module
 
     # The automatic worker limit follows this computer's cores and memory (2 on a
@@ -98,7 +113,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             }
             yield {"type": "final", "message": {"body": "Implemented and tested."}}
 
-    data = tmp_path.parent / (tmp_path.name + "-data")
+    data = tmp_path_factory.mktemp("rem-data")
     instance = RemHome(
         data,
         source=source,
@@ -333,7 +348,14 @@ def test_task_completion_appends_after_other_requests_without_changing_replies(
     assert home._finish(run["id"], "succeeded", "The audit is ready.", epoch=run["epoch"])
     home.deliver_outcomes()
     after = home.store.conversation()["messages"]
-    assert after[:-1] == before
+
+    def written(message: dict[str, Any]) -> dict[str, Any]:
+        # A card is served with its run's state now; everything written stays as it was.
+        work = {k: v for k, v in (message.get("work") or {}).items() if k not in LIVE_CARD}
+        return {**message, "work": work} if "work" in message else message
+
+    assert [written(m) for m in after[:-1]] == [written(m) for m in before]
+    assert after[0]["work"]["state"] == "succeeded"
     assert after[-1]["kind"] == "task_update"
     updates = [m for m in after if m.get("work", {}).get("task_id") == task["id"]]
     assert len(updates) == 2
@@ -3415,7 +3437,7 @@ def test_stale_outcome_delivered_late_does_not_follow_the_newer_one(home: RemHom
     home._update(run["id"], state="verifying", worker_result="Implemented and tested.")
     home._finish(run["id"], "blocked", "The project changed during review.", 0)
     # Recovery resumes the review under a new epoch.
-    home._update(run["id"], state="verifying", epoch=1)
+    force_run(home, run["id"], state="verifying", epoch=1)
     home._finish(run["id"], "succeeded", "Implemented and tested.", 1)
     stale, newer = home.store.outbox()
     assert (stale["state"], newer["state"]) == ("blocked", "succeeded")
@@ -4078,6 +4100,55 @@ def test_unreadable_decision_explains_itself_without_parser_errors(home: RemHome
     assert "couldn’t read my own reply" in error and "didn’t change anything" in error
 
 
+def test_a_retried_reply_is_logged_as_routine_and_never_quoted(home: RemHome, caplog):
+    secret_words = "my private plans for the weekend"
+
+    def generate(prompt, config, cancel):
+        if "not the requested JSON object" not in prompt:
+            raise MalformedDecision(f"Sure! {secret_words}")
+        return {"reply": "Done."}
+
+    home.generate = generate
+    caplog.set_level(logging.DEBUG, logger="gofer")
+    home.submit_message({"request_id": "fix", "body": secret_words})
+    home._reply()
+    records = [r for r in caplog.records if r.name == "gofer.ui.rem_home"]
+    assert [(r.levelno, r.getMessage()) for r in records] == [
+        (
+            logging.INFO,
+            f"Rem's reply was not the requested JSON ({len('Sure! ' + secret_words)} characters); "
+            "asking again",
+        )
+    ]
+    assert all(secret_words not in r.getMessage() for r in caplog.records)
+
+
+def test_failed_requests_reach_the_app_log_at_the_right_level(home: RemHome, caplog):
+    caplog.set_level(logging.DEBUG, logger="gofer")
+
+    def unreadable(prompt, config, cancel):
+        raise MalformedDecision("still chatting, private words")
+
+    home.generate = unreadable
+    home.submit_message({"request_id": "garbled", "body": "private words"})
+    home._reply()
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning.getMessage().startswith("Rem couldn't read its own reply to request garbled")
+    assert "private words" not in warning.getMessage() and warning.exc_info is None
+    caplog.clear()
+
+    def broken(prompt, config, cancel):
+        raise RuntimeError("bug in Rem")
+
+    home.generate = broken
+    home.submit_message({"request_id": "crash", "body": "Do the thing."})
+    home._reply()
+    [error] = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert error.getMessage() == "Rem failed while answering request crash"
+    assert error.exc_info and error.exc_info[0] is RuntimeError, "the traceback is kept"
+    assert "bug in Rem" in home.store.conversation()["messages"][-1]["body"]
+
+
 def test_outcome_update_never_promises_actions_rem_cannot_take(home: RemHome, tmp_path: Path):
     prompts: list[str] = []
 
@@ -4703,7 +4774,7 @@ def test_turn_sources_need_web_use_and_skip_private_addresses():
 
 
 def test_draft_reply_reads_the_reply_string_as_it_arrives():
-    from gofer.ui.rem_home_provider import _StreamingClaude, draft_reply
+    from gofer.ui.rem_home_provider import _RemClaude, draft_reply
 
     assert draft_reply('{"reply":"Hel') == "Hel"
     assert draft_reply('{"reply": "Line\\nTwo \\"q\\" \\u00e9 \\') == 'Line\nTwo "q" é '
@@ -4711,7 +4782,7 @@ def test_draft_reply_reads_the_reply_string_as_it_arrives():
     assert draft_reply('{"recall":{"queries":["x"]}}') == ""
     assert draft_reply('{"reply":"half \\u00') == "half "
     seen: list[str] = []
-    claude = _StreamingClaude(seen.append)
+    claude = _RemClaude(seen.append)
     delta = {
         "type": "stream_event",
         "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": '{"re'}},
@@ -4922,12 +4993,41 @@ def test_agent_sign_ins_and_secret_files_need_the_request_to_name_them(
         "id_rsa.pub",
         ".env.production",
         "server.key",
+        # Sign-in files tools also keep inside projects (2026-11-07 audit).
+        ".npmrc",
+        ".netrc",
+        "_netrc",
+        ".pypirc",
+        ".pgpass",
+        ".dockercfg",
+        "kubeconfig",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
     ):
         assert sensitive_path(tmp_path / "anywhere" / name), name
+    for folder, name in ((".git", "config"), (".docker", "config.json"), (".kube", "config")):
+        assert sensitive_path(tmp_path / "project" / folder / name), f"{folder}/{name}"
     for name in ("desktop-light-result-card.png", "identity.md", "notes.txt", "author.json"):
         assert not sensitive_path(tmp_path / "anywhere" / name), name
+    # The same generic names elsewhere stay ordinary files.
+    for rel in ("app/config", "web/config.json", "docs/git-config.md", ".github/config.yml"):
+        assert not sensitive_path(tmp_path / "project" / rel), rel
     for folder in (".config/claude", ".config/github-copilot", ".gemini", ".cursor"):
         assert sensitive_path(house / folder / "settings.json"), folder
+    # Browser profiles and credential stores on Linux, macOS and Windows (2026-11-10 audit).
+    for folder in (
+        ".config/microsoft-edge/Default",
+        "Library/Keychains",
+        "Library/Application Support/Google/Chrome/Default",
+        "Library/Application Support/Microsoft Edge/Default",
+        "Library/Application Support/Firefox/Profiles/x.default",
+        "AppData/Local/Google/Chrome/User Data/Default",
+        "AppData/Local/Microsoft/Edge/User Data/Default",
+        "AppData/Roaming/Mozilla/Firefox/Profiles/x.default",
+        "AppData/Roaming/Microsoft/Protect",
+    ):
+        assert sensitive_path(house / folder / "History"), folder
+    assert not sensitive_path(house / "Library" / "Mobile Documents" / "notes.txt")
 
     # Raticode's data root, marked by its trusted tools folder, is protected around data_dir.
     root = tmp_path / "state" / "data"
@@ -5047,3 +5147,205 @@ def test_new_workers_wait_while_swap_is_nearly_full(
     assert home._admission() == (limit, "Waiting for free memory (swap is 90% full)")
     monkeypatch.setattr(command_slots, "swap_used_share", lambda: 0.4)
     assert home._admission() == (limit, None)
+
+
+def test_a_run_stopped_mid_turn_keeps_its_reason_instead_of_a_steering_error(
+    home: RemHome, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """A run stopped while its worker streams ends blocked with the real reason.
+
+    Stopping a turn makes the steering stream forget it and then yield a final
+    "stopped" event. Rem used to stop the turn again on that event, which raised
+    "The requested Rem turn is no longer active", logged it as a worker failure
+    and recorded it in the thread instead of the reason the run stopped.
+    """
+    revoked = threading.Event()
+    working = threading.Event()
+
+    def authorize(config: dict[str, Any], task: dict[str, Any]) -> None:
+        if revoked.is_set():
+            raise ValueError("Rem projects must be canonical existing directories")
+
+    async def source(**kwargs: Any):
+        yield {"type": "thought", "text": "Working"}
+        working.set()
+        while not kwargs["cancel_event"].is_set():
+            await asyncio.sleep(0.01)
+        yield {"type": "stopped"}
+
+    home.authorize = authorize
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    deadline = time.monotonic() + 5
+    while not working.is_set():
+        assert time.monotonic() < deadline
+        home.tick()
+        time.sleep(0.01)
+    revoked.set()
+    with caplog.at_level(logging.INFO, logger="gofer.ui.rem_home"):
+        run = wait_run(home, task["id"], {"blocked", "cancelled", "succeeded", "outcome_unknown"})
+    assert run["state"] == "blocked", run
+    assert "canonical existing directories" in run["summary_short"]
+    messages = home.store.thread(run["thread_id"])["messages"]
+    assert not any("no longer active" in str(m.get("body")) for m in messages), messages
+    assert [m["body"] for m in messages if m.get("kind") in {"error", "stopped"}] == ["Stopped"]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], caplog.text
+
+
+def _worker_prompts(calls: list[dict[str, Any]]) -> list[list[tuple[str, str]]]:
+    """Each worker turn's user-role messages as (role, body), oldest first."""
+    return [
+        [(m["role"], m["body"]) for m in call["messages"] if m["role"] == "user"]
+        for call in calls
+        if "independent read-only reviewer" not in call["agent_instructions"]
+    ]
+
+
+def _recording(home: RemHome) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    original = home.source
+
+    async def source(**kwargs: Any):
+        calls.append({"messages": list(kwargs["messages"]), **kwargs})
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    return calls
+
+
+@pytest.mark.parametrize("ending", ["succeeded", "blocked"])
+def test_user_prompt_to_an_ended_thread_is_the_turn_prompt_without_a_rem_message(
+    home: RemHome, tmp_path: Path, ending: str
+):
+    """Prompting an ended or errored worker thread adds no Rem continuation message."""
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"succeeded"})
+    if ending == "blocked":
+        home._finish(run["id"], "blocked", "The worker hit an error", run["epoch"])
+    calls = _recording(home)
+    home.instruct(run["thread_id"], {"request_id": "mine", "body": "Also cover the empty case"})
+    finished = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert finished["state"] == "succeeded", finished
+    messages = home.store.thread(finished["thread_id"])["messages"]
+    users = [m for m in messages if m["role"] == "user" and m.get("worker_role") != "verify"]
+    # One Rem prompt started the task; the user's message is the only one after it.
+    assert [(m["sender"], m["body"]) for m in users] == [
+        ("rem", "Implement the feature"),
+        ("user", "Also cover the empty case"),
+    ]
+    assert not any("Please continue" in m["body"] for m in messages)
+    # The provider sees both authors as user-role messages, labelled, with the
+    # user's message last so it answers that.
+    turns = _worker_prompts(calls)
+    assert turns[0][-1] == ("user", "User: Also cover the empty case")
+    assert ("user", "Rem: Implement the feature") in turns[0]
+    assert finished.get("user_prompts") == []
+
+
+def test_user_message_while_a_worker_runs_restarts_it_without_a_rem_message(
+    home: RemHome, tmp_path: Path
+):
+    """Steering a running worker: the restarted turn answers the user's own message."""
+    working = threading.Event()
+    calls: list[dict[str, Any]] = []
+    original = home.source
+
+    async def source(**kwargs: Any):
+        calls.append({"messages": list(kwargs["messages"]), **kwargs})
+        reviewer = "independent read-only reviewer" in kwargs["agent_instructions"]
+        if not reviewer and len(_worker_prompts(calls)) == 1:
+            yield {"type": "thought", "text": "Reading the code"}
+            working.set()
+            while not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.01)
+            yield {"type": "stopped"}
+            return
+        async for event in original(**kwargs):
+            yield event
+
+    home.source = source
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    deadline = time.monotonic() + 5
+    while not working.is_set():
+        assert time.monotonic() < deadline
+        home.tick()
+        time.sleep(0.01)
+    run = home.store.tasks()[0]["active_run"]
+    home.instruct(run["thread_id"], {"request_id": "steer", "body": "Use the new parser instead"})
+    # The user's message shows in the thread at once.
+    assert home.store.thread(run["thread_id"])["messages"][-1]["id"] == "steer"
+    finished = wait_run(home, task["id"], {"succeeded", "blocked"}, timeout=10)
+    assert finished["state"] == "succeeded", finished
+    messages = home.store.thread(finished["thread_id"])["messages"]
+    assert [
+        (m["sender"], m["body"])
+        for m in messages
+        if m["role"] == "user" and m.get("worker_role") != "verify"
+    ] == [
+        ("rem", "Implement the feature"),
+        ("user", "Use the new parser instead"),
+    ]
+    # The stopped turn's end follows the user's message in the thread, but the
+    # provider's copy puts the user's message last.
+    ids = [m["id"] for m in messages]
+    stopped = next(m["id"] for m in messages if m.get("kind") == "stopped")
+    assert ids.index("steer") < ids.index(stopped)
+    workers = [c for c in calls if "independent read-only reviewer" not in c["agent_instructions"]]
+    second = workers[1]
+    assert second["messages"][-1]["body"] == "User: Use the new parser instead"
+
+
+def test_rem_follow_ups_stay_rem_messages_after_a_pending_user_prompt(
+    home: RemHome, tmp_path: Path
+):
+    """Rem's own follow-up is still its message to the worker, and comes last."""
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"succeeded"})
+    home._finish(run["id"], "blocked", "Needs an answer", run["epoch"])
+    with home.store.connect() as db:
+        home.instruct(
+            run["thread_id"], {"request_id": "user", "body": "Mine first"}, notify=False, db=db
+        )
+        home.instruct(
+            run["thread_id"],
+            {"request_id": "rem", "body": "Use the connected account."},
+            notify=False,
+            context={"source_message_id": "chat-1"},
+            db=db,
+        )
+    calls = _recording(home)
+    finished = wait_run(home, task["id"], {"succeeded", "blocked"})
+    assert finished["state"] == "succeeded", finished
+    users = [
+        m
+        for m in home.store.thread(run["thread_id"])["messages"]
+        if m["role"] == "user" and m.get("worker_role") != "verify"
+    ]
+    assert [(m["sender"], m["body"]) for m in users] == [
+        ("rem", "Implement the feature"),
+        ("user", "Mine first"),
+        ("rem", "Use the connected account."),
+    ]
+    assert _worker_prompts(calls)[0][-1] == ("user", "Rem: Use the connected account.")
+
+
+def test_thread_readers_name_the_author_of_older_user_messages(home: RemHome, tmp_path: Path):
+    """Messages saved before senders were recorded read as the user's."""
+    from gofer.ui.rem_home_recall import RemRecall, ThreadRead
+
+    task = home.create_task({"request_id": "create", **recipe(tmp_path)})["task"]
+    run = wait_run(home, task["id"], {"succeeded"})
+    home.store.append_thread(
+        run["thread_id"], {"id": "legacy", "role": "user", "body": "An old message of mine"}
+    )
+    with home.store.connect() as db:
+        home.store.message(db, "Done.", work=home.store.work(run))
+    thread = home.store.thread(run["thread_id"])["messages"]
+    assert {m["id"]: m.get("sender") for m in thread if m["role"] == "user"}["legacy"] == "user"
+    assert home.store.transcript(run["thread_id"])[-1]["sender"] == "user"
+    recall = RemRecall(home.store, {"projects": [{"root": str(tmp_path)}]})
+    recalled = recall.read_thread(ThreadRead(thread_id=run["thread_id"]), "")
+    senders = {m["id"]: m.get("sender") for m in recalled["messages"] if m["role"] == "user"}
+    assert senders["legacy"] == "user"
+    assert "rem" in senders.values()

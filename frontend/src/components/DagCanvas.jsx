@@ -58,6 +58,7 @@ import {
 } from "lucide-react";
 
 import { apiUrl } from "../lib/api.js";
+import { RattishTriggersSection } from "./RattishTriggersSection.jsx";
 import { DEFAULT_APP_SETTINGS, matchesCommand } from "../lib/settings.js";
 import { Dialog } from "./Dialog.jsx";
 import GraphOutline from "./GraphOutline.jsx";
@@ -5527,6 +5528,11 @@ function RattishInspector({
                 Output references and schemas are checked again by the Rattish compiler after every change.
               </p>
             </InspectorSection>
+            <RattishTriggersSection
+              active={!collapsed}
+              showInputs={Boolean(workflowFields.inputs)}
+              workflowId={document?.workflowId}
+            />
           </div>
         )}
       </div>

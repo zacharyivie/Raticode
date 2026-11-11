@@ -106,6 +106,12 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=os.environ.get("GOFER_CODESIGN_IDENTITY"),
-    entitlements_file=None,
+    # Signed Mac releases set both; the hardened runtime needs the entitlements that let
+    # Python's native libraries load.
+    codesign_identity=os.environ.get("GOFER_CODESIGN_IDENTITY") or None,
+    entitlements_file=(
+        os.path.join(SPECPATH, os.environ["GOFER_CODESIGN_ENTITLEMENTS"])
+        if os.environ.get("GOFER_CODESIGN_ENTITLEMENTS")
+        else None
+    ),
 )

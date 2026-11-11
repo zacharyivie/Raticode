@@ -1,0 +1,398 @@
+{
+ "list.idle": {
+  "digest": "9b767dee2c7452b21f55f3a0474173fb",
+  "earlier": 0,
+  "workflows": [
+   {
+    "description": "3 nodes, 2 routes.",
+    "latest_run": null,
+    "name": "Phone check",
+    "project_name": "Notes",
+    "status": "idle",
+    "updated_at": "2026-10-31T20:05:22.665477+00:00",
+    "workflow_id": "phone-check"
+   }
+  ]
+ },
+ "list.running": {
+  "digest": "9e43ba47ef5ae868f00f1cc046bd609c",
+  "earlier": 0,
+  "workflows": [
+   {
+    "description": "3 nodes, 2 routes.",
+    "latest_run": {
+     "duration_seconds": 0.018,
+     "finished_at": "",
+     "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+     "started_at": "2026-10-31T20:05:22.732877+00:00",
+     "status": "running",
+     "summary": "Running",
+     "trigger": "manual"
+    },
+    "name": "Phone check",
+    "project_name": "Notes",
+    "status": "running",
+    "updated_at": "2026-10-31T20:05:22.665477+00:00",
+    "workflow_id": "phone-check"
+   }
+  ]
+ },
+ "overview": {
+  "digest": "4d1e137e64adaf7be33be2822396a6a9",
+  "file_links": true,
+  "media": true,
+  "organizations": false,
+  "projects": [
+   {
+    "name": "Notes",
+    "project_id": "5d468996-d6d4-5e43-81f6-8c209d4a16f3"
+   },
+   {
+    "name": "Code",
+    "project_id": "74f47251-f72f-51ce-a4d8-7db10a216e1e"
+   }
+  ],
+  "rem": true,
+  "settings": false,
+  "swarms": false,
+  "usage": false,
+  "workflows": true
+ },
+ "read.idle": {
+  "controls": {
+   "resume": {
+    "allowed": false,
+    "reason": "Resuming Rattish workflow runs is not supported yet. Start a new run instead."
+   },
+   "run": {
+    "allowed": true,
+    "reason": ""
+   },
+   "stop": {
+    "allowed": false,
+    "reason": "No run is going right now."
+   }
+  },
+  "description": "3 nodes, 2 routes.",
+  "digest": "b26a65aeeb6435a89c76d3953e80c94e",
+  "earlier_runs": 0,
+  "edges": [
+   {
+    "from": "build",
+    "label": "",
+    "to": "report"
+   },
+   {
+    "from": "report",
+    "label": "",
+    "to": "lint"
+   },
+   {
+    "from": "build",
+    "label": "needs",
+    "to": "lint"
+   }
+  ],
+  "latest_run": null,
+  "name": "Phone check",
+  "nodes": [
+   {
+    "kind": "bash-command",
+    "label": "build",
+    "node_id": "build"
+   },
+   {
+    "kind": "bash-command",
+    "label": "lint",
+    "node_id": "lint"
+   },
+   {
+    "kind": "bash-command",
+    "label": "report",
+    "node_id": "report"
+   }
+  ],
+  "preview": {
+   "blocking": [],
+   "destructive": [
+    "build: command, filesystem write",
+    "lint: command, filesystem write",
+    "report: command, filesystem write"
+   ],
+   "warnings": []
+  },
+  "project_name": "Notes",
+  "revision": "sha256:f92498e1c333803cdd9c23d6b6f8b9c783f469bc5c4c2a56d298e49adfe32ccc",
+  "run": null,
+  "runs": [],
+  "status": "idle",
+  "updated_at": "2026-10-31T20:05:22.665477+00:00",
+  "workflow_id": "phone-check"
+ },
+ "read.running": {
+  "controls": {
+   "resume": {
+    "allowed": false,
+    "reason": "Resuming Rattish workflow runs is not supported yet. Start a new run instead."
+   },
+   "run": {
+    "allowed": true,
+    "reason": ""
+   },
+   "stop": {
+    "allowed": true,
+    "reason": ""
+   }
+  },
+  "description": "3 nodes, 2 routes.",
+  "digest": "fd616fe34a813a0ef959a9d4635baec6",
+  "earlier_runs": 0,
+  "edges": [
+   {
+    "from": "build",
+    "label": "",
+    "to": "report"
+   },
+   {
+    "from": "report",
+    "label": "",
+    "to": "lint"
+   },
+   {
+    "from": "build",
+    "label": "needs",
+    "to": "lint"
+   }
+  ],
+  "latest_run": {
+   "duration_seconds": 0.018,
+   "finished_at": "",
+   "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+   "started_at": "2026-10-31T20:05:22.732877+00:00",
+   "status": "running",
+   "summary": "Running",
+   "trigger": "manual"
+  },
+  "name": "Phone check",
+  "nodes": [
+   {
+    "kind": "bash-command",
+    "label": "build",
+    "node_id": "build"
+   },
+   {
+    "kind": "bash-command",
+    "label": "lint",
+    "node_id": "lint"
+   },
+   {
+    "kind": "bash-command",
+    "label": "report",
+    "node_id": "report"
+   }
+  ],
+  "preview": {
+   "blocking": [],
+   "destructive": [
+    "build: command, filesystem write",
+    "lint: command, filesystem write",
+    "report: command, filesystem write"
+   ],
+   "warnings": []
+  },
+  "project_name": "Notes",
+  "revision": "sha256:f92498e1c333803cdd9c23d6b6f8b9c783f469bc5c4c2a56d298e49adfe32ccc",
+  "run": {
+   "duration_seconds": 0.018,
+   "error": "",
+   "finished_at": "",
+   "nodes": [
+    {
+     "detail": "",
+     "finished_at": "",
+     "node_id": "build",
+     "started_at": "2026-10-31T20:05:22.751051+00:00",
+     "status": "running"
+    },
+    {
+     "detail": "",
+     "finished_at": "",
+     "node_id": "lint",
+     "started_at": "",
+     "status": "pending"
+    },
+    {
+     "detail": "",
+     "finished_at": "",
+     "node_id": "report",
+     "started_at": "",
+     "status": "pending"
+    }
+   ],
+   "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+   "started_at": "2026-10-31T20:05:22.732877+00:00",
+   "status": "running",
+   "summary": "Running",
+   "trigger": "manual"
+  },
+  "runs": [
+   {
+    "duration_seconds": 0.018,
+    "finished_at": "",
+    "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+    "started_at": "2026-10-31T20:05:22.732877+00:00",
+    "status": "running",
+    "summary": "Running",
+    "trigger": "manual"
+   }
+  ],
+  "status": "running",
+  "updated_at": "2026-10-31T20:05:22.665477+00:00",
+  "workflow_id": "phone-check"
+ },
+ "read.stopped": {
+  "controls": {
+   "resume": {
+    "allowed": false,
+    "reason": "Resuming Rattish workflow runs is not supported yet. Start a new run instead."
+   },
+   "run": {
+    "allowed": true,
+    "reason": ""
+   },
+   "stop": {
+    "allowed": false,
+    "reason": "No run is going right now."
+   }
+  },
+  "description": "3 nodes, 2 routes.",
+  "digest": "4b5baeac687293ce1176c4c0d737c4b9",
+  "earlier_runs": 0,
+  "edges": [
+   {
+    "from": "build",
+    "label": "",
+    "to": "report"
+   },
+   {
+    "from": "report",
+    "label": "",
+    "to": "lint"
+   },
+   {
+    "from": "build",
+    "label": "needs",
+    "to": "lint"
+   }
+  ],
+  "latest_run": {
+   "duration_seconds": 0.071,
+   "finished_at": "2026-10-31T20:05:22.803768+00:00",
+   "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+   "started_at": "2026-10-31T20:05:22.732877+00:00",
+   "status": "stopped",
+   "summary": "Took 0 s",
+   "trigger": "manual"
+  },
+  "name": "Phone check",
+  "nodes": [
+   {
+    "kind": "bash-command",
+    "label": "build",
+    "node_id": "build"
+   },
+   {
+    "kind": "bash-command",
+    "label": "lint",
+    "node_id": "lint"
+   },
+   {
+    "kind": "bash-command",
+    "label": "report",
+    "node_id": "report"
+   }
+  ],
+  "preview": {
+   "blocking": [],
+   "destructive": [
+    "build: command, filesystem write",
+    "lint: command, filesystem write",
+    "report: command, filesystem write"
+   ],
+   "warnings": []
+  },
+  "project_name": "Notes",
+  "revision": "sha256:f92498e1c333803cdd9c23d6b6f8b9c783f469bc5c4c2a56d298e49adfe32ccc",
+  "run": {
+   "duration_seconds": 0.071,
+   "error": "",
+   "finished_at": "2026-10-31T20:05:22.803768+00:00",
+   "nodes": [
+    {
+     "detail": "",
+     "finished_at": "2026-10-31T20:05:22.802078+00:00",
+     "node_id": "build",
+     "started_at": "",
+     "status": "stopped"
+    },
+    {
+     "detail": "",
+     "finished_at": "",
+     "node_id": "lint",
+     "started_at": "",
+     "status": "skipped"
+    },
+    {
+     "detail": "",
+     "finished_at": "",
+     "node_id": "report",
+     "started_at": "",
+     "status": "skipped"
+    }
+   ],
+   "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+   "started_at": "2026-10-31T20:05:22.732877+00:00",
+   "status": "stopped",
+   "summary": "Took 0 s",
+   "trigger": "manual"
+  },
+  "runs": [
+   {
+    "duration_seconds": 0.071,
+    "finished_at": "2026-10-31T20:05:22.803768+00:00",
+    "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+    "started_at": "2026-10-31T20:05:22.732877+00:00",
+    "status": "stopped",
+    "summary": "Took 0 s",
+    "trigger": "manual"
+   }
+  ],
+  "status": "stopped",
+  "updated_at": "2026-10-31T20:05:22.665477+00:00",
+  "workflow_id": "phone-check"
+ },
+ "resume.refused": {
+  "code": "unavailable",
+  "detail": "Resuming Rattish workflow runs is not supported yet. Start a new run instead.",
+  "ok": false
+ },
+ "run.answer": {
+  "digest": "e4f47dd7344b1fad5201740ea6dcb5e6",
+  "message": "Started on your computer.",
+  "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+  "status": "running",
+  "workflow_id": "phone-check"
+ },
+ "run.stale": {
+  "code": "conflict",
+  "detail": "This workflow changed on your computer. Review it again before running.",
+  "ok": false
+ },
+ "stop.answer": {
+  "digest": "3f9866f8aadd5b619d0728575e77f527",
+  "message": "Stopping this run.",
+  "run_id": "20261031T200522732490Z-c725c1aa2c5e",
+  "status": "stopping",
+  "workflow_id": "phone-check"
+ }
+}

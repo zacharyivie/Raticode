@@ -20,7 +20,10 @@ from gofer.core.provider_preferences import commit_message_preference
 from gofer.ui.commit_message import generate_commit_message
 from gofer.ui.report_theme_generation import generate_report_theme
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links, open_binary_input
+from gofer.utils.logging import get_logger
 from gofer.utils.process import build_subprocess_env, run_subprocess
+
+log = get_logger(__name__)
 
 
 def _validate_stored_job(job: Any, path: Path) -> dict[str, Any]:
@@ -176,7 +179,10 @@ class GenerationJobs:
                             pass
                     self._save(job)
                 self.jobs[job["id"]] = job
-            except (ValueError, KeyError, OSError):
+            except (ValueError, KeyError, OSError) as exc:
+                log.warning(
+                    "Skipping unreadable generation job %s (%s)", path.name, type(exc).__name__
+                )
                 continue
 
     def close(self) -> None:
@@ -320,6 +326,9 @@ class GenerationJobs:
                                 lambda commit: self._prepare_commit(job_id, commit),
                             )
                         except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                            log.warning(
+                                "Auto-commit for generation job %s failed", job_id, exc_info=True
+                            )
                             self._update(
                                 job_id,
                                 status="needs_review",
@@ -329,6 +338,10 @@ class GenerationJobs:
                             return
                 self._update(job_id, status="completed", result=result, progress="")
             except Exception as exc:
+                if self.stopped.is_set():
+                    log.info("Generation job %s was interrupted by shutdown", job_id)
+                else:
+                    log.warning("Generation job %s failed", job_id, exc_info=True)
                 self._update(
                     job_id,
                     status="interrupted" if self.stopped.is_set() else "failed",

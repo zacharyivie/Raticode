@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000186",
+  "id": "10000000-0000-4000-8000-000000000186",
+  "sequence": 186,
+  "type": "desktop.action",
+  "payload": {
+    "op": "selfwork.report.seen",
+    "params": {
+      "updated_at": "2026-11-09T12:30:00+00:00"
+    }
+  }
+}

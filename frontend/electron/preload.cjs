@@ -299,6 +299,9 @@ contextBridge.exposeInMainWorld("goferBrowser", {
   }),
   zoom: (id, direction) => browserAction(id, "zoom", direction === 0 ? { reset: true } : { direction: direction > 0 ? 1 : -1 }),
   mute: (id, muted) => browserAction(id, "mute", { muted: muted === true }),
+  // The media bar: what tabs are playing, and the page's own play, previous and next.
+  mediaControl: (id, command) => browserAction(id, "media-control", { command: typeof command === "string" ? command : "" }),
+  mediaSessions: () => ipcRenderer.invoke("gofer:browser-library", { action: "media-sessions" }),
   toggleDevTools: (id) => browserAction(id, "toggle-devtools"),
   print: (id) => browserAction(id, "print"),
   savePdf: (id) => browserAction(id, "save-pdf"),
@@ -331,10 +334,31 @@ contextBridge.exposeInMainWorld("goferBrowser", {
     action: typeof action === "string" ? action : "",
   }),
   setPolicy: (policy = {}) => ipcRenderer.invoke("gofer:browser-policy", { policy: policy && typeof policy === "object" ? policy : {} }),
+  // Firefox tabs: the studio reports its view, forwards input and draws frames.
+  firefoxView: (id, view = {}) => browserAction(id, "firefox-view", {
+    height: finiteNumber(view.height),
+    scale: finiteNumber(view.scale) || 1,
+    visible: view.visible === true,
+    width: finiteNumber(view.width),
+  }),
+  firefoxInput: (id, events) => browserAction(id, "firefox-input", { events: firefoxInputEvents(events) }),
+  frameAck: (id, seq) => browserAction(id, "frame-ack", { seq: Number.isInteger(seq) ? seq : -1 }),
+  viewDetached: (id) => browserAction(id, "view-detached"),
+  // Signs in from a normal Firefox window, for sites that refuse remote control.
+  firefoxSignIn: (id) => browserAction(id, "firefox-sign-in-window"),
+  engineStatus: () => ipcRenderer.invoke("gofer:browser-library", { action: "engine-status" }),
+  gecko: (action, options = {}) => ipcRenderer.invoke("gofer:gecko", {
+    ...(options && typeof options === "object" && !Array.isArray(options) ? options : {}),
+    action: typeof action === "string" ? action : "",
+  }),
+  onGecko: (callback) => subscribeToBrowserEvent("gofer:gecko-state", callback),
+  onFrame: (callback) => subscribeToBrowserEvent("gofer:browser-frame", callback),
+  onFirefox: (callback) => subscribeToBrowserEvent("gofer:browser-firefox", callback),
   onAgentClose: (callback) => subscribeToBrowserEvent("gofer:browser-agent-close", callback),
   onAgentOpen: (callback) => subscribeToBrowserEvent("gofer:browser-agent-open", callback),
   onCommand: (callback) => subscribeToBrowserEvent("gofer:browser-command", callback),
   onDownloads: (callback) => subscribeToBrowserEvent("gofer:browser-downloads", callback),
+  onMedia: (callback) => subscribeToBrowserEvent("gofer:browser-media", callback),
   onLibraryChanged: (callback) => subscribeToBrowserEvent("gofer:browser-library-changed", callback),
   onOpenFile: (callback) => subscribeToBrowserEvent("gofer:browser-open-file", callback),
   onOpenTab: (callback) => subscribeToBrowserEvent("gofer:browser-open-tab", callback),
@@ -343,6 +367,26 @@ contextBridge.exposeInMainWorld("goferBrowser", {
 });
 
 // Only plain values cross the bridge; credentials go straight to the main process.
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+const FIREFOX_INPUT_TYPES = new Set(["move", "down", "up", "wheel", "keydown", "keyup", "text", "copy", "cut", "focus", "blur", "select-option"]);
+
+// Only the fields each input event needs cross to the main process.
+function firefoxInputEvents(events) {
+  if (!Array.isArray(events)) return [];
+  return events.slice(0, 200).flatMap((item) => {
+    if (!item || !FIREFOX_INPUT_TYPES.has(item.t)) return [];
+    const event = { t: item.t };
+    for (const key of ["x", "y", "dx", "dy", "button", "index"]) if (Number.isFinite(item[key])) event[key] = item[key];
+    if (typeof item.key === "string") event.key = item.key.slice(0, 32);
+    if (typeof item.text === "string") event.text = item.text.slice(0, 20000);
+    return [event];
+  });
+}
+
 function promptResponse(value) {
   if (typeof value === "string") return value.slice(0, 40);
   if (value && typeof value === "object") {
@@ -405,6 +449,9 @@ async function createBrowser(options = {}) {
       ? { history: { index: Number(options.history.index) || 0, entries: options.history.entries.slice(-25) } }
       : {}),
     path: targetPath,
+    ...(options.private === true ? { private: true } : {}),
+    // The browser this tab runs in; without it the default in Settings > Browser.
+    ...(typeof options.engine === "string" && options.engine ? { engine: options.engine.slice(0, 20) } : {}),
     url: typeof options.url === "string" ? options.url : "",
   });
 }

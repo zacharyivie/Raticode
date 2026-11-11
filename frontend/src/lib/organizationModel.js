@@ -182,7 +182,7 @@ export function entity(model, ref) {
     case "kb": { const k = model.knowledge[id]; return k && { type, id, label: k.title, sub: KINDS[k.kind] || "Note", color: `var(--k-${k.kind})` }; }
     case "run": { const r = model.runs[id]; const t = r && model.tickets[r.taskId]; return r && { type, id, label: `Run on ${t?.key || "a ticket"}`, sub: "Run", color: "var(--run)" }; }
     case "claim": { const c = Object.values(model.claimsByTask).flat().find(item => item.id === id) || model.runtime.claims?.[id]; return c && { type, id, label: { check: "Check", quote: "Quote", commit: "Commit", file: "File" }[c.evidence?.kind] || "Claim", sub: "Evidence", color: "var(--done)" }; }
-    case "new": return { type, id, label: { ticket: "New ticket", epic: "New epic", ms: "New milestone", orgms: "New organization milestone", project: "New project", kb: "New note", worker: "New worker", hours: "Working hours" }[id.split(":")[0]] || "New", sub: "New" };
+    case "new": return { type, id, label: { ticket: "New ticket", epic: "New epic", ms: "New milestone", orgms: "New organization milestone", project: "New project", kb: "New note", worker: "New worker", hours: "Working hours", schedule: "Work schedule" }[id.split(":")[0]] || "New", sub: "New" };
     default: return null;
   }
 }
@@ -300,7 +300,7 @@ export function startHint(model, ticket) {
   if (reason === "Assign an employee") return { tone: "you", text: "No worker is assigned, so it won't run. Edit the ticket to assign one." };
   if (reason === "Employee is held") return { tone: "you", text: `${name} is held. Release the hold in their details to let it run.` };
   if (reason === "Waiting for plan approval") return { tone: "you", text: "Waiting for you to approve its plan." };
-  if (reason.startsWith("Scheduled for ")) return { tone: "wait", text: `Scheduled to start ${formatDate(reason.slice(14))}.` };
+  if (reason.startsWith("Scheduled for ")) return { tone: "wait", text: `Scheduled to start ${formatWhen(reason.slice(14))}.` };
   if (reason.startsWith("Queued: ")) return { tone: "wait", text: `${reason.slice(8)}; this one starts after.` };
   if (reason.startsWith("Waiting for monthly run capacity") || reason.startsWith("Monthly ")) return { tone: "you", text: `${reason}. Raise the limit or wait for next month.` };
   const yours = /cancelled|no longer exists|Reassign|Move the ticket|Reopen|reopen|Raise|unavailable|outside|Assign/.test(reason);
@@ -319,6 +319,8 @@ export function moveRule(ticket, column) {
   if (ticket.column === "running") return { ok: false, reason: "This ticket is running. Pause the organization or wait for the run to finish." };
   if (column === "review") return { ok: false, reason: "Work moves to Review when a run finishes." };
   if (column === "done") return ticket.column === "review" ? { ok: true, review: true } : { ok: false, reason: "Only reviewed work moves to Done. Open the ticket to review it first." };
+  // Sending work back goes through Request changes, which records the review and clears its claims.
+  if (ticket.column === "review") return { ok: false, reason: "Open it to request changes, so the review is recorded." };
   if (ticket.status === "done" || ticket.status === "blocked") return { ok: true, reopen: true, status: column };
   return { ok: true, status: column };
 }
@@ -377,6 +379,12 @@ export function layoutGraph(nodes, edges, width, height, positions, topicOf) {
 }
 
 export { shortTitle };
+
+// A date with its time, in your own time zone.
+export function formatWhen(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
 
 export function formatDate(value) {
   if (!value) return "";
@@ -453,7 +461,8 @@ export function describeHours(hours) {
 export function zoneTime(value, timezone) {
   if (!value) return "";
   try {
-    return new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: timezone }).format(new Date(value));
+    // The zone is named, since the organization's hours may not be in your own time zone.
+    return new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: timezone, timeZoneName: "short" }).format(new Date(value));
   } catch { return formatDate(value); }
 }
 
@@ -463,4 +472,20 @@ export function hoursStatus(model) {
   if (!state || state.mode !== "scheduled") return null;
   if (state.open) return { open: true, text: state.closesAt ? `Working hours until ${zoneTime(state.closesAt, state.timezone)}` : "Working hours" };
   return { open: false, text: state.opensAt ? `Off hours until ${zoneTime(state.opensAt, state.timezone)}` : "Off hours" };
+}
+
+// The configuration without one worker. Their reports move up to their manager, and what they
+// owned, managed or led is left without an owner, so the saved configuration stays valid.
+export function removeWorker(config, id) {
+  const leaving = config.employees.find(e => e.id === id);
+  const without = (item, key) => { if (item[key] !== id) return item; const copy = { ...item }; delete copy[key]; return copy; };
+  return {
+    ...config,
+    employees: config.employees.filter(e => e.id !== id).map(e => (e.reportsTo === id ? { ...e, reportsTo: leaving?.reportsTo || null } : e)),
+    projects: (config.projects || []).map(item => without(item, "owner")),
+    teams: (config.teams || []).map(item => without(item, "manager")),
+    epics: (config.epics || []).map(item => (item.owner === id ? { ...item, owner: null } : item)),
+    goalRecords: (config.goalRecords || []).map(item => (item.owner === id ? { ...item, owner: null } : item)),
+    executionTargets: (config.executionTargets || []).map(item => ({ ...item, employees: item.employees.filter(e => e !== id) })).filter(item => item.employees.length),
+  };
 }

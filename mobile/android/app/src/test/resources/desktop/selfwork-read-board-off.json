@@ -1,0 +1,63 @@
+{
+ "settings": {
+  "enabled": true,
+  "max_threads": 1,
+  "auto_pull_backlog": false,
+  "idle_minutes": 15,
+  "revision": 1
+ },
+ "limits": {
+  "max_threads_min": 1,
+  "max_threads_max": 16
+ },
+ "state": {
+  "mode": "waiting",
+  "active_threads": 0,
+  "thread_limit": 1,
+  "todo_remaining": 0,
+  "proposals_waiting": 0,
+  "assigned_projects": 1,
+  "outside_projects": 0,
+  "board_enabled": false,
+  "activity": [],
+  "last_prompt_at": "",
+  "starts_at": "",
+  "detail": "Out of work. Research is done for now, and with the board off there are no tickets to take on."
+ },
+ "report": {
+  "since": "2026-11-10T13:59:12.977690+00:00",
+  "updated_at": "2026-11-10T13:59:13.497088+00:00",
+  "unseen": true,
+  "summary": "Researched 1 project.",
+  "tickets_added": [],
+  "work_done": [
+   {
+    "ticket_id": "",
+    "title": "Research new features for project",
+    "state": "researched",
+    "summary": "Found 1 idea: Voice shortcuts.",
+    "thread_id": "6dafa9ca-9115-4a39-885f-c548fde5379a",
+    "at": "2026-11-10T13:59:13.150334+00:00"
+   }
+  ],
+  "duplicates_merged": [],
+  "notes": [
+   {
+    "text": "Started after 15 quiet minutes with the board off: 1 research run, no tickets.",
+    "at": "2026-11-10T13:59:12.977690+00:00"
+   },
+   {
+    "text": "I finished “Research reliability problems in project” but couldn't read its ideas.",
+    "at": "2026-11-10T13:59:13.324478+00:00"
+   },
+   {
+    "text": "I finished “Research speed and upkeep in project” but couldn't read its ideas.",
+    "at": "2026-11-10T13:59:13.491915+00:00"
+   },
+   {
+    "text": "Out of work. Research is done for now, and with the board off there are no tickets to take on.",
+    "at": "2026-11-10T13:59:13.497088+00:00"
+   }
+  ]
+ }
+}

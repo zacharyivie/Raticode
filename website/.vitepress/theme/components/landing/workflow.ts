@@ -38,6 +38,7 @@ node review:
 node open-pr:
   type: bash-command
   command: gh pr create --fill
+  needs: run-tests
   finish: pass`
 
 export interface GraphNode {

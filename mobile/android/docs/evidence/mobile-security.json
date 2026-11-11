@@ -1,0 +1,790 @@
+{
+  "milestone": "m-security",
+  "base_revision": "edf6da3283fb25904df26477155d2e912e33e3f2",
+  "date": "2026-09-19",
+  "scope": "Local import cancellation, Back/IME, build dependencies. No live peer or external review claim.",
+  "environment": {
+    "JAVA_HOME": "/home/doonk/.local/opt/jdk-21",
+    "ANDROID_HOME": "/home/doonk/Android/Sdk",
+    "ANDROID_SDK_ROOT": "/home/doonk/Android/Sdk",
+    "ANDROID_SERIAL": "emulator-5582",
+    "RATICODE_DESKTOP_PROBE_ROOT": "/home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/integration-f58b41c1dd704380af0b9482ced7dfb5"
+  },
+  "desktop_revision": "e5f46649a2f6be0cd85e41c013397d8cebe136a5",
+  "desktop_sources": {
+    "scripts/device_tls_probe.py": "783f782acd4bc9bc1912113f64f0c044caceb337e58bd9a2fb8db4277d81a0df",
+    "src/gofer/devices/tls.py": "81a533ae8cf863de2ff79bec5e581b499ed9a22f92777d3a8079bc858b65950c"
+  },
+  "protocol_v2_hashes": {
+    "protocol/v2/SHA256SUMS": "f3faf4bb173b6fe4238530cf271c9fbe647025ce7587195cb1e7401ac9ba8e60",
+    "protocol/v2/event.schema.json": "f4d5d824bd2643fb978e99b3d990234199bda86768fa7dccb97a467ce5655bc1",
+    "protocol/v2/fixtures/approval.required.json": "495c23124b9a55756e0508a0e3e09b76ae3f2b01a0f932a2d6021069a06cd817",
+    "protocol/v2/fixtures/approval.resolve.json": "4d02cee9cf48771c3d45a0dd27f327814b02eed43e52f2a41497ec5c460de5e0",
+    "protocol/v2/fixtures/catalog.request.json": "0ce3a932af54af26af7bd688a4b065534aeb0101061b4c9f7020ce584b2e9670",
+    "protocol/v2/fixtures/catalog.snapshot.json": "34e4d4890ca904cd4fcd340b4f9561651a9ddc393b967e89092c15fcc011888e",
+    "protocol/v2/fixtures/chat.accepted.json": "5dfa385fff1f40c15edb44291cddcc62180ecb4d4d22fd8d20f18017a895802e",
+    "protocol/v2/fixtures/chat.message.json": "09add34e74b623623b6df84ff5bb2e78b63975117f73927b39507604fe16582b",
+    "protocol/v2/fixtures/chat.submit.json": "da79277f89028d07237f01c45bb52354584623c352c51f3183e83200c72bd453",
+    "protocol/v2/fixtures/error.json": "79a69090401559b2578b8d78d8d712c03984c2b60887361acb49c945fbc4edee",
+    "protocol/v2/fixtures/file.offer.json": "724905ba78bd5b2cfa7dbb8106536270e4f223e6923922c899134e0da71bfa05",
+    "protocol/v2/fixtures/file.request.json": "1e426576e0f772fac7494c912bd868ea82d695860e3a31f052aebfabf4819499",
+    "protocol/v2/fixtures/fleet.request.json": "f112e0fde37b1a4b15e1c4a63f656235dc863c8d7e8518c7b745797ca06c8901",
+    "protocol/v2/fixtures/fleet.snapshot.json": "6599988c49a467defd5c1484747f45ffd1e85899c8a1b6ba3b81839b965b905e",
+    "protocol/v2/fixtures/frame.json": "c8a3eba13b94448fa52881d1add67aa664aa262eea12277d7efdf6589447e9b2",
+    "protocol/v2/fixtures/invitation.json": "feaccc5c7d5861d837633ed901bb5f1ae3326403795d9c621c72a485e6556ee0",
+    "protocol/v2/fixtures/job.cancel.json": "d86f81288671c397ef2e1b600619815ef087e8ebcb08dc449f0a20c3b540de42",
+    "protocol/v2/fixtures/job.get.json": "01c472417917fb8e5a891fe4170aa77ef149db4ed0c86ce028d4a53c5ca0eb8c",
+    "protocol/v2/fixtures/job.status.json": "448e1f127447766df748f065999d63a91540e2e9877b27d2151bb6e4c9ae95f2",
+    "protocol/v2/fixtures/job.submit.json": "0fd08ab7c7ff375e525e2ba89279e5f51bdee96878c434312172616ea7533e02",
+    "protocol/v2/fixtures/request.cancel.json": "4e6164e8e7131085ed9bba925bc8c0d0dbad864cab36c87cc4690b353c51c7e2",
+    "protocol/v2/fixtures/request.status.json": "5394623efb7f5f3ce43e8fee9a04eab65ffd9d81e552ed2c191f79285e051425",
+    "protocol/v2/fixtures/session.json": "48fcb4d21148cfaf7cbf840d770779561ae34f6635a76df7eb818f5c589fb2ad",
+    "protocol/v2/fixtures/swarm.snapshot.json": "d116a7893e91d75b26cdbb381757a91fed14d70eb02f0da0f88b0fbe7a2c8327",
+    "protocol/v2/fixtures/sync.request.json": "cf1ccdc2113027a55611d3a526ef98b60c97339c7d7d155f0ee45451a67d742a",
+    "protocol/v2/fixtures/sync.snapshot.json": "52ee8739d782b4f6f61e742fdf8ded21c3e78ace5c0bdb310c102c8774fd8199",
+    "protocol/v2/fixtures/thread.context.update.json": "c81913d26fa37f37a82c7323b6686fe7e393f89b224c6721e9d9f81d0f16c3fc",
+    "protocol/v2/fixtures/thread.create.json": "b8c1719ba59539641a20ed12d4817c0115b51804fdf094a9b30e63ec0978868c",
+    "protocol/v2/fixtures/thread.snapshot.json": "0783552a4f584a1248dfbaa01b0ea5c63f4f2030e80696479066e55fd8b56585",
+    "protocol/v2/frame.schema.json": "2a3235efb8e005cdb1e56a8d196baacb9c072b1bad4e196a3d98785722e7a7e7",
+    "protocol/v2/invitation.schema.json": "31a00f035852dd9651d986cb181922b2e31f7a7c84ac0bf57d8951aaa67f4215",
+    "protocol/v2/session.schema.json": "7bc4e77251d50379ec459cf33aad4c4354e7aa561e08d5e61cdc6e21c8526210"
+  },
+  "commands": [
+    {
+      "argv": [
+        "./gradlew",
+        "assembleDebug",
+        "testDebugUnitTest",
+        "lintDebug",
+        "connectedDebugAndroidTest",
+        "-Pandroid.testInstrumentationRunnerArguments.interop=true"
+      ],
+      "env": {
+        "JAVA_HOME": "/home/doonk/.local/opt/jdk-21",
+        "ANDROID_HOME": "/home/doonk/Android/Sdk",
+        "ANDROID_SDK_ROOT": "/home/doonk/Android/Sdk",
+        "ANDROID_SERIAL": "emulator-5582",
+        "RATICODE_DESKTOP_PROBE_ROOT": "/home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/integration-f58b41c1dd704380af0b9482ced7dfb5"
+      },
+      "exit_code": 0,
+      "log": "artifacts/security/full-checks.log",
+      "jvm": {
+        "tests": 44,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "device": {
+        "tests": 34,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "argv": [
+        "./gradlew",
+        "connectedDebugAndroidTest",
+        "-Pandroid.testInstrumentationRunnerArguments.class=dev.raticode.mobile.DocumentImportTest"
+      ],
+      "env": {
+        "JAVA_HOME": "/home/doonk/.local/opt/jdk-21",
+        "ANDROID_HOME": "/home/doonk/Android/Sdk",
+        "ANDROID_SDK_ROOT": "/home/doonk/Android/Sdk",
+        "ANDROID_SERIAL": "emulator-5582",
+        "RATICODE_DESKTOP_PROBE_ROOT": "/home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/integration-f58b41c1dd704380af0b9482ced7dfb5"
+      },
+      "exit_code": 0,
+      "log": "artifacts/security/import-final.log",
+      "device": {
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "reason": "Strengthened oversize rejection reason and successful subsequent import assertions after full suite."
+    },
+    {
+      "argv": [
+        ".venv-contract/bin/python",
+        "scripts/check-contract.py"
+      ],
+      "exit_code": 0,
+      "log": "artifacts/security/schema.log"
+    }
+  ],
+  "bridge": {
+    "command": [
+      "python3",
+      "scripts/probes/tls-peer-bridge.py",
+      "--desktop-root",
+      "/home/doonk/Projects/Gofer Flow Workflows/workspaces/c5433a2cf44145019e991896acbb7da1-cf3577a5f087cd98/integration-f58b41c1dd704380af0b9482ced7dfb5",
+      "--port",
+      "38644"
+    ],
+    "binding": "127.0.0.1:38644",
+    "device_reverse": "tcp:38643 -> tcp:38644",
+    "public_fixtures_only": true
+  },
+  "advisories": [
+    {
+      "id": "GHSA-2363-cqg2-863c",
+      "url": "https://github.com/advisories/GHSA-2363-cqg2-863c",
+      "updated_at": "2025-09-16T15:06:11Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.jdom:jdom2"
+          },
+          "vulnerable_version_range": "< 2.0.6.1",
+          "first_patched_version": "2.0.6.1",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.jdom:jdom"
+          },
+          "vulnerable_version_range": "<= 2.0.2",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-3677-xxcr-wjqv",
+      "url": "https://github.com/advisories/GHSA-3677-xxcr-wjqv",
+      "updated_at": "2026-01-06T19:46:24Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bitbucket.b_c:jose4j"
+          },
+          "vulnerable_version_range": "< 0.9.6",
+          "first_patched_version": "0.9.6",
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-574f-3g2m-x479",
+      "url": "https://github.com/advisories/GHSA-574f-3g2m-x479",
+      "updated_at": "2026-06-30T19:45:24Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.80.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.80.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.80.1",
+          "first_patched_version": "1.80.2",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.80.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.80.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.80.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-ext-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.78.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-ext-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.78.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-ext-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.78.1",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-ext-debug-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.74",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-ext-debug-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.77",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-ext-debug-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.59, <= 1.77",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk14"
+          },
+          "vulnerable_version_range": "= 1.81.0",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk15to18"
+          },
+          "vulnerable_version_range": "= 1.81.0",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk18on"
+          },
+          "vulnerable_version_range": "= 1.81.0",
+          "first_patched_version": "1.81.1",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk14"
+          },
+          "vulnerable_version_range": "= 1.81.0",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk15to18"
+          },
+          "vulnerable_version_range": "= 1.81.0",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk18on"
+          },
+          "vulnerable_version_range": "= 1.81.0",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.82, <= 1.83",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.82, <= 1.83",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.82, <= 1.83",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.82, <= 1.83",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.82, <= 1.83",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-debug-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.82, <= 1.83",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-9pwp-9qqc-pr26",
+      "url": "https://github.com/advisories/GHSA-9pwp-9qqc-pr26",
+      "updated_at": "2026-09-18T17:36:32Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bc-fips"
+          },
+          "vulnerable_version_range": "< 1.0.2.7",
+          "first_patched_version": "1.0.2.7",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bc-fips"
+          },
+          "vulnerable_version_range": ">= 2.0.0, < 2.0.2",
+          "first_patched_version": "2.0.2",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bc-fips"
+          },
+          "vulnerable_version_range": ">= 2.1.0, < 2.1.3",
+          "first_patched_version": "2.1.3",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk18on"
+          },
+          "vulnerable_version_range": "< 1.85",
+          "first_patched_version": "1.85",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-lts8on"
+          },
+          "vulnerable_version_range": "< 2.73.12",
+          "first_patched_version": "2.73.12",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk15to18"
+          },
+          "vulnerable_version_range": "< 1.85",
+          "first_patched_version": "1.85",
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-c3fc-8qff-9hwx",
+      "url": "https://github.com/advisories/GHSA-c3fc-8qff-9hwx",
+      "updated_at": "2026-04-18T01:06:03Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.74, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.74, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.74, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-j288-q9x7-2f5v",
+      "url": "https://github.com/advisories/GHSA-j288-q9x7-2f5v",
+      "updated_at": "2025-11-05T20:30:33Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.apache.commons:commons-lang3"
+          },
+          "vulnerable_version_range": ">= 3.0, < 3.18.0",
+          "first_patched_version": "3.18.0",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "commons-lang:commons-lang"
+          },
+          "vulnerable_version_range": ">= 2.0, <= 2.6",
+          "first_patched_version": null,
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-qp49-qgx5-5m26",
+      "url": "https://github.com/advisories/GHSA-qp49-qgx5-5m26",
+      "updated_at": "2026-09-18T17:37:53Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk18on"
+          },
+          "vulnerable_version_range": "< 1.85",
+          "first_patched_version": "1.85",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bc-fips"
+          },
+          "vulnerable_version_range": "< 1.0.2.7",
+          "first_patched_version": "1.0.2.7",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bc-fips"
+          },
+          "vulnerable_version_range": ">= 2.0.0, < 2.0.2",
+          "first_patched_version": "2.0.2",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bc-fips"
+          },
+          "vulnerable_version_range": ">= 2.1.0, < 2.1.3",
+          "first_patched_version": "2.1.3",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-lts8on"
+          },
+          "vulnerable_version_range": "< 2.73.12",
+          "first_patched_version": "2.73.12",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcprov-jdk15to18"
+          },
+          "vulnerable_version_range": "< 1.85",
+          "first_patched_version": "1.85",
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-r937-wjx7-w2jp",
+      "url": "https://github.com/advisories/GHSA-r937-wjx7-w2jp",
+      "updated_at": "2026-08-12T19:25:24Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.jetbrains.kotlin:kotlin-gradle-plugin"
+          },
+          "vulnerable_version_range": "< 2.4.20-Beta1",
+          "first_patched_version": "2.4.20-Beta1",
+          "vulnerable_functions": []
+        }
+      ]
+    },
+    {
+      "id": "GHSA-wg6q-6289-32hp",
+      "url": "https://github.com/advisories/GHSA-wg6q-6289-32hp",
+      "updated_at": "2026-04-16T21:32:20Z",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcpkix-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.49, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcpkix-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.49, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcpkix-jdk15on"
+          },
+          "vulnerable_version_range": ">= 1.49, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcpkix-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.49, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcpkix-debug-jdk18on"
+          },
+          "vulnerable_version_range": ">= 1.49, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcpkix-debug-jdk15to18"
+          },
+          "vulnerable_version_range": ">= 1.49, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        },
+        {
+          "package": {
+            "ecosystem": "maven",
+            "name": "org.bouncycastle:bcpkix-debug-jdk14"
+          },
+          "vulnerable_version_range": ">= 1.49, < 1.84",
+          "first_patched_version": "1.84",
+          "vulnerable_functions": []
+        }
+      ]
+    }
+  ],
+  "upstream_sources": [
+    {
+      "id": "GHSA-r937-wjx7-w2jp",
+      "source": "https://github.com/JetBrains/kotlin/commit/bf51df665b458fda7c3eaf436c4d88dc119d7ec6",
+      "bytes": 861916
+    },
+    {
+      "id": "GHSA-574f-3g2m-x479",
+      "source": "https://github.com/bcgit/bc-java/commit/701686cb0184cd9ae103c801b3581fdf95c6d4f3",
+      "bytes": 336317
+    },
+    {
+      "id": "GHSA-9pwp-9qqc-pr26",
+      "source": "https://github.com/bcgit/bc-java/commit/2c28b253a44681fbbc562561eab6ad383d2ae558",
+      "bytes": 586087
+    },
+    {
+      "id": "GHSA-c3fc-8qff-9hwx",
+      "source": "https://github.com/bcgit/bc-java/commit/d20cdb8430e09224114fec0179a71859929fcbde",
+      "bytes": 748429
+    },
+    {
+      "id": "GHSA-qp49-qgx5-5m26",
+      "source": "https://github.com/bcgit/bc-java/commit/77454da9b3dcaaa2991412d1c3c1a6e1a338ff84",
+      "bytes": 551688
+    },
+    {
+      "id": "GHSA-wg6q-6289-32hp",
+      "source": "https://github.com/bcgit/bc-java/wiki/CVE%E2%80%902026%E2%80%905588",
+      "bytes": 387310
+    },
+    {
+      "id": "GHSA-j288-q9x7-2f5v",
+      "source": "https://github.com/apache/commons-lang/commit/b424803abdb2bec818e4fbcb251ce031c22aca53",
+      "bytes": 408617
+    },
+    {
+      "id": "GHSA-3677-xxcr-wjqv",
+      "source": "https://bitbucket.org/b_c/jose4j/commits/19a90a64c47bb07c4aa5462f1316d5c293d81fcf",
+      "bytes": 14995
+    },
+    {
+      "id": "GHSA-2363-cqg2-863c",
+      "source": "https://github.com/hunterhacker/jdom/commit/dd4f3c2fc7893edd914954c73eb577f925a7d361",
+      "bytes": 298035
+    }
+  ],
+  "scan": {
+    "endpoint": "https://api.osv.dev/v1/querybatch",
+    "build": 113,
+    "releaseRuntime": 113,
+    "python": 6,
+    "matches_after": 0,
+    "initial_python_pip": "26.1.1 matched; isolated environment upgraded to 26.2.1",
+    "limitations": "Excludes Gradle embedded libraries, SDK binaries, test-only configurations, desktop Python environment and full supply chain certification."
+  },
+  "historical_provenance": {
+    "source": "../77989ae333c1431a993f10f6c501cc37/artifacts/protocol",
+    "files": "artifacts/security/historical preserves initial full-suite and isolated Back/IME failures plus scoped protocol successes byte-for-byte",
+    "current_attempt_failures": [
+      "import-tests-first.log: test harness issues corrected",
+      "device-second.log: Back/IME failure retained",
+      "landscape-third.log: read-only composer did not preserve keyboard; replaced with draft save separation"
+    ]
+  },
+  "remaining_gates": [
+    "Exact candidate and integrated Mobile reviewer approval",
+    "Physical-device testing",
+    "Public-network verification",
+    "Independent cryptographic review",
+    "Remaining pairing, transport, service and product milestones"
+  ],
+  "artifacts": {
+    "artifacts/security/GHSA-2363-cqg2-863c-upstream.html": "638ebfa822288a917c0a79a75badc4170dfc894eb43eb22f9aff215934869085",
+    "artifacts/security/GHSA-2363-cqg2-863c.json": "72dcd57949069efa58a8cbaa53cd296e121e71d25b4a4a3923a8024662f549e8",
+    "artifacts/security/GHSA-3677-xxcr-wjqv-upstream.html": "5b273b7343a07a28d37ef7a33863dd981d812bbb123dca554dd973ea994d4b9e",
+    "artifacts/security/GHSA-3677-xxcr-wjqv.json": "f7e11d6149cf079a4f72fdc5c39de04864de7ebd6ef06100b5cda6e1f44c2cde",
+    "artifacts/security/GHSA-574f-3g2m-x479-upstream.html": "fe3a1be579ec774f337572dd6e920866c5495707986660af756fbf8597bcbf9d",
+    "artifacts/security/GHSA-574f-3g2m-x479.json": "261e04da8127a9a645c0de5e58e2b089cfadc3e33d25b276b5597b1751578efe",
+    "artifacts/security/GHSA-9pwp-9qqc-pr26-upstream.html": "78b40507df307b91dd313c0fea80610e60a69195efa2d1866c37d3e571871e4d",
+    "artifacts/security/GHSA-9pwp-9qqc-pr26.json": "5f415bc0dbbb7936075937ef021f2750e98dae9ded49897df8a9033081be9f0f",
+    "artifacts/security/GHSA-c3fc-8qff-9hwx-upstream.html": "f804367079c9b7bb2c10d72b6ef4a6677af403f4d312bfc5b34615c1b23b3951",
+    "artifacts/security/GHSA-c3fc-8qff-9hwx.json": "633815cfa67b18f3c619c73b3e50fcadf8fcf0cfa0b62e796cb2e42e21adb1eb",
+    "artifacts/security/GHSA-j288-q9x7-2f5v-upstream.html": "f26044e90461140edce6e5c68ed635fff413cf20f9f86a667ecd92a0555791c8",
+    "artifacts/security/GHSA-j288-q9x7-2f5v.json": "5ef1bdd8eeb42119378867a29ea31ba21900198695e3e4860464cbf1d7183129",
+    "artifacts/security/GHSA-qp49-qgx5-5m26-upstream.html": "0b3ceae502f3ad6bb92bde615442379a3e888d4a8f84b494f889ad1994841e9f",
+    "artifacts/security/GHSA-qp49-qgx5-5m26.json": "4435fd2b1711b3f72cddf04855c3ccb65991398e987b427c98d84c7aa2d3f394",
+    "artifacts/security/GHSA-r937-wjx7-w2jp-upstream.html": "0143dad1f4ecc9343152c7926c5a7ef7bb1b2028c671ca4314ff50859b61f6ca",
+    "artifacts/security/GHSA-r937-wjx7-w2jp.json": "b7f8228704c81570cec603ea53fe4538b72eacbc7ba70c1dd36bc78af6b2e901",
+    "artifacts/security/GHSA-wg6q-6289-32hp-upstream.html": "3c7fed4919bbcd96c69b8dd60e8b21668c34fe655ec6804ab55afb888869f8d8",
+    "artifacts/security/GHSA-wg6q-6289-32hp.json": "21c4f7cf9bb025039248228a25a75dbf2605e2ee5fb21716a4b6c5d467c76da4",
+    "artifacts/security/build-first.log": "7d74b08aa18d3237fe5fb430c4b401f01544e385687fc969555c035021daaef3",
+    "artifacts/security/dependencies-before.log": "e10afe5b6752be046ba959fb09ea584732604ca4b4d7618f8700cd73f6439164",
+    "artifacts/security/device/TEST-Swarm_Mobile_Protocol_API36(AVD) - 16-_app-.xml": "abc9913d36ed1f750740d326c669effe8d127228d73246022bb3f09f0f942e82",
+    "artifacts/security/device-second/TEST-Swarm_Mobile_Protocol_API36(AVD) - 16-_app-.xml": "a18703c7cac1236a2bb20f410d5e666f7d81cb6354bc5bc386c59457834c7af4",
+    "artifacts/security/device-second.log": "f78748d013847f42b092bbeda08ca5d73fc73bf9d7f7a08c64149b0fc452174b",
+    "artifacts/security/fixture-bridge.log": "fea80ed020875b47a830a2b59a354cb372a6e3258933b4a7e681a9c9153cc412",
+    "artifacts/security/full-checks.log": "65dbead101167e24c964eda257d0102b11092222d87be9a4f2a4907ffe34d839",
+    "artifacts/security/historical/full-device-initial-failure.log": "ef83c4abfa0960fb500b6092c0aaa837cc1009d7660e0f7cf6dfec6d51fd8ebf",
+    "artifacts/security/historical/full-device-initial-failure.xml": "94e0324b0bfbcfb3695dc2fd3311e3378363012ef94bc2981bd65119b9fd056f",
+    "artifacts/security/historical/landscape-rerun.log": "36fa426a4ebda4231816a31e6f4fa75f69295e55fd7eb01d770830156b9e9b4a",
+    "artifacts/security/historical/landscape-rerun.xml": "c5cd331455a61039f5869e44013da377f40640a7fadb91574909dada8b0be773",
+    "artifacts/security/historical/protocol-device.log": "4dfee1d5936fa33ca3a83d31ccbce9cbdc62ae1abf321ec279793e3adda56584",
+    "artifacts/security/historical/protocol-device.xml": "926f865f6423df0364eea48274d795a1e7fd8afbcc0067c8d8c02f8f994d3223",
+    "artifacts/security/import-final/TEST-Swarm_Mobile_Protocol_API36(AVD) - 16-_app-.xml": "2ed961a1d6c58ddf107abf9cd80df20eb54bc80f24a7d1b25456eef2e49d6468",
+    "artifacts/security/import-final.log": "8aa206f5b5e10fa11b151d04a7e83f211e98fe13cee6b76fc86a1aea85b8fa2e",
+    "artifacts/security/import-tests-first.log": "5aa8a13784554fc40564d5e8fc3eafac99bf06fbcc9c93269db4b5903d49441d",
+    "artifacts/security/inventory.log": "bacd771009df5e1622313f8109ab60e0b9bd5d9882bf77cfeeaa518b6b94372d",
+    "artifacts/security/landscape-fourth.log": "ff7533177813738cc0efa0ad4493c8e67499c7137fecaac1608a4c986b6999c8",
+    "artifacts/security/landscape-third.log": "8eac9d7d8d613b151a4483a4528fcb68466f6d2977c33912004eb075ca56c8bd",
+    "artifacts/security/lint-results-debug.xml": "649cdff27926a98ddd8e75a13957c0b967ba5c21220c47b01e954a4ba338ae7c",
+    "artifacts/security/osv-after.json": "38b7ff43fa295dd0944ce3397abffa2685d846bd9bb7bf009098c3a7ca88046d",
+    "artifacts/security/osv-before-pip-upgrade.json": "9e7c51f0c815692301ba8e4e729f446645513c00c7cbc56f2d33258dd6a0fb0e",
+    "artifacts/security/python-inventory.json": "09f3f2d27b85e47a5245fbf83d62fd949b62156a404422dec1c341aebc3d3f35",
+    "artifacts/security/python-pip-upgrade.log": "0a19aba18c38c7414118dbbfa449c221d10511dc2b860145639ffd8a4d44af2b",
+    "artifacts/security/python-setup.log": "95aa7a2fd8e40a5f6e87868cd0567a2657193bc75d3523a697c6710e18a14eb1",
+    "artifacts/security/resolved-inventory.json": "36781b3d5f7c383b65357c12c28fa087027f8aaacfbcde5b2cd1a6dc9b282ba6",
+    "artifacts/security/schema.log": "ec1c953e73575e86dbad78861abc3e45ae94f1922c8f5a4e8178602194a317f0",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.ProtocolTest.xml": "9a0f9e9528d30ce54cebe75de6a278c7b4618a88321dc7943c70c0c9847214ce",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.WorkspaceTest.xml": "be47b73a04540d314592e00b8f26ab1e64bf4cfabbcefceb15824120a5f0d148",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.protocol.v2.MobileCapabilitiesTest.xml": "4f22c72db870df7b16c8fbf297c804cf7c438227c2ad0b6dfad2386dd5d28e04",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.protocol.v2.OpaqueTlsFramesTest.xml": "34bd1e3d81b5bad848a13cf95f3ffc2b053d3d9a876f24c644e66c68d7b99678",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.protocol.v2.PinnedTlsEngineTest.xml": "219cd5f9c97b791389282b2bd184e8b581fd65a2454bd1090b8d4386fe9f9327",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.protocol.v2.PythonTlsInteropTest.xml": "4f47fd2ec328f8c2efd1666c764ecf6ffa0cb71cc5e739eac64eec8f9d24e77c",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.protocol.v2.SessionBindingTest.xml": "019b1383da75a65f0ef80bd7bb67edd062a2259fd8356c550968d510266a4295",
+    "artifacts/security/unit/TEST-dev.raticode.mobile.protocol.v2.StreamingInteropTest.xml": "cab9b9dd8fd1042614928e05b288e8cbd626934adcede9da64a53c3d9dcc06b7",
+    "artifacts/security/upstream-sources.json": "325bbb6ab73be3dba230c6fb0322e1185b481629f994137325d29725be63231e"
+  }
+}

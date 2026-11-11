@@ -1,0 +1,130 @@
+{
+ "list": {
+  "more": 0,
+  "projects": [
+   {
+    "ahead": 1,
+    "behind": 0,
+    "branch": "dev",
+    "changes": {
+     "conflicts": 0,
+     "staged": 1,
+     "total": 3,
+     "unstaged": 1,
+     "untracked": 1
+    },
+    "detached": false,
+    "fetched_at": "",
+    "head": "fd5dec7f6c03",
+    "last_commit": {
+     "at": "2026-11-04T09:00:00Z",
+     "author": "Ada",
+     "hash": "fd5dec7f6c03",
+     "subject": "Add bar settings"
+    },
+    "name": "Raticode",
+    "operation": "",
+    "project_id": "p1",
+    "state": "ok",
+    "subfolder": "",
+    "upstream": "origin/dev"
+   },
+   {
+    "detail": "This project isn't a Git repository.",
+    "name": "Notes",
+    "project_id": "p2",
+    "state": "not_repository"
+   }
+  ]
+ },
+ "read": {
+  "ahead": 1,
+  "behind": 0,
+  "branch": "dev",
+  "changes": {
+   "conflicts": 0,
+   "staged": 1,
+   "total": 3,
+   "unstaged": 1,
+   "untracked": 1
+  },
+  "commits": [
+   {
+    "at": "2026-11-04T09:00:00Z",
+    "author": "Ada",
+    "hash": "fd5dec7f6c03",
+    "subject": "Add bar settings"
+   },
+   {
+    "at": "2026-11-04T09:00:00Z",
+    "author": "Ada",
+    "hash": "505ad4c73fe8",
+    "subject": "First commit"
+   }
+  ],
+  "detached": false,
+  "fetched_at": "",
+  "files": [
+   {
+    "path": "a.kt",
+    "staged": false,
+    "status": "modified",
+    "unstaged": true
+   },
+   {
+    "path": "loose.txt",
+    "staged": false,
+    "status": "untracked",
+    "unstaged": true
+   },
+   {
+    "path": "new.kt",
+    "staged": true,
+    "status": "added",
+    "unstaged": false
+   }
+  ],
+  "head": "fd5dec7f6c03",
+  "last_commit": {
+   "at": "2026-11-04T09:00:00Z",
+   "author": "Ada",
+   "hash": "fd5dec7f6c03",
+   "subject": "Add bar settings"
+  },
+  "more_files": 0,
+  "more_worktrees": 0,
+  "name": "Raticode",
+  "operation": "",
+  "project_id": "p1",
+  "stashes": 0,
+  "state": "ok",
+  "subfolder": "",
+  "upstream": "origin/dev",
+  "worktrees": [
+   {
+    "branch": "dev",
+    "changes": 3,
+    "current": true,
+    "detached": false,
+    "locked": false,
+    "missing": false,
+    "name": "raticode"
+   },
+   {
+    "branch": "feature",
+    "changes": 0,
+    "current": false,
+    "detached": false,
+    "locked": false,
+    "missing": false,
+    "name": ".worktrees/feature"
+   }
+  ]
+ },
+ "read.not_repository": {
+  "detail": "This project isn't a Git repository.",
+  "name": "Notes",
+  "project_id": "p2",
+  "state": "not_repository"
+ }
+}

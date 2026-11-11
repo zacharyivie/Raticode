@@ -226,6 +226,8 @@ export default function PairedDevices() {
             const peerGrants = grants.filter(grant => grant.device_id === peer.device_id);
             const canCreate = peerGrants.some(grant => grant.allow_thread_create);
             const desktopControl = (status.desktop_control_peers || []).includes(peer.device_id);
+            const canWake = sharing && desktopControl && Boolean(status.wake_computer_available);
+            const wakeComputer = canWake && (status.wake_computer_peers || []).includes(peer.device_id);
             const remoteControl = desktopControl || (status.remote_control_peers || []).includes(peer.device_id);
             const evidence = fleet.find(device => device.device_id === peer.device_id) || {};
             const [tone, label] = peerState(peer);
@@ -256,9 +258,13 @@ export default function PairedDevices() {
                     hint={needsSync || (desktopControl ? "Included with Use Raticode from this phone." : "")}
                     onChange={event => action({ action: "remote_control", device_id: peer.device_id, enabled: event.target.checked })} />
                   <Toggle checked={desktopControl} disabled={busy || !sharing} saving={saving === `desktop_control:${peer.device_id}`} title="Use Raticode from this phone"
-                    description="Also talk to Rem and manage its tasks, run organizations, start swarms, view, run and stop workflows, check usage and change display settings. Work still runs on this computer under its approval policies. Files, terminals, the browser, credentials and agent permissions stay here."
+                    description="Also talk to Rem and manage its tasks, run organizations, start swarms, view, run and stop workflows, check source control, browse and open files in your open projects, check usage and change display settings. Work still runs on this computer under its approval policies. Editing files, files that may hold passwords or keys, terminals, the browser, credentials and agent permissions stay here."
                     hint={needsSync}
                     onChange={event => action({ action: "desktop_control", device_id: peer.device_id, enabled: event.target.checked })} />
+                  <Toggle checked={wakeComputer} disabled={busy || !canWake} saving={saving === `wake_computer:${peer.device_id}`} title="Let this phone wake this computer"
+                    description="Sends this computer's network card hardware address to the phone over the encrypted link. The phone can then send an unencrypted wake signal on your local network. Needs Wake-on-LAN turned on in this computer's firmware, and doesn't work over Tailscale."
+                    hint={!status.wake_computer_available ? "Not available on this system yet." : desktopControl && sharing ? "" : "Turn on Use Raticode from this phone first."}
+                    onChange={event => action({ action: "wake_computer", device_id: peer.device_id, enabled: event.target.checked })} />
                 </div>
               </div>}
               {peer.state === "active" && peer.role === "desktop" && <div className="border-t border-line">

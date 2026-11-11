@@ -10,10 +10,22 @@ export function shareInFlight(key, task) {
   return promise;
 }
 
-export function startPolling(refresh, { interval = 2000, immediate = false, target = window, documentTarget = globalThis.document } = {}) {
+// Aborted requests and an unreachable backend (restarting, or not started yet) are
+// routine for pollers; every poller would report the same restart at once.
+const ROUTINE_POLL_FAILURE = /backend is unavailable|backend isn't reachable|Failed to fetch|NetworkError|Load failed/i;
+
+export function startPolling(refresh, { interval = 2000, immediate = false, target = window, documentTarget = globalThis.document, label = "", warn = (message) => console.warn(message) } = {}) {
   let stopped = false;
   let timer;
   let pending;
+  // A failing poll repeats every few seconds; report each new problem once.
+  let lastFailure = "";
+  const failed = (error) => {
+    const message = error?.message || String(error);
+    if (error?.name === "AbortError" || ROUTINE_POLL_FAILURE.test(message) || message === lastFailure) return;
+    lastFailure = message;
+    warn(`Background refresh${label ? ` of ${label}` : ""} failed: ${message}`);
+  };
   const schedule = (delay) => {
     target.clearTimeout(timer);
     if (!stopped) timer = target.setTimeout(run, delay);
@@ -27,7 +39,7 @@ export function startPolling(refresh, { interval = 2000, immediate = false, targ
       return Promise.resolve();
     }
     const started = Date.now();
-    pending = Promise.resolve().then(refresh).catch(() => {}).finally(() => {
+    pending = Promise.resolve().then(refresh).then(() => { lastFailure = ""; }, failed).finally(() => {
       pending = undefined;
       // Preserve the visible two-second cadence while avoiding overlapping work.
       schedule(Math.max(0, interval - (Date.now() - started)));

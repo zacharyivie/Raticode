@@ -13,11 +13,11 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'Working with Rem', collapsed: false,
-    items: [page('Chat & threads', 'rem/chat'), page('Providers, models & effort', 'rem/providers'), page('Tools, skills & MCP', 'rem/resources'), page('Attachments & dictation', 'rem/attachments'), page('Usage & allowances', 'rem/usage')],
+    items: [page("Rem's home & tasks", 'rem/home'), page('Global board & self-work', 'rem/board'), page('Chat & threads', 'rem/chat'), page('Providers, models & effort', 'rem/providers'), page('Tools, skills & MCP', 'rem/resources'), page('Attachments & dictation', 'rem/attachments'), page('Usage & allowances', 'rem/usage')],
   },
   {
     text: 'Building workflows', collapsed: false,
-    items: [page('Rattish language', 'workflows/rattish'), page('Routes, branches & joins', 'workflows/routes'), page('Inputs, outputs & bindings', 'workflows/inputs'), page('Loops & fan-out', 'workflows/loops'), page('Validation & preflight', 'workflows/validation'), page('Schedules', 'workflows/schedules'), page('File watchers', 'workflows/watchers'), page('Runner queue', 'workflows/runner-queue')],
+    items: [page('Rattish language', 'workflows/rattish'), page('Routes, branches & joins', 'workflows/routes'), page('Inputs, outputs & bindings', 'workflows/inputs'), page('Loops & fan-out', 'workflows/loops'), page('Validation & preflight', 'workflows/validation'), page('Triggers', 'workflows/triggers'), page('Schedules', 'workflows/schedules'), page('File watchers', 'workflows/watchers'), page('Runner queue', 'workflows/runner-queue')],
   },
   {
     text: 'Node reference', collapsed: true,
@@ -35,10 +35,14 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'Teams & devices', collapsed: false,
-    items: [page('Swarms', 'advanced/swarms'), page('Organizations', 'advanced/organizations'), page('Desktop fleet', 'advanced/fleet'), page('Mobile & pairing', 'advanced/mobile'), page('Permissions & local data', 'advanced/security')],
+    items: [page('Swarms', 'advanced/swarms'), page('Organizations', 'advanced/organizations'), page('Desktop fleet', 'advanced/fleet'), page('Permissions & local data', 'advanced/security')],
+  },
+  {
+    text: 'Raticode Mobile', collapsed: false,
+    items: [page('Overview', 'mobile/'), page('Pair & connect', 'mobile/pairing'), page('Rem on the phone', 'mobile/rem'), page('Projects, boards & workflows', 'mobile/workspace'), page('App lock & Child lock', 'mobile/locks')],
   },
   {
     text: 'Reference & help', collapsed: false,
-    items: [page('CLI reference', 'reference/cli'), page('Settings', 'reference/settings'), page('Keyboard shortcuts', 'reference/shortcuts'), page('Troubleshooting', 'reference/troubleshooting')],
+    items: [page('CLI reference', 'reference/cli'), page('CLI command index', 'reference/cli-commands'), page('Rem & tickets from the CLI', 'reference/cli-rem'), page('Workflows, Organizations & more from the CLI', 'reference/cli-headless'), page('Headless backend', 'reference/headless'), page('Settings', 'reference/settings'), page('Keyboard shortcuts', 'reference/shortcuts'), page('Troubleshooting', 'reference/troubleshooting'), page('Support', 'support'), page('Privacy', 'privacy')],
   },
 ]

@@ -13,7 +13,7 @@ import socket
 import struct
 import time
 import urllib.parse
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -1060,3 +1060,41 @@ def test_legacy_registry_gains_stable_generation_without_changing_trust(tmp_path
     assert registry.generation(peer) == generation
     assert registry.ready(peer, pin, "controller") == before
     registry.close()
+
+
+def test_device_refusals_name_their_cause_and_log_once(tmp_path, monkeypatch, caplog):
+    """The phone sync retries every few seconds; one lasting refusal used to log each time."""
+    import logging
+
+    from gofer.ui import server as server_module
+    from tests.unit import test_ui_server as harness
+
+    server = harness._fake_server(tmp_path / "data")
+    reasons = iter(["workspace_history_quota"] * 3 + ["peer_unknown"])
+
+    class Devices:
+        def action(self, body):
+            raise PairingError(next(reasons))
+
+    server.devices = Devices()
+    monkeypatch.setattr(harness, "_fake_server", lambda *_args, **_kwargs: server)
+    monkeypatch.setattr(server_module, "_device_refusals", server_module.RepeatedNotice(600))
+    with caplog.at_level(logging.DEBUG, logger="gofer.ui.server"):
+        answers = [
+            harness._request(tmp_path, "POST", "/api/devices", body={"action": "enable"})
+            for _ in range(4)
+        ]
+    assert [a.status for a in answers] == [400] * 4
+    full, other = cast(dict[str, str], answers[0].json()), cast(dict[str, str], answers[3].json())
+    assert full["code"] == "workspace_history_quota"
+    assert "history is full" in full["error"] and "credential store" not in full["error"]
+    # Other refusals keep the general message.
+    assert other["code"] == "peer_unknown"
+    assert "credential store" in other["error"]
+    refusals = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in refusals] == [
+        (logging.INFO, "Device action enable refused: workspace_history_quota"),
+        (logging.DEBUG, "Device action enable refused: workspace_history_quota"),
+        (logging.DEBUG, "Device action enable refused: workspace_history_quota"),
+        (logging.INFO, "Device action enable refused: peer_unknown"),
+    ]

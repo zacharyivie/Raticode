@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronRight, MessageSquare, Plus, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowLeft, ChevronRight, Hourglass, MessageSquare, Plus, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import { OutcomeGlyph, TaskGlyph, TaskTypeIcon, taskActions, typeLabel } from "./RemHomeParts.jsx";
 import {
-  CREATABLE_TYPES, TASK_TYPES, WEEKDAYS, changesActiveWork, criteriaSummary, describeSchedule, draftTitle, draftToRequest,
-  formatWhen, newTaskDraft, plainMarkdown, projectLabel, runState, scheduleIsEditable, taskActivity, taskMessages, taskRecap,
-  taskToDraft, validateDraft, weekdayShort,
+  CREATABLE_TYPES, TASK_TYPES, WEEKDAYS, afterChoices, afterEditable, changesActiveWork, criteriaSummary, describeSchedule,
+  draftTitle, draftToRequest, formatWhen, newTaskDraft, plainMarkdown, prerequisites, projectLabel, runState, scheduleIsEditable,
+  startsWhen, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, weekdayShort,
 } from "../lib/remHome.js";
+import TaskChecks from "./RemTaskChecks.jsx";
+import { TicketPills } from "./TicketPill.jsx";
+import { taskTickets } from "../lib/ticketMentions.js";
 import { closeTaskSheet, createRemTask, deleteRemTask, openRemThread, openTaskSheet, updateRemTask } from "../lib/remHomeStore.js";
 
 // One task, shown in the Rem sidebar in place of the task list: live status above
 // a small editor with the four task sections plus "Done when". Edits stay local
 // until saved, then go to the server as a revision. The back arrow returns to
 // every task, like leaving a thread.
-export default function TaskSheet({ sheet, tasks, projectOptions, now, messages, onShowMessage, active = true }) {
+export default function TaskSheet({ sheet, tasks, projectOptions, now, messages, onShowMessage, active = true, tickets = null }) {
   const task = sheet.mode === "task" ? tasks.find(item => item.id === sheet.taskId) : null;
   const projects = useMemo(() => [...new Set([task?.project_dir, ...projectOptions].filter(Boolean))], [task?.project_dir, projectOptions]);
   const [baseline, setBaseline] = useState(() => (task ? taskToDraft(task) : newTaskDraft({ project_dir: "" })));
@@ -80,6 +83,7 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
     </header>
     <div className="rem-sheet-scroll">
       {task ? <TaskStatus task={task} activity={activity} now={now} /> : null}
+      {task ? <TaskTickets task={task} tickets={tickets} /> : null}
       {task ? <TaskUpdates messages={taskMessages(messages, task.id)} onShowMessage={onShowMessage} now={now} /> : null}
       <form id="rem-task-form" className="rem-sheet-form" onSubmit={save}>
         <Field label="What should Rem do?" error={errors.prompt} htmlFor="rem-task-prompt">
@@ -100,8 +104,9 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
           </select>
         </Field>
         <Field label="When" error={errors.schedule}>
-          {scheduleIsEditable(draft.schedule) ? <ScheduleFields schedule={draft.schedule} onChange={updateSchedule} isNew={!task} /> : <p className="rem-field-note">{describeSchedule(draft.schedule)}. Ask Rem to change this schedule.</p>}
+          {scheduleIsEditable(draft.schedule) ? <ScheduleFields schedule={draft.schedule} onChange={updateSchedule} isNew={!task} note={startsWhen(draft, !task)} /> : <p className="rem-field-note">{describeSchedule(draft.schedule)}. Ask Rem to change this schedule.</p>}
         </Field>
+        <AfterField value={draft.after || []} tasks={tasks} choices={afterChoices(tasks, task)} editable={afterEditable(task, draft)} started={Boolean(task?.after_started)} onChange={after => update({ after })} />
         <Field label="Done when">
           <Criteria criteria={draft.criteria} onChange={criteria => update({ criteria })} />
         </Field>
@@ -114,7 +119,7 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
       </div> : <>
         {steering ? <p className="rem-sheet-steer"><Sparkles size={13} aria-hidden="true" />Rem will update the running thread with these changes.</p> : null}
         <div className="rem-sheet-actions">
-          <button type="submit" form="rem-task-form" className="rem-button" data-variant="primary" disabled={!dirty || saving}>{saving ? "Saving…" : task ? (steering ? "Save and update" : "Save changes") : draft.schedule.kind === "once" ? "Start task" : "Save task"}</button>
+          <button type="submit" form="rem-task-form" className="rem-button" data-variant="primary" disabled={!dirty || saving}>{saving ? "Saving…" : task ? (steering ? "Save and update" : "Save changes") : draft.schedule.kind === "once" ? ((draft.after || []).length ? "Queue task" : "Start task") : "Save task"}</button>
           {task && dirty ? <button type="button" className="rem-button" onClick={() => { setDraft(baseline); setErrors({}); }}>Discard</button> : null}
           <span className="rem-spacer" />
           {task ? <button type="button" className="rem-button" data-variant="quiet-danger" aria-label="Delete task" title="Delete task" onClick={() => setConfirmDelete(true)}><Trash2 size={14} aria-hidden="true" /></button> : null}
@@ -122,6 +127,16 @@ export default function TaskSheet({ sheet, tasks, projectOptions, now, messages,
       </>}
     </footer>
   </aside>;
+}
+
+// The board tickets this task's runs created, worked on or changed.
+function TaskTickets({ task, tickets }) {
+  const refs = taskTickets(task);
+  if (!refs.length) return null;
+  return <section className="rem-sheet-tickets" aria-labelledby="rem-sheet-tickets-title">
+    <h4 id="rem-sheet-tickets-title">Tickets</h4>
+    <TicketPills refs={refs} index={tickets} limit={12} label="Tickets for this task" />
+  </section>;
 }
 
 function BackToTasks() {
@@ -150,7 +165,27 @@ function Field({ label, error, htmlFor, children }) {
 }
 
 const SCHEDULE_KINDS = [["once", "Once"], ["daily", "Daily"], ["weekly", "Weekly"], ["cron", "Custom"]];
-function ScheduleFields({ schedule, onChange, isNew }) {
+// "Start after": the tasks this one-time task waits for. It starts by itself once every one
+// of them succeeds. Fixed once the task has started.
+function AfterField({ value, tasks, choices, editable, started, onChange }) {
+  const titles = Object.fromEntries(tasks.map(item => [item.id, item.title]));
+  const open = choices.filter(item => !value.includes(item.id));
+  if (!editable && !value.length) return null;
+  return <Field label="Start after" htmlFor={editable ? "rem-task-after" : undefined}>
+    {value.length ? <ul className="rem-after-list" aria-label="Tasks this waits for">{value.map(id => <li key={id}>
+      <Hourglass size={13} aria-hidden="true" />
+      {titles[id] ? <button type="button" className="rem-after-open" title="Open this task" onClick={() => openTaskSheet(id)}>{titles[id]}</button> : <span>A task or run that is no longer listed</span>}
+      {editable ? <button type="button" aria-label={`Stop waiting for ${titles[id] || "this task"}`} title="Remove" onClick={() => onChange(value.filter(item => item !== id))}><X size={13} /></button> : null}
+    </li>)}</ul> : null}
+    {editable && open.length ? <select id="rem-task-after" value="" onChange={event => { if (event.target.value) onChange([...value, event.target.value]); }}>
+      <option value="">{value.length ? "Wait for another task too…" : "Start right away"}</option>
+      {open.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}
+    </select> : null}
+    <p className="rem-field-note">{started ? "Started after these tasks." : editable ? "Waits until each task here finishes successfully, then starts by itself. If one fails or is stopped, it waits for you." : "Waits for these tasks."}</p>
+  </Field>;
+}
+
+function ScheduleFields({ schedule, onChange, isNew, note }) {
   const kind = schedule.kind === "now" ? "once" : schedule.kind;
   return <div className="rem-schedule">
     <div className="rem-segments" role="radiogroup" aria-label="How often">
@@ -164,7 +199,7 @@ function ScheduleFields({ schedule, onChange, isNew }) {
     </div> : null}
     {kind === "daily" || kind === "weekly" ? <label className="rem-inline-field"><span>At</span><input type="time" value={schedule.local_time} onChange={event => onChange({ local_time: event.target.value })} /></label> : null}
     {kind === "cron" ? <label className="rem-inline-field"><span>Cron</span><input className="rem-mono" value={schedule.cron} placeholder="0 9 * * 1" spellCheck={false} onChange={event => onChange({ cron: event.target.value })} /></label> : null}
-    <p className="rem-field-note">{kind === "once" ? (isNew ? "Starts as soon as you save." : "Runs once. Run it again any time.") : `${describeSchedule({ ...schedule, kind })}${schedule.timezone ? ` · ${schedule.timezone.replace(/_/g, " ")}` : ""}`}</p>
+    <p className="rem-field-note">{kind === "once" ? note || (isNew ? "Starts as soon as you save." : "Runs once. Run it again any time.") : `${describeSchedule({ ...schedule, kind })}${schedule.timezone ? ` · ${schedule.timezone.replace(/_/g, " ")}` : ""}`}</p>
   </div>;
 }
 
@@ -200,12 +235,14 @@ function TaskStatus({ task, activity, now }) {
       {run.state !== "queued" && run.state !== "cancelling" ? <ol className="rem-steps" aria-label="Progress">
         {STEPS.map(([key, label], index) => <li key={key} data-state={index < current ? "done" : index === current ? "current" : "next"} aria-current={index === current ? "step" : undefined}>{index === 1 && run.state === "repairing" ? "Fixing" : label}</li>)}
       </ol> : null}
+      {run.state === "repairing" ? <TaskChecks criteria={run.criteria} label="What the review found" /> : null}
       <StatusActions run={run} controls={controls} />
     </section>;
   }
   if (!last) {
-    return <section className="rem-status" aria-label="Schedule" data-tone={activity.tone}>
+    return <section className="rem-status" aria-label={task.dependency ? "Waiting for other tasks" : "Schedule"} data-tone={activity.tone}>
       <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{activity.kind === "idle" ? "Hasn’t run yet" : activity.label}</strong></div>
+      {task.dependency ? <WaitsFor task={task} /> : null}
       <StatusActions controls={controls} />
     </section>;
   }
@@ -214,9 +251,22 @@ function TaskStatus({ task, activity, now }) {
   return <section className="rem-status" aria-label="Last run" data-tone={tone}>
     <div className="rem-status-line"><OutcomeGlyph status={{ ...info, tone, state: last.state, type: task.type }} /><strong>{last.state === "succeeded" ? taskRecap(last.summary_short || info.label) : plainMarkdown(last.summary_short) || info.label}</strong>{last.finished_at ? <small>{formatWhen(last.finished_at, now, { past: true })}</small> : null}</div>
     {criteriaSummary(last.criteria) ? <p className="rem-status-note">{criteriaSummary(last.criteria)}</p> : null}
+    <TaskChecks criteria={last.criteria} label="Checks from the last run" />
     {task.state === "paused" ? <p className="rem-status-note">Schedule paused</p> : task.next_occurrence_at ? <p className="rem-status-note">Next run {formatWhen(task.next_occurrence_at, now)}</p> : null}
     <StatusActions run={last} controls={controls} />
   </section>;
+}
+
+// Each task a waiting task needs, with where it stands. A title opens that task.
+function WaitsFor({ task }) {
+  const items = prerequisites(task);
+  if (!items.length) return null;
+  return <ul className="rem-waits-for" aria-label="Starts after">
+    {items.map(item => <li key={item.task_id} data-tone={item.tone}>
+      <button type="button" className="rem-after-open" onClick={() => openTaskSheet(item.task_id)}>{item.title}</button>
+      <span>{item.label}</span>
+    </li>)}
+  </ul>;
 }
 
 function StatusActions({ run, controls }) {

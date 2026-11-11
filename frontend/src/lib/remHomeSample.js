@@ -40,14 +40,25 @@ function tasks() {
         { id: "c-4", description: "The test passes 20 runs in a row", authored_by: "user" },
         { id: "c-5", description: "Ruff, mypy and the scheduler tests pass", authored_by: "project_rules" },
       ],
-      active_run: { id: "run-flaky-1", state: "repairing", phase_label: "Second pass after review", started_at: ago(6), thread_id: "thread-flaky-worker", verification_thread_id: "thread-flaky-review" },
+      active_run: { id: "run-flaky-1", state: "repairing", phase_label: "Second pass after review", started_at: ago(6), thread_id: "thread-flaky-worker", verification_thread_id: "thread-flaky-review", criteria: [
+        { id: "c-4", description: "The test passes 20 runs in a row", result: "fail", evidence: "Run 14 of 20 timed out waiting for the resume event." },
+        { id: "c-5", description: "Ruff, mypy and the scheduler tests pass", result: "pass", evidence: "ruff, mypy and 42 scheduler tests passed." },
+      ] },
     },
     {
       id: "task-csv-export", revision: 1, state: "enabled", type: "develop", title: "CSV export for Runs",
       prompt: "Add a CSV export button to the Runs list that exports the visible rows.",
       project_dir: PROJECT, schedule: { kind: "once" },
-      acceptance_criteria: [{ id: "c-6", description: "Exported rows match the filtered list", authored_by: "rem_recommended" }],
-      last_run: { id: "run-csv-1", state: "blocked", summary_short: "Needs a test database", finished_at: ago(95), thread_id: "thread-csv-worker" },
+      acceptance_criteria: [
+        { id: "c-6", description: "Exported rows match the filtered list", authored_by: "rem_recommended" },
+        { id: "c-6b", description: "The export test covers an empty list", authored_by: "user" },
+        { id: "c-6c", description: "The button is keyboard reachable", authored_by: "rem_recommended" },
+      ],
+      last_run: { id: "run-csv-1", state: "blocked", summary_short: "Needs a test database", finished_at: ago(95), thread_id: "thread-csv-worker", criteria: [
+        { id: "c-6", description: "Exported rows match the filtered list", result: "fail", evidence: "The export ignores the status filter: with Failed selected, the file still held all 48 rows. " + "Checked runs_export.py and the Runs list filter state; the query builder drops the status clause when the date range is empty. ".repeat(3) },
+        { id: "c-6b", description: "The export test covers an empty list", result: "unknown", evidence: "Not accepted: no project check receipts. The test file exists, but no test run was recorded." },
+        { id: "c-6c", description: "The button is keyboard reachable", result: "pass", evidence: "Tab reaches Export CSV after the filter bar." },
+      ] },
     },
     {
       id: "task-weekly-health", revision: 4, state: "enabled", type: "maintain", title: "Weekly workflow health",
@@ -111,9 +122,57 @@ function messages() {
   ];
 }
 
+// Tasks that start after other tasks: one waiting for a running audit, one held because
+// the task it waits for was blocked, with the chat's hold notice and a queued request.
+function waitingTasks() {
+  const blocked = tasks().find(task => task.id === "task-csv-export");
+  return [
+    {
+      id: "task-cli-audit", revision: 1, state: "enabled", type: "research", title: "Audit the CLI against the app",
+      prompt: "Find where the CLI is out of step with the app and save a cited report.", project_dir: PROJECT, schedule: { kind: "once" },
+      acceptance_criteria: [{ id: "c-a", description: "Lists every gap with evidence", authored_by: "rem_recommended" }],
+      active_run: { id: "run-audit-1", state: "executing", phase_label: "Reading the CLI commands", started_at: ago(12), thread_id: "thread-audit-worker" },
+    },
+    {
+      id: "task-cli-fixes", revision: 1, state: "enabled", type: "develop", title: "Fix the CLI gaps the audit finds",
+      prompt: "Fix every gap in the audit report.", project_dir: PROJECT, schedule: { kind: "once" }, after: ["task-cli-audit"],
+      prerequisites: [{ task_id: "task-cli-audit", title: "Audit the CLI against the app", since: ago(12) }],
+      acceptance_criteria: [{ id: "c-f", description: "Each gap from the report is fixed or explained", authored_by: "rem_recommended" }],
+      active_run: null, last_run: null, recent_runs: [],
+      dependency: { state: "waiting", reason: "Waiting for “Audit the CLI against the app” to finish", prerequisites: [
+        { task_id: "task-cli-audit", title: "Audit the CLI against the app", state: "waiting", reason: "Waiting for “Audit the CLI against the app” to finish", run_id: "run-audit-1", run_state: "executing", retryable: false },
+      ] },
+    },
+    blocked,
+    {
+      id: "task-release-notes", revision: 1, state: "enabled", type: "develop", title: "Write release notes for the export",
+      prompt: "Add the CSV export to the changelog and the website.", project_dir: PROJECT, schedule: { kind: "once" }, after: ["task-csv-export"],
+      prerequisites: [{ task_id: "task-csv-export", title: "CSV export for Runs", since: ago(200) }],
+      acceptance_criteria: [{ id: "c-r", description: "Changelog and website mention the export", authored_by: "rem_recommended" }],
+      active_run: null, last_run: null, recent_runs: [],
+      dependency: { state: "held", reason: "On hold: “CSV export for Runs” was blocked. Retry it, or start this task now.", prerequisites: [
+        { task_id: "task-csv-export", title: "CSV export for Runs", state: "held", reason: "“CSV export for Runs” was blocked", run_id: "run-csv-1", run_state: "blocked", retryable: true },
+      ] },
+    },
+  ];
+}
+
+function waitingMessages() {
+  return [
+    { id: "w-1", role: "user", created_at: ago(14), body: "Audit the CLI. When the audit's done, start up to 4 threads to address all the findings." },
+    { id: "w-2", role: "rem", created_at: ago(13), body: "I’m auditing the CLI now. The fixes start by themselves once the audit succeeds.", work: { task_id: "task-cli-audit", run_id: "run-audit-1", thread_id: "thread-audit-worker" } },
+    { id: "after-held-task-release-notes-1", role: "rem", kind: "task_update", created_at: ago(90), body: "“Write release notes for the export” is on hold: “CSV export for Runs” was blocked. Retry the earlier task, or start this one now from its card.",
+      work: { task_id: "task-release-notes", run_id: "", thread_id: "", title: "Write release notes for the export", type: "develop", state: "held", needs_user: true } },
+    { id: "after-run-plan-1", role: "user", source: "after", created_at: ago(2), body: "Start up to 4 threads to address all the findings.", refers_to: "w-1",
+      referenced: { id: "w-1", role: "user", body: "Audit the CLI. When the audit's done, start up to 4 threads to address all the findings.", created_at: ago(14) },
+      queued_after: [{ task_id: "task-old-audit", title: "Audit the API", run_id: "run-old", thread_id: "thread-old", summary: "Found 6 gaps.", reports: [] }] },
+  ];
+}
+
 export function remHomeScene(scene = "busy") {
   const conversation = { id: "rem-supervisor", provider: "claude_code", model: "claude-opus-5-5", turn_state: scene === "replying" ? "replying" : "idle", turn_label: scene === "replying" ? "Reading earlier messages" : null };
   if (scene === "empty") return { conversation, messages: [], tasks: [] };
+  if (scene === "waiting") return { conversation, messages: waitingMessages(), tasks: waitingTasks() };
   if (scene === "replying") return { conversation, messages: [...messages(), { id: "m-11", role: "user", created_at: ago(0), body: "Remind me Friday to send the release notes." }], tasks: tasks() };
   return { conversation, messages: messages(), tasks: tasks() };
 }

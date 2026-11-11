@@ -16,7 +16,7 @@ app.commandLine.appendSwitch("disable-dev-shm-usage");
 const timer = setTimeout(() => { console.error("Settings devices layout test timed out"); app.exit(1); }, 90000);
 const phone = "11111111-1111-4111-8111-111111111111";
 const state = { enabled: true, experimental_network: true, lan_available: true, rem_ready: true, port: 44233, lan_host: "192.168.1.203",
-  fingerprint: "02".repeat(32), outbound: "idle", grants: [], fleet: [], workspace_peers: [], remote_control_peers: [], desktop_control_peers: [],
+  fingerprint: "02".repeat(32), outbound: "idle", grants: [], fleet: [], workspace_peers: [], remote_control_peers: [], desktop_control_peers: [], wake_computer_peers: [], wake_computer_available: true,
   peers: [{ device_id: phone, name: "Phone", fingerprint: "01".repeat(32), role: "controller", state: "active", last_seen: 1793378953, capabilities: [] }] };
 let vite;
 
@@ -50,7 +50,7 @@ async function main() {
           let raw = "";
           for await (const chunk of request) raw += chunk;
           const body = JSON.parse(raw);
-          const list = { share_workspace: "workspace_peers", remote_control: "remote_control_peers", desktop_control: "desktop_control_peers" }[body.action];
+          const list = { share_workspace: "workspace_peers", remote_control: "remote_control_peers", desktop_control: "desktop_control_peers", wake_computer: "wake_computer_peers" }[body.action];
           if (list) state[list] = body.enabled ? [body.device_id] : [];
           response.end(JSON.stringify(state));
         });

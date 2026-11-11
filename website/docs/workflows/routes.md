@@ -30,12 +30,14 @@ Node left:
   type: write-file
   path: reports/left.txt
   content: Left result
+  needs: prepare
   to: join
 
 Node right:
   type: write-file
   path: reports/right.txt
   content: Right result
+  needs: prepare
   to: join
 
 Node join:
@@ -48,13 +50,13 @@ Node join:
   finish: pass
 ```
 
-The outgoing routes make both branches eligible. The join waits for its declared readiness conditions. Do not use a dependency on an unreachable branch: the compiler checks whether the required node can participate in the activation lineage.
+The outgoing routes make both branches eligible. A route target with no `needs` also runs when the workflow starts, so give each target `needs` on its source to run it only after that source; the compiler warns with `RATTISH_ROUTE_TARGET_AUTO_STARTS` otherwise. The join waits for its declared readiness conditions. Do not use a dependency on an unreachable branch: the compiler checks whether the required node can participate in the activation lineage.
 
 ## Conditional routes
 
 Routes can have `when` predicates and an `otherwise` fallback. All matching conditional routes are eligible. A list is not a first-match switch. `otherwise` matches only when no conditional route from that completion matched; unconditional routes fire independently.
 
-For operation failures, set `allow-fail: true` before routing `when failed`. Otherwise the operation failure ends the workflow rather than following a recovery edge.
+For operation failures, set `allow-fail: true` before routing `when failed`. Without it, the compiler rejects the route as unreachable (`RATTISH_UNREACHABLE_FAILURE_ROUTE`).
 
 ```rattish
 Rattish: 1
@@ -74,12 +76,14 @@ Node record-error:
   type: write-file
   path: reports/status.txt
   content: Could not inspect repository status.
+  needs: check
   finish: fail
 
 Node record-success:
   type: write-file
   path: reports/status.txt
   content: Repository status checked.
+  needs: check
   finish: pass
 ```
 

@@ -4,11 +4,25 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
   - package-ecosystem: npm
     directory: /frontend
     schedule:
       interval: weekly
   - package-ecosystem: uv
     directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gradle
+    directory: /mobile/android
+    schedule:
+      interval: weekly
+    groups:
+      gradle:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /mobile/android/protocol
     schedule:
       interval: weekly

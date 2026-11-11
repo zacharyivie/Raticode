@@ -27,7 +27,15 @@ function installPermissionPolicy(remoteSession, studioSession, getStudio, option
     if (details.mediaType) return details.mediaType === "audio";
     return Array.isArray(details.mediaTypes) && details.mediaTypes.length > 0 && details.mediaTypes.every((type) => type === "audio");
   };
-  studioSession.setPermissionRequestHandler((contents, permission, callback, details) => callback(allowed(contents, permission, details)));
+  studioSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const ok = allowed(contents, permission, details);
+    if (!ok || permission !== "media" || typeof options.systemMicrophone !== "function") return callback(ok);
+    // macOS's own microphone permission (see voice-diagnostics.cjs). A failed check
+    // never blocks the microphone.
+    Promise.resolve()
+      .then(() => options.systemMicrophone())
+      .then((granted) => callback(granted !== false), () => callback(true));
+  });
   studioSession.setPermissionCheckHandler((contents, permission, _origin, details) => allowed(contents, permission, details));
   studioSession.setDevicePermissionHandler(() => false);
 }

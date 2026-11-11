@@ -6,25 +6,26 @@ pageClass: docs-layout
 
 # Settings
 
-Open Settings from the app menu or use the configured shortcut. Search by a control's name to find it across categories.
+Open Settings with **Help > Settings**, the gear (**Open settings**) in the toolbar, or Mod+,. Search by a control's name to find it across categories. **Reset all settings** restores the defaults.
 
 ## Categories
 
 | Category | Controls and related guide |
 | --- | --- |
-| General | Application behavior and file autosave; [editor guide](../studio/editors.md) |
-| Devices | Microphone and, with pairing turned on, paired-device management; [pairing guide](../advanced/mobile.md) |
-| Appearance | App colors and visual preferences; report styling is configured separately under Memory |
-| Editor | Code font, wrapping, indentation, and related editor behavior |
-| Browser | Home and search behavior; [integrated browser](../studio/browser.md) |
-| Terminal | Terminal behavior and appearance; [terminal guide](../studio/terminal.md) |
-| Providers | Provider selection, catalog settings, and supported permission preferences |
+| General | Application data directory, initial sidebar, file autosave, default run target (local or runner queue), checking for updates at startup, and **Delete archived threads** after 7, 30 or 90 days |
+| Devices | Microphone and level, **Dictation** (press or hold), **Send after dictation**, **Speech recognition** (the built-in recognizer on macOS and Windows, **Test speech recognition** on macOS, and **Download offline model** with its progress), and, with pairing turned on, paired phones and computers; [dictation](../rem/attachments.md#dictate-a-message), [pairing](../mobile/pairing.md) |
+| Appearance | **Color theme** and **Reduced motion**; report styling is configured separately under Memory |
+| Editor | Font size, line height, tab size, word wrap, minimap, autosave delay, and whether Markdown and HTML files open in preview or edit mode; [editor guide](../studio/editors.md) |
+| Browser | **Default browser for new tabs** (Raticode (chromium), Raticode (gecko), Firefox, Chrome or Edge), home page, search URL, downloads, and what Rem may do in the browser; [Browser](../studio/browser.md) |
+| Terminal | Shell, font, cursor and scrollback; [terminal guide](../studio/terminal.md) |
+| Providers | Enabled providers, executable overrides, allowed and denied models, defaults, and **Refresh providers**; [provider setup](../setup.md) |
 | Usage | Remaining allowances and usage measured in Raticode; [usage guide](../rem/usage.md) |
-| Rem | Chat and assistant preferences; [chat guide](../rem/chat.md) |
+| Rem | **Self-work** (on or off, max threads, backlog pulling, Rem's projects and the latest report), commit messages, **Tidy voice messages**, default scope, avatar and thoughts, **Swarm access**, **Rem task workers**, **Queue tests and builds**, default resources, and the default and Rem chat provider, model and effort; [Rem's home and tasks](../rem/home.md) |
 | Memory | Second Brain, conversation archive, report output, and report themes |
-| Developer | Feature Preview switches for every experimental feature, plus diagnostic controls |
-| Layout | Workspace and pane presentation |
-| Keybindings | Assign, clear, or restore application shortcuts |
+| Developer | Feature Preview switches for every experimental feature (phone and desktop pairing, Organizations, Swarms, Second Brain), plus diagnostic controls |
+| Layout | Arrangement, which side the project and Rem panes sit on, what the Rem pane shows (threads or Rem's home), terminal location, startup panes, pane sizes and **Reset layout** |
+| Plugins | Which plugins show in the plugin rail and their order, with **Lock plugin order**. **Browser** has no side pane; hiding it removes its icon, and links, Rem's tabs and `Ctrl+J` still open it |
+| Keybindings | Assign, clear, or restore application shortcuts; [shortcuts](./shortcuts.md) |
 
 Availability can depend on the platform, enabled feature flags, and installed provider capabilities. Use the labels in your installed app rather than assuming every development feature is in the current public build.
 

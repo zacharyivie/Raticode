@@ -1,21 +1,31 @@
 """Using Raticode from a phone: opt-in, path-free results and desktop-owned actions."""
 
 import base64
+import errno
 import hashlib
 import json
+import logging
+import re
+import secrets
+import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
 from gofer.devices import desktop_control as module
+from gofer.devices import wake
+from gofer.devices.control import DeviceControl
+from gofer.devices.registry import PairingError
 from gofer.devices.remote_control import swarm_wire_id
 from gofer.ui.organizations import OrganizationManager
+from gofer.ui.rem_kanban import add_report, new_ticket, put_ticket, read_tickets
+from tests.unit.test_device_application import TestSecrets, event
 from tests.unit.test_device_application import application as application
-from tests.unit.test_device_application import event
 from tests.unit.test_device_parity import parity
 from tests.unit.test_device_remote_control import Swarms
 from tests.unit.test_rem_home import home as home
@@ -306,6 +316,7 @@ def test_work_threads_reach_the_phone_with_thoughts_grouped_like_the_desktop(pho
         thought(7, kind="summary", title="Summary", body="Tests pass now."),
         thought(8, kind="summary", body="Tokens used: 1,234"),
         {"id": "done", "role": "assistant", "kind": "final", "body": report},
+        {"id": "mine", "role": "user", "sender": "user", "body": "Also check the loading state"},
         thought(9, id="late", kind="tool", phase="start", status="running", title="Read"),
     ]
     app.desktop.rem.store.thread = lambda identifier: {
@@ -318,8 +329,11 @@ def test_work_threads_reach_the_phone_with_thoughts_grouped_like_the_desktop(pho
         ("ask", ""),
         ("w1", "thoughts"),
         ("done", "final"),
+        ("mine", ""),
         ("w9", "thoughts"),
     ]
+    # Instructions say who wrote them; replies and thought groups don't.
+    assert [m.get("sender") for m in thread["messages"]] == ["rem", None, None, "user", None]
     group = thread["messages"][1]
     # Start, update and result records of one step merge; the memory note doesn't split the run.
     assert group["count"] == 4 and group["body"] == "Worked through 4 steps."
@@ -333,7 +347,7 @@ def test_work_threads_reach_the_phone_with_thoughts_grouped_like_the_desktop(pho
     assert "SECRET" not in json.dumps(thread) and "hidden" not in json.dumps(thread)
     # The final report arrives whole instead of cut at 4,000 characters.
     assert thread["messages"][2]["body"] == report and thread["earlier"] == 0
-    assert thread["messages"][3]["steps"][0]["status"] == "running"
+    assert thread["messages"][4]["steps"][0]["status"] == "running"
 
 
 def test_unexpected_failures_still_answer_the_request(phone, monkeypatch):
@@ -1256,6 +1270,42 @@ def test_rem_home_carries_rich_results_and_live_progress(phone):
     assert send("desktop.read", "overview")["value"]["rich_results"] is True
 
 
+def test_rem_task_lists_each_check_of_the_newest_run_with_its_reason(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    checks = [
+        {"id": "a", "description": "Tests pass", "result": "fail", "evidence": "x" * 5000},
+        {"id": "b", "description": "Docs", "result": "unknown", "evidence": "Not accepted."},
+        {"id": "c", "description": "Lint", "result": "pass", "evidence": "ruff passed"},
+        {"id": "d", "result": "weird"},
+        "not a check",
+    ]
+    last = {"id": "run1", "state": "blocked", "summary_short": "Needs you", "criteria": checks}
+    rem.store.task.update(active_run=None, last_run=last, recent_runs=[last, {**last, "id": "r0"}])
+
+    task = send("desktop.read", "rem.task", {"task_id": rem.store.task["id"]})["value"]
+    details = task["last_run"]["criteria"]
+    assert [(c["id"], c["description"], c["result"]) for c in details] == [
+        ("a", "Tests pass", "fail"),
+        ("b", "Docs", "unknown"),
+        ("c", "Lint", "pass"),
+        # Unknown outcomes and missing descriptions arrive as unknown and empty.
+        ("d", "", "unknown"),
+    ]
+    assert len(details[0]["evidence"]) == 1500 and details[1]["evidence"] == "Not accepted."
+    assert task["last_run"]["checks"] == {"passed": 1, "failed": 1, "total": 4}
+    assert task["active_run"] is None
+    # Older runs and the polled task list keep their counts only.
+    assert all("criteria" not in run for run in task["runs"])
+    home = send("desktop.read", "rem.home")["value"]
+    assert "criteria" not in home["tasks"][0]["last_run"]
+
+    rem.store.task.update(last_run={**last, "criteria": [{"id": "a", "result": "pass"}] * 60})
+    task = send("desktop.read", "rem.task", {"task_id": rem.store.task["id"]})["value"]
+    assert len(task["last_run"]["criteria"]) == 40
+
+
 def test_source_previews_are_fetched_by_the_desktop(phone, monkeypatch):
     app, peer, _, send = phone
     png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
@@ -1518,6 +1568,436 @@ def test_phone_alerts_cover_only_its_own_requests_and_their_tasks(phone, home):
     assert send("desktop.read", "rem.notices", {"after": 2})["value"]["notices"] == []
 
 
+ALL_ALERTS = ["needs_you", "finished", "proposals"]
+
+
+def alerting_phone(phone: Any, home: Any) -> Any:
+    """A phone allowed to use this desktop, with the real Rem home behind it."""
+    app, peer, context, send = phone
+    app.desktop.enable(peer, True)
+    app.desktop.rem = home
+    return app, peer, context, send
+
+
+def research_round(home, session: str, *titles: str) -> None:
+    """Self-work ingesting one research pass of the round ``session``."""
+    run = {
+        "id": str(uuid4()),
+        "worker_result": "```json\n"
+        + json.dumps({"proposals": [{"title": t} for t in titles], "duplicates": []})
+        + "\n```",
+    }
+    record = {"title": "Research", "target": "/project", "session_id": session}
+    with home.store.connect() as db:
+        home.self_work._ingest(db, run, record, [], {"/project"})
+
+
+def check_phone_can_read(answer: dict[str, Any]) -> None:
+    """What the phone's parser relies on, and only ever keeps."""
+    assert 0 < len(answer["mark"]) <= 256
+    for notice in answer["notices"]:
+        assert notice["kind"] in {"reply", "task_update", "proposals", "organization"}
+        assert notice.get("reason", "needs_you") in ALL_ALERTS
+        assert 0 < len(notice["id"]) <= 128 and len(notice["body"]) <= 1500
+
+
+def test_alert_filter_is_advertised_and_checked(phone, home):
+    app, peer, _, send = alerting_phone(phone, home)
+    assert send("desktop.read", "overview")["value"]["rem_notices_filter"] is True
+    bad_lists: list[Any] = [
+        [],
+        None,
+        "needs_you",
+        ["sometimes"],
+        [1],
+        [["needs_you"]],
+        ["needs_you", "needs_you"],
+    ]
+    for bad in bad_lists:
+        assert send("desktop.read", "rem.notices", {"include": bad})["code"] == "invalid"
+    for bad in (5, None, "", "abc", "n1.1", "n1.1.2.3", "n1.a.2", "n2.1.2", "x" * 257):
+        read = send("desktop.read", "rem.notices", {"include": ["finished"], "mark": bad})
+        assert read["code"] == "invalid"
+    filtered = {"include": ["finished"], "after": 0, "extra": True}
+    assert send("desktop.read", "rem.notices", filtered)["code"] == "invalid"
+    assert send("desktop.read", "rem.notices", {"include": ["finished"], "after": "1"})["code"] == (
+        "invalid"
+    )
+
+    # A phone without the filter sends what it always did and gets what it always got.
+    plain = send("desktop.read", "rem.notices")["value"]
+    assert set(plain) == {"cursor", "notices", "skipped", "more", "digest"}
+    plain = send("desktop.read", "rem.notices", {"after": 0})["value"]
+    assert set(plain) == {"cursor", "notices", "skipped", "more", "digest"}
+    # A field outside ``params`` is an unknown event field, refused as it always was.
+    replies = app.handle(
+        peer,
+        event(
+            "desktop.read",
+            900,
+            thread_id=None,
+            payload={"op": "rem.notices", "params": {}, "include": ALL_ALERTS},
+        ),
+    )
+    refused = [r["payload"] for r in replies if r["type"] == "error"]
+    assert len(refused) == 1 and refused[0]["retryable"] is False
+    assert not [r for r in replies if r["type"] == "desktop.result"]
+    app.desktop.rem = None
+    assert send("desktop.read", "overview")["value"]["rem_notices_filter"] is False
+
+
+def test_alert_filter_covers_tasks_from_any_source(phone, home):
+    app, peer, _, send = alerting_phone(phone, home)
+    store = home.store
+
+    def update(identity: str, body: str, *, state: str, needs_user: bool = False) -> None:
+        work = {"task_id": f"task-{identity}", "title": "Desk job", "state": state}
+        with store.connect() as db:
+            store.message(
+                db,
+                body,
+                identity=identity,
+                kind="task_update",
+                work={**work, "needs_user": needs_user},
+            )
+
+    start = send("desktop.read", "rem.notices", {"include": ALL_ALERTS})["value"]
+    assert start["notices"] == [] and start["more"] is False and start["mark"]
+    # What this phone asked for keeps the old rule: it counts, with no reason.
+    request = str(uuid4())
+    app.desktop.db.execute(
+        "INSERT INTO device_rem_requests(peer, request) VALUES(?,?)", (peer, request)
+    )
+    with store.connect() as db:
+        store.message(db, "Please check", identity=request, role="user")
+        store.message(db, "Own answer", identity=f"reply-{request}")
+    update(
+        "n-1",
+        "Waiting on [the notes](</home/me/a b.md>) in /home/me/x/y.txt, see https://example.com/a/b",
+        state="blocked",
+        needs_user=True,
+    )
+    update("f-1", "All done.", state="succeeded")
+    update("f-2", "It failed.", state="failed")
+    update("skip-1", "Cancelled by you.", state="cancelled")
+    update("skip-2", "Checking the saved thread.", state="executing")
+    after = start["cursor"]
+    read = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": after, "include": ALL_ALERTS, "mark": start["mark"]},
+    )["value"]
+    check_phone_can_read(read)
+    assert [(n["id"], n.get("reason")) for n in read["notices"]] == [
+        (f"reply-{request}", None),
+        ("n-1", "needs_you"),
+        ("f-1", "finished"),
+        ("f-2", "finished"),
+    ]
+    assert read["notices"][1]["needs_user"] is True
+    assert read["notices"][1]["body"] == (
+        "Waiting on the notes in y.txt, see https://example.com/a/b"
+    )
+    assert "/home" not in json.dumps(read["notices"])
+
+    # Only the switches that are on count, and a task waiting on the user isn't finished.
+    only = send("desktop.read", "rem.notices", {"after": after, "include": ["needs_you"]})["value"]
+    assert [n["id"] for n in only["notices"]] == [f"reply-{request}", "n-1"]
+    only = send("desktop.read", "rem.notices", {"after": after, "include": ["finished"]})["value"]
+    assert [n["id"] for n in only["notices"]] == [f"reply-{request}", "f-1", "f-2"]
+    # Without a filter, work started elsewhere stays on the desktop as before.
+    plain = send("desktop.read", "rem.notices", {"after": after})["value"]
+    assert [n["id"] for n in plain["notices"]] == [f"reply-{request}"]
+    assert "mark" not in plain and "reason" not in plain["notices"][0]
+
+
+def test_self_work_updates_in_chat_do_not_alert_a_second_time(phone, home):
+    """Self-work's own alerts cover its tickets; its chat updates must not repeat them."""
+    app, peer, _, send = alerting_phone(phone, home)
+    store = home.store
+    start = send("desktop.read", "rem.notices", {"include": ALL_ALERTS})["value"]
+    with store.connect() as db:
+        for identity, extra in (("self", {"self_work": "ticket"}), ("asked", {})):
+            store.message(
+                db,
+                "Finished REM-1.",
+                identity=identity,
+                kind="task_update",
+                work={"task_id": f"task-{identity}", "title": "Job", "state": "succeeded", **extra},
+            )
+    read = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": start["cursor"], "include": ALL_ALERTS, "mark": start["mark"]},
+    )["value"]
+    assert [n["id"] for n in read["notices"]] == ["asked"]
+
+
+def test_rem_home_carries_the_board_tickets_named_in_chat(phone, home):
+    app, peer, _, send = alerting_phone(phone, home)
+    with home.store.connect() as db:
+        created = new_ticket(db, title="Fix login", status="todo")
+        put_ticket(db, created)
+        home.store.message(db, f"Started REM-{created['number']}; REM-404 isn't real.")
+    tickets = send("desktop.read", "rem.home")["value"]["tickets"]
+    key = f"REM-{created['number']}"
+    assert list(tickets) == [key]
+    assert tickets[key]["title"] == "Fix login" and tickets[key]["ticket_id"] == created["id"]
+    assert tickets[key]["status"] == "todo" and tickets[key]["scope"] == "rem"
+
+
+def test_alert_filter_reports_each_self_work_round_once(phone, home):
+    app, peer, _, send = alerting_phone(phone, home)
+    include = {"include": ALL_ALERTS}
+    research_round(home, "before", "From before the switch")
+    first = send("desktop.read", "rem.notices", include)["value"]
+    # The first filtered read only sets the position: nothing from before alerts.
+    assert first["notices"] == [] and first["mark"].startswith("n1.")
+    cursor = first["cursor"]
+
+    def read(mark: str, names: list[str] | None = None) -> dict[str, Any]:
+        params = {"after": cursor, "include": names or ALL_ALERTS, "mark": mark}
+        answer: dict[str, Any] = send("desktop.read", "rem.notices", params)["value"]
+        return answer
+
+    research_round(home, "round-1", "First idea", "Second idea")
+    research_round(home, "round-1", "Third idea")
+    one = read(first["mark"])
+    check_phone_can_read(one)
+    assert [(n["id"], n["kind"], n["reason"]) for n in one["notices"]] == [
+        ("self-work-round-round-1", "proposals", "proposals")
+    ]
+    assert one["notices"][0]["body"] == "3 proposals waiting for your approval."
+    assert one["notices"][0]["title"] == "Self-work proposals"
+    assert "First idea" not in json.dumps(one["notices"])
+
+    # The same round keeps its ID when it adds more; a new round is its own item.
+    research_round(home, "round-1", "Fourth idea")
+    again = read(one["mark"])
+    assert [n["id"] for n in again["notices"]] == ["self-work-round-round-1"]
+    assert again["notices"][0]["body"] == "4 proposals waiting for your approval."
+    research_round(home, "round-2", "Fifth idea")
+    next_round = read(again["mark"])
+    assert [n["id"] for n in next_round["notices"]] == ["self-work-round-round-2"]
+
+    # A round nothing is left waiting from doesn't alert.
+    research_round(home, "round-3", "Decided idea")
+    with home.store.connect() as db:
+        tickets = read_tickets(db)
+        for ticket in tickets:
+            if ticket["title"] == "Decided idea":
+                ticket["proposal"]["state"] = "approved"
+                put_ticket(db, ticket)
+    assert read(next_round["mark"])["notices"] == []
+
+    # The switch being off leaves the round out, but the position still moves past it.
+    research_round(home, "round-4", "Unwanted idea")
+    filtered = read(next_round["mark"], ["needs_you"])
+    assert filtered["notices"] == []
+    assert read(filtered["mark"], ALL_ALERTS)["notices"] == []
+    # A position past a cleared report starts from now.
+    gone = send("desktop.read", "rem.notices", {**include, "after": cursor, "mark": "n1.9999.-"})[
+        "value"
+    ]
+    assert gone["notices"] == [] and gone["mark"] == read(filtered["mark"])["mark"]
+
+
+def test_alert_filter_reports_self_work_tickets_outside_the_chat(phone, home):
+    app, peer, _, send = alerting_phone(phone, home)
+    store = home.store
+    with store.connect() as db:
+        for title, status in (("Stuck", "blocked"), ("Shipped", "done"), ("Moved on", "todo")):
+            put_ticket(db, new_ticket(db, title=title, status=status))
+        tickets = {t["title"]: t for t in read_tickets(db)}
+    start = send("desktop.read", "rem.notices", {"include": ALL_ALERTS})["value"]
+    with store.connect() as db:
+        add_report(
+            db, "work_done", ticket_id=tickets["Stuck"]["id"], title="Stuck", state="blocked"
+        )
+        add_report(
+            db, "work_done", ticket_id=tickets["Shipped"]["id"], title="Shipped", state="done"
+        )
+        add_report(
+            db, "work_done", ticket_id=tickets["Moved on"]["id"], title="Moved on", state="blocked"
+        )
+        add_report(db, "work_done", ticket_id="", title="Research pass", state="blocked")
+        add_report(
+            db,
+            "work_done",
+            ticket_id=tickets["Stuck"]["id"],
+            title="Stopped",
+            state="blocked",
+            stopped=True,
+        )
+    read = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": start["cursor"], "include": ALL_ALERTS, "mark": start["mark"]},
+    )["value"]
+    check_phone_can_read(read)
+    assert [(n["title"], n["kind"], n["reason"], n["needs_user"]) for n in read["notices"]] == [
+        ("Stuck", "organization", "needs_you", True),
+        ("Shipped", "organization", "finished", False),
+    ]
+    assert read["notices"][0]["body"] == "“Stuck” needs you."
+    # Reading again from the new position reports nothing twice.
+    assert (
+        send(
+            "desktop.read",
+            "rem.notices",
+            {"after": start["cursor"], "include": ALL_ALERTS, "mark": read["mark"]},
+        )["value"]["notices"]
+        == []
+    )
+
+
+def test_alert_filter_reports_organization_tasks(phone, home, tmp_path):
+    app, peer, context, send = alerting_phone(phone, home)
+
+    async def stream(**_: Any) -> Any:
+        if False:
+            yield {}
+
+    manager = OrganizationManager(tmp_path / "orgs", stream=stream, start_runtime=False)
+    root = context["projects"][0]["root"]
+    try:
+        app.desktop.organizations = manager
+        org = manager.call(
+            root,
+            "user",
+            {
+                "action": "create",
+                "params": {
+                    "config": {
+                        "name": "Eng",
+                        "projectRoots": [root],
+                        "employees": [{"id": "lead", "name": "Lead", "title": "CTO"}],
+                    }
+                },
+            },
+        )
+        oid = org["id"]
+        tasks: dict[str, str] = {}
+        for title in ("Stuck", "Review me", "Shipped", "Mine", "Waiting", "Heartbeat", "Undone"):
+            created = manager.call(
+                root,
+                "user",
+                {
+                    "action": "task_create",
+                    "organizationId": oid,
+                    "params": {"title": title, "assignee": "lead"},
+                },
+            )
+            tasks[title] = created["id"]
+        start = send("desktop.read", "rem.notices", {"include": ALL_ALERTS})["value"]
+
+        def change(actor: str, title: str, status: str, **extra: Any) -> None:
+            def apply(current: dict[str, Any]) -> dict[str, Any]:
+                task = next(t for t in current["runtime"]["tasks"] if t["id"] == tasks[title])
+                task.update(status=status, **extra)
+                return {}
+
+            manager.store.mutate(root, oid, actor, "state_updated", apply)
+
+        employee = "employee:lead"
+        change(employee, "Stuck", "blocked", blockReason="Needs a decision")
+        change(employee, "Review me", "in_review")
+        change(employee, "Shipped", "done")
+        # None of these is something to tell the user about.
+        change("user", "Mine", "done")
+        change(employee, "Waiting", "blocked", blockReason="dependencies")
+        change(employee, "Heartbeat", "done", heartbeat=True)
+        change(employee, "Undone", "in_review")
+        change(employee, "Undone", "todo")
+
+        def ask(current: dict[str, Any]) -> dict[str, Any]:
+            current["runtime"].setdefault("consentRequests", {})["req"] = {
+                "id": "req",
+                "status": "pending",
+            }
+            return {"requestId": "req", "action": "control", "summary": "Start it"}
+
+        manager.store.mutate(root, oid, "Rem", "consent_requested", ask)
+
+        params = {"after": start["cursor"], "include": ALL_ALERTS, "mark": start["mark"]}
+        read = send("desktop.read", "rem.notices", params)["value"]
+        check_phone_can_read(read)
+        assert [(n["title"], n["reason"], n["kind"]) for n in read["notices"]] == [
+            ("Stuck", "needs_you", "organization"),
+            ("Review me", "needs_you", "organization"),
+            ("Shipped", "finished", "organization"),
+            ("Eng", "needs_you", "organization"),
+        ]
+        assert read["notices"][0]["body"] == "Eng: “Stuck” needs you."
+        assert read["notices"][3]["body"] == "Eng: A change needs you."
+        assert read["notices"][0]["needs_user"] is True
+        assert read["more"] is False
+        # IDs are the same if the phone names the same place twice.
+        again = send("desktop.read", "rem.notices", params)["value"]
+        assert [n["id"] for n in again["notices"]] == [n["id"] for n in read["notices"]]
+
+        # A newly shared item starts from the saved mark; nothing from before repeats.
+        following = send(
+            "desktop.read",
+            "rem.notices",
+            {"after": start["cursor"], "include": ["needs_you"], "mark": read["mark"]},
+        )["value"]
+        assert following["notices"] == [] and following["mark"] == read["mark"]
+        change(employee, "Stuck", "done")
+        turned_on = send(
+            "desktop.read",
+            "rem.notices",
+            {"after": start["cursor"], "include": ["finished"], "mark": following["mark"]},
+        )["value"]
+        assert [n["title"] for n in turned_on["notices"]] == ["Stuck"]
+
+        # Organizations turned off report nothing, and the mark still works.
+        manager.enabled = False
+        off = send(
+            "desktop.read",
+            "rem.notices",
+            {"after": start["cursor"], "include": ALL_ALERTS, "mark": turned_on["mark"]},
+        )["value"]
+        assert off["notices"] == [] and off["mark"].startswith("n1.")
+    finally:
+        manager.close()
+        app.desktop.organizations = None
+
+
+def test_alert_filter_without_organizations_keeps_the_mark_readable(phone, home):
+    _, _, _, send = alerting_phone(phone, home)
+    first = send("desktop.read", "rem.notices", {"include": ["finished"]})["value"]
+    assert first["mark"].endswith(".-")
+    read = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": first["cursor"], "include": ["finished"], "mark": first["mark"]},
+    )["value"]
+    assert read["notices"] == [] and read["mark"] == first["mark"]
+
+
+def test_alert_filter_caps_a_burst_at_eight_newest_first(phone, home):
+    _, _, _, send = alerting_phone(phone, home)
+    store = home.store
+    start = send("desktop.read", "rem.notices", {"include": ALL_ALERTS})["value"]
+    with store.connect() as db:
+        for index in range(11):
+            store.message(
+                db,
+                f"Done {index}",
+                identity=f"burst-{index}",
+                kind="task_update",
+                work={"task_id": "t", "title": "T", "state": "succeeded"},
+            )
+    read = send(
+        "desktop.read",
+        "rem.notices",
+        {"after": start["cursor"], "include": ALL_ALERTS, "mark": start["mark"]},
+    )["value"]
+    assert [n["id"] for n in read["notices"]] == [f"burst-{i}" for i in range(3, 11)]
+    assert read["skipped"] == 3
+
+
 def test_phone_voice_tidy_answers_pending_then_the_tidied_words(phone, monkeypatch, tmp_path):
     from gofer.core import provider_preferences
     from gofer.ui import voice_tidy
@@ -1578,3 +2058,528 @@ def test_phone_voice_tidy_answers_pending_then_the_tidied_words(phone, monkeypat
     seen.clear()
     app.handle(peer, request)
     assert seen == {}
+
+
+# Wake the computer ---------------------------------------------------------------
+
+WAKE_HOST = "192.168.1.20"
+WAKE_MAC = "aa:bb:cc:dd:ee:01"
+
+
+@pytest.fixture
+def waking(phone):
+    """A phone using Raticode, on a desktop whose card is a fake one."""
+    app, peer, _, send = phone
+    app.lan_endpoint = {"host": WAKE_HOST, "port": 44233}
+    app.desktop.hardware_address = lambda host: WAKE_MAC if host == WAKE_HOST else None
+    app.desktop.enable(peer, True)
+    return app, peer, send
+
+
+def overview(send: Any) -> dict[str, Any]:
+    answer = send("desktop.read", "overview")
+    assert answer["ok"], answer
+    value: dict[str, Any] = answer["value"]
+    return value
+
+
+def pair_phone(app: Any, peer: str | None = None) -> str:
+    identity = peer or str(uuid4())
+    pin = secrets.token_bytes(32)
+    app.registry.propose(identity, pin, "controller", app.registry.clock() + 300)
+    app.registry.confirm(identity, pin.hex())
+    app.registry.acknowledge(
+        identity,
+        pin,
+        "controller",
+        {"type": "session.ready_ack", "device_id": identity, "trust_revision": 1},
+    )
+    return identity
+
+
+def read_overview_as(app: Any, peer: str, sequence: int) -> dict[str, Any]:
+    replies = app.handle(
+        peer,
+        event("desktop.read", sequence, thread_id=None, payload={"op": "overview", "params": {}}),
+    )
+    result = next(r for r in replies if r["type"] == "desktop.result")["payload"]
+    assert result["ok"], result
+    value: dict[str, Any] = json.loads(result["body"])
+    return value
+
+
+def test_wake_address_is_off_by_default(waking):
+    _, _, send = waking
+    assert "wake_mac" not in overview(send)
+
+
+def test_wake_address_follows_the_setting_and_is_gone_when_off(waking):
+    app, peer, send = waking
+    app.desktop.wake.enable(peer, True)
+    answer = overview(send)
+    assert answer["wake_mac"] == WAKE_MAC
+    assert re.fullmatch(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", answer["wake_mac"])
+    assert len(answer["wake_mac"]) == 17
+    app.desktop.wake.enable(peer, False)
+    assert "wake_mac" not in overview(send)
+
+
+def test_wake_address_is_read_fresh_for_each_answer(waking):
+    app, peer, send = waking
+    app.desktop.wake.enable(peer, True)
+    assert overview(send)["wake_mac"] == WAKE_MAC
+    app.desktop.hardware_address = lambda _host: "aa:bb:cc:dd:ee:02"
+    assert overview(send)["wake_mac"] == "aa:bb:cc:dd:ee:02"
+
+
+def test_wake_setting_is_per_phone(waking):
+    app, peer, send = waking
+    other = pair_phone(app)
+    app.workspace.enable(other, True)
+    app.desktop.enable(other, True)
+    app.desktop.wake.enable(peer, True)
+    assert overview(send)["wake_mac"] == WAKE_MAC
+    assert "wake_mac" not in read_overview_as(app, other, 10)
+    assert app.desktop.wake.enabled() == [peer]
+
+
+def test_wake_needs_desktop_control(waking):
+    app, peer, send = waking
+    app.desktop.enable(peer, False)
+    app.desktop.wake.enable(peer, True)
+    # Enabling has no effect: the phone can't read overview at all.
+    assert app.desktop.wake.allowed(peer) is False
+    refused = send("desktop.read", "overview")
+    assert refused["code"] == "unauthorized" and WAKE_MAC not in json.dumps(refused)
+    # Turning desktop control off also stops the field, as does turning thread sync off.
+    app.desktop.enable(peer, True)
+    assert overview(send)["wake_mac"] == WAKE_MAC
+    app.desktop.enable(peer, False)
+    assert app.desktop.wake.allowed(peer) is False
+    assert send("desktop.read", "overview")["code"] == "unauthorized"
+    app.desktop.enable(peer, True)
+    app.workspace.enable(peer, False)
+    assert app.desktop.wake.allowed(peer) is False
+
+
+def test_unpairing_forgets_the_wake_setting(waking):
+    app, peer, _ = waking
+    app.desktop.wake.enable(peer, True)
+    app.remove_peer(peer)
+    assert app.desktop.wake.enabled() == []
+    pair_phone(app, peer)
+    app.workspace.enable(peer, True)
+    app.desktop.enable(peer, True)
+    assert app.desktop.wake.allowed(peer) is False
+    assert "wake_mac" not in read_overview_as(app, peer, 500)
+
+
+def test_wake_setting_refuses_a_desktop(waking):
+    app, _, _ = waking
+    computer, pin = str(uuid4()), secrets.token_bytes(32)
+    app.registry.propose(computer, pin, "desktop", app.registry.clock() + 300)
+    app.registry.confirm(computer, pin.hex())
+    app.registry.acknowledge(
+        computer,
+        pin,
+        "desktop",
+        {"type": "session.ready_ack", "device_id": computer, "trust_revision": 1},
+    )
+    with pytest.raises(PairingError, match="phone_required"):
+        app.desktop.wake.enable(computer, True)
+    assert app.desktop.wake.enabled() == []
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        None,
+        {"host": "8.8.8.8", "port": 44233},
+        {"host": "100.101.1.2", "port": 44233},
+        {"host": "fd7a:115c:a1e0::1", "port": 44233},
+        {"host": "127.0.0.1", "port": 44233},
+        {"host": "169.254.10.2", "port": 44233},
+        {"host": "fd00::20", "port": 44233},
+    ],
+    ids=["no-endpoint", "public", "tailscale", "tailscale-v6", "loopback", "link-local", "ipv6"],
+)
+def test_wake_address_is_left_out_without_a_private_lan_endpoint(waking, endpoint):
+    app, peer, send = waking
+    app.desktop.wake.enable(peer, True)
+    app.lan_endpoint = endpoint
+    # Would answer for any host, so only the endpoint rule can keep the key out.
+    app.desktop.hardware_address = lambda _host: WAKE_MAC
+    answer = overview(send)
+    assert "wake_mac" not in answer and answer["media"] is True
+
+
+def _reader(result: object) -> Any:
+    def read(_host: str) -> object:
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    return read
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,
+        OSError(f"can't read {WAKE_MAC}"),
+        ValueError(f"bad {WAKE_MAC}"),
+        "",
+        "00:00:00:00:00:00",
+        "ff:ff:ff:ff:ff:ff",
+        "01:00:5e:00:00:01",
+        "aa-bb-cc-dd-ee-01",
+        "aa:bb:cc:dd:ee",
+    ],
+    ids=[
+        "none",
+        "oserror",
+        "other-error",
+        "empty",
+        "zero",
+        "broadcast",
+        "multicast",
+        "dash",
+        "short",
+    ],
+)
+def test_wake_address_is_left_out_when_unreadable_or_unusable(waking, result, caplog):
+    app, peer, send = waking
+    app.desktop.wake.enable(peer, True)
+    app.desktop.hardware_address = _reader(result)
+    caplog.set_level(logging.DEBUG)
+    answer = overview(send)
+    assert "wake_mac" not in answer and answer["media"] is True
+    assert WAKE_MAC not in caplog.text
+
+
+class Interfaces:
+    """Faked interface table and /sys/class/net, for the real address reader."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, sys_net: Path) -> None:
+        self.table: dict[str, str | None | OSError] = {}
+        self.sys_net = sys_net
+        sys_net.mkdir()
+        monkeypatch.setattr(wake, "SYS_NET", sys_net)
+        monkeypatch.setattr(wake, "supported", lambda: True)
+        monkeypatch.setattr(
+            wake.socket, "if_nameindex", lambda: list(enumerate(self.table, start=1))
+        )
+        monkeypatch.setattr(wake, "_interface_address", self.read)
+
+    def read(self, name: str) -> str | None:
+        value = self.table[name]
+        if isinstance(value, OSError):
+            raise value
+        return value
+
+    def add(
+        self,
+        name: str,
+        host: str | None | OSError,
+        address: str = WAKE_MAC,
+        *,
+        physical: bool = True,
+    ) -> None:
+        self.table[name] = host
+        folder = self.sys_net / name
+        folder.mkdir()
+        (folder / "address").write_text(address + "\n")
+        if physical:
+            (folder / "device").mkdir()
+
+
+@pytest.fixture
+def interfaces(monkeypatch, tmp_path):
+    return Interfaces(monkeypatch, tmp_path / "net")
+
+
+def test_card_holding_the_address_wins_over_earlier_cards(interfaces):
+    interfaces.add("eno1", "10.0.0.5", "aa:bb:cc:dd:ee:02")
+    interfaces.add("lo", "127.0.0.1", "00:00:00:00:00:00", physical=False)
+    interfaces.add("wlan0", None, "aa:bb:cc:dd:ee:03")
+    interfaces.add("enp3s0", WAKE_HOST)
+    assert wake.hardware_address(WAKE_HOST) == WAKE_MAC
+
+
+def test_interface_without_a_device_link_is_refused(interfaces):
+    interfaces.add("br0", WAKE_HOST, physical=False)
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_virtual_interface_sharing_the_address_does_not_hide_the_card(interfaces):
+    interfaces.add("veth0", WAKE_HOST, "aa:bb:cc:dd:ee:02", physical=False)
+    interfaces.add("eno1", WAKE_HOST)
+    assert wake.hardware_address(WAKE_HOST) == WAKE_MAC
+
+
+def test_two_cards_holding_the_address_are_refused(interfaces):
+    interfaces.add("eno1", WAKE_HOST)
+    interfaces.add("eno2", WAKE_HOST, "aa:bb:cc:dd:ee:02")
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_no_interface_holding_the_address_is_refused(interfaces):
+    interfaces.add("eno1", "192.168.1.21")
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_uppercase_address_with_whitespace_is_lowercased(interfaces):
+    interfaces.add("eno1", WAKE_HOST, "  AA:BB:CC:DD:EE:01")
+    assert wake.hardware_address(WAKE_HOST) == WAKE_MAC
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "01:00:5e:00:00:01", "ab:bb:cc:dd:ee:01", "nope"],
+)
+def test_unusable_card_address_is_refused(interfaces, address):
+    interfaces.add("eno1", WAKE_HOST, address)
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_failed_interface_read_leaves_the_address_out(interfaces):
+    interfaces.add("eno1", WAKE_HOST)
+    interfaces.add("eno2", OSError(errno.EPERM, "denied"))
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_missing_address_file_leaves_the_address_out(interfaces):
+    interfaces.add("eno1", WAKE_HOST)
+    (interfaces.sys_net / "eno1" / "address").unlink()
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_unlisted_interfaces_leave_the_address_out(interfaces, monkeypatch):
+    def fail() -> list[tuple[int, str]]:
+        raise OSError(errno.EPERM, "denied")
+
+    monkeypatch.setattr(wake.socket, "if_nameindex", fail)
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_other_systems_report_no_address(interfaces, monkeypatch):
+    interfaces.add("eno1", WAKE_HOST)
+    monkeypatch.setattr(wake, "supported", lambda: False)
+    assert wake.hardware_address(WAKE_HOST) is None
+
+
+def test_interface_address_comes_from_the_kernel_answer(monkeypatch):
+    fcntl = pytest.importorskip("fcntl")
+    seen: list[tuple[int, bytes]] = []
+
+    def ioctl(_fd: int, request: int, argument: bytes) -> bytes:
+        seen.append((request, argument))
+        return argument[:20] + socket.inet_aton(WAKE_HOST) + bytes(232)
+
+    monkeypatch.setattr(fcntl, "ioctl", ioctl)
+    assert wake._interface_address("enp3s0") == WAKE_HOST
+    assert seen[0][0] == wake.SIOCGIFADDR and seen[0][1].rstrip(b"\0") == b"enp3s0"
+
+
+@pytest.mark.parametrize("code", [errno.EADDRNOTAVAIL, errno.ENODEV])
+def test_interface_without_an_address_holds_nothing(monkeypatch, code):
+    fcntl = pytest.importorskip("fcntl")
+
+    def ioctl(*_args: Any) -> bytes:
+        raise OSError(code, "no address")
+
+    monkeypatch.setattr(fcntl, "ioctl", ioctl)
+    assert wake._interface_address("wlan0") is None
+
+
+def test_interface_read_failures_are_not_mistaken_for_no_address(monkeypatch):
+    fcntl = pytest.importorskip("fcntl")
+
+    def ioctl(*_args: Any) -> bytes:
+        raise OSError(errno.EPERM, "denied")
+
+    monkeypatch.setattr(fcntl, "ioctl", ioctl)
+    with pytest.raises(OSError, match="denied"):
+        wake._interface_address("eno1")
+
+
+def test_wake_address_is_never_logged(waking, caplog):
+    app, peer, send = waking
+    caplog.set_level(logging.DEBUG)
+    app.desktop.wake.enable(peer, True)
+    assert overview(send)["wake_mac"] == WAKE_MAC
+    app.desktop.wake.enable(peer, False)
+    overview(send)
+    assert WAKE_MAC not in caplog.text and WAKE_MAC.upper() not in caplog.text
+    # Only that the setting changed, with the device ID.
+    changes = [r.getMessage() for r in caplog.records if "Wake this computer" in r.getMessage()]
+    assert changes == [f"Wake this computer turned on for {peer}"] + [
+        f"Wake this computer turned off for {peer}"
+    ]
+
+
+def _files_holding(root: Path, needle: bytes) -> list[Path]:
+    return [p for p in root.rglob("*") if p.is_file() and needle in p.read_bytes()]
+
+
+def test_wake_address_is_never_on_disk_in_readable_form(waking, tmp_path):
+    app, peer, send = waking
+    app.desktop.wake.enable(peer, True)
+    assert overview(send)["wake_mac"] == WAKE_MAC
+    app.registry.db.commit()
+    assert _files_holding(tmp_path, WAKE_MAC.encode()) == []
+
+
+def test_answer_holding_the_wake_address_is_deleted_once_acknowledged(waking):
+    app, peer, send = waking
+    app.desktop.wake.enable(peer, True)
+    db = app.registry.db
+    overview(send)
+    sequence = db.execute(
+        "SELECT MAX(sequence) FROM device_outbox WHERE peer=?", (peer,)
+    ).fetchone()[0]
+    assert WAKE_MAC in json.dumps(app.pending(peer, sequence - 1, 1)[0]["payload"])
+
+    # Not acknowledged yet: it has to stay until the phone has it.
+    app.handle(
+        peer,
+        event(
+            "sync.request",
+            300,
+            thread_id=None,
+            payload={"after_sequence": sequence - 1, "limit": 1, "include_connection": False},
+        ),
+    )
+    assert db.execute(
+        "SELECT 1 FROM device_outbox WHERE peer=? AND sequence=?", (peer, sequence)
+    ).fetchone()
+
+    app.handle(
+        peer,
+        event(
+            "sync.request",
+            301,
+            thread_id=None,
+            payload={"after_sequence": sequence, "limit": 1, "include_connection": False},
+        ),
+    )
+    assert not db.execute(
+        "SELECT 1 FROM device_outbox WHERE peer=? AND sequence=?", (peer, sequence)
+    ).fetchone()
+    assert not db.execute("SELECT 1 FROM device_wake_answers WHERE peer=?", (peer,)).fetchone()
+
+
+@pytest.fixture
+def settings_api(tmp_path, monkeypatch):
+    for name in (
+        "RATICODE_DEVICE_EXPERIMENTAL_NETWORK",
+        "RATICODE_DEVICE_HOST",
+        "RATICODE_DEVICE_PORT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    control = DeviceControl(tmp_path, store=TestSecrets())
+    control.action({"action": "enable"})
+    yield control
+    control.close()
+
+
+def test_wake_computer_action_reports_device_ids_only(settings_api):
+    control = settings_api
+    peer = pair_phone(control.application)
+    control.application.desktop.hardware_address = lambda _host: WAKE_MAC
+    assert control.status()["wake_computer_peers"] == []
+    changed = control.action({"action": "wake_computer", "device_id": peer, "enabled": True})
+    assert changed["wake_computer_peers"] == [peer]
+    assert WAKE_MAC not in json.dumps(changed, default=str)
+    off = control.action({"action": "wake_computer", "device_id": peer, "enabled": False})
+    assert off["wake_computer_peers"] == []
+
+
+@pytest.mark.parametrize("choice", [None, 1, "true", [], {}])
+def test_wake_computer_action_rejects_a_non_boolean(settings_api, choice):
+    control = settings_api
+    peer = pair_phone(control.application)
+    with pytest.raises(PairingError, match="invalid_wake_computer_choice"):
+        control.action({"action": "wake_computer", "device_id": peer, "enabled": choice})
+    assert control.status()["wake_computer_peers"] == []
+
+
+def test_status_says_whether_this_system_can_wake(settings_api, monkeypatch):
+    from gofer.devices import control as control_module
+
+    monkeypatch.setattr(control_module, "wake_supported", lambda: False)
+    assert settings_api.status()["wake_computer_available"] is False
+    monkeypatch.setattr(control_module, "wake_supported", lambda: True)
+    assert settings_api.status()["wake_computer_available"] is True
+
+
+def test_a_task_waiting_for_others_shows_why_on_the_phone(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    rem.store.task.update(
+        active_run=None,
+        last_run=None,
+        recent_runs=[],
+        dependency={
+            "state": "held",
+            "reason": "On hold: “Audit” was blocked. Retry it, or start this task now.",
+            "prerequisites": [
+                {
+                    "task_id": "audit",
+                    "title": "Audit",
+                    "state": "held",
+                    "reason": "“Audit” was blocked",
+                    "run_id": "audit-run",
+                    "run_state": "blocked",
+                    "retryable": True,
+                    "thread_id": "private-thread",
+                    "since": "2026-11-10T00:00:00+00:00",
+                },
+                "not a prerequisite",
+            ],
+        },
+    )
+    home = send("desktop.read", "rem.home")["value"]
+    shown = home["tasks"][0]["dependency"]
+    assert shown["state"] == "held" and shown["reason"].startswith("On hold:")
+    assert shown["prerequisites"] == [
+        {
+            "task_id": "audit",
+            "title": "Audit",
+            "state": "held",
+            "reason": "“Audit” was blocked",
+            "run_id": "audit-run",
+            "run_state": "blocked",
+            "retryable": True,
+        }
+    ]
+    task = send("desktop.read", "rem.task", {"task_id": rem.store.task["id"]})["value"]
+    assert task["dependency"] == shown
+    # A task that waits for nothing carries no dependency at all, as from older desktops.
+    rem.store.task.pop("dependency")
+    assert "dependency" not in send("desktop.read", "rem.home")["value"]["tasks"][0]
+
+
+def test_a_queued_request_names_what_it_waited_for_on_the_phone(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    rem.store.messages.append(
+        {
+            "id": "after-run",
+            "role": "user",
+            "source": "after",
+            "body": "Start up to 4 threads to fix the findings.",
+            "created_at": "t9",
+            "queued_after": [
+                {"task_id": "audit", "title": "CLI audit", "summary": "6 gaps", "reports": ["/x"]},
+                "junk",
+            ],
+        }
+    )
+    shown = next(
+        m for m in send("desktop.read", "rem.home")["value"]["messages"] if m["id"] == "after-run"
+    )
+    assert shown["queued_after"] == ["CLI audit"]
+    assert "/x" not in json.dumps(shown)

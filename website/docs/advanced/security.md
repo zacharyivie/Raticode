@@ -50,6 +50,6 @@ An enabled [conversation archive](../knowledge/archive.md) creates a separate co
 
 ## Network behavior
 
-Raticode does not require a Raticode cloud account. Provider requests, enabled web search, remote MCP servers, model downloads, optional relays, and explicit HTTP workflow nodes can still use the network. Local state does not make every feature offline.
+Raticode does not require a Raticode cloud account. Provider requests, enabled web search, remote MCP servers, model downloads, Tailscale if you turn it on for the phone, and explicit HTTP workflow nodes can still use the network. Local state does not make every feature offline.
 
 See [Provider setup](../setup.md), [Tools and resources](../rem/resources.md), and [Troubleshooting](../reference/troubleshooting.md).

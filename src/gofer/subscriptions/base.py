@@ -108,7 +108,7 @@ class Subscription(ABC):
                     else DEFAULT_RESOURCE_LIMITS.max_subprocess_output_bytes
                 ),
                 protocol_stdout=True,
-                stdin=prompt.encode("utf-8") if self.prompt_via_stdin else None,
+                stdin=self._stdin_bytes(prompt) if self.prompt_via_stdin else None,
             )
             try:
                 async with aclosing(source):
@@ -182,6 +182,10 @@ class Subscription(ABC):
             message=message,
             usage_metadata=usage_metadata,
         )
+
+    def _stdin_bytes(self, prompt: str) -> bytes:
+        """What a prompt_via_stdin provider reads on stdin: the prompt text by default."""
+        return prompt.encode("utf-8")
 
     def _prompt_file_instruction(self, prompt_path: Path) -> str:
         return (

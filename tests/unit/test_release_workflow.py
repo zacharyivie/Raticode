@@ -312,12 +312,13 @@ def test_release_security_gates_are_mandatory_and_publish_provenance() -> None:
     assert "--config.forceCodeSigning=true" in build["Build Electron packages"]["run"]
     for name in (
         "Require Windows signing credentials",
-        "Prepare macOS signing keychain",
         "Sign Windows backend before packaging",
         "Verify Windows release signatures",
-        "Verify macOS signatures and notarization",
     ):
-        assert "inputs.signed_release && runner.os" in build[name]["if"]
+        assert build[name]["if"] == "inputs.windows_signing && runner.os == 'Windows'"
+        assert "continue-on-error" not in build[name]
+    for name in ("Prepare macOS signing keychain", "Verify macOS signatures and notarization"):
+        assert build[name]["if"] == "inputs.macos_signing && runner.os == 'macOS'"
         assert "continue-on-error" not in build[name]
     assert "env" not in build["Install frontend dependencies"]
     assert "env" not in _build_job(workflow)
@@ -348,6 +349,9 @@ def test_triggers_separate_validation_preparation_and_publication() -> None:
     publish = _entry_workflow("release.yml")
     assert set(validation["on"]) == {"pull_request", "workflow_call"}
     assert candidate["on"]["push"]["branches"] == ["stage"]
+    not_desktop = ["mobile/android/**", ".github/workflows/mobile-*.yml", "website/**"]
+    assert candidate["on"]["push"]["paths-ignore"] == not_desktop
+    assert validation["on"]["pull_request"]["paths-ignore"] == not_desktop
     assert set(candidate["on"]) == {"push", "workflow_dispatch"}
     assert publish["on"] == {"push": {"tags": ["v*"]}}
     assert _job(candidate, "prepare")["if"] == "github.ref == 'refs/heads/stage'"
@@ -366,13 +370,21 @@ def test_triggers_separate_validation_preparation_and_publication() -> None:
 
 def test_signing_defaults_to_unsigned_and_environment_settings_are_scoped() -> None:
     workflow = _release_workflow()
-    assert workflow["on"]["workflow_call"]["inputs"]["signed_release"]["default"] is False
-    assert workflow["on"]["workflow_call"]["inputs"]["signed_release"]["type"] == "boolean"
-    for name in ("build", "credentials"):
-        assert (
-            _job(workflow, name)["environment"]
-            == "${{ inputs.signed_release && 'release-signing' || 'release-unsigned' }}"
-        )
+    assert set(workflow["on"]) == {"workflow_call"}
+    inputs = workflow["on"]["workflow_call"]["inputs"]
+    assert set(inputs) == {"macos_signing", "windows_signing"}
+    for name in inputs:
+        assert inputs[name]["default"] is False
+        assert inputs[name]["type"] == "boolean"
+    assert _job(workflow, "credentials")["environment"] == (
+        "${{ (inputs.macos_signing || inputs.windows_signing) "
+        "&& 'release-signing' || 'release-unsigned' }}"
+    )
+    # Linux, and a platform that doesn't sign, never enter the signing environment.
+    assert _build_job(workflow)["environment"] == (
+        "${{ (matrix.name == 'macos' && inputs.macos_signing || matrix.name == 'windows' "
+        "&& inputs.windows_signing) && 'release-signing' || 'release-unsigned' }}"
+    )
     build = _build_job(workflow)
     assert build["needs"] == "[validate, credentials]"
     matrix = _matrix_by_platform(build)
@@ -397,94 +409,253 @@ def test_signing_defaults_to_unsigned_and_environment_settings_are_scoped() -> N
     assert _job(_entry_workflow("release.yml"), "publish")["permissions"]["attestations"] == "read"
 
 
-@pytest.mark.parametrize("runner_os", ["macOS", "Windows", "Linux"])
-@pytest.mark.parametrize("signed", [False, True])
-def test_electron_build_obeys_signing_policy(runner_os: str, signed: bool) -> None:
+def _run_electron_build(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     step = _steps_by_name(_build_job(_release_workflow()))["Build Electron packages"]
     script = step["run"].replace("${{ matrix.electron_builder_args }}", "--native-test")
-    env = {
-        **os.environ,
-        "RUNNER_OS": runner_os,
-        "SIGNED_RELEASE": str(signed).lower(),
-        "CSC_LINK": "certificate",
-        "CSC_KEY_PASSWORD": "password",
-        "APPLE_ID": "apple",
-        "APPLE_APP_SPECIFIC_PASSWORD": "apple-password",
-        "APPLE_TEAM_ID": "team",
-    }
+    # The fake electron-builder prints its arguments, then the signing settings it sees.
     probe = r"""
     npm() { :; }
     npx() {
-      if [ "$SIGNED_RELEASE" != "true" ] || [ "$RUNNER_OS" = "Linux" ]; then
-        [ -z "${CSC_LINK+x}" ] && [ -z "${APPLE_ID+x}" ] || return 1
-      else
-        [ "$CSC_LINK" = "certificate" ] || return 1
-      fi
       printf '%s\n' "$@"
+      for name in CSC_LINK CSC_NAME CSC_KEYCHAIN APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE \
+          APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID CSC_IDENTITY_AUTO_DISCOVERY; do
+        [ -z "${!name+x}" ] || printf 'env %s=%s\n' "$name" "${!name}"
+      done
     }
     """
-    result = subprocess.run(
+    return subprocess.run(
         [shutil.which("bash") or "bash", "-eo", "pipefail", "-c", probe + script],
         env=env,
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
-    args = result.stdout.splitlines()
+
+
+MAC_KEYCHAIN_OUTPUTS = {
+    "CSC_NAME": "0123456789ABCDEF0123456789ABCDEF01234567",
+    "CSC_KEYCHAIN": "/runner/temp/raticode-signing.keychain-db",
+    "APPLE_KEYCHAIN": "/runner/temp/raticode-signing.keychain-db",
+    "APPLE_KEYCHAIN_PROFILE": "raticode-notary",
+}
+
+
+@pytest.mark.parametrize("runner_os", ["macOS", "Windows", "Linux"])
+@pytest.mark.parametrize("macos_signing", [False, True])
+@pytest.mark.parametrize("windows_signing", [False, True])
+def test_electron_build_obeys_each_platforms_signing_policy(
+    runner_os: str, macos_signing: bool, windows_signing: bool
+) -> None:
+    if os.name == "nt":
+        pytest.skip("The packaging step runs in bash")
+    signed = {"macOS": macos_signing, "Windows": windows_signing, "Linux": False}[runner_os]
+    mac_signed = signed and runner_os == "macOS"
+    windows_signed = signed and runner_os == "Windows"
+    env = {
+        **os.environ,
+        "RUNNER_OS": runner_os,
+        "MACOS_SIGNING": str(macos_signing).lower(),
+        "WINDOWS_SIGNING": str(windows_signing).lower(),
+        # The workflow fills these only for the platform that signs.
+        "CSC_LINK": "certificate" if windows_signed else "",
+        "CSC_KEY_PASSWORD": "password" if windows_signed else "",
+        # Even if they leaked into the step's environment, they must never reach the builder.
+        "APPLE_ID": "apple",
+        "APPLE_APP_SPECIFIC_PASSWORD": "apple-password",
+        "APPLE_TEAM_ID": "team",
+        **(MAC_KEYCHAIN_OUTPUTS if mac_signed else dict.fromkeys(MAC_KEYCHAIN_OUTPUTS, "")),
+    }
+    result = _run_electron_build(env)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    args = [line for line in lines if not line.startswith("env ")]
+    seen = dict(line[4:].split("=", 1) for line in lines if line.startswith("env "))
     assert "--publish=never" in args
-    assert ("--config.forceCodeSigning=true" in args) == (signed and runner_os != "Linux")
-    assert ("--config.mac.notarize=true" in args) == (signed and runner_os == "macOS")
-    assert ("--config.dmg.sign=true" in args) == (signed and runner_os == "macOS")
-    assert ("--config.mac.identity=-" in args) == (not signed and runner_os == "macOS")
-    assert ("--config.mac.notarize=false" in args) == (not signed and runner_os == "macOS")
-    mode = "signed" if signed and runner_os != "Linux" else "unsigned"
+    assert ("--config.forceCodeSigning=true" in args) == signed
+    assert ("--config.forceCodeSigning=false" in args) == (not signed)
+    mode = "signed" if signed else "unsigned"
     assert f"--config.extraMetadata.raticodeReleaseSigning={mode}" in args
+    assert ("--config.mac.notarize=true" in args) == mac_signed
+    assert ("--config.mac.hardenedRuntime=true" in args) == mac_signed
+    # The verify step signs the DMG with a timestamp, then notarizes and staples it.
+    assert ("--config.dmg.sign=false" in args) == (runner_os == "macOS")
+    assert "--config.dmg.sign=true" not in args
+    assert ("--config.mac.identity=-" in args) == (runner_os == "macOS" and not signed)
+    assert ("Unsigned macOS build" in result.stdout) == (runner_os == "macOS" and not signed)
+    assert not {"APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID"} & set(seen)
+    assert seen["CSC_IDENTITY_AUTO_DISCOVERY"] == str(signed).lower()
+    if mac_signed:
+        assert {k: seen[k] for k in MAC_KEYCHAIN_OUTPUTS} == MAC_KEYCHAIN_OUTPUTS
+    else:
+        assert not set(MAC_KEYCHAIN_OUTPUTS) & set(seen)
+    assert ("CSC_LINK" in seen) == windows_signed
 
 
-def test_credential_preflight_reports_all_missing_names_without_values() -> None:
+def test_signed_mac_build_stops_without_a_prepared_keychain() -> None:
+    if os.name == "nt":
+        pytest.skip("The packaging step runs in bash")
+    env = {
+        **os.environ,
+        "RUNNER_OS": "macOS",
+        "MACOS_SIGNING": "true",
+        "WINDOWS_SIGNING": "false",
+        **dict.fromkeys(MAC_KEYCHAIN_OUTPUTS, ""),
+    }
+    result = _run_electron_build(env)
+    assert result.returncode != 0
+    assert "--publish=never" not in result.stdout
+    assert "no prepared signing keychain" in result.stderr
+
+
+MAC_SECRETS = {
+    "MACOS_CERTIFICATE",
+    "MACOS_CERTIFICATE_PASSWORD",
+    "APPLE_ID",
+    "APPLE_APP_SPECIFIC_PASSWORD",
+}
+WINDOWS_SECRETS = {"WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD"}
+
+
+@pytest.mark.parametrize("macos_signing", [False, True])
+@pytest.mark.parametrize("windows_signing", [False, True])
+def test_credential_preflight_reports_each_platforms_missing_names_without_values(
+    macos_signing: bool, windows_signing: bool
+) -> None:
     step = _steps_by_name(_job(_release_workflow(), "credentials"))[
         "Check all required settings without printing values"
     ]
-    assert step["if"] == "inputs.signed_release"
+    assert step["if"] == "inputs.macos_signing || inputs.windows_signing"
     # Exercise the actual embedded Python rather than merely checking YAML strings.
     source = step["run"].split("<<'PYCODE'\n", 1)[1].rsplit("PYCODE", 1)[0]
     env = {k: v for k, v in os.environ.items() if k not in step["env"]}
-    env["WINDOWS_CERTIFICATE"] = "do-not-print-this"
+    env["MACOS_SIGNING"] = str(macos_signing).lower()
+    env["WINDOWS_SIGNING"] = str(windows_signing).lower()
+    env["APPLE_ID"] = "do-not-print-this"
     result = subprocess.run(
-        [os.sys.executable, "-c", source],
-        env=env,
-        capture_output=True,
-        text=True,
+        [sys.executable, "-c", source], env=env, capture_output=True, text=True, check=False
     )
-    assert result.returncode != 0
-    assert "do-not-print-this" not in result.stderr
-    for name in set(step["env"]) - {"WINDOWS_CERTIFICATE"}:
+    expected = (MAC_SECRETS if macos_signing else set()) | (
+        WINDOWS_SECRETS if windows_signing else set()
+    )
+    assert "do-not-print-this" not in result.stdout + result.stderr
+    assert (result.returncode != 0) == bool(expected - {"APPLE_ID"})
+    for name in expected - {"APPLE_ID"}:
         assert name in result.stderr
-    env.update(dict.fromkeys(step["env"], "configured"))
-    assert subprocess.run([os.sys.executable, "-c", source], env=env).returncode == 0
+    for name in (MAC_SECRETS | WINDOWS_SECRETS) - expected:
+        assert name not in result.stderr
+    if macos_signing:
+        # The APPLE_CERTIFICATE_* names and electron-builder's own names are accepted
+        # for the certificate and its password.
+        assert "MACOS_CERTIFICATE (or APPLE_CERTIFICATE_P12_BASE64 or CSC_LINK)" in result.stderr
+        assert (
+            "MACOS_CERTIFICATE_PASSWORD (or APPLE_CERTIFICATE_PASSWORD or CSC_KEY_PASSWORD)"
+            in result.stderr
+        )
+    env.update(dict.fromkeys(expected, "configured"))
+    assert subprocess.run([sys.executable, "-c", source], env=env, check=False).returncode == 0
+
+
+def test_mac_secrets_reach_only_the_keychain_step() -> None:
+    build = _steps_by_name(_build_job(_release_workflow()))
+    prepare = build["Prepare macOS signing keychain"]
+    assert prepare["run"] == "uv run --locked python scripts/macos-release-signing.py prepare"
+    assert prepare["id"] == "macos-signing"
+    expected = {
+        "MACOS_CERTIFICATE": (
+            "(secrets.MACOS_CERTIFICATE || secrets.APPLE_CERTIFICATE_P12_BASE64"
+            " || secrets.CSC_LINK)"
+        ),
+        "MACOS_CERTIFICATE_PASSWORD": (
+            "(secrets.MACOS_CERTIFICATE_PASSWORD || secrets.APPLE_CERTIFICATE_PASSWORD"
+            " || secrets.CSC_KEY_PASSWORD)"
+        ),
+        "APPLE_ID": "(secrets.APPLE_ID || vars.APPLE_ID)",
+        "APPLE_APP_SPECIFIC_PASSWORD": "secrets.APPLE_APP_SPECIFIC_PASSWORD",
+        "APPLE_TEAM_ID": "(secrets.APPLE_TEAM_ID || vars.APPLE_TEAM_ID)",
+        "MACOS_SIGNING_IDENTITY": (
+            "(secrets.MACOS_SIGNING_IDENTITY || vars.MACOS_SIGNING_IDENTITY)"
+        ),
+    }
+    assert set(prepare["env"]) == set(expected)
+    for name, source in expected.items():
+        assert prepare["env"][name] == (
+            "${{ inputs.macos_signing && runner.os == 'macOS' && " + source + " || '' }}"
+        )
+    apple = re.compile(r"secrets\.(MACOS_|APPLE_|CSC_)")
+    for name, step in build.items():
+        if name != prepare["name"]:
+            assert not apple.search(str(step.get("env", {}))), name
+    # Pull requests run only source validation, which reads no secrets at all.
+    assert "secrets." not in (REPO_ROOT / ".github/workflows/validate-source.yml").read_text()
+
+
+def test_signing_keychain_outlives_its_users_and_is_always_deleted() -> None:
+    build = _steps_by_name(_build_job(_release_workflow()))
+    names = list(build)
+    delete = build["Delete temporary macOS signing keychain"]
+    assert delete["if"] == "always() && inputs.macos_signing && runner.os == 'macOS'"
+    assert delete["run"] == "python3 scripts/macos-release-signing.py cleanup"
+    users = [n for n, step in build.items() if "steps.macos-signing.outputs" in str(step)]
+    assert set(users) >= {
+        "Build backend",
+        "Build Electron packages",
+        "Verify macOS signatures and notarization",
+        "Smoke-test final distributions",
+    }
+    keychain_users = [n for n in users if "outputs.keychain" in str(build[n].get("env"))]
+    assert keychain_users == ["Build Electron packages", "Verify macOS signatures and notarization"]
+    assert all(names.index(n) < names.index(delete["name"]) for n in users[:-1])
+    verify = build["Verify macOS signatures and notarization"]
+    assert verify["run"] == "uv run --locked python scripts/macos-release-signing.py verify"
+    # Stapling rewrites the DMG; the updater hashes and checksums are checked afterwards.
+    for later in (
+        "Verify final updater hashes",
+        "Smoke-test final distributions",
+        "Generate macOS checksums",
+        "Upload workflow artifacts",
+    ):
+        assert names.index(verify["name"]) < names.index(later)
+    smoke = build["Smoke-test final distributions"]["env"]
+    assert smoke["RATICODE_MACOS_SIGNING"] == (
+        "${{ inputs.macos_signing && 'developer-id' || 'unsigned' }}"
+    )
+    backend = build["Build backend"]["env"]
+    assert backend["GOFER_CODESIGN_IDENTITY"] == "${{ steps.macos-signing.outputs.identity }}"
+    assert "entitlements.mac.plist" in backend["GOFER_CODESIGN_ENTITLEMENTS"]
 
 
 def test_candidate_manifest_receives_the_build_policy() -> None:
     workflow = _entry_workflow("release-candidate.yml")
-    assert (
-        _job(workflow, "prepare")["with"]["signed_release"]
-        == "${{ vars.RELEASE_SIGNING == 'true' }}"
-    )
+    policy = _job(workflow, "prepare")["with"]
+    # No repository variable can turn Mac signing off for this repository's candidates.
+    assert policy["macos_signing"] == "${{ github.repository == 'zacharyivie/Raticode' }}"
+    assert policy["windows_signing"] == "${{ vars.WINDOWS_RELEASE_SIGNING == 'true' }}"
     step = _steps_by_name(_job(workflow, "stage"))[
         "Create candidate manifest and verify completeness"
     ]
-    assert step["env"]["SIGNED_RELEASE"] == "${{ needs.prepare.outputs.signed_release }}"
     build = _release_workflow()
-    assert (
-        build["on"]["workflow_call"]["outputs"]["signed_release"]["value"]
-        == "${{ jobs.credentials.outputs.signed_release }}"
-    )
-    assert (
-        _job(build, "credentials")["outputs"]["signed_release"]
-        == "${{ steps.policy.outputs.signed_release }}"
-    )
-    steps = _steps_by_name(_build_job(build))
-    assert (
-        steps["Build Electron packages"]["env"]["SIGNED_RELEASE"] == "${{ inputs.signed_release }}"
-    )
-    assert "inputs.signed_release" in steps["Build backend"]["env"]["GOFER_CODESIGN_IDENTITY"]
+    for platform in ("macos", "windows"):
+        assert step["env"][f"{platform.upper()}_SIGNED"] == (
+            "${{ needs.prepare.outputs." + platform + "_signed }}"
+        )
+        assert build["on"]["workflow_call"]["outputs"][f"{platform}_signed"]["value"] == (
+            "${{ jobs.credentials.outputs." + platform + "_signed }}"
+        )
+        assert _job(build, "credentials")["outputs"][f"{platform}_signed"] == (
+            "${{ steps.policy.outputs." + platform + "_signed }}"
+        )
+    steps = _steps_by_name(_build_job(build))["Build Electron packages"]["env"]
+    assert steps["MACOS_SIGNING"] == "${{ inputs.macos_signing }}"
+    assert steps["WINDOWS_SIGNING"] == "${{ inputs.windows_signing }}"
+
+
+def test_mac_packages_build_the_speech_helper_they_bundle() -> None:
+    # electron-builder skips a missing extraResources file, so without this step a Mac
+    # release has no dictation helper and silently falls back to the offline model.
+    steps = _steps_by_name(_build_job(_release_workflow()))
+    names = list(steps)
+    helper = steps["Build macOS speech helper"]
+    assert helper["if"] == "runner.os == 'macOS'"
+    assert helper["run"] == "node scripts/build-macos-speech-helper.cjs --require"
+    assert names.index("Build backend") < names.index("Build macOS speech helper")
+    assert names.index("Build macOS speech helper") < names.index("Build Electron packages")

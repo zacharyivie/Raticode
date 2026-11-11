@@ -3,6 +3,8 @@ import { textEditorSessions, flushCodeDrafts } from "../lib/codeEditorSessions.j
 import { startGenerationJob } from "../lib/generationJobs.js";
 import { generateReportTheme, reportThemeContext, normalizeReportThemes } from "../lib/reportThemes.js";
 import { applyPhoneSettings, orderDeviceMessages } from "../lib/deviceMessages.js";
+import { controlledEngine, webBrowserEngine } from "../lib/browserEngines.js";
+import { browserTabOpening, viewedBrowserMedia, withBrowserTabEngines } from "../lib/browserTabs.js";
 import { fetchChatTurn } from "../lib/chatTransport.js";
 import { previousRemModelSelection, remModelSelection, remModelSwitchBanner } from "../lib/remModelSelection.js";
 import { pathKey, samePath, pathWithin, uniquePaths, pathValue, withPathValue, replacePathPrefix, pathMatchesChange } from "../lib/workspacePaths.js";
@@ -31,6 +33,7 @@ import { lazy, Suspense, memo, useCallback, useEffect, useLayoutEffect, useMemo,
 import {
   AlertCircle,
   ArrowLeft,
+  Bot,
   Check,
   ChevronDown,
   ChevronRight,
@@ -58,11 +61,12 @@ import {
   Smartphone,
   Undo2,
   Upload,
+  UserRound,
   Waypoints,
   X,
 } from "lucide-react";
 import { autoLayoutWorkflow } from "../lib/workflowLayout.js";
-import { connectRemHome, remThreadWasCleared, setRemHomeContext, sendManagedRemInstruction } from "../lib/remHomeStore.js";
+import { adoptRemProjects, connectRemHome, onRemOpenedProjects, remThreadWasCleared, setRemHomeContext, sendManagedRemInstruction } from "../lib/remHomeStore.js";
 const DagCanvas = lazy(() => import("../components/DagCanvas.jsx"));
 const RunPreviewDialog = lazy(() => import("../components/RunPreviewDialog.jsx"));
 const WorkflowHistoryDialog = lazy(() => import("../components/WorkflowDialogs.jsx").then(module => ({ default: module.WorkflowHistoryDialog })));
@@ -70,6 +74,8 @@ const ExportWorkflowDialog = lazy(() => import("../components/WorkflowDialogs.js
 const WorkflowListItem = lazy(() => import("../components/WorkflowListItem.jsx"));
 const ChatSources = lazy(() => import("../components/ChatSources.jsx"));
 import { Dialog } from "../components/Dialog.jsx";
+import BrowserMediaBar from "../components/BrowserMediaBar.jsx";
+const KanbanWorkspace = lazy(() => import("../components/KanbanWorkspace.jsx"));
 const OrganizationHome = lazy(() => import("../components/OrganizationHome.jsx"));
 const SecondBrainWorkspace = lazy(() => import("../components/SecondBrainWorkspace.jsx"));
 const RemHomeWorkspace = lazy(() => import("../components/RemHomeWorkspace.jsx"));
@@ -83,7 +89,7 @@ import ChatComposer, { MessageAttachments } from "../components/ChatComposer.jsx
 const SettingsPopover = lazy(() => import("../components/SettingsPopover.jsx"));
 import { commandSlotSettings, defaultSettingsSnapshot, normalizeAppSettings } from "../lib/settings.js";
 import { VOICE_COMMAND_ID, requestVoiceDictation, setDictationAutoSend, setDictationMode, setVoiceBinding } from "../lib/voiceShortcut.js";
-import { EDITOR_CONTENT, initialMainContent, pluginAvailable, pluginEnabled, resolveMainContent, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
+import { BROWSER_CONTENT, EDITOR_CONTENT, initialMainContent, pluginAvailable, pluginEnabled, pluginHasPane, resolveMainContent, resolvePluginActivity, withPluginPreview } from "../lib/plugins.js";
 import RaticodeMark from "../components/RaticodeMark.jsx";
 import RatFaceIcon from "../components/RatFaceIcon.jsx";
 import { createPortal } from "react-dom";
@@ -363,11 +369,28 @@ export default function App() {
     }
   }, [settings.memory.secondBrainEnabled, settings.memory.secondBrainRoot]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The editor tabs on screen; the media bar skips a tab the user is looking at.
+  const [viewedCodePaths, setViewedCodePaths] = useState([]);
+  const [viewedBrowserPaths, setViewedBrowserPaths] = useState([]);
+  // A Rem approval waiting in a web tab while the Browser plugin isn't in front.
+  const [hiddenBrowserApproval, setHiddenBrowserApproval] = useState(null);
   const [settingsCategory, setSettingsCategory] = useState("general");
+  const [settingsBrowserSection, setSettingsBrowserSection] = useState("");
   useEffect(() => {
     const openProviders = () => { setSettingsCategory("providers"); setSettingsOpen(true); };
+    // Firefox and Chrome tabs open Settings > Browser for that browser's settings.
+    // A tab's menu names its browser, so Settings shows that browser's section.
+    const openBrowser = (event) => { setSettingsCategory("browser"); setSettingsBrowserSection(typeof event?.detail?.engine === "string" ? event.detail.engine : ""); setSettingsOpen(true); };
+    // Self-work's settings are in Settings > Rem, reachable with the Kanban board off.
+    const openRem = () => { setSettingsCategory("assistant"); setSettingsOpen(true); };
     window.addEventListener("raticode:open-provider-settings", openProviders);
-    return () => window.removeEventListener("raticode:open-provider-settings", openProviders);
+    window.addEventListener("raticode:open-browser-settings", openBrowser);
+    window.addEventListener("raticode:open-rem-settings", openRem);
+    return () => {
+      window.removeEventListener("raticode:open-provider-settings", openProviders);
+      window.removeEventListener("raticode:open-browser-settings", openBrowser);
+      window.removeEventListener("raticode:open-rem-settings", openRem);
+    };
   }, []);
   const [systemDark, setSystemDark] = useState(
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
@@ -392,12 +415,22 @@ export default function App() {
   const [activeCodePath, setActiveCodePath] = useState(initialEditorSession?.activePath || "");
   const [previewCodePath, setPreviewCodePath] = useState("");
   const [codeNavigationRequest, setCodeNavigationRequest] = useState(null);
-  const [browserTabs, setBrowserTabs] = useState(initialEditorSession?.browserTabs || {});
+  // The Browser plugin's tabs, apart from the File explorer's file tabs. Each
+  // tab keeps the browser it runs in; tabs saved before that ran in the
+  // browser chosen in Settings > Browser and keep it.
+  const [initialBrowserSession] = useState(() => withBrowserTabEngines(initialEditorSession?.browserPaths || [], initialEditorSession?.browserTabs || {}, settings.browser.engine));
+  const [browserTabs, setBrowserTabs] = useState(initialBrowserSession.tabs);
+  const [browserOpenPaths, setBrowserOpenPaths] = useState(initialBrowserSession.paths);
+  const [activeBrowserPath, setActiveBrowserPath] = useState(() => initialBrowserSession.paths.includes(initialEditorSession?.browserActivePath) ? initialEditorSession.browserActivePath : initialBrowserSession.paths.at(-1) || "");
   const [newCodeFileRequest, setNewCodeFileRequest] = useState(0);
   const [recentCodePaths, setRecentCodePaths] = useState(loadRecentCodePaths);
   const [recentProjectRoots, setRecentProjectRoots] = useState(loadRecentProjectRoots);
   deviceSyncContext.current = { settings, roots: mergeRecentProjects(recentProjectRoots, workflows.map(item => item.projectRoot).filter(Boolean)),
-    updateSettings: changes => setSettings(current => normalizeAppSettings(applyPhoneSettings(current, changes))) };
+    updateSettings: changes => setSettings(current => normalizeAppSettings(applyPhoneSettings(current, changes))),
+    // A paired phone's browser lists these web tabs and can send a page to a new background tab.
+    browser: { searchUrl: settings.browser.searchUrl, engine: controlledEngine(settings.browser.engine), tabs: () => phoneBrowserTabs(browserOpenPaths, activeBrowserPath, browserTabs),
+      // A page from the phone opens where the phone was told the computer's tabs run.
+      open: url => openIntegratedBrowserRef.current?.(url, { newTab: true, background: true, engine: controlledEngine(settings.browser.engine) }) } };
   const [lastWorktreeByProject, setLastWorktreeByProject] = useState(loadLastWorktreeByProject);
   const [rattishSessions, setRattishSessions] = useState({});
   const documentSessionsRef = useRef(new Map());
@@ -437,12 +470,20 @@ export default function App() {
   // The main content area changes only when something is opened, not when the
   // sidebar switches plugins, so Rem's conversation stays visible while the
   // sidebar shows source control or workflows. Clicking Rem or Second Brain in
-  // the rail opens its home; Swarms and Organizations show their workspace once
-  // one is opened.
+  // the rail opens its home, and clicking File explorer brings back the file and
+  // browser tabs; Swarms and Organizations show their workspace once one is opened.
   const [requestedMainContent, setMainContent] = useState(() => initialEditorSession?.mainContent || initialMainContent(requestedSidebarActivity));
   const mainContent = resolveMainContent(settings.plugins, requestedMainContent);
   const remHomeOpen = mainContent === "rem";
   const secondBrainOpen = mainContent === "second-brain";
+  const kanbanOpen = mainContent === "kanban";
+  useEffect(() => {
+    const open = () => { setSidebarActivity("kanban"); setMainContent("kanban"); };
+    window.addEventListener("gofer:kanban-open", open);
+    return () => window.removeEventListener("gofer:kanban-open", open);
+  }, []);
+  // Rem's backend learns whether the board is shown: with it off, self-work uses no tickets.
+  const kanbanBoardOn = pluginEnabled(settings.plugins, "kanban");
   useEffect(() => {
     setRemHomeContext(async () => {
       const workspace = window.goferDesktop?.workspace;
@@ -469,10 +510,13 @@ export default function App() {
       const roots = new Set(projects.map(project => project.root));
       const threads = loadAllChatThreads().filter(thread => thread.scopeMode === "global" || roots.has(thread.projectRoot))
         .map(thread => ({ id: thread.id, title: thread.title, projectRoot: thread.projectRoot, updatedAt: thread.updatedAt, archived: thread.archived }));
-      return { provider: settings.assistant.provider || "codex", model: settings.assistant.model || "cli-default", effort: settings.assistant.effort || "", chat_provider: settings.assistant.chatProvider || "", chat_model: settings.assistant.chatModel || "", chat_effort: settings.assistant.chatEffort || "", projects, resources: selection, brain, conversation_archive_root: memory.archiveFolder || "", report_theme: reportThemeContext(memory), workspace_snapshot: { threads }, browser_target: settings.browser.agentBrowser, swarm_access: settings.assistant.swarmAccessEnabled !== false, command_slots: commandSlotSettings(settings.assistant) };
+      return { provider: settings.assistant.provider || "codex", model: settings.assistant.model || "cli-default", effort: settings.assistant.effort || "", chat_provider: settings.assistant.chatProvider || "", chat_model: settings.assistant.chatModel || "", chat_effort: settings.assistant.chatEffort || "", projects, resources: selection, brain, conversation_archive_root: memory.archiveFolder || "", report_theme: reportThemeContext(memory), workspace_snapshot: { threads }, browser_target: settings.browser.agentBrowser, swarm_access: settings.assistant.swarmAccessEnabled !== false, command_slots: commandSlotSettings(settings.assistant), kanban_board: kanbanBoardOn };
     });
     return () => setRemHomeContext(null);
-  }, [settings.assistant, settings.memory, settings.browser.agentBrowser, activeProjectRoot, recentProjectRoots]);
+  }, [settings.assistant, settings.memory, settings.browser.agentBrowser, activeProjectRoot, recentProjectRoots, kanbanBoardOn]);
+
+  // Projects Rem opened for a request join the window's projects, without switching to them.
+  useEffect(() => onRemOpenedProjects(opened => setRecentProjectRoots(current => adoptRemProjects(current, opened))), []);
 
   // Task supervision keeps updating threads even while another workspace is open.
   useEffect(() => connectRemHome(), []);
@@ -599,8 +643,9 @@ export default function App() {
   runRegistryRecordsRef.current = runRegistry.records;
   const [pinnedRun, setPinnedRun] = useState(initialEditorSession?.pinnedRun || null);
   useEffect(() => {
-    saveEditorSession({ ...withoutAgentBrowserTabs(codeOpenPaths, activeCodePath, browserTabs), workflowTabs, activity: sidebarActivity, mainContent, pinnedRun });
-  }, [codeOpenPaths, activeCodePath, workflowTabs, browserTabs, sidebarActivity, mainContent, pinnedRun]);
+    const savedBrowser = withoutAgentBrowserTabs(browserOpenPaths, activeBrowserPath, browserTabs);
+    saveEditorSession({ paths: codeOpenPaths, activePath: activeCodePath, browserPaths: savedBrowser.paths, browserActivePath: savedBrowser.activePath, browserTabs: savedBrowser.browserTabs, workflowTabs, activity: sidebarActivity, mainContent, pinnedRun });
+  }, [codeOpenPaths, activeCodePath, browserOpenPaths, activeBrowserPath, workflowTabs, browserTabs, sidebarActivity, mainContent, pinnedRun]);
   const pinnedRunRef = useRef(pinnedRun);
   pinnedRunRef.current = pinnedRun;
   const setRunState = useCallback((update) => {
@@ -648,6 +693,11 @@ export default function App() {
   const logListRequestRef = useRef(0);
   const approvalRequestRef = useRef(0);
   const rattishEditorRef = useRef(null);
+  // The Browser plugin's tab area, and whichever tab area is in front, for
+  // commands such as Find and Close tab.
+  const browserWorkspaceRef = useRef(null);
+  const browserContentOpenRef = useRef(false);
+  const activeWorkspaceRef = useMemo(() => ({ get current() { return (browserContentOpenRef.current ? browserWorkspaceRef : rattishEditorRef).current; } }), []);
   const previewCodePathRef = useRef("");
   const codeNavigationSequenceRef = useRef(0);
   const pendingProjectFileRef = useRef(null);
@@ -682,7 +732,9 @@ export default function App() {
   const swarmProjectRoot = browsingWorkspace?.projectRoot || activeProjectRoot || "";
   const swarmOpen = mainContent === "swarms" && samePath(selectedSwarm?.projectRoot, swarmProjectRoot);
   const organizationOpen = mainContent === "organizations" && Boolean(selectedOrganization);
-  const editorContentOpen = !remHomeOpen && !secondBrainOpen && !swarmOpen && !organizationOpen;
+  const browserContentOpen = mainContent === BROWSER_CONTENT;
+  browserContentOpenRef.current = browserContentOpen;
+  const editorContentOpen = !remHomeOpen && !secondBrainOpen && !swarmOpen && !organizationOpen && !kanbanOpen && !browserContentOpen;
   const codeWorkspaceWorkflow = workflows.find(item => samePath(item.sourcePath, activeCodePath)) ?? activeWorkflow ?? browsingWorkspace;
   // Rem's chat looks the same in the main area and in the side pane.
   const remHomeProps = {
@@ -1047,7 +1099,7 @@ export default function App() {
       if (command?.action === "text-zoom" && command.reset === true) {
         setTextZoom(100);
       }
-      if (command?.action === "editor-find") rattishEditorRef.current?.runCommand?.("edit.find");
+      if (command?.action === "editor-find") activeWorkspaceRef.current?.runCommand?.("edit.find");
       if (command?.action === "open-browser") runShortcutAction("browser.open");
       if (command?.action === "settings-open") runShortcutAction("settings.open");
       if (command?.action === "file-open") runShortcutAction("file.open");
@@ -1057,7 +1109,8 @@ export default function App() {
       if (command?.action === "assistant-pane-toggle") runShortcutAction("view.toggleAssistantPane");
     });
     const unsubscribeOpenTab = window.goferBrowser?.onOpenTab?.((request) => {
-      if (request?.url) openIntegratedBrowserRef.current?.(request.url, { newTab: true, background: request.background === true });
+      // A link from a web tab opens in a new tab of the same browser.
+      if (request?.url) openIntegratedBrowserRef.current?.(request.url, { newTab: true, background: request.background === true, private: request.private === true, ...(typeof request.engine === "string" && request.engine ? { engine: request.engine } : {}) });
     });
     const unsubscribeOpenFile = window.goferBrowser?.onOpenFile?.((request) => {
       const target = request?.href ? markdownFileLinkTarget("", request.href) : request;
@@ -1079,7 +1132,7 @@ export default function App() {
       unsubscribeTerminalEditor?.();
       window.removeEventListener("keydown", handleApplicationShortcut, true);
     };
-  }, [activeWorkflow, activeCodePath, workflowTabs, runState.running, settings, settingsOpen, setAssistantPaneVisible, setProjectPaneVisible]);
+  }, [activeWorkflow, activeCodePath, activeWorkspaceRef, workflowTabs, runState.running, settings, settingsOpen, setAssistantPaneVisible, setProjectPaneVisible]);
 
   useEffect(() => () => {
     for (const session of documentSessionsRef.current.values()) {
@@ -1225,52 +1278,74 @@ export default function App() {
     setStudioView("code");
   }
 
+  // The Browser plugin in front. It has no side pane; Rem and threads stay on the right.
+  function showBrowserContent() {
+    setSidebarActivity(BROWSER_CONTENT);
+    showMainContent(BROWSER_CONTENT);
+  }
+
   function openIntegratedBrowser(initialUrl, options = {}) {
     const requestedUrl = initialUrl || settings.browser.homepage || "about:blank";
-    // Background tabs join the strip without changing the user's view.
-    if (!options.background) showEditorContent();
-    const openBrowserPaths = codeOpenPaths.filter((path) => Boolean(browserTabs[path]));
-    if (!options.newTab && openBrowserPaths.length) {
-      const targetPath = browserTabs[activeCodePath]
-        ? activeCodePath
-        : openBrowserPaths.at(-1);
-      setActiveCodePath(targetPath);
-      setCodeEditorOpened(true);
-      setStudioView("code");
+    // Background tabs join the tab bar without changing the user's view.
+    if (!options.background) showBrowserContent();
+    if (!options.newTab && !options.private && !options.engine && browserOpenPaths.length) {
+      const targetPath = browserTabs[activeBrowserPath] ? activeBrowserPath : browserOpenPaths.at(-1);
+      setActiveBrowserPath(targetPath);
       return targetPath;
+    }
+    const opening = browserTabOpening({ paths: browserOpenPaths, tabs: browserTabs, defaultEngine: settings.browser.engine, engine: options.engine, privateTab: options.private === true });
+    if (opening.reuse) {
+      // Raticode (gecko) is one Firefox window: the address opens as a Firefox tab there.
+      if (/^https?:/i.test(String(initialUrl || ""))) {
+        setBrowserTabs((current) => current[opening.reuse]
+          ? { ...current, [opening.reuse]: { ...current[opening.reuse], pendingUrls: [...(current[opening.reuse].pendingUrls || []), initialUrl].slice(-25) } }
+          : current);
+      }
+      if (!options.background) setActiveBrowserPath(opening.reuse);
+      return opening.reuse;
     }
     const path = createBrowserTabPath();
     setBrowserTabs((current) => ({
       ...current,
       [path]: {
+        engine: opening.engine,
         error: "",
-        focusLocation: !options.background && (options.focusLocation ?? !initialUrl),
+        focusLocation: !options.background && opening.engine !== "gecko" && (options.focusLocation ?? !initialUrl),
         loading: true,
         title: options.title || "",
         url: requestedUrl,
+        ...(options.private ? { private: true } : {}),
         ...(options.history ? { history: options.history } : {}),
       },
     }));
-    setCodeOpenPaths((current) => mergeCodeOpenPaths(current, [path]));
+    setBrowserOpenPaths((current) => mergeCodeOpenPaths(current, [path]));
     if (options.background) return path;
-    setActiveCodePath(path);
-    setCodeEditorOpened(true);
-    setStudioView("code");
+    setActiveBrowserPath(path);
     return path;
+  }
+
+  function clearGeckoPending(path, urls = []) {
+    const sent = new Set(urls);
+    setBrowserTabs((current) => {
+      const tab = current[path];
+      if (!tab?.pendingUrls?.length) return current;
+      const pendingUrls = tab.pendingUrls.filter((url) => !sent.has(url));
+      return { ...current, [path]: { ...tab, pendingUrls } };
+    });
   }
 
   // Ctrl+Shift+T brings back the most recently closed web tab with its history.
   function reopenClosedBrowserTab() {
     const tab = closedBrowserTabsRef.current.pop();
     if (!tab) return "";
-    return openIntegratedBrowser(tab.url, { newTab: true, focusLocation: false, title: tab.title, history: tab.history });
+    return openIntegratedBrowser(tab.url, { newTab: true, focusLocation: false, title: tab.title, history: tab.history, ...(tab.engine ? { engine: tab.engine } : {}) });
   }
   reopenClosedBrowserTabRef.current = reopenClosedBrowserTab;
 
   openIntegratedBrowserRef.current = openIntegratedBrowser;
   closeAgentBrowserTabRef.current = (id) => {
     const path = Object.keys(browserTabs).find((candidate) => browserTabs[candidate].agentSessionId === id);
-    if (path) closeCodeFiles([path]);
+    if (path) closeBrowserTabs([path]);
   };
 
   useEffect(() => {
@@ -1279,8 +1354,11 @@ export default function App() {
     const unsubscribeOpen = window.goferBrowser?.onAgentOpen?.((request) => {
       if (typeof request?.id !== "string" || !request.id) return;
       const path = createBrowserTabPath();
-      setBrowserTabs((current) => ({ ...current, [path]: agentBrowserTab(request) }));
-      setCodeOpenPaths((current) => mergeCodeOpenPaths(current, [path]));
+      // Rem's tab streams from Firefox, Chrome or Edge when one is the default browser.
+      const engine = webBrowserEngine(request.engine);
+      const tab = { ...agentBrowserTab(request), agentEngine: engine, engine };
+      setBrowserTabs((current) => ({ ...current, [path]: tab }));
+      setBrowserOpenPaths((current) => mergeCodeOpenPaths(current, [path]));
     });
     const unsubscribeClose = window.goferBrowser?.onAgentClose?.((request) => {
       if (request?.id) closeAgentBrowserTabRef.current?.(request.id);
@@ -1295,6 +1373,13 @@ export default function App() {
   useEffect(() => {
     void Promise.resolve(window.goferBrowser?.setPolicy?.(browserPolicyFromSettings(settings.browser))).catch(() => {});
   }, [settings.browser]);
+
+  // On Linux, Raticode (gecko) needs Raticode to start in X11 mode. It's wanted
+  // while Gecko is the default browser or a Gecko tab is open.
+  const geckoWanted = webBrowserEngine(settings.browser.engine) === "gecko" || browserOpenPaths.some((path) => browserTabs[path]?.engine === "gecko");
+  useEffect(() => {
+    void Promise.resolve(window.goferBrowser?.gecko?.("select", { selected: geckoWanted })).catch(() => {});
+  }, [geckoWanted]);
 
   // The browser sends the page text with the element and selection first.
   function askRemAboutPage({ url, title, text = "" }) {
@@ -1397,15 +1482,34 @@ export default function App() {
     closeCodeFiles([path]);
   }
 
-  function closeCodeFiles(paths) {
+  // Closing web tabs in the Browser plugin. Ctrl+Shift+T can bring back the
+  // user's own tabs, in the browser they ran in.
+  function closeBrowserTabs(paths) {
     const closing = new Set(paths.filter(Boolean));
     if (!closing.size) return;
     for (const path of closing) {
       const tab = browserTabs[path];
-      if (tab && !tab.agentSessionId && /^https?:/i.test(String(tab.url || ""))) {
-        closedBrowserTabsRef.current = [...closedBrowserTabsRef.current, { url: tab.url, title: tab.title || "", history: tab.history || null }].slice(-25);
+      if (tab && !tab.agentSessionId && !tab.private && /^https?:/i.test(String(tab.url || ""))) {
+        closedBrowserTabsRef.current = [...closedBrowserTabsRef.current, { url: tab.url, title: tab.title || "", history: tab.history || null, engine: tab.engine || "" }].slice(-25);
       }
     }
+    setBrowserOpenPaths((current) => {
+      const next = current.filter((candidate) => !closing.has(candidate));
+      setActiveBrowserPath((currentActive) => {
+        if (!closing.has(currentActive)) return currentActive;
+        const index = current.indexOf(currentActive);
+        return next[Math.min(index, next.length - 1)] ?? next.at(-1) ?? "";
+      });
+      return next;
+    });
+    setBrowserTabs((current) => Object.fromEntries(
+      Object.entries(current).filter(([path]) => !closing.has(path)),
+    ));
+  }
+
+  function closeCodeFiles(paths) {
+    const closing = new Set(paths.filter(Boolean));
+    if (!closing.size) return;
     for (const path of closing) {
       const requests = terminalEditorRequestsRef.current.get(path);
       if (!requests) continue;
@@ -1428,14 +1532,11 @@ export default function App() {
       previewCodePathRef.current = "";
       return "";
     });
-    setBrowserTabs((current) => Object.fromEntries(
-      Object.entries(current).filter(([path]) => !closing.has(path)),
-    ));
     setWorkflowTabs(current => Object.fromEntries(Object.entries(current).filter(([path]) => !closing.has(path))));
   }
 
   function closeActiveCodeFile() {
-    rattishEditorRef.current?.closeActive?.();
+    activeWorkspaceRef.current?.closeActive?.();
   }
 
   function editWorkflowFile(workflow) {
@@ -2216,9 +2317,11 @@ export default function App() {
         : await window.goferUpdates.downloadAndInstall();
       setUpdateState((current) => ({ ...current, ...nextState }));
       if (update.supported === false) {
-        setTopBarNotice({ type: "info", message: update.platform === "darwin"
-          ? "Open the downloaded DMG, quit Raticode, and drag Raticode into Applications to replace the old copy."
-          : "Download and install the update from the release page." });
+        setTopBarNotice({ type: "info", message: update.managedBy
+          ? `Update Raticode with ${update.managedBy}, for example yay -Syu or paru -Syu, then restart it.`
+          : update.platform === "darwin"
+            ? "Open the downloaded DMG, quit Raticode, and drag Raticode into Applications to replace the old copy."
+            : "Download and install the update from the release page." });
       }
     } catch (error) {
       setTopBarNotice({
@@ -3881,7 +3984,7 @@ export default function App() {
       if (runFocusedEdit(action)) return;
     }
     if (action.startsWith("edit.") || action.startsWith("selection.")) {
-      const ran = rattishEditorRef.current?.runCommand?.(action);
+      const ran = activeWorkspaceRef.current?.runCommand?.(action);
       if (!ran) setTopBarNotice({ type: "info", message: "This command is unavailable for the active document." });
       return;
     }
@@ -4014,7 +4117,8 @@ export default function App() {
       <div className="studio-panes flex h-full min-h-0 min-w-0 flex-1 overflow-hidden" data-project-side={settings.layout.projectPaneSide} data-assistant-side={settings.layout.assistantPaneSide}>
       {<WorkflowSidebar
         activity={sidebarActivity}
-        paneVisible={projectPaneVisible}
+        // Browser has no side pane: the rail stays, and the browser fills the main area.
+        paneVisible={projectPaneVisible && pluginHasPane(sidebarActivity)}
         activeWorkflow={browsingWorkspace}
         mainProjectRoot={Object.entries(lastWorktreeByProject).find(([, root]) => samePath(root, activeProjectRoot))?.[0] || activeProjectRoot}
         activeWorkflowId={activeWorkflow?.id}
@@ -4041,13 +4145,17 @@ export default function App() {
         onOpenOrganization={(id) => { setSidebarActivity("organizations"); showMainContent("organizations"); setSelectedOrganization({ id }); closeCompactPane(); }}
         selectedOrganizationId={selectedOrganization ? selectedOrganization.id : null}
         onOpenSecondBrain={() => { setSidebarActivity("second-brain"); showMainContent("second-brain"); closeCompactPane(); }}
+        onOpenKanban={() => { setSidebarActivity("kanban"); showMainContent("kanban"); closeCompactPane(); }}
+        kanbanOpen={kanbanOpen}
         secondBrainOpen={secondBrainOpen}
         onOpenRemHome={() => { setSidebarActivity("rem"); showMainContent("rem"); closeCompactPane(); }}
+        onShowEditor={showEditorContent}
+        onOpenBrowser={() => { showBrowserContent(); closeCompactPane(); }}
         remHomeOpen={remHomeOpen}
         remProjectOptions={remHomeProps.projectOptions}
         onOpenSwarm={(id, agentId) => { setSidebarActivity("swarms"); showMainContent("swarms"); setSelectedSwarm({ id, agentId, projectRoot: swarmProjectRoot }); closeCompactPane(); }}
         activeCodePath={activeCodePath}
-        onCloseCodeFile={closeActiveCodeFile}
+        onCloseCodeFile={() => rattishEditorRef.current?.closeActive?.()}
         onCodeFilesystemChange={handleCodeFilesystemChange}
         onRefresh={() => { void runRegistry.refresh(); return loadWorkflows({ discoverProject: true }); }}
         onRenameWorkflow={renameWorkflow}
@@ -4079,6 +4187,14 @@ export default function App() {
       />}
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-x border-line bg-[#f9fbfd]">
+            <BrowserMediaBar viewedTabs={[...viewedCodePaths, ...viewedBrowserMedia(viewedBrowserPaths, browserTabs)]} />
+            {!browserContentOpen && hiddenBrowserApproval ? (
+              <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-ink dark:bg-amber-950 dark:text-amber-100">
+                <Bot aria-hidden="true" className="shrink-0 text-amber-800" size={14} />
+                <span className="min-w-0 flex-1">{hiddenBrowserApproval.agentLabel} needs your approval to {hiddenBrowserApproval.label || "continue"} in “{hiddenBrowserApproval.title}”.</span>
+                <button className="rounded-md bg-brand px-2.5 py-1 font-semibold text-white hover:opacity-90" type="button" onClick={() => { showBrowserContent(); setActiveBrowserPath(hiddenBrowserApproval.path); }}>Review</button>
+              </div>
+            ) : null}
             {(workflowTabs[activeCodePath] || activeCodePath === activeWorkflow?.sourcePath) && rattishEditorState?.recoveryWarning ? (
               <div role="status" className="shrink-0 border-b border-line bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:bg-amber-950 dark:text-amber-200">
                 <strong>Draft recovery: </strong>{rattishEditorState.recoveryWarning}
@@ -4086,6 +4202,7 @@ export default function App() {
             ) : null}
         {organizationOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading organization...</p>}><OrganizationHome key={selectedOrganization.id} rootPath={swarmProjectRoot} projectOptions={recentProjectRoots} organizationId={selectedOrganization.id} defaults={settings.assistant} memorySettings={settings.memory} onSelect={id => setSelectedOrganization({ id })} onClose={() => setSelectedOrganization(null)} /></Suspense> : null}
         {secondBrainOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading Second Brain...</p>}><SecondBrainWorkspace assistant={settings.assistant} memorySettings={settings.memory} onClose={showEditorContent} /></Suspense> : null}
+        {kanbanOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading the board...</p>}><KanbanWorkspace /></Suspense> : null}
         {remHomeOpen ? <RemSlot host={remHost} /> : null}
         {swarmOpen ? <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading swarm...</p>}><SwarmWorkspace projectPaths={mergeRecentProjects(activeProjectRoot ? [activeProjectRoot] : [], recentProjectRoots).map(root => pathValue(lastWorktreeByProject, root) || root)} selectedAgentId={selectedSwarm.agentId} defaults={settings.assistant} key={`${swarmProjectRoot}:${selectedSwarm.id}`} rootPath={swarmProjectRoot} swarmId={selectedSwarm.id} onSelect={(id) => setSelectedSwarm({ id, projectRoot: swarmProjectRoot })} onClose={() => setSelectedSwarm(null)} /></Suspense> : null}
         <div className={`${editorContentOpen ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
@@ -4098,7 +4215,7 @@ export default function App() {
             <CodeWorkspace
               active={editorContentOpen}
               activePath={activeCodePath}
-              browserTabs={browserTabs}
+              onViewedPathsChange={setViewedCodePaths}
               navigationRequest={codeNavigationRequest}
               ref={rattishEditorRef}
               openPaths={codeOpenPaths}
@@ -4126,11 +4243,7 @@ export default function App() {
               workflow={codeWorkspaceWorkflow}
               onActivePathChange={activateEditorPath}
               onActiveDocumentStateChange={setActiveCodeDocumentState}
-              onBrowserStateChange={updateBrowserTab}
               onAskRemAboutPage={askRemAboutPage}
-              onShareBrowserTab={shareBrowserTabWithRem}
-              canShareBrowserTab={settings.browser.agentBrowser === "raticode"}
-              onReopenClosedBrowserTab={() => reopenClosedBrowserTabRef.current?.()}
               onClosePath={closeCodeFile}
               onClosePaths={closeCodeFiles}
               saveBeforeClosePaths={[...terminalEditorRequestsRef.current.keys()]}
@@ -4162,6 +4275,37 @@ export default function App() {
               onRattishSaved={refreshRattishAfterFileSave}
               onSettingChange={changeSetting}
               terminalProjectRoot={panelProjectRoot}
+            />
+            </Suspense>
+        </div>
+        {/* The Browser plugin. Its tabs stay mounted while another area is in
+            front, so pages keep playing and keep their place. */}
+        <div className={`${browserContentOpen ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
+            <Suspense fallback={<p role="status" className="p-4 text-sm text-muted">Loading browser...</p>}>
+            <CodeWorkspace
+              ref={browserWorkspaceRef}
+              variant="browser"
+              active={browserContentOpen}
+              activePath={activeBrowserPath}
+              openPaths={browserOpenPaths}
+              browserTabs={browserTabs}
+              defaultBrowserEngine={settings.browser.engine}
+              theme={theme}
+              settings={settings}
+              onViewedPathsChange={setViewedBrowserPaths}
+              onHiddenApprovalChange={setHiddenBrowserApproval}
+              onActivePathChange={setActiveBrowserPath}
+              onOpenPathsChange={setBrowserOpenPaths}
+              onClosePath={(path) => closeBrowserTabs([path])}
+              onClosePaths={closeBrowserTabs}
+              onBrowserStateChange={updateBrowserTab}
+              onGeckoPendingOpened={clearGeckoPending}
+              onAskRemAboutPage={askRemAboutPage}
+              onShareBrowserTab={shareBrowserTabWithRem}
+              canShareBrowserTab={settings.browser.agentBrowser === "raticode"}
+              onReopenClosedBrowserTab={() => reopenClosedBrowserTabRef.current?.()}
+              onOpenBrowser={(options) => openIntegratedBrowser(undefined, options)}
+              onOpenPath={(path) => void openRecentCodeFile(path)}
             />
             </Suspense>
         </div>
@@ -4214,12 +4358,13 @@ export default function App() {
         <Suspense fallback={<p role="status">Loading settings...</p>}>
         <SettingsPopover
           initialCategory={settingsCategory}
+          initialBrowserSection={settingsBrowserSection}
           dataDir={dataDir}
           open
           settings={settings}
           onChange={changeSetting}
           onChooseDataDirectory={chooseApplicationDataDirectory}
-          onClose={() => { setSettingsOpen(false); setSettingsCategory("general"); }}
+          onClose={() => { setSettingsOpen(false); setSettingsCategory("general"); setSettingsBrowserSection(""); }}
           onResetAll={async () => {
             try { await window.goferDesktop?.rem?.configure?.("reset", true); setSettings(defaultSettingsSnapshot()); }
             catch (error) { reportArchiveError(error); }
@@ -4950,9 +5095,13 @@ export function WorkflowSidebar({
   selectedOrganizationId,
   onOpenSecondBrain,
   secondBrainOpen,
+  onOpenKanban,
+  kanbanOpen,
   onOpenRemHome,
   remHomeOpen,
   remProjectOptions,
+  onShowEditor,
+  onOpenBrowser,
   onCloseCodeFile,
   onCodeFilesystemChange,
   onCreate,
@@ -5144,10 +5293,14 @@ export function WorkflowSidebar({
             onOpenOrganization={onOpenOrganization}
             selectedOrganizationId={selectedOrganizationId}
             onOpenSecondBrain={onOpenSecondBrain}
+            onOpenKanban={onOpenKanban}
+            kanbanOpen={kanbanOpen}
             secondBrainOpen={secondBrainOpen}
             onOpenRemHome={onOpenRemHome}
             remHomeOpen={remHomeOpen}
             remProjectOptions={remProjectOptions}
+            onShowEditor={onShowEditor}
+            onOpenBrowser={onOpenBrowser}
             onOpenSwarm={onOpenSwarm}
             selectedSwarmId={selectedSwarmId}
             onSelectProject={onSelectProject}
@@ -5383,6 +5536,18 @@ export function nextCodeFileOpenState(openPaths, previewPath, path, preview) {
   };
 }
 
+// Browser tabs as the paired-device sync publishes them. The backend keeps only web
+// addresses; previews, local files and blank tabs are dropped there.
+export function phoneBrowserTabs(paths, activePath, browserTabs) {
+  return paths.filter(path => browserTabs[path] && !browserTabs[path].private).map(path => {
+    const tab = browserTabs[path];
+    return { id: path, title: String(tab.title || ""), url: String(tab.url || ""), active: path === activePath,
+      // The browser this tab runs in; phones that predate per-tab browsers ignore it.
+      engine: webBrowserEngine(tab.agentSessionId ? tab.agentEngine || tab.engine : tab.engine),
+      ...(tab.agentSessionId ? { owner: "rem", label: tab.agentLabel || "Rem" } : { owner: "you" }) };
+  });
+}
+
 export function agentBrowserTab({ id, label, partition }) {
   return {
     agentLabel: typeof label === "string" && label.trim() ? label.trim().slice(0, 60) : "Rem",
@@ -5397,8 +5562,9 @@ export function agentBrowserTab({ id, label, partition }) {
 }
 
 // Rem's tabs belong to live desktop sessions and cannot be restored later.
+// Private tabs are never written down.
 export function withoutAgentBrowserTabs(paths, activePath, browserTabs) {
-  const agentPaths = new Set(Object.keys(browserTabs).filter((path) => browserTabs[path]?.agentSessionId));
+  const agentPaths = new Set(Object.keys(browserTabs).filter((path) => browserTabs[path]?.agentSessionId || browserTabs[path]?.private));
   if (!agentPaths.size) return { paths, activePath, browserTabs };
   const kept = paths.filter((path) => !agentPaths.has(path));
   return {
@@ -5418,6 +5584,7 @@ export function browserChromeOwnsShortcut(event) {
 
 export function browserPolicyFromSettings(browser = {}) {
   return {
+    engine: controlledEngine(browser.engine),
     searchUrl: browser.searchUrl,
     homepage: browser.homepage,
     remSignInSites: browser.remSignInSites || [],
@@ -6262,6 +6429,7 @@ function RemSidePane({ width, onResizeStart, onResizeKeyDown, children }) {
 }
 
 function updateButtonLabel(updateState) {
+  if (updateState?.managedBy) return `Update ${updateState?.info?.version ?? "available"} with ${updateState.managedBy}`;
   if (updateState?.supported === false) return updateState.platform === "darwin" ? "Download Mac installer" : "Open update downloads";
   if (updateState?.downloaded) return "Restart to update";
   if (updateState?.downloading) {
@@ -6272,6 +6440,7 @@ function updateButtonLabel(updateState) {
 }
 
 function updateButtonTitle(updateState) {
+  if (updateState?.managedBy) return `Your system package manager installed Raticode, so ${updateState.managedBy} updates it, for example with yay -Syu or paru -Syu. This opens the release notes.`;
   if (updateState?.supported === false) return updateState.platform === "darwin"
     ? "Download the Mac installer. Open the DMG, quit Raticode, and drag it into Applications. This build requires manual installation."
     : "Open the release page to download and install the update manually";
@@ -8316,7 +8485,7 @@ const ForkableMessage = memo(function ForkableMessage({ onFork, canFork, ...prop
   </div>;
 });
 
-const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, message, onEdit, onResume, onOpenLink, onUndoChanges, sourcePath, supportsImages = true, providerName = "This provider" }) {
+export const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, message, onEdit, onResume, onOpenLink, onUndoChanges, sourcePath, supportsImages = true, providerName = "This provider" }) {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState(message.body);
@@ -8339,6 +8508,13 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
   }
   const isSystem = message.role === "system" || message.kind === "system";
   const isUser = message.role === "user";
+  // Rem's task threads say who wrote each instruction: Rem or the user. Both
+  // reach the worker as user messages; here they must not look the same.
+  const author = isUser && (message.sender === "rem" || message.sender === "user") ? message.sender : "";
+  const fromRem = author === "rem";
+  const headerButton = fromRem
+    ? "grid h-5 w-5 place-items-center rounded text-muted outline-none transition hover:bg-brand/15 hover:text-ink focus-visible:ring-2 focus-visible:ring-brand/50"
+    : "grid h-5 w-5 place-items-center rounded text-white/80 outline-none transition hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70";
 
   async function copyMessage() {
     try {
@@ -8376,6 +8552,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
     <div
       data-message-id={message.id}
       data-history-anchor={message.id}
+      data-author={author || undefined}
       className={`flex ${
         isSystem ? "justify-center" : message.role === "user" ? "justify-end" : "justify-start"
       }`}
@@ -8384,6 +8561,8 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
         className={`${isSystem ? "max-w-[86%]" : "w-full min-w-0"} rounded-lg px-3 py-2 text-sm leading-6 ${
           isSystem
             ? "border border-line bg-slate-50 text-xs font-medium text-muted"
+            : fromRem
+            ? "border border-brand/40 bg-brand/10 text-ink"
             : message.role === "user"
             ? "bg-brand text-white"
             : "border border-line bg-white text-slate-700 shadow-sm"
@@ -8395,11 +8574,17 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
           <>
             {isUser ? (
               <div className="mb-1 flex h-5 items-center justify-end gap-0.5">
+                {author ? (
+                  <span className={`mr-auto inline-flex items-center gap-1 text-[11px] font-semibold ${fromRem ? "text-brand" : "text-white/90"}`}>
+                    {fromRem ? <Bot aria-hidden="true" size={12} /> : <UserRound aria-hidden="true" size={12} />}
+                    <span className="sr-only">Written by </span>{fromRem ? "Rem" : "You"}
+                  </span>
+                ) : null}
                 {message.origin === "phone" && <span title="Sent from your phone" aria-label="Sent from your phone" className="mr-1 inline-flex"><Smartphone aria-hidden="true" size={12} /></span>}
-                {canEdit ? (
+                {canEdit && !fromRem ? (
                   <button
                     aria-label="Edit message"
-                    className="grid h-5 w-5 place-items-center rounded text-white/80 outline-none transition hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70"
+                    className={headerButton}
                     title="Edit message"
                     type="button"
                     onClick={beginEditing}
@@ -8409,7 +8594,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
                 ) : null}
                 <button
                   aria-label={copied ? "Message copied" : "Copy message"}
-                  className="grid h-5 w-5 place-items-center rounded text-white/80 outline-none transition hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/70"
+                  className={headerButton}
                   title={copied ? "Message copied" : "Copy message"}
                   type="button"
                   onClick={() => void copyMessage()}
@@ -8418,7 +8603,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
                 </button>
               </div>
             ) : null}
-            {isUser ? <MessageAttachments attachments={editing ? editAttachments : message.attachments} inverse onOpenLink={onOpenLink} /> : null}
+            {isUser ? <MessageAttachments attachments={editing ? editAttachments : message.attachments} inverse={!fromRem} onOpenLink={onOpenLink} /> : null}
             {isUser && editing ? (
               <div className="space-y-2">
                 <textarea
@@ -8466,7 +8651,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = false, mes
             ) : message.body ? (
               <>
                 {message.kind === "search-source" ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
-                  : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
+                  : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser && !fromRem} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
                 {!isUser && message.kind !== "streaming" && (message.sources?.length || /youtu\.?be/.test(message.body))
                   ? <Suspense fallback={null}><ChatSources body={message.body} sources={message.sources} /></Suspense> : null}
                 {!isUser && message.kind !== "streaming" ? (

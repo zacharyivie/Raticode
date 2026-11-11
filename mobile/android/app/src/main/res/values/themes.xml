@@ -1,0 +1,32 @@
+<resources>
+  <style name="Theme.Raticode" parent="android:style/Theme.Material.NoActionBar">
+    <item name="android:fontFamily">sans</item>
+    <item name="android:windowLightStatusBar">false</item>
+    <item name="android:windowActionModeOverlay">true</item>
+    <item name="android:windowBackground">#E4DFD5</item>
+  </style>
+  <!-- Voice mode floats over whatever is on screen, including the lock screen. -->
+  <style name="Theme.Raticode.Voice" parent="Theme.Raticode">
+    <item name="android:windowIsTranslucent">true</item>
+    <item name="android:windowBackground">@android:color/transparent</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:backgroundDimEnabled">false</item>
+    <item name="android:windowAnimationStyle">@android:style/Animation.Translucent</item>
+  </style>
+  <!-- Share to Rem is a sheet over the app you share from; it draws its own dimmed backdrop. -->
+  <style name="Theme.Raticode.Share" parent="Theme.Raticode">
+    <item name="android:windowIsTranslucent">true</item>
+    <item name="android:windowBackground">@android:color/transparent</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:backgroundDimEnabled">false</item>
+  </style>
+  <!-- The child lock floats over Raticode and appears at once; it dims nothing, so a video stays watchable. App lock
+       shares this window style so the screens beneath stay started, and draws an opaque page in it. -->
+  <style name="Theme.Raticode.ChildLock" parent="Theme.Raticode">
+    <item name="android:windowIsTranslucent">true</item>
+    <item name="android:windowBackground">@android:color/transparent</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:backgroundDimEnabled">false</item>
+    <item name="android:windowAnimationStyle">@null</item>
+  </style>
+</resources>

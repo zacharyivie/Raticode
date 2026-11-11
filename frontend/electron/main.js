@@ -25,6 +25,7 @@ const {
   shell,
   session,
   protocol,
+  systemPreferences,
   webContents,
 } = require("electron");
 protocol.registerSchemesAsPrivileged([{ scheme: "raticode-media", privileges: { standard: true, secure: true, stream: true } }]);
@@ -70,24 +71,31 @@ const { createBrowserStore } = require("./browser-store.cjs");
 const { createOpenWith } = require("./open-with.cjs");
 const { PARTITIONS: BROWSER_PARTITIONS } = require("./browser-policy.cjs");
 const { searchProject, replaceProject } = require("./project-search.cjs");
-const { createAppLog } = require("./app-log.cjs");
+const { createAppLog, redactLog } = require("./app-log.cjs");
 const { createBackendOutput } = require("./backend-log.cjs");
 const util = require("node:util");
 const { createArchiveQueue } = require("./archive-queue.cjs");
 const conversationArchives = createArchiveQueue();
 const { createPathGrantQueue } = require("./path-grant-queue.cjs");
 const backendPathGrants = createPathGrantQueue();
+// Folder access is renewed every 14 minutes; the log notes each folder once per backend.
+const loggedPathGrants = new Set();
 let archivesDrained = false;
 let logsDrained = false;
 let logsClosing = false;
 const REPORT_THEMES = ["auto", "light", "dark", "sepia", "vaporwave", "steam", "carbon", "botanical", "blueprint", "arcade", "sakura", "deep-sea", "solarpunk", "noir", "candy-lab", "cosmic"];
 let applicationLog;
 const { registerIpcHandlers } = require("./ipc-handlers.cjs");
+const { createFirefoxEngine } = require("./firefox-engine.cjs");
+const { createGeckoWindow } = require("./gecko-window.cjs");
+const { X11_SWITCH, relaunchNeeded } = require("./gecko-display.cjs");
+const { CHROME, EDGE, createChromiumEngine } = require("./chromium-engine.cjs");
 const { BACKEND_FEATURES, featureEnv, featureStates, readFeatureChoices, writeFeatureChoice } = require("./feature-preview.cjs");
 const { inspectPath, missingRecentFiles, missingThreadRoots } = require("./path-info.cjs");
 const safeFiles = require("./safe-files.cjs");
 const { migrateSource } = require("./rattish-migration.cjs");
 const { installPermissionPolicy, isStudioDocument, studioCsp } = require("./studio-policy.cjs");
+const { createSystemMicrophoneGate, describeSpeechHelper } = require("./voice-diagnostics.cjs");
 const { createIpcSecurity, isSafeExternalUrl } = require("./security.cjs");
 const { createTrustedProjectStore } = require("./trusted-projects.cjs");
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -155,6 +163,13 @@ let updateState = {
 };
 let installUpdateAfterDownload = false;
 
+// Gecko's window can only be placed inside Raticode's over X11. The dev runner
+// adds the switch itself, since it has to stay Electron's parent.
+if (!isSmokeTest && !process.env.VITE_DEV_SERVER_URL && relaunchNeeded({ userData: app.getPath("userData") })) {
+  app.relaunch({ args: [...process.argv.slice(1), X11_SWITCH] });
+  app.exit(0);
+}
+
 const singleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   if (!isProduction) {
@@ -177,7 +192,7 @@ function createWindow(apiBaseUrl, apiToken = "", { show = true } = {}) {
   legacyProjectMigrationToken = "";
   try {
     if (!trustedProjectStore().read().legacyRecentProjectsMigrated) legacyProjectMigrationToken = crypto.randomUUID();
-  } catch { writeBackendLog("TRUSTED_PROJECT_REGISTRY_UNAVAILABLE\n", "warn"); }
+  } catch (error) { logTrustedRegistryFailure(error); }
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 960,
@@ -213,8 +228,13 @@ function createWindow(apiBaseUrl, apiToken = "", { show = true } = {}) {
   const terminalOwnerId = mainWindow.webContents.id;
   const studioOptions = { indexPath: distIndexPath, devServerUrl: VITE_DEV_SERVER_URL, isProduction };
   browsers.install();
+  const systemMicrophone = createSystemMicrophoneGate({
+    systemPreferences,
+    helperPath: macosSpeechHelperPath,
+    log: (level, message) => applicationLog?.write(level, "desktop", message),
+  });
   installPermissionPolicy(session.fromPartition(BROWSER_PARTITIONS.preview), mainWindow.webContents.session,
-    () => mainWindow?.webContents, studioOptions);
+    () => mainWindow?.webContents, { ...studioOptions, systemMicrophone });
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (!isStudioDocument(url, studioOptions)) event.preventDefault();
   });
@@ -347,6 +367,7 @@ function allocateBackendPort() {
 
 function startBackend(port = 0) {
   backendPathGrants.reset();
+  loggedPathGrants.clear();
   const manualApiBaseUrl = process.env.GOFER_API_BASE_URL || process.env.VITE_API_BASE_URL;
   if (manualApiBaseUrl) {
     return Promise.resolve({
@@ -377,6 +398,8 @@ function startBackend(port = 0) {
         // Backend log records arrive on stderr as JSON lines for Settings > Developer.
         GOFER_LOG_FORMAT: "desktop",
         GOFER_LOG_LEVEL: process.env.GOFER_LOG_LEVEL || "debug",
+        // Paired phones read the same log from its file (Developer log on the phone).
+        ...(applicationLog?.file ? { GOFER_APP_LOG: applicationLog.file } : {}),
         // Dictation on macOS uses Apple's on-device recognizer through this helper.
         ...(process.platform === "darwin" ? { GOFER_SPEECH_HELPER: macosSpeechHelperPath() } : {}),
         // Lets the backend grant and revoke Rem's per-turn browser access.
@@ -464,6 +487,7 @@ function startBackend(port = 0) {
         : `Backend ${settled ? "stopped unexpectedly" : "exited before it was ready"} after ${ran} s (${signal ? `signal ${signal}` : `exit code ${code}`})`);
       if (backendProcess === child) {
         backendPathGrants.reset();
+        loggedPathGrants.clear();
         backendProcess = undefined;
         closeBackendLogStream();
       }
@@ -471,12 +495,14 @@ function startBackend(port = 0) {
         return;
       }
       const detail = stderrBuffer.trim() || `Backend exited with code ${code ?? signal}.`;
+      // The exit and its output are already in the log above.
+      const exitError = Object.assign(new Error(detail), { backendExit: true });
       if (!settled) {
-        fail(new Error(detail));
+        fail(exitError);
         return;
       }
 
-      showBackendCrash(new Error(detail));
+      showBackendCrash(exitError);
     });
   });
 }
@@ -566,6 +592,7 @@ function dataDirConfigPath() {
 
 function stopBackend() {
   backendPathGrants.reset();
+  loggedPathGrants.clear();
   // Turns end with their backend, and so does their browser access.
   agentBrowserCapabilities.revokeAll();
   if (!backendProcess || backendProcess.killed) return;
@@ -598,6 +625,10 @@ function captureMainConsole(log) {
   }
 }
 
+function logTrustedRegistryFailure(error) {
+  writeBackendLog(`Could not read the list of trusted project folders (${error?.code || error?.name || "error"}). Folders you opened before may ask for access again.`, "warn");
+}
+
 function writeBackendLog(message, level = "info") {
   applicationLog?.write(level, "desktop", String(message).trimEnd());
   if (!backendLogStream) return;
@@ -625,7 +656,10 @@ function showBackendCrash(error) {
 }
 
 function createBackendErrorWindow(error, { title = "Raticode backend did not start" } = {}) {
-  const message = error instanceof Error ? error.message : String(error);
+  // Startup failures outside the backend process (a port, the PDF or browser
+  // service, a bad ready message) were only ever shown in this window.
+  if (!error?.backendExit) applicationLog?.write("error", "desktop", `${title}: ${error?.stack || error}`);
+  const message = redactLog(error instanceof Error ? error.message : String(error));
   if (backendErrorWindow && !backendErrorWindow.isDestroyed()) {
     backendErrorWindow.focus();
     return;
@@ -661,8 +695,13 @@ app.whenReady().then(async () => {
   protocol.handle("raticode-media", request => mediaPreviews.handle(request));
   applicationLog = createAppLog(app.getPath("logs"));
   applicationLog.write("info", "desktop", `Starting Raticode ${app.getVersion()} on ${process.platform} ${process.arch}`);
+  if (process.platform === "darwin") {
+    // A copy built without its helper dictates with the offline model; say so up front.
+    const helper = describeSpeechHelper(macosSpeechHelperPath());
+    applicationLog.write(helper.startsWith("present") ? "info" : "warn", "desktop", `macOS speech helper ${helper}`);
+  }
   process.on("uncaughtExceptionMonitor", (error) => applicationLog.emergency(error.stack || error.message));
-  process.on("unhandledRejection", (error) => applicationLog.write("error", "desktop", error?.stack || error));
+  process.on("unhandledRejection", (error) => applicationLog.write("error", "desktop", `Unhandled rejection: ${error?.stack || util.inspect(error, { depth: 3 })}`));
   app.on("web-contents-created", (_event, contents) => {
     contents.once("destroyed", () => { mediaPreviews.closeOwner(contents.id); gitWatcher.closeOwner(contents.id); });
     contents.on("render-process-gone", () => { mediaPreviews.closeOwner(contents.id); gitWatcher.closeOwner(contents.id); });
@@ -671,10 +710,17 @@ app.whenReady().then(async () => {
     contents.on("console-message", (details) => {
       if (contents !== mainWindow?.webContents && contents !== backendErrorWindow?.webContents) return;
       const { level, message } = details;
+      // The main window's preload already reports uncaught errors with their stack.
+      if (contents === mainWindow?.webContents && /^Uncaught /.test(String(message))) return;
       if (["warning", "error"].includes(level)) applicationLog.write(level === "error" ? "error" : "warn", "renderer", message);
     });
   });
-  app.on("render-process-gone", (_event, contents, details) => applicationLog.write("error", "renderer", `${contents === mainWindow?.webContents ? "The Raticode window's page" : "A page"} stopped: ${details.reason}, exit code ${details.exitCode}`));
+  app.on("render-process-gone", (_event, contents, details) => {
+    const own = contents === mainWindow?.webContents;
+    // A clean exit is routine; a crashed browser tab matters less than the app window.
+    const level = details.reason === "clean-exit" ? "debug" : own ? "error" : "warn";
+    applicationLog.write(level, "renderer", `${own ? "The Raticode window's page" : "A page"} stopped: ${details.reason}, exit code ${details.exitCode}`);
+  });
   app.on("child-process-gone", (_event, details) => applicationLog.write(details.reason === "clean-exit" ? "debug" : "error", "desktop", `Electron ${details.type}${details.name ? ` (${details.name})` : ""} process ended: ${details.reason}, exit code ${details.exitCode}`));
   captureMainConsole(applicationLog);
   Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([
@@ -797,6 +843,7 @@ app.on("before-quit", (event) => {
     return;
   }
   browsers.closeAll();
+  geckoWindow.close();
   closeTerminalEditorServer();
   closeAllTerminals();
   stopBackend();
@@ -861,6 +908,7 @@ function setupIpcHandlers() {
     browserAction: (event, options) => browsers.browserAction(event, options),
     browserLibrary: (event, options) => browsers.browserLibrary(event, options),
     browserOwnerZoom: (event) => browsers.ownerZoom(event),
+    gecko: (_event, options = {}) => geckoWindow.handle(String(options?.action || ""), options),
     browserPolicy: (event, options) => browsers.setPolicy(event, options?.policy),
     createBrowser: (event, options) => browsers.createBrowser(event, options),
     createFile,
@@ -886,7 +934,12 @@ function setupIpcHandlers() {
     grantUserPath,
     getUpdateState,
     apiSession: async () => {
-      const backend = await backendReady;
+      let backend;
+      try { backend = await backendReady; }
+      catch (error) {
+        // The startup failure is logged once when it happens; every poll asks again.
+        throw Object.assign(new Error(error?.message || "The backend did not start."), { expected: true });
+      }
       return { apiBaseUrl: backend.apiBaseUrl, apiToken: backend.apiToken };
     },
     installDownloadedUpdate,
@@ -926,12 +979,37 @@ function setupIpcHandlers() {
       }
       try { return await ipcSecurity.secureHandler(handler)(event, ...args); }
       catch (error) {
-        applicationLog?.write("error", "ipc", `${channel}: ${error.message}`);
+        // Expected answers, such as a terminal that already exited, are routine.
+        applicationLog?.write(error?.expected ? "debug" : "error", "ipc", `${channel}: ${error.message}`);
         throw error;
       }
     },
   });
 }
+
+// Firefox mode's headless Firefox, in a profile only Raticode uses.
+const firefoxEngine = createFirefoxEngine({
+  dataDir: app.getPath("userData"),
+  stagingDir: path.join(app.getPath("userData"), "browser", "firefox-downloads"),
+  log: (level, message) => applicationLog?.write(level, "browser", message),
+});
+
+// Chrome mode's headless Google Chrome, in a profile only Raticode uses.
+const chromeEngine = createChromiumEngine({
+  browser: CHROME,
+  dataDir: app.getPath("userData"),
+  stagingDir: path.join(app.getPath("userData"), "browser", "chrome-downloads"),
+  log: (level, message) => applicationLog?.write(level, "browser", message),
+});
+
+// Edge mode's headless Microsoft Edge, on the same engine as Chrome mode, in
+// a profile only Raticode uses.
+const edgeEngine = createChromiumEngine({
+  browser: EDGE,
+  dataDir: app.getPath("userData"),
+  stagingDir: path.join(app.getPath("userData"), "browser", "edge-downloads"),
+  log: (level, message) => applicationLog?.write(level, "browser", message),
+});
 
 const browsers = createBrowserSessions({
   app,
@@ -947,6 +1025,35 @@ const browsers = createBrowserSessions({
   log: (level, message) => applicationLog?.write(level, "browser", message),
   openWith: createOpenWith(),
   quarantineDir: path.join(app.getPath("userData"), "browser", "quarantine"),
+  firefox: firefoxEngine,
+  chrome: chromeEngine,
+  chromium: { edge: edgeEngine },
+  nativeImage,
+});
+firefoxEngine.events.on("exit", () => browsers.firefoxStopped());
+// Firefox tabs come back once the user closes the window they signed in with.
+firefoxEngine.events.on("sign-in-window-closed", () => void browsers.reviveFirefoxTabs());
+chromeEngine.events.on("exit", () => browsers.streamStopped("chrome"));
+chromeEngine.events.on("sign-in-window-closed", () => void browsers.reviveStreamTabs("chrome"));
+edgeEngine.events.on("exit", () => browsers.streamStopped("edge"));
+edgeEngine.events.on("sign-in-window-closed", () => void browsers.reviveStreamTabs("edge"));
+
+// Gecko: real Firefox, its window placed inside Raticode's.
+const geckoWindow = createGeckoWindow({
+  dataDir: app.getPath("userData"),
+  getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+  log: (level, message) => applicationLog?.write(level, "browser", message),
+  x11Switch: app.commandLine.getSwitchValue("ozone-platform") === "x11",
+  ask: async ({ message, detail }) => (await dialog.showMessageBox(mainWindow, { type: "question", buttons: ["Import", "Cancel"], defaultId: 1, cancelId: 1, message, detail })).response === 0,
+  onState: (state) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("gofer:gecko-state", state); },
+  relaunch: async () => {
+    if (process.env.VITE_DEV_SERVER_URL) return { manual: true };
+    if (!await prepareLifecycle("restart Raticode")) return { cancelled: true };
+    lifecycleApproved = true;
+    app.relaunch({ args: [...process.argv.slice(1).filter((arg) => arg !== X11_SWITCH), X11_SWITCH] });
+    app.quit();
+    return { restarting: true };
+  },
 });
 
 const agentBrowserCapabilities = createCapabilityRegistry();
@@ -1208,7 +1315,8 @@ function closeTerminalEditorServer() {
 function ownedTerminalSession(event, id) {
   const session = typeof id === "string" ? terminalSessions.get(id) : null;
   if (!session || session.ownerId !== event.sender.id) {
-    throw new Error("Terminal session was not found.");
+    // Resizes and closes routinely arrive after a shell exits.
+    throw Object.assign(new Error("Terminal session was not found."), { expected: true });
   }
   return session;
 }
@@ -1318,8 +1426,28 @@ function closeAllTerminals() {
   }
 }
 
+// The Arch package (raticode-bin) writes "pacman" to resources/package-type. Pacman owns
+// every file of that copy, so Raticode must never replace them: updates come from the
+// package manager instead. The .deb and .rpm builds write "deb" and "rpm" and keep
+// updating themselves through electron-updater.
+let installedPackageManager;
+function systemPackageManager() {
+  if (installedPackageManager === undefined) {
+    installedPackageManager = "";
+    if (process.platform === "linux" && app.isPackaged) {
+      try {
+        const value = fs.readFileSync(path.join(process.resourcesPath, "package-type"), "utf8").trim();
+        if (value === "pacman") installedPackageManager = value;
+      } catch {
+        // AppImage, unpacked and source builds have no marker.
+      }
+    }
+  }
+  return installedPackageManager;
+}
+
 function supportsAutoUpdates() {
-  return app.isPackaged && !isSmokeTest
+  return app.isPackaged && !isSmokeTest && !systemPackageManager()
     && (process.platform !== "darwin" || raticodeReleaseSigning === "signed");
 }
 
@@ -1377,7 +1505,7 @@ function setupAutoUpdater() {
     });
     if (installUpdateAfterDownload) {
       installUpdateAfterDownload = false;
-      setImmediate(() => { void installDownloadedUpdate().catch(error => setUpdateState({ error: error.message })); });
+      setImmediate(() => { void installDownloadedUpdate().catch(error => { logUpdaterError(error); setUpdateState({ error: error.message }); }); });
     }
   });
   autoUpdater.on("error", (error) => {
@@ -1386,12 +1514,17 @@ function setupAutoUpdater() {
       setNoReleasesUpdateState();
       return;
     }
+    logUpdaterError(error);
     setUpdateState({
       checking: false,
       downloading: false,
       error: error instanceof Error ? error.message : String(error),
     });
   });
+}
+
+function logUpdaterError(error) {
+  applicationLog?.write("warn", "updater", error instanceof Error ? (error.stack || error.message) : String(error));
 }
 
 async function checkForUpdates() {
@@ -1407,6 +1540,7 @@ async function checkForUpdates() {
       setNoReleasesUpdateState();
       return getUpdateState();
     }
+    logUpdaterError(error);
     setUpdateState({
       checking: false,
       downloading: false,
@@ -1464,6 +1598,7 @@ function getUpdateState() {
     platform: process.platform,
     arch: process.arch,
     supported: supportsAutoUpdates(),
+    managedBy: systemPackageManager(),
   };
 }
 
@@ -2051,8 +2186,11 @@ async function setFeaturePreview(_event, { id, enabled } = {}) {
   await replaceBackendWindow();
   return { features: featurePreview() };
 }
+// Aborted requests, cancelled editor work and the ResizeObserver notice are routine.
+const ROUTINE_RENDERER_ERRORS = /^(?:AbortError\b|Canceled\b|Error: Canceled\b|ResizeObserver loop)|\bThe (?:operation|user) (?:was )?aborted\b/;
 function rendererLog(_event, { message } = {}) {
-  applicationLog?.write("error", "renderer", String(message || ""));
+  const text = String(message || "");
+  applicationLog?.write(ROUTINE_RENDERER_ERRORS.test(text) ? "debug" : "error", "renderer", text);
 }
 function remSettings() {
   try {
@@ -2099,7 +2237,12 @@ async function forgetRem(_event, { threadIds } = {}) {
 async function gitRepoAction(_event, options = {}) {
   const projectRoot = await resolveGitProjectDirectory(options);
   try { return await gitRepositoryAction(projectRoot, options.action, options.value, { authorizeTarget: (target) => resolveGitProjectDirectory({ projectRoot: target, grantId: getIpcSecurity().grantForPath(target) }), managedFolders: ["rem-worktrees", "organization-worktrees", "workspaces"].map(folder => path.join(getGoferDataDir(), folder)) }); }
-  catch (error) { return { ...await readGitStatus(projectRoot), error: String(error.stderr || error.message).replace(/^Command failed:[^\n]*\n?/, "").trim() }; }
+  catch (error) {
+    const reason = String(error.stderr || error.message).replace(/^Command failed:[^\n]*\n?/, "").trim();
+    // Shown to the user, but returned rather than thrown, so the IPC wrapper never logged it.
+    applicationLog?.write("warn", "git", `Git ${options.action || "action"} failed in ${projectRoot}: ${reason.split("\n")[0].slice(0, 300)}`);
+    return { ...await readGitStatus(projectRoot), error: reason };
+  }
   // Commits, branch deletes and cleanups change what other open views show. Previews only read.
   finally { if (!/(^|-)preview$|^commit-diff$|^stash-list$|^integration-targets$/.test(String(options.action))) notifyGitChanged(projectRoot, ["index", "refs", "worktrees"]); }
 }
@@ -2330,15 +2473,15 @@ function migrateLegacyProjects(event, payload) {
       getIpcSecurity().restoreTrustedPath(root);
     }
     event.returnValue = true;
-  } catch {
-    writeBackendLog("LEGACY_PROJECT_MIGRATION_FAILED\n", "error");
+  } catch (error) {
+    writeBackendLog(`Could not move the recent projects list from the old settings (${error?.code || error?.name || "error"}). Reopen those projects from File > Open Folder.`, "error");
   }
 }
 
 function readTrustedRoots() {
   let roots = [];
   try { roots = trustedProjectStore().read().roots; }
-  catch { writeBackendLog("TRUSTED_PROJECT_REGISTRY_UNAVAILABLE\n", "warn"); }
+  catch (error) { logTrustedRegistryFailure(error); }
   // These paths were accepted and persisted by main after native selection.
   // Restore them during migration without exposing a new grant to the renderer.
   try {
@@ -2393,11 +2536,14 @@ async function sendBackendPathGrant(handle) {
     if (payload?.grantId !== handle.grantId || typeof payload?.path !== "string" || payload.path !== handle.path) {
       throw new Error("Registration acknowledgment does not match");
     }
-    writeBackendLog(`PATH_GRANT_REGISTERED ${JSON.stringify({ path: handle.path, status, durationMs: Date.now() - startedAt })}\n`, "debug");
+    if (!loggedPathGrants.has(handle.path)) {
+      loggedPathGrants.add(handle.path);
+      writeBackendLog(`Gave the backend access to ${handle.path} (renewed quietly every 14 minutes)`, "debug");
+    }
   } catch (error) {
     if (error?.name === "TimeoutError" || error?.name === "AbortError") reason = "timeout";
     // Do not log headers, grant IDs, response bodies, or raw network errors.
-    writeBackendLog(`PATH_GRANT_REGISTER_FAILED ${JSON.stringify({ path: handle?.path, reason, status, durationMs: Date.now() - startedAt })}\n`, "warn");
+    writeBackendLog(`Could not give the backend access to ${handle?.path || "a folder"}: ${reason.replace(/-/g, " ")}${status ? ` (HTTP ${status})` : ""} after ${Date.now() - startedAt} ms`, "warn");
     const detail = reason === "timeout" ? "The backend timed out."
       : reason === "http-error" ? `The backend rejected registration with HTTP ${status}.`
         : reason === "backend-unavailable" ? "The backend is not ready."

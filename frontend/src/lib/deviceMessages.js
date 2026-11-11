@@ -38,12 +38,15 @@ export function mergeDeviceMessages(current, incoming) {
 // Phones allowed to use Raticode see these settings. The backend keeps only its
 // allowlisted display and default choices; agent tool defaults stay here.
 const PHONE_SETTING_SECTIONS = ["appearance", "general", "assistant", "editor", "terminal", "memory"];
+// Single fields from sections phones otherwise never see: Rem's browser rules stay on the desktop.
+const PHONE_SETTING_FIELDS = { browser: ["engine"] };
 
 export function phoneSettings(settings = {}) {
   const assistant = { ...settings.assistant };
   delete assistant.resources;
   return { appearance: settings.appearance, general: settings.general, assistant, editor: settings.editor,
-    terminal: settings.terminal, memory: { reportFormat: settings.memory?.reportFormat } };
+    terminal: settings.terminal, memory: { reportFormat: settings.memory?.reportFormat },
+    browser: { engine: settings.browser?.engine } };
 }
 
 export function applyPhoneSettings(settings, changes = []) {
@@ -51,7 +54,8 @@ export function applyPhoneSettings(settings, changes = []) {
   for (const change of changes) {
     for (const [key, value] of Object.entries(change.values || {})) {
       const [section, field, ...rest] = key.split(".");
-      if (rest.length || !field || !PHONE_SETTING_SECTIONS.includes(section)) continue;
+      if (rest.length || !field) continue;
+      if (!PHONE_SETTING_SECTIONS.includes(section) && !PHONE_SETTING_FIELDS[section]?.includes(field)) continue;
       next[section] = { ...(next[section] || {}), [field]: value };
     }
   }

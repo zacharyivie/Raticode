@@ -147,3 +147,52 @@ def test_missing_cards_note_counts_what_was_kept():
     )
     four = [timer] * 4
     assert missing_cards_note(four, four[:3]).endswith("only 3 are on your phone.")
+
+
+def test_calls_and_texts_can_name_a_person_instead_of_a_number():
+    assert phone_action({"type": "dial", "recipient": " my brother "}) == {
+        "type": "dial",
+        "recipient": "my brother",
+    }
+    assert phone_action({"type": "sms_draft", "recipient": "Baby Bro", "body": "You alive?"}) == {
+        "type": "sms_draft",
+        "to": "",
+        "body": "You alive?",
+        "recipient": "Baby Bro",
+    }
+    # A name without a message still opens a draft to that person.
+    assert phone_action({"type": "sms_draft", "recipient": "Mom"})
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A number and a name at once, or neither, is ambiguous.
+        {"type": "dial", "number": "5551234567", "recipient": "brother"},
+        {"type": "dial"},
+        {"type": "sms_draft", "to": "5551234567", "recipient": "brother", "body": "hi"},
+        # Numbers belong in number/to, never smuggled in as a name.
+        {"type": "dial", "recipient": "555 123 4567"},
+        {"type": "sms_draft", "recipient": "brother 555", "body": "hi"},
+        {"type": "dial", "recipient": "x" * 61},
+        {"type": "dial", "recipient": "two\nlines"},
+        {"type": "dial", "recipient": "Bro‮"},
+        {"type": "dial", "recipient": 7},
+        {"type": "email_draft", "recipient": "brother", "body": "x"},
+    ],
+)
+def test_person_names_are_checked(raw: Any):
+    assert phone_action(raw) is None
+
+
+def test_phone_prompt_asks_for_the_users_words_not_a_number(home: RemHome):
+    prompts, home.generate = _answer(
+        [{"type": "sms_draft", "recipient": "my brother", "body": "You alive?"}]
+    )
+    home.submit_message({"request_id": "phone-3", "body": "Text my brother"}, source="phone")
+    home._reply()
+    reply = next(m for m in home.store.conversation()["messages"] if m["id"] == "reply-phone-3")
+    assert reply["phone_actions"] == [
+        {"type": "sms_draft", "to": "", "body": "You alive?", "recipient": "my brother"}
+    ]
+    assert "put their words for that person in recipient" in prompts[0]

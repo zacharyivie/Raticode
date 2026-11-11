@@ -1,0 +1,733 @@
+{
+ "commits": {
+  "commits": [
+   {
+    "at": "2026-11-01T16:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "9765a38bc5621c6d480880a78afd8846406f58f4",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [
+     "refs/heads/feature/c"
+    ],
+    "parents": [
+     "1152183d658d91635b60bd7895b71a0b45b414c4"
+    ],
+    "short": "9765a38",
+    "subject": "Add c1"
+   },
+   {
+    "at": "2026-11-01T14:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "928c4589411d44dee4f58fd503d838417e30e6a9",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [
+     "refs/heads/docs"
+    ],
+    "parents": [],
+    "short": "928c458",
+    "subject": "Add pages"
+   },
+   {
+    "at": "2026-11-01T11:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "b2268339ce7a40e8a19f7ab3ed7f6aa91024dbc9",
+    "insertions": 1,
+    "is_head": true,
+    "labels": [
+     "refs/heads/main"
+    ],
+    "parents": [
+     "3bea291d1dfdc7ebba81dedab7f5f1d8e24c9ec4"
+    ],
+    "short": "b226833",
+    "subject": "Add after"
+   },
+   {
+    "at": "2026-11-01T18:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "3bea291d1dfdc7ebba81dedab7f5f1d8e24c9ec4",
+    "insertions": 2,
+    "is_head": false,
+    "labels": [
+     "refs/tags/v2"
+    ],
+    "parents": [
+     "1152183d658d91635b60bd7895b71a0b45b414c4",
+     "a1a3bdb1eb6aad468d6938ef7a458e0306229701"
+    ],
+    "short": "3bea291",
+    "subject": "Merge feature/b"
+   },
+   {
+    "at": "2026-11-01T12:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "a1a3bdb1eb6aad468d6938ef7a458e0306229701",
+    "insertions": 3,
+    "is_head": false,
+    "labels": [
+     "refs/heads/feature/b"
+    ],
+    "parents": [
+     "d18afc6eb7398298bfc47bac5623fc3c53bf2699",
+     "1152183d658d91635b60bd7895b71a0b45b414c4"
+    ],
+    "short": "a1a3bdb",
+    "subject": "Merge main into feature/b"
+   },
+   {
+    "at": "2026-11-01T18:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "1152183d658d91635b60bd7895b71a0b45b414c4",
+    "insertions": 2,
+    "is_head": false,
+    "labels": [],
+    "parents": [
+     "0d56afcaf44b69143ecc2d81e6702e0f77098dbf",
+     "abc9776cd5d501d4853a794110c62effc75e31bd"
+    ],
+    "short": "1152183",
+    "subject": "Merge feature/a"
+   },
+   {
+    "at": "2026-11-01T10:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "abc9776cd5d501d4853a794110c62effc75e31bd",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [
+     "refs/heads/feature/a"
+    ],
+    "parents": [
+     "761c231e3d4c72a5ceed8b4081c44c1ef04bbbf3"
+    ],
+    "short": "abc9776",
+    "subject": "Add a2"
+   },
+   {
+    "at": "2026-11-01T18:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "761c231e3d4c72a5ceed8b4081c44c1ef04bbbf3",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [],
+    "parents": [
+     "4f39d765151fc76d172f5cc286937591d461682f"
+    ],
+    "short": "761c231",
+    "subject": "Add a1"
+   },
+   {
+    "at": "2026-11-01T17:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "0d56afcaf44b69143ecc2d81e6702e0f77098dbf",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [],
+    "parents": [
+     "4f39d765151fc76d172f5cc286937591d461682f"
+    ],
+    "short": "0d56afc",
+    "subject": "Add hotfix"
+   },
+   {
+    "at": "2026-11-01T11:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "d18afc6eb7398298bfc47bac5623fc3c53bf2699",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [],
+    "parents": [
+     "86da15524e9fccab3bda21f0892b20f6a9f4a5d8"
+    ],
+    "short": "d18afc6",
+    "subject": "Add b2"
+   },
+   {
+    "at": "2026-11-01T14:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "86da15524e9fccab3bda21f0892b20f6a9f4a5d8",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [],
+    "parents": [
+     "4f39d765151fc76d172f5cc286937591d461682f"
+    ],
+    "short": "86da155",
+    "subject": "Add b1"
+   },
+   {
+    "at": "2026-11-01T15:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "4f39d765151fc76d172f5cc286937591d461682f",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [],
+    "parents": [
+     "e0955544ecd90ec8d34ccbeed03fadeaa0db9c1a"
+    ],
+    "short": "4f39d76",
+    "subject": "Add core"
+   },
+   {
+    "at": "2026-11-01T13:00:00Z",
+    "author": "Ada",
+    "binary_files": 0,
+    "body": "",
+    "deletions": 0,
+    "hash": "e0955544ecd90ec8d34ccbeed03fadeaa0db9c1a",
+    "insertions": 1,
+    "is_head": false,
+    "labels": [],
+    "parents": [],
+    "short": "e095554",
+    "subject": "Add base"
+   }
+  ],
+  "has_more": false,
+  "head": "b2268339ce7a40e8a19f7ab3ed7f6aa91024dbc9",
+  "refs": [
+   {
+    "ahead": 0,
+    "behind": 0,
+    "current": false,
+    "hash": "928c4589411d44dee4f58fd503d838417e30e6a9",
+    "id": "refs/heads/docs",
+    "name": "docs",
+    "type": "local",
+    "upstream": "",
+    "upstream_gone": false
+   },
+   {
+    "ahead": 0,
+    "behind": 0,
+    "current": false,
+    "hash": "abc9776cd5d501d4853a794110c62effc75e31bd",
+    "id": "refs/heads/feature/a",
+    "name": "feature/a",
+    "type": "local",
+    "upstream": "",
+    "upstream_gone": false
+   },
+   {
+    "ahead": 0,
+    "behind": 0,
+    "current": false,
+    "hash": "a1a3bdb1eb6aad468d6938ef7a458e0306229701",
+    "id": "refs/heads/feature/b",
+    "name": "feature/b",
+    "type": "local",
+    "upstream": "",
+    "upstream_gone": false
+   },
+   {
+    "ahead": 0,
+    "behind": 0,
+    "current": false,
+    "hash": "9765a38bc5621c6d480880a78afd8846406f58f4",
+    "id": "refs/heads/feature/c",
+    "name": "feature/c",
+    "type": "local",
+    "upstream": "",
+    "upstream_gone": false
+   },
+   {
+    "ahead": 0,
+    "behind": 0,
+    "current": true,
+    "hash": "b2268339ce7a40e8a19f7ab3ed7f6aa91024dbc9",
+    "id": "refs/heads/main",
+    "name": "main",
+    "type": "local",
+    "upstream": "",
+    "upstream_gone": false
+   },
+   {
+    "ahead": 0,
+    "behind": 0,
+    "current": false,
+    "hash": "3bea291d1dfdc7ebba81dedab7f5f1d8e24c9ec4",
+    "id": "refs/tags/v2",
+    "name": "v2",
+    "type": "tag",
+    "upstream": "",
+    "upstream_gone": false
+   }
+  ]
+ },
+ "expected": [
+  {
+   "hash": "9765a38bc5621c6d480880a78afd8846406f58f4",
+   "lane": 0,
+   "color": 0,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "928c4589411d44dee4f58fd503d838417e30e6a9",
+   "lane": 1,
+   "color": 1,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": true,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "b2268339ce7a40e8a19f7ab3ed7f6aa91024dbc9",
+   "lane": 1,
+   "color": 2,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 2,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "3bea291d1dfdc7ebba81dedab7f5f1d8e24c9ec4",
+   "lane": 1,
+   "color": 2,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 2,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 1,
+     "to": 0,
+     "color": 2,
+     "full": false,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "a1a3bdb1eb6aad468d6938ef7a458e0306229701",
+   "lane": 1,
+   "color": 3,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": false,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "1152183d658d91635b60bd7895b71a0b45b414c4",
+   "lane": 0,
+   "color": 0,
+   "segments": [
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": false
+    },
+    {
+     "from": 0,
+     "to": 2,
+     "color": 0,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "abc9776cd5d501d4853a794110c62effc75e31bd",
+   "lane": 2,
+   "color": 0,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "761c231e3d4c72a5ceed8b4081c44c1ef04bbbf3",
+   "lane": 2,
+   "color": 0,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "0d56afcaf44b69143ecc2d81e6702e0f77098dbf",
+   "lane": 0,
+   "color": 0,
+   "segments": [
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 0,
+     "to": 2,
+     "color": 0,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "d18afc6eb7398298bfc47bac5623fc3c53bf2699",
+   "lane": 1,
+   "color": 3,
+   "segments": [
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 3,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 1,
+     "to": 0,
+     "color": 3,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "86da15524e9fccab3bda21f0892b20f6a9f4a5d8",
+   "lane": 0,
+   "color": 3,
+   "segments": [
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 0,
+     "to": 0,
+     "color": 3,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 0,
+     "to": 2,
+     "color": 3,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "4f39d765151fc76d172f5cc286937591d461682f",
+   "lane": 2,
+   "color": 0,
+   "segments": [
+    {
+     "from": 2,
+     "to": 2,
+     "color": 0,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 2,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "e0955544ecd90ec8d34ccbeed03fadeaa0db9c1a",
+   "lane": 0,
+   "color": 0,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": true
+    }
+   ]
+  }
+ ],
+ "width": 48,
+ "filter": "feature",
+ "filtered": [
+  {
+   "hash": "3bea291d1dfdc7ebba81dedab7f5f1d8e24c9ec4",
+   "parents": [
+    "1152183d658d91635b60bd7895b71a0b45b414c4",
+    "a1a3bdb1eb6aad468d6938ef7a458e0306229701"
+   ]
+  },
+  {
+   "hash": "a1a3bdb1eb6aad468d6938ef7a458e0306229701",
+   "parents": [
+    "1152183d658d91635b60bd7895b71a0b45b414c4"
+   ]
+  },
+  {
+   "hash": "1152183d658d91635b60bd7895b71a0b45b414c4",
+   "parents": []
+  }
+ ],
+ "expectedFiltered": [
+  {
+   "hash": "3bea291d1dfdc7ebba81dedab7f5f1d8e24c9ec4",
+   "lane": 0,
+   "color": 0,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": false
+    },
+    {
+     "from": 0,
+     "to": 1,
+     "color": 1,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "a1a3bdb1eb6aad468d6938ef7a458e0306229701",
+   "lane": 1,
+   "color": 1,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": true,
+     "top": false
+    },
+    {
+     "from": 1,
+     "to": 1,
+     "color": 1,
+     "full": false,
+     "top": true
+    },
+    {
+     "from": 1,
+     "to": 0,
+     "color": 1,
+     "full": false,
+     "top": false
+    }
+   ]
+  },
+  {
+   "hash": "1152183d658d91635b60bd7895b71a0b45b414c4",
+   "lane": 0,
+   "color": 0,
+   "segments": [
+    {
+     "from": 0,
+     "to": 0,
+     "color": 0,
+     "full": false,
+     "top": true
+    }
+   ]
+  }
+ ]
+}

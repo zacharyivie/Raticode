@@ -45,6 +45,9 @@
 /* A narrow side pane gives the steps the card's full width. */
 @container rem-home (max-width: 420px) {
   .rem-work .rem-progress { padding-left: 0; }
+  /* The title keeps its row and the links move under it, instead of the title shrinking to a letter. */
+  .rem-work:is(:has(.rem-progress), :has(.rem-work-tickets)) .rem-work-main { flex-basis: calc(100% - 40px); }
+  .rem-work .rem-work-tickets { padding-left: 0; }
   .rem-progress-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 8px; }
 }
 

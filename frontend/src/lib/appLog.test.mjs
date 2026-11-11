@@ -7,6 +7,7 @@ import {
   entryAsText,
   firstLine,
   formatLogTime,
+  groupRepeats,
   logTimeParts,
   levelName,
   matchesFilter,
@@ -16,6 +17,7 @@ import {
   keyRange,
   logSelectionForRem,
   selectionAsText,
+  uniqueEntries,
   withHistoryKeys,
 } from "./appLog.js";
 
@@ -107,4 +109,21 @@ test("a very large selection for Rem keeps the newest entries and says how many 
   const one = logSelectionForRem([entries[0]], {}, 10);
   assert.match(one, /1 entry, oldest first/);
   assert.ok(one.includes("line 1 "), "a single entry is never dropped");
+});
+
+test("repeats of one message in a row become one group named after its oldest entry", () => {
+  const same = (seq, extra = {}) => entry(seq, "debug", "backend", "Device action workspace_exchange refused: workspace_history_quota", { component: "gofer.ui.server", ...extra });
+  // Newest first, as the log shows them.
+  const shown = [same(9), same(8), same(7), entry(6, "debug", "phone", "Connection attempt ended: SocketException"), same(5), same(4, { level: "info" }), same(3, { component: "other" }), same(2)];
+  const groups = groupRepeats(shown);
+  assert.deepEqual(groups.map((group) => [group.key, group.entries.map((item) => item.seq)]), [
+    ["gl7", [9, 8, 7]], ["l6", [6]], ["l5", [5]], ["l4", [4]], ["l3", [3]], ["l2", [2]],
+  ], "only identical level, source, logger and message group, and only next to each other");
+  assert.equal(groups[0].entry.seq, 9, "a group shows its newest entry");
+  // A newer repeat joins without renaming the group, so an open group stays open.
+  assert.equal(groupRepeats([same(10), ...shown])[0].key, "gl7");
+  const history = withHistoryKeys([same(undefined), same(undefined)]);
+  assert.equal(groupRepeats(history)[0].key, "gh1");
+  assert.deepEqual(groupRepeats([]), []);
+  assert.deepEqual(uniqueEntries([shown[0], shown[1], shown[0]]).map((item) => item.seq), [9, 8]);
 });

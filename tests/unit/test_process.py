@@ -157,7 +157,7 @@ def test_explicit_child_environment_does_not_restore_removed_git_overrides(monke
     assert build_subprocess_env(
         {"GIT_LITERAL_PATHSPECS": "1", "GOFER_DESKTOP_GRANT_SECRET": "desktop-secret"},
         inherit_parent=False,
-    ) == {"GIT_LITERAL_PATHSPECS": "1"}
+    ) == {"GIT_LITERAL_PATHSPECS": "1", "RATICODE_AGENT_SESSION": "1"}
 
 
 def test_build_subprocess_env_filters_packaged_entries_from_original_library_path(

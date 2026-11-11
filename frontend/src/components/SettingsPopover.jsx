@@ -29,6 +29,8 @@ import {
 
 import DeveloperSettings, { RemMemorySettings } from "./DeveloperSettings.jsx";
 import RemResources from "./RemResources.jsx";
+import { NumberControl, SwitchControl } from "./SettingControls.jsx";
+import SelfWorkSettings from "./SelfWorkSettings.jsx";
 import ProviderSettings from "./ProviderSettings.jsx";
 import CommitMessageSettings from "./CommitMessageSettings.jsx";
 import VoiceTidySettings from "./VoiceTidySettings.jsx";
@@ -36,6 +38,11 @@ import SpeechEngineSettings from "./SpeechEngineSettings.jsx";
 import UsageDashboard from "./UsageDashboard.jsx";
 import PairedDevices from "./PairedDevices.jsx";
 import { FEATURE_PREVIEWS } from "../lib/featurePreview.js";
+import FirefoxSettings from "./FirefoxSettings.jsx";
+import ChromeSettings from "./ChromeSettings.jsx";
+import EdgeSettings from "./EdgeSettings.jsx";
+import { WEB_BROWSER_OPTIONS } from "../lib/browserEngines.js";
+import GeckoSettings from "./GeckoSettings.jsx";
 import "./SettingsPopover.css";
 import { PLUGIN_ICONS } from "./pluginIcons.js";
 import { useProviderSettingsCapabilities } from "../lib/useProviderSettingsCapabilities.js";
@@ -74,8 +81,9 @@ import {
   withPluginEnabled,
   withPluginPreview,
 } from "../lib/plugins.js";
+import { menuModels } from "../lib/providerModels.js";
 
-const INITIAL_ACTIVITY_IDS = ["rem", "workflows", "files", "search", "source-control", "organizations", "second-brain"];
+const INITIAL_ACTIVITY_IDS = ["rem", "workflows", "files", "search", "source-control", "kanban", "organizations", "second-brain"];
 
 const CATEGORIES = [
   { id: "general", label: "General", icon: MonitorCog },
@@ -96,6 +104,8 @@ const CATEGORIES = [
 
 export default function SettingsPopover({
   initialCategory = "general",
+  // A browser whose settings to show, when a tab's menu opened Settings.
+  initialBrowserSection = "",
   dataDir = "",
   onChange,
   onChooseDataDirectory,
@@ -225,6 +235,7 @@ export default function SettingsPopover({
             matchingCategories.length ? matchingCategories.map((categoryId) => (
               <SettingsCategory
                 key={categoryId}
+                browserSection={initialBrowserSection}
                 category={categoryId}
                 query={query}
                 providerState={providerState}
@@ -236,6 +247,7 @@ export default function SettingsPopover({
             )) : <EmptySettingsSearch query={query} />
           ) : (
             <SettingsCategory
+              browserSection={initialBrowserSection}
               category={category}
               providerState={providerState}
               settings={settings}
@@ -250,9 +262,10 @@ export default function SettingsPopover({
   );
 }
 
-function SettingsCategory({ category, dataDir, onChange, onChooseDataDirectory, providerState, query = "", settings }) {
+function SettingsCategory({ browserSection = "", category, dataDir, onChange, onChooseDataDirectory, providerState, query = "", settings }) {
   const heading = CATEGORIES.find((item) => item.id === category)?.label ?? "Settings";
   const rows = categoryRows(category, settings, onChange, providerState, {
+    browserSection,
     dataDir,
     onChooseDataDirectory,
   });
@@ -346,9 +359,11 @@ function categoryRows(category, settings, onChange, providerState, appControls) 
     row("html", "HTML files", "Choose the mode used when a local HTML file opens.", <SelectControl value={settings.editor.htmlDefault} onChange={(value) => onChange("editor.htmlDefault", value)} options={[["preview", "Browse"], ["edit", "Edit"]]} />),
   ];
   if (category === "browser") return [
+    row("engine", "Default browser for new tabs", "The Browser plugin keeps tabs from every browser in one tab bar, and each tab stays in the browser it opened in. New tab opens here; the arrow beside it picks another browser for one tab. Raticode (chromium) is Raticode's own browser. Raticode (gecko) puts real Firefox, with its own tabs, settings and extensions, directly inside one tab on Linux. Firefox, Chrome and Edge run without a window in their own profile, separate from your everyday Firefox, Chrome or Edge; Raticode shows their pages in tabs and passes your clicks and typing through. Rem's tabs and pages sent from your phone use this browser, or Raticode (chromium) when it is Raticode (gecko). Local files and previews always use Raticode (chromium).", <WebBrowserControl value={settings.browser.engine} onChange={(value) => onChange("browser.engine", value)} />),
+    row("engineSettings", "Settings for each browser", "Profiles and importing for Raticode (gecko), whose own tabs, settings, bookmarks and extensions are inside its tab; settings, extensions, sign-in and importing for Raticode's Firefox, Chrome and Microsoft Edge. Your everyday Firefox, Chrome and Edge are not changed. Tabs can run in any of them, whatever the default.", <BrowserEngineSections defaultEngine={settings.browser.engine} requested={appControls.browserSection} />, { stacked: true }),
     row("homepage", "Home page", "Address loaded when you open a new integrated browser tab.", <TextControl value={settings.browser.homepage} placeholder={DEFAULT_APP_SETTINGS.browser.homepage} onCommit={(value) => onChange("browser.homepage", value)} />),
     row("search", "Search URL", "Use {query} where the encoded search terms belong.", <TextControl value={settings.browser.searchUrl} placeholder="https://www.google.com/search?q={query}" onCommit={(value) => onChange("browser.searchUrl", value)} />),
-    row("agentBrowser", "Rem's browser", "Where Rem opens pages when its Browser tool is on. Raticode tabs open in the background, so you keep your place, and several tasks can work side by side. External browsers use Playwright and need Node.js.", <SelectControl value={settings.browser.agentBrowser} onChange={(value) => onChange("browser.agentBrowser", value)} options={[["raticode", "Raticode browser tabs"], ["external", "External browser window"], ["external-headless", "External browser, hidden"]]} />),
+    row("agentBrowser", "Rem's browser", "Where Rem opens pages when its Browser tool is on. Raticode tabs open in the background, so you keep your place, and several tasks can work side by side, using the default browser chosen above. External browsers use Playwright and need Node.js.", <SelectControl value={settings.browser.agentBrowser} onChange={(value) => onChange("browser.agentBrowser", value)} options={[["raticode", "Raticode browser tabs"], ["external", "External browser window"], ["external-headless", "External browser, hidden"]]} />),
     row("remSignInSites", "Sites where Rem uses your sign-ins", "Rem browses in its own profile and is signed out everywhere. List sites, such as github.com, whose sign-ins Rem may use. Rem asks before submitting or running scripts on them.", <TextControl value={settings.browser.remSignInSites.join(", ")} placeholder="None" onCommit={(value) => onChange("browser.remSignInSites", value)} />),
     row("remAllowedSites", "Sites Rem may open", "Leave empty to let Rem open any site. Subdomains are included.", <TextControl value={settings.browser.remAllowedSites.join(", ")} placeholder="Any site" onCommit={(value) => onChange("browser.remAllowedSites", value)} />),
     row("remBlockedSites", "Sites Rem may not open", "Always blocked, even when listed above.", <TextControl value={settings.browser.remBlockedSites.join(", ")} placeholder="None" onCommit={(value) => onChange("browser.remBlockedSites", value)} />),
@@ -395,6 +410,7 @@ function assistantRows(settings, onChange, row, providerState) {
     ?? chatModels.find((item) => item.id === chatProvider?.defaultModel)
     ?? chatModels[0];
   return [
+    { searchText: "Self-work self work idle quiet away minutes max threads backlog auto pull tickets projects research report kanban board", element: <SelfWorkSettings key="self-work" /> },
     { searchText: "Rem commit messages provider model auto commit changes template format", element: <CommitMessageSettings key="commit-messages" capabilities={capabilities} /> },
     { searchText: "Tidy voice messages dictation transcription speech punctuation model provider", element: <VoiceTidySettings key="voice-tidy" capabilities={capabilities} defaultProvider={provider?.id ?? settings.assistant.provider} /> },
     row("defaultScope", "Default scope", "Start threads in the current directory or let Rem choose from open projects.", <SelectControl value={settings.assistant.defaultScope} onChange={(value) => onChange("assistant.defaultScope", value)} options={[["current-directory", "Current directory"], ["global", "Global"]]} />),
@@ -414,7 +430,7 @@ function assistantRows(settings, onChange, row, providerState) {
       <SelectControl disabled={loading || !availableProviders.length} value={provider?.id ?? settings.assistant.provider} onChange={(value) => onChange("assistant.provider", value)} options={availableProviders.map((item) => [item.id, item.displayName ?? item.id])} />
     )),
     row("model", "Default model", "Used for new tasks and threads. Existing task and thread selections stay unchanged.", (
-      <SelectControl disabled={!models.length} value={model?.id ?? settings.assistant.model} onChange={(value) => onChange("assistant.model", value)} options={models.map((item) => [item.id, item.displayName ?? item.id])} />
+      <SelectControl disabled={!models.length} value={model?.id ?? settings.assistant.model} onChange={(value) => onChange("assistant.model", value)} options={menuModels(provider, settings.assistant.model).map((item) => [item.id, item.displayName ?? item.id])} />
     )),
     row("effort", "Default reasoning effort", "Reasoning level for new tasks and threads.", (
       <SelectControl disabled={!model?.efforts?.length} value={settings.assistant.effort || model?.defaultEffort || ""} onChange={(value) => onChange("assistant.effort", value)} options={(model?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
@@ -429,7 +445,7 @@ function assistantRows(settings, onChange, row, providerState) {
     )),
     ...(chatProvider ? [
       row("chatModel", "Rem chat model", "Model for Rem’s chat replies.", (
-        <SelectControl disabled={!chatModels.length} value={chatModel?.id ?? settings.assistant.chatModel} onChange={(value) => { onChange("assistant.chatModel", value); onChange("assistant.chatEffort", ""); }} options={chatModels.map((item) => [item.id, item.displayName ?? item.id])} />
+        <SelectControl disabled={!chatModels.length} value={chatModel?.id ?? settings.assistant.chatModel} onChange={(value) => { onChange("assistant.chatModel", value); onChange("assistant.chatEffort", ""); }} options={menuModels(chatProvider, settings.assistant.chatModel).map((item) => [item.id, item.displayName ?? item.id])} />
       )),
       row("chatEffort", "Rem chat reasoning effort", "Low or medium keeps chat replies quick.", (
         <SelectControl disabled={!chatModel?.efforts?.length} value={settings.assistant.chatEffort || chatModel?.defaultEffort || ""} onChange={(value) => onChange("assistant.chatEffort", value)} options={(chatModel?.efforts ?? []).map((item) => [item.id, item.displayName ?? item.id])} />
@@ -572,6 +588,80 @@ function PathControl({ onChoose, value }) {
       <span className="min-w-0 flex-1 truncate text-muted">{value || "Desktop app only"}</span>
       <span className="shrink-0 font-semibold text-brand">Choose…</span>
     </button>
+  );
+}
+
+// Settings for one browser at a time: the default one, or the one a tab's menu
+// asked for. Tabs run in any browser, so every browser's settings stay reachable.
+const ENGINE_SECTIONS = [["gecko", "Raticode (gecko)"], ["firefox", "Firefox"], ["chrome", "Chrome"], ["edge", "Edge"]];
+const isEngineSection = (value) => ENGINE_SECTIONS.some(([id]) => id === value);
+
+function BrowserEngineSections({ defaultEngine, requested = "" }) {
+  const [section, setSection] = useState(() => [requested, defaultEngine].find(isEngineSection) || "");
+  const defaultRef = useRef(defaultEngine);
+  useEffect(() => {
+    // Choosing a new default shows its settings, as before.
+    if (defaultRef.current === defaultEngine) return;
+    defaultRef.current = defaultEngine;
+    if (isEngineSection(defaultEngine)) setSection(defaultEngine);
+  }, [defaultEngine]);
+  return (
+    <div className="grid gap-3" data-testid="browser-engine-sections">
+      <SelectControl label="Show settings for" value={section} onChange={setSection} options={[["", "Choose a browser"], ...ENGINE_SECTIONS]} />
+      {section === "gecko" ? <GeckoSettings /> : null}
+      {section === "firefox" ? <FirefoxSettings /> : null}
+      {section === "chrome" ? <ChromeSettings /> : null}
+      {section === "edge" ? <EdgeSettings /> : null}
+    </div>
+  );
+}
+
+// The default browser for new tabs, with whether Raticode found it on this
+// computer. The app itself tells Linux when Raticode (gecko) needs X11 mode.
+function WebBrowserControl({ onChange, value }) {
+  const [engines, setEngines] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve(window.goferBrowser?.engineStatus?.())
+      .then((status) => { if (!cancelled) setEngines(status || {}); })
+      .catch(() => { if (!cancelled) setEngines({}); });
+    return () => { cancelled = true; };
+  }, []);
+  const [gecko, setGecko] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve(window.goferBrowser?.gecko?.("status"))
+      .then((status) => { if (!cancelled) setGecko(status || null); })
+      .catch(() => { if (!cancelled) setGecko(null); });
+    return () => { cancelled = true; };
+  }, [value]);
+  const firefox = engines ? engines.firefox || { available: false } : null;
+  const chrome = engines ? engines.chrome || { available: false } : null;
+  const edge = engines ? engines.edge || { available: false } : null;
+  let note = "";
+  let missing = false;
+  if (value === "gecko") {
+    if (gecko) {
+      note = gecko.problem || (gecko.executable ? `Raticode (gecko) runs the Firefox at ${gecko.executable}, inside Raticode's window.` : "Firefox was not found. Install Firefox to use Raticode (gecko).");
+      missing = Boolean(gecko.problem) || !gecko.executable;
+    }
+  } else if (value === "edge" && edge) {
+    note = edge.available ? `Microsoft Edge found at ${edge.executable}.` : "Microsoft Edge was not found. Install Edge to use it here.";
+    missing = !edge.available;
+  } else if (value === "chrome" && chrome) {
+    note = chrome.available ? `Google Chrome found at ${chrome.executable}.` : "Google Chrome was not found. Install Chrome to use it here.";
+    missing = !chrome.available;
+  } else if (firefox) {
+    note = firefox.available
+      ? `Firefox found at ${firefox.executable}.${firefox.snap ? " Snap packages keep this profile in the snap's own folder." : ""}`
+      : "Firefox was not found. Install Firefox to use it here.";
+    missing = value === "firefox" && !firefox.available;
+  }
+  return (
+    <div className="grid gap-1">
+      <SelectControl label="Default browser for new tabs" value={value} onChange={onChange} options={WEB_BROWSER_OPTIONS} />
+      {note ? <p role="status" className={`text-[11px] ${missing ? "text-amber-700" : "text-muted"}`}>{note}</p> : null}
+    </div>
   );
 }
 
@@ -763,32 +853,6 @@ function deviceErrorMessage(error) {
   return error instanceof Error ? error.message : "The microphone could not be opened.";
 }
 
-function SwitchControl({ checked, disabled = false, label, onChange }) {
-  return (
-    <button
-      aria-checked={checked}
-      aria-label={label}
-      className="ml-auto grid h-7 w-10 place-items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:cursor-wait disabled:opacity-50"
-      disabled={disabled}
-      role="switch"
-      type="button"
-      onClick={() => onChange(!checked)}
-    >
-      <span
-        aria-hidden="true"
-        className={`relative h-[18px] w-8 rounded-full border transition-[background-color,border-color] duration-150 ${
-          checked ? "border-brand bg-brand" : "border-line bg-slate-100"
-        }`}
-      >
-        <span
-          className={`absolute left-0.5 top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-150 ease-out motion-reduce:transition-none ${
-            checked ? "translate-x-3.5" : "translate-x-0"
-          }`}
-        />
-      </span>
-    </button>
-  );
-}
 
 // Every experimental feature has a switch here, and only here. Backend
 // features need the desktop app, which restarts the backend to apply them.
@@ -956,50 +1020,6 @@ function PluginSettings({ onChange, value }) {
   );
 }
 
-function NumberControl({ max, min, onCommit, step = 1, suffix = "", value }) {
-  const [draft, setDraft] = useState(String(value));
-  const focusedRef = useRef(false);
-  useEffect(() => {
-    if (!focusedRef.current) setDraft(String(value));
-  }, [value]);
-  function commit() {
-    focusedRef.current = false;
-    const parsed = Number(draft);
-    if (!Number.isFinite(parsed)) {
-      setDraft(String(value));
-      return;
-    }
-    const next = Math.min(max, Math.max(min, parsed));
-    setDraft(String(next));
-    onCommit(next);
-  }
-  return (
-    <div className="relative">
-      <input
-        className="h-8 w-full rounded-md border border-line bg-white px-2 pr-10 text-right text-xs text-ink outline-none transition focus:border-brand"
-        inputMode="decimal"
-        value={draft}
-        onBlur={commit}
-        onChange={(event) => setDraft(event.target.value)}
-        onFocus={() => { focusedRef.current = true; }}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") event.currentTarget.blur();
-          if (event.key === "Escape") {
-            setDraft(String(value));
-            event.currentTarget.blur();
-          }
-          if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-            event.preventDefault();
-            const parsed = Number(draft);
-            const base = Number.isFinite(parsed) ? parsed : value;
-            setDraft(String(base + (event.key === "ArrowUp" ? step : -step)));
-          }
-        }}
-      />
-      {suffix ? <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted">{suffix}</span> : null}
-    </div>
-  );
-}
 
 function TextControl({ onCommit, placeholder, value }) {
   const [draft, setDraft] = useState(value);
@@ -1137,11 +1157,11 @@ function categoryKeywords(category) {
     devices: "microphone mic audio input device recording transcription dictation speech recognition recognizer offline model macOS Windows Linux test signal level paired devices phone mobile desktop pairing qr trust revoke",
     appearance: "theme dark light system motion animation",
     editor: "font line tab wrap minimap autosave markdown html preview code",
-    browser: "homepage new tab search engine url web rem agent playwright chrome automation testing sign-in cookies sites allowlist blocklist downloads memory approval approve prompts full access permission scripts",
+    browser: "web browser default new tab raticode chromium engine firefox gecko google chrome chromium microsoft edge msedge sync extensions add-ons addons import profile preferences about:config https-only tracking dns proxy homepage new tab search engine url web rem agent playwright chrome automation testing sign-in cookies sites allowlist blocklist downloads memory approval approve prompts full access permission scripts",
     terminal: "font line cursor blink scrollback shell",
     providers: "providers enabled disabled executable coding harness path apps default model reasoning effort",
     usage: "usage tokens allowance limits remaining quotas credits billing spend accounts providers history refresh",
-    assistant: "commit messages auto commit template format default scope current directory global projects rem provider model effort chat faster speed codex claude conversation skills tools mcp servers resources swarm access teams runs",
+    assistant: "self-work self work idle away max threads backlog auto pull research report kanban commit messages auto commit template format default scope current directory global projects rem provider model effort chat faster speed codex claude conversation skills tools mcp servers resources swarm access teams runs",
     memory: "rem memory conversation archive folder second brain knowledge notes reports html markdown",
     developer: "developer diagnostics application log logs logging errors warnings debug info filter connection app data storage version backend restart tools feature preview experimental",
     layout: "width pane sidebar panel inspector arrangement preset position side left right swap mirror dock chat rem files explorer project activity bar terminal tab editor startup open hidden compact narrow reset",

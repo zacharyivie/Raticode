@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, LoaderCircle, Sparkles } from "lucide-react";
 
 import { apiUrl } from "../lib/api";
+import { menuModels } from "../lib/providerModels.js";
 
 const activePickerStyle = {
   backgroundColor: "var(--model-picker-active-bg)",
@@ -436,7 +437,7 @@ function ProviderMark({ providerId }) {
 
 function selectableModels(provider, configuredModel, allowInheritedModel) {
   const options = allowInheritedModel ? [{ id: "", label: "Inherit agent" }] : [];
-  const providerModels = provider?.models ?? [];
+  const providerModels = menuModels(provider, configuredModel);
   const concreteDefaultModel = providerModels.find(
     (model) => model.id === provider?.defaultModel && model.id.toLowerCase() !== "default",
   );

@@ -8,7 +8,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from gofer.ui.rem_home_store import RemHomeStore
+from gofer.ui.rem_home_store import RemHomeStore, with_author
 
 
 class ThreadRead(BaseModel):
@@ -271,7 +271,7 @@ class RemRecall:
                 (request.thread_id, anchor[0] if anchor else 2**63 - 1),
             ).fetchall()
         messages = bounded_messages(
-            [excerpt(json.loads(r["body"]), query) for r in reversed(rows[:20])], 12000
+            [excerpt(with_author(json.loads(r["body"])), query) for r in reversed(rows[:20])], 12000
         )
         return {
             "thread_id": request.thread_id,

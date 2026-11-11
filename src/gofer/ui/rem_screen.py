@@ -66,7 +66,7 @@ def screen_withheld(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def acts(decision: Any) -> bool:
-    """Whether a Rem decision starts, changes, remembers or sends anything."""
+    """Whether a Rem decision starts, changes, opens, remembers or sends anything."""
     return bool(
         decision.tasks
         or decision.controls
@@ -74,4 +74,6 @@ def acts(decision: Any) -> bool:
         or decision.memories
         or decision.memory_changes
         or decision.phone_actions
+        or decision.open_projects
+        or decision.tickets
     )

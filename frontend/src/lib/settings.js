@@ -1,6 +1,7 @@
 import { DEFAULT_REPORT_THEMES, normalizeReportThemes, reportOutputFormat } from "./reportThemes.js";
 import brandCompat from "./brandCompat.js";
 import { cloneJson } from "./jsonValue.js";
+import { webBrowserEngine } from "./browserEngines.js";
 import { DEFAULT_REM_RESOURCES, snapshotRemResources } from "./remResources.js";
 import { DEFAULT_PLUGIN_SETTINGS, normalizePluginSettings } from "./plugins.js";
 import { ARCHIVE_RETENTION_OPTIONS } from "./threadActivity.js";
@@ -138,6 +139,9 @@ export const DEFAULT_APP_SETTINGS = Object.freeze({
     wordWrap: false,
   },
   browser: {
+    // The web browser for web tabs and Rem's tabs: Raticode's own engine, or
+    // a Firefox or Chrome that Raticode runs without a window and streams into tabs.
+    engine: "raticode",
     homepage: RATICODE_BROWSER_HOME,
     searchUrl: "https://www.google.com/search?q={query}",
     // Where Rem's Browser tool opens pages. Keep in sync with BROWSER_TARGETS
@@ -249,7 +253,7 @@ export function normalizeAppSettings(value = {}) {
     settings.assistant[key] = Math.round(boundedNumber(settings.assistant[key], 0, 16, 0));
   }
   settings.general.autosave = settings.general.autosave !== false;
-  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["rem", "workflows", "files", "search", "source-control", "organizations", "second-brain"], value?.general?.defaultView === "code" ? "files" : "workflows");
+  settings.general.initialActivity = enumValue(value?.general?.initialActivity, ["rem", "workflows", "files", "search", "source-control", "kanban", "organizations", "second-brain"], value?.general?.defaultView === "code" ? "files" : "workflows");
   // Retain the old field for older installations reading these settings.
   settings.general.defaultView = settings.general.initialActivity === "workflows" ? "graph" : "code";
   settings.general.executionMode = enumValue(settings.general.executionMode, ["local", "remote"], "local");
@@ -276,6 +280,7 @@ export function normalizeAppSettings(value = {}) {
     2048,
   );
   settings.browser.searchUrl = searchUrlValue(settings.browser.searchUrl);
+  settings.browser.engine = webBrowserEngine(settings.browser.engine);
   settings.browser.agentBrowser = enumValue(settings.browser.agentBrowser, ["raticode", "external", "external-headless"], "raticode");
   settings.browser.remSignInSites = siteListValue(settings.browser.remSignInSites);
   settings.browser.remAllowedSites = siteListValue(settings.browser.remAllowedSites);

@@ -144,6 +144,7 @@ async function run() {
   if (process.env.GOFER_CHAT_ONLY === "1") {
     await exerciseConversationEfficiency();
     await exerciseLazyThoughtHistory();
+    await exerciseRemThreadAuthors();
     clearTimeout(timeout);
     assert.deepEqual(rendererErrors, [], "Renderer must not log errors");
     console.log("Browser conversation efficiency regressions passed.");
@@ -176,6 +177,7 @@ async function run() {
   await exerciseSourceControl();
   await exerciseConversationEfficiency();
   await exerciseLazyThoughtHistory();
+  await exerciseRemThreadAuthors();
   await exerciseRemSteering();
 
   clearTimeout(timeout);
@@ -505,6 +507,45 @@ async function exerciseLazyThoughtHistory() {
   fs.writeFileSync("/tmp/rem-lazy-thoughts.png", (await windowRef.webContents.capturePage()).toPNG());
 }
 
+// A Rem task thread labels who wrote each instruction: Rem's prompts and the
+// user's own messages both reach the worker as user messages but must not look alike.
+const remAuthorsThread = {
+  metadata: { id: "rem-authors", title: "Rem authors", managedRunId: "run-authors", managedRole: "execute", scopeMode: "global", projectRoot: "", provider: "codex", model: "cli-default", updatedAt: new Date().toISOString() },
+  messages: [
+    { id: "authors-goal", role: "user", sender: "rem", body: "Implement the feature and run its tests." },
+    { id: "authors-done", role: "assistant", kind: "final", body: "Implemented it; the tests pass." },
+    { id: "authors-mine", role: "user", sender: "user", body: "Also cover the empty case." },
+    { id: "authors-again", role: "assistant", kind: "final", body: "Added the empty case." },
+  ],
+  running: false,
+};
+
+async function exerciseRemThreadAuthors() {
+  await evaluate(thread => {
+    const index = JSON.parse(localStorage.getItem("gofer-flow-chat-threads") || "[]");
+    localStorage.setItem("gofer-flow-chat-threads", JSON.stringify([{ id: thread.metadata.id, updatedAt: thread.metadata.updatedAt }, ...index]));
+    localStorage.setItem(`gofer-flow-chat-thread-meta:${thread.metadata.id}`, JSON.stringify(thread.metadata));
+    localStorage.setItem(`gofer-flow-chat-thread:${thread.metadata.id}`, JSON.stringify(thread.messages));
+  }, remAuthorsThread);
+  await windowRef.reload();
+  await waitFor(() => evaluate(() => Boolean(document.querySelector("[data-assistant-home]"))));
+  await evaluate(() => [...document.querySelectorAll("[data-assistant-home] button")].find(button => button.textContent.includes("Rem authors")).click());
+  await waitFor(() => evaluate(() => Boolean(document.querySelector('[data-message-id="authors-again"]'))), 50, "Rem task thread");
+  const authors = await evaluate(() => [...document.querySelectorAll("[data-chat-pane] [data-author]")].map(node => ({
+    id: node.getAttribute("data-message-id"),
+    author: node.getAttribute("data-author"),
+    label: node.textContent.trim(),
+    background: getComputedStyle(node.firstElementChild).backgroundColor,
+  })));
+  assert.deepEqual(authors.map(({ id, author }) => [id, author]), [["authors-goal", "rem"], ["authors-mine", "user"]]);
+  assert.match(authors[0].label, /^Written by Rem/);
+  assert.match(authors[1].label, /^Written by You/);
+  assert.notEqual(authors[0].background, authors[1].background, "Rem's prompt and the user's message look different");
+  await evaluate(() => document.querySelector('[data-message-id="authors-goal"]').scrollIntoView({ block: "start" }));
+  await wait(300);
+  fs.writeFileSync("/tmp/rem-thread-authors.png", (await windowRef.webContents.capturePage()).toPNG());
+}
+
 async function exerciseThreadSearchNavigation() {
   await evaluate(() => {
     const thread = { id: "search-navigation", title: "Search navigation", updatedAt: new Date(Date.now() - 11 * 86400000).toISOString(), projectRoot: "/workspace", provider: "codex" };
@@ -639,12 +680,17 @@ async function exerciseRemSidePane() {
 async function exerciseSidebarKeepsMainContent() {
   const remHomeShown = () => evaluate(() => Boolean(document.querySelector(".rem-home")?.offsetParent));
   assert.equal(await remHomeShown(), true, "Rem's conversation starts open");
-  for (const id of ["source-control", "workflows", "search", "files"]) {
+  for (const id of ["source-control", "workflows", "search"]) {
     await evaluate(id => document.querySelector(`.studio-sidebar #sidebar-tab-${id}`).click(), id);
     await waitFor(() => evaluate(id => document.querySelector(`#sidebar-panel-${id}`)?.hidden === false, id), 25, `${id} sidebar`);
     assert.equal(await remHomeShown(), true, `${id} keeps Rem's conversation`);
     if (id === "workflows") { await wait(300); fs.writeFileSync("/tmp/raticode-sidebar-workflows-rem-open.png", (await windowRef.webContents.capturePage()).toPNG()); }
   }
+  // File explorer is the way back to the editor's file and browser tabs.
+  await evaluate(() => document.querySelector(".studio-sidebar #sidebar-tab-files").click());
+  await waitFor(() => evaluate(() => !document.querySelector(".rem-home")?.offsetParent && Boolean(document.querySelector("#sidebar-panel-files:not([hidden])"))), 25, "File explorer shows the editor");
+  await evaluate(() => document.querySelector(".studio-sidebar #sidebar-tab-rem").click());
+  await waitFor(remHomeShown, 25, "Rem's conversation reopens");
   await evaluate(() => document.querySelector(".studio-sidebar #sidebar-tab-workflows").click());
   await waitFor(() => evaluate(() => [...document.querySelectorAll("#sidebar-panel-workflows [role='button']")].some(row => row.textContent.includes("Demo workflow"))));
   await evaluate(() => [...document.querySelectorAll("#sidebar-panel-workflows [role='button']")].find(row => row.textContent.includes("Demo workflow")).click());
@@ -654,7 +700,7 @@ async function exerciseSidebarKeepsMainContent() {
   assert.match(await evaluate(() => document.querySelector("[aria-label='Editor tabs'] [role='tab'][aria-selected='true']")?.textContent || ""), /Demo workflow/);
   await wait(300);
   fs.writeFileSync("/tmp/raticode-sidebar-workflow-opened.png", (await windowRef.webContents.capturePage()).toPNG());
-  console.log("Sidebar switches kept Rem's conversation; choosing a workflow opened it.");
+  console.log("Sidebar switches kept Rem's conversation, File explorer showed the editor, and choosing a workflow opened it.");
 }
 
 async function exerciseRemAvatar() {
@@ -2051,6 +2097,10 @@ function routeApi(pathname, response) {
     json(response, { errors: [], warnings: [] });
     return;
   }
+  if (pathname === "/api/rem/threads/rem-authors") {
+    json(response, remAuthorsThread);
+    return;
+  }
   json(response, {});
 }
 
@@ -2211,6 +2261,9 @@ async function exerciseSourceControl() {
     document.querySelector("[aria-label='Refresh source control']").click();
     document.querySelector("#sidebar-tab-source-control").click();
   });
+  // Source control opens to History; Changes holds the staged files and commit box.
+  await waitFor(() => evaluate(() => document.querySelector("#scm-tab-history")?.getAttribute("aria-selected") === "true"), 25, "Source control opens to History");
+  await evaluate(() => document.querySelector("#scm-tab-changes").click());
   await waitFor(() => evaluate(() => Boolean(document.querySelector(".scm-composer"))));
   for (const dark of [false, true]) {
     await windowRef.webContents.executeJavaScript(`document.documentElement.classList.toggle("dark", ${dark})`);

@@ -16,7 +16,10 @@ import pytest
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
 from gofer.core.scheduler import WorkflowScheduler
 from gofer.core.watcher import WorkflowWatcher
-from gofer.rattish.workspaces import create_registered_workflow
+from gofer.rattish.trigger_service import TriggerRun
+from gofer.rattish.triggers import TriggerStore
+from gofer.rattish.workspaces import create_registered_workflow, find_registered_workflow
+from gofer.ui import api as api_module
 from gofer.ui import server as server_module
 from gofer.ui.chat import workflow_chat_prompt_path
 from gofer.ui.chat_steering import ChatSteering
@@ -1229,9 +1232,11 @@ def test_ui_bundle_path_uses_nearest_existing_parent_for_missing_destination(
 
 
 @pytest.mark.parametrize("secret", ["", "invalid-\u00e9"])
-def test_ui_desktop_path_grant_registration_requires_secret(tmp_path: Path, secret: str) -> None:
-    outside_dir = tmp_path.parent / f"{tmp_path.name}-registered"
-    outside_dir.mkdir()
+def test_ui_desktop_path_grant_registration_requires_secret(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, secret: str
+) -> None:
+    # Its own folder: a passing case's tmp_path is removed and its name reused.
+    outside_dir = tmp_path_factory.mktemp("registered")
 
     denied = _request(
         tmp_path,
@@ -1982,6 +1987,58 @@ def test_ui_server_reports_and_saves_the_speech_recognizer(monkeypatch, tmp_path
     assert started == {"engine": "offline"}
     refused = _request(tmp_path, "POST", "/api/chat/transcribe/engines", body={"engine": "cloud"})
     assert refused.status == 400
+
+
+def test_ui_server_downloads_the_offline_model_and_tries_the_mac_recognizer(
+    monkeypatch, tmp_path
+) -> None:
+    from gofer.core import provider_preferences
+    from gofer.ui import system_speech
+
+    monkeypatch.setattr(provider_preferences, "get_data_dir", lambda: tmp_path)
+    started = []
+    status: dict[str, object] = {
+        "name": "Raticode's offline speech model",
+        "installed": False,
+        "downloadMb": 130,
+    }
+
+    def fake_start(*, data_dir):
+        started.append(data_dir)
+        return {**status, "download": {"state": "starting", "receivedBytes": 0, "totalBytes": 0}}
+
+    monkeypatch.setattr(server_module, "start_offline_model_download", fake_start)
+    monkeypatch.setattr(server_module, "offline_model_status", lambda *, data_dir: status)
+    shown = _request(tmp_path, "GET", "/api/chat/transcribe/model")
+    assert shown.json() == status
+    begun = _request(tmp_path, "POST", "/api/chat/transcribe/model", body={})
+    assert begun.status == 202
+    assert begun.json() == {
+        **status,
+        "download": {"state": "starting", "receivedBytes": 0, "totalBytes": 0},
+    }
+    assert len(started) == 1
+
+    refreshed = []
+    monkeypatch.setattr(
+        system_speech,
+        "try_system_engine",
+        lambda: {"id": "macos", "ok": True, "message": "macOS speech recognition works."},
+    )
+
+    def fake_engines(*, data_dir, refresh):
+        refreshed.append(refresh)
+        return {"system": {"id": "macos", "available": True}, "offline": status}
+
+    monkeypatch.setattr(server_module, "transcription_engines", fake_engines)
+    tried = _request(tmp_path, "POST", "/api/chat/transcribe/engines/test", body={})
+    assert tried.json() == {
+        "test": {"id": "macos", "ok": True, "message": "macOS speech recognition works."},
+        "engine": "system",
+        "system": {"id": "macos", "available": True},
+        "offline": status,
+    }
+    assert refreshed == [True]
 
 
 def test_ui_server_chat_stream_provider_error_is_ndjson(monkeypatch, tmp_path) -> None:
@@ -2996,10 +3053,9 @@ def test_rem_swarm_grant_is_private_and_revoked_after_chat(
 
 @pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream"])
 def test_rem_swarm_access_requires_project_grant(
-    monkeypatch, tmp_path: Path, endpoint: str
+    monkeypatch, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, endpoint: str
 ) -> None:
-    outside = tmp_path.parent / f"{tmp_path.name}-outside"
-    outside.mkdir()
+    outside = tmp_path_factory.mktemp("outside")
     monkeypatch.setattr(
         server_module, "run_workflow_chat", lambda **kwargs: pytest.fail("Must not start")
     )
@@ -3690,3 +3746,152 @@ def test_generation_job_post_returns_receipt_without_waiting_for_provider(
     assert dismissed.status == 200
     empty = _request(tmp_path, "GET", "/api/generation-jobs?kind=theme")
     assert cast(dict[str, Any], empty.json())["jobs"] == []
+
+
+def _trigger_workflow(tmp_path: Path) -> str:
+    project = tmp_path / "trigger-project"
+    project.mkdir()
+    registered = create_registered_workflow(project, name="Trigger API", registry_dir=tmp_path)
+    return registered.workflow_id
+
+
+def test_rattish_trigger_routes_require_authentication(tmp_path: Path) -> None:
+    result = _request(tmp_path, "GET", "/api/rattish/triggers?workflowId=x", authenticated=False)
+    assert result.status == 401
+
+
+def test_rattish_trigger_api_creates_lists_and_removes(tmp_path: Path) -> None:
+    workflow_id = _trigger_workflow(tmp_path)
+
+    created = _request(
+        tmp_path,
+        "POST",
+        "/api/rattish/triggers",
+        body={
+            "workflowId": workflow_id,
+            "kind": "cron",
+            "config": {"expression": "0 9 * * 1-5", "timezone": "UTC"},
+            "overlap": "queue",
+        },
+    )
+    assert created.status == 201, created.text()
+    trigger = json.loads(created.body)["trigger"]
+    assert trigger["overlap"] == "queue"
+    assert trigger["nextRunAt"]
+
+    listed = _request(tmp_path, "GET", f"/api/rattish/triggers?workflowId={workflow_id}")
+    assert listed.status == 200
+    payload = json.loads(listed.body)
+    assert [item["id"] for item in payload["triggers"]] == [trigger["id"]]
+    assert payload["scheduler"]["running"] is False
+    assert "only while Raticode" in payload["scheduler"]["notice"]
+    assert payload["login"]["enabled"] is False
+
+    switched = _request(
+        tmp_path, "POST", f"/api/rattish/triggers/{trigger['id']}", body={"enabled": False}
+    )
+    assert json.loads(switched.body)["trigger"]["enabled"] is False
+
+    removed = _request(tmp_path, "DELETE", f"/api/rattish/triggers/{trigger['id']}")
+    assert removed.status == 200
+    missing = _request(tmp_path, "DELETE", f"/api/rattish/triggers/{trigger['id']}")
+    assert missing.status == 404
+
+
+def test_rattish_trigger_api_returns_webhook_token_once(tmp_path: Path) -> None:
+    workflow_id = _trigger_workflow(tmp_path)
+    created = _request(
+        tmp_path,
+        "POST",
+        "/api/rattish/triggers",
+        body={"workflowId": workflow_id, "kind": "webhook"},
+    )
+    assert created.status == 201, created.text()
+    body = json.loads(created.body)
+    assert body["token"].startswith("rtw_")
+    assert body["trigger"]["webhookUrl"].startswith("http://127.0.0.1:")
+
+    listed = _request(tmp_path, "GET", f"/api/rattish/triggers?workflowId={workflow_id}")
+    assert body["token"] not in listed.text()
+
+    rotated = _request(
+        tmp_path, "POST", f"/api/rattish/triggers/{body['trigger']['id']}/rotate-token", body={}
+    )
+    assert json.loads(rotated.body)["token"] != body["token"]
+
+
+def test_rattish_trigger_api_reports_bad_settings(tmp_path: Path) -> None:
+    workflow_id = _trigger_workflow(tmp_path)
+    bad_cron = _request(
+        tmp_path,
+        "POST",
+        "/api/rattish/triggers",
+        body={"workflowId": workflow_id, "kind": "cron", "config": {"expression": "nope"}},
+    )
+    assert bad_cron.status == 400
+    assert "five fields" in bad_cron.text()
+
+    unknown = _request(tmp_path, "GET", "/api/rattish/triggers?workflowId=missing")
+    assert unknown.status == 400
+    preview = _request(
+        tmp_path,
+        "POST",
+        "/api/rattish/triggers/preview",
+        body={"expression": "0 9 * * *", "timezone": "UTC"},
+    )
+    assert len(json.loads(preview.body)["nextRuns"]) == 3
+
+
+def test_start_at_login_api_writes_the_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    enabled = _request(tmp_path, "POST", "/api/rattish/triggers/login", body={"enabled": True})
+    assert enabled.status == 200, enabled.text()
+    entry = Path(json.loads(enabled.body)["login"]["path"])
+    assert entry.is_file()
+    disabled = _request(tmp_path, "POST", "/api/rattish/triggers/login", body={"enabled": False})
+    assert json.loads(disabled.body)["login"]["enabled"] is False
+    assert not entry.exists()
+
+
+def test_deleting_a_workflow_removes_its_triggers(tmp_path: Path) -> None:
+    workflow_id = _trigger_workflow(tmp_path)
+    created = _request(
+        tmp_path,
+        "POST",
+        "/api/rattish/triggers",
+        body={"workflowId": workflow_id, "kind": "webhook"},
+    )
+    assert created.status == 201
+    api_module.delete_workflow_payload(workflow_id, tmp_path, source_format="rattish")
+    assert TriggerStore(tmp_path).list_triggers() == []
+
+
+def test_a_triggered_run_can_be_stopped_from_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow_id = _trigger_workflow(tmp_path)
+    source = find_registered_workflow(workflow_id, registry_dir=tmp_path).entrypoint
+    cancel = threading.Event()
+    seen: list[threading.Event] = []
+
+    def fake_run(run: TriggerRun) -> Any:
+        key = (str(tmp_path.resolve()), workflow_id, run.run_id)
+        seen.append(api_module._active_rattish_runs[key])
+        return object()
+
+    monkeypatch.setattr(api_module, "run_in_process", fake_run)
+    api_module.run_triggered_rattish(
+        TriggerRun(
+            source=source,
+            workflow_id=workflow_id,
+            inputs={},
+            events=[],
+            data_dir=tmp_path.resolve(),
+            run_id="run-1",
+            cancel_event=cancel,
+        )
+    )
+    assert seen == [cancel]
+    assert not any(key[2] == "run-1" for key in api_module._active_rattish_runs)

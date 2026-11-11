@@ -247,8 +247,11 @@ async def refresh_usage(
                     ),
                     timeout=CLI_REFRESH_TIMEOUT_SECONDS + 5,
                 )
-            except Exception:
-                # Provider stderr and HTTP bodies can contain credentials.
+            except Exception as exc:
+                # Provider stderr and HTTP bodies can contain credentials: type only.
+                logger.info(
+                    "Usage refresh for %s failed (%s)", identity["provider"], type(exc).__name__
+                )
                 row = {
                     "status": "error",
                     "reason": "Could not refresh usage. Try again shortly.",
@@ -326,9 +329,9 @@ def start_background_refresh(data_dir: Path | None = None) -> Callable[[], None]
     def run(**options: Any) -> None:
         try:
             asyncio.run(refresh_usage(data_dir, **options))
-        except Exception:
+        except Exception as exc:
             # Provider failures are already per-account rows; never log secrets.
-            logger.warning("Background usage refresh failed", exc_info=False)
+            logger.warning("Background usage refresh failed (%s)", type(exc).__name__)
 
     def loop() -> None:
         if stop.wait(BACKGROUND_START_DELAY_SECONDS):

@@ -553,6 +553,8 @@ def test_human_help_and_missing_skill_recovery_point_to_authoring_contract(
     # Rich styles options and wraps help at the terminal width, including in CI.
     root_text = " ".join(Text.from_ansi(root_help.output).plain.split())
     node_text = " ".join(Text.from_ansi(node_help.output).plain.split())
-    assert "Raticode schema --format json" in root_text
+    # The root help sends scripts to the Rattish contracts, not the legacy TOML one.
+    assert "Raticode rattish docs --format json" in root_text
+    assert "Raticode schema --format json" not in root_text
     assert "Raticode schema --operation TYPE" in node_text
     assert "Raticode rattish docs --format json" in _load_skill_text()

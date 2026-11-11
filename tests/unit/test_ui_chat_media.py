@@ -177,7 +177,7 @@ def test_vosk_model_canonicalizes_data_root_alias(monkeypatch, tmp_path):
     paths: list[Path] = []
     monkeypatch.setattr(chat_media, "_vosk_model", None)
     monkeypatch.setattr(chat_media, "_vosk_model_path", None)
-    monkeypatch.setattr(chat_media, "_ensure_vosk_model", paths.append)
+    monkeypatch.setattr(chat_media, "_require_vosk_model", paths.append)
     monkeypatch.setitem(sys.modules, "vosk", SimpleNamespace(Model=lambda path: path))
     assert chat_media._load_vosk_model(alias) == str(
         real / "speech-models" / chat_media.VOSK_MODEL_NAME
@@ -253,3 +253,89 @@ def test_locate_chat_attachment_finds_uploads_and_refuses_anything_else(tmp_path
     (tmp_path / "chat-attachments" / "thread-one" / linked).symlink_to(outside)
     with pytest.raises(ChatMediaError, match="no longer available"):
         locate_chat_attachment(linked, data_dir=tmp_path)
+
+
+# The offline model's download: certificates and errors the user can act on.
+
+
+def no_system_cas(monkeypatch, tmp_path) -> None:
+    missing = str(tmp_path / "Python.framework" / "etc" / "openssl")
+    monkeypatch.setattr(
+        chat_media.ssl,
+        "get_default_verify_paths",
+        lambda: chat_media.ssl.DefaultVerifyPaths(
+            None, None, "SSL_CERT_FILE", f"{missing}/cert.pem", "SSL_CERT_DIR", f"{missing}/certs"
+        ),
+    )
+
+
+def test_a_frozen_backend_without_system_certificates_uses_the_bundled_ones(
+    monkeypatch, tmp_path
+) -> None:
+    import certifi
+
+    loaded: list[str] = []
+    real = chat_media.ssl.SSLContext.load_verify_locations
+
+    def load(self, cafile=None, *args, **kwargs):
+        loaded.append(cafile)
+        return real(self, cafile, *args, **kwargs)
+
+    monkeypatch.setattr(chat_media.ssl.SSLContext, "load_verify_locations", load)
+    no_system_cas(monkeypatch, tmp_path)
+    made, source = chat_media._download_tls_context()
+    assert loaded == [certifi.where()]
+    assert made.verify_mode == chat_media.ssl.CERT_REQUIRED and made.check_hostname
+    assert made.cert_store_stats()["x509_ca"] > 0
+    assert source.startswith("bundled certifi")
+
+
+def test_system_certificates_are_kept_when_present(monkeypatch, tmp_path) -> None:
+    bundle = tmp_path / "cert.pem"
+    bundle.write_text("")
+    monkeypatch.setattr(
+        chat_media.ssl,
+        "get_default_verify_paths",
+        lambda: chat_media.ssl.DefaultVerifyPaths(str(bundle), None, "", "", "", ""),
+    )
+    _context, source = chat_media._download_tls_context()
+    assert source == f"system ({bundle})"
+
+
+def test_the_download_passes_its_context_and_names_a_certificate_failure(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    seen: dict[str, object] = {}
+
+    def refuse(request, **kwargs):
+        seen.update(kwargs)
+        raise chat_media.URLError(
+            chat_media.ssl.SSLCertVerificationError(1, "certificate verify failed")
+        )
+
+    no_system_cas(monkeypatch, tmp_path)
+    monkeypatch.setattr(chat_media, "urlopen", refuse)
+    with pytest.raises(ChatMediaError) as raised:
+        chat_media._ensure_vosk_model(tmp_path / "models" / chat_media.VOSK_MODEL_NAME)
+    assert isinstance(seen["context"], chat_media.ssl.SSLContext)
+    assert "security certificate couldn't be verified" in str(raised.value)
+    assert "certificates: bundled certifi" in caplog.text
+    assert "SSLCertVerificationError" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (chat_media.URLError(TimeoutError("timed out")), "the connection timed out"),
+        (TimeoutError("timed out"), "the connection timed out"),
+        (
+            chat_media.HTTPError(chat_media.VOSK_MODEL_URL, 503, "busy", {}, None),  # type: ignore[arg-type]
+            "the server answered HTTP 503",
+        ),
+        (chat_media.URLError(OSError(8, "nodename nor servname")), "Check the connection"),
+        (OSError(28, "No space left on device"), "couldn't be saved: No space left on device"),
+        (RuntimeError("boom"), "could not be installed. Check the connection"),
+    ],
+)
+def test_download_failures_say_what_happened(error, expected) -> None:
+    assert expected in chat_media._download_failure_message(error)

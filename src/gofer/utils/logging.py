@@ -35,6 +35,35 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
+class RepeatingFailure:
+    """Log a background loop's failures without repeating the same traceback.
+
+    A loop that ticks every few seconds would otherwise log one traceback per tick
+    for as long as a problem lasts. The first occurrence of each distinct error is
+    logged with its traceback at ``level``; repeats go to debug; the first success
+    afterwards is logged at info.
+    """
+
+    def __init__(self, logger: logging.Logger, what: str, level: int = logging.ERROR) -> None:
+        self.logger = logger
+        self.what = what
+        self.level = level
+        self.current: str | None = None
+
+    def failed(self, exc: BaseException) -> None:
+        signature = f"{type(exc).__name__}: {exc}"
+        if signature == self.current:
+            self.logger.debug("%s still failing (%s)", self.what, type(exc).__name__)
+            return
+        self.current = signature
+        self.logger.log(self.level, "%s failed", self.what, exc_info=exc)
+
+    def succeeded(self) -> None:
+        if self.current is not None:
+            self.current = None
+            self.logger.info("%s recovered", self.what)
+
+
 def desktop_level_name(levelno: int) -> str:
     if levelno >= logging.ERROR:
         return "error"
@@ -92,7 +121,8 @@ def configure_backend_logging(env: dict[str, str] | None = None) -> logging.Hand
 
     The desktop app sets ``GOFER_LOG_FORMAT=desktop`` and gets JSON lines it can
     file by level. A terminal gets plain lines. ``GOFER_LOG_LEVEL`` picks how much of
-    Raticode's own logging is kept (default ``info``); other libraries only report
+    Raticode's own logging is kept (default ``info``; the desktop app passes ``debug``
+    so Settings > Developer can show debug entries on request); other libraries only report
     warnings and errors, so their routine chatter does not crowd the log.
     """
     global _desktop_handler

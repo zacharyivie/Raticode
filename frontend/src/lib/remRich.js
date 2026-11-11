@@ -9,8 +9,15 @@ const STEP_LABELS = { plan: "Plan", work: "Work", check: "Check", report: "Repor
 const STEP_AT = { queued: 0, executing: 1, cancelling: 1, verifying: 2, repairing: 2 };
 const ENDED = new Set(["failed", "blocked", "cancelled", "outcome_unknown"]);
 
-export function runSteps(state, { reachedCheck = false } = {}) {
-  const at = state === "succeeded" ? 4 : STEP_AT[state] ?? (ENDED.has(state) ? (reachedCheck ? 2 : 1) : -1);
+// The desktop sends each run's `step`. It matters for a queued run: one whose work is
+// done but waits to be checked again (a retried review, a restart's recovery check) is
+// at Check, not Plan. Older desktops send no step; the state decides, as before.
+const STEP_INDEX = { plan: 0, work: 1, check: 2 };
+
+export function runSteps(state, { reachedCheck = false, step } = {}) {
+  const at = state === "succeeded" ? 4
+    : !(state in STEP_AT) && !ENDED.has(state) ? -1
+      : STEP_INDEX[step] ?? STEP_AT[state] ?? (reachedCheck ? 2 : 1);
   if (at < 0) return [];
   const stopped = ENDED.has(state);
   return STEP_KEYS.map((key, index) => ({
@@ -160,6 +167,14 @@ export function resultActions(message, tasks = [], { live = true, reviewRetry = 
   const task = tasks.find(item => item.id === message.work.task_id);
   if (!task || task.deleted_at) return actions;
   if (task.active_run && ACTIVE.has(task.active_run.state)) return actions;
+  // A task waiting for others: retry each prerequisite that didn't succeed, or start it now.
+  if (task.dependency) {
+    for (const item of task.dependency.prerequisites || []) {
+      if (item.retryable) actions.push({ id: `retry-after:${item.task_id}`, label: `Retry “${item.title}”`, task: { id: item.task_id } });
+    }
+    actions.push({ id: "run", label: "Start now", task });
+    return actions;
+  }
   const run = task.last_run;
   if (reviewRetry && run?.id === message.work.run_id && run.review_retryable === true) actions.push({ id: "retry", label: "Retry review", task, run });
   actions.push({ id: "run", label: "Run again", task });

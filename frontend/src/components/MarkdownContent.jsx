@@ -1,5 +1,6 @@
 import { isLocalFileLink, resolveMarkdownLinkPath } from "../lib/fileLinks.js";
 import { remarkFileMentions } from "../lib/fileMentions.js";
+import { remarkTicketMentions, ticketKeys } from "../lib/ticketMentions.js";
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -10,6 +11,8 @@ import remarkGfm from "remark-gfm";
 const RichCodeBlock = lazy(() => import("./RichCodeBlock.jsx"));
 // Web images load through the backend; the loader is its own small chunk too.
 const WebImage = lazy(() => import("./WebImage.jsx"));
+// Only chat with ticket keys in it loads the pill (and the board code it opens).
+const TicketPill = lazy(() => import("./TicketPill.jsx"));
 const DEFAULT_REMARK_PLUGINS = [remarkGfm];
 const imagePlaceholder = <span aria-hidden="true" className="block h-40 w-full max-w-md rounded-lg bg-slate-100 dark:bg-[#26262a]" />;
 
@@ -20,6 +23,7 @@ function MarkdownContent({
   inverse = false,
   onOpenRelativeLink,
   sourcePath = "",
+  tickets = null,
   value,
 }) {
   const rootRef = useRef(null);
@@ -28,10 +32,18 @@ function MarkdownContent({
   const spacing = compact ? "space-y-2" : "space-y-4";
   // Full file paths the backend found in the text open like links.
   const mentionsKey = fileMentions?.length ? JSON.stringify(fileMentions) : "";
+  // Board ticket keys the backend found on the board ([tickets], by key) show as pills.
+  // Only the tickets this text names count, so a rename elsewhere doesn't re-render it.
+  const named = tickets ? ticketKeys(String(value ?? "")).filter(key => tickets[key]) : [];
+  const ticketsKey = named.length ? JSON.stringify(Object.fromEntries(named.map(key => [key, tickets[key]]))) : "";
   const remarkPlugins = useMemo(
-    () => (mentionsKey ? [remarkGfm, remarkFileMentions(JSON.parse(mentionsKey))] : DEFAULT_REMARK_PLUGINS),
-    [mentionsKey],
+    () => {
+      const plugins = mentionsKey ? [remarkGfm, remarkFileMentions(JSON.parse(mentionsKey))] : DEFAULT_REMARK_PLUGINS;
+      return ticketsKey ? [...plugins, remarkTicketMentions(JSON.parse(ticketsKey))] : plugins;
+    },
+    [mentionsKey, ticketsKey],
   );
+  const ticketIndex = useMemo(() => (ticketsKey ? JSON.parse(ticketsKey) : null), [ticketsKey]);
 
   const handleLinkClick = useCallback((event, href) => {
     if (!href) return;
@@ -52,6 +64,11 @@ function MarkdownContent({
   }, []);
 
   const components = useMemo(() => ({
+    "ticket-pill"({ node, children }) {
+      const key = node?.properties?.dataTicketKey || String(children ?? "");
+      const ticket = ticketIndex?.[key] || null;
+      return ticket ? <Suspense fallback={key}><TicketPill ticketKey={key} ticket={ticket} /></Suspense> : key;
+    },
     a({ children, href = "", title }) {
       const external = isExternalUrl(href);
       return (
@@ -164,7 +181,7 @@ function MarkdownContent({
     ul({ children, className: listClassName = "" }) {
       return <ul className={`${listClassName} ml-6 list-disc space-y-1`}>{children}</ul>;
     },
-  }), [handleLinkClick, inverse, sourcePath]);
+  }), [handleLinkClick, inverse, sourcePath, ticketIndex]);
 
   return (
     <div

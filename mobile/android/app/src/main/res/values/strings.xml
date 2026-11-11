@@ -1,0 +1,7 @@
+<resources>
+  <string name="app_name">Raticode</string>
+  <string name="voice_label">Talk to Rem</string>
+  <string name="voice_service_label">Rem voice assistant</string>
+  <string name="voice_shortcut_long">Talk to Rem by voice</string>
+  <string name="share_label">Rem</string>
+</resources>

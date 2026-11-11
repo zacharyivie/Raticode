@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- Android 16: lets the task progress notification be a Live Update with a status-bar chip. Granted at install; the user can turn it off in Android settings. -->
+  <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.CAMERA" />
+  <!-- Lets Child lock and App lock ask Android who is holding the phone. Raticode never sees the pattern, PIN, password or biometric. -->
+  <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-feature android:name="android.hardware.camera" android:required="false" />
+  <!-- Voice mode's own commands only: "call Emily" rings and "text Emily …" sends after a short countdown the user can
+       cancel, once the user allows them. Raticode never reads texts, the call log or contacts. Phones without a radio
+       can still install Raticode. -->
+  <uses-permission android:name="android.permission.CALL_PHONE" />
+  <uses-permission android:name="android.permission.SEND_SMS" />
+  <uses-feature android:name="android.hardware.telephony" android:required="false" />
+  <queries>
+    <intent><action android:name="android.speech.RecognitionService" /></intent>
+    <!-- Lets the paperclip menu say when no camera app can take a photo for Rem's chat. -->
+    <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
+    <!-- "Open Spotify": apps with a launcher icon, so voice mode can open one by name. Nothing else about them is read. -->
+    <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
+    <!-- Firefox for Android and Firefox Beta, when the user chooses Firefox as the browser. Only these packages become visible. -->
+    <package android:name="org.mozilla.firefox" />
+    <package android:name="org.mozilla.firefox_beta" />
+    <!-- Microsoft Edge and its Beta, Dev and Canary builds, when the user chooses Edge as the browser. Only these packages become visible. -->
+    <package android:name="com.microsoft.emmx" />
+    <package android:name="com.microsoft.emmx.beta" />
+    <package android:name="com.microsoft.emmx.dev" />
+    <package android:name="com.microsoft.emmx.canary" />
+    <!-- Google Chrome and Chrome Beta, when the user chooses Chrome as the browser. Only these packages become visible. -->
+    <package android:name="com.android.chrome" />
+    <package android:name="com.chrome.beta" />
+  </queries>
+  <!-- Android requires INTERNET for any socket. Device sockets bind to Wi-Fi, or to the Tailscale VPN when the user opts in. -->
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <!-- A page playing sound in Raticode's browser keeps playing after Raticode leaves the screen, with a notification and Stop. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+  <!-- A normal permission Android requires to ask the clock app for a timer or alarm. Only a tapped card asks; the clock app shows what it set. -->
+  <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+  <application
+      android:name=".RaticodeApplication"
+      android:allowBackup="false"
+      android:fullBackupContent="@xml/backup_rules"
+      android:dataExtractionRules="@xml/data_extraction_rules"
+      android:icon="@drawable/raticode_roundel"
+      android:label="@string/app_name"
+      android:supportsRtl="true"
+      android:theme="@style/Theme.Raticode"
+      android:usesCleartextTraffic="false">
+    <!-- The browser's WebView sends no usage metrics to Google. Safe Browsing stays on. -->
+    <meta-data android:name="android.webkit.WebView.MetricsOptOut" android:value="true" />
+    <service tools:targetApi="29" android:name=".live.DeviceSyncService" android:exported="false" android:foregroundServiceType="dataSync" />
+    <service tools:targetApi="29" android:name=".browser.BrowserPlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
+    <activity android:name=".ui.SecureCaptureActivity" android:exported="false" />
+    <!-- Where notifications and shortcuts land first. It has no window, closes at once, and leaves the child lock in place. -->
+    <activity
+        android:name=".childlock.NotificationOpenActivity"
+        android:exported="false"
+        android:theme="@android:style/Theme.NoDisplay" />
+    <!-- The child lock: a see-through screen above Raticode. Private, and it stays in Raticode's own task. -->
+    <activity
+        tools:targetApi="29"
+        android:name=".childlock.ChildLockActivity"
+        android:exported="false"
+        android:launchMode="singleTop"
+        android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation"
+        android:theme="@style/Theme.Raticode.ChildLock" />
+    <!-- App lock: covers Raticode until Android confirms the phone's owner. Private, and it stays in the task it covers. -->
+    <activity
+        tools:targetApi="29"
+        android:name=".applock.AppLockActivity"
+        android:exported="false"
+        android:launchMode="singleTop"
+        android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation"
+        android:theme="@style/Theme.Raticode.ChildLock" />
+    <!-- Replies typed into Rem's alert. Private: only that alert's PendingIntent can reach it. -->
+    <receiver android:name=".live.RemReplyReceiver" android:exported="false" />
+    <!-- Hide on the task progress notification. Private: only that notification's PendingIntent can reach it. -->
+    <receiver android:name=".live.TaskProgressReceiver" android:exported="false" />
+    <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.opened"
+        android:exported="false"
+        android:grantUriPermissions="true">
+      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/opened_files" />
+    </provider>
+    <activity
+        android:name=".MainActivity"
+        android:exported="true"
+        android:windowSoftInputMode="adjustResize">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+      <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+    </activity>
+    <!--
+      Share to Rem from other apps. Text, pictures, videos and PDFs only; the screen re-checks each file's type, never
+      shows over the lock screen, and sends nothing until the user taps Send. It runs in the sharing app's task, so
+      Android's temporary read grant lasts while the review is open.
+    -->
+    <activity
+        android:name=".share.ShareActivity"
+        android:enabled="@bool/share_to_rem"
+        android:exported="true"
+        android:label="@string/share_label"
+        android:theme="@style/Theme.Raticode.Share"
+        android:windowSoftInputMode="adjustResize">
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/*" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="application/pdf" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/*" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="application/pdf" />
+      </intent-filter>
+    </activity>
+    <!-- Voice mode. Every voice component is off below Android 12, which lacks on-device speech recognition. -->
+    <activity
+        android:name=".voice.VoiceActivity"
+        tools:targetApi="31"
+        android:enabled="@bool/voice_mode"
+        android:exported="false"
+        android:excludeFromRecents="true"
+        android:label="@string/voice_label"
+        android:launchMode="singleTask"
+        android:showWhenLocked="true"
+        android:taskAffinity="dev.raticode.mobile.voice"
+        android:theme="@style/Theme.Raticode.Voice"
+        android:windowSoftInputMode="adjustResize" />
+    <!-- The assist gesture's fallback where Android skips voice interaction services, such as low-memory phones. It only opens the voice screen. -->
+    <activity-alias
+        android:name=".voice.VoiceAssist"
+        tools:targetApi="31"
+        android:enabled="@bool/voice_mode"
+        android:exported="true"
+        android:label="@string/voice_label"
+        android:targetActivity=".voice.VoiceActivity">
+      <intent-filter>
+        <action android:name="android.intent.action.ASSIST" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity-alias>
+    <service
+        android:name=".voice.RemVoiceInteractionService"
+        tools:targetApi="31"
+        android:enabled="@bool/voice_mode"
+        android:exported="true"
+        android:label="@string/voice_service_label"
+        android:permission="android.permission.BIND_VOICE_INTERACTION">
+      <meta-data android:name="android.voice_interaction" android:resource="@xml/rem_voice_interaction" />
+      <intent-filter>
+        <action android:name="android.service.voice.VoiceInteractionService" />
+      </intent-filter>
+    </service>
+    <service
+        android:name=".voice.RemVoiceSessionService"
+        tools:targetApi="31"
+        android:enabled="@bool/voice_mode"
+        android:exported="true"
+        android:permission="android.permission.BIND_VOICE_INTERACTION" />
+    <!-- Required of an assistant. Android checks the caller's microphone permission; requests go to the on-device recognizer only. -->
+    <service
+        android:name=".voice.RemRecognitionService"
+        tools:targetApi="31"
+        android:enabled="@bool/voice_mode"
+        android:exported="true"
+        android:label="@string/voice_service_label"
+        tools:ignore="ExportedService">
+      <intent-filter>
+        <action android:name="android.speech.RecognitionService" />
+      </intent-filter>
+    </service>
+    <service
+        android:name=".voice.RemVoiceTile"
+        tools:targetApi="31"
+        android:enabled="@bool/voice_mode"
+        android:exported="true"
+        android:icon="@drawable/ic_mic"
+        android:label="@string/voice_label"
+        android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+      <intent-filter>
+        <action android:name="android.service.quicksettings.action.QS_TILE" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

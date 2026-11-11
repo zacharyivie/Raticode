@@ -1085,3 +1085,28 @@ def test_provider_exit_messages_and_plain_output():
     assert chat.plain_output("Error: please sign in") == "Error: please sign in"
     assert chat.plain_output('{"type": "result"}') == ""
     assert chat.plain_output('nput_json_delta","partial_json":"ls') == ""
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude_code"])
+async def test_a_user_steer_after_a_stopped_turn_resumes_with_only_that_message(
+    native_cli, tmp_path, provider
+):
+    """Rem's worker threads send the user's steer as the last user message, with no
+    Rem prompt after it. The native session resumes and receives just that message."""
+    goal = {"id": "goal", "role": "user", "body": "Rem: Implement the feature"}
+    first = await turn(tmp_path, provider, [goal])
+    second = await turn(
+        tmp_path,
+        provider,
+        [
+            goal,
+            {"id": "t1", "role": "assistant", "kind": "thought", "body": "Reading the code"},
+            {"id": "t1-stopped", "role": "assistant", "kind": "stopped", "body": "Stopped"},
+            {"id": "steer", "role": "user", "body": "User: Use the new parser instead"},
+        ],
+    )
+    assert second[-1]["sessionId"] == first[-1]["sessionId"]
+    assert second[-1]["sessionResumed"] is True
+    prompt = native_cli[-1][2]
+    assert "User: Use the new parser instead" in prompt
+    assert "Rem: Implement the feature" not in prompt

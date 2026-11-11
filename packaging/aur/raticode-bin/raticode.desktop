@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Raticode
+Comment=Local workflow automation studio
+Exec=raticode %U
+Terminal=false
+Type=Application
+Icon=raticode
+StartupWMClass=gofer-flow
+Keywords=workflow;automation;agents;raticode;
+Categories=Development;

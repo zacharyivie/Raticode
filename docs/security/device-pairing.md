@@ -3,8 +3,8 @@
 > **October 26, 2026:** The ntfy relay was removed. Phones and desktops connect
 > only over the local network. Relay, topic and quota material below is historical.
 > Invitation `relay` and topic fields remain only for wire compatibility and name the
-> unresolvable `https://relay.invalid`. See the mobile repository's
-> `docs/mobile-desktop-v2.md` Wi-Fi-only amendment.
+> unresolvable `https://relay.invalid`. See the Wi-Fi-only amendment in
+> `mobile/android/docs/mobile-desktop-v2.md`.
 
 > **October 31, 2026, optional Tailscale reach:** With the network opt-in on, a
 > user can also choose **Away from home with Tailscale** under Paired devices. The

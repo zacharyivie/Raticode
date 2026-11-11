@@ -52,6 +52,7 @@ from gofer.ui.brain_documents import (
     validate_settings,
 )
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
+from gofer.utils.logging import RepeatingFailure
 
 log = logging.getLogger(__name__)
 
@@ -2025,6 +2026,7 @@ class BrainLibrary:
         except InterruptedError as exc:
             self._task_update(task_id, state="cancelled", error=str(exc), finishedAt=now())
         except Exception as exc:
+            log.warning("Second Brain %s task %s failed", task["kind"], task_id, exc_info=True)
             # Record the failure on its brain or job before the receipt reports it,
             # so a client that sees the failed task never reads stale state.
             try:
@@ -2412,50 +2414,63 @@ class BrainLibrary:
         return seen != set(previous)
 
     def _monitor(self) -> None:
+        # One bad pass must not end the thread: scheduled jobs and refreshes would stop
+        # for the rest of the session.
+        failure = RepeatingFailure(log, "Second Brain background check")
         while not self.stop.wait(15):
-            for brain in self.brains():
-                if self.stop.is_set():
-                    return
-                try:
-                    if (
-                        Path(brain["root"]).is_dir()
-                        and brain["id"] not in self._scan_pending
-                        and (self.needs_scan(brain["id"]) or self._needs_embedding(brain))
-                    ):
-                        self.start_task(
-                            "index", {"brainId": brain["id"]}, label=f"Refreshing {brain['name']}"
-                        )
-                except (ValueError, OSError):
-                    continue
-            for job in self.entities("jobs"):
-                if not job.get("enabled") or job["trigger"]["kind"] != "schedule":
-                    continue
-                try:
-                    from zoneinfo import ZoneInfo
+            try:
+                self._monitor_pass()
+                failure.succeeded()
+            except Exception as exc:
+                failure.failed(exc)
 
-                    moment = datetime.now(ZoneInfo(job["trigger"].get("timezone", "UTC")))
-                    day = job["trigger"].get("day", "Every day")
-                    eligible = (
-                        day == "Every day"
-                        or (day == "Weekdays" and moment.weekday() < 5)
-                        or (day == "Mondays" and moment.weekday() == 0)
-                        or (day == "Fridays" and moment.weekday() == 4)
+    def _monitor_pass(self) -> None:
+        for brain in self.brains():
+            if self.stop.is_set():
+                return
+            try:
+                if (
+                    Path(brain["root"]).is_dir()
+                    and brain["id"] not in self._scan_pending
+                    and (self.needs_scan(brain["id"]) or self._needs_embedding(brain))
+                ):
+                    self.start_task(
+                        "index", {"brainId": brain["id"]}, label=f"Refreshing {brain['name']}"
                     )
-                    key = moment.date().isoformat()
-                    if (
-                        eligible
-                        and moment.strftime("%H:%M") >= job["trigger"].get("time", "09:00")
-                        and job.get("lastScheduled") != key
-                    ):
-                        self.start_task(
-                            "job",
-                            {"brainId": job["brainId"], "jobId": job["id"]},
-                            label=f"Running {job['name']}",
-                        )
-                        job["lastScheduled"] = key
-                        self.put("jobs", job)
-                except (ValueError, OSError):
-                    continue
+            except (ValueError, OSError) as exc:
+                # A refresh already running or a folder that is gone: checked again later.
+                log.debug("Skipped refreshing brain %s (%s)", brain.get("id"), type(exc).__name__)
+                continue
+        for job in self.entities("jobs"):
+            if not job.get("enabled") or job["trigger"]["kind"] != "schedule":
+                continue
+            try:
+                from zoneinfo import ZoneInfo
+
+                moment = datetime.now(ZoneInfo(job["trigger"].get("timezone", "UTC")))
+                day = job["trigger"].get("day", "Every day")
+                eligible = (
+                    day == "Every day"
+                    or (day == "Weekdays" and moment.weekday() < 5)
+                    or (day == "Mondays" and moment.weekday() == 0)
+                    or (day == "Fridays" and moment.weekday() == 4)
+                )
+                key = moment.date().isoformat()
+                if (
+                    eligible
+                    and moment.strftime("%H:%M") >= job["trigger"].get("time", "09:00")
+                    and job.get("lastScheduled") != key
+                ):
+                    self.start_task(
+                        "job",
+                        {"brainId": job["brainId"], "jobId": job["id"]},
+                        label=f"Running {job['name']}",
+                    )
+                    job["lastScheduled"] = key
+                    self.put("jobs", job)
+            except (ValueError, OSError) as exc:
+                log.debug("Skipped scheduled job %s (%s)", job.get("id"), type(exc).__name__)
+                continue
 
     def _event_jobs(self, brain_id: str, added: list[str], changed: list[str]) -> None:
         cited = {
