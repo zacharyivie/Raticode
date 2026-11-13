@@ -395,6 +395,28 @@ def blocks_for(text: str) -> list[dict[str, Any]]:
     return blocks
 
 
+MAX_FRONT_MATTER_CHARS = 64 * 1024
+
+
+def _front_matter(header: str) -> Any:
+    """Parse a note's YAML front matter, or None when it is too large or uses aliases.
+
+    Anchors and aliases let a few hundred bytes expand into gigabytes once the values are
+    turned into text, and any agent or synced folder can add a note.
+    """
+    if len(header) > MAX_FRONT_MATTER_CHARS:
+        return None
+    try:
+        if any(
+            isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken))
+            for token in yaml.scan(header)
+        ):
+            return None
+        return yaml.safe_load(header)
+    except yaml.YAMLError:
+        return None
+
+
 def extract(
     data: bytes, suffix: str, *, encoding: str = "utf-8", obsidian: bool = True
 ) -> dict[str, Any]:
@@ -462,7 +484,7 @@ def extract(
     elif suffix in {".md", ".markdown"}:
         front = re.match(r"\A---\s*\n(.*?)\n---\s*\n", text, re.S)
         if front:
-            loaded = yaml.safe_load(front.group(1))
+            loaded = _front_matter(front.group(1))
             if isinstance(loaded, dict):
                 meta = loaded
             text = text[front.end() :]

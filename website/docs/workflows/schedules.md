@@ -6,9 +6,7 @@ pageClass: docs-layout
 
 # Schedules
 
-A schedule repeats work at configured times while a scheduler process is available.
-
-To run a `workflow.rattish` on a schedule, add a [trigger](./triggers.md).
+To run a `workflow.rattish` on a schedule, add a [cron trigger](./triggers.md#cron-schedules). Schedules fire only while a scheduler process is running.
 
 ::: warning Rattish compatibility boundary
 The `Raticode schedule` commands load the legacy workflow configuration. `Raticode schedule add` doesn't accept `workflow.rattish`. Use `Raticode rattish triggers add cron` instead.
@@ -16,25 +14,45 @@ The `Raticode schedule` commands load the legacy workflow configuration. `Ratico
 
 ## Schedule a Rattish command externally
 
-An OS scheduler or CI system can also run a workflow directly, which suits machines where Raticode's scheduler won't be running:
+An OS scheduler or CI system can run a workflow directly. This suits machines where Raticode's scheduler won't be running:
 
 ```bash
 Raticode rattish run /absolute/project/.raticode/WORKFLOW_ID/workflow.rattish --format json
 ```
 
-Use an absolute executable path if the scheduled environment does not inherit your interactive PATH. Configure the same project resources, provider authentication, environment variables, and secrets on the executing machine. Test check and preflight under that environment before enabling the job.
+Before you turn the job on:
 
-An external schedule executes real work. Choose overlap behavior deliberately so a slow run does not collide with the next occurrence. Keep the process output and exit status for diagnosis.
+- Use the absolute path to `Raticode` if the job doesn't inherit your interactive `PATH`.
+- Set up the same project files, provider sign-in, environment variables and secrets on that machine.
+- Run check and preflight in that same environment.
+- Decide what happens when a slow run overlaps the next one.
+- Keep the job's output and exit status for diagnosis.
+
+An external schedule runs real work.
 
 ## Existing built-in schedules
 
-For a workflow already using the compatible legacy scheduler, `Raticode schedule list` shows registered jobs. `Raticode schedule start --foreground` runs the scheduler in the current process; `Raticode schedule start` starts its background mode. `Raticode schedule stop` stops that background scheduler. `Raticode schedule remove WORKFLOW_ID` removes a registration.
+These commands manage workflows that already use the legacy scheduler:
 
-The scheduler uses APScheduler and a persisted SQLite job store. Jobs remain registered when the scheduler stops, but they cannot execute while their scheduler process is unavailable. Do not interpret a saved job as an installed operating-system service.
+| Command | What it does |
+| --- | --- |
+| `Raticode schedule list` | Show registered jobs |
+| `Raticode schedule start --foreground` | Run the scheduler in this process |
+| `Raticode schedule start` | Start it in the background |
+| `Raticode schedule stop` | Stop the background scheduler |
+| `Raticode schedule remove WORKFLOW_ID` | Remove a registration |
+
+The scheduler uses APScheduler with a SQLite job store. Jobs stay registered when it stops, but they can't run until it starts again. A saved job is not an installed operating-system service.
 
 ## Check the environment
 
-Scheduling problems often come from a different working directory, missing PATH entries, a sleeping computer, or a provider login unavailable in the background environment. Saving a schedule does not install dependencies or wake a computer.
+Scheduled runs usually fail for one of these reasons:
 
-Use [CLI reference](../reference/cli.md) and [Validation and preflight](./validation.md). Organization routines are a separate experimental feature described in [Organizations](../advanced/organizations.md).
+- A different working directory
+- Missing `PATH` entries
+- A sleeping computer
+- A provider login that isn't available in the background
 
+Saving a schedule doesn't install dependencies or wake the computer.
+
+See the [CLI reference](../reference/cli.md) and [Validation and preflight](./validation.md). Organization routines are a separate experimental feature, described in [Organizations](../advanced/organizations.md).

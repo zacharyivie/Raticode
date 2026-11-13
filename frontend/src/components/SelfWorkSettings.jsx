@@ -1,5 +1,6 @@
+import { formatWhen } from "../lib/remHome.js";
 import { openRemThread } from "../lib/remHomeStore.js";
-import { activityLine, autoPullHint, boardOn, cappedThreads, modeLabel, remProjectChoices, saveParticipant, saveSelfWork, selfWorkLine, useKanban, withProject } from "../lib/remKanban.js";
+import { activityLine, autoPullHint, boardOn, cancelSelfWorkWindow, cappedThreads, modeLabel, remProjectChoices, saveParticipant, saveSelfWork, savedSwitchNote, selfWorkLine, selfWorkWindows, useKanban, windowDetail, withProject } from "../lib/remKanban.js";
 import { NumberControl, SwitchControl } from "./SettingControls.jsx";
 import SelfWorkReport from "./SelfWorkReport.jsx";
 import "./Kanban.css";
@@ -20,6 +21,8 @@ export default function SelfWorkSettings() {
   const save = change => run(() => saveSelfWork({ ...change, expected_revision: settings.revision }));
   const rem = board?.participants?.find(person => person.kind === "rem") || null;
   const choices = remProjectChoices(board);
+  const windows = selfWorkWindows(view);
+  const switchNote = savedSwitchNote(view);
   return <section id="settings-self-work" aria-label="Self-work" className="space-y-3 pb-3" data-testid="self-work-settings">
     <div className="flex items-center justify-between gap-2">
       <h3 className="text-xs font-semibold">Self-work</h3>
@@ -31,9 +34,12 @@ export default function SelfWorkSettings() {
       <div className="min-w-0 flex-1">
         <p className="text-xs font-medium text-ink">Work on my own after {settings.idle_minutes} quiet minutes</p>
         <p className="text-[11px] text-muted">{tickets ? "Rem works through its To do tickets first, then the backlog or research, within its projects." : "The Kanban board is off, so Rem leaves tickets alone. It researches its projects and lists the ideas in the report below."}</p>
+        <p className="text-[11px] text-muted" data-testid="self-work-priority-hint">Work you ask for goes first: self-work pauses to make room and picks up again later. You can also tell Rem &ldquo;turn on self-work&rdquo;, &ldquo;stop self-work&rdquo;{windows ? <> or &ldquo;self-work from 11 PM to 7 AM&rdquo;</> : null}.</p>
+        {switchNote ? <p className="text-[11px] text-ink" data-testid="self-work-switch-note">{switchNote}</p> : null}
       </div>
       <SwitchControl label="Self-work" checked={settings.enabled} onChange={value => save({ enabled: value })} />
     </div>
+    {windows ? <SelfWorkWindows windows={windows} onCancel={id => run(() => cancelSelfWorkWindow(id))} /> : null}
     <div className="flex items-start gap-3">
       <div className="min-w-0 flex-1">
         <p className="text-xs font-medium text-ink">Max threads</p>
@@ -65,4 +71,29 @@ export default function SelfWorkSettings() {
     {tickets && state.proposals_waiting ? <p className="text-[11px] text-muted">{state.proposals_waiting} {state.proposals_waiting === 1 ? "idea waits" : "ideas wait"} for your approval on the board.</p> : null}
     <div className="text-xs"><SelfWorkReport report={view.report} title="Latest report" limit={12} /></div>
   </section>;
+}
+
+// Timed self-work: the window running now and the ones coming up, each with a button that
+// ends or drops it, then what the last period did. Rem sets windows from the user's words.
+function SelfWorkWindows({ windows, onCancel }) {
+  const { active, upcoming, last } = windows;
+  if (!active && !upcoming.length && !last) return null;
+  const row = (item, current) => <li key={item.id} className="flex items-start gap-2" data-window={current ? "active" : "upcoming"}>
+    <div className="min-w-0 flex-1">
+      <p className="text-xs text-ink">{current ? <span className="font-medium">Now: </span> : null}{item.label}</p>
+      {windowDetail(item) ? <p className="text-[11px] text-muted">{windowDetail(item)}</p> : null}
+    </div>
+    <button type="button" className="kb-open shrink-0 text-[11px]" title={current ? "Self-work stops now and Rem posts what it did" : "Drop this window"} onClick={() => onCancel(item.id)}>{current ? "End now" : "Cancel"}</button>
+  </li>;
+  const ended = last ? formatWhen(last.ended_at, new Date(), { past: true }) : "";
+  return <div className="space-y-2" data-testid="self-work-windows">
+    {active || upcoming.length ? <ul className="space-y-2" aria-label="Self-work windows">
+      {active ? row(active, true) : null}
+      {upcoming.map(item => row(item, false))}
+    </ul> : null}
+    {last ? <div data-testid="self-work-last-period">
+      <p className="text-xs font-medium text-ink">Last self-work period{ended ? <span className="font-normal text-muted"> · ended {ended}</span> : null}</p>
+      <p className="text-[11px] text-muted">{last.summary}</p>
+    </div> : null}
+  </div>;
 }

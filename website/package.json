@@ -9,7 +9,8 @@
     "preview": "vitepress preview",
     "typecheck": "vue-tsc --noEmit",
     "check:links": "node scripts/check-links.mjs",
-    "check": "npm run typecheck && npm run build && npm run check:links",
+    "check:versions": "node scripts/check-versions.mjs",
+    "check": "npm run check:versions && npm run typecheck && npm run build && npm run check:links",
     "check:downloads": "node scripts/check-downloads.mjs",
     "set-release": "node scripts/set-release.mjs"
   },
@@ -22,5 +23,8 @@
     "vitepress": "1.6.4",
     "vue": "^3.5.43",
     "vue-tsc": "^3.3.12"
+  },
+  "overrides": {
+    "vite": "^6.4.6"
   }
 }

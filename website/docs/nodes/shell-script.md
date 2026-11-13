@@ -10,7 +10,7 @@ Run a Bash script stored in the project, with explicit arguments and environment
 
 ## When to use it
 
-Keep repeatable shell logic in a reviewed source file and call it from several workflows. This node runs the script through Bash; it is different from the platform command shell used by a command node.
+Use it for shell logic you want in a reviewed file that several workflows can call. It always runs the script with Bash, unlike [bash-command](./bash-command.md), which uses the platform shell.
 
 ## Example
 
@@ -28,13 +28,14 @@ Node step:
   finish: pass
 ```
 
-Create `scripts/check.sh` before validating this example. A minimal script can contain `echo checked`; make it handle the supplied arguments if they matter. Arguments are passed as an ordered list, not as a single shell command.
-
-`with.stdin` supplies standard input. Other bindings become uppercase environment variables. An unsuccessful exit fails the node, and output includes the resolved script path.
+- Create `scripts/check.sh` before you validate the example. `echo checked` is enough.
+- `args` is an ordered list of strings, not one shell command.
+- `with.stdin` supplies standard input. Other bindings become uppercase environment variables.
+- A nonzero exit fails the node. The output includes the resolved script path.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -44,15 +45,15 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
 | `stdin` | string |
 
-Additional local bindings are supported. See [Inputs and bindings](../workflows/inputs.md) for delivery and type rules.
+You can bind other locals too. [Inputs and bindings](../workflows/inputs.md) covers delivery and types.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -61,12 +62,12 @@ Successful output fields use these exact selector names:
 | `exit_code` | integer |
 | `script_path` | string |
 
-For example, refer to `node.step.output.stdout` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.stdout`.
 
 ## Preflight and limits
 
-Bash must be on PATH and the script must be readable. The script runs with workflow permissions and can perform any effects allowed by that environment.
+Bash must be on PATH and the script must be readable. The script runs with the workflow's permissions and can do anything they allow.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

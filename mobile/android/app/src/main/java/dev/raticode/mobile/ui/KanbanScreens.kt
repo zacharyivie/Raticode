@@ -206,7 +206,8 @@ private fun BoardTab(client: LiveClient, board: KanbanBoard, busy: Boolean, scop
 @Composable
 private fun KanbanCard(ticket: KanbanTicket, onOpen: () -> Unit, onMove: (() -> Unit)? = null) {
     val block = Kanban.blockText(ticket)
-    val stripe = when { block.isNotBlank() -> orgColors(OrgTone.BAD).first; ticket.running -> orgColors(OrgTone.RUN).first; Kanban.column(ticket) == "review" -> orgColors(OrgTone.WAIT).first; else -> null }
+    val paused = ticket.paused.isNotBlank()
+    val stripe = when { paused -> orgColors(OrgTone.WAIT).first; block.isNotBlank() -> orgColors(OrgTone.BAD).first; ticket.running -> orgColors(OrgTone.RUN).first; Kanban.column(ticket) == "review" -> orgColors(OrgTone.WAIT).first; else -> null }
     val shape = RoundedCornerShape(10.dp)
     Surface(shape = shape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp)
         .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape).clip(shape)
@@ -222,7 +223,9 @@ private fun KanbanCard(ticket: KanbanTicket, onOpen: () -> Unit, onMove: (() -> 
                     if (ticket.priority in setOf("critical", "high")) Pill(ticket.priority.replaceFirstChar { it.uppercase() }, if (ticket.priority == "critical") OrgTone.BAD else OrgTone.WAIT)
                 }
                 Text(ticket.title, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium), maxLines = 3, overflow = TextOverflow.Ellipsis)
-                if (block.isNotBlank()) Text(block, style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.BAD).first, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                // Paused isn't stuck: a calm pill in words, and its reason without the red.
+                if (paused) Pill(RunPause.label(ticket.paused), OrgTone.WAIT, Modifier.testTag("kanbanPaused"))
+                if (block.isNotBlank()) Text(block, style = MaterialTheme.typography.bodySmall, color = if (paused) MaterialTheme.colorScheme.onSurfaceVariant else orgColors(OrgTone.BAD).first, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (ticket.running) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp).semantics { contentDescription = "Running" }, color = orgColors(OrgTone.RUN).first)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) { AssigneeLine(ticket) }
@@ -365,11 +368,13 @@ private fun ColumnScope.KanbanTicketPage(client: LiveClient, board: KanbanBoard?
                     when { ticket.proposed -> Pill("Proposed", OrgTone.WAIT)
                         else -> Kanban.column(ticket)?.let { Pill(Kanban.COLUMN_LABELS[it].orEmpty(), columnTone(it)) } }
                     if (ticket.running) Pill("Running", OrgTone.RUN)
+                    if (ticket.paused.isNotBlank()) Pill(RunPause.label(ticket.paused), OrgTone.WAIT)
                     if (ticket.priority in setOf("critical", "high")) Pill(ticket.priority.replaceFirstChar { it.uppercase() }, if (ticket.priority == "critical") OrgTone.BAD else OrgTone.WAIT)
                     if (ticket.project.isNotBlank()) Pill(ticket.project, OrgTone.IDLE)
                 }
                 Kanban.outsideProject(ticket).takeIf { it.isNotBlank() }?.let { Text(it, Modifier.testTag("kanbanOutsideProject"), style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.WAIT).first) }
-                Kanban.blockText(ticket).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = orgColors(OrgTone.BAD).first) }
+                Kanban.blockText(ticket).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium,
+                    color = if (ticket.paused.isNotBlank()) MaterialTheme.colorScheme.onSurface else orgColors(OrgTone.BAD).first) }
                 if (ticket.proposed) {
                     if (ticket.proposalReason.isNotBlank()) { SectionTitle("Why Rem proposes it"); ChatMarkdown(ticket.proposalReason, compact = true) }
                     if (ticket.duplicateOf.isNotBlank()) Pill("Might duplicate ${ticket.duplicateOf}", OrgTone.WAIT)
@@ -621,6 +626,30 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
                         state.startsAt.takeIf { it.isNotBlank() && state.mode == "waiting" }?.let { "Starts ${whenText(it)}" },
                         state.lastPromptAt.takeIf { it.isNotBlank() }?.let { "Last message ${whenText(it, past = true)}" })
                     if (facts.isNotEmpty()) Text(facts.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = ink)
+                    Kanban.windowNote(view)?.let { Text(it, Modifier.testTag("selfWorkWindowNote"), style = MaterialTheme.typography.bodySmall, color = ink) }
+                }
+            }
+        }
+        // Timed windows from a desktop that has them; set or cancel them in Rem's chat or on the computer.
+        view.schedule?.takeIf { !it.isEmpty }?.let { schedule ->
+            item {
+                SettingsGroup("Self-work windows") {
+                    schedule.active?.let { window ->
+                        WindowRow("Now", window, settings.idleMinutes, "selfWorkActiveWindow")
+                    }
+                    schedule.upcoming.forEachIndexed { index, window ->
+                        if (index > 0 || schedule.active != null) HorizontalDivider()
+                        WindowRow(if (index == 0) "Next" else "Later", window, settings.idleMinutes, "selfWorkUpcomingWindow")
+                    }
+                    schedule.lastPeriod?.let { period ->
+                        if (schedule.active != null || schedule.upcoming.isNotEmpty()) HorizontalDivider()
+                        Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 6.dp).testTag("selfWorkLastPeriod"), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Last time", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (period.summary.isNotBlank()) Text(period.summary, style = MaterialTheme.typography.bodyMedium)
+                            Text(listOfNotNull(Kanban.periodEnd(period), period.endedAt.takeIf { it.isNotBlank() }?.let { whenText(it, past = true) }).joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                 }
             }
         }
@@ -653,7 +682,7 @@ internal fun SelfWorkBody(view: SelfWorkView, board: KanbanBoard?, busy: Boolean
         }
         if (showSettings) item {
             SettingsGroup("Settings") {
-                SwitchRow("Self-work", "After ${settings.idleMinutes} minutes without a message from you, Rem works by itself.", settings.enabled, !busy, "selfWorkEnabled") {
+                SwitchRow("Self-work", "After ${settings.idleMinutes} minutes without a message from you, Rem works by itself. Work you ask for goes first: self-work pauses to make room. You can also tell Rem \"turn on self-work\", \"self-work until 7 PM\" or \"stop self-work\".", settings.enabled, !busy, "selfWorkEnabled") {
                     onChange(Kanban.settingsParams(settings, enabled = it))
                 }
                 HorizontalDivider()
@@ -721,6 +750,18 @@ private fun selfWorkBoundary(view: SelfWorkView, board: KanbanBoard?): Pair<Stri
     val where = if (names.size == count) names.joinToString(", ") else "$count ${if (count == 1) "project" else "projects"}"
     val outside = view.state.outsideProjects.takeIf { it > 0 }?.let { " $it ${if (it == 1) "ticket waits" else "tickets wait"} outside them." }.orEmpty()
     return where + outside to false
+}
+
+/** One timed window: its label as the desktop formats it, then when it ends and what the switch does after. */
+@Composable
+private fun WindowRow(heading: String, window: SelfWorkWindow, idleMinutes: Int, tag: String) {
+    Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 6.dp).testTag(tag), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(heading, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(window.label.ifBlank { "Self-work window" }, style = MaterialTheme.typography.bodyMedium)
+        Kanban.windowDetail(window, idleMinutes).takeIf { it.isNotBlank() }?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable

@@ -97,3 +97,16 @@ frontend/artifacts/
 
 # Disposable mobile conversation verification
 /artifacts/mobile-conversation/
+
+# docs/ keeps only files that scripts, tests and release tooling read. Notes,
+# plans, reports and evidence live in the maintainer's Second Brain, and user
+# documentation lives in website/docs/ (see AGENTS.md).
+/docs/*
+!/docs/releasing.md
+!/docs/cli-parity.json
+!/docs/security/
+/docs/security/*
+!/docs/security/release-verification.md
+/mobile/android/docs/*
+!/mobile/android/docs/releasing.md
+!/mobile/android/docs/versioning.md

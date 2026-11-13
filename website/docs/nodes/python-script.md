@@ -6,11 +6,11 @@ pageClass: docs-layout
 
 # python-script
 
-Execute a project Python file without embedding its implementation in Rattish.
+Run a Python file from the project, keeping its code out of the workflow source.
 
 ## When to use it
 
-Use this node for processing data, checking an artifact, or running Python automation already maintained in the repository.
+Use it to process data, check an artifact, or run Python automation the repository already has.
 
 ## Example
 
@@ -28,13 +28,15 @@ Node step:
   finish: pass
 ```
 
-Create `scripts/check.py` before preflight. A minimal fixture can contain `print("checked")`. Arguments are an ordered string list. `with.stdin` supplies standard input, and other bindings become uppercase environment variables.
-
-The node uses the `python` executable on PATH. Activate the intended environment before launching the CLI, or ensure the desktop can see the interpreter and dependencies you need. A packaged workflow backend does not automatically install third-party dependencies for your script.
+- Create `scripts/check.py` before preflight. `print("checked")` is enough.
+- `args` is an ordered list of strings.
+- `with.stdin` supplies standard input. Other bindings become uppercase environment variables.
+- The node runs the `python` on PATH. Activate the right environment before you start the CLI, or make sure the desktop can see the interpreter and packages you need.
+- The packaged backend doesn't install third-party packages for your script.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -44,15 +46,15 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
 | `stdin` | string |
 
-Additional local bindings are supported. See [Inputs and bindings](../workflows/inputs.md) for delivery and type rules.
+You can bind other locals too. [Inputs and bindings](../workflows/inputs.md) covers delivery and types.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -61,12 +63,12 @@ Successful output fields use these exact selector names:
 | `exit_code` | integer |
 | `script_path` | string |
 
-For example, refer to `node.step.output.stdout` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.stdout`.
 
 ## Preflight and limits
 
-Preflight requires a readable script and a Python interpreter. Import failures, script bugs, and unsuccessful exit codes can still occur at runtime.
+Preflight needs a readable script and a Python interpreter. Import errors, bugs and nonzero exits still show up only when it runs.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

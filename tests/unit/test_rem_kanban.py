@@ -87,6 +87,11 @@ class Fake:
             }
             return
         while not self.hold.is_set():
+            # A stopped or paused turn ends, as a real provider's process does.
+            cancel = kwargs.get("cancel_event")
+            if cancel is not None and cancel.is_set():
+                kwargs["finished"] = True
+                return
             await asyncio.sleep(0.005)
         kwargs["finished"] = True
         title = kwargs["workflow"]["chatThreadTitle"].removeprefix("Rem task: ")
@@ -649,7 +654,8 @@ def test_unattended_runs_lose_outside_reach(board):
     assert workflow["remSwarmAccess"]["enabled"] is False
     resources = workflow["remResources"]
     assert resources["browser"] is False and resources["agents"] is False
-    assert not resources.get("mcpServers")
+    # Only Rem's own per-turn sleep tool remains; it reaches nothing outside the run.
+    assert [s["name"] for s in resources.get("mcpServers", [])] == ["rem_wait"]
     assert "git push is blocked" in worker["agent_instructions"]
 
 
@@ -1485,6 +1491,7 @@ def test_settings_validate_and_detect_conflicts(board):
     view = home.self_work.view()
     assert view["settings"] == {
         "enabled": True,
+        "saved_enabled": True,
         "max_threads": 2,
         "auto_pull_backlog": False,
         "idle_minutes": 15,

@@ -1,8 +1,10 @@
 # Raticode
 
+**Website: [raticode.dev](https://raticode.dev/)** · [Download](https://raticode.dev/#download) · [Docs](https://raticode.dev/docs/) · [Releases](https://github.com/zacharyivie/Raticode/releases)
+
 Raticode is a desktop studio and Python CLI for building and running AI coding workflows. Workflows use the Rattish language in `workflow.rattish` and connect shell commands, scripts, HTTP requests, and coding agents through explicit routes, joins, branches, and cycles.
 
-**Documentation:** the [Raticode website](https://zacharyivie.github.io/Raticode/docs/) (source in [`website/docs/`](website/docs/index.md)) is the single source of truth for using Raticode, desktop and mobile. This README covers development and the legacy TOML interface; the files in [`docs/`](docs/README.md) and [`mobile/android/docs/`](mobile/android/docs/README.md) are developer and design notes.
+**Documentation:** the [Raticode website](https://raticode.dev/docs/) (source in [`website/docs/`](website/docs/index.md)) is the single source of truth for using Raticode, desktop and mobile. This README covers development and the legacy TOML interface; `docs/` and `mobile/android/docs/` keep only the release guides and data files that scripts, tests and release tooling read.
 
 For current workflow authoring, start with the [Rattish guide](rattish/spec/README.md).
 The TOML examples below document the legacy workflow interface.
@@ -28,9 +30,9 @@ The installed command is `Raticode`.
 
 ## Phone access
 
-The Android app's source and guides are in [`mobile/android`](mobile/android/README.md).
+The Android app's source and guides are in [`mobile/android`](mobile/android/README.md). Users install it from the signed APK on its `mobile-vX.Y.Z` GitHub release, linked from the website's download section and [install guide](website/docs/mobile/index.md#install-the-app).
 
-Turn on **Settings > Developer > Feature Preview > Phone and desktop pairing**, then pair a phone from **Settings > Devices**. Each paired phone has its own switches for thread sync, approvals and swarm controls, using Raticode from the phone, and waking the computer. **Unpair** removes a pairing; **Revoke** also blocks the device until **Revoked devices > Remove from revoked list**. See [Raticode Mobile](website/docs/mobile/index.md) for the user guide and [device setup](docs/security/device-pairing.md) for developer details.
+Turn on **Settings > Developer > Feature Preview > Phone and desktop pairing**, then pair a phone from **Settings > Devices**. Each paired phone has its own switches for thread sync, approvals and swarm controls, using Raticode from the phone, and waking the computer. **Unpair** removes a pairing; **Revoke** also blocks the device until **Revoked devices > Remove from revoked list**. See [Raticode Mobile](website/docs/mobile/index.md) for the user guide and [device setup](website/docs/mobile/pairing.md) for developer details.
 
 ## Requirements
 
@@ -1021,7 +1023,7 @@ Real encrypted LAN pairing requires explicit experimental opt-in. Independent
 security review is still pending. Encrypted mobile chat over Wi-Fi, local
 thread grants, scoped files and authorized desktop fleet execution are available
 for experimental testing. See the
-[setup, recovery and verification guide](docs/security/device-pairing.md).
+[setup, recovery and verification guide](website/docs/mobile/pairing.md).
 
 Turn on **Phone and desktop pairing** in Settings > Developer > Feature Preview;
 the desktop restarts its backend to apply it. While it is off, Settings hides
@@ -1032,10 +1034,10 @@ creates a phone invitation only when it has a private address. Set
 `RATICODE_DEVICE_HOST` to the desktop's private LAN IP if it picks the wrong interface.
 
 The experimental paired-device messaging, local thread grants, fleet dispatch and
-bounded file transfer are described in [device messaging](docs/security/device-messaging.md).
+bounded file transfer are described in [device messaging](website/docs/mobile/rem.md).
 Independent review and physical-device acceptance remain release gates.
 
-The current [release scope and acceptance guide](docs/security/device-release.md)
+The current [release scope and acceptance guide](website/docs/mobile/index.md)
 describes fleet grant/revocation, storage recovery, packaging and the remaining
 security, physical-device and distribution decisions.
 
@@ -1053,11 +1055,11 @@ Closing the Raticode window keeps it running in the tray, and phone threads keep
 
 **Sync desktop threads with this phone** is checked by default for new phone pairings in Paired devices. It shares current/future desktop thread metadata, text history and provider/model catalogs. Keep the desktop window open. Mobile keeps the thread list open, creates threads in your desktop projects, chooses models, attaches verified files and supports Android on-device dictation. Settings and replies return to the same renderer conversations. Sync activates only after desktop identity confirmation and the phone acknowledgment. Existing sync choices remain unchanged.
 
-Remote execution keeps Codex read-only/workspace-write, Claude plan/default and Cursor/Copilot/OpenCode default policies. Other provider catalogs and project-less histories are readable; their remote execution remains unavailable. Both peers need the updated v2 history/pagination extension. See [device messaging](docs/security/device-messaging.md) and `mobile/android/docs/live-device-setup.md`.
+Remote execution keeps Codex read-only/workspace-write, Claude plan/default and Cursor/Copilot/OpenCode default policies. Other provider catalogs and project-less histories are readable; their remote execution remains unavailable. Both peers need the updated v2 history/pagination extension. See [device messaging](website/docs/mobile/rem.md) and [pairing setup](website/docs/mobile/pairing.md).
 
 Phone-started turns now appear in the same desktop conversation with the normal thought trace, tool activity, reply and turn summary. A small phone icon marks the user message. The desktop reads its existing local Rem event journal during reconciliation, including turns completed while the window was closed. This requires the updated desktop backend and frontend; restarting an older packaged binary does not load source changes. The phone still receives the bounded text history over encrypted device sync.
 
 
-Paired mobile clients can use shared desktop thread scope, model, effort and permission settings, Global project selection, saved-message search and group/running state. The desktop retains dispatch and approval authority. Update both apps together; see [mobile parity details](docs/mobile-desktop-parity.md).
+Paired mobile clients can use shared desktop thread scope, model, effort and permission settings, Global project selection, saved-message search and group/running state. The desktop retains dispatch and approval authority. Update both apps together; see [mobile parity details](website/docs/mobile/index.md).
 
-Mobile 0.5.3 adds the compact desktop-style thread home, unnamed creation with first-message titles, scope/model/permission controls, and synchronized pin/archive/delete. Update both the desktop backend and renderer. See [mobile parity](docs/mobile-desktop-parity.md).
+Mobile 0.5.3 adds the compact desktop-style thread home, unnamed creation with first-message titles, scope/model/permission controls, and synchronized pin/archive/delete. Update both the desktop backend and renderer. See [mobile parity](website/docs/mobile/index.md).

@@ -10,7 +10,7 @@ Send a desktop, Slack, Teams, webhook, or email notification from a workflow.
 
 ## When to use it
 
-Use this node to notify a person or service of an outcome. Use an approval gate when the next step must wait for a decision.
+Use it to tell a person or service how something turned out. When the next step must wait for a decision, use [approval-gate](./approval-gate.md).
 
 ## Example
 
@@ -29,15 +29,20 @@ Node step:
   finish: pass
 ```
 
-Desktop is the default channel and needs a usable platform notifier. Slack, Teams, and webhook channels require a configured webhook URL. Email requires its sender, recipient list, and SMTP host; port 587 and STARTTLS are the defaults.
+| Channel | Needs |
+| --- | --- |
+| `desktop` (default) | A working system notifier |
+| `slack`, `teams`, `webhook` | A webhook URL |
+| `email` | Sender, recipients and SMTP host. Port 587 and STARTTLS are the defaults. |
 
-Compatible ports can bind title, body, channel, destination, headers, payload, or protected credentials. Use named secret references instead of embedding webhook secrets or SMTP passwords in source.
-
-Network channels have a request timeout and HTTP retry/status policy. Repeated sends can duplicate notifications. `sent: true` records successful delivery to the channel, not proof a recipient read it.
+- Ports can bind the title, body, channel, destination, headers, payload or credentials.
+- Use named secret references. Don't put webhook secrets or SMTP passwords in the source.
+- Network channels have a request timeout and an HTTP retry and status policy. Retries can send the same notification twice.
+- `sent: true` means the channel accepted it, not that anyone read it.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -62,7 +67,7 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
@@ -81,7 +86,7 @@ Bind these declared ports through `with`:
 | `smtp-password` | string |
 | `smtp-starttls` | boolean |
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -91,12 +96,12 @@ Successful output fields use these exact selector names:
 | `channel` | `desktop`, `slack`, `teams`, `webhook`, `email` |
 | `urgency` | `low`, `normal`, `critical` |
 
-For example, refer to `node.step.output.sent` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.sent`.
 
 ## Preflight and limits
 
-The channel must be configured and available. Headless sessions may have no desktop notifier; network channels need their own connectivity and credentials.
+The channel must be set up and reachable. Headless sessions may have no desktop notifier. Network channels need a connection and their own credentials.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

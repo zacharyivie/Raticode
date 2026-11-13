@@ -1954,6 +1954,36 @@ def test_ui_server_streams_local_transcription_sessions(monkeypatch, tmp_path) -
     assert cancelled.json() == {"cancelled": True}
 
 
+def test_ui_server_tidies_a_dictation_that_continues_earlier_words(monkeypatch, tmp_path) -> None:
+    from gofer.ui import voice_tidy
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_tidy(heard, chosen, data_dir, *, context="", before=""):
+        calls.append((heard, before))
+        return {"text": heard.capitalize(), "tidied": True, "reason": ""}
+
+    monkeypatch.setattr(GoferUiServer, "rem_home", None, raising=False)
+    monkeypatch.setattr(voice_tidy, "current", lambda *_args: {"available": False})
+    monkeypatch.setattr(voice_tidy, "tidy", fake_tidy)
+
+    continued = _request(
+        tmp_path,
+        "POST",
+        "/api/chat/voice-tidy",
+        body={"text": "and invite the team", "before": "Book a room."},
+    )
+    alone = _request(tmp_path, "POST", "/api/chat/voice-tidy", body={"text": "book a room"})
+    refused = _request(
+        tmp_path, "POST", "/api/chat/voice-tidy", body={"text": "words", "before": 3}
+    )
+
+    assert continued.json() == {"text": "And invite the team", "tidied": True, "reason": ""}
+    assert calls == [("and invite the team", "Book a room."), ("book a room", "")]
+    assert alone.status == 200
+    assert refused.status == 400 and refused.json() == {"error": "before must be a string"}
+
+
 def test_ui_server_reports_and_saves_the_speech_recognizer(monkeypatch, tmp_path) -> None:
     from gofer.core import provider_preferences
 

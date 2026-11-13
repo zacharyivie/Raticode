@@ -459,6 +459,14 @@ function createFirefoxEngine({
       // Claim Firefox's only session at once: it then refuses other clients.
       const created = await next.send("session.new", {
         capabilities: { alwaysMatch: { acceptInsecureCerts: false, unhandledPromptBehavior: { default: "ignore", file: "ignore" } } },
+      }).catch((error) => {
+        if (error?.code !== "session not created") throw error;
+        // Firefox has one session. If it is taken, another program, possibly
+        // another account on this computer, reached the control port first and
+        // can drive this Firefox, so it is closed at once rather than used.
+        try { processHandle.kill("SIGKILL"); } catch { /* Already gone. */ }
+        log("warn", `Another program took control of Firefox before Raticode could, so Raticode closed that Firefox (${error.message}).`);
+        throw new Error("Another program on this computer took control of Firefox as it started, so Raticode closed it. Try again. If this keeps happening, check what else runs on this computer.");
       });
       browserVersion = String(created?.capabilities?.browserVersion || "");
       await next.send("session.subscribe", { events: SUBSCRIBED_EVENTS });

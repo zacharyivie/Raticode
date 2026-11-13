@@ -7,14 +7,14 @@ pkgver=0.5.2
 pkgrel=1
 pkgdesc="Raticode command line tool for running Rattish workflows (prebuilt)"
 arch=('x86_64')
-url="https://github.com/zacharyivie/Raticode"
+url="https://raticode.dev"
 license=('AGPL-3.0-only')
 depends=('glibc' 'zlib')
 provides=('raticode-cli')
 conflicts=('raticode-cli')
 # A PyInstaller binary carries its program inside the file; stripping it breaks it.
 options=('!strip' '!debug')
-source=("raticode-cli-$pkgver::$url/releases/download/v$pkgver/raticode-cli-linux-x64")
+source=("raticode-cli-$pkgver::https://github.com/zacharyivie/Raticode/releases/download/v$pkgver/raticode-cli-linux-x64")
 sha256sums=('87401d69a74f830f6c7913bb534c95b040f733b527aac940e35b2be5c9848396')
 
 package() {

@@ -57,10 +57,10 @@ def registry(tmp_path):
 
 
 def invitation(
-    registry: DeviceRegistry, invitations: Invitations | None = None
+    registry: DeviceRegistry, invitations: Invitations | None = None, role: str = "controller"
 ) -> tuple[Invitations, bytes, dict[str, Any]]:
     invitations = invitations or Invitations(registry)
-    payload = invitations.create("Test desktop")
+    payload = invitations.create("Test desktop", role=role)
     raw, value = parse_invitation(payload["uri"], registry.clock())
     return invitations, raw, value
 
@@ -181,6 +181,19 @@ def test_five_failed_secrets_exhaust_invitation(registry):
             invites.claim(record, b.session_id, secrets.token_bytes(32))
     with pytest.raises(PairingError, match="unavailable"):
         invites.claim(b.record(), b.session_id, secrets.token_bytes(32))
+
+
+def test_claims_without_the_qr_hash_cannot_exhaust_the_invitation(registry):
+    """A LAN peer that never saw the QR code can't block the user's pairing."""
+    invites, raw, value = invitation(registry)
+    b = binding(registry, raw, value)
+    for wrong in ("0" * 64, None, 7):
+        for _ in range(5):
+            with pytest.raises(FrameError):
+                invites.claim(b.record() | {"invitation_sha256": wrong}, b.session_id, b"p" * 32)
+    peer, role = invites.claim(b.record(), b.session_id, secrets.token_bytes(32))
+    assert role == b.initiator_role
+    assert registry.list()[0]["state"] == "pending"
 
 
 def test_confirmation_ack_restart_routes_protected_and_revocation(tmp_path):
@@ -369,7 +382,7 @@ async def test_two_desktops_pair_over_actual_bounded_loopback_stream(tmp_path):
     invites = Invitations(a)
     listener = DeviceListener(a, invites)
     port = await listener.start()
-    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port})
+    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port}, role="desktop")
     task = asyncio.create_task(pair_desktop(b, payload["uri"]))
     try:
         async with asyncio.timeout(5):
@@ -501,7 +514,7 @@ def test_local_control_gate_and_no_secrets_in_status(tmp_path):
         assert not control.status()["lan_available"]
         # Local probes bypass the user-facing phone invitation API deliberately.
         payload = control.invitations.create(
-            "Local test", {"host": "127.0.0.1", "port": control.port}
+            "Local test", {"host": "127.0.0.1", "port": control.port}, role="controller"
         )
         raw, data = parse_invitation(payload["uri"], control.registry.clock())
         assert data["secret"] not in json.dumps(control.status())
@@ -619,7 +632,9 @@ async def test_two_desktop_reconnect_survives_registry_restart(tmp_path):
     listener = DeviceListener(a, invites)
     port = await listener.start()
     endpoint = {"host": "127.0.0.1", "port": port}
-    task = asyncio.create_task(pair_desktop(b, invites.create("A", endpoint)["uri"]))
+    task = asyncio.create_task(
+        pair_desktop(b, invites.create("A", endpoint, role="desktop")["uri"])
+    )
     try:
         async with asyncio.timeout(5):
             while not a.list():
@@ -1098,3 +1113,30 @@ def test_device_refusals_name_their_cause_and_log_once(tmp_path, monkeypatch, ca
         (logging.DEBUG, "Device action enable refused: workspace_history_quota"),
         (logging.INFO, "Device action enable refused: peer_unknown"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("invited", "claimed"), [("controller", "desktop"), ("desktop", "controller")]
+)
+def test_the_invitation_fixes_the_role_a_claim_may_have(registry, invited, claimed):
+    """A phone QR code can't pair a desktop and a desktop link can't pair a phone (B-O17)."""
+    invites, raw, value = invitation(registry, role=invited)
+    claim = binding(registry, raw, value, role=claimed)
+    with pytest.raises(PairingError, match="invitation_role_mismatch"):
+        invites.claim(claim.record(), claim.session_id, secrets.token_bytes(32))
+    assert registry.list() == []
+    # The right role still pairs with the same invitation.
+    right = binding(registry, raw, value, role=invited)
+    peer, role = invites.claim(right.record(), right.session_id, secrets.token_bytes(32))
+    assert role == invited and registry.list()[0]["role"] == invited
+
+
+def test_the_paired_devices_invite_names_the_device(tmp_path):
+    control = DeviceControl(tmp_path, store=TestSecrets())
+    try:
+        control.action({"action": "enable"})
+        with pytest.raises(PairingError, match="invalid_role"):
+            control.invitations.create("x", None, role="worker")  # type: ignore[union-attr]
+        assert control.invitations is not None and control.invitations.current is None
+    finally:
+        control.close()

@@ -21,9 +21,13 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
+from gofer.utils.http_read import read_before
+
 PAGE_LIMIT = 512 * 1024
 IMAGE_LIMIT = 400 * 1024
 TIMEOUT_SECONDS = 6
+# A slow site can't hold a preview open longer than this, redirects included.
+FETCH_DEADLINE_SECONDS = 20
 CACHE_SECONDS = 6 * 60 * 60
 CACHE_SIZE = 300
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/avif"}
@@ -71,10 +75,16 @@ def fetch(
     *,
     resolver: Resolver = socket.getaddrinfo,
     redirects: int = 0,
+    deadline: float | None = None,
 ) -> tuple[str, str, bytes, bool]:
-    """GET a public URL. Returns final URL, MIME type, body and whether it was cut short."""
+    """GET a public URL. Returns final URL, MIME type, body and whether it was cut short.
+
+    The whole fetch, redirects included, ends after FETCH_DEADLINE_SECONDS.
+    """
     if redirects > 4:
         raise PreviewError("Too many redirects")
+    if deadline is None:
+        deadline = time.monotonic() + FETCH_DEADLINE_SECONDS
     parsed = urlparse(url)
     if (
         parsed.scheme not in {"https", "http"}
@@ -111,12 +121,17 @@ def fetch(
             if not location:
                 raise PreviewError("The site redirected without a destination")
             return fetch(
-                urljoin(url, location), accept, limit, resolver=resolver, redirects=redirects + 1
+                urljoin(url, location),
+                accept,
+                limit,
+                resolver=resolver,
+                redirects=redirects + 1,
+                deadline=deadline,
             )
         if response.status != 200:
             raise PreviewError(f"The site returned HTTP {response.status}")
         content_type = response.getheader("Content-Type", "")
-        body = response.read(limit + 1)
+        body = read_before(response, limit + 1, deadline, sock)
         return url, content_type.split(";")[0].strip().lower(), body[:limit], len(body) > limit
     except (OSError, http.client.HTTPException) as exc:
         raise PreviewError("The site did not answer") from exc

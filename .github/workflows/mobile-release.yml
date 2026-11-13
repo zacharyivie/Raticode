@@ -16,6 +16,9 @@ jobs:
   publish:
     name: Publish verified candidate
     runs-on: ubuntu-24.04
+    # GitHub holds this job until a required reviewer approves it. The environment
+    # also allows only mobile-v* tags to deploy. See "Release approval" in docs/releasing.md.
+    environment: mobile-release-publish
     defaults:
       run:
         working-directory: mobile/android

@@ -3,6 +3,7 @@ import { textEditorSessions, flushCodeDrafts } from "../lib/codeEditorSessions.j
 import { startGenerationJob } from "../lib/generationJobs.js";
 import { generateReportTheme, reportThemeContext, normalizeReportThemes } from "../lib/reportThemes.js";
 import { applyPhoneSettings, orderDeviceMessages } from "../lib/deviceMessages.js";
+import { phoneLockNotice } from "../lib/phoneLocks.js";
 import { controlledEngine, webBrowserEngine } from "../lib/browserEngines.js";
 import { browserTabOpening, viewedBrowserMedia, withBrowserTabEngines } from "../lib/browserTabs.js";
 import { fetchChatTurn } from "../lib/chatTransport.js";
@@ -57,6 +58,7 @@ import {
   Redo2,
   Search,
   Settings as SettingsIcon,
+  ShieldAlert,
   Sun,
   Smartphone,
   Undo2,
@@ -374,6 +376,8 @@ export default function App() {
   const [viewedBrowserPaths, setViewedBrowserPaths] = useState([]);
   // A Rem approval waiting in a web tab while the Browser plugin isn't in front.
   const [hiddenBrowserApproval, setHiddenBrowserApproval] = useState(null);
+  // Phones the suspicious-request guard locked; only the user unlocks them, in Settings.
+  const [phoneLocks, setPhoneLocks] = useState([]);
   const [settingsCategory, setSettingsCategory] = useState("general");
   const [settingsBrowserSection, setSettingsBrowserSection] = useState("");
   useEffect(() => {
@@ -386,7 +390,16 @@ export default function App() {
     window.addEventListener("raticode:open-provider-settings", openProviders);
     window.addEventListener("raticode:open-browser-settings", openBrowser);
     window.addEventListener("raticode:open-rem-settings", openRem);
+    const openDevices = () => { setSettingsCategory("devices"); setSettingsOpen(true); };
+    const locked = (event) => setPhoneLocks(current => {
+      const next = Array.isArray(event?.detail) ? event.detail : [];
+      return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+    });
+    window.addEventListener("raticode:open-device-settings", openDevices);
+    window.addEventListener("gofer:phone-locked", locked);
     return () => {
+      window.removeEventListener("raticode:open-device-settings", openDevices);
+      window.removeEventListener("gofer:phone-locked", locked);
       window.removeEventListener("raticode:open-provider-settings", openProviders);
       window.removeEventListener("raticode:open-browser-settings", openBrowser);
       window.removeEventListener("raticode:open-rem-settings", openRem);
@@ -1300,6 +1313,11 @@ export default function App() {
         setBrowserTabs((current) => current[opening.reuse]
           ? { ...current, [opening.reuse]: { ...current[opening.reuse], pendingUrls: [...(current[opening.reuse].pendingUrls || []), initialUrl].slice(-25) } }
           : current);
+      } else if (options.newTab) {
+        // New tab with no address: Firefox opens an empty tab of its own.
+        setBrowserTabs((current) => current[opening.reuse]
+          ? { ...current, [opening.reuse]: { ...current[opening.reuse], geckoNewTabs: (current[opening.reuse].geckoNewTabs || 0) + 1 } }
+          : current);
       }
       if (!options.background) setActiveBrowserPath(opening.reuse);
       return opening.reuse;
@@ -1411,7 +1429,7 @@ export default function App() {
         sourcePath,
         href,
       );
-      if (target?.path) await openLinkedCodeFile(target.path, { ...target, preview: true });
+      if (target?.path) await openLinkedCodeFile(target.path, { ...target, preview: true, fromLink: true });
     } catch (error) {
       setTopBarNotice({
         type: "error",
@@ -1427,7 +1445,14 @@ export default function App() {
       path = selected?.path || path;
       const info = await window.goferDesktop?.workspace?.getPathInfo?.(path);
       if (info?.isDirectory) {
-        await openProjectAtPath(info.path || path, { rememberProject: true });
+        const folder = info.path || path;
+        // A link in a message or a Markdown file can point anywhere. Opening a
+        // folder makes it a trusted project Rem can work in, so a folder
+        // outside the open project is opened only after the user agrees, and
+        // isn't added to recent projects.
+        const outside = options.fromLink && !(activeProjectRootRef.current && pathWithin(folder, activeProjectRootRef.current));
+        if (outside && !window.confirm(`Open "${folder}" as a project?\n\nA link points to this folder, which is outside the open project. Opening it lets Raticode and Rem work in it.`)) return;
+        await openProjectAtPath(folder, { rememberProject: !outside });
         setStudioView("code");
         setSidebarActivity("files");
         setProjectPaneVisible(true);
@@ -1463,7 +1488,7 @@ export default function App() {
     const resolvedPath = resolveDisplayPath(path, projectRoot);
     if (!resolvedPath) return;
     try {
-      await openLinkedCodeFile(resolvedPath);
+      await openLinkedCodeFile(resolvedPath, { fromLink: true });
     } catch (error) {
       setTopBarNotice({
         type: "error",
@@ -2268,17 +2293,9 @@ export default function App() {
     try {
       const info = await window.goferUpdates.check();
       setUpdateState((current) => ({ ...current, ...info, checking: false }));
-      if (info?.error) throw new Error(info.error);
-      if (!silent) {
-        setUpdateNotice({
-          type: "success",
-          message: info?.available
-            ? `Raticode ${info.info?.version ?? "update"} is available`
-            : info?.info?.noReleases
-              ? "No published Raticode releases yet"
-            : "Raticode is up to date",
-        });
-      }
+      const notice = updateCheckNotice(info);
+      if (notice.type === "error") throw new Error(notice.message);
+      if (!silent) setUpdateNotice(notice);
     } catch (error) {
       setUpdateState((current) => ({
         ...current,
@@ -2316,13 +2333,7 @@ export default function App() {
         ? await window.goferUpdates.installDownloaded()
         : await window.goferUpdates.downloadAndInstall();
       setUpdateState((current) => ({ ...current, ...nextState }));
-      if (update.supported === false) {
-        setTopBarNotice({ type: "info", message: update.managedBy
-          ? `Update Raticode with ${update.managedBy}, for example yay -Syu or paru -Syu, then restart it.`
-          : update.platform === "darwin"
-            ? "Open the downloaded DMG, quit Raticode, and drag Raticode into Applications to replace the old copy."
-            : "Download and install the update from the release page." });
-      }
+      if (update.supported === false) setTopBarNotice({ type: "info", message: manualUpdateNotice(update) });
     } catch (error) {
       setTopBarNotice({
         type: "error",
@@ -4188,6 +4199,13 @@ export default function App() {
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-x border-line bg-[#f9fbfd]">
             <BrowserMediaBar viewedTabs={[...viewedCodePaths, ...viewedBrowserMedia(viewedBrowserPaths, browserTabs)]} />
+            {phoneLocks.length ? (
+              <div role="alert" aria-label="Locked phone" className="flex shrink-0 items-center gap-2 border-b border-red-300 bg-red-50 px-3 py-1.5 text-xs text-ink dark:bg-red-950 dark:text-red-100">
+                <ShieldAlert aria-hidden="true" className="shrink-0 text-red-700 dark:text-red-300" size={14} />
+                <span className="min-w-0 flex-1">{phoneLockNotice(phoneLocks)}</span>
+                <button className="rounded-md bg-brand px-2.5 py-1 font-semibold text-white hover:opacity-90" type="button" onClick={() => { setSettingsCategory("devices"); setSettingsOpen(true); }}>Review</button>
+              </div>
+            ) : null}
             {!browserContentOpen && hiddenBrowserApproval ? (
               <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-ink dark:bg-amber-950 dark:text-amber-100">
                 <Bot aria-hidden="true" className="shrink-0 text-amber-800" size={14} />
@@ -6000,12 +6018,12 @@ export function GlobalToolbar({
               </span>
             ) : null}
             {updateState?.available ? (
-              <button className="inline-flex h-7 shrink-0 items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-70" disabled={Boolean(updateState.downloading)} title={updateButtonTitle(updateState)} type="button" onClick={onApplyUpdate}>
-                {updateState.downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+              <button className="inline-flex h-7 shrink-0 items-center gap-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-wait disabled:opacity-70" disabled={Boolean(updateState.downloading || updateState.verifying)} title={updateButtonTitle(updateState)} type="button" onClick={onApplyUpdate}>
+                {updateState.downloading || updateState.verifying ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
                 {updateButtonLabel(updateState)}
               </button>
             ) : null}
-            <button className={`${buttonClass} shrink-0`} disabled={Boolean(updateState?.checking || updateState?.downloading)} title={updateState?.error ? `Update check failed: ${updateState.error}` : "Check for updates"} aria-label="Check for updates" type="button" onClick={onCheckForUpdates}>
+            <button className={`${buttonClass} shrink-0`} disabled={Boolean(updateState?.checking || updateState?.downloading || updateState?.verifying)} title={updateState?.error ? `Update check failed: ${updateState.error}` : "Check for updates"} aria-label="Check for updates" type="button" onClick={onCheckForUpdates}>
               <RefreshCw size={16} className={updateState?.checking ? "animate-spin" : ""} />
             </button>
           </div>
@@ -6428,10 +6446,33 @@ function RemSidePane({ width, onResizeStart, onResizeKeyDown, children }) {
   );
 }
 
+// A failed check must never read as "up to date": the main process returns its
+// error in the state instead of rejecting.
+export function updateCheckNotice(info) {
+  if (!info) return { type: "error", message: "The update check returned no result. Try again." };
+  if (info.error) return { type: "error", message: info.error };
+  if (info.available) return { type: "success", message: `Raticode ${info.info?.version ?? "update"} is available` };
+  if (info.info?.noReleases) return { type: "success", message: "No published Raticode releases yet" };
+  return { type: "success", message: "Raticode is up to date" };
+}
+
+function opensMacInstaller(updateState) {
+  return updateState?.platform === "darwin" && Boolean(updateState.info?.installerUrl);
+}
+
+export function manualUpdateNotice(updateState) {
+  if (updateState?.managedBy) return `Update Raticode with ${updateState.managedBy}, for example yay -Syu or paru -Syu, then restart it.`;
+  const steps = opensMacInstaller(updateState)
+    ? "Quit Raticode, open the downloaded DMG, and drag Raticode into Applications to replace the old copy."
+    : "Download and install the update from the release page.";
+  return updateState?.manualReason ? `${updateState.manualReason} ${steps}` : steps;
+}
+
 function updateButtonLabel(updateState) {
   if (updateState?.managedBy) return `Update ${updateState?.info?.version ?? "available"} with ${updateState.managedBy}`;
-  if (updateState?.supported === false) return updateState.platform === "darwin" ? "Download Mac installer" : "Open update downloads";
+  if (updateState?.supported === false) return opensMacInstaller(updateState) ? "Download Mac installer" : "Open update downloads";
   if (updateState?.downloaded) return "Restart to update";
+  if (updateState?.verifying) return "Verifying update";
   if (updateState?.downloading) {
     const percent = Math.max(0, Math.min(100, updateState.progress?.percent ?? 0));
     return `Downloading ${Math.round(percent)}%`;
@@ -6441,10 +6482,14 @@ function updateButtonLabel(updateState) {
 
 function updateButtonTitle(updateState) {
   if (updateState?.managedBy) return `Your system package manager installed Raticode, so ${updateState.managedBy} updates it, for example with yay -Syu or paru -Syu. This opens the release notes.`;
-  if (updateState?.supported === false) return updateState.platform === "darwin"
-    ? "Download the Mac installer. Open the DMG, quit Raticode, and drag it into Applications. This build requires manual installation."
-    : "Open the release page to download and install the update manually";
+  if (updateState?.supported === false) {
+    const reason = updateState.manualReason ? `${updateState.manualReason} ` : "";
+    return opensMacInstaller(updateState)
+      ? `${reason}Download the Mac installer, quit Raticode, then open the DMG and drag Raticode into Applications. This copy requires manual installation.`
+      : `${reason}Open the release page to download and install the update manually`;
+  }
   if (updateState?.downloaded) return "Restart Raticode and apply the downloaded update";
+  if (updateState?.verifying) return "macOS is checking the downloaded update's signature. Raticode restarts when it's done.";
   if (updateState?.downloading) return "Downloading update";
   return "Download, install, and restart Raticode";
 }
@@ -8651,7 +8696,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({ canEdit = fal
             ) : message.body ? (
               <>
                 {message.kind === "search-source" ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
-                  : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser && !fromRem} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
+                  : <>{message.interrupted ? <span className="mb-2 block text-xs text-muted">Partial response. Rem was interrupted.</span> : null}<MarkdownMessage inverse={isUser && !fromRem} loadWebImages={Boolean(message.sources?.length)} sourcePath={sourcePath} onOpenLink={onOpenLink} value={message.body} /></>}
                 {!isUser && message.kind !== "streaming" && (message.sources?.length || /youtu\.?be/.test(message.body))
                   ? <Suspense fallback={null}><ChatSources body={message.body} sources={message.sources} /></Suspense> : null}
                 {!isUser && message.kind !== "streaming" ? (
@@ -8859,11 +8904,12 @@ export function formatAssistantTurnTiming(completedAt, durationMs) {
   return `${completed} · Ran for ${duration}`;
 }
 
-export function MarkdownMessage({ compact = false, inverse = false, onOpenLink, sourcePath, value }) {
+export function MarkdownMessage({ compact = false, inverse = false, loadWebImages = false, onOpenLink, sourcePath, value }) {
   return (
     <MarkdownContent
       compact={compact}
       inverse={inverse}
+      loadWebImages={loadWebImages}
       value={value}
       onOpenRelativeLink={onOpenLink}
       sourcePath={sourcePath}

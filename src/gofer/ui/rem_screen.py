@@ -42,7 +42,7 @@ SCREEN_GONE = (
 )
 
 # Control and invisible formatting characters, which could hide text from the user's view.
-_HIDDEN = re.compile(r"[\x00-\x08\x0b-\x1f\x7f​-‏‪-‮⁦-⁩﻿]")
+_HIDDEN = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def clean_screen(raw: Any) -> dict[str, str]:
@@ -76,4 +76,10 @@ def acts(decision: Any) -> bool:
         or decision.phone_actions
         or decision.open_projects
         or decision.tickets
+        or getattr(decision, "org_approvals", None)
+        # Asking whether self-work is on, or for its report, changes nothing; the rest do.
+        or (
+            getattr(decision, "self_work", None)
+            and decision.self_work.action not in {"status", "report"}
+        )
     )

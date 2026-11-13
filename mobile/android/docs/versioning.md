@@ -32,7 +32,7 @@ python3 scripts/version.py check           # what CI runs
 
 `--code N` sets a specific higher code, for example to skip codes already given to testers from another branch. The script edits only `version.properties`. It never commits, tags, builds or publishes.
 
-When a version needs a matching desktop change, say so in the README update notes ("Version 0.7.0 requires the matching desktop backend") and in `docs/mobile-desktop-v2.md`, as earlier versions did.
+When a version needs a matching desktop change, say so in the README update notes ("Version 0.7.0 requires the matching desktop backend") and on the website's [Raticode Mobile](../../../website/docs/mobile/index.md) pages.
 
 ## Release tags
 

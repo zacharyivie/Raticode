@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   activityFeed, buildModel, describeHours, hoursStatus, claimSummary, columnOf, epicProgress, epicState, knowledgeEdges, layoutGraph, milestoneProgress,
-  moveRule, needsYou, orgMilestoneProgress, removeWorker, projectProgress, reviewCaution, runSteps, searchEntities, startHint, suggestedLinks, workerStatus,
+  moveRule, needsYou, orgMilestoneProgress, removeWorker, projectProgress, reviewCaution, runSteps, searchEntities, startHint, suggestedLinks, visibleCommand, workerStatus,
 } from "./organizationModel.js";
 
 const task = (id, status, more = {}) => ({ id, title: `Task ${id}`, status, number: Number(id.slice(1)), key: `STU-${id.slice(1)}`, revision: 1, comments: [], knowledge: [], ...more });
@@ -180,6 +180,34 @@ test("start hints say plainly when a ticket will run and what it waits for", () 
   assert.equal(startHint(model, model.tickets.t6).tone, "you");
 });
 
+test("Backlog hints say whether a worker pulls the ticket, and older desktops keep the old text", () => {
+  const base = organization();
+  const tasks = [...base.runtime.tasks, task("t7", "backlog", { assignee: "mira" })];
+  const hint = (reasons, config = {}, state = "running") => {
+    const model = buildModel({ ...base, config: { ...base.config, ...config }, runtime: { ...base.runtime, state, tasks }, diagnostics: { taskReasons: reasons } });
+    return startHint(model, model.tickets.t7);
+  };
+  // An older desktop sends no reason for Backlog tickets; its workers never pull.
+  assert.match(hint({}).text, /^In Backlog, so it won't run/);
+  assert.match(hint({ t7: "backlog" }).text, /^In Backlog, so it won't run/);
+  assert.match(hint({ t7: "In Backlog until its worker is free to pull it" }, { pullBacklog: false }).text, /^In Backlog, so it won't run/);
+  assert.deepEqual(hint({ t7: "In Backlog until its worker is free to pull it" }), { tone: "wait", text: "In Backlog. Mira Santos pulls it into To do when free." });
+  assert.equal(hint({ t7: "In Backlog until its worker is free to pull it" }, {}, "paused").text, "In Backlog. Mira Santos pulls it into To do when free once the organization runs.");
+  assert.equal(hint({ t7: "Proposed by a worker. Move it to To do to accept it." }).tone, "you");
+  assert.match(hint({ t7: "Kept in Backlog: it was moved back here, so workers leave it" }).text, /^Kept in Backlog because it was moved back here/);
+  assert.equal(hint({ t7: "Waiting for STU-1" }).text, "In Backlog, waiting for STU-1. Then Mira Santos pulls it when free.");
+  assert.equal(hint({ t7: "Waiting for plan approval" }).text, "Waiting for you to approve its plan. Then Mira Santos pulls it when free.");
+});
+
+test("recent activity lists each pulled Backlog ticket with its worker", () => {
+  const model = buildModel(organization());
+  const feed = activityFeed(model, [
+    { sequence: 7, at: "2026-11-11T10:00:00Z", actor: "system", kind: "backlog_pull", payload: { pulled: [{ taskId: "t1", employee: "Mira Santos" }, { taskId: "gone", employee: "Sage Kim" }, { taskId: "t2", employee: "Sage Kim" }] } },
+  ]);
+  assert.deepEqual(feed.map(item => [item.who, item.text, item.ref]), [["Mira Santos", "pulled into To do", "ticket:t1"], ["Sage Kim", "pulled into To do", "ticket:t2"]]);
+  assert.equal(new Set(feed.map(item => item.key)).size, 2);
+});
+
 test("working hours read plainly, and the header says when they open or close", () => {
   assert.equal(describeHours({ mode: "always" }), "24/7");
   assert.equal(describeHours({ mode: "scheduled", timezone: "America/New_York", windows: [{ days: [0, 1, 2, 3, 4], start: "09:00", end: "17:00" }, { days: [4], start: "22:00", end: "06:00" }] }),
@@ -217,4 +245,10 @@ test("removing a worker leaves a configuration that still saves", () => {
   assert.equal(next.epics[0].owner, null);
   assert.equal(next.goalRecords[0].owner, null);
   assert.deepEqual(next.executionTargets, [{ id: "y", employees: ["lead"] }]);
+});
+
+test("worker commands spell out characters that would hide what runs", () => {
+  assert.deepEqual(visibleCommand("npm test"), { text: "npm test", hidden: 0, lines: 1 });
+  assert.deepEqual(visibleCommand("a\u202eb\u200bc\rd\te\nf"), { text: "a⟨U+202E⟩b⟨U+200B⟩c⟨U+000D⟩d\te\nf", hidden: 3, lines: 2 });
+  assert.deepEqual(visibleCommand(null), { text: "", hidden: 0, lines: 1 });
 });

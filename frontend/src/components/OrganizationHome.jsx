@@ -8,6 +8,7 @@ import OrganizationDetail from "./OrganizationSheet.jsx";
 import { KnowledgeView } from "./OrganizationKnowledge.jsx";
 import { IssuesView, OverviewView, ProjectsView, WorkersView } from "./OrganizationViews.jsx";
 import "./OrganizationHome.css";
+import { AutoBadge } from "./OrganizationAutoMode.jsx";
 
 const TABS = [["org", "Organization", Building2], ["projects", "Projects", Folder], ["issues", "Issues", SquareKanban], ["workers", "Workers", Users], ["knowledge", "Knowledge", Network]];
 const POLL_ERROR = "Couldn't refresh: ";
@@ -195,6 +196,7 @@ function Home({ organizationId, onClose, openSettings }) {
         <button className="oh-btn ghost icon" type="button" aria-label="Close organization" title="Close organization" onClick={onClose}><ArrowLeft size={16} /></button>
         <span className="oh-mark" aria-hidden="true">{initialsOf(config.name)}</span>
         <h1>{config.name}</h1>
+        <AutoBadge organization={organization} />
         <span className={`oh-pill st-${archived ? "paused" : running ? "running" : "paused"}`}><i className="oh-dot" />{archived ? "Archived" : running ? "Running" : "Paused"}</span>
         {hours && !archived && <button className={`oh-pill oh-hours-pill ${hours.open ? "open" : "closed"}`} type="button" title="Working hours. Click to change them." onClick={() => open("new:hours", true)}><Clock size={13} />{hours.text}</button>}
         {focusBlock && !archived && <button className="oh-pill oh-block-pill" type="button" title={`${focusBlock.label}: ${focusBlock.focus || "the current schedule block"}. Click to change the schedule.`} onClick={() => open("new:schedule", true)}>{focusBlock.label}</button>}

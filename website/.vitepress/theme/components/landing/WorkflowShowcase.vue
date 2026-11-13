@@ -63,8 +63,7 @@ const nodeNotes: Record<string, string> = {
         <span class="rc-eyebrow">One workflow, two views</span>
         <h2 id="showcase-title" class="rc-h2">Readable source. <em>Visible graph.</em></h2>
         <p class="rc-lede">
-          Workflows are plain text you can diff, review and commit. The studio draws the same file as a live graph.
-          Hover a node to see where it lives in the source.
+          Workflows are plain text you can diff and commit. The studio draws the same file as a live graph.
         </p>
       </div>
 
@@ -108,7 +107,7 @@ const nodeNotes: Record<string, string> = {
 <style scoped>
 .split {
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   gap: 22px;
   margin-top: 56px;
   align-items: stretch;
@@ -176,7 +175,7 @@ pre {
   width: 46px;
   padding-right: 16px;
   text-align: right;
-  color: #4f4a72;
+  color: #8580a8;
   user-select: none;
 }
 
@@ -193,7 +192,7 @@ pre {
 }
 
 .t-punct {
-  color: #6d6894;
+  color: #9893bb;
 }
 
 .t-str {
@@ -223,13 +222,13 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 28px;
-  padding: 44px 26px 26px;
+  padding: 40px 16px 22px;
   background:
     radial-gradient(rgba(185, 177, 255, 0.12) 1px, transparent 1px) 0 0 / 22px 22px,
     linear-gradient(170deg, rgba(22, 19, 56, 0.85), rgba(8, 7, 26, 0.95));
 }
 
-.graph-panel :deep(.graph) {
+.graph-panel :deep(.graph-scroll) {
   margin: auto 0;
 }
 

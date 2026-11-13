@@ -7,7 +7,7 @@ pkgver=0.5.2
 pkgrel=1
 pkgdesc="Local workflow automation studio with Rem, coding agents and Rattish workflows (prebuilt)"
 arch=('x86_64')
-url="https://github.com/zacharyivie/Raticode"
+url="https://raticode.dev"
 license=('AGPL-3.0-only')
 # Libraries the bundled Electron, backend and node-pty link against (checked with namcap),
 # plus xdg-utils, which the app runs to open links and files.
@@ -18,7 +18,7 @@ optdepends=('git: source control, worktrees and organization repositories')
 provides=('raticode')
 conflicts=('raticode')
 options=('!strip' '!debug')
-source=("raticode-$pkgver-amd64.deb::$url/releases/download/v$pkgver/Raticode-$pkgver-amd64.deb"
+source=("raticode-$pkgver-amd64.deb::https://github.com/zacharyivie/Raticode/releases/download/v$pkgver/Raticode-$pkgver-amd64.deb"
         "raticode"
         "raticode.desktop")
 noextract=("raticode-$pkgver-amd64.deb")

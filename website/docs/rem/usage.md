@@ -6,36 +6,37 @@ pageClass: docs-layout
 
 # Usage and allowances
 
-Check what the provider says remains in your account, and separately inspect the activity recorded by Raticode.
+**Settings > Usage** has two views that answer different questions:
 
-## Open Usage
-
-Go to **Settings > Usage**. The dashboard has two views:
-
-| View | What it measures |
+| View | Shows |
 | --- | --- |
-| Remaining allowance | Provider account quota, credits, or reset windows when available |
-| Tokens in Raticode | Recorded invocation activity across projects on this device |
+| Remaining allowance | What the provider says is left: quota, credits or reset windows, when available |
+| Tokens in Raticode | Activity Raticode recorded across projects on this computer |
 
-Some providers report allowances only with a usage-reporting key. **Configure usage reporting** stores that usage-only key in the operating system's secret store.
+The two don't need to match. Provider totals include work done outside Raticode, and Raticode can't count usage a provider doesn't report.
 
-Use **Refresh usage** to request a new observation. A timestamp shows when account data was checked. A failed refresh can leave the last loaded result visible, so read the status and freshness together.
+## Refresh
+
+**Refresh usage** asks providers again. A timestamp shows when account data was last checked. A failed refresh can leave the previous result on screen, so read the status and the time together.
+
+Some providers report allowances only with a usage-reporting key. **Configure usage reporting** stores that key in the system's secret store.
 
 ## Account allowances
 
-Filter accounts to coding apps, API profiles, or all accounts. Each provider keeps its own units and reset periods. A subscription percentage does not reveal how many tokens remain, and two accounts with similar percentages may have different limits.
+Filter by coding apps, API profiles or all accounts.
 
-Some providers cannot expose a usable allowance. Missing, stale, or unauthenticated data is not a zero balance. Follow the account link or fix authentication when the dashboard cannot obtain a current observation.
+- Each provider uses its own units and reset periods.
+- A subscription percentage doesn't tell you how many tokens are left, and two accounts at the same percentage can have different limits.
+- Missing, stale or signed-out data isn't a zero balance. Follow the account link or fix sign-in when the dashboard can't get a current reading.
 
 ## Raticode activity
 
-Select the last 24 hours, 7 days, 30 days, or 90 days in the token view. Recorded usage comes from the provider's reported values or supported estimates. Tracking starts when records become available; it does not reconstruct all work performed before then.
+Pick the last 24 hours, 7, 30 or 90 days. Figures come from what providers report, or from supported estimates. Tracking starts when records exist; earlier work isn't rebuilt.
 
-Provider totals can include activity outside Raticode. Raticode's local activity can omit unreported cost or usage. These views answer different questions and need not match.
+## Costs
 
-## Interpret costs carefully
+- Unknown cost stays unknown.
+- Restoring a provider's native session avoids replaying the transcript but doesn't make earlier context free.
+- Subscriptions, caching and API pricing decide what you pay.
 
-Unknown cost remains unknown. Native conversation restoration avoids unnecessary transcript replay but does not promise zero-cost context. Provider subscriptions, caching, and API pricing determine billing.
-
-Organization budgets and swarm progress have additional rules. Read [Organizations](../advanced/organizations.md) before treating a reported-dollar budget as a guarantee that no in-flight work can exceed it.
-
+Organization budgets and swarm progress have their own rules. Read [Organizations](../advanced/organizations.md#budgets-and-destinations) before treating a dollar budget as a hard cap: work already running can go past it.

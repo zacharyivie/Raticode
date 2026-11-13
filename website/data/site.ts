@@ -1,12 +1,13 @@
 // Where the published site lives. The Pages deploy job passes two repository variables:
 //   WEBSITE_URL   the site's full address, such as https://raticode.dev/
 //   WEBSITE_BASE  the path the site is served from, such as / or /Raticode/
-// Both are optional. With neither, the site builds for project Pages at
-// https://zacharyivie.github.io/Raticode/. With only WEBSITE_URL, the base is that URL's
-// path, so a custom domain needs just WEBSITE_URL=https://<domain>/. If both are set they
-// must agree. The sitemap, canonical links and social preview image use the full address.
+// Both are optional. With neither, the site builds for its own domain, https://raticode.dev/.
+// With only WEBSITE_URL, the base is that URL's path, so another domain needs just
+// WEBSITE_URL=https://<domain>/ and project Pages needs
+// WEBSITE_URL=https://<owner>.github.io/<repo>/. If both are set they must agree. The
+// sitemap, robots.txt, canonical links and social preview image use the full address.
 
-export const defaultSiteUrl = 'https://zacharyivie.github.io/Raticode/'
+export const defaultSiteUrl = 'https://raticode.dev/'
 
 export interface SiteLocation {
   /** Full address of the site root, ending in a slash. */

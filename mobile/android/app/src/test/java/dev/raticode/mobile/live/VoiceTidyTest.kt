@@ -25,6 +25,15 @@ class VoiceTidyTest {
         assertEquals(4000, VoiceTidy.parse(heard, JSONObject().put("text", "x".repeat(5000)).put("tidied", true)).text.length)
     }
 
+    @Test fun dictationTooLongToTidyComesBackWhole() {
+        assertNull(VoiceTidy.tooLong("x".repeat(VoiceTidy.LIMIT)))
+        val long = "word ".repeat(1200).trim()
+        val result = VoiceTidy.tooLong(long)!!
+        assertEquals(long, result.text)
+        assertFalse(result.tidied)
+        assertEquals("Not tidied: It's longer than 4,000 characters, the most your desktop tidies at once.", VoiceTidy.notice(result))
+    }
+
     @Test fun onlyWordsAddedAfterTheBoxAreTidied() {
         assertEquals("and rebuild it", VoiceTidy.added("Check the build.", "Check the build. and rebuild it"))
         assertEquals("all of it", VoiceTidy.added("", " all of it "))

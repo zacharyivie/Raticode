@@ -3,6 +3,7 @@ import { reportThemeContext } from "./reportThemes.js";
 import { apiUrl } from "./api.js";
 import { inspectThreadScopes, organizeThreads, threadIndexEntry } from "./threadActivity.js";
 import { conversationRepository } from "./conversationRepository.js";
+import { phoneLocks } from "./phoneLocks.js";
 
 const indexKey = "gofer-flow-chat-threads";
 const metaKey = id => `gofer-flow-chat-thread-meta:${id}`;
@@ -167,6 +168,7 @@ export function startDeviceWorkspaceSync({ storage = window.localStorage, reposi
         return;
       }
       const status = await response.json();
+      emit("gofer:phone-locked", phoneLocks(status));
       for (const peer of status.workspace_peers || []) {
         if (!peers.has(peer)) peers.set(peer, { revisions: new Map(), known: {}, threads: new Map() });
         const { revisions, known, threads } = peers.get(peer);

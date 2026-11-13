@@ -10,7 +10,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         <span class="rc-eyebrow">Inside the studio</span>
         <h2 id="features-title" class="rc-h2">Everything your agents need. <em>Nothing they don't.</em></h2>
         <p class="rc-lede">
-          A complete coding workspace built around one idea: small, focused agent steps beat one enormous conversation.
+          A coding workspace built around small, focused agent steps.
         </p>
       </div>
 
@@ -20,8 +20,8 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
             <span class="kicker">Rem</span>
             <h3>Switch models. Keep the thread.</h3>
             <p>
-              Rem is the coding agent that lives in Raticode. Move a conversation from Claude Code to Codex mid-task.
-              The history, project scope and resources stay with the thread.
+              Rem is Raticode's coding agent. Move a thread from Claude Code to Codex mid-task and keep its history,
+              project and tools.
             </p>
           </div>
           <div class="switcher" aria-hidden="true">
@@ -47,7 +47,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         <article class="tile tile-routes rc-reveal" style="--rc-delay: 80ms">
           <span class="kicker">Control flow</span>
           <h3>Branches, joins and cycles</h3>
-          <p>Route on failure, on typed output, or otherwise. Wait for several steps with needs. Cap loops with max-runs.</p>
+          <p>Route on failure or typed output, wait on several steps, and cap loops.</p>
           <div class="chips" aria-hidden="true">
             <code>when failed</code><code>otherwise</code><code>needs</code><code>max-runs: 24</code>
           </div>
@@ -56,7 +56,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         <article class="tile tile-loop rc-reveal" style="--rc-delay: 120ms">
           <span class="kicker">Fan-out</span>
           <h3>One step, many runs</h3>
-          <p>Loop an agent over a count, the rows of a spreadsheet or every file in a folder, with a concurrency limit you choose.</p>
+          <p>Loop an agent over a count, spreadsheet rows or the files in a folder, with a concurrency limit.</p>
           <div class="stack" aria-hidden="true">
             <i /><i /><i /><b>×25</b>
           </div>
@@ -65,7 +65,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         <article class="tile tile-schedule rc-reveal" style="--rc-delay: 60ms">
           <span class="kicker">Automation</span>
           <h3>Runs while you sleep</h3>
-          <p>Cron schedules, file changes and local webhooks start workflows while Raticode or its background scheduler runs.</p>
+          <p>Schedules, file changes and local webhooks start workflows while Raticode or its background scheduler runs.</p>
           <div class="cron" aria-hidden="true"><span>0 2 * * *</span><small>next run 02:00</small></div>
         </article>
 
@@ -101,7 +101,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
         <article class="tile tile-cli rc-reveal" style="--rc-delay: 120ms">
           <span class="kicker">Headless</span>
           <h3>The same engine, no UI</h3>
-          <p>Ship workflows to a server and run them with the standalone Raticode CLI on Linux, macOS or Windows.</p>
+          <p>Run workflows on a server with the standalone CLI for Linux, macOS or Windows.</p>
           <pre aria-hidden="true"><span>$</span> Raticode rattish run triage/workflow.rattish</pre>
         </article>
       </div>
@@ -149,7 +149,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
 
 .kicker {
   font-family: var(--rc-font-pixel);
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--rc-cyan);
@@ -160,8 +160,8 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
   font-family: var(--rc-font-display);
   font-size: 1.5rem;
   font-weight: 700;
-  line-height: 1.1;
-  letter-spacing: -0.025em;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
   color: var(--rc-ivory);
 }
 
@@ -224,7 +224,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
   display: block;
   margin-bottom: 2px;
   font-family: var(--rc-font-mono);
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--rc-cyan);
 }
 
@@ -242,7 +242,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
   gap: 10px;
   margin: 4px 0;
   font-family: var(--rc-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
   color: var(--rc-cyan);
 }
@@ -266,8 +266,8 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
 
 .model-label {
   font-family: var(--rc-font-mono);
-  font-size: 11px;
-  color: #8d88ad;
+  font-size: 12px;
+  color: #a9a4c8;
 }
 
 .model-roll {
@@ -381,7 +381,7 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
   font-family: var(--rc-font-display);
   font-size: 2.2rem;
   font-weight: 800;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.02em;
   color: var(--rc-cyan);
   text-shadow: 0 0 24px rgba(79, 240, 255, 0.6);
 }
@@ -413,8 +413,8 @@ const swarm = Array.from({ length: 18 }, (_, index) => index)
 
 .cron small {
   font-family: var(--rc-font-mono);
-  font-size: 11px;
-  color: #b9a27f;
+  font-size: 12px;
+  color: #c9b48f;
 }
 
 .tabs {

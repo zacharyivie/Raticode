@@ -20,6 +20,7 @@ from typing import Any
 
 from gofer.core.resources import DEFAULT_RESOURCE_LIMITS, ResourceLimits
 from gofer.rattish.workspaces import (
+    SAFE_FILE_MODE_MASK,
     WORKFLOW_ENTRYPOINT,
     WORKFLOW_IGNORE,
     RegisteredWorkflow,
@@ -165,11 +166,13 @@ def _install_archive(
             destination.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(name) as source, destination.open("wb") as target:
                 shutil.copyfileobj(source, target)
-                # Keep scripts executable, but never restore setuid/setgid
-                # or sticky bits supplied by an archive.
+                # Keep scripts executable, but never restore setuid/setgid,
+                # sticky or group/other write bits supplied by an archive: a
+                # world-writable script lets another local account change what
+                # the workflow runs.
                 mode = info.external_attr >> 16
                 if os.name != "nt" and info.create_system == 3 and stat.S_ISREG(mode):
-                    os.fchmod(target.fileno(), mode & 0o777)
+                    os.fchmod(target.fileno(), mode & SAFE_FILE_MODE_MASK)
         return install_registered_workflow(
             project_root,
             staged_root,
@@ -202,7 +205,10 @@ def duplicate_rattish_workspace(
             with open_binary_input(source) as input_file, destination.open("wb") as target:
                 shutil.copyfileobj(input_file, target, 1024 * 1024)
                 if os.name != "nt":
-                    os.fchmod(target.fileno(), os.fstat(input_file.fileno()).st_mode & 0o777)
+                    os.fchmod(
+                        target.fileno(),
+                        os.fstat(input_file.fileno()).st_mode & SAFE_FILE_MODE_MASK,
+                    )
         return install_registered_workflow(
             workflow.project_root,
             staged_root,

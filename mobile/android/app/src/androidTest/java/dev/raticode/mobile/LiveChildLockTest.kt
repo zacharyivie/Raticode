@@ -128,7 +128,7 @@ class LiveChildLockTest {
         assertEquals(1, count("childLockScreen"))
 
         // The compose test rule runs every window's clock, so a short press is checked in ChildLockHandleTest with a
-        // stopped clock, and with Android's animations off by hand with adb (see docs/live-device-setup.md).
+        // stopped clock, and with Android's animations off by hand with adb.
 
         // A full hold asks; cancelling keeps the lock.
         reveal("childLockUnlock")

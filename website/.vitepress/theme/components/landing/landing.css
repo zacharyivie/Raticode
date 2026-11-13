@@ -79,18 +79,33 @@
   font-family: var(--rc-font-display);
   font-size: clamp(2.2rem, 5.2vw, 4rem);
   font-weight: 700;
-  line-height: 1.02;
-  letter-spacing: -0.035em;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
   color: var(--rc-ivory);
   text-wrap: balance;
 }
 
 .rc-h2 em {
   font-style: normal;
-  background: linear-gradient(100deg, var(--rc-periwinkle) 0%, var(--rc-cyan) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--rc-periwinkle);
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .rc-h2 em {
+    background: linear-gradient(100deg, var(--rc-periwinkle) 0%, var(--rc-cyan) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}
+
+@media (forced-colors: active) {
+  .rc-h2 em {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: CanvasText;
+  }
 }
 
 .rc-lede {
@@ -196,7 +211,7 @@
   border-radius: 999px;
   background: rgba(79, 240, 255, 0.14);
   font-family: var(--rc-font-pixel);
-  font-size: 10.5px;
+  font-size: 12px;
   letter-spacing: 0.06em;
   color: var(--rc-cyan);
 }

@@ -15,7 +15,7 @@ import { PROVIDER_PERMISSIONS, defaultPermissionMode } from "../lib/providerPerm
 import { audioInputConstraints, createSilenceWatch, silentInputMessage } from "../lib/audioDevices.js";
 import { loadVoiceTidy, tidyTranscript } from "../lib/voiceTidy.js";
 import { DictationText, QUIET_MS } from "../lib/dictation.js";
-import { ProgressiveTidy, TIDY_PAUSE_MS } from "../lib/progressiveTidy.js";
+import { ProgressiveTidy, TIDY_PAUSE_MS, hasVoice } from "../lib/progressiveTidy.js";
 import { DotMood, levelFromSamples } from "../lib/voiceDots.js";
 import { VoiceStage, atStage, reportQuietRecording, reportSilentInput, reportVoiceProblem, trackState } from "../lib/voiceDiagnostics.js";
 import { ariaKeyshortcuts, registerVoiceComposer, useDictationAutoSend, useDictationMode, useVoiceBinding, voiceShortcutLabel } from "../lib/voiceShortcut.js";
@@ -78,6 +78,9 @@ export default function ChatComposer({
   // for the box to show them so the send uses them. Anything else changing the box first
   // (typing, another chat) cancels it, and the words simply wait to be sent by hand.
   const autoSendRef = useRef(null);
+  // Bumped when a finished dictation hands over its words, so the send happens even when the
+  // box already showed them all (every word was tidied while listening).
+  const [autoSendTick, setAutoSendTick] = useState(0);
   // This dictation listens while held: hold mode, unless it was started from the menu.
   const held = Boolean(voice?.held);
 
@@ -139,7 +142,7 @@ export default function ChatComposer({
     } else if (draft !== pending.before) {
       autoSendRef.current = null;
     }
-  }, [draft, sending, sendDisabled, onSend]);
+  }, [draft, sending, sendDisabled, onSend, autoSendTick]);
 
   useEffect(() => {
     if (!dictating || !textareaRef.current) return;
@@ -168,17 +171,36 @@ export default function ChatComposer({
     onDraftChange(appendTranscription(dictation.base, dictation.words.text));
   }
 
+  // With tidying on, the box as this dictation last left it, unless something else changed
+  // it since (the parent may not have re-rendered between two of its own changes yet).
+  function boxText(dictation) {
+    return dictation.wrote !== null && draftRef.current === dictation.wroteOver ? dictation.wrote : draftRef.current;
+  }
+
+  // With tidying on, words are only ever added to the end of the box: text already tidied,
+  // and anything else in the box, stays as it is.
+  function addToBox(dictation, words) {
+    const text = appendTranscription(boxText(dictation), words);
+    dictation.wroteOver = draftRef.current;
+    dictation.wrote = text;
+    onDraftChange(text);
+    return text;
+  }
+
   // Recording or transcription can't go on: keep what was heard, as heard, with the reason.
   function dictationFailed(dictation, error) {
     if (dictationRef.current !== dictation) return;
     dictation.words.interrupted();
     const heard = dictation.words.text;
+    // With tidying on, words already tidied are in the box; the rest goes after them as heard.
+    const rest = dictation.tidyOn ? dictation.progress.tail(heard) : heard;
     const message = error instanceof Error ? error.message : "Live transcription stopped.";
     reportVoiceProblem(error?.voiceStage || VoiceStage.STREAM, error);
     endDictation(dictation);
     if (heard) {
-      onDraftChange(appendTranscription(dictation.base, heard));
-      setVoiceNotice(`${message} Your words so far are kept${dictation.tidyOn ? ", untidied" : ""}.`);
+      if (!dictation.tidyOn) onDraftChange(appendTranscription(dictation.base, heard));
+      else if (rest) addToBox(dictation, rest);
+      setVoiceNotice(`${message} Your words so far are kept${dictation.tidyOn && rest ? ", untidied" : ""}.`);
     } else {
       setTranscriptionError(message);
     }
@@ -314,6 +336,9 @@ export default function ChatComposer({
       // Tidy rounds while listening, with tidying on: what came back, and the request out.
       progress: new ProgressiveTidy(Date.now()),
       round: null,
+      // What this dictation last put in the box, and what the box held just before.
+      wrote: null,
+      wroteOver: null,
       pauseTimer: null,
       gapTimer: null,
     };
@@ -424,31 +449,33 @@ export default function ChatComposer({
     setVoice({ phase: "tidying" });
     window.clearTimeout(dictation.pauseTimer);
     window.clearTimeout(dictation.gapTimer);
-    let result;
-    const ready = dictation.progress.ready(heard);
-    const round = dictation.round;
-    if (ready !== null) {
-      // A round while listening already tidied everything said: no wait.
-      result = { text: ready, tidied: true, reason: "" };
-    } else if (round && round.source === heard.trim()) {
-      // The round that is out covers it all: wait for it rather than asking twice.
-      result = await round.answer;
-      if (!result) result = { text: heard, tidied: false, reason: "Tidying was stopped." };
-    } else {
-      round?.abort.abort();
+    // A round that is out adds its words first, so the rest goes after them.
+    if (dictation.round) await dictation.round.settled;
+    if (dictationRef.current !== dictation) return;
+    const progress = dictation.progress;
+    const rest = progress.tail(heard);
+    let reason = "";
+    if (hasVoice(rest)) {
+      const request = { upto: heard.trim(), words: rest };
       const abort = new AbortController();
       dictation.abort = abort;
+      let result;
       try {
-        result = await tidyTranscript(heard, { signal: abort.signal });
+        result = await tidyTranscript(rest, { before: tidyContext(dictation), signal: abort.signal });
       } catch (error) {
         if (error?.name === "AbortError") return;
-        result = { text: heard, tidied: false, reason: "Tidying isn't available right now." };
+        result = { text: rest, tidied: false, reason: "Tidying isn't available right now." };
       }
+      if (dictationRef.current !== dictation) return;
+      const tidied = result.tidied && String(result.text ?? "").trim();
+      // Words that couldn't be tidied go in as heard, never dropped.
+      addToBox(dictation, tidied ? result.text : rest);
+      progress.kept(request);
+      if (!tidied) reason = result.reason || "Tidying isn't available right now.";
     }
-    if (dictationRef.current !== dictation) return;
     // Words that couldn't be tidied wait in the box even with Send after dictation on.
-    putDictatedWords(appendTranscription(dictation.base, result.text), result.tidied);
-    if (!result.tidied) setVoiceNotice(`Not tidied: ${result.reason}`);
+    putDictatedWords(boxText(dictation), !reason && dictation.wrote !== null);
+    if (reason) setVoiceNotice(`Not tidied: ${reason}`);
     endDictation(dictation);
     textareaRef.current?.focus();
   }
@@ -478,35 +505,42 @@ export default function ChatComposer({
     }, wait);
   }
 
-  // One tidy round while listening: everything said so far goes, and the answer shows in the
-  // (read-only) box. A failure changes nothing; stopping tidies again, so no words are lost.
+  // The end of the box, sent with a round once this dictation has added tidied words, so the
+  // next words read on from them.
+  function tidyContext(dictation) {
+    return dictation.wrote === null ? "" : boxText(dictation).slice(-TIDY_CONTEXT_CHARS);
+  }
+
+  // One tidy round while listening: the words said since the last tidied round go, and the
+  // answer is added to the end of the (read-only) box. A failure adds nothing; its words go
+  // with the next round, and stopping adds whatever is left, so no words are lost.
   function tidyRound(dictation) {
     if (dictationRef.current !== dictation || dictation.finishing || !dictation.tidyOn) return;
     window.clearTimeout(dictation.pauseTimer);
     window.clearTimeout(dictation.gapTimer);
     const progress = dictation.progress;
-    const source = progress.next(dictation.words.text, Date.now());
-    if (!source) return;
+    const request = progress.next(dictation.words.text, Date.now());
+    if (!request) return;
     const abort = new AbortController();
-    const answer = tidyTranscript(source, { signal: abort.signal }).catch((error) => (
-      error?.name === "AbortError" ? null : { text: source, tidied: false, reason: "Tidying isn't available right now." }
+    const answer = tidyTranscript(request.words, { before: tidyContext(dictation), signal: abort.signal }).catch((error) => (
+      error?.name === "AbortError" ? null : { text: request.words, tidied: false, reason: "Tidying isn't available right now." }
     ));
-    const round = { source, abort, answer };
-    dictation.round = round;
-    void answer.then((result) => {
+    const round = { request, abort };
+    round.settled = answer.then((result) => {
       if (dictation.round === round) dictation.round = null;
-      if (!result) {
-        progress.dropped(source);
+      if (!result || dictationRef.current !== dictation) {
+        progress.dropped(request);
         return;
       }
-      const changed = progress.answered(source, result);
-      if (dictationRef.current !== dictation || dictation.finishing) return;
-      if (changed) onDraftChange(appendTranscription(dictation.base, progress.shown));
+      const text = progress.answered(request, result);
+      if (text) addToBox(dictation, text);
+      if (dictation.finishing) return;
       // Words said while it was out: a round now if it has gone quiet, otherwise when enough
       // words and time have passed.
       if (Date.now() - dictation.lastWordsAt >= TIDY_PAUSE_MS) tidyRound(dictation);
       else considerRound(dictation);
     });
+    dictation.round = round;
   }
 
   // The finished words go in the box to edit; with Send after dictation on, and words fit
@@ -514,6 +548,7 @@ export default function ChatComposer({
   function putDictatedWords(text, sendable) {
     autoSendRef.current = dictationAutoSend && sendable && text.trim() ? { text, before: draftRef.current } : null;
     onDraftChange(text);
+    if (autoSendRef.current) setAutoSendTick((tick) => tick + 1);
   }
 
   // Throws away only what was said in this dictation; the words already in the box stay.
@@ -855,6 +890,9 @@ const VOICE_STATUS = {
 const NO_SPEECH = /No speech was detected/;
 // How long stopping waits for the last buffer of audio to arrive: one buffer period plus margin.
 const RECORDER_TAIL_MS = 150;
+// How much of the end of the box goes with a tidy round as the text it continues.
+const TIDY_CONTEXT_CHARS = 300;
+
 // In Hold to talk, a press shorter than this with nothing heard is a tap, not a dictation.
 const HOLD_TAP_MS = 400;
 const HOLD_HINT = "Hold to talk: keep the mic pressed while you speak, and let go when you're done.";

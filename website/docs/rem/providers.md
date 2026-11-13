@@ -6,46 +6,50 @@ pageClass: docs-layout
 
 # Providers, models and effort
 
-Choose the coding tool for a task without moving the conversation into another app. Raticode works with the Codex, Claude Code, Cursor, GitHub Copilot, OpenCode, Antigravity and Grok CLIs you have installed and signed in to.
+Raticode works with the Codex, Claude Code, Cursor, GitHub Copilot, OpenCode, Antigravity and Grok CLIs you have installed and signed in to. You can change the coding tool for a task without leaving the conversation.
 
-## Provider, model, and effort
-
-| Selection | Meaning |
+| Choice | Meaning |
 | --- | --- |
-| Provider | The installed coding CLI or transport Raticode invokes |
+| Provider | The installed coding CLI or transport Raticode runs |
 | Model | The model requested through that provider |
-| Effort | A provider-supported reasoning setting for that model |
-| Permissions | The provider's allowed actions and approval behavior |
-
-The model and effort catalogs come from provider discovery. They can differ by CLI version, account, and access policy. An unavailable saved choice remains selected so you can diagnose it; Raticode does not silently substitute another provider.
+| Effort | A reasoning setting the provider supports for that model |
+| Permissions | What the provider may do and when it asks for approval |
 
 ## Choose a model
 
-Open the model picker in Rem and choose from the provider's discovered catalog. There is no free-text model field in Rem; if a model is missing, refresh providers or check the provider CLI's own access.
+Open the model picker in Rem and pick from the provider's catalog.
 
-Some models have no effort selector. A CLI-default model delegates selection to the coding tool. That choice is not evidence of a particular underlying model or reasoning level.
+- Model and effort lists come from the provider itself. They can differ by CLI version, account and access policy.
+- There's no free-text model field. If a model is missing, refresh providers or check the CLI's own access.
+- Some models have no effort setting.
+- A CLI-default model leaves the choice to the coding tool. It doesn't tell you which model or reasoning level actually runs.
+- A saved choice that's no longer available stays selected so you can see the problem. Raticode never quietly swaps in another provider.
 
 ## Save defaults
 
-**Settings > Providers** manages enabled providers, executable paths, allowed or denied models, and provider-specific defaults. **Settings > Rem** chooses the default provider, model and effort for new tasks and threads. Existing explicit thread selections remain their own settings.
+| Where | What it sets |
+| --- | --- |
+| **Settings > Providers** | Enabled providers, executable paths, allowed or denied models, provider-specific defaults |
+| **Settings > Rem** | Default provider, model and effort for new tasks and threads. Threads with their own choices keep them. |
+| **Settings > Rem > Rem chat provider** | Who writes replies in Rem's home chat. Leave it on **Same as tasks and threads**, or pick a faster model or lower effort so chat answers quickly while tasks keep a stronger model. |
 
-**Rem chat provider**, model and effort in **Settings > Rem** choose who writes the replies in Rem's home chat. Leave it on **Same as tasks and threads**, or pick a faster model or lower effort so chat answers quickly while tasks keep a stronger model.
+With Claude Code as the chat provider, Rem's home chat reply appears as it's written. Other providers show what Rem is doing, such as "Reading earlier messages", then the finished reply. Hover a reply (or open its ⋯ menu on the phone) to see which model wrote it and how long it took.
 
-With Claude Code as the chat provider, Rem's reply in its home chat appears as it is written. Other providers show what Rem is doing, such as "Reading earlier messages", and then the finished reply. Hover a reply, or open its ⋯ menu on the phone, to see which model wrote it and how long it took.
-
-Choose **Refresh providers** in **Settings > Providers** after signing in, changing a binary, or receiving a new model entitlement. Repeated refreshes are not a substitute for authenticating the CLI itself.
+After signing in, changing a binary or getting access to a new model, choose **Refresh providers** in **Settings > Providers**. Refreshing doesn't sign the CLI in; do that in the CLI itself.
 
 ## Conversation continuity
 
-Provider and model changes preserve the Raticode thread. Same-provider model or effort changes keep that provider's native session. Each provider stores its own session for the thread, so returning to a previous provider restores it with the intervening visible conversation.
+Changing provider or model keeps the Raticode thread.
 
-For a large handoff, Raticode can summarize imported history for the destination. The complete Rem history remains saved; it is not replaced by that handoff summary. If a native session is unavailable, Rem reports the error instead of silently replaying everything in a fresh session.
+- Changing model or effort within one provider keeps that provider's native session.
+- Each provider keeps its own session for the thread. Going back to a provider restores its session along with the conversation you had elsewhere.
+- For a large handoff, Raticode can summarize earlier history for the new provider. The full history stays saved.
+- If a native session is unavailable, Rem reports the error instead of quietly replaying everything into a fresh session.
 
 ## Workflow providers
 
-Agent nodes select their provider and model in `workflow.rattish`, not from the currently visible Rem picker. Workflow API profiles and coding CLI subscriptions are separate configuration paths. Check [Agent](../nodes/agent.md) and [Provider setup](../setup.md) before assuming an API profile works in Rem chat.
+[Agent](../nodes/agent.md) nodes set their provider and model in `workflow.rattish`, not from Rem's picker. Workflow API profiles and coding CLI subscriptions are configured separately, so an API profile doesn't automatically work in Rem chat. See [Provider setup](../setup.md).
 
 ## Usage and billing
 
-Authentication, subscriptions, rate limits, and billing belong to the provider. Keeping a thread or restoring a native session does not make prior context free. Use [Usage and allowances](./usage.md) to separate observed Raticode activity from provider account totals.
-
+Sign-in, subscriptions, rate limits and billing belong to the provider. Keeping a thread or restoring a session doesn't make earlier context free. [Usage and allowances](./usage.md) separates what Raticode recorded from your provider account totals.

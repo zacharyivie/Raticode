@@ -254,4 +254,46 @@ class RemRichTest {
         assertTrue(home.tasks.single().lastRun!!.reviewRetryable)
         assertTrue("rem.run.retry_review" in DesktopViews.ACTIONS && "rem.draft" in DesktopViews.READS)
     }
+
+    @Test fun aPausedRunHoldsItsStepAndSaysPausedInWords() {
+        val steps = RemRich.steps("paused", step = "work")
+        assertEquals(listOf("DONE", "PAUSED", "TODO", "TODO"), steps.map { it.state.name })
+        assertEquals("Work paused", steps[1].spoken)
+        assertEquals(listOf("DONE", "DONE", "PAUSED", "TODO"), RemRich.steps("paused", step = "check").map { it.state.name })
+    }
+
+    @Test fun aSelfWorkReportListsWhatItStartedAndOlderDesktopsSendNone() {
+        val report = JSONObject("""{"period_id":"p1","started_at":"2026-11-12T03:00:00Z","ended_at":"2026-11-12T11:00:00Z","ended_by":"window",
+            "counts":{"started":3,"finished":2,"paused":0,"blocked":1,"tickets_created":1,"tickets_moved":2,"proposals":1,"odd":"x"},
+            "items":[{"task_id":"t1","run_id":"r1","thread_id":"th1","title":"Fix login","kind":"ticket","outcome":"finished",
+                      "tickets":[{"ticket_id":"12","key":"REM-12","title":"Login","scope":"rem","role":"worked"}]},
+                     {"task_id":"","run_id":"r2","thread_id":"th2","title":"Research caching","kind":"research","outcome":"running"},
+                     {"task_id":"t3","title":"Triage","kind":"triage","outcome":"blocked"}]}""")
+        val home = DesktopViews.parse("rem.home", JSONObject().put("messages", JSONArray()
+            .put(JSONObject().put("id", "self-work-period-p1").put("role", "rem").put("kind", "self_work_report").put("body", "Did REM-12.")
+                .put("self_work_report", report))
+            .put(JSONObject().put("id", "old").put("role", "rem").put("body", "Plain"))
+            .put(JSONObject().put("id", "u").put("role", "user").put("body", "Hi").put("self_work_report", report)))) as RemHome
+        val message = home.messages[0]
+        assertEquals("self_work_report", message.kind)
+        val parsed = message.selfWorkReport!!
+        assertEquals("p1", parsed.periodId); assertEquals("window", parsed.endedBy)
+        assertEquals(3, parsed.counts["started"]); assertEquals(1, parsed.counts["proposals"]); assertNull(parsed.counts["odd"])
+        assertEquals(listOf("Fix login", "Research caching", "Triage"), parsed.items.map { it.title })
+        assertEquals(listOf("REM-12"), parsed.items[0].tickets.map { it.key })
+        assertEquals("th2", parsed.items[1].threadId); assertEquals("", parsed.items[1].taskId)
+        assertEquals(listOf("Finished", "Still running", "Needs you"), parsed.items.map { dev.raticode.mobile.ui.RemTaskStatus.selfWorkOutcome(it.outcome).second.label })
+        assertTrue(parsed.items.none { dev.raticode.mobile.ui.RemTaskStatus.selfWorkOutcome(it.outcome).second.spinning })
+        // An older desktop sends no report, and only Rem's messages carry one.
+        assertNull(home.messages[1].selfWorkReport)
+        assertNull(home.messages[2].selfWorkReport)
+    }
+
+    @Test fun aSelfWorkReportKeepsAtMostThirtyItems() {
+        val items = JSONArray().apply { repeat(40) { put(JSONObject().put("task_id", "t$it").put("title", "T$it").put("outcome", "finished")) } }
+        val home = DesktopViews.parse("rem.home", JSONObject().put("messages", JSONArray().put(JSONObject().put("id", "m").put("role", "rem")
+            .put("kind", "self_work_report").put("body", "").put("self_work_report", JSONObject().put("items", items))))) as RemHome
+        assertEquals(30, home.messages.single().selfWorkReport!!.items.size)
+        assertTrue(home.messages.single().selfWorkReport!!.counts.isEmpty())
+    }
 }

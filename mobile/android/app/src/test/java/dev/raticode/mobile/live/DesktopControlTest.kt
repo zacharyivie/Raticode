@@ -48,6 +48,22 @@ class DesktopControlTest {
         assertNull(bounded.add("old0", part(part = 1, parts = 2, body = "}")))
     }
 
+    /** Android's org.json has no depth limit; a body nested thousands deep must be refused before it is parsed. */
+    @Test fun deeplyNestedResultsAreRefusedBeforeParsing() {
+        val deep = "[".repeat(20000) + "]".repeat(20000)
+        val chunks = ("{\"a\":$deep}").chunked(24000)
+        val parts = DesktopParts()
+        chunks.dropLast(1).forEachIndexed { i, c -> assertNull(parts.add("deep", part(part = i, parts = chunks.size, body = c))) }
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            parts.add("deep", part(part = chunks.lastIndex, parts = chunks.size, body = chunks.last()))
+        }
+        assertEquals("Result nested too deeply", error.message)
+        // Brackets inside strings don't count, and the limit itself is allowed.
+        val atLimit = "{\"s\":\"[[[[{{{{\\\"\"," + "\"a\":" + "[".repeat(DesktopParts.MAX_DEPTH - 1) + "]".repeat(DesktopParts.MAX_DEPTH - 1) + "}"
+        assertNotNull(DesktopParts().add("ok", part(body = atLimit)))
+        assertFalse(DesktopParts.nestingWithin("[".repeat(DesktopParts.MAX_DEPTH + 1), DesktopParts.MAX_DEPTH))
+    }
+
     @Test fun actionsRefreshTheScreenTheyChange() {
         assertEquals("rem.home", DesktopViews.key("rem.task.create", JSONObject()))
         assertEquals("rem.thread:t1", DesktopViews.key("rem.instruct", JSONObject().put("thread_id", "t1")))

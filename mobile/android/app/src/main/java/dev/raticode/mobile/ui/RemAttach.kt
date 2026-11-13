@@ -42,8 +42,19 @@ import dev.raticode.mobile.share.ShareIntake
 import java.io.File
 import java.time.LocalDateTime
 
-/** A file the user picked: [name] replaces the provider's name, and [photo] is a camera file to delete once read. */
-internal data class Picked(val uri: Uri, val name: String? = null, val photo: File? = null)
+/**
+ * A file the user picked: [name] replaces the provider's name, and [photo] is a camera or handoff file to delete once
+ * read. [text] is the long text the file holds when it was made from words for Rem ([LongText]), kept so the message box
+ * can preview it and put it back.
+ */
+internal data class Picked(val uri: Uri, val name: String? = null, val photo: File? = null, val text: String? = null)
+
+/** Writes long [text] to a private handoff file for Rem's message box, or null when the phone couldn't write it. */
+internal fun pickedText(context: Context, text: String, kind: dev.raticode.mobile.data.LongText.Kind): Picked? = runCatching {
+    val file = dev.raticode.mobile.data.HandoffFiles.write(context.cacheDir, text)
+    Picked(FileProvider.getUriForFile(context, context.packageName + OpenedFiles.AUTHORITY_SUFFIX, file),
+        dev.raticode.mobile.data.LongText.name(kind, text), file, text)
+}.getOrNull()
 
 /**
  * Files and words another screen hands to Rem's message box, such as Developer log entries or a browser page for Ask

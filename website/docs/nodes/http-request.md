@@ -10,7 +10,7 @@ Call an HTTP or HTTPS endpoint and expose a structured response.
 
 ## When to use it
 
-Use this node for a reviewed service request. Use open-resource when the goal is to open a URL in a browser rather than consume its response.
+Use it for a reviewed call to a service. To open a URL in a browser instead of reading the response, use [open-resource](./open-resource.md).
 
 ## Example
 
@@ -33,15 +33,16 @@ Node step:
   finish: pass
 ```
 
-GET, a 30-second request timeout, one attempt, and expected status 200 are the defaults. Choose explicit expected statuses for endpoints that return 201 or 204. Set retry attempts, backoff, and retry-on-statuses deliberately, especially for requests that write data.
-
-Use `json` or `body` for a request payload, not both. Bound payload ports override the corresponding authored payload. Response modes are `auto`, `json`, `text`, and `none`. Output includes raw body, parsed JSON where available, selected values, and request metadata.
-
-`output-mapping` selects response values by supported paths; `network-allowlist` constrains configured destinations. Use compatible secret bindings for protected values and review redaction fields. An allowed target is not a guarantee that arbitrary response content is trustworthy.
+- **Defaults.** GET, a 30-second timeout, one attempt, expected status 200. List other statuses yourself for endpoints that return 201 or 204.
+- **Retries.** Set attempts, backoff and retry-on-statuses on purpose, especially for requests that write data.
+- **Payload.** Use `json` or `body`, not both. A bound payload port overrides the matching field you wrote.
+- **Response modes** are `auto`, `json`, `text` and `none`. Output includes the raw body, parsed JSON when there is some, selected values and request details.
+- `output-mapping` picks values out of the response by path. `network-allowlist` limits where requests may go.
+- Bind secrets for protected values, and check the redaction fields. An allowed host can still send back content you shouldn't trust.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -61,7 +62,7 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
@@ -71,7 +72,7 @@ Bind these declared ports through `with`:
 | `json` | any JSON value |
 | `body` | string |
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -85,12 +86,12 @@ Successful output fields use these exact selector names:
 | `method` | string |
 | `attempts` | integer (min 1) |
 
-For example, refer to `node.step.output.status` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.status`.
 
 ## Preflight and limits
 
-Preflight validates the URL and network policy without sending the request. Availability, rate limits, authentication, response format, and status are runtime concerns.
+Preflight checks the URL and network policy without sending anything. Whether the service is up, rate limits, sign-in, the response format and status all show up only at run time.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

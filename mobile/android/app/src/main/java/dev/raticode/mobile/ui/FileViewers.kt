@@ -8,6 +8,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.pdf.PdfRenderer
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -217,6 +218,14 @@ internal fun svgPage(svg: String): String {
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 internal fun WebPreview(html: String, label: String, modifier: Modifier = Modifier) {
+    // A preview whose page process ended, such as a file built to crash it, shows a message instead of ending Raticode.
+    var ended by remember { mutableStateOf(false) }
+    if (ended) {
+        Box(modifier.fillMaxSize().testTag("webPreviewEnded"), contentAlignment = Alignment.Center) {
+            ProblemCard("This preview stopped. Open the file again to try once more.", null)
+        }
+        return
+    }
     AndroidView(factory = { context ->
         WebView(context).apply {
             settings.javaScriptEnabled = false
@@ -234,6 +243,11 @@ internal fun WebPreview(html: String, label: String, modifier: Modifier = Modifi
                 // Anything the page asks for besides itself gets nothing back.
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                     if (request.url.scheme == "data") null else WebResourceResponse("text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
+                // Without this, Android ends the whole app when the preview's page process crashes or is reclaimed.
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    ended = true
+                    return true
+                }
             }
             contentDescription = label
         }

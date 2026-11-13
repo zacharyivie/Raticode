@@ -10,6 +10,7 @@ All subprocess arguments and API payloads are passed without shell interpolation
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -35,6 +36,10 @@ SCHEMA = 2
 # stapled. A fork may stage an unsigned candidate for testing, but nothing publishes one.
 CANONICAL_REPOSITORY = "zacharyivie/Raticode"
 MAC_SIGNING_MODES = {True: "developer-id", False: "unsigned"}
+# The Apple Developer team that signs this repository's Mac releases, read from the
+# published v0.5.3 evidence. A certificate from any other team is refused, even when
+# the signing secrets hold it. Change this only when the releases move to a new team.
+MACOS_TEAM_ID = "UG6K997W6C"
 
 
 def require(condition: Any, message: str) -> None:
@@ -139,6 +144,77 @@ def required_files(
     return files
 
 
+UPDATER_METADATA = {"linux": "latest-linux.yml", "windows": "latest.yml", "macos": "latest-mac.yml"}
+
+
+def updater_target(group: str, version: str) -> str:
+    """The file each platform's updater installs. Squirrel.Mac only accepts the zip."""
+    return {
+        "linux": f"Raticode-{version}-x86_64.AppImage",
+        "windows": f"Raticode-Setup-{version}.exe",
+        "macos": f"Raticode-{version}-arm64.zip",
+    }[group]
+
+
+def publish_feed(root: Path = ROOT) -> str:
+    """The update feed every packaged app must use, from electron-builder's publish config."""
+    publish = json.loads((root / "frontend/package.json").read_text())["build"]["publish"]
+    entry = publish[0] if isinstance(publish, list) else publish
+    return f"{entry['provider']}:{entry['owner']}/{entry['repo']}"
+
+
+def read_updater_metadata(text: str) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Read electron-builder's flat latest-*.yml: top-level fields and the files list."""
+    top: dict[str, str] = {}
+    files: list[dict[str, str]] = []
+    in_files = False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        item = re.fullmatch(r"\s+-\s+(\w+):\s*(.*)", line)
+        nested = re.fullmatch(r"\s+(\w+):\s*(.*)", line)
+        field = re.fullmatch(r"(\w+):\s*(.*)", line)
+        if in_files and item:
+            files.append({item[1]: item[2].strip("'\"")})
+        elif in_files and nested and files:
+            files[-1][nested[1]] = nested[2].strip("'\"")
+        elif field:
+            in_files = field[1] == "files" and not field[2]
+            if not in_files:
+                top[field[1]] = field[2].strip("'\"")
+        else:
+            require(False, f"Unreadable updater metadata line: {line!r}")
+    return top, files
+
+
+def verify_updater_metadata(folder: Path, group: str, version: str) -> None:
+    """The installed apps update from these files, so they must describe the final bytes."""
+    name = UPDATER_METADATA[group]
+    target = updater_target(group, version)
+    top, files = read_updater_metadata((folder / name).read_text())
+    require(top.get("version") == version, f"{name} is not for version {version}")
+    require(top.get("path") == target, f"{name} must point updates at {target}")
+    hashes = {}
+    for entry in files:
+        url = entry.get("url", "")
+        require(
+            re.fullmatch(r"[A-Za-z0-9_.-]+", url) and (folder / url).is_file(),
+            f"{name} lists a file this candidate doesn't have: {url!r}",
+        )
+        with (folder / url).open("rb") as stream:
+            sha512 = base64.b64encode(hashlib.file_digest(stream, "sha512").digest()).decode()
+        require(entry.get("sha512") == sha512, f"{name} hash doesn't match {url}")
+        require(
+            entry.get("size") in (None, str((folder / url).stat().st_size)),
+            f"{name} size doesn't match {url}",
+        )
+        hashes[url] = sha512
+    require(
+        target in hashes and top.get("sha512") == hashes[target],
+        f"{name} must list {target} with its hash",
+    )
+
+
 def verify_group(
     folder: Path,
     group: str,
@@ -181,16 +257,26 @@ def verify_group(
         smoke.get("status") == "passed" and smoke.get("version") == version,
         f"{group}: missing successful distribution tests",
     )
+    verify_updater_metadata(folder, group, version)
     if group == "macos":
         # The package check records how it found the Mac apps signed.
         require(
             smoke.get("signing") == MAC_SIGNING_MODES[macos_signed],
             f"macos: distribution tests did not confirm {MAC_SIGNING_MODES[macos_signed]} signing",
         )
+        require(
+            smoke.get("update_feed") == publish_feed(),
+            "macos: distribution tests did not confirm the apps' update feed",
+        )
         if macos_signed:
             require(
                 re.fullmatch(r"[A-Z0-9]{10}", str(smoke.get("team_id", ""))),
                 "macos: distribution tests did not record the signing team",
+            )
+            require(
+                smoke["team_id"] == MACOS_TEAM_ID,
+                f"macos: signed by team {smoke['team_id']}, not the release team "
+                f"{MACOS_TEAM_ID}. See MACOS_TEAM_ID in scripts/release-candidate.py.",
             )
     if windows_signed and group == "windows":
         signatures = json.loads(

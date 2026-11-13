@@ -22,6 +22,8 @@ export const modeLabel = mode => MODE_LABELS[mode] || "Waiting";
 
 // Columns a ticket can be dragged to. Reviews and finished runs land on their own.
 export function canDropOn(ticket, column) {
+  // A paused ticket keeps its run: moving it to In progress resumes that run, nothing else.
+  if (ticket?.paused) return column === "in_progress";
   if (!ticket || ticket.status === column || ticket.running || ticket.proposed) return false;
   if (ticket.scope === "organization") return ["backlog", "todo", "in_progress"].includes(column) && ticket.status !== "in_review";
   return ["backlog", "todo", "in_progress", "done"].includes(column);
@@ -101,15 +103,52 @@ export function columnTickets(tickets = []) {
 
 // One line per thing Rem is working on by itself, research and ranking included.
 export function activityLine(item) {
-  return item.project && !item.title.endsWith(item.project) ? `${item.title} · ${item.project}` : item.title;
+  const line = item.project && !item.title.endsWith(item.project) ? `${item.title} · ${item.project}` : item.title;
+  return item.paused ? `${line} · ${pausedLabel(item.paused)}` : line;
 }
 
-// What the board header says about self-work, in one short phrase.
+// A paused ticket or self-work item: paused by you, or making way for your own work.
+export const pausedLabel = by => by === "priority" ? "Paused for your work" : "Paused";
+
+// What the board header says about self-work, in one short phrase. While waiting for quiet
+// minutes inside a timed window, it also says when the window ends.
 export function selfWorkLine(view) {
   if (!view) return "";
   const { state, settings } = view;
-  if (state.mode === "waiting" && state.starts_at) return `Starts after ${settings.idle_minutes} quiet minutes`;
+  if (state.mode === "waiting" && state.starts_at) {
+    const active = selfWorkWindows(view)?.active;
+    return `Starts after ${settings.idle_minutes} quiet minutes${active?.end_label ? ` · ends ${active.end_label}` : ""}`;
+  }
   return state.detail || "";
+}
+
+// Timed self-work: the window running now, the ones coming up and the last period that
+// ended. Older desktops send no schedule, so there is nothing to show.
+export function selfWorkWindows(view) {
+  const schedule = view?.schedule;
+  if (!schedule || typeof schedule !== "object") return null;
+  return {
+    active: schedule.active || null,
+    upcoming: Array.isArray(schedule.upcoming) ? schedule.upcoming : [],
+    last: schedule.last_period?.summary ? schedule.last_period : null,
+  };
+}
+
+// "Ends 7:00 PM Thu 12 Nov (Asia/Irkutsk), then back to off": the line under a window.
+export function windowDetail(window) {
+  if (!window) return "";
+  const end = window.end_label ? `Ends ${window.end_label}` : "";
+  return [end, window.after_label].filter(Boolean).join(", ");
+}
+
+// A note when the switch shows a window's state rather than the saved one, such as
+// "On for this window, then back to off." Older desktops don't send saved_enabled.
+export function savedSwitchNote(view) {
+  const settings = view?.settings;
+  if (!settings || typeof settings.saved_enabled !== "boolean" || settings.saved_enabled === settings.enabled) return "";
+  if (!settings.enabled) return "Off for now. The saved switch is on.";
+  const after = selfWorkWindows(view)?.active?.after_end;
+  return after === "on" ? "On for this window; stays on after it." : "On for this window; goes back to off after it.";
 }
 
 // Whether self-work uses tickets: the desktop's Kanban board is on. Older desktops don't say,
@@ -228,6 +267,8 @@ export function checksLine(checks = []) {
 }
 export const saveParticipant = (person, projects) => post("/participant", "POST", { participant_id: person.participant_id, projects, expected_revision: person.revision });
 export const saveSelfWork = change => post("/settings", "PUT", change);
+// Ends a running self-work window now (its report is posted) or drops one that hasn't started.
+export const cancelSelfWorkWindow = windowId => post("/window", "POST", { action: "cancel", window_id: windowId });
 export const markReportSeen = updatedAt => post("/report/seen", "POST", { updated_at: updatedAt || undefined });
 
 // Keeps one view of the board and self-work current while a surface is open.

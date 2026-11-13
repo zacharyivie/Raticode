@@ -1,16 +1,16 @@
 ---
 title: local-search
-description: Find ranked text chunks in a previously created local retrieval index.
+description: Find the best-matching text chunks in a local search index.
 pageClass: docs-layout
 ---
 
 # local-search
 
-Find ranked text chunks in a previously created local retrieval index.
+Find the best-matching text chunks in a local search index.
 
 ## When to use it
 
-Use this node to obtain relevant snippets for a later prompt. Choose Second Brain tools for conversational knowledge-folder search instead.
+Use it to fetch relevant snippets for a later prompt. To search a knowledge folder from a chat, use Second Brain's tools instead.
 
 ## Example
 
@@ -29,15 +29,16 @@ Node step:
   finish: pass
 ```
 
-Build the index first using local-vectorize, either before the run or in an upstream step listed in `needs`, and keep the embedding/search strategies compatible. The default pair is `hash_token_v1` and `cosine_v1`. The default returns up to five results, with snippets and file metadata enabled.
-
-`score-threshold` ranges from -1 to 1. Raising it can remove all results; a count of zero is not a provider failure. Bind `with.query` to replace the authored query from a public input or upstream value.
-
-Read the returned source context before using a match as evidence. A ranking score measures retrieval similarity, not the truth or freshness of a statement.
+- Build the index with [local-vectorize](./local-vectorize.md) first, before the run or in an upstream step listed in `needs`.
+- Use the same strategy pair as the index. The default is `hash_token_v1` and `cosine_v1`.
+- By default it returns up to five results, with snippets and file metadata.
+- `score-threshold` runs from -1 to 1. A high threshold can remove every result. Zero results is not a failure.
+- Bind `with.query` to replace the query you wrote with a public input or upstream value.
+- Read the source text before you treat a match as evidence. The score measures similarity, not whether a statement is true or current.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -52,13 +53,13 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
 | `query` | string |
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -69,12 +70,12 @@ Successful output fields use these exact selector names:
 
 Each result has `score`, `path`, `chunk` and `text`, plus `snippet` when snippets are enabled. With file metadata enabled, `metadata` holds the file's `size` in bytes and its `modified_at` time as an ISO 8601 UTC string.
 
-For example, refer to `node.step.output.query` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.query`.
 
 ## Preflight and limits
 
-The index must exist and be readable, and its strategy pair must be available. When the node has `needs`, preflight skips the existence check because an upstream step may create it with local-vectorize earlier in the run; the node then reports a missing index when it runs.
+The index must exist and be readable, and its strategy pair must be available. With `needs`, preflight skips the existence check, because an earlier local-vectorize step may create the index. A missing index then fails when the node runs.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

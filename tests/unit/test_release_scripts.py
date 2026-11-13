@@ -95,13 +95,19 @@ def test_release_metadata_uses_agpl_3_only() -> None:
 
 def test_release_metadata_uses_canonical_repository() -> None:
     repository = "https://github.com/zacharyivie/Raticode"
+    website = "https://raticode.dev"
     frontend_package = _read_json(REPO_ROOT / "frontend" / "package.json")
 
-    assert frontend_package["homepage"] == repository
+    # Packages name the website as their homepage; issues, updates and downloads stay on
+    # the repository.
+    assert frontend_package["homepage"] == website
+    assert frontend_package["bugs"]["url"] == f"{repository}/issues"
     assert frontend_package["build"]["publish"] == [
         {"provider": "github", "owner": "zacharyivie", "repo": "Raticode"}
     ]
-    assert repository in (REPO_ROOT / "scripts" / "package-cli-linux.sh").read_text(encoding="utf8")
+    cli_packaging = (REPO_ROOT / "scripts" / "package-cli-linux.sh").read_text(encoding="utf8")
+    assert f"Homepage: {website}\n" in cli_packaging
+    assert f"URL:            {website}\n" in cli_packaging
     assert f'RELEASES_URL = "{repository}/releases"' in (
         REPO_ROOT / "frontend" / "electron" / "main.js"
     ).read_text(encoding="utf8")
@@ -123,6 +129,7 @@ def test_release_metadata_uses_canonical_repository() -> None:
         "docs/releasing.md",
         "docs/security/release-verification.md",
         "website/.vitepress/config.ts",
+        "website/.vitepress/seo.ts",
         "website/data/releases.ts",
     ]
     for name in release_files:
@@ -344,7 +351,7 @@ echo "args=$*" >>"{log_path}"
     )
 
 
-def test_build_backend_binary_sh_invokes_uv_with_tmp_cache(tmp_path: Path) -> None:
+def test_build_backend_binary_sh_keeps_the_uv_cache_in_the_repository(tmp_path: Path) -> None:
     repo = _copy_release_fixture(tmp_path)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -365,7 +372,8 @@ echo "args=$*" >>"{log_path}"
     assert result.returncode == 0, result.stderr
     log = log_path.read_text(encoding="utf8")
     assert f"cwd={repo}" in log
-    assert "UV_CACHE_DIR=/tmp/uv-cache" in log
+    assert f"UV_CACHE_DIR={repo / '.uv-cache'}" in log
+    assert "/tmp/uv-cache" not in (REPO_ROOT / "scripts/build-backend-binary.sh").read_text()
     assert (
         "args=run --locked --extra xlsx --extra devices pyinstaller --clean --noconfirm "
         "raticode.spec" in log
@@ -433,3 +441,93 @@ def test_macos_speech_dependency_and_permissions_are_packaged() -> None:
         assert entitlements["com.apple.security.device.audio-input"] is True
         assert entitlements["com.apple.security.cs.allow-jit"] is True
     assert '"*.dyld"' in (REPO_ROOT / "raticode.spec").read_text()
+
+
+AFTER_PACK = REPO_ROOT / "frontend/build-resources/after-pack.cjs"
+
+
+def test_after_pack_hook_is_registered_for_every_desktop_build() -> None:
+    build = json.loads((REPO_ROOT / "frontend/package.json").read_text())["build"]
+    assert build["afterPack"] == "./build-resources/after-pack.cjs"
+    assert (REPO_ROOT / "frontend" / build["afterPack"]).resolve() == AFTER_PACK
+    # The hook is build tooling, never part of the packaged app.
+    assert not any("build-resources" in pattern for pattern in build["files"])
+
+
+def _run_after_pack(script: str, tmp_path: Path) -> str:
+    result = _run(["node", "-e", script, str(AFTER_PACK), str(tmp_path / "app")], cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_after_pack_hook_removes_write_access_for_other_accounts(tmp_path: Path) -> None:
+    if os.name == "nt":
+        return
+    app = tmp_path / "app"
+    (app / "locales").mkdir(parents=True)
+    files = {
+        "gofer-flow": 0o777,
+        "libffmpeg.so": 0o777,
+        "resources.pak": 0o666,
+        "locales/en-US.pak": 0o664,
+        "chrome-sandbox": 0o4777,
+        "already-fine": 0o644,
+    }
+    for name, mode in files.items():
+        (app / name).write_text(name)
+        os.chmod(app / name, mode)
+    os.chmod(app / "locales", 0o777)
+    os.symlink("gofer-flow", app / "link")
+    output = _run_after_pack(
+        "const [hook, root] = process.argv.slice(1);"
+        "require(hook).stripGroupAndWorldWrite(root)"
+        ".then((changed) => console.log(JSON.stringify(changed.sort())));",
+        tmp_path,
+    )
+    assert json.loads(output) == sorted(
+        [
+            "chrome-sandbox",
+            "gofer-flow",
+            "libffmpeg.so",
+            "locales",
+            "locales/en-US.pak",
+            "resources.pak",
+        ]
+    )
+    modes = {name: (app / name).stat().st_mode & 0o7777 for name in files}
+    assert modes == {
+        "gofer-flow": 0o755,
+        "libffmpeg.so": 0o755,
+        "resources.pak": 0o644,
+        "locales/en-US.pak": 0o644,
+        "chrome-sandbox": 0o4755,
+        "already-fine": 0o644,
+    }
+    assert (app / "locales").stat().st_mode & 0o777 == 0o755
+    assert (app / "link").is_symlink()
+
+
+def test_after_pack_hook_runs_for_linux_and_mac_but_not_windows(tmp_path: Path) -> None:
+    if os.name == "nt":
+        return
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "gofer-flow").write_text("")
+    os.chmod(app / "gofer-flow", 0o777)
+    script = (
+        "const [hook, root] = process.argv.slice(1);"
+        "require(hook)({ electronPlatformName: process.env.PLATFORM, appOutDir: root })"
+        ".then(() => console.log((require('fs').statSync(root + '/gofer-flow').mode & 0o777)"
+        ".toString(8)));"
+    )
+    results = {}
+    for platform in ("win32", "linux", "darwin"):
+        os.chmod(app / "gofer-flow", 0o777)
+        result = _run(
+            ["node", "-e", script, str(AFTER_PACK), str(app)],
+            cwd=tmp_path,
+            env={**os.environ, "PLATFORM": platform},
+        )
+        assert result.returncode == 0, result.stderr
+        results[platform] = result.stdout.split()[-1]
+    assert results == {"win32": "777", "linux": "755", "darwin": "755"}

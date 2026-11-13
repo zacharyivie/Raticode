@@ -31,7 +31,7 @@ settings_app = typer.Typer(
 memories_app = typer.Typer(help="List and change what Rem remembers.", no_args_is_help=True)
 tasks_app = typer.Typer(help="Rem's tasks: list, create, edit, run and wait.", no_args_is_help=True)
 runs_app = typer.Typer(
-    help="One run of a Rem task: show, cancel, acknowledge.", no_args_is_help=True
+    help="One run of a Rem task: show, pause, resume, cancel, acknowledge.", no_args_is_help=True
 )
 thread_app = typer.Typer(help="A Rem task's work thread.", no_args_is_help=True)
 
@@ -491,6 +491,14 @@ def _needs_user(task: dict[str, Any]) -> bool:
     return run.get("needs_user") is True
 
 
+def _sleep(run: dict[str, Any]) -> dict[str, Any] | None:
+    """A run's worker sleep while it is parked (rem_home_sleep), else None."""
+    record = run.get("sleep")
+    if run.get("state") != "queued" or not isinstance(record, dict) or not record.get("asleep"):
+        return None
+    return record
+
+
 def _task_line(task: dict[str, Any]) -> str:
     run = task.get("active_run") or task.get("last_run") or {}
     waiting = task.get("dependency") or {}
@@ -499,6 +507,15 @@ def _task_line(task: dict[str, Any]) -> str:
     flag = " (needs you)" if _needs_user(task) else ""
     if waiting:
         flag += f" - {waiting.get('reason', '')}"
+    asleep = _sleep(run)
+    if asleep:
+        state = "sleeping"
+        until = str(asleep.get("until") or "")[11:16]
+        flag += (
+            f" - waiting for {asleep.get('waiting_for') or 'an outside event'}"
+            + (f", next check {until} UTC" if until else "")
+            + f", woke {int(asleep.get('wakes') or 0)} times"
+        )
     return f"{task['id']}  {state:<11} {task.get('type', ''):<9} {task.get('title', '')}{flag}"
 
 
@@ -767,6 +784,34 @@ def tasks_wait(
     backend.run("rem tasks wait", output, (endpoint, token_file, data_dir), body)
 
 
+@tasks_app.command("wake")
+def tasks_wake(
+    task_id: str = typer.Argument(...),
+    request: opts.RequestId = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Wake a task's sleeping run now, without waiting out its sleep."""
+    identity = backend.request_id(request)
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        run = _task(client, task_id).get("active_run") or {}
+        if not _sleep(run):
+            raise CliError(
+                f"Rem task {task_id} isn't sleeping.", code="conflict", exit_code=ExitCode.CONFLICT
+            )
+        changed = client.post(
+            f"/rem/runs/{backend.segment(run['id'])}/wake", {}, request_id=identity
+        )
+        return CommandResult(data=changed, text=f"Woke task {task_id}; it resumes in its thread.")
+
+    backend.run(
+        "rem tasks wake", output, (endpoint, token_file, data_dir), body, request_id=identity
+    )
+
+
 @tasks_app.command("pause")
 def tasks_pause(
     task_id: str = typer.Argument(...),
@@ -777,7 +822,7 @@ def tasks_pause(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Pause a task's schedule."""
+    """Pause a task's schedule. To pause a run that is going, use `rem runs pause`."""
     identity = backend.request_id(request)
 
     def body(client: ApiClient, out: Output) -> CommandResult:
@@ -803,7 +848,7 @@ def tasks_resume(
     token_file: opts.TokenFile = None,
     data_dir: opts.DataDir = None,
 ) -> None:
-    """Resume a paused task, as the app's Resume button does."""
+    """Turn a paused schedule back on. To resume a paused run, use `rem runs resume`."""
     identity = backend.request_id(request)
 
     def body(client: ApiClient, out: Output) -> CommandResult:
@@ -897,6 +942,34 @@ def runs_cancel(
     _run_action("rem runs cancel", run_id, "cancel", request, output, connection)
 
 
+@runs_app.command("pause")
+def runs_pause(
+    run_id: str = typer.Argument(...),
+    request: opts.RequestId = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Pause a running run: its turn stops, its thread and worktree stay, its slot frees up."""
+    connection = (endpoint, token_file, data_dir)
+    _run_action("rem runs pause", run_id, "pause", request, output, connection)
+
+
+@runs_app.command("resume")
+def runs_resume(
+    run_id: str = typer.Argument(...),
+    request: opts.RequestId = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Resume a paused run in the same thread, with what it already did."""
+    connection = (endpoint, token_file, data_dir)
+    _run_action("rem runs resume", run_id, "resume", request, output, connection)
+
+
 @runs_app.command("acknowledge")
 def runs_acknowledge(
     run_id: str = typer.Argument(...),
@@ -923,6 +996,20 @@ def runs_retry_review(
     """Retry a run's interrupted independent review."""
     connection = (endpoint, token_file, data_dir)
     _run_action("rem runs retry-review", run_id, "retry_review", request, output, connection)
+
+
+@runs_app.command("wake")
+def runs_wake(
+    run_id: str = typer.Argument(...),
+    request: opts.RequestId = None,
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Wake a sleeping run now; its worker resumes in the same thread."""
+    connection = (endpoint, token_file, data_dir)
+    _run_action("rem runs wake", run_id, "wake", request, output, connection)
 
 
 @thread_app.command("show")

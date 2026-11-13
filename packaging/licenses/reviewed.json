@@ -220,9 +220,9 @@
       "license": "MIT",
       "version": "1.4.0"
     },
-    "lucide-react@0.468.0": {
+    "lucide-react@1.70.0": {
       "license": "ISC",
-      "version": "0.468.0"
+      "version": "1.70.0"
     },
     "markdown-table@3.0.4": {
       "license": "MIT",
@@ -642,10 +642,6 @@
       "license": "BSD-3-Clause",
       "version": "2026.9.0"
     },
-    "greenlet": {
-      "license": "MIT AND PSF-2.0",
-      "version": "3.5.1"
-    },
     "h11": {
       "license": "MIT",
       "version": "0.16.0"
@@ -716,7 +712,7 @@
     },
     "mypy": {
       "license": "MIT",
-      "version": "2.1.0"
+      "version": "2.4.1"
     },
     "mypy-extensions": {
       "license": "MIT",
@@ -812,7 +808,7 @@
     },
     "pydantic-settings": {
       "license": "MIT",
-      "version": "2.16.1"
+      "version": "2.16.2"
     },
     "pygments": {
       "license": "BSD-2-Clause",
@@ -820,11 +816,11 @@
     },
     "pyinstaller": {
       "license": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)",
-      "version": "6.21.0"
+      "version": "6.22.3"
     },
     "pyinstaller-hooks-contrib": {
       "license": "License :: OSI Approved :: Apache Software License; License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
-      "version": "2026.6"
+      "version": "2026.10"
     },
     "pylatexenc": {
       "license": "MIT",
@@ -844,7 +840,7 @@
     },
     "pytest-asyncio": {
       "license": "Apache-2.0",
-      "version": "1.4.0"
+      "version": "1.4.1.post1"
     },
     "pytest-cov": {
       "license": "MIT",
@@ -904,7 +900,7 @@
     },
     "sqlalchemy": {
       "license": "MIT",
-      "version": "2.0.50"
+      "version": "2.1.8"
     },
     "srt": {
       "license": "MIT",

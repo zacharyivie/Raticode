@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, EyeOff, Plus } from "lucide-react";
-import { MENU_ITEM_CLASS, usePopupMenu } from "./BrowserPanels.jsx";
-import { WEB_BROWSER_OPTIONS, engineBadge, engineLabel, webBrowserEngine } from "../lib/browserEngines.js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { EyeOff, Plus, X } from "lucide-react";
+import { engineBadge, engineLabel, webBrowserEngine } from "../lib/browserEngines.js";
+import { browserGroupHasNewTab } from "../lib/browserTabs.js";
 
 // Colors that tell the browsers apart at a glance; the badge's text and label
 // name the browser, so color is never the only cue.
@@ -12,6 +12,8 @@ const BADGE_TONES = {
   chrome: "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
   edge: "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-200",
 };
+
+const FOCUS = "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand";
 
 // The small label on a web tab naming the browser it runs in.
 export function BrowserEngineBadge({ engine }) {
@@ -33,98 +35,152 @@ export function engineUnavailableReason(engine, engines = null, gecko = null) {
   if (engine === "gecko") {
     if (!gecko) return "";
     if (gecko.problem) return gecko.problem;
-    if (!gecko.executable) return "Install Firefox to use Raticode (gecko)";
+    if (!gecko.executable) return "Install Firefox to use Raticode (gecko).";
     return "";
   }
   const status = engines?.[engine];
   if (!status) return "";
-  return status.available ? "" : `Install ${engineLabel(engine)} to open tabs in it`;
+  return status.available ? "" : `${engineLabel(engine)} isn't installed. Install it to open tabs in it.`;
 }
 
-// New tab in the default browser, and an arrow to pick another browser or a
-// private tab. The default is Settings > Browser > Default browser for new tabs.
-export function NewBrowserTabButton({ defaultEngine = "raticode", onNewTab }) {
-  const [open, setOpen] = useState(false);
-  const defaultValue = webBrowserEngine(defaultEngine);
+// Which browsers are installed, asked again whenever refresh is called.
+export function useBrowserEngineStatus(enabled = true) {
+  const [engines, setEngines] = useState(null);
+  const [gecko, setGecko] = useState(null);
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  const refresh = useCallback(() => {
+    const bridge = typeof window === "undefined" ? null : window.goferBrowser;
+    if (!bridge) return;
+    void bridge.library?.("engine-status")?.then((status) => { if (mounted.current) setEngines(status || null); })?.catch?.(() => {});
+    void bridge.gecko?.("status")?.then((status) => { if (mounted.current) setGecko(status || null); })?.catch?.(() => {});
+  }, []);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    refresh();
+    const unsubscribe = window.goferBrowser?.onGecko?.((next) => { if (mounted.current) setGecko(next || null); });
+    return () => unsubscribe?.();
+  }, [enabled, refresh]);
+  const reasonFor = useCallback((engine) => engineUnavailableReason(engine, engines, gecko), [engines, gecko]);
+  return { engines, gecko, reasonFor, refresh };
+}
+
+// The + after a browser's tabs: one more tab in that browser.
+export function BrowserGroupNewTab({ group, onNewTab }) {
+  if (!browserGroupHasNewTab(group)) return null;
+  const label = group.private ? "New private tab" : `New ${engineLabel(group.engine)} tab`;
   return (
-    <div className="relative flex shrink-0 items-center border-l border-line">
+    <button
+      aria-label={label}
+      className={`grid h-9 w-7 shrink-0 place-items-center border-r border-line text-muted hover:bg-white hover:text-ink ${FOCUS}`}
+      data-browser-group-new-tab={group.key}
+      title={label}
+      type="button"
+      onClick={() => onNewTab?.(group)}
+    ><Plus aria-hidden="true" size={13} /></button>
+  );
+}
+
+// After the last group: start a tab in a browser that has none yet. It opens
+// in the tab bar itself rather than as a menu over the page, because Raticode
+// (gecko)'s window would have to step aside for anything drawn over it.
+// inside lists browsers that already have their one tab, where a choice opens
+// a tab inside that tab's own window (Raticode (gecko)).
+export function BrowserFamilyChooser({ choices = [], inside = [], offerPrivate = true, reasonFor = () => "", onOpen, onChoose }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const toggleRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const outside = (event) => { if (!rootRef.current?.contains(event.target)) setOpen(false); };
+    window.addEventListener("pointerdown", outside);
+    return () => window.removeEventListener("pointerdown", outside);
+  }, [open]);
+  useEffect(() => {
+    if (open) rootRef.current?.querySelector("[data-browser-family]")?.focus?.();
+  }, [open]);
+  if (!choices.length && !offerPrivate) return null;
+  function close(restoreFocus) {
+    setOpen(false);
+    if (restoreFocus) toggleRef.current?.focus?.();
+  }
+  return (
+    <div
+      ref={rootRef}
+      className="flex h-9 max-w-full shrink-0 items-center"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) { event.preventDefault(); event.stopPropagation(); close(true); return; }
+        if (!open || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+        const buttons = [...rootRef.current.querySelectorAll("[data-browser-family]")];
+        const index = buttons.indexOf(document.activeElement);
+        if (index < 0) return;
+        event.preventDefault();
+        buttons[(index + (event.key === "ArrowRight" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
+      }}
+    >
       <button
-        aria-label={`New tab in ${engineLabel(defaultValue)}`}
-        className="grid h-9 w-8 place-items-center text-muted hover:bg-white hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand"
-        data-testid="browser-new-tab"
-        title={`New tab in ${engineLabel(defaultValue)}`}
-        type="button"
-        onClick={() => onNewTab?.({ engine: defaultValue })}
-      ><Plus size={14} /></button>
-      <button
+        ref={toggleRef}
         aria-expanded={open}
-        aria-haspopup="menu"
-        aria-label="Choose a browser for a new tab"
-        className="grid h-9 w-5 place-items-center text-muted hover:bg-white hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand"
-        data-testid="browser-new-tab-menu"
-        title="Choose a browser for a new tab"
+        aria-label={open ? "Close the browser choices" : "Open a tab in another browser"}
+        className={`flex h-9 shrink-0 items-center gap-1 px-2 text-[11px] text-muted hover:bg-white hover:text-ink ${FOCUS}`}
+        data-testid="browser-family-chooser"
+        title={open ? "Close" : "Open a tab in another browser"}
         type="button"
-        onClick={() => setOpen((value) => !value)}
-      ><ChevronDown size={12} /></button>
-      {open ? <NewTabMenu defaultEngine={defaultValue} onClose={() => setOpen(false)} onNewTab={onNewTab} /> : null}
+        onClick={() => { if (!open) onOpen?.(); setOpen((value) => !value); }}
+      >{open ? <X aria-hidden="true" size={12} /> : <><Plus aria-hidden="true" size={13} /><span>Browser</span></>}</button>
+      {open ? (
+        <div aria-label="Open a tab in" className="tab-strip-scrollbar flex h-9 min-w-0 items-center gap-1 overflow-x-auto pr-2" role="group">
+          {choices.map((engine) => {
+            const reason = reasonFor(engine);
+            const action = inside.includes(engine) ? `New tab inside ${engineLabel(engine)}'s Firefox window` : `New ${engineLabel(engine)} tab`;
+            return (
+              <button
+                key={engine}
+                aria-disabled={reason ? "true" : undefined}
+                aria-label={reason ? `${engineLabel(engine)}: ${reason}` : action}
+                className={`flex h-7 shrink-0 items-center gap-1 rounded border border-line bg-white px-1.5 text-[11px] text-ink hover:bg-slate-50 ${reason ? "opacity-50" : ""} ${FOCUS}`}
+                data-browser-family={engine}
+                title={reason || action}
+                type="button"
+                onClick={() => { setOpen(false); onChoose?.({ engine }); }}
+              >
+                <BrowserEngineBadge engine={engine} />
+                <span>{engineLabel(engine)}</span>
+              </button>
+            );
+          })}
+          {offerPrivate ? (
+            <button
+              aria-label="New private tab"
+              className={`flex h-7 shrink-0 items-center gap-1 rounded border border-line bg-white px-1.5 text-[11px] text-ink hover:bg-slate-50 ${FOCUS}`}
+              data-browser-family="private"
+              title="New private tab, in Raticode (chromium)"
+              type="button"
+              onClick={() => { setOpen(false); onChoose?.({ engine: "raticode", private: true }); }}
+            ><EyeOff aria-hidden="true" className="text-muted" size={11} /><span>Private</span></button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function NewTabMenu({ defaultEngine, onClose, onNewTab }) {
-  const menuRef = useRef(null);
-  const [engines, setEngines] = useState(null);
-  const [gecko, setGecko] = useState(null);
-  const handleKeyDown = usePopupMenu(menuRef, (options) => {
-    if (options?.restoreFocus) menuRef.current?.parentElement?.querySelector("button[aria-haspopup]")?.focus();
-    onClose();
-  }, { includeParent: true });
+// A line under the tab bar, so it never covers a page.
+export function BrowserTabNotice({ notice, onDismiss }) {
   useEffect(() => {
-    const bridge = window.goferBrowser;
-    let current = true;
-    void bridge?.library?.("engine-status").then((status) => { if (current) setEngines(status || null); }).catch(() => {});
-    void bridge?.gecko?.("status").then((status) => { if (current) setGecko(status || null); }).catch(() => {});
-    return () => { current = false; };
-  }, []);
-  function choose(options) {
-    onClose();
-    onNewTab?.(options);
-  }
+    if (!notice) return undefined;
+    const timer = window.setTimeout(() => onDismiss?.(), notice.tone === "error" ? 12000 : 8000);
+    return () => window.clearTimeout(timer);
+  }, [notice, onDismiss]);
+  if (!notice) return null;
   return (
     <div
-      ref={menuRef}
-      aria-label="New tab in"
-      className="absolute right-0 top-9 z-50 w-60 rounded-md border border-line bg-white py-1 text-xs text-ink shadow-lg"
-      role="menu"
-      onKeyDown={handleKeyDown}
+      className={`flex min-h-7 w-full items-center gap-2 border-t border-line px-3 py-1 text-[11px] ${notice.tone === "error" ? "bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-100" : "bg-white text-ink"}`}
+      data-testid="browser-tab-notice"
+      role={notice.tone === "error" ? "alert" : "status"}
     >
-      <p className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">New tab in</p>
-      {WEB_BROWSER_OPTIONS.map(([value, label]) => {
-        const reason = engineUnavailableReason(value, engines, gecko);
-        return (
-          <button
-            key={value}
-            className={MENU_ITEM_CLASS}
-            data-new-tab-engine={value}
-            disabled={Boolean(reason)}
-            role="menuitem"
-            tabIndex={-1}
-            title={reason || (value === "gecko" ? "Firefox's window inside Raticode. More Gecko tabs open inside it." : undefined)}
-            type="button"
-            onClick={() => choose({ engine: value })}
-          >
-            <BrowserEngineBadge engine={value} />
-            <span className="flex-1">{label}</span>
-            {value === defaultEngine ? <span className="flex items-center gap-0.5 text-[10px] text-muted"><Check aria-hidden="true" size={10} />Default</span> : null}
-          </button>
-        );
-      })}
-      <div className="my-1 border-t border-line" role="separator" />
-      <button className={MENU_ITEM_CLASS} role="menuitem" tabIndex={-1} type="button" onClick={() => choose({ engine: "raticode", private: true })}>
-        <EyeOff aria-hidden="true" className="shrink-0 text-muted" size={12} />
-        <span className="flex-1">New private tab</span>
-        <span className="text-[10px] text-muted">Raticode (chromium)</span>
-      </button>
+      <span className="min-w-0 flex-1">{notice.text}</span>
+      <button aria-label="Dismiss" className={`grid h-5 w-5 shrink-0 place-items-center rounded text-muted hover:bg-slate-100 hover:text-ink ${FOCUS}`} type="button" onClick={() => onDismiss?.()}><X aria-hidden="true" size={11} /></button>
     </div>
   );
 }

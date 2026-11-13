@@ -4,13 +4,19 @@ import { withBase } from 'vitepress'
 import MazeBackdrop from './MazeBackdrop.vue'
 import HeroScene from './HeroScene.vue'
 import { usePlatform } from './usePlatform'
-import { assetUrl, desktopPlatforms, desktopRelease, releaseUrl } from '../../../../data/releases'
+import { assetUrl, desktopPlatforms, desktopRelease, mobileApk, mobileAssetUrl, releaseUrl } from '../../../../data/releases'
 
-const { os } = usePlatform()
+const { os, android } = usePlatform()
 
 const detected = computed(() => desktopPlatforms.find((platform) => platform.os === os.value) ?? null)
-const primaryHref = computed(() => (detected.value ? assetUrl(detected.value.primary.assetName) : '#download'))
-const primaryLabel = computed(() => (detected.value ? `Download for ${detected.value.name}` : 'Download Raticode'))
+const primaryHref = computed(() => {
+  if (android.value) return mobileAssetUrl(mobileApk.assetName)
+  return detected.value ? assetUrl(detected.value.primary.assetName) : '#download'
+})
+const primaryLabel = computed(() => {
+  if (android.value) return 'Download for Android'
+  return detected.value ? `Download for ${detected.value.name}` : 'Download Raticode'
+})
 </script>
 
 <template>
@@ -31,9 +37,8 @@ const primaryLabel = computed(() => (detected.value ? `Download for ${detected.v
       </h1>
 
       <p class="hero-lede">
-        Raticode turns the coding work you keep re-prompting into workflows. Wire shell commands, scripts,
-        HTTP calls and AI agents together with real branches, loops and reviews. Design them with Rem, run
-        them on your machine, and wake up to finished work.
+        Turn the coding work you keep re-prompting into workflows. Rem drafts them, you see every step, and
+        they run on your machine.
       </p>
 
       <div class="hero-actions">
@@ -55,7 +60,7 @@ const primaryLabel = computed(() => (detected.value ? `Download for ${detected.v
         <span class="dot" aria-hidden="true" />
         <span>No account required</span>
         <span class="dot" aria-hidden="true" />
-        <span class="soon">Mobile coming soon</span>
+        <a class="mobile-link" href="#download">Android app</a>
       </p>
 
       <div class="hero-stage">
@@ -145,8 +150,8 @@ const primaryLabel = computed(() => (detected.value ? `Download for ${detected.v
   font-family: var(--rc-font-display);
   font-size: clamp(3rem, 9.4vw, 7.4rem);
   font-weight: 800;
-  line-height: 0.92;
-  letter-spacing: -0.055em;
+  line-height: 1;
+  letter-spacing: -0.03em;
   color: var(--rc-ivory);
   text-shadow: 0 0 80px rgba(143, 130, 255, 0.35);
   animation: rise 1s 0.08s cubic-bezier(0.2, 0.8, 0.2, 1) both;
@@ -154,16 +159,35 @@ const primaryLabel = computed(() => (detected.value ? `Download for ${detected.v
 
 .hero-title em {
   font-style: normal;
-  background: linear-gradient(92deg, #b9b1ff 0%, #8f82ff 35%, #4ff0ff 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  /* Solid fallback for browsers that drop gradient text. */
+  color: #b9b1ff;
   text-shadow: none;
-  filter: drop-shadow(0 0 30px rgba(79, 240, 255, 0.35));
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .hero-title em {
+    /* Light enough to read on the maze, but not so pale that Chromium's forced dark mode
+       treats the first stop as a light background and darkens it (#d6d0ff was). */
+    background: linear-gradient(92deg, #b9b1ff 0%, #a99fff 40%, #4ff0ff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    filter: drop-shadow(0 0 30px rgba(79, 240, 255, 0.35));
+  }
+}
+
+@media (forced-colors: active) {
+  .hero-title em {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: CanvasText;
+    filter: none;
+  }
 }
 
 .hero-lede {
-  max-width: 700px;
+  max-width: 640px;
   margin: 30px 0 0;
   font-size: clamp(1.06rem, 1.7vw, 1.28rem);
   line-height: 1.6;
@@ -207,14 +231,19 @@ const primaryLabel = computed(() => (detected.value ? `Download for ${detected.v
   background: #5d587d;
 }
 
-.hero-meta .soon {
+.hero-meta .mobile-link {
   color: var(--rc-amber);
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 182, 72, 0.4);
+  text-underline-offset: 3px;
 }
 
 .hero-stage {
+  /* Rem sits above the preview, so the gap is always taller than the sprite (640/550 aspect). */
+  --rem-w: clamp(76px, 9vw, 116px);
   position: relative;
   width: 100%;
-  margin-top: clamp(72px, 8vw, 104px);
+  margin-top: calc(var(--rem-w) * 1.164 + 16px);
   animation: rise-stage 1.4s 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
@@ -233,9 +262,10 @@ const primaryLabel = computed(() => (detected.value ? `Download for ${detected.v
   z-index: 2;
   left: 3%;
   top: 0;
-  width: clamp(76px, 9vw, 116px);
+  width: var(--rem-w);
   height: auto;
-  transform: translateY(-95%);
+  /* Sits on the preview's top edge without covering the window chrome. */
+  transform: translateY(-100%);
   filter: drop-shadow(0 10px 30px rgba(79, 240, 255, 0.25));
   pointer-events: none;
 }
@@ -262,10 +292,6 @@ const primaryLabel = computed(() => (detected.value ? `Download for ${detected.v
   .hero-actions {
     flex-direction: column;
     align-self: stretch;
-  }
-
-  .hero-stage {
-    margin-top: 104px;
   }
 
   .stage-rem {

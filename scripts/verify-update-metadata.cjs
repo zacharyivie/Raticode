@@ -33,6 +33,17 @@ function verifyMetadata(root, version, platform) {
   }
   for (const file of doc.files) verify(file.url, file.sha512, file.size);
   if (doc.path || doc.sha512) verify(doc.path, doc.sha512);
+  if (platform === 'darwin') {
+    // Squirrel.Mac installs only from the zip: electron-updater picks the zip entry and
+    // downloads it in pieces using its blockmap. A DMG-only feed can't update anything.
+    const zip = doc.files.find(file => /\.zip$/.test(file.url));
+    if (!zip || doc.path !== zip.url || doc.sha512 !== zip.sha512) {
+      throw new Error(`${metadata} must list the app's .zip and point path at it`);
+    }
+    if (!fs.existsSync(path.join(root, `${decodeURIComponent(zip.url)}.blockmap`))) {
+      throw new Error(`Missing blockmap for ${zip.url}`);
+    }
+  }
   return `${metadata}: all updater hashes match final ${version} packages.`;
 }
 

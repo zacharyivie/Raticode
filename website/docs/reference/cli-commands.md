@@ -254,6 +254,29 @@ Organizations through the running backend: read, configure, employees, work sche
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
+### Raticode org auto-mode
+
+*Backend: needs a running Raticode backend.* Show or set Auto mode, where Rem decides the organization's requests.
+
+- `ORGANIZATION_ID` (required)
+- `--on` / `--off`: Turn Auto mode on or off. Without either, show it, its stop reason and Rem's recent decisions.
+- `--yes`: Confirm what Auto mode allows. Needed with --on.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode org backlog-pulls
+
+*Backend: needs a running Raticode backend.* Show or set whether free workers pull accepted Backlog tickets into To do.
+
+- `ORGANIZATION_ID` (required)
+- `--on` / `--off`: Turn pulling on or off. Without either, show the setting.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
 ### Raticode org config
 
 *Backend: needs a running Raticode backend.* Write an organization's configuration file for editing and `org apply`.
@@ -1168,6 +1191,28 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
+### Raticode rem runs pause
+
+*Backend: needs a running Raticode backend.* Pause a running run: its turn stops, its thread and worktree stay, its slot frees up.
+
+- `RUN_ID` (required)
+- `--request-id` `STR`: Idempotency key sent as request_id. Only Rem messages, tasks, run controls and thread messages, and board ticket create and comment, deduplicate on it: reuse the ID when retrying those. Other endpoints ignore it. 'auto' generates one and prints it in the result.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode rem runs resume
+
+*Backend: needs a running Raticode backend.* Resume a paused run in the same thread, with what it already did.
+
+- `RUN_ID` (required)
+- `--request-id` `STR`: Idempotency key sent as request_id. Only Rem messages, tasks, run controls and thread messages, and board ticket create and comment, deduplicate on it: reuse the ID when retrying those. Other endpoints ignore it. 'auto' generates one and prints it in the result.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
 ### Raticode rem runs retry-review
 
 *Backend: needs a running Raticode backend.* Retry a run's interrupted independent review.
@@ -1184,6 +1229,17 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 *Backend: needs a running Raticode backend.* Show one run: state, result, criteria and whether it needs you.
 
 - `RUN_ID` (required)
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode rem runs wake
+
+*Backend: needs a running Raticode backend.* Wake a sleeping run now; its worker resumes in the same thread.
+
+- `RUN_ID` (required)
+- `--request-id` `STR`: Idempotency key sent as request_id. Only Rem messages, tasks, run controls and thread messages, and board ticket create and comment, deduplicate on it: reuse the ID when retrying those. Other endpoints ignore it. 'auto' generates one and prints it in the result.
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
@@ -1338,7 +1394,7 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 
 ### Raticode rem tasks pause
 
-*Backend: needs a running Raticode backend.* Pause a task's schedule.
+*Backend: needs a running Raticode backend.* Pause a task's schedule. To pause a run that is going, use `rem runs pause`.
 
 - `TASK_ID` (required)
 - `--cancel-current`: Also stop a run going
@@ -1350,7 +1406,7 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 
 ### Raticode rem tasks resume
 
-*Backend: needs a running Raticode backend.* Resume a paused task, as the app's Resume button does.
+*Backend: needs a running Raticode backend.* Turn a paused schedule back on. To resume a paused run, use `rem runs resume`.
 
 - `TASK_ID` (required)
 - `--expected-revision` `INT` (required): The task's revision from `show`
@@ -1390,6 +1446,17 @@ Rem from the command line. Chat, tasks, memories, alerts and settings go through
 - `TASK_ID` (required)
 - `--timeout` `STR`: Longest to wait, such as 30s, 5m or 1h30m.
 - `--interval` `FLOAT RANGE`: Seconds between polls.
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode rem tasks wake
+
+*Backend: needs a running Raticode backend.* Wake a task's sleeping run now, without waiting out its sleep.
+
+- `TASK_ID` (required)
+- `--request-id` `STR`: Idempotency key sent as request_id. Only Rem messages, tasks, run controls and thread messages, and board ticket create and comment, deduplicate on it: reuse the ID when retrying those. Other endpoints ignore it. 'auto' generates one and prints it in the result.
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
@@ -1532,6 +1599,24 @@ Rem's self-work: status, report and settings. Needs a running backend.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
 - `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
 
+### Raticode selfwork off
+
+*Backend: needs a running Raticode backend.* Turn self-work off. Work it already started keeps going; pause or stop it by run.
+
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode selfwork on
+
+*Backend: needs a running Raticode backend.* Turn self-work on, as telling Rem "turn on self-work" does. Other settings stay.
+
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
 ### Raticode selfwork report
 
 *Backend: needs a running Raticode backend.* Show the running report: tickets added and work done since you last looked.
@@ -1559,6 +1644,25 @@ Rem's self-work: status, report and settings. Needs a running backend.
 
 *Backend: needs a running Raticode backend.* Show whether self-work is on, what it's doing and its settings.
 
+- `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
+- `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
+- `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).
+- `--data-dir` `PATH`: Raticode data folder to discover the backend from. Defaults to RATICODE_DATA_DIR, GOFER_DATA_DIR, then the standard folder.
+
+### Raticode selfwork window
+
+*Backend: needs a running Raticode backend.* Run self-work for a stretch of time, end it at a time, or cancel a window.
+
+- `--until` `STR`: End time, 24-hour HH:MM
+- `--until-day` `STR`: today, tonight, tomorrow or YYYY-MM-DD for --until
+- `--from` `STR`: Start time, HH:MM; now if left out
+- `--from-day` `STR`: today, tonight, tomorrow or YYYY-MM-DD for --from
+- `--timezone` `STR`: IANA time zone, such as Asia/Irkutsk; this computer's if left out
+- `--until-running-done`: End when your tasks running now finish
+- `--then` `STR`: The switch after the window: restore, on or off
+- `--wait-for-idle`: Inside the window, still wait for 15 quiet minutes
+- `--stop`: End the self-work running now at --until, then leave it off
+- `--cancel` `STR`: Cancel or end this window ID
 - `--output` / `-o` / `--format` `json` / `ndjson` / `text`: json: one envelope on stdout. ndjson: one object per line. text: for people.
 - `--endpoint` `STR`: Backend URL on this computer (http://127.0.0.1:PORT) or unix:/path/to.sock. Defaults to RATICODE_URL, RATICODE_SOCKET, then &#60;data&#62;/headless/endpoint.json.
 - `--token-file` `PATH`: File holding the API token (mode 600). Defaults to RATICODE_TOKEN, RATICODE_TOKEN_FILE, then &#60;data&#62;/headless/owner-token (not in Rem worker sessions).

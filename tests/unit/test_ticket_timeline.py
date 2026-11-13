@@ -452,7 +452,8 @@ def test_organization_moves_get_entries_from_the_ticket_and_skip_routine_moves()
     activity.note_organization_transitions(org, {"o1": "in_progress"}, "employee:mira")
     entry = reviewed["comments"][-1]
     assert entry["kind"] == "status" and entry["title"] == "Work complete, moved to In review"
-    assert entry["body"] == "Ported it; 12 tests pass."
+    # The worker's report is the comment just above; the entry doesn't repeat it.
+    assert entry["body"] == ""
     # Polling the same state again adds nothing.
     activity.note_organization_transitions(org, {"o1": "in_review"}, "system")
     activity.note_organization_transitions(org, {"o1": "in_progress"}, "employee:mira")

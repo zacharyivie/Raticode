@@ -10,7 +10,7 @@ Run one command and use its exit status, standard output, and standard error in 
 
 ## When to use it
 
-Use this node for a short project check or a command whose complete invocation belongs in the workflow source. Prefer a script node when the operation is large enough to deserve its own file.
+Use it for a short check, or any command short enough to live in the workflow source. Once it grows big enough for its own file, use [shell-script](./shell-script.md) or [python-script](./python-script.md).
 
 ## Example
 
@@ -27,13 +27,15 @@ Node step:
   finish: pass
 ```
 
-The working directory defaults to the project root. The installed contract checks shell availability; the runtime selects the platform shell, including PowerShell on Windows. Keep portable commands portable, or document their platform requirement. A nonzero exit code fails the operation. Use `allow-fail: true` and a failure route for deliberate recovery.
-
-Bind text to `with.stdin` for standard input. Other bindings become uppercase environment variables, with structured values encoded as JSON. Do not insert untrusted values into a shell command through unchecked interpolation.
+- The working directory defaults to the project root.
+- The runtime picks the platform shell, which is PowerShell on Windows. Keep commands portable, or note which platform they need.
+- A nonzero exit code fails the node. For planned recovery, set `allow-fail: true` and add a failure route.
+- `with.stdin` supplies standard input. Other bindings become uppercase environment variables, with structured values encoded as JSON.
+- Never paste untrusted values into the command text unchecked.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -43,15 +45,15 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
 | `stdin` | string |
 
-Additional local bindings are supported. See [Inputs and bindings](../workflows/inputs.md) for delivery and type rules.
+You can bind other locals too. [Inputs and bindings](../workflows/inputs.md) covers delivery and types.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -59,12 +61,12 @@ Successful output fields use these exact selector names:
 | `stderr` | string |
 | `exit_code` | integer |
 
-For example, refer to `node.step.output.stdout` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.stdout`.
 
 ## Preflight and limits
 
-The shell and selected directory must be available. Validation does not run the command, inspect its eventual exit status, or restrict its side effects.
+Preflight checks that the shell and the working directory exist. Validation doesn't run the command, predict its exit status or limit what it does.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

@@ -37,6 +37,14 @@ internal class BrowserControlsMotion {
         settlesAt = maxOf(settlesAt, now + REVEAL_HOLD_MS)
     }
 
+    /**
+     * The page's area changed size: the keyboard opened or closed, Raticode's bottom bar stepped aside, the phone turned.
+     * The page's scroll position follows on its own (at the end of a page it moves up by what the page gained), and the
+     * browser scrolls a focused field into view. Neither is the user scrolling, and unfolding the controls then would push
+     * the field the browser just placed down behind the keyboard.
+     */
+    fun resized(now: Long) { lastY = null; travelled = 0; settlesAt = maxOf(settlesAt, now + RESIZE_SETTLE_MS) }
+
     /** Another page or tab is showing: its scroll position is unrelated to the last one. */
     fun pageChanged(now: Long) { lastY = null; travelled = 0; show(now) }
 
@@ -67,6 +75,8 @@ internal class BrowserControlsMotion {
         const val TOP_DP = 2
         const val SETTLE_MS = 350L
         const val REVEAL_HOLD_MS = 1_500L
+        /** Long enough for the keyboard's slide and the engine's scroll to the focused field that follows it. */
+        const val RESIZE_SETTLE_MS = 800L
         const val BUTTON_DP = 48
         const val MIN_ADDRESS_DP = 96
         private const val ROW_PADDING_DP = 8

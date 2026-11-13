@@ -240,6 +240,23 @@ def test_full_access_agents_need_confirmation_to_start(manager, tmp_path):
     assert any(e["kind"] == "full_access_confirmed" for e in run["events"])
 
 
+def test_full_access_started_by_rem_is_not_recorded_as_the_users_confirmation(manager, tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    swarm = manager.create(
+        root,
+        {
+            "name": "Fixture",
+            "agents": agents(provider="codex", permissionMode="danger-full-access"),
+        },
+    )
+    run = manager.start(root, swarm["id"], "Build", confirm_full_access=True, confirmed_by="rem")[
+        "run"
+    ]
+    confirmed = [e for e in run["events"] if e["kind"] == "full_access_confirmed"]
+    assert [e["actorId"] for e in confirmed] == ["rem"]
+
+
 def test_start_rejects_a_configuration_changed_since_review(manager, tmp_path):
     root = tmp_path / "project"
     sid = team(manager, root)

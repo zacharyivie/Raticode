@@ -148,9 +148,20 @@ class BrowserRulesTest {
         assertEquals("bashrc", BrowserRules.safeName(".bashrc"))
         assertEquals("download", BrowserRules.safeName("\u0000"))
         assertEquals("ab.txt", BrowserRules.safeName("a<|>b.txt"))
+        // Right-to-left and other invisible marks can't disguise an app as a PDF.
+        assertEquals("invoicefdp.apk", BrowserRules.safeName("invoice\u202Efdp.apk"))
+        assertEquals("ab.pdf", BrowserRules.safeName("a\u200E\u2066b\uFEFF.pdf\u2069"))
+        assertEquals("ab.txt", BrowserRules.safeName("a\u2028b.txt"))
+        assertEquals("résumé.pdf", BrowserRules.safeName("résumé.pdf"))
         val long = BrowserRules.safeName("x".repeat(300) + ".pdf")
         assertEquals(120, long.length); assertTrue(long.endsWith(".pdf"))
         assertEquals("1.5 MB", BrowserRules.size(1_572_864)); assertEquals("Unknown size", BrowserRules.size(-1))
+    }
+
+    /** A page can't swap a download or another app in under the user's finger while a question is open. */
+    @Test fun anOpenQuestionIsNeverReplaced() {
+        assertEquals("download", BrowserRules.nextQuestion(null, "download"))
+        assertEquals(null, BrowserRules.nextQuestion("alert", "download"))
     }
 
     @Test fun savedStateRoundTripsAndDropsAnythingButWebAddresses() {

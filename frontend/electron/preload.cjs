@@ -1,7 +1,6 @@
 const { contextBridge, ipcRenderer, webFrame, webUtils } = require("electron");
 
 const API_BASE_URL_ARG = "--gofer-api-base-url=";
-const API_TOKEN_ARG = "--gofer-api-token=";
 const BROWSER_PRELOAD_ARG = "--gofer-browser-preload=";
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8765";
 const LOCAL_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -25,11 +24,6 @@ function readApiBaseUrl() {
   return isSafeLocalHttpUrl(value) ? value : DEFAULT_API_BASE_URL;
 }
 
-function readApiToken() {
-  const arg = process.argv.find((value) => value.startsWith(API_TOKEN_ARG));
-  return arg ? arg.slice(API_TOKEN_ARG.length) : "";
-}
-
 function readBrowserPreloadPath() {
   const arg = process.argv.find((value) => value.startsWith(BROWSER_PRELOAD_ARG));
   const value = arg ? arg.slice(BROWSER_PRELOAD_ARG.length) : "";
@@ -49,7 +43,6 @@ function isSafeLocalHttpUrl(value) {
 }
 
 contextBridge.exposeInMainWorld("goferApiBaseUrl", readApiBaseUrl());
-contextBridge.exposeInMainWorld("goferApiToken", readApiToken());
 const pathGrants = new Map();
 
 function rememberPathGrant(payload) {
@@ -284,6 +277,8 @@ contextBridge.exposeInMainWorld("goferBrowser", {
   openExternal: (id) => browserAction(id, "open-external"),
   reload: (id) => browserAction(id, "reload"),
   reloadHard: (id) => browserAction(id, "reload", { hard: true }),
+  // A page that stopped answering: its stuck page process ends, then it reloads.
+  recover: (id) => browserAction(id, "reload", { recover: true }),
   setPreferences: (id, preferences = {}) => browserAction(id, "set-preferences", {
     ...(preferences.applicationKeybindings
       ? { applicationKeybindings: browserKeybindings(preferences.applicationKeybindings) }

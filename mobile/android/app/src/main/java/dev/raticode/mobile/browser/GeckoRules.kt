@@ -21,6 +21,11 @@ internal object GeckoRules {
     const val MAX_BOOKMARKS = 500
     const val MAX_CLOSED = 25
     private const val MAX_NAME = 40
+    /** Questions (dialogs, sign-ins, saves) that may wait at once; more are dismissed as if the user said no. */
+    const val MAX_WAITING_ASKS = 3
+
+    /** A page may ask only from the tab on screen, and only while few questions wait. */
+    fun mayAsk(activeTab: Boolean, waiting: Int): Boolean = activeTab && waiting < MAX_WAITING_ASKS
 
     /** [private] tabs live only in memory: [encode] leaves them out of everything written to storage. */
     data class Tab(val id: String, val url: String = BrowserRules.HOME, val title: String = "", val profile: String = DEFAULT_PROFILE, val private: Boolean = false)
@@ -164,6 +169,12 @@ internal object GeckoRules {
         uri.scheme == "https" && uri.host == AMO && uri.userInfo == null && uri.port == -1 && uri.path.endsWith(".xpi")
     }.getOrDefault(false)
 
+    /**
+     * Whether a tab's saved back/forward list can reopen it: its current page is a web page. A page process that ended
+     * can leave a list that is empty or stops at about:blank, which would reopen the tab blank (see TabRecovery).
+     */
+    fun restorable(currentUri: String?): Boolean = currentUri != null && BrowserAddress.isWeb(currentUri)
+
     /** Whether an address is an extension file offered by a page, wherever it came from. */
     fun looksLikeExtension(url: String): Boolean = runCatching { URI(url).path.orEmpty().endsWith(".xpi", ignoreCase = true) }.getOrDefault(false)
 
@@ -202,6 +213,41 @@ internal object GeckoRules {
         -100 -> "Installation cancelled."
         else -> "The extension couldn't be installed (error $code)."
     }
+
+    /** What tapping Open on an installed extension does. */
+    sealed interface ExtensionOpen {
+        /** Press its toolbar button: Gecko shows the button's popup, or tells the extension it was clicked. */
+        data object Button : ExtensionOpen
+        /** Its settings page, in a new tab. */
+        data class Options(val url: String) : ExtensionOpen
+        /** Nothing opens; [message] says why, in plain words. */
+        data class Refused(val message: String) : ExtensionOpen
+    }
+
+    /**
+     * What Open does for an extension. [button] is whether it has a toolbar button, and [buttonOn] whether the button is
+     * on for the page in view (null when the extension didn't say). [privateTab] is the tab in view: extensions don't run
+     * in private tabs, so a button press there is refused. Its settings page has no page to act on, so it still opens, in a
+     * regular tab, as the Settings button does.
+     */
+    fun extensionOpen(name: String, enabled: Boolean, button: Boolean, buttonOn: Boolean?, options: String?, privateTab: Boolean): ExtensionOpen = when {
+        !enabled -> ExtensionOpen.Refused("Turn $name on to open it.")
+        button && privateTab -> ExtensionOpen.Refused("Extensions don't run in private tabs. Switch to a regular tab to open $name.")
+        button && buttonOn != false -> ExtensionOpen.Button
+        options != null -> ExtensionOpen.Options(options)
+        button -> ExtensionOpen.Refused("$name's button is off on this page. Try it on another page.")
+        else -> ExtensionOpen.Refused("$name has nothing to open. It works on the pages you visit by itself.")
+    }
+
+    /** Shown when a button press opened no popup or tab: the extension handles the press itself, on the page in view. */
+    fun extensionActedOnPage(name: String) = "$name has no window to open. Its button works on the page you're viewing."
+
+    /**
+     * The tab Gecko's extensions should treat as the one in view, or null for none. Gecko keeps no idea of its own of which
+     * tab that is: without being told, a toolbar button press finds no tab and quietly does nothing. A private tab is never
+     * named, so extensions, which don't run in private tabs, learn nothing about it.
+     */
+    fun extensionTab(active: String?, private: Boolean, live: Boolean): String? = active?.takeIf { live && !private }
 
     /** Turns a Firefox bookmarks HTML export into links; only web addresses are kept. */
     fun parseBookmarks(html: String, profile: String): List<Link> =

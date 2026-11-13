@@ -501,6 +501,30 @@ export function cancelRemRun(task) {
   return command(() => request(`/runs/${encodeURIComponent(run.id)}/cancel`, { method: "POST", body: { request_id: requestId("run-cancel") } }), "Couldn't stop the run.");
 }
 
+// Pauses a run that is going: its turn stops, its thread and worktree stay, its slot frees up.
+export function pauseRemRun(task) {
+  const run = task.active_run;
+  if (!run) return Promise.resolve(false);
+  if (state.fixture) { localTask(task.id, { active_run: null, last_run: { ...run, state: "paused", paused_by: "user" } }); return Promise.resolve(true); }
+  return command(() => request(`/runs/${encodeURIComponent(run.id)}/pause`, { method: "POST", body: { request_id: requestId("run-pause") } }), "Couldn't pause the task.");
+}
+
+// Resumes a paused run in the same thread, with what it already did.
+export function resumeRemRun(task) {
+  const run = task.last_run;
+  if (run?.state !== "paused") return Promise.resolve(false);
+  if (state.fixture) { localTask(task.id, { active_run: { ...run, state: "queued", paused_by: undefined } }); return Promise.resolve(true); }
+  return command(() => request(`/runs/${encodeURIComponent(run.id)}/resume`, { method: "POST", body: { request_id: requestId("run-resume") } }), "Couldn't resume the task.");
+}
+
+// Wake now: a sleeping worker resumes in its own thread without waiting out its sleep.
+export function wakeRemRun(task) {
+  const run = task.active_run;
+  if (!run?.sleep?.asleep) return Promise.resolve(false);
+  if (state.fixture) { localTask(task.id, { active_run: { ...run, sleep: { ...run.sleep, asleep: false }, waiting_reason: "" } }); return Promise.resolve(true); }
+  return command(() => request(`/runs/${encodeURIComponent(run.id)}/wake`, { method: "POST", body: { request_id: requestId("run-wake") } }), "Couldn't wake the task.");
+}
+
 export function acknowledgeRemRun(task) {
   if (!task.last_run) return Promise.resolve(false);
   if (state.fixture) { localTask(task.id, { last_run: { ...task.last_run, acknowledged: true } }); return Promise.resolve(true); }

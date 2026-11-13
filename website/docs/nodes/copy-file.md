@@ -10,7 +10,7 @@ Copy a file, directory, or symlink to a reviewed destination.
 
 ## When to use it
 
-Use this node to preserve an original while producing a working copy or deliverable. For renaming without keeping the original, use move-file.
+Use it to make a working copy or deliverable and keep the original. To rename without keeping the original, use [move-file](./move-file.md).
 
 ## Example
 
@@ -28,13 +28,14 @@ Node step:
   finish: pass
 ```
 
-Create the source before preflight, or give the node `needs` on the step that creates it. Missing destination parents are created by default, but an existing destination is not overwritten by default. The output describes source, destination, and resource kind rather than returning file content.
-
-Review directory destinations carefully. Copying a directory is broader than copying one text file, and symlink behavior matters when a link points elsewhere.
+- Create the source before preflight, or add `needs` on the step that creates it.
+- By default the node creates missing parent folders and won't overwrite an existing destination.
+- Output describes the source, destination and resource kind. It doesn't return file content.
+- Check folder copies carefully. A folder copies much more than one file, and symlink settings matter when a link points elsewhere.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -45,9 +46,9 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -58,12 +59,12 @@ Successful output fields use these exact selector names:
 | `destination_directory` | string |
 | `path_kind` | `file`, `directory`, `symlink` |
 
-For example, refer to `node.step.output.source_path` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.source_path`.
 
 ## Preflight and limits
 
-The source must be readable and the destination must meet its write policy. When the node has `needs`, preflight skips the existence check because an upstream step may create the source earlier in the run; the node then reports a missing source when it runs. Parent/child containment and resource-type checks prevent invalid transfers; ordinary filesystem access remains subject to OS permissions.
+The source must be readable and the destination must fit its write settings. With `needs`, preflight skips the existence check, because an earlier step may create the source. A missing source then fails when the node runs. Checks on folder nesting and resource type block invalid copies. Everything else is up to the OS permissions.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

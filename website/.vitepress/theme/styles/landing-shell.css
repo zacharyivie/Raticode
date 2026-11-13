@@ -71,3 +71,8 @@
 .Layout.landing .VPNavBarMenuLink:hover {
   color: var(--rc-ivory);
 }
+
+/* Keep the document's own color scheme dark on the landing page, even when the docs were switched to light. */
+html:has(.Layout.landing) {
+  color-scheme: dark;
+}

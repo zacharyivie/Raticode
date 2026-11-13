@@ -25,7 +25,7 @@ class PageFilesTest {
         assertFalse(PageFiles.allowed("data:text/html,x", "http://chat.example.com/"))
         assertFalse(PageFiles.allowed("https://chat.example.com/a.html", "https://chat.example.com/"))
         assertEquals("chat.example.com", PageFiles.host("blob:https://chat.example.com/5c7b", "https://other.example/"))
-        assertEquals("chat.example.com", PageFiles.host("data:text/html,x", "https://www.chat.example.com/"))
+        assertEquals("a page on chat.example.com", PageFiles.host("data:text/html,x", "https://www.chat.example.com/"))
     }
 
     @Test fun geckoFollowsOnlyAPagesLinksToItsOwnFiles() {

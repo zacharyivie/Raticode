@@ -77,6 +77,10 @@ def receive(manager: Any, oid: str, rid: str, headers: Any, raw: bytes) -> dict[
             receipt.update(receipts[key])
             return {}
         instant = time.time()
+        # A signed delivery is only accepted within five minutes of its timestamp, so
+        # receipts older than a day can't catch a replay; drop them so they don't pile up.
+        for old in [k for k, r in receipts.items() if r.get("receivedEpoch", 0) < instant - 86400]:
+            del receipts[old]
         if sum(r.get("receivedEpoch", 0) > instant - 60 for r in receipts.values()) >= 60:
             raise ValueError("Webhook rate exceeded; retry later with the same delivery ID")
         routine = current["runtime"].get("routines", {}).get(rid)

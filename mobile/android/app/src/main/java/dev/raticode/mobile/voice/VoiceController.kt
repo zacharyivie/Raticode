@@ -25,9 +25,11 @@ import dev.raticode.mobile.live.RemMessage
 import dev.raticode.mobile.live.TidyResult
 import dev.raticode.mobile.live.VoiceTidy
 import dev.raticode.mobile.data.AttachPlan
+import dev.raticode.mobile.data.LongText
 import dev.raticode.mobile.ui.AttachNotice
 import dev.raticode.mobile.ui.ImportQueue
 import dev.raticode.mobile.ui.Picked
+import dev.raticode.mobile.ui.pickedText
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
@@ -97,6 +99,10 @@ class VoiceController internal constructor(private val app: Application) {
     var screenNote by mutableStateOf<String?>(null); private set
     /** Files attached to the next message: their upload IDs, in the same channel as Rem's chat. */
     var attachments by mutableStateOf(listOf<String>()); private set
+    /** Long spoken words going as a text file, by attachment ID, so a retry reuses the file instead of adding another. */
+    private var spokenFiles = mapOf<String, String>()
+    /** The words being sent went as a text file, so voice mode says so under their first words. */
+    var sentAsFile by mutableStateOf(false); private set
     internal var attachNotice by mutableStateOf<AttachNotice?>(null)
     /** Picked files still being read, one at a time, as in Rem's chat. */
     internal val importing = ImportQueue<Picked> { picked, done ->
@@ -106,6 +112,7 @@ class VoiceController internal constructor(private val app: Application) {
         client.importRemFile(picked.uri, picked.name, onFailed = { reason -> late.cancel(); attachNotice = AttachNotice(reason); finish() }) { id ->
             late.cancel()
             if (attachNotice?.text == AttachPlan.TOO_SLOW) attachNotice = null
+            picked.text?.let { spokenFiles = spokenFiles + (id to it) }
             attachments = (attachments + id).distinct().take(AttachPlan.MAX_FILES); finish()
         }
     }
@@ -531,7 +538,8 @@ class VoiceController internal constructor(private val app: Application) {
      * the box. Words the user hasn't seen are never sent untidied.
      */
     private fun tidied(base: String, result: TidyResult, editing: Boolean) {
-        val text = DictationText.join(base, result.text).take(VoiceLogic.MAX_CHARS)
+        // Not cut at Rem's message limit: words that long go to Rem as a text file when sent.
+        val text = DictationText.join(base, result.text).take(LongText.MAX_CHARS)
         val notice = VoiceTidy.notice(result)
         val sendNow = sendWhenDone && result.tidied && surfaces > 0
         sendWhenDone = false
@@ -553,8 +561,8 @@ class VoiceController internal constructor(private val app: Application) {
     private fun send(text: String, unlocked: Boolean, toRem: Boolean = false) {
         val words = VoiceLogic.outgoing(text) ?: if (attachments.isNotEmpty()) "" else return
         stopListening(); speaker?.stop(); sendWhenDone = false
-        // The user's own phone commands never go to the desktop. Rem's suggestions and messages with files are for Rem.
-        if (VoiceLogic.mayRunOnPhone(toRem, attachments.size)) commandFor(words)?.let { runCommand(words, it, unlocked); return }
+        // The user's own phone commands never go to the desktop. Rem's suggestions, messages with files and long text are for Rem.
+        if (VoiceLogic.mayRunOnPhone(toRem, attachments.size) && !VoiceLogic.asFile(words)) commandFor(words)?.let { runCommand(words, it, unlocked); return }
         if (!unlocked && locked()) { state = VoiceState.NeedsUnlock(words, toRem); return }
         turn?.cancel()
         state = VoiceState.Sending(words)
@@ -631,6 +639,7 @@ class VoiceController internal constructor(private val app: Application) {
     /** Takes a file off the message. One still uploading stops, so it doesn't hold up the next. */
     fun removeAttachment(id: String) {
         attachments = attachments - id
+        spokenFiles = spokenFiles - id
         val file = client.files.firstOrNull { it.id == id }
         if (file?.direction == "upload" && file.state in setOf("offered", "receiving")) client.cancelFile(id)
     }
@@ -758,6 +767,9 @@ class VoiceController internal constructor(private val app: Application) {
         if (call && effects.isEmergency(to.number)) {
             step(CommandStep.Launch(CommandPlan.fallback(true, to.number, ""), CommandPlan.EMERGENCY)); return
         }
+        if (!call && !effects.mayText()) {
+            step(CommandStep.Launch(CommandPlan.fallback(false, to.number, body), NOT_ASSISTANT_DRAFT)); return
+        }
         if (if (call) !effects.canCall() else !effects.canText()) { step(CommandStep.NeedsPermission(call, to.who, to.number, body)); return }
         val total = if (call) CommandPlan.CALL_MS else CommandPlan.TEXT_MS
         val countdown = CommandStep.Countdown(call, to.who, to.number, body, clock() + total, total)
@@ -838,6 +850,19 @@ class VoiceController internal constructor(private val app: Application) {
             DeskReadiness.CONTROL_OFF -> { state = VoiceState.Failed(text, CONTROL_OFF, true); return }
             else -> Unit
         }
+        // Long words go as a text file, with nothing else in the message; Rem reads the file like any text attachment.
+        // Offline, words that still fit in a message wait in the phone's queue as a message instead.
+        var body = text
+        sentAsFile = false
+        if (VoiceLogic.asFile(text) && !(text.length <= VoiceLogic.MAX_CHARS && !client.connected)) {
+            val reused = attachments.any { spokenFiles[it] == text }
+            val filesThread = (client.desktopViews["rem.home"] as? RemHome)?.filesThread != null
+            VoiceLogic.longProblem(text, if (reused) 1 else attachRoom, filesThread)?.let { state = VoiceState.Failed(text, it, true); return }
+            if (reused || (attachRoom > 0 && filesThread)) {
+                if (!attachSpoken(text)) { state = VoiceState.Failed(text, attachNotice?.text ?: LongText.FILE_FAILED, true); return }
+                body = ""; sentAsFile = true
+            }
+        }
         // Files go once they have all arrived on the desktop; one that stopped has to be dealt with first.
         val files = attachments
         if (files.isNotEmpty()) {
@@ -853,11 +878,11 @@ class VoiceController internal constructor(private val app: Application) {
         // The screen goes with this message only: if the user chose it, sharing is still allowed and it is recent.
         val shared = VoiceLogic.screenToSend(screen, shareScreen, VoicePrefs.screen(app), clock())
         forgetScreen()
-        client.sendRemMessage(text, files, onRequest = { queued.complete(it) }, screen = shared)
+        client.sendRemMessage(body, files, onRequest = { queued.complete(it) }, screen = shared)
         val request = withTimeoutOrNull(QUEUE_MS) { queued.await() }
         if (request == null) { state = VoiceState.Failed(text, NOT_QUEUED, true); return }
         // Queued with the message; the desktop keeps its own copies.
-        attachments = emptyList()
+        attachments = emptyList(); spokenFiles = emptyMap()
         state = VoiceState.Waiting(text, request)
         // Over Rem's chat the message and its reply show right behind; a second chat on top would only be in the way.
         // The message is already in the phone's encrypted queue, so closing can't lose it.
@@ -867,6 +892,20 @@ class VoiceController internal constructor(private val app: Application) {
             .first { (home, refusal) -> refusal?.first == request || VoiceLogic.reply(home, request) != null }
         if (refusal?.first == request) state = VoiceState.Failed(text, refusal.second, true)
         else replied(text, VoiceLogic.reply(home, request)!!, VoiceLogic.actions(home, request))
+    }
+
+    /**
+     * Attaches long spoken [text] as a text file, or finds the one a failed try already attached. True once it is
+     * attached; false when the phone couldn't write or read it, with the reason in [attachNotice].
+     */
+    private suspend fun attachSpoken(text: String): Boolean {
+        if (attachments.any { spokenFiles[it] == text }) return true
+        val picked = pickedText(app, text, LongText.Kind.SPOKEN) ?: run { attachNotice = AttachNotice(LongText.FILE_FAILED); return false }
+        attachNotice = null
+        importing.add(listOf(picked))
+        // The import queue always finishes an item, attached or not, within its own time limit.
+        snapshotFlow { importing.waiting.none { it === picked } }.first { it }
+        return attachments.any { spokenFiles[it] == text }
     }
 
     private fun replied(text: String, message: RemMessage, actions: PhoneActionList) {
@@ -900,6 +939,7 @@ class VoiceController internal constructor(private val app: Application) {
         /** How long a finished device command stays on screen before voice mode steps aside. */
         const val DONE_MS = 3000L
         const val CALL_CLOSE_MS = 600L
+        const val NOT_ASSISTANT_DRAFT = "Raticode sends texts itself only as the phone's assistant, so the message is open as a draft"
         const val CONNECT_MS = 25000L
         const val QUEUE_MS = 10000L
         const val IMPORT_MS = 45_000L

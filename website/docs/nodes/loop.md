@@ -10,7 +10,7 @@ Create runtime iterations from a count, rows, directory files, trigger events, o
 
 ## When to use it
 
-Use a loop when the work items are known only at runtime. The loop routes each iteration into its body; it is not a scheduler or an agent-specific mode.
+Use it when the work items are known only at runtime. The loop sends each iteration into its body. It is not a scheduler and not an agent mode.
 
 ## Example
 
@@ -35,9 +35,22 @@ Node record:
   needs: step
 ```
 
-`source.type` accepts `count`, `tabular`, `directory`, `trigger-events`, and `infinite`. Count defaults to one and allows zero. Tabular and directory sources require a path. Directory defaults to glob `*` and no content; trigger events can also opt into content.
+### Sources
 
-Every source defaults to one overlapping iteration and `fail-fast: false`. `source.max-concurrency` limits iterations, while the common node `max-concurrency` limits activations of an individual node. Both limits apply, and a body node's own limit also defaults to one. To run three iterations at once, set `max-concurrency: 3` on the loop source and on each body node; the compiler warns when a body node would hold a parallel loop back. Use limits appropriate for shared file writes.
+| `source.type` | Notes |
+| --- | --- |
+| `count` | Defaults to 1. Zero is allowed. |
+| `tabular` | Needs a path. |
+| `directory` | Needs a path. Defaults to glob `*` without file content. |
+| `trigger-events` | Can also include content. |
+| `infinite` | Needs a break, timeout or run limit. |
+
+### Concurrency
+
+- Every source defaults to one iteration at a time and `fail-fast: false`.
+- `source.max-concurrency` limits iterations. The shared node `max-concurrency` limits how often one node runs at once. Both apply, and a body node's own limit also defaults to 1.
+- To run three iterations at once, set `max-concurrency: 3` on the loop source and on each body node. The compiler warns when a body node would hold a parallel loop back.
+- Keep limits low for nodes that write the same files.
 
 ```rattish
 Node items:
@@ -52,13 +65,16 @@ Node work:
   max-concurrency: 3
 ```
 
-Bind from `node.step.output` inside the body, not from a `loop.*` alias. Iteration fields depend on the source: count items carry `index`; directory items include `path`, `name`, and `directory`, with `file_content` when requested. Refer to the compiled contract before assuming fields for other source types.
+### Iteration data
 
-Directory and tabular files are opened at activation, after upstream nodes. Zero matching files succeeds with zero body activations. Infinite work needs a break, timeout, or run limit.
+- Inside the body, bind from `node.step.output`, not a `loop.*` alias.
+- Fields depend on the source. Count items carry `index`. Directory items have `path`, `name` and `directory`, plus `file_content` when requested. For other sources, check the compiled contract first.
+- Directory and tabular files are opened when the loop starts, after upstream nodes finish.
+- Zero matching files succeeds with zero body runs.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -66,14 +82,14 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-The source contract returns an object; the runtime exposes iteration-specific data to body activations. Do not treat every source type as if it has the same fields.
+The source returns an object, and each body run gets its own iteration data. Source types don't all share the same fields.
 
 ## Preflight and limits
 
-Filesystem-backed sources require a path, but availability is checked when the loop activates. Source sizes and aggregate reads have runtime bounds. Read [Loops and fan-out](../workflows/loops.md) for lifecycle and concurrency details.
+File-based sources need a path, but the path is checked only when the loop starts. The runtime caps source size and total reads. [Loops and fan-out](../workflows/loops.md) covers the lifecycle and concurrency in detail.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

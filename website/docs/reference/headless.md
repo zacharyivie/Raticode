@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Headless backend
 
-`Raticode serve --headless` runs the Raticode backend with no desktop window, for servers, remote boxes and containers. Rem, tickets, Organizations, workflows and triggers keep working, and scripts on the same computer reach the backend's API with a token file.
+`Raticode serve --headless` runs the Raticode backend with no desktop window, on servers, remote boxes and containers. Rem, tickets, Organizations, workflows and triggers keep working. Scripts on the same computer reach the backend's API with a token file.
 
 ::: info New in 0.5.3
 Headless mode arrived in Raticode 0.5.3. Earlier versions have only `Raticode ui serve`, which needs the desktop window for Rem.
@@ -18,15 +18,15 @@ Headless mode arrived in Raticode 0.5.3. Earlier versions have only `Raticode ui
 Raticode serve --headless
 ```
 
-The backend listens on `127.0.0.1:8765`. Use `--port 0` to let the system choose a free port, and `--data-dir PATH` (or the `GOFER_DATA_DIR` environment variable) for a different data folder.
-
-Headless mode listens only on this computer, over TCP. It refuses `--host 0.0.0.0` or any other non-loopback address, and it can't listen on a Unix socket. To reach it from another machine, forward the port over SSH, for example `ssh -L 8765:127.0.0.1:8765 box`. Raticode has no remote listener or TLS yet.
-
-`Raticode serve` without `--headless` is the same as `Raticode ui serve`: the backend the desktop app starts.
+- It listens on `127.0.0.1:8765`. `--port 0` lets the system pick a free port.
+- `--data-dir PATH` (or the `GOFER_DATA_DIR` environment variable) uses a different data folder.
+- It listens only on this computer, over TCP. It refuses `--host 0.0.0.0` or any other non-loopback address, and it can't listen on a Unix socket.
+- To reach it from another machine, forward the port over SSH, for example `ssh -L 8765:127.0.0.1:8765 box`. Raticode has no remote listener or TLS yet.
+- `Raticode serve` without `--headless` is the same as `Raticode ui serve`, the backend the desktop app starts.
 
 ## Find the endpoint and token
 
-At startup, headless mode writes two files in `<data>/headless/`. On Linux and macOS the folder is readable only by your account (mode 700), and so are the files (mode 600):
+At startup, headless mode writes two files in `<data>/headless/`. On Linux and macOS only your account can read the folder (mode 700) and the files (mode 600):
 
 | File | Contents |
 | --- | --- |
@@ -46,17 +46,17 @@ curl -s -H "Authorization: Bearer $(cat ~/.local/share/gofer/headless/owner-toke
   http://127.0.0.1:8765/api/workflows
 ```
 
-Both files are removed when the backend stops. The token is never put on a command line, where other accounts on the computer could see it.
-
-To supply your own token instead, such as a mounted container secret, pass `--token-file PATH`. The file must belong to you and be mode 600. The `GOFER_UI_API_TOKEN` environment variable also works. In both cases Raticode doesn't write `owner-token`.
+- The backend removes both files when it stops.
+- The token never goes on a command line, where other accounts could see it.
+- To use your own token, such as a mounted container secret, pass `--token-file PATH`. The file must belong to you and be mode 600. The `GOFER_UI_API_TOKEN` environment variable also works. Either way, Raticode doesn't write `owner-token`.
 
 ::: warning Windows
-On Windows, Raticode doesn't set or check permissions on these files, on token files you pass with `--token-file`, or on agent token files. They get whatever access the folder they're in allows. The default data folder is inside your user profile, which other standard accounts can't normally read, but an administrator can. Keep custom data folders and token files inside your profile too.
+On Windows, Raticode doesn't set or check permissions on these files, on token files you pass with `--token-file`, or on agent token files. They get whatever access their folder allows. The default data folder is in your user profile, which other standard accounts can't normally read but an administrator can. Keep custom data folders and token files in your profile too.
 :::
 
 ## Give Rem its settings
 
-The desktop window normally tells Rem which projects, provider and resources to use, and Rem's tasks wait with "Waiting for Raticode to connect" until it does. In headless mode Rem reads them from `<data>/headless/rem-settings.json`, or from the file named with `--rem-settings PATH`:
+The desktop window normally tells Rem which projects, provider and resources to use. Until it does, Rem's tasks wait with "Waiting for Raticode to connect". In headless mode Rem reads them from `<data>/headless/rem-settings.json`, or from the file named with `--rem-settings PATH`:
 
 ```json
 {
@@ -68,15 +68,17 @@ The desktop window normally tells Rem which projects, provider and resources to 
 }
 ```
 
-The file takes the same fields the desktop sends: `provider`, `model`, `effort`, `chat_provider`, `chat_model`, `chat_effort`, `projects`, `resources`, `brain`, `report_theme`, `conversation_archive_root`, `browser_target`, `swarm_access`, `command_slots` and `kanban_board`. Project and Second Brain folders must be existing absolute paths. Rem gets access to every folder the file lists, so the file must belong to you and must not be writable by other accounts.
+- The file takes the same fields the desktop sends: `provider`, `model`, `effort`, `chat_provider`, `chat_model`, `chat_effort`, `projects`, `resources`, `brain`, `report_theme`, `conversation_archive_root`, `browser_target`, `swarm_access`, `command_slots` and `kanban_board`.
+- Project and Second Brain folders must be existing absolute paths.
+- Rem gets access to every folder the file lists, so the file must belong to you and must not be writable by other accounts.
+- Without the file, the backend still starts and queued Rem tasks say they're waiting for it.
+- Restart the backend after changing the file.
 
-If the file doesn't exist, the backend still starts, and queued Rem tasks say they are waiting for it. Restart the backend after changing the file.
-
-[`Raticode rem settings export --file rem.json`](./cli-rem.md#rem-s-settings) writes this format from a running backend. `Raticode rem settings apply` changes the settings without a restart, but only for folders the backend already has access to. To add a project folder, add it to the settings file and restart.
+[`Raticode rem settings export --file rem.json`](./cli-rem.md#rem-s-settings) writes this format from a running backend. `Raticode rem settings apply` changes the settings without a restart, but only for folders the backend can already reach. To add a project folder, add it to the settings file and restart.
 
 ## Turn on Organizations
 
-Organizations are a Feature Preview. The desktop app turns them on from Settings, but a headless backend doesn't read that choice. Start it with the environment variable instead:
+Organizations are a Feature Preview. A headless backend doesn't read the desktop app's Settings choice, so start it with the environment variable:
 
 ```bash
 RATICODE_EXPERIMENTAL_ORGANIZATIONS=1 Raticode serve --headless
@@ -94,7 +96,9 @@ Raticode tokens list --format json
 Raticode tokens revoke ci
 ```
 
-`create` writes the token to a new file that only you can read and never prints it. Raticode stores only a hash. Revoking takes effect immediately, even on a running backend, and the tokens work with the desktop's backend too.
+- `create` writes the token to a new file only you can read, and never prints it. Raticode stores only a hash.
+- Revoking takes effect at once, even on a running backend.
+- Agent tokens work with the desktop's backend too.
 
 An agent token acts with Rem's authority, not yours:
 
@@ -104,7 +108,7 @@ An agent token acts with Rem's authority, not yours:
 - It can't create, edit, run, queue, resume, stop or delete workflows, change their triggers, or create, start or control swarms. Editing a workflow and then running it would let it run any command it wrote, with your account.
 - It can't change Second Brain libraries.
 
-Reading workflows, runs, triggers, swarms, tickets, organizations and other state is allowed, except Rem's context and Rem's MCP server list (`/api/rem-resources`), whose addresses and arguments can hold keys. Beyond reads, an agent token can only:
+It can read workflows, runs, triggers, swarms, tickets, organizations and other state. The exceptions are Rem's context and Rem's MCP server list (`/api/rem-resources`), whose addresses and arguments can hold keys. Beyond reads, an agent token can only:
 
 - Check a workflow without saving it: validate a draft, analyze a document, preview a bundle import or a trigger.
 - Read a ticket's timeline and search or read Second Brain.
@@ -114,15 +118,24 @@ Any other change, including endpoints added in later versions, is refused with H
 
 ## What Rem's workers can reach
 
-Raticode never gives either kind of token to Rem's workers, providers or workflow commands. Everything the backend starts runs with `RATICODE_AGENT_SESSION=1`, and without `RATICODE_TOKEN` or `RATICODE_TOKEN_FILE`, even if you exported them before starting Raticode. Inside such a session the CLI doesn't pick up the owner token from the data folder and refuses any token that isn't an agent token, `Raticode api` refuses requests an agent token couldn't make, and `Raticode tokens` refuses to create or revoke agent tokens. A worker you deliberately give an agent token file can use it with `--token-file`.
+Raticode never gives either kind of token to Rem's workers, providers or workflow commands. Everything the backend starts runs with `RATICODE_AGENT_SESSION=1` and without `RATICODE_TOKEN` or `RATICODE_TOKEN_FILE`, even if you exported them before starting Raticode.
 
-This isn't a sandbox. A worker runs as your account, so it could read any file your account can, including `owner-token`. Keep agent token files out of the projects Rem works in. To keep workers away from the owner token completely, run the backend under its own account.
+Inside such a session:
+
+- The CLI doesn't pick up the owner token from the data folder, and refuses any token that isn't an agent token.
+- `Raticode api` refuses requests an agent token couldn't make.
+- `Raticode tokens` refuses to create or revoke agent tokens.
+- A worker you deliberately give an agent token file can use it with `--token-file`.
+
+::: warning This isn't a sandbox
+A worker runs as your account, so it could read any file your account can, including `owner-token`. Keep agent token files out of the projects Rem works in. To keep workers away from the owner token completely, run the backend under its own account.
+:::
 
 ## In a container
 
-The backend only listens on loopback, inside the container. Publishing its port with `-p` doesn't work, so run your scripts in the same container with `docker exec`. The backend writes its address and token into the data folder, and the CLI in the same container finds them there.
+The backend only listens on loopback inside the container, so publishing its port with `-p` doesn't work. Run your scripts in the same container with `docker exec`. The CLI there finds the address and token the backend writes into the data folder.
 
-This recipe uses the standalone Linux CLI from a release. It needs Raticode 0.5.3 or later, which adds `serve --headless`; it hasn't been tried with a published build yet. Put `raticode-cli-linux-x64` next to this `Dockerfile`:
+This recipe uses the standalone Linux CLI from a release. It needs Raticode 0.5.3 or later, which adds `serve --headless`, and hasn't been tried with a published build yet. Put `raticode-cli-linux-x64` next to this `Dockerfile`:
 
 ```dockerfile
 FROM debian:bookworm-slim

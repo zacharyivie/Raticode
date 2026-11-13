@@ -195,7 +195,7 @@ async def test_real_desktop_exchange_dispatches_once_and_returns_response(tmp_pa
     invitations = Invitations(target)
     listener = DeviceListener(target, invitations, application)
     port = await listener.start()
-    invite = invitations.create("Test", {"host": "127.0.0.1", "port": port})
+    invite = invitations.create("Test", {"host": "127.0.0.1", "port": port}, role="desktop")
 
     async def confirm() -> None:
         while not target.list():

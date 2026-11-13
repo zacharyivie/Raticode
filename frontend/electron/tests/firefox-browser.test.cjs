@@ -148,6 +148,42 @@ test("a missing Firefox fails with an answer the user can act on", async () => {
   await assert.rejects(engine.ensure(), /Firefox is not installed/);
 });
 
+test("a Firefox whose control session another program took is closed, not used", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "firefox-takeover-"));
+  const killed = [];
+  const sent = [];
+  const logs = [];
+  const spawnFake = () => {
+    const child = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = (signal) => { killed.push(signal); setImmediate(() => child.emit("exit", null, signal)); return true; };
+    setImmediate(() => child.stderr.emit("data", "WebDriver BiDi listening on ws://127.0.0.1:45678\n"));
+    return child;
+  };
+  // Firefox answers session.new this way when a session already exists.
+  class TakenSocket {
+    constructor(url) { this.url = url; setImmediate(() => this.onopen?.()); }
+    send(text) {
+      const { id, method } = JSON.parse(text);
+      sent.push(method);
+      setImmediate(() => this.onmessage?.({ data: JSON.stringify({ type: "error", id, error: "session not created", message: "Maximum number of active sessions" }) }));
+    }
+    close() { setImmediate(() => this.onclose?.()); }
+  }
+  try {
+    const engine = createFirefoxEngine({
+      dataDir, find: () => "/usr/bin/firefox-fake", spawn: spawnFake, WebSocketImpl: TakenSocket,
+      watchdog: false, log: (level, message) => logs.push([level, message]),
+    });
+    await assert.rejects(engine.ensure(), /Another program on this computer took control of Firefox/);
+    assert.deepEqual(sent, ["session.new"]);
+    assert.equal(killed[0], "SIGKILL");
+    assert.ok(logs.some(([level, message]) => level === "warn" && /took control of Firefox/.test(message)));
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Rem's DevTools commands map to WebDriver BiDi", async () => {
   const calls = [];
   const contents = Object.assign(new EventEmitter(), {
@@ -480,7 +516,8 @@ test("a real Firefox reports files a page builds (blob: and data: links) with ma
     contents.close();
     engine.stop();
     server.close();
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    // stop() doesn't wait for Firefox to exit, and it writes its profile while it shuts down.
+    fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 });
   }
 });
 

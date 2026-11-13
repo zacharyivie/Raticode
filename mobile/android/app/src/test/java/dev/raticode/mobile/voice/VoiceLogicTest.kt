@@ -88,7 +88,30 @@ class VoiceLogicTest {
     @Test fun outgoingTrimsAndBoundsTheMessage() {
         assertNull(VoiceLogic.outgoing("   "))
         assertEquals("Hello Rem", VoiceLogic.outgoing("  Hello Rem \n"))
-        assertEquals(VoiceLogic.MAX_CHARS, VoiceLogic.outgoing("a".repeat(5000))!!.length)
+        // Long words aren't cut at Rem's message limit any more: they go as a text file.
+        assertEquals(5000, VoiceLogic.outgoing("a".repeat(5000))!!.length)
+        assertEquals(dev.raticode.mobile.data.LongText.MAX_CHARS, VoiceLogic.outgoing("a".repeat(dev.raticode.mobile.data.LongText.MAX_CHARS + 10))!!.length)
+    }
+
+    @Test fun longWordsGoAsAFileWhenTheyCan() {
+        val long = "word ".repeat(500)
+        assertTrue(VoiceLogic.asFile(long))
+        assertFalse(VoiceLogic.asFile("Call Sam"))
+        // Room for a file and a desktop that takes them: no problem.
+        assertNull(VoiceLogic.longProblem(long, room = 1, filesThread = true))
+        // No room or an old desktop, but the words still fit in one message: they go as a message.
+        assertNull(VoiceLogic.longProblem(long.take(3000), room = 0, filesThread = true))
+        assertNull(VoiceLogic.longProblem(long.take(3000), room = 8, filesThread = false))
+        // Too long for a message and no way to send a file: say why instead of cutting the words.
+        val huge = "word ".repeat(1000)
+        assertEquals(VoiceLogic.TOO_LONG_OLD_DESKTOP, VoiceLogic.longProblem(huge, room = 8, filesThread = false))
+        assertEquals(VoiceLogic.TOO_LONG_NO_ROOM, VoiceLogic.longProblem(huge, room = 0, filesThread = true))
+    }
+
+    @Test fun theBoxSaysLongWordsGoAsAFile() {
+        assertNull(VoiceLogic.lengthNote(100))
+        assertEquals("2,000 characters. Goes to Rem as an attached text file.", VoiceLogic.lengthNote(2000))
+        assertEquals("12,345 characters. Goes to Rem as an attached text file.", VoiceLogic.lengthNote(12345))
     }
 
     @Test fun talkingBackOffSaysNothingAboutVoicesWhateverIsInstalled() {

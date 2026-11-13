@@ -26,6 +26,9 @@ class DeviceInvitation private constructor(val bytes: ByteArray, val json: JSONO
                 require(host.matches(Regex("[0-9a-fA-F:.]+")))
                 // Shortened IPv4 forms such as 100.1 are not addresses the desktop would report.
                 require(':' in host || host.matches(Regex("\\d{1,3}(\\.\\d{1,3}){3}")))
+                // Only a well-formed literal: InetAddress falls back to a DNS lookup for anything else (999.1.1.1,
+                // dead:beef), and a later connect would look it up again, so DNS could choose the address.
+                require(IpLiteral.isNumeric(host)) { "Not an IP address" }
                 val address = java.net.InetAddress.getByName(host)
                 require(!address.isAnyLocalAddress && !address.isMulticastAddress)
                 val port = endpoint.integer("port")
@@ -71,5 +74,32 @@ class DeviceInvitation private constructor(val bytes: ByteArray, val json: JSONO
             validateDesktopEndpoint(j.getJSONObject("lan_endpoint"))
             return DeviceInvitation(bytes, j)
         }
+    }
+}
+
+/** Strict IPv4 and IPv6 literals, checked without the network. */
+internal object IpLiteral {
+    fun isNumeric(host: String): Boolean = if (':' in host) ipv6(host) else ipv4(host)
+
+    private fun ipv4(host: String): Boolean {
+        val parts = host.split('.')
+        return parts.size == 4 && parts.all { it.length in 1..3 && it.all(Char::isDigit) && it.toInt() <= 255 }
+    }
+
+    private fun ipv6(host: String): Boolean {
+        if (host.length > 45 || host.count { it == ':' } < 2) return false
+        val halves = host.split("::")
+        if (halves.size > 2) return false
+        fun groups(part: String) = if (part.isEmpty()) emptyList() else part.split(':')
+        val head = groups(halves[0])
+        val tail = if (halves.size == 2) groups(halves[1]) else emptyList()
+        val all = head + tail
+        // An IPv4 tail such as ::ffff:192.168.1.2 counts as two groups.
+        val v4 = all.lastOrNull()?.takeIf { '.' in it }
+        if (v4 != null && !ipv4(v4)) return false
+        val hex = if (v4 != null) all.dropLast(1) else all
+        if (hex.any { it.isEmpty() || it.length > 4 || !it.all { c -> c.isDigit() || c.lowercaseChar() in 'a'..'f' } }) return false
+        val count = hex.size + if (v4 != null) 2 else 0
+        return if (halves.size == 2) count <= 7 else count == 8
     }
 }

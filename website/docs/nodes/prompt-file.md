@@ -1,16 +1,16 @@
 ---
 title: prompt-file
-description: Render a text template to a file and expose both its path and rendered text.
+description: Render a text template to a file, and output both its path and the rendered text.
 pageClass: docs-layout
 ---
 
 # prompt-file
 
-Render a text template to a file and expose both its path and rendered text.
+Render a text template to a file, and output both its path and the rendered text.
 
 ## When to use it
 
-Use this node when a generated prompt is worth reviewing or reusing as an artifact before a later provider call.
+Use it when you want to review or reuse a generated prompt as a file before a provider call.
 
 ## Example
 
@@ -29,13 +29,14 @@ Node step:
   finish: pass
 ```
 
-Choose an inline `template` or a `template-path`; do not author both template sources. `variables` provides string values, and open `with` bindings make additional locals available. Template references use `{{name}}`.
-
-Parent directories are created and the destination can be replaced by default. Set `overwrite: false` when you want to preserve an existing prompt. Output includes rendered `content`, `prompt`, `path`, and the input map.
+- Use inline `template` or `template-path`, not both.
+- `variables` holds string values. Extra `with` bindings add more locals. Refer to them as `{{name}}`.
+- By default the node creates missing parent folders and replaces an existing file. Set `overwrite: false` to keep an existing prompt.
+- Output includes the rendered `content`, `prompt`, `path` and the input map.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -49,9 +50,9 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Additional local bindings are supported. See [Inputs and bindings](../workflows/inputs.md) for delivery and type rules.
+You can bind other locals too. [Inputs and bindings](../workflows/inputs.md) covers delivery and types.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -60,12 +61,12 @@ Successful output fields use these exact selector names:
 | `prompt` | string |
 | `inputs` | object |
 
-For example, refer to `node.step.output.path` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.path`.
 
 ## Preflight and limits
 
-A selected template file must be readable, and the output path and encoding must be valid. Rendering a prompt does not invoke a provider.
+A template file must be readable, and the output path and encoding must be valid. Rendering never calls a provider.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

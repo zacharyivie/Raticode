@@ -15,7 +15,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ (e: 'focus-node', id: string | null): void }>()
 
-const W = 176
+const W = 200
 const H = 58
 
 const statusText: Record<NodeState, string> = {
@@ -42,53 +42,55 @@ const edges = computed(() =>
 </script>
 
 <template>
-  <svg class="graph" viewBox="0 0 640 300" role="img" :aria-label="title" :class="{ 'has-highlight': highlight }">
-    <defs>
-      <marker id="wg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M0 0L10 5L0 10z" fill="rgba(185,177,255,.55)" />
-      </marker>
-      <marker id="wg-arrow-on" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M0 0L10 5L0 10z" fill="#4ff0ff" />
-      </marker>
-      <filter id="wg-glow" x="-30%" y="-30%" width="160%" height="160%">
-        <feGaussianBlur stdDeviation="5" result="b" />
-        <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
-      </filter>
-    </defs>
+  <div class="graph-scroll">
+    <svg class="graph" viewBox="0 0 660 300" role="img" :aria-label="title" :class="{ 'has-highlight': highlight }">
+      <defs>
+        <marker id="wg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0L10 5L0 10z" fill="rgba(185,177,255,.55)" />
+        </marker>
+        <marker id="wg-arrow-on" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0L10 5L0 10z" fill="#4ff0ff" />
+        </marker>
+        <filter id="wg-glow" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="5" result="b" />
+          <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+        </filter>
+      </defs>
 
-    <g v-for="edge in edges" :key="edge.id" class="edge" :class="{ 'is-active': edge.active, 'is-related': edge.related }">
-      <path class="edge-line" :d="edge.d" :marker-end="edge.active || edge.related ? 'url(#wg-arrow-on)' : 'url(#wg-arrow)'" />
-      <path v-if="edge.active" class="edge-flow" :d="edge.d" pathLength="1" filter="url(#wg-glow)" />
-      <g v-if="edge.label" class="edge-label" :transform="`translate(${edge.lx} ${edge.ly})`">
-        <rect :x="-edge.label.length * 3.4 - 8" y="-10" :width="edge.label.length * 6.8 + 16" height="20" rx="10" />
-        <text text-anchor="middle" dy="4">{{ edge.label }}</text>
+      <g v-for="edge in edges" :key="edge.id" class="edge" :class="{ 'is-active': edge.active, 'is-related': edge.related }">
+        <path class="edge-line" :d="edge.d" :marker-end="edge.active || edge.related ? 'url(#wg-arrow-on)' : 'url(#wg-arrow)'" />
+        <path v-if="edge.active" class="edge-flow" :d="edge.d" pathLength="1" filter="url(#wg-glow)" />
+        <g v-if="edge.label" class="edge-label" :transform="`translate(${edge.lx} ${edge.ly})`">
+          <rect :x="-edge.label.length * 3.75 - 8" y="-11" :width="edge.label.length * 7.5 + 16" height="22" rx="11" />
+          <text text-anchor="middle" dy="4.5">{{ edge.label }}</text>
+        </g>
       </g>
-    </g>
 
-    <g
-      v-for="node in nodes"
-      :key="node.id"
-      class="node"
-      :class="[`is-${node.state}`, { 'is-highlight': highlight === node.id, 'is-dim': highlight && highlight !== node.id }]"
-      :transform="`translate(${node.x} ${node.y})`"
-      :tabindex="interactive ? 0 : undefined"
-      :role="interactive ? 'button' : undefined"
-      :aria-label="interactive ? `${node.id}: ${node.kind}. ${node.detail}` : undefined"
-      @mouseenter="interactive && emit('focus-node', node.id)"
-      @mouseleave="interactive && emit('focus-node', null)"
-      @focus="interactive && emit('focus-node', node.id)"
-      @blur="interactive && emit('focus-node', null)"
-    >
-      <rect class="node-halo" x="-6" y="-6" :width="W + 12" :height="H + 12" rx="16" />
-      <rect class="node-box" :width="W" :height="H" rx="12" />
-      <rect class="node-icon" x="10" y="13" width="32" height="32" rx="8" />
-      <text class="node-glyph" x="26" y="34" text-anchor="middle">{{ node.glyph }}</text>
-      <text class="node-name" x="52" y="26">{{ node.id }}</text>
-      <text class="node-detail" x="52" y="43">{{ node.detail }}</text>
-      <circle class="node-dot" :cx="W - 14" cy="16" r="4" />
-      <title>{{ node.id }} — {{ node.status }}</title>
-    </g>
-  </svg>
+      <g
+        v-for="node in nodes"
+        :key="node.id"
+        class="node"
+        :class="[`is-${node.state}`, { 'is-highlight': highlight === node.id, 'is-dim': highlight && highlight !== node.id }]"
+        :transform="`translate(${node.x} ${node.y})`"
+        :tabindex="interactive ? 0 : undefined"
+        :role="interactive ? 'button' : undefined"
+        :aria-label="interactive ? `${node.id}: ${node.kind}. ${node.detail}` : undefined"
+        @mouseenter="interactive && emit('focus-node', node.id)"
+        @mouseleave="interactive && emit('focus-node', null)"
+        @focus="interactive && emit('focus-node', node.id)"
+        @blur="interactive && emit('focus-node', null)"
+      >
+        <rect class="node-halo" x="-6" y="-6" :width="W + 12" :height="H + 12" rx="16" />
+        <rect class="node-box" :width="W" :height="H" rx="12" />
+        <rect class="node-icon" x="10" y="13" width="32" height="32" rx="8" />
+        <text class="node-glyph" x="26" y="34" text-anchor="middle">{{ node.glyph }}</text>
+        <text class="node-name" x="52" y="27">{{ node.id }}</text>
+        <text class="node-detail" x="52" y="45">{{ node.detail }}</text>
+        <circle class="node-dot" :cx="W - 14" cy="16" r="4" />
+        <title>{{ node.id }} — {{ node.status }}</title>
+      </g>
+    </svg>
+  </div>
 </template>
 
 <style scoped>
@@ -98,6 +100,20 @@ const edges = computed(() =>
   height: auto;
   overflow: visible;
   font-family: var(--rc-font-mono);
+}
+
+/* On phones the graph keeps a readable size and scrolls sideways instead of shrinking. */
+@media (max-width: 640px) {
+  .graph-scroll {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    padding-bottom: 6px;
+  }
+
+  .graph {
+    min-width: 600px;
+  }
 }
 
 .edge-line {
@@ -140,8 +156,8 @@ const edges = computed(() =>
 }
 
 .edge-label text {
-  font-size: 10.5px;
-  fill: #b9b1ff;
+  font-size: 12.5px;
+  fill: #c9c2ff;
 }
 
 .edge.is-active .edge-label rect,
@@ -195,14 +211,14 @@ const edges = computed(() =>
 }
 
 .node-name {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   fill: #fdf2dc;
 }
 
 .node-detail {
-  font-size: 10.5px;
-  fill: #9f9ac2;
+  font-size: 12.5px;
+  fill: #b5b0d6;
 }
 
 .node-dot {

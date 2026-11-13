@@ -9,8 +9,9 @@
   <uses-permission android:name="android.permission.RECORD_AUDIO" />
   <uses-feature android:name="android.hardware.camera" android:required="false" />
   <!-- Voice mode's own commands only: "call Emily" rings and "text Emily …" sends after a short countdown the user can
-       cancel, once the user allows them. Raticode never reads texts, the call log or contacts. Phones without a radio
-       can still install Raticode. -->
+       cancel, once the user allows them. Texts go directly only while Raticode is the phone's default assistant, as
+       Google Play's SMS policy requires; otherwise a draft opens. Raticode never reads texts, the call log or contacts.
+       Phones without a radio can still install Raticode. -->
   <uses-permission android:name="android.permission.CALL_PHONE" />
   <uses-permission android:name="android.permission.SEND_SMS" />
   <uses-feature android:name="android.hardware.telephony" android:required="false" />
@@ -88,9 +89,14 @@
         android:grantUriPermissions="true">
       <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/opened_files" />
     </provider>
+    <!--
+      Turning the phone, or resizing Raticode in split screen, keeps this screen instead of rebuilding it, so browser pages
+      and a full-screen video go on without a pause. Compose lays the screen out again for the new size.
+    -->
     <activity
         android:name=".MainActivity"
         android:exported="true"
+        android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"
         android:windowSoftInputMode="adjustResize">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />

@@ -40,6 +40,45 @@ class OrganizationModelTest {
         assertEquals(listOf(plan.notes.first { it.kind == "finding" }.id), note.links)
     }
 
+    // DESK-2: an older desktop sent each status change as a plain comment that copied the one above it.
+    private val report = "I ran the permission trial in plan mode. Its done-when isn't met.\n\n| Capability | Result |"
+    private val olderDesk2 = listOf(
+        OrganizationComment("Director", "2026-11-11T20:05:36.001518+00:00", report, ""),
+        OrganizationComment("Director", "2026-11-11T20:05:36.001833+00:00", "I ran the permission trial in plan mode. Its done-when isn't met.", ""),
+        OrganizationComment("You", "2026-11-11T20:09:12.379912+00:00", "Accepted", "accept"),
+        OrganizationComment("You", "2026-11-11T20:09:12.380346+00:00", "Accepted", ""))
+
+    @Test fun anOlderDesktopsCopiedStatusEntriesShowOnce() {
+        val shown = OrganizationModel.visibleComments(olderDesk2)
+        assertEquals(listOf(report, "Accepted"), shown.map { it.body })
+        assertEquals("accept", shown.last().decision)
+    }
+
+    @Test fun repeatedWordsLaterOrFromSomeoneElseAreKept() {
+        val comments = listOf(
+            OrganizationComment("You", "2026-01-01T00:00:00Z", "Ping", ""),
+            OrganizationComment("Mira", "2026-01-01T00:00:01Z", "Ping", ""),
+            OrganizationComment("Mira", "2026-01-01T01:00:01Z", "Ping", ""))
+        assertEquals(comments, OrganizationModel.visibleComments(comments))
+        assertTrue(OrganizationModel.repeats("Ported the importer and…", "Ported the importer and ran every test."))
+        assertFalse(OrganizationModel.repeats("", "Anything"))
+    }
+
+    @Test fun aCurrentDesktopMarksStatusEntriesAndCountsTheConversation() {
+        val json = JSONObject(read("organizations-read-v2.json").toString())
+        val first = json.getJSONArray("tasks").getJSONObject(0)
+        first.put("comment_count", 4).put("comments", JSONArray()
+            .put(JSONObject().put("actor", "Director").put("at", "2026-11-11T20:05:36Z").put("body", report))
+            .put(JSONObject().put("actor", "Director").put("at", "2026-11-11T20:05:36Z").put("body", "").put("kind", "status")
+                .put("title", "Work complete, moved to In review").put("from", "in_progress").put("to", "in_review")))
+        val parsed = (DesktopViews.parse("organizations.read:x", json) as Organization).tasks.first { it.id == first.getString("task_id") }
+        assertEquals(4, parsed.commentCount)
+        val status = OrganizationModel.visibleComments(parsed.comments).last()
+        assertEquals("status", status.kind)
+        assertEquals("Work complete, moved to In review", OrganizationModel.statusHeadline(status))
+        assertEquals("In progress → In review", OrganizationModel.statusMove(status))
+    }
+
     @Test fun anOlderDesktopHasNoPlan() {
         val older = JSONObject(read("organizations-read-v2.json").toString()).apply { remove("v2") }
         val parsed = DesktopViews.parse("organizations.read:x", older) as Organization

@@ -197,7 +197,7 @@ export function ProgressSteps({ status, now }) {
   return <div className="rem-progress">
     <ol className="rem-progress-steps" aria-label="Progress">
       {steps.map(step => <li key={step.key} data-state={step.state} aria-current={step.state === "current" ? "step" : undefined}>
-        <span aria-hidden="true">{{ done: "✓", current: "▶", stopped: "■", todo: "○" }[step.state]}</span>
+        <span aria-hidden="true">{{ done: "✓", current: "▶", stopped: "■", paused: "⏸", todo: "○" }[step.state]}</span>
         <span className="sr-only">{stepText(step)}</span>
         <span aria-hidden="true">{step.label}</span>
       </li>)}

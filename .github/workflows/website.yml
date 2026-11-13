@@ -4,20 +4,23 @@ name: Website docs
 # - docs-gate: a pull request that adds a feature (a feat: commit or title) and changes
 #   app code must also change website/, unless a commit or the pull request says
 #   "Docs-not-needed: <reason>". See scripts/check-website-docs.py.
-# - build: type-checks and builds the site and checks its internal links, sitemap and
-#   robots.txt when website/ changes. Every run except a pull request also checks that the
-#   download links match the newest published desktop release.
+# - build: type-checks and builds the site and checks its internal links, sitemap,
+#   robots.txt, page titles, canonical links and link preview tags when website/ changes.
+#   Every run except a pull request also checks that the download links match the newest
+#   published desktop release and that the signed phone APK the site links exists on its
+#   published mobile release.
 # - deploy: publishes the built site to GitHub Pages, only from main, only after every
 #   check above passed. It runs on pushes to main that change the site, when the
-#   "Publish release" workflow finishes successfully, and from Run workflow on main.
-#   If the site already names a release that isn't published yet (it is moved to a new
-#   version before that version's tag publishes it), the push waits and the deploy happens
-#   when the release workflow finishes.
+#   "Publish release" or "Publish mobile release" workflow finishes successfully, and from
+#   Run workflow on main. If the site names a desktop or phone release that isn't published
+#   yet (it is moved to new versions before their tags publish them), check:downloads exits
+#   3, the run waits, and the deploy happens when the last of those publish workflows
+#   finishes, so the live site never links a missing download.
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables), optional:
-#   WEBSITE_URL   full site address; default https://zacharyivie.github.io/Raticode/
+#   WEBSITE_URL   full site address; default https://raticode.dev/
 #   WEBSITE_BASE  path the site is served from; default is the path of WEBSITE_URL
-# For a custom domain set WEBSITE_URL=https://<domain>/ and leave WEBSITE_BASE unset.
+# For another domain set WEBSITE_URL=https://<domain>/ and leave WEBSITE_BASE unset.
 # Pages must use "GitHub Actions" as its source (Settings > Pages). See docs/releasing.md.
 
 on:
@@ -29,7 +32,7 @@ on:
       - 'website/**'
       - '.github/workflows/website.yml'
   workflow_run:
-    workflows: ["Publish release"]
+    workflows: ["Publish release", "Publish mobile release"]
     types: [completed]
   schedule:
     - cron: '41 7 * * 1'
@@ -64,8 +67,13 @@ jobs:
 
   changes:
     name: Detect website changes
-    # A release that failed publishes nothing, so there is nothing new to deploy.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # A release that failed publishes nothing, so there is nothing new to deploy. Only a
+    # tag push in this repository counts, not a fork's workflow with the same name.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -109,10 +117,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Full history, so each sitemap entry's lastmod is the date its page last changed.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -135,7 +145,7 @@ jobs:
           status=0
           npm run --silent check:downloads || status=$?
           if [ "$status" -eq 3 ]; then
-            echo "::notice title=Website waits for its release::The site names a release that isn't published yet. It deploys when the Publish release workflow finishes."
+            echo "::notice title=Website waits for its release::The site names a desktop or phone release that isn't published yet. It deploys when Publish release or Publish mobile release finishes and every download it links is public."
             echo "deploy=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi

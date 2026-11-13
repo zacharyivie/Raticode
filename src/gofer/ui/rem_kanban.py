@@ -326,7 +326,9 @@ def ticket_view(
         "created_at": ticket["created_at"],
         "updated_at": ticket["updated_at"],
         "revision": ticket["revision"],
-        "running": bool(ticket.get("claim")),
+        # A paused run keeps its claim but isn't running; "paused" says who paused it.
+        "running": bool(ticket.get("claim")) and not ticket.get("paused"),
+        "paused": str((ticket.get("paused") or {}).get("by") or ""),
         "block_reason": ticket.get("block_reason", ""),
         "summary": ticket.get("summary", ""),
         "type": ticket.get("type", "develop"),
@@ -392,11 +394,14 @@ class RemKanban:
         *,
         organizations: Callable[[], Any] = lambda: None,
         start: Callable[[str, str], None] | None = None,
+        resume: Callable[[str, str], Any] | None = None,
     ) -> None:
         self.store = store
         self.organizations = organizations
         # Starts a ticket's run now (the self-work engine); given the ticket ID and actor.
         self.start = start
+        # Resumes a ticket's paused run in its thread; given the run ID and actor.
+        self.resume = resume
         # Organization ticket keys, re-read at most every ORG_KEYS_FOR seconds.
         self._org_keys: tuple[float, dict[str, dict[str, Any]]] = (-ORG_KEYS_FOR, {})
 
@@ -879,11 +884,24 @@ class RemKanban:
                 raise KanbanRefused(
                     "unauthorized", "You declined this ticket, so Rem can't move it."
                 )
-            if ticket.get("claim"):
+            paused_run = (ticket.get("claim") or {}).get("run_id") if ticket.get("paused") else None
+            if paused_run and target == "in_progress" and actor == "user" and self.resume:
+                resume_run = paused_run
+            elif paused_run:
+                raise KanbanRefused(
+                    "conflict",
+                    "This ticket's task is paused. Move it to In progress to resume it, or stop "
+                    "its run first.",
+                )
+            elif ticket.get("claim"):
                 raise KanbanRefused(
                     "conflict", "This ticket is running. Stop its run or wait for it to finish."
                 )
-            if target == "in_progress":
+            else:
+                resume_run = None
+            if resume_run:
+                pass  # The run resumes below, outside this transaction; the ticket follows it.
+            elif target == "in_progress":
                 if ticket["status"] not in {"backlog", "todo"}:
                     raise KanbanRefused("invalid", "Move it back to To do before starting it.")
             else:
@@ -939,6 +957,10 @@ class RemKanban:
                         else "Marked done by you without a verified run.",
                     )
                 return
+        if resume_run and self.resume:
+            # Moving a paused ticket to In progress resumes the same run in its thread.
+            self.resume(resume_run, actor)
+            return
         if self.start is None:
             raise KanbanRefused("unavailable", "Rem can't start work right now.")
         self.start(identity, actor)
@@ -1089,7 +1111,10 @@ class RemKanban:
             task = next((t for t in org["runtime"]["tasks"] if t["id"] == identity), None)
             if task is None:
                 raise KanbanRefused("not_found", "This ticket no longer exists.")
-            comments = [activity.organization_comment(c, org) for c in task.get("comments") or []]
+            comments = [
+                activity.organization_comment(c, org)
+                for c in activity.visible_comments(task.get("comments") or [])
+            ]
             earlier = max(0, len(comments) - activity.TIMELINE_ENTRIES)
             return {
                 "ticket": organization_ticket_view(org, task),

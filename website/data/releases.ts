@@ -29,9 +29,9 @@ export interface CliBinary {
 const repo = 'https://github.com/zacharyivie/Raticode'
 
 export const desktopRelease = {
-  version: '0.5.3',
-  tag: 'v0.5.3',
-  publishedAt: '2026-11-11',
+  version: '0.5.4',
+  tag: 'v0.5.4',
+  publishedAt: '2026-11-12',
   // Mac builds are Developer ID signed and notarized from 0.5.3 on.
   macNotarized: true,
 }
@@ -40,10 +40,20 @@ const v = desktopRelease.version
 
 // Raticode Mobile (Android) releases separately, from `mobile-vX.Y.Z` tags. Its publish job
 // makes a staged candidate public only when the APK is signed with the release key, because
-// Android won't install an unsigned APK. Keep `published: false` until that tag's release is
-// public; `npm run set-release -- --mobile X.Y.Z` then switches the download card to the APK.
-// Kept on one line so the desktop `set-release` never edits it.
-export const mobileRelease = { version: '0.32.0', tag: 'mobile-v0.32.0', published: false }
+// Android won't install an unsigned APK. The version is mobile/android/version.properties,
+// the same file the publish job checks the tag against (`npm run check` fails when they
+// differ). The site always links this version's APK: until its release is public,
+// `npm run check:downloads` exits 3 and the deploy waits, so the live site never links a
+// file that doesn't exist. `npm run set-release` keeps it in step with version.properties.
+// Kept on one line so set-release can rewrite it.
+export const mobileRelease = { version: '0.34.0', tag: 'mobile-v0.34.0' }
+
+// SHA-256 fingerprint of the certificate Raticode Mobile releases are signed with. It is
+// public, the same value as the ANDROID_SIGNING_CERT_SHA256 repository variable the publish
+// job checks every APK against. `npm run check:downloads` compares it with the published
+// release's apk-checks.json, so the site can't show a fingerprint the APK doesn't have.
+export const mobileSigningCertificate =
+  '97:13:FF:FF:09:A4:30:E1:75:B4:B7:68:39:2B:52:A4:B6:BA:96:56:BB:EC:CE:E7:35:93:08:63:E6:FA:E7:BC'
 
 export const mobileApk = {
   label: 'Download APK',

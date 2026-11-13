@@ -368,6 +368,33 @@ def test_triggers_separate_validation_preparation_and_publication() -> None:
     assert not (REPO_ROOT / ".github/workflows/frontend-checks.yml").exists()
 
 
+# GitHub creates an environment named by a workflow on first use, without protection.
+# These names must exist in Settings > Environments with a required reviewer and a
+# deployment rule for their tags before the workflows reach main (docs/releasing.md).
+PUBLISH_ENVIRONMENTS = {
+    "release.yml": "release-publish",
+    "mobile-release.yml": "mobile-release-publish",
+}
+
+
+def test_publication_waits_in_a_reviewed_environment() -> None:
+    for name, environment in PUBLISH_ENVIRONMENTS.items():
+        publish = _entry_workflow(name)
+        assert set(publish["jobs"]) == {"publish"}, name
+        assert _job(publish, "publish")["environment"] == environment, name
+    # Candidate builds never enter the publish environments, so a stage push never
+    # waits for approval; only the tag's publish job does.
+    for path in (REPO_ROOT / ".github/workflows").glob("*.yml"):
+        if path.name in PUBLISH_ENVIRONMENTS:
+            continue
+        text = path.read_text()
+        for environment in PUBLISH_ENVIRONMENTS.values():
+            assert environment not in text, (path.name, environment)
+    releasing = (REPO_ROOT / "docs/releasing.md").read_text()
+    for environment in (*PUBLISH_ENVIRONMENTS.values(), "aur-publish"):
+        assert f"`{environment}`" in releasing
+
+
 def test_signing_defaults_to_unsigned_and_environment_settings_are_scoped() -> None:
     workflow = _release_workflow()
     assert set(workflow["on"]) == {"workflow_call"}
@@ -589,6 +616,34 @@ def test_mac_secrets_reach_only_the_keychain_step() -> None:
     assert "secrets." not in (REPO_ROOT / ".github/workflows/validate-source.yml").read_text()
 
 
+def test_third_party_build_and_test_code_never_runs_beside_an_unlocked_keychain() -> None:
+    build = _steps_by_name(_build_job(_release_workflow()))
+    names = list(build)
+    prepare = names.index("Prepare macOS signing keychain")
+    delete = names.index("Delete temporary macOS signing keychain")
+    # Vite and its plugins finish before the keychain exists.
+    assert names.index("Build renderer") < prepare
+    # The packaged-runtime Electron tests start only after the keychain is deleted.
+    assert (
+        names.index("Test native terminal and Electron security on packaged runtime version")
+        > delete
+    )
+    # Between the two, only steps that need the keychain or only copy and check files.
+    assert names[prepare + 1 : delete] == [
+        "Build backend",
+        "Sign Windows backend before packaging",
+        # First-party Swift source, compiled by Apple's toolchain.
+        "Build macOS speech helper",
+        "Build Electron packages",
+        "Copy Linux CLI artifact",
+        "Build Linux CLI packages",
+        "Copy Windows CLI artifact",
+        "Copy macOS CLI artifact",
+        "Verify Windows release signatures",
+        "Verify macOS signatures and notarization",
+    ]
+
+
 def test_signing_keychain_outlives_its_users_and_is_always_deleted() -> None:
     build = _steps_by_name(_build_job(_release_workflow()))
     names = list(build)
@@ -659,3 +714,25 @@ def test_mac_packages_build_the_speech_helper_they_bundle() -> None:
     assert helper["run"] == "node scripts/build-macos-speech-helper.cjs --require"
     assert names.index("Build backend") < names.index("Build macOS speech helper")
     assert names.index("Build macOS speech helper") < names.index("Build Electron packages")
+
+
+def test_workflow_pip_installs_require_hashes_for_every_package() -> None:
+    installs = [
+        (path.name, line.strip())
+        for path in sorted((REPO_ROOT / ".github/workflows").glob("*.yml"))
+        for line in path.read_text().splitlines()
+        if re.search(r"\bpip3? install\b", line)
+    ]
+    assert installs, "expected the mobile protocol check install"
+    for name, line in installs:
+        assert "--require-hashes" in line and "--no-deps" in line, (name, line)
+    protocol = REPO_ROOT / "mobile/android/protocol"
+    lock = (protocol / "requirements.txt").read_text()
+    pins = re.findall(r"^([A-Za-z0-9_.-]+)==(\S+)", lock, re.MULTILINE)
+    blocks = re.split(r"\n(?=[A-Za-z0-9_.-]+==)", lock.split("\n", 2)[2])
+    assert len(blocks) == len(pins) and all("--hash=sha256:" in b for b in blocks)
+    # The direct pin in requirements.in is the one the hashed file was compiled from.
+    direct = re.findall(
+        r"^([A-Za-z0-9_.-]+)==(\S+)", (protocol / "requirements.in").read_text(), re.MULTILINE
+    )
+    assert direct and set(direct) <= set(pins)

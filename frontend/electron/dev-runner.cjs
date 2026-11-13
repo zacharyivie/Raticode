@@ -71,10 +71,41 @@ const child = spawn(electronPath, [
   stdio: ["inherit", "inherit", "pipe"],
 });
 
-child.stderr.pipe(createChromiumStderrFilter()).pipe(process.stderr, { end: false });
+const filtered = child.stderr.pipe(createChromiumStderrFilter());
+filtered.pipe(process.stderr, { end: false });
+
+// If the terminal stops reading, keep draining Electron's stderr anyway: a full pipe
+// would block Electron's next write instead of letting it notice and stop.
+let terminalClosed = false;
+function stopEchoing() {
+  if (terminalClosed) return;
+  terminalClosed = true;
+  filtered.unpipe?.(process.stderr);
+  filtered.resume?.();
+}
+process.stderr?.on?.("error", stopEchoing);
+process.stdout?.on?.("error", () => {});
+
+// Ctrl+C signals every process in the terminal's group, Electron included, and
+// Electron quits on it by itself. Stay until it has, so its shutdown output still
+// reaches the terminal and its stderr pipe isn't closed under it. Never pass the
+// signal on: Electron handles only the first one and a second kills it outright.
+// A second signal here quits at once, as the first one used to.
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+let signalled = false;
+function stopListening() {
+  for (const name of SIGNALS) process.removeListener?.(name, onSignal);
+}
+function onSignal(signal) {
+  if (!signalled) { signalled = true; return; }
+  stopListening();
+  process.kill(process.pid, signal);
+}
+for (const signal of SIGNALS) process.on?.(signal, onSignal);
 
 // Wait for stderr to drain before exiting.
 child.on("close", (code, signal) => {
+  stopListening();
   if (signal) {
     process.kill(process.pid, signal);
     return;

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -27,8 +29,37 @@ def candidate() -> Any:
     return module
 
 
-TEAM = "ABCDE12345"
+TEAM = "UG6K997W6C"
 FORK = "someone/Raticode"
+
+
+UPDATER_FILES = {
+    "linux": ["{target}", "Raticode-{version}-amd64.deb", "Raticode-{version}-x86_64.rpm"],
+    "windows": ["{target}"],
+    "macos": ["{target}", "Raticode-{version}-arm64.dmg"],
+}
+
+
+def sha512(path: Path) -> str:
+    return base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
+
+
+def write_updater_metadata(
+    candidate: Any, folder: Path, group: str, version: str, target: str | None = None
+) -> None:
+    """electron-builder's latest-*.yml for the fixture's packages, as the build writes it."""
+    target = target or candidate.updater_target(group, version)
+    names = [n.format(target=target, version=version) for n in UPDATER_FILES[group]]
+    lines = [f"version: {version}", "files:"]
+    for name in names:
+        size = (folder / name).stat().st_size
+        lines += [f"  - url: {name}", f"    sha512: {sha512(folder / name)}", f"    size: {size}"]
+    lines += [
+        f"path: {target}",
+        f"sha512: {sha512(folder / target)}",
+        "releaseDate: '2026-11-11T05:46:21.892Z'",
+    ]
+    (folder / candidate.UPDATER_METADATA[group]).write_text("\n".join(lines) + "\n")
 
 
 def write_candidate_input(
@@ -45,9 +76,11 @@ def write_candidate_input(
         for name in expected:
             (folder / name).write_text(f"fixture {name}")
         if group != "audit-evidence":
+            write_updater_metadata(candidate, folder, group, version)
             smoke: dict[str, Any] = {"status": "passed", "version": version}
             if group == "macos":
                 smoke["signing"] = "developer-id" if macos_signed else "unsigned"
+                smoke["update_feed"] = candidate.publish_feed()
                 if macos_signed:
                     smoke["team_id"] = TEAM
             (folder / f"package-tests-{group}.json").write_text(json.dumps(smoke))
@@ -521,6 +554,22 @@ def test_mac_packages_must_have_been_checked_as_developer_id_signed(
         candidate.verify_group(folder, "macos", candidate.versions(), macos_signed=True)
 
 
+def test_mac_packages_signed_by_another_team_are_refused(
+    candidate: Any, prepared: Any, tmp_path: Path
+) -> None:
+    assert TEAM == candidate.MACOS_TEAM_ID
+    folder = tmp_path / "input/raticode-macos"
+    path = folder / "package-tests-macos.json"
+    smoke = json.loads(path.read_text())
+    # A well-formed team ID that isn't the release team, such as a certificate swapped
+    # into the signing secrets, still fails before anything is staged or published.
+    smoke["team_id"] = "ZZZZZ99999"
+    path.write_text(json.dumps(smoke))
+    _rewrite_checksums(candidate, folder, "macos")
+    with pytest.raises(ValueError, match="not the release team UG6K997W6C"):
+        candidate.verify_group(folder, "macos", candidate.versions(), macos_signed=True)
+
+
 def test_this_repository_cannot_prepare_unsigned_mac_packages(
     candidate: Any, tmp_path: Path
 ) -> None:
@@ -709,3 +758,59 @@ def test_candidates_are_only_prepared_on_stage(
     monkeypatch.setattr("sys.argv", ["release-candidate.py", command])
     with pytest.raises(ValueError, match="trusted stage branch"):
         candidate.main()
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ("dmg", "must point updates at Raticode-.*-arm64.zip"),
+        ("hash", "latest-mac.yml hash doesn't match Raticode-.*-arm64.zip"),
+        ("version", "latest-mac.yml is not for version"),
+        ("feed", "did not confirm the apps' update feed"),
+    ],
+)
+def test_mac_candidate_must_carry_an_accurate_update_feed(
+    candidate: Any, tmp_path: Path, change: str, error: str
+) -> None:
+    """Signed Macs update from the zip that latest-mac.yml names, so staging checks it."""
+    write_candidate_input(candidate, tmp_path / "input", False, True)
+    folder = tmp_path / "input/raticode-macos"
+    version = candidate.versions()
+    if change == "dmg":
+        write_updater_metadata(
+            candidate, folder, "macos", version, target=f"Raticode-{version}-arm64.dmg"
+        )
+    elif change == "hash":
+        (folder / f"Raticode-{version}-arm64.zip").write_text("changed after the metadata")
+    elif change == "version":
+        metadata = folder / "latest-mac.yml"
+        metadata.write_text(metadata.read_text().replace(f"version: {version}", "version: 0.0.1"))
+    else:
+        path = folder / "package-tests-macos.json"
+        smoke = json.loads(path.read_text())
+        del smoke["update_feed"]
+        path.write_text(json.dumps(smoke))
+    _rewrite_checksums(candidate, folder, "macos")
+    with pytest.raises(ValueError, match=error):
+        candidate.verify_group(folder, "macos", version, macos_signed=True)
+
+
+def test_updater_metadata_reader_matches_electron_builder_output(candidate: Any) -> None:
+    top, files = candidate.read_updater_metadata(
+        "version: 0.5.3\nfiles:\n  - url: Raticode-0.5.3-x86_64.AppImage\n"
+        "    sha512: abc==\n    size: 277792927\n    blockMapSize: 288947\n"
+        "  - url: Raticode-0.5.3-amd64.deb\n    sha512: def==\n    size: 1\n"
+        "path: Raticode-0.5.3-x86_64.AppImage\nsha512: abc==\n"
+        "releaseDate: '2026-11-11T05:43:19.556Z'\n"
+    )
+    assert top == {
+        "version": "0.5.3",
+        "path": "Raticode-0.5.3-x86_64.AppImage",
+        "sha512": "abc==",
+        "releaseDate": "2026-11-11T05:43:19.556Z",
+    }
+    assert [f["url"] for f in files] == [
+        "Raticode-0.5.3-x86_64.AppImage",
+        "Raticode-0.5.3-amd64.deb",
+    ]
+    assert files[0]["blockMapSize"] == "288947"

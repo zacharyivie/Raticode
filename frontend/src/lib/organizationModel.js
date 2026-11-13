@@ -117,6 +117,30 @@ export function epicState(model, epicId) {
   return tickets.some(ticket => !["backlog", "todo"].includes(ticket.column)) || progress > 0 ? "active" : "planned";
 }
 
+// Characters that change how text looks without showing up themselves:
+// controls other than tab and newline, zero-width marks, variation selectors
+// and the direction overrides that can make a command read differently from
+// what runs.
+const HIDDEN_COMMAND_RANGES = [
+  [0x0000, 0x0008], [0x000b, 0x001f], [0x007f, 0x009f], [0x00ad, 0x00ad], [0x061c, 0x061c],
+  [0x115f, 0x1160], [0x180e, 0x180e], [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x2069],
+  [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xfff9, 0xfffb], [0xe0000, 0xe007f],
+];
+const isHiddenCharacter = (code) => HIDDEN_COMMAND_RANGES.some(([low, high]) => code >= low && code <= high);
+
+// A worker's command as the user should read it before running it: every
+// hidden character is spelled out, so what shows is what runs.
+export function visibleCommand(command) {
+  let hidden = 0;
+  const text = Array.from(String(command ?? ""), (character) => {
+    const code = character.codePointAt(0);
+    if (!isHiddenCharacter(code)) return character;
+    hidden += 1;
+    return `⟨U+${code.toString(16).toUpperCase().padStart(4, "0")}⟩`;
+  }).join("");
+  return { text, hidden, lines: text.split("\n").length };
+}
+
 export function evidenceState(claim) {
   return claim?.evidence?.state || "none";
 }
@@ -155,7 +179,8 @@ export function workerStatus(model, workerId) {
 export function needsYou(model, now = Date.now()) {
   const items = [];
   for (const request of Object.values(model.runtime.consentRequests || {})) {
-    if (request.status === "pending" && now - Date.parse(request.at) < 24 * 3600 * 1000) items.push({ type: "request", request });
+    // In Auto mode, Rem's review decides requests waiting on it; they don't need the user.
+    if (request.status === "pending" && request.waitingOn !== "rem" && now - Date.parse(request.at) < 24 * 3600 * 1000) items.push({ type: "request", request });
   }
   // Reviews come before flagged work: they are what moves the plan forward.
   const tickets = Object.values(model.tickets);
@@ -282,6 +307,25 @@ export function runSteps(events = []) {
 
 // When a ticket starts, in a sentence: Raticode's own reason for the ticket, put plainly.
 // Tones: "run" will start, "wait" waits for something that resolves itself, "you" needs you.
+// A Backlog ticket: whether a worker pulls it by itself, and if not, what it waits for. An older
+// desktop gives no reason for Backlog tickets, and its workers never pull them.
+function backlogHint(model, reason, name, running) {
+  const pulling = model.config.pullBacklog !== false;
+  const who = name === "Its worker" ? "its worker" : name;
+  const stays = { tone: "wait", text: "In Backlog, so it won't run. Move it to To do when it should start." };
+  if (!pulling || !reason || reason === "backlog") return stays;
+  if (reason.startsWith("Proposed by a worker")) return { tone: "you", text: "A worker's proposal. Move it to To do to accept it; workers never pull proposals." };
+  if (reason.startsWith("Kept in Backlog")) return { tone: "wait", text: "Kept in Backlog because it was moved back here. Move it to To do when it should start." };
+  if (reason === "Waiting for plan approval") return { tone: "you", text: `Waiting for you to approve its plan. Then ${who} pulls it when free.` };
+  if (reason.startsWith("Waiting for your decision")) return { tone: "you", text: "Waiting for your decision on a request about it." };
+  if (reason.startsWith("In Backlog. Assign it")) return { tone: "you", text: "In Backlog with no worker. Assign it, or a free worker assigned to its project takes it." };
+  const later = running ? "" : " once the organization runs";
+  if (reason.startsWith("In Backlog until")) return { tone: "wait", text: `In Backlog. ${name} pulls it into To do when free${later}.` };
+  if (/cancelled|no longer exists/.test(reason)) return { tone: "you", text: reason.endsWith(".") ? reason : `${reason}.` };
+  if (reason.startsWith("Waiting for ")) return { tone: "wait", text: `In Backlog, ${reason.charAt(0).toLowerCase()}${reason.slice(1).replace(/\.$/, "")}. Then ${who} pulls it when free.` };
+  return stays;
+}
+
 export function startHint(model, ticket) {
   const reason = model.organization?.diagnostics?.taskReasons?.[ticket.id] || "";
   const running = model.runtime.state === "running" && !model.runtime.archived;
@@ -290,7 +334,7 @@ export function startHint(model, ticket) {
   if (ticket.column === "running") return { tone: "run", text: `${name} is working on it now.` };
   if (ticket.column === "review") return { tone: "you", text: "Waiting for your review." };
   if (ticket.column === "done") return null;
-  if (ticket.column === "backlog") return { tone: "wait", text: "In Backlog, so it won't run. Move it to To do when it should start." };
+  if (ticket.column === "backlog") return backlogHint(model, reason, name, running);
   if (reason.startsWith("Off hours until ")) return { tone: "wait", text: `Outside working hours. It starts when they resume, ${zoneTime(reason.slice(16), model.organization?.diagnostics?.hours?.timezone)}.` };
   if (reason.startsWith("Off hours")) return { tone: "you", text: "Outside working hours, and no hours are coming up. Change the working hours to let it run." };
   if (reason.startsWith("Next up: ")) return { tone: "wait", text: `Next up. ${reason.slice(9)}; this one starts right after.` };
@@ -430,10 +474,21 @@ export function activityFeed(model, events = [], limit = 8) {
     else if (event.kind === "configuration_restored") line = { who, text: `restored revision ${payload.restoredFrom}` };
     else if (event.kind === "organization_control") line = { who, text: payload.state === "running" ? "started the organization" : "paused the organization" };
     else if (event.kind === "consent_requested") line = { who: "Rem", text: `asked to ${payload.summary?.replace(/^Change settings to /, "") || "change something"}` };
-    else if (event.kind === "consent_decided") line = { who, text: payload.decision === "approve" ? "approved Rem's request" : "declined Rem's request", bad: Boolean(payload.error) };
+    else if (event.kind === "consent_decided") line = { who, text: `${payload.decision === "approve" ? "approved" : "declined"} Rem's request${actor === "Rem:auto" ? " in Auto mode" : actor === "Rem:user-instruction" ? " on your instruction" : ""}`, bad: Boolean(payload.error) };
+    else if (event.kind === "auto_mode_halted") line = { who: "Rem", text: `stopped the organization in Auto mode: ${payload.halt?.reason || ""}`, bad: true };
     else if (event.kind === "task_update" && task && payload.changes?.status) line = { who, text: `moved to ${COLUMN_LABELS[columnOf({ status: payload.changes.status })] || payload.changes.status}`, ref: `ticket:${task.id}` };
     else if (event.kind === "approve" && task) line = { who, text: "approved the plan for", ref: `ticket:${task.id}` };
     else if (event.kind === "reopen" && task) line = { who, text: "reopened", ref: `ticket:${task.id}` };
+    else if (event.kind === "backlog_pull") {
+      // One line per ticket, so each links to its ticket.
+      for (const item of payload.pulled || []) {
+        if (!model.tickets[item.taskId]) continue;
+        items.push({ who: item.employee || "a worker", text: "pulled into To do", ref: `ticket:${item.taskId}`, at: event.at, key: `${event.sequence}:${item.taskId}` });
+        if (items.length >= limit) break;
+      }
+      if (items.length >= limit) break;
+      continue;
+    }
     else if (event.kind === "state_updated") {
       const change = (payload.taskChanges || []).find(item => model.tickets[item.taskId]);
       if (change) line = { who, text: `moved to ${COLUMN_LABELS[columnOf({ status: change.to })] || change.to}`, ref: `ticket:${change.taskId}` };

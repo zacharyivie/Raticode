@@ -20,6 +20,7 @@ from typing import Any
 from uuid import uuid4
 
 from gofer.ui.rem_home_models import completion_recap, now
+from gofer.ui.rem_home_sleep import asleep
 
 # What one entry may hold. Longer text is kept in ``details``, which clients fold away.
 BODY_CHARS = 1200
@@ -188,6 +189,8 @@ def run_phase(run: dict[str, Any] | None, at: datetime | None = None) -> str:
     state = run.get("state")
     if state == "cancelling":
         return "settling"
+    if state == "paused":
+        return "paused"
     if state == "queued":
         until = _instant(run.get("not_before")) if run.get("not_before") else None
         if run.get("waiting_for") and until and until > (at or datetime.now(UTC)):
@@ -212,6 +215,8 @@ PHASE_STATUS = {
     "working": "in_progress",
     "review": "in_review",
     "waiting": "blocked",
+    # Paused keeps the ticket out of Done and off the "needs you" list; its comment says why.
+    "paused": "blocked",
     "done": "done",
     "needs_user": "blocked",
     "failed": "blocked",
@@ -255,11 +260,34 @@ def block_reason(run: dict[str, Any] | None, at: datetime | None = None) -> tupl
     if run is None:
         return "Task record removed", "The record of this ticket's run was removed.", ""
     summary = str(run.get("summary_short") or "").strip()
+    if phase == "waiting" and asleep(run):
+        # A worker's sleep (rem_home_sleep). Its next check time changes with every sleep,
+        # so it stays out of the entry: one entry covers every sleep of this stretch of work.
+        awaited = str(run.get("waiting_for") or "an outside event")
+        return (
+            "Sleeping",
+            f"The worker is waiting for {awaited}. Rem wakes it in the same thread to check "
+            "again; it holds no worker meanwhile.",
+            "",
+        )
     if phase == "waiting":
         awaited = str(run.get("waiting_for") or "an outside event")
         return (
             "Waiting",
             f"The work is done and the review is waiting for {awaited} before checking again.",
+            "",
+        )
+    if phase == "paused":
+        if (run.get("paused") or {}).get("by") == "priority":
+            return (
+                "Paused for your work",
+                "Paused so your own work could run first. Rem resumes it in the same thread "
+                "once your work is done and you've been away 15 minutes.",
+                "",
+            )
+        return (
+            "Paused",
+            "Paused by you. Resume the task to continue in the same thread.",
             "",
         )
     if phase == "needs_user":
@@ -321,8 +349,13 @@ def transition_entry(
                 "checks": run_checks(run),
             }
         same_run = run is not None and run.get("id") == ticket.get("run_id")
+        woke = same_run and before == "blocked" and isinstance((run or {}).get("sleep"), dict)
         why = resumed_by or (
-            "The task resumed in its thread." if same_run else "The task was run again."
+            "The worker woke from its sleep and is checking again in its thread."
+            if woke
+            else "The task resumed in its thread."
+            if same_run
+            else "The task was run again."
         )
         return {
             "title": "Moved to In progress: task " + ("resumed" if same_run else "retried"),
@@ -470,8 +503,8 @@ def organization_transition(
             else f"Reopened by {who.lower() if who == 'You' else who}."
         )
     elif after == "todo" and before == "in_review":
+        # The review's own comment, just above, says what should change.
         title = "Sent back to To do: changes requested"
-        body = _latest_review(task)
     elif after == "in_review":
         title = "Work complete, moved to In review"
         final = next(
@@ -482,13 +515,14 @@ def organization_transition(
             ),
             "",
         )
-        body = completion_recap(str(final or task.get("evidence") or "The run finished."))
+        # The worker's report is already in the conversation, so the entry doesn't repeat it.
+        body = "" if final else completion_recap(str(task.get("evidence") or "The run finished."))
     elif after == "done":
         review = _latest_review(task)
         title = "Verified complete, moved to Done" if review else "Moved to Done"
-        body = review or (
-            completion_recap(task.get("evidence") or "") if task.get("evidence") else ""
-        )
+        # A review is a comment of its own, just above; only a move without one explains itself.
+        evidence = str(task.get("evidence") or "")
+        body = "" if review or not evidence else completion_recap(evidence)
         if not review and who != "Raticode":
             body = (body + f" Marked done by {who}.").strip()
     elif after == "cancelled":
@@ -545,6 +579,59 @@ def note_organization_transitions(
         if last and all(last.get(k) == entry[k] for k in ("to", "title", "body")):
             continue
         comments.append(entry)
+
+
+# A comment that says exactly what the same author's previous comment said, within this long,
+# is the same comment written twice (a retried request, or a report sent as both a comment
+# and the run's final message). The same words said again later are a new comment.
+REPEAT_WINDOW_SECONDS = 120
+
+
+def _repeats(body: str, said: str) -> bool:
+    """Whether ``body`` only repeats ``said``: the same text or its opening, as recaps clip it."""
+    text = body.strip().removesuffix("…").rstrip()
+    return bool(text) and said.strip().startswith(text)
+
+
+def visible_comments(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """An organization ticket's conversation as people should read it. Stored entries stay.
+
+    Older Raticode wrote a status entry whose text repeated the comment just above it (the
+    worker's report, or the review's note), so the same words showed twice. Such an entry
+    keeps its headline and loses the repeated text. A comment that repeats the same author's
+    previous comment within :data:`REPEAT_WINDOW_SECONDS` is left out; anything said again
+    later, by someone else, or with a different review decision is kept.
+    """
+    shown: list[dict[str, Any]] = []
+    # Comments since the last status entry: what a status entry may have copied.
+    since_status: list[dict[str, Any]] = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if comment.get("kind") == "status":
+            if body and any(_repeats(body, str(c.get("body") or "")) for c in since_status):
+                comment = {**comment, "body": ""}
+            shown.append(comment)
+            since_status = []
+            continue
+        previous = next((c for c in reversed(shown) if c.get("kind") != "status"), None)
+        if previous is not None and _same_comment(previous, comment):
+            continue
+        shown.append(comment)
+        since_status.append(comment)
+    return shown
+
+
+def _same_comment(earlier: dict[str, Any], later: dict[str, Any]) -> bool:
+    if any(
+        str(earlier.get(k) or "") != str(later.get(k) or "") for k in ("actor", "body", "decision")
+    ):
+        return False
+    first, second = _instant(earlier.get("at")), _instant(later.get("at"))
+    return (
+        first is not None
+        and second is not None
+        and abs((second - first).total_seconds()) <= REPEAT_WINDOW_SECONDS
+    )
 
 
 def organization_comment(comment: dict[str, Any], org: dict[str, Any]) -> dict[str, Any]:

@@ -71,6 +71,7 @@ from gofer.devices.registry import PairingError
 from gofer.devices.tailnet import is_tailnet_address
 from gofer.devices.wake import clean_address, hardware_address, private_ipv4
 from gofer.ui.file_mentions import file_mentions
+from gofer.ui.rem_ticket_activity import visible_comments
 
 READ_OPS = frozenset(
     {
@@ -132,11 +133,17 @@ ACTION_OPS = frozenset(
         "rem.run.cancel",
         "rem.run.acknowledge",
         "rem.run.retry_review",
+        "rem.run.pause",
+        "rem.run.resume",
+        "rem.run.wake",
         "organizations.control",
         "organizations.task",
         "organizations.knowledge",
         "organizations.worker",
         "organizations.schedule",
+        "organizations.backlog_pull",
+        "organizations.requests",
+        "organizations.auto_mode",
         "swarms.start",
         "settings.update",
         "workflows.run",
@@ -796,6 +803,28 @@ def fetch_preview(url: str) -> dict[str, Any]:
     }
 
 
+def _whole_link(body: str, href: str) -> bool:
+    """Whether [href] is a whole link or path in [body], not part of a longer one.
+
+    The phone sends a link exactly as the message has it: a Markdown link's target, a
+    path Rem mentioned or a bare path. Any of those starts and ends where a path does,
+    so a piece cut from a longer path or word (``/home/me`` out of
+    ``/home/me/notes.txt``) is refused.
+    """
+    for found in re.finditer(re.escape(href), body):
+        start, end = found.start(), found.end()
+        if start and body[start - 1] not in _LINK_BEFORE:
+            continue
+        if end < len(body) and body[end] not in _LINK_AFTER:
+            continue
+        return True
+    return False
+
+
+_LINK_BEFORE = frozenset(" \t\r\n([{<\"'`*_")
+_LINK_AFTER = frozenset(" \t\r\n)]}>\"'`*_,;:!?.")
+
+
 def link_paths(href: str) -> list[str]:
     """Paths a Markdown file link may name, read the way the desktop opens links.
 
@@ -934,6 +963,8 @@ def _dependency(value: Any) -> dict[str, Any]:
                 "reason": _text(item.get("reason"), 300),
                 "run_id": _text(item.get("run_id"), 128),
                 "run_state": _text(item.get("run_state"), 40),
+                # task (a named task), run (one running when asked), idle, time or self_work.
+                "kind": _text(item.get("kind") or "task", 20),
                 # Whether "Retry" can run it again: false once it is deleted or itself waits.
                 "retryable": item.get("retryable") is True,
             }
@@ -1562,6 +1593,16 @@ class DesktopControl:
                 # organizations.read carries the work schedule, and phones send
                 # organizations.schedule, only with desktops that say so here.
                 "organization_schedule": True,
+                # organizations.read says whether workers pull Backlog tickets, and phones
+                # send organizations.backlog_pull, only with desktops that say so here.
+                "organization_backlog_pull": True,
+                # organizations.read lists Rem's requests with their IDs, and phones send
+                # organizations.requests (approve, decline, approve all) only with desktops
+                # that say so here.
+                "organization_requests": True,
+                # organizations.read carries Auto mode, its stop reason and Rem's decisions,
+                # and phones send organizations.auto_mode, only with desktops that say so.
+                "organization_auto_mode": True,
                 # Phones read browser.tabs and send browser.open only to desktops that
                 # say so here.
                 "browser": True,
@@ -1572,6 +1613,9 @@ class DesktopControl:
                 # Phones read kanban.timeline and send kanban.ticket's comment action only
                 # to desktops that say so here.
                 "kanban_comments": self.rem is not None,
+                # Phones send rem.run.pause and rem.run.resume, and show a run's paused
+                # state, only with desktops that say so here.
+                "run_pause": self.rem is not None,
                 **self._wake_field(peer),
             }
         if op == "kanban.board":
@@ -1701,6 +1745,8 @@ class DesktopControl:
             "rich_results": True,
             "draft_deltas": True,
             "review_retry": True,
+            # rem.run.pause and rem.run.resume work, and runs can be "paused".
+            "run_pause": True,
             "memories": True,
             "phone_actions": True,
             "screen_context": True,
@@ -2028,7 +2074,7 @@ class DesktopControl:
             body = _authored(messages, message_id, {"rem"})
         if body is None:
             raise Refused("not_found", "This message is no longer on the desktop.")
-        if href not in body:
+        if not _whole_link(body, href):
             raise Refused("not_found", "That link isn't in this message on the desktop.")
         # A full path Rem wrote as plain text is exactly the text the phone linked; it is
         # read as written, so spaces, "#", "?" and "~/" name the file the desktop found.
@@ -2169,6 +2215,9 @@ class DesktopControl:
                 item["work"]["tickets"] = tickets
             if work.get("self_work"):
                 item["work"]["self_work"] = _text(work["self_work"], 20)
+            if work.get("paused_by") in {"user", "priority"}:
+                # A paused card: by the user, or making way for the user's own work.
+                item["work"]["paused_by"] = work["paused_by"]
         started = message.get("self_work")
         if isinstance(started, dict):
             # Cards one self-work pass started share a batch; the phone shows them together.
@@ -2180,6 +2229,42 @@ class DesktopControl:
             item["state"] = _text(message["state"], 40)
         if message.get("kind") == "task_update":
             item["kind"] = "task_update"
+        report = message.get("self_work_report")
+        if message.get("kind") == "self_work_report" and isinstance(report, dict):
+            # What self-work did in one period; each item opens its task like a card.
+            item["kind"] = "self_work_report"
+            counts = report.get("counts")
+            if not isinstance(counts, dict):
+                counts = {}
+            item["self_work_report"] = {
+                "period_id": _text(report.get("period_id"), 64),
+                "started_at": _text(report.get("started_at"), 80),
+                "ended_at": _text(report.get("ended_at"), 80),
+                "ended_by": _text(report.get("ended_by"), 20),
+                "counts": {
+                    str(key)[:30]: value
+                    for key, value in counts.items()
+                    if isinstance(value, int) and not isinstance(value, bool)
+                },
+                "items": [
+                    {
+                        **{
+                            key: _text(entry.get(key), 160)
+                            for key in (
+                                "task_id",
+                                "run_id",
+                                "thread_id",
+                                "title",
+                                "kind",
+                                "outcome",
+                            )
+                        },
+                        "tickets": _ticket_refs(entry.get("tickets")),
+                    }
+                    for entry in report.get("items") or []
+                    if isinstance(entry, dict)
+                ][:30],
+            }
         queued = message.get("queued_after")
         if message.get("role") == "user" and isinstance(queued, list):
             # A request the user queued behind these tasks; Rem got it once they succeeded.
@@ -2215,7 +2300,8 @@ class DesktopControl:
     def _run(run: dict[str, Any] | None) -> dict[str, Any] | None:
         if not run:
             return None
-        from gofer.ui.rem_home_store import progress_step
+        from gofer.ui.rem_home_sleep import public as public_sleep
+        from gofer.ui.rem_home_store import paused_by, progress_step
 
         return {
             "run_id": _text(run.get("id"), 128),
@@ -2237,6 +2323,11 @@ class DesktopControl:
             "review_retryable": run.get("review_retryable") is True,
             # Board tickets the run created, worked on or changed.
             "tickets": _ticket_refs(run.get("tickets")),
+            # Who paused a paused run: the user, or self-work making way for the user's work.
+            "paused_by": paused_by(run) if run.get("state") == "paused" else "",
+            # A worker's sleep while it waits for something outside Raticode, or null. Older
+            # phones ignore it and show waiting_reason; it also tells a phone Wake now works.
+            "sleep": public_sleep(run),
         }
 
     def _task_summary(
@@ -2371,6 +2462,7 @@ class DesktopControl:
         catalog = self.projects(peer)
         tasks = []
         for task in (runtime.get("tasks") or [])[-200:]:
+            conversation = visible_comments(task.get("comments") or [])
             tasks.append(
                 {
                     **organization_view.task_extras(task, diagnostics, claims, reads),
@@ -2393,15 +2485,28 @@ class DesktopControl:
                     "block_reason": _text(task.get("blockReason"), 600),
                     "evidence": _text(task.get("evidence"), 1500),
                     "due_at": _text(task.get("dueAt"), 80),
+                    # The conversation as people read it: a status entry is marked as one, and
+                    # a repeat of the comment above it is left out (rem_ticket_activity).
                     "comments": [
                         {
                             "actor": _text(_comment_author(c.get("actor"), employees), 150),
                             "at": _text(c.get("at"), 80),
                             "body": _text(c.get("body"), 1500),
                             "decision": _text(c.get("decision"), 20),
+                            **(
+                                {
+                                    "kind": "status",
+                                    "title": _text(c.get("title"), 200),
+                                    "from": _text(c.get("from"), 20),
+                                    "to": _text(c.get("to"), 20),
+                                }
+                                if c.get("kind") == "status"
+                                else {}
+                            ),
                         }
-                        for c in (task.get("comments") or [])[-5:]
+                        for c in conversation[-5:]
                     ],
+                    "comment_count": len(conversation),
                 }
             )
         return {
@@ -2510,20 +2615,8 @@ class DesktopControl:
             if params.get("state") not in {"running", "paused"}:
                 raise Refused("invalid", "Choose running or paused.")
             identifier = _text(params.get("organization_id"), 100)
-            if params["state"] == "running":
-                from gofer.ui.organization_store import DANGEROUS_PERMISSION_MODES
-
-                config = manager.store.get("", identifier)["config"]
-                if any(
-                    not e.get("paused") and e.get("permissionMode") in DANGEROUS_PERMISSION_MODES
-                    for e in config.get("employees", [])
-                ):
-                    # The phone can't show the roster for review, so it can't confirm this.
-                    raise Refused(
-                        "unauthorized",
-                        "This organization has employees that run without a sandbox. Start it "
-                        "from the desktop, where you can review and confirm them.",
-                    )
+            # A phone with Use Raticode from this phone on is the user, so it may start an
+            # organization whose workers run without a sandbox, as the desktop can.
             manager.call(
                 "",
                 "user",
@@ -2550,6 +2643,12 @@ class DesktopControl:
             return self._organization_worker(peer, params)
         if op == "organizations.schedule":
             return self._organization_schedule(peer, params)
+        if op == "organizations.backlog_pull":
+            return self._organization_backlog_pull(peer, params)
+        if op == "organizations.requests":
+            return self._organization_requests(peer, params)
+        if op == "organizations.auto_mode":
+            return self._organization_auto_mode(peer, params)
         if op == "swarms.start":
             remote = self.app.remote
             self._need(remote.swarms, "Swarms")
@@ -2557,18 +2656,17 @@ class DesktopControl:
             if not task:
                 raise Refused("invalid", "Describe the task for the swarm.")
             root, identifier = remote._swarm(peer, _text(params.get("swarm_id"), 36))
-            from gofer.ui.swarms import full_access_agents
-
-            team = remote.swarms.get(root, identifier, include_history=False)
-            if full_access_agents(team.get("agents", [])):
-                # The phone can't show the team for review, so it can't confirm this.
-                raise Refused(
-                    "unauthorized",
-                    "This swarm has agents that run without a sandbox. Start it from the "
-                    "desktop, where you can review and confirm them.",
-                )
+            # Starting from the phone is the user's own confirmation, as Start is on the
+            # desktop: a phone with Use Raticode from this phone on is the user.
             _, grants = remote.projects(peer)
-            remote.swarms.start(root, identifier, task, workspace_grants=grants)
+            remote.swarms.start(
+                root,
+                identifier,
+                task,
+                workspace_grants=grants,
+                confirm_full_access=True,
+                confirmed_by="user",
+            )
             return {"started": True}
         if op == "settings.update":
             return self._update_settings(params, request)
@@ -2667,10 +2765,22 @@ class DesktopControl:
                 _text(params.get("run_id"), 128), {"request_id": request}, op.rsplit(".", 1)[1]
             )
             return self._rem_home(peer)
+        if op in {"rem.run.pause", "rem.run.resume"}:
+            # Pausing keeps the run, its thread and worktree; resuming continues that thread.
+            run_id = _text(params.get("run_id"), 128)
+            if op == "rem.run.pause":
+                rem.pause_run(run_id, {"request_id": request})
+            else:
+                rem.resume_run(run_id, {"request_id": request})
+            return self._rem_home(peer)
         if op == "rem.run.retry_review":
             # The same desktop control as the chat's "retry the review"; it refuses runs
             # without an interrupted review or whose task changed since.
             rem.retry_review(_text(params.get("run_id"), 128), {"request_id": request})
+            return self._rem_home(peer)
+        if op == "rem.run.wake":
+            # Wake now: a sleeping worker resumes in its thread without waiting out its time.
+            rem.wake_run(_text(params.get("run_id"), 128), {"request_id": request})
             return self._rem_home(peer)
         raise Refused("invalid", "Unknown Rem action.")
 
@@ -3122,14 +3232,13 @@ class DesktopControl:
         return self._organization(peer, identifier)
 
     def _organization_worker(self, peer: str, params: dict[str, Any]) -> Any:
-        """Holds a worker, or releases the hold of one that runs in a sandbox."""
+        """Holds a worker or releases its hold, whatever its permissions, as the desktop can."""
         manager = self._organizations_manager()
         identifier = _text(params.get("organization_id"), 100)
         employee = _text(params.get("employee_id"), 100)
         paused = params.get("paused")
         if type(paused) is not bool:
             raise Refused("invalid", "Choose hold or release.")
-        from gofer.ui.organization_store import DANGEROUS_PERMISSION_MODES
 
         current = manager.store.get("", identifier)
         config = current["config"]
@@ -3139,13 +3248,6 @@ class DesktopControl:
             raise Refused("not_found", "This worker is no longer in the organization.")
         if found.get("paused") is paused:
             return self._organization(peer, identifier)
-        if not paused and found.get("permissionMode") in DANGEROUS_PERMISSION_MODES:
-            # The phone can't show the worker's access for review, so it can't confirm this.
-            raise Refused(
-                "unauthorized",
-                "This worker runs without a sandbox. Release the hold from the desktop, where "
-                "you can review and confirm its access.",
-            )
         name = found.get("name") or employee
         manager.call(
             "",
@@ -3221,6 +3323,123 @@ class DesktopControl:
                     "item": item,
                     "expectedRevision": revision,
                     "reason": "Changed the work schedule from the phone",
+                },
+            },
+        )
+        return self._organization(peer, identifier)
+
+    def _organization_requests(self, peer: str, params: dict[str, Any]) -> Any:
+        """Approves or declines Rem's requests the user confirmed on the phone.
+
+        ``request_ids`` is the exact list the phone showed; requests that arrived later
+        are never in it. Approving uses the desktop's Approve all order and checks
+        (organization_consent), and each result comes back in ``request_results``.
+        """
+        from gofer.ui.organization_consent import MAX_BATCH, approve_all
+        from gofer.ui.organizations import CONSENT_TTL
+
+        manager = self._organizations_manager()
+        identifier = _text(params.get("organization_id"), 100)
+        decision = params.get("decision")
+        ids = params.get("request_ids")
+        if decision not in {"approve", "decline"}:
+            raise Refused("invalid", "Choose approve or decline.")
+        if (
+            not isinstance(ids, list)
+            or not 0 < len(ids) <= MAX_BATCH
+            or not all(isinstance(i, str) and 0 < len(i) <= 100 for i in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            raise Refused("invalid", "Refresh the organization, then choose the requests again.")
+        if decision == "decline":
+            results = []
+            for rid in ids:
+                try:
+                    manager.call(
+                        "",
+                        "user",
+                        {
+                            "action": "request_decide",
+                            "organizationId": identifier,
+                            "params": {"requestId": rid, "decision": "decline"},
+                        },
+                    )
+                    results.append({"requestId": rid, "status": "declined", "message": ""})
+                except ValueError as exc:
+                    results.append({"requestId": rid, "status": "failed", "message": str(exc)})
+        else:
+            results = approve_all(
+                manager,
+                "",
+                identifier,
+                ids,
+                ttl_seconds=CONSENT_TTL.total_seconds(),
+            )["results"]
+        return {
+            **self._organization(peer, identifier),
+            "request_results": [
+                {
+                    "request_id": _text(r.get("requestId"), 100),
+                    "summary": _text(r.get("summary"), 400),
+                    "status": _text(r.get("status"), 20),
+                    "message": _text(r.get("message"), 600),
+                }
+                for r in results
+            ],
+        }
+
+    def _organization_auto_mode(self, peer: str, params: dict[str, Any]) -> Any:
+        """Turns Auto mode on or off from the phone: the user's own switch.
+
+        Turning it on needs ``confirm`` true, which the phone sends only after showing what
+        Auto mode allows.
+        """
+        manager = self._organizations_manager()
+        identifier = _text(params.get("organization_id"), 100)
+        revision = params.get("expected_revision")
+        enabled = params.get("enabled")
+        if type(revision) is not int:
+            raise Refused("invalid", "Refresh the organization, then try again.")
+        if not isinstance(enabled, bool):
+            raise Refused("invalid", "Say whether Auto mode is on.")
+        if enabled and params.get("confirm") is not True:
+            raise Refused("invalid", "Confirm what Auto mode allows before turning it on.")
+        manager.call(
+            "",
+            "user",
+            {
+                "action": "auto_mode",
+                "organizationId": identifier,
+                "params": {"enabled": enabled, "confirm": enabled, "expectedRevision": revision},
+            },
+        )
+        return self._organization(peer, identifier)
+
+    def _organization_backlog_pull(self, peer: str, params: dict[str, Any]) -> Any:
+        """Turns workers pulling Backlog tickets into To do on or off, from the phone."""
+        manager = self._organizations_manager()
+        identifier = _text(params.get("organization_id"), 100)
+        revision = params.get("expected_revision")
+        enabled = params.get("enabled")
+        if type(revision) is not int:
+            raise Refused("invalid", "Refresh the organization, then save again.")
+        if not isinstance(enabled, bool):
+            raise Refused("invalid", "Say whether workers pull Backlog tickets.")
+        manager.call(
+            "",
+            "user",
+            {
+                "action": "plan_save",
+                "organizationId": identifier,
+                "params": {
+                    "kind": "operations",
+                    "item": {"pullBacklog": enabled},
+                    "expectedRevision": revision,
+                    "reason": (
+                        "Workers pull Backlog tickets when they need work, set from the phone"
+                        if enabled
+                        else "Workers leave Backlog tickets for you to move, set from the phone"
+                    ),
                 },
             },
         )

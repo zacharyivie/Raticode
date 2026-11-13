@@ -10,6 +10,9 @@
 .kb-search input { border: 0; outline: 0; background: transparent; width: 170px; color: var(--ink); }
 .kb-check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .kb-proposed { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--k-decision); }
+/* Paused keeps its claim but isn't stuck: a quiet chip in words, not the red flag. */
+.kb-paused { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ink-2, currentColor); }
+.oh-card.is-paused { border-style: dashed; }
 
 .kb-sheet { width: min(420px, 100%); flex: none; display: flex; flex-direction: column; gap: 12px; padding: 14px 18px; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; }
 .kb-sheet-head { display: flex; align-items: center; }

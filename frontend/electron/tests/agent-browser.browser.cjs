@@ -20,7 +20,12 @@ const PAGE = `<!doctype html><title>Form</title>
 <button id=go onclick="document.title=['sent',document.getElementById('name').value,document.getElementById('size').value,document.querySelector('[contenteditable]').innerText.trim()].join(':')">Send</button>
 <a href="/next">Next page</a>
 <input id=keys aria-label="Keys" onkeydown="if(event.key==='Enter')document.title='enter:'+this.value">
-<button hidden>Hidden button</button>`;
+<button hidden>Hidden button</button>
+<form id=search onsubmit="event.preventDefault();document.title='searched:'+this.q.value"><input name=q aria-label="Query"><button>Search</button></form>
+<textarea aria-label="Body" onkeydown="if(event.key==='Enter')document.title='newline:'+this.value"></textarea>
+<button id=delete onclick="document.title='deleted'">Delete account</button>
+<div style="position:relative"><button id=under onclick="document.title='under'">Under</button>
+<iframe srcdoc="<p>ad</p>" style="position:absolute;left:0;top:0;width:200px;height:60px;border:0"></iframe></div>`;
 
 function finish(error) {
   clearTimeout(timer);
@@ -48,7 +53,7 @@ app.whenReady().then(async () => {
 
   const sessions = new Map();
   const hosts = ["screen", "behind", "hidden"];
-  const controller = createAgentBrowserController({
+  const tabs = {
     openTab: ({ agent }) => {
       const id = `tab-${sessions.size + 1}`;
       const host = hosts[sessions.size % hosts.length];
@@ -74,7 +79,8 @@ app.whenReady().then(async () => {
     agentTabs: (agent) => [...sessions.values()].filter((item) => item.agent.id === agent && !item.closed),
     closeTab: (session) => { session.closed = true; sessions.delete(session.id); session.contents?.close?.(); },
     normalizeUrl: normalizeBrowserUrl,
-  });
+  };
+  const controller = createAgentBrowserController(tabs);
   const call = (agent, action, extra = {}) => controller.handle({ agent, action, ...extra });
 
   // Three agents open tabs in parallel: on screen, behind, and hidden.
@@ -131,5 +137,40 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("document.activeElement.id"), "user");
   await call(agents[0], "close");
   await assert.rejects(call(agents[0], "snapshot"), /browser_open first/);
+
+  // With approval on for every site, Enter still never asks, but a click on
+  // a consequential control does, and a declined click never reaches the page.
+  const asked = [];
+  const approvals = createAgentBrowserController({
+    ...tabs,
+    policy: () => ({ remConfirm: "always", remSignInSites: [] }),
+    confirm: async (_session, details) => { asked.push(`${details.action}:${details.label}`); return false; },
+  });
+  const careful = "agent-careful-0004";
+  const ask = (action, extra = {}) => approvals.handle({ agent: careful, action, ...extra });
+  await ask("open", { url: base });
+  await ask("type", { selector: "#search input", text: "cats", submit: true });
+  assert.equal((await ask("tabs")).tabs[0].title, "searched:cats");
+  await ask("type", { selector: "textarea", text: "line" });
+  await ask("press", { key: "Enter" });
+  assert.equal((await ask("tabs")).tabs[0].title, "newline:line");
+  assert.deepEqual(asked, []);
+  await assert.rejects(ask("click", { selector: "#delete" }), /did not approve "Delete account"/);
+  assert.deepEqual(asked, ["click:Delete account"]);
+  assert.equal((await ask("tabs")).tabs[0].title, "newline:line");
+  await ask("close");
+
+  // Real input (Firefox tabs) would land on a frame covering the element, so
+  // such a click is refused before any input is sent.
+  const native = [];
+  const framed = "agent-framed-0005";
+  await call(framed, "open", { url: base });
+  const framedTab = [...sessions.values()].find((item) => item.agent.id === framed);
+  framedTab.contents.nativeInput = { click: async (input) => { native.push(input); } };
+  await assert.rejects(call(framed, "click", { selector: "#under" }), /frame from another page covers/);
+  assert.deepEqual(native, []);
+  await call(framed, "click", { selector: "#delete" });
+  assert.equal(native.length, 1);
+  await call(framed, "close");
   server.close();
 }).then(() => finish(), finish);

@@ -200,7 +200,7 @@ def git_fixture(base):
     return str(root)
 
 def fake_alert_filter(desktop, advertise):
-    """A stand-in for the desktop's rem.notices filter, until the phone is tested against the real one; see docs/desktop-handoff.md.
+    """A stand-in for the desktop's rem.notices filter, until the phone is tested against the real one.
 
     With advertise, it answers the filter contract from a script, one step per filtered read. Otherwise it plays an older
     desktop: the overview says nothing, and a read that sends the filter anyway gets a reply the phone's test looks for.

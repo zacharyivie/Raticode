@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Runner queue
 
-The runner queue separates a request to run a workflow from the worker process that executes it.
+The runner queue separates asking for a run from the worker process that executes it.
 
 ::: warning Rattish compatibility boundary
 The current `Raticode runner queue` path resolves workflows through the legacy loader. Registered Rattish workflows use local execution or an explicit `Raticode rattish run` invocation on the target machine. Selecting Runner queue does not add Rattish support to that loader.
@@ -22,21 +22,32 @@ The current `Raticode runner queue` path resolves workflows through the legacy l
 | Status | Inspect queued, running, and terminal records |
 | Cancellation | Request that queued or active work stop |
 
-Submission is not successful execution. A queued record can wait indefinitely when no eligible worker is available.
+A submitted run hasn't succeeded yet. It can wait forever if no matching worker is available.
 
 ## Existing CLI controls
 
-`Raticode runner list` lists known runners. `Raticode runner status` inspects work, optionally by queued run ID. `Raticode runner register --name NAME --label LABEL` registers a local runner record. `Raticode runner start` starts a worker, and `--once` processes at most one eligible run. `Raticode runner cancel RUN_ID` requests cancellation. `Raticode runner queue WORKFLOW` submits a legacy workflow ID or TOML path with optional `--priority`, `--label` and `--param KEY=JSON`.
+| Command | What it does |
+| --- | --- |
+| `Raticode runner list` | List known runners |
+| `Raticode runner status` | Inspect work, optionally by queued run ID |
+| `Raticode runner register --name NAME --label LABEL` | Register a local runner record |
+| `Raticode runner start` | Start a worker. `--once` handles at most one eligible run. |
+| `Raticode runner cancel RUN_ID` | Ask for a run to be cancelled |
+| `Raticode runner queue WORKFLOW` | Submit a legacy workflow ID or TOML path, with optional `--priority`, `--label` and `--param KEY=JSON` |
 
-Use each command's `--help` for workspace-root, provider capability, priority, and label options. Registration does not install a provider or copy a project to another machine.
+Each command's `--help` lists its workspace-root, provider capability, priority and label options. Registering a runner doesn't install a provider or copy a project to another machine.
 
 ## Remote Rattish execution
 
-Install the standalone CLI on the target machine, make the project and its required resources available there, and invoke `Raticode rattish run` with the source path. Validate and preflight on that machine first.
+To run a Rattish workflow on another machine:
 
-This is a CLI deployment pattern; it does not imply that the current local queue is a network transport. [Desktop fleet](../advanced/fleet.md) is a separate experimental paired-device feature with target-local grants.
+1. Install the standalone CLI there.
+2. Make the project and the resources it needs available on that machine.
+3. Run check and preflight there.
+4. Run `Raticode rattish run` with the source path.
+
+This is a way to deploy the CLI. The local queue is not a network transport. [Desktop fleet](../advanced/fleet.md) is a separate experimental feature for paired devices, with grants local to each target.
 
 ## Review failures
 
-Check label matching, project availability, interpreter paths, provider authentication, and the worker's own logs. Cancellation does not roll back completed effects. Preserve evidence of interrupted work before submitting it again.
-
+Check label matching, whether the project is on that machine, interpreter paths, provider sign-in and the worker's own logs. Cancelling doesn't undo effects that already happened. Keep the evidence from interrupted work before you submit it again.

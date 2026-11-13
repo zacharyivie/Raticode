@@ -6,67 +6,81 @@ pageClass: docs-layout
 
 # Troubleshooting
 
-Start with the failing layer: installation, provider, workflow validation, execution, or saved state. Keep the exact error and target path before changing settings.
+Find the layer that's failing: installation, provider, workflow validation, a run, or saved state. Copy the exact error and the file path before you change anything.
 
-## The desktop will not open
+## The desktop app won't open
 
-Check that the asset matches your operating system and architecture. The current macOS asset targets Apple Silicon; Windows and Linux assets target x64. Follow the [installation guide](../installation.md) for unsigned-build and Linux executable notes.
+- Check the download matches your system. The macOS build is for Apple Silicon; Windows and Linux builds are x64. See [Installation](../installation.md) for unsigned-build prompts and making the AppImage executable.
+- Building from source: select the repository's Node version with nvm and install both the Python and frontend dependencies. Don't mix dependencies from another checkout with a packaged release.
 
-If building from source, use the repository's Node version through nvm and install both Python and frontend dependencies. Do not mix dependencies from a different checkout with the packaged release.
+## A provider is missing or can't sign in
 
-## A provider is missing or cannot authenticate
+1. Run the provider's own CLI outside Raticode and check its login works.
+2. Make sure its executable is on the PATH that Raticode starts with. Restart Raticode after changing PATH or installing a CLI.
+3. Use **Refresh providers** and pick a supported model. A model listed for one provider isn't necessarily available through another.
 
-Run that provider's own CLI outside Raticode. Confirm login works and its executable is visible in the environment used to launch the desktop. Restart the app after changing PATH or installing a CLI.
+API-backed providers need their credentials and network access. See [Provider setup](../setup.md).
 
-Refresh the provider catalog and choose a supported model. A model's appearance in one provider does not imply it is available through another. API-backed providers need their configured credentials and network access. See [Provider setup](../setup.md).
+## Rem can't use a tool
 
-## Rem cannot use a tool
+- Check the thread's own tools and permissions. Shell, web, skills and each MCP server are switched on separately.
+- For an MCP server, check its transport, command or URL, arguments and sign-in.
+- A Global thread needs a project before it can edit project files.
+- Read-only sessions can't change app state.
+- Tool changes apply from the next turn. An earlier turn's tool list can show the old setup.
 
-Inspect the active thread's resources and permissions. Shell and web toggles, selected skills, and MCP registrations are independent. Check an MCP server's transport, executable or URL, arguments, and authentication.
-
-A global thread needs a project selection before project file editing. Read-only sessions cannot mutate application state. Resource changes apply to the next turn; the preceding turn's tool list can describe an older configuration.
-
-## A workflow will not validate
+## A workflow won't validate
 
 ```bash
 Raticode rattish check WORKFLOW_PATH --format json
 Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
-Read each diagnostic's node and field. Common causes include unknown node IDs, misspelled provider IDs, underscore configuration fields instead of hyphenated fields, invalid output selectors, incompatible input types, and missing executables or files.
+Read each diagnostic's node and field. Common causes:
 
-Check validates source and contracts; preflight checks resource readiness. An upstream command that might create a file does not mean every node's preflight will accept a currently missing resource. Keep required fixtures available or redesign the step. See [Validation](../workflows/validation.md).
+- an unknown node ID or a misspelled provider ID
+- underscores in field names that use hyphens
+- an invalid output selector or mismatched input types
+- a missing executable or file
 
-## Execution fails after validation
+`check` validates the source and contracts; `preflight` checks that resources exist. A file an earlier step would create still counts as missing at preflight, so keep needed files in place or change the step. See [Validation](../workflows/validation.md).
 
-Inspect the failing activation in Runs and its output/error. A service can reject a request, a provider can fail, a file can change, or a command can return a nonzero exit code after preflight succeeds.
+## A run fails after validation
 
-Review routes and `allow-fail` before adding retries. Retrying a write, network request, or remote job can repeat a side effect. Stop requests cancellation; it does not restore the project automatically.
+Open the failing step in **Runs** and read its output and error. Services, providers, files and commands can all fail after preflight passed.
 
-## Scheduling or queueing rejects Rattish
+Look at routes and `allow-fail` before adding retries. Retrying a write, a network request or a remote job can repeat its side effect. **Stop** cancels the run but doesn't restore your project.
 
-`Raticode schedule`, `Raticode watch`, and the runner queue still use legacy workflow-loading paths. For a `workflow.rattish`, use [triggers](../workflows/triggers.md) or call `Raticode rattish run` from an external tool.
+## Schedules or the runner queue reject a Rattish workflow
+
+`Raticode schedule`, `Raticode watch` and the runner queue still use the older workflow format. For a `workflow.rattish`, use [triggers](../workflows/triggers.md), or call `Raticode rattish run` from another tool.
 
 ## A trigger didn't fire
 
-Run `Raticode rattish triggers status`. Triggers fire only while Raticode or its background scheduler is running, and the computer has to be awake. `Raticode rattish triggers history --problems` lists missed, failed, skipped, and interrupted runs with the reason.
+- Run `Raticode rattish triggers status`.
+- Triggers fire only while Raticode or its background scheduler is running and the computer is awake.
+- `Raticode rattish triggers history --problems` lists missed, failed, skipped and interrupted runs with the reason.
 
-## Knowledge is not found or a report did not save
+## Knowledge isn't found, or a report didn't save
 
-Verify Second Brain is enabled and points to the intended folder. Supported text is indexed with file-size and scan limits; hidden folders, dependency trees, and symlinks are excluded. PDFs need their HTML companion for text search.
+- Check Second Brain is on and points at the right folder.
+- Supported text files are indexed within size and scan limits. Hidden folders, dependency folders and symlinks are skipped. PDFs need their HTML companion for text search.
+- Read what the save tool returned. A name collision, missing folder, permission error or failed PDF render means nothing was saved.
+- If the archive can't be written, deleting the working thread is blocked until you fix or turn off the archive.
 
-Inspect the save tool's returned result. A collision, missing destination, permission failure, or PDF-render failure is not a successful save. Archive write failures can block deletion of the working thread until the archive is restored or disabled.
+## A phone or paired computer seems stuck
 
-## Devices or managed work are uncertain
-
-Use matching device builds, check the experimental flag, compare paired identities, and request fresh status. A stale status is unknown. Do not replay a job merely because its reply was lost.
-
-For a phone that won't pair or connect, see [Pair and connect: troubleshooting](../mobile/pairing.md#troubleshooting): check **Phone and desktop pairing**, the computer's firewall, the same (non-guest) Wi-Fi network, **Set desktop address**, and the phone's 64 MB history share.
-
-Swarms and organizations remain paused after restart. Inspect interrupted changes and receipts before resuming. Managed remote stops require confirmation, not just a cancellation request.
+- **Phone won't pair or connect:** see [Pair and connect: troubleshooting](../mobile/pairing.md#troubleshooting). Check **Phone and desktop pairing**, the computer's firewall, the same (non-guest) Wi-Fi, **Set desktop address**, and the phone's 64 MB history share.
+- **Status looks wrong:** use matching versions on both devices, check the Feature Preview switch, compare the paired identities and ask for fresh status. Old status means unknown, not up or down.
+- **A reply was lost:** don't send the job again just because the reply didn't arrive.
+- **After a restart:** swarms and organizations stay paused. Check interrupted changes and receipts before resuming. Stopping managed work on another computer needs confirmation, not just a cancel request.
 
 ## Report an issue
 
-Include the Raticode version, OS and architecture, provider/CLI version, reproduction steps, and redacted diagnostics. A minimal failing Rattish file is useful. Remove keys, tokens, private attachments, and personal paths before publishing.
+Open an issue on [GitHub](https://github.com/zacharyivie/Raticode/issues) with:
 
-Use the [GitHub issue tracker](https://github.com/zacharyivie/Raticode/issues). Preserve the original working state rather than deleting databases to make the error disappear.
+- the Raticode version, your OS and architecture, and the provider CLI's version
+- steps to reproduce
+- diagnostics from **Settings > Developer**, and a minimal failing Rattish file if you have one
+
+Remove keys, tokens, private attachments and personal paths first. Keep your working state as it is; don't delete databases to make an error go away.

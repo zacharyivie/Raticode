@@ -66,6 +66,14 @@ class GeckoBrowserTest {
             SystemClock.sleep(150)
         }
     }
+    /** Like [waitFor], but a timeout also says what [state] showed then, such as the page that loaded instead. */
+    private fun waitShowing(what: String, timeout: Long, state: () -> String, condition: () -> Boolean) {
+        val deadline = SystemClock.uptimeMillis() + timeout
+        while (!condition()) {
+            if (SystemClock.uptimeMillis() > deadline) throw AssertionError("$what; ${state()}")
+            SystemClock.sleep(150)
+        }
+    }
     private fun bounds(tag: String): Rect = compose.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
     private fun shown(tag: String) = compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
 
@@ -200,7 +208,10 @@ class GeckoBrowserTest {
             SystemClock.sleep(800)
             assertEquals("file: stays closed", before, gecko.page.url)
             compose.runOnUiThread { gecko.go("https://expired.badssl.com/") }
-            waitFor("the certificate refusal", 45000) { gecko.page.title == "This connection isn't private" }
+            // A live site, so a slow or failed network shows up here as a different page.
+            waitShowing("the certificate refusal", 45000, { gecko.page.let { "title='${it.title}' url='${it.url}' loading=${it.loading}" } }) {
+                gecko.page.title == "This connection isn't private"
+            }
             assertFalse(gecko.page.secure)
         } finally { end() }
     }
@@ -276,6 +287,84 @@ class GeckoBrowserTest {
             if ((android.graphics.Color.red(pixel) + android.graphics.Color.green(pixel) + android.graphics.Color.blue(pixel)) / 3 > 128) light++
         }
         return light.toDouble() / total
+    }
+
+    private fun screen(): Bitmap = instrumentation.uiAutomation.takeScreenshot() ?: throw AssertionError("no screenshot")
+    private fun screencap(name: String) = instrumentation.uiAutomation.executeShellCommand("screencap -p /data/local/tmp/$name.png")
+        .use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes() }
+
+    /**
+     * How many distinct colors (coarsely binned) the real screen shows inside [tag]. The popup's sheet covers the page, so
+     * a popup that loaded but wasn't drawn shows only the sheet's own background: one or two colors.
+     */
+    private fun colorsIn(tag: String): Int {
+        compose.waitForIdle() // lets the sheet's slide-in run on the test's clock
+        val shot = screen()
+        val area = compose.onNodeWithTag(tag, useUnmergedTree = true).fetchSemanticsNode().boundsInWindow
+        val seen = HashSet<Int>()
+        for (x in area.left.toInt().coerceAtLeast(0) until minOf(area.right.toInt(), shot.width) step 6)
+            for (y in area.top.toInt().coerceAtLeast(0) until minOf(area.bottom.toInt(), shot.height) step 6) seen.add(shot.getPixel(x, y) and 0xF0F0F0)
+        return seen.size
+    }
+
+    /**
+     * The Open button of an installed extension, run alone in a fresh app (`-e class …#opensExtensionsFromTheOpenButton`),
+     * so no extension has opened a tab of its own first. Before the fix Gecko was never told which tab was in view, and
+     * the button press found no tab and quietly did nothing.
+     */
+    @Test fun opensExtensionsFromTheOpenButton() {
+        val gecko = start()
+        try {
+            assumeTrue("Needs the emulator's internet", online(gecko))
+            val ublock = install(gecko, "ublock-origin")
+            assertTrue("uBlock Origin installed: ${gecko.notice}", ublock != null && ublock.enabled)
+            waitFor("uBlock's button", 30000) { gecko.extensions.first { it.id == ublock!!.id }.action != null }
+            fun openFromSheet() {
+                compose.onNodeWithTag("geckoMenu").performClick()
+                waitFor("menu") { shown("geckoMenuSheet") }
+                compose.onNode(hasText("Extensions")).performClick()
+                waitFor("extensions sheet") { shown("geckoExtensionsSheet") }
+                compose.onNode(hasScrollToNodeAction()).performScrollToNode(hasTestTag("geckoOpen-${ublock!!.id}"))
+                compose.onNodeWithTag("geckoOpen-${ublock.id}").performClick()
+            }
+
+            // On a page: the real Open button closes the sheet and shows uBlock's popup, drawn over the page.
+            openFromSheet()
+            waitFor("uBlock's popup from Open", 20000) { gecko.popup != null && shown("geckoPopupView") }
+            assertFalse("The Extensions sheet closed", shown("geckoExtensionsSheet"))
+            waitFor("the popup's page loaded", 20000) { gecko.popupLoaded }
+            var colors = 0
+            val drawn = runCatching { waitFor("the popup drew its page", 20000) { colors = colorsIn("geckoPopupView"); colors > 6 } }
+            Log.i("GeckoExtensions", "popup on a page: loaded=${gecko.popupLoaded}, $colors colors")
+            screencap("raticode-gecko-extension-popup")
+            drawn.getOrThrow()
+            compose.runOnUiThread { gecko.closePopup() }
+            waitFor("popup closed") { !shown("geckoPopup") }
+
+            // On a new tab's start page, which has no page session until Open needs one.
+            compose.runOnUiThread { gecko.newTab() }
+            waitFor("start page") { gecko.page.url == BrowserRules.HOME }
+            openFromSheet()
+            waitFor("uBlock's popup on the start page", 20000) { gecko.popup != null && shown("geckoPopupView") }
+            waitFor("the start page's popup loaded", 20000) { gecko.popupLoaded }
+            waitFor("the start page's popup drew", 20000) { colorsIn("geckoPopupView") > 6 }
+            assertEquals("The start page stays the start page", BrowserRules.HOME, gecko.page.url)
+            compose.runOnUiThread { gecko.closePopup() }
+            waitFor("popup closed") { !shown("geckoPopup") }
+
+            // In a private tab extensions don't run: Open says so under the row, and nothing opens.
+            compose.runOnUiThread { gecko.newTab(private = true) }
+            waitFor("private tab") { gecko.activeIsPrivate }
+            openFromSheet()
+            waitFor("the private-tab message") { shown("geckoOpenMessage-${ublock!!.id}") }
+            SystemClock.sleep(1000)
+            assertEquals("No popup from a private tab", null, gecko.popup)
+            compose.onNode(hasText("private tabs", substring = true)).assertExists()
+        } finally {
+            compose.runOnUiThread { gecko.closePopup(); gecko.extensions.forEach(gecko::uninstall); gecko.tabs.map { it.id }.forEach(gecko::close) }
+            SystemClock.sleep(1500)
+            end()
+        }
     }
 
     @Test fun installsAndRunsFirefoxExtensions() {

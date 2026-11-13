@@ -11,6 +11,7 @@ import {
   mobileAssetUrl,
   mobileRelease,
   mobileReleaseUrl,
+  mobileSigningCertificate,
   releaseUrl,
 } from '../../../../data/releases'
 
@@ -65,7 +66,7 @@ const published = new Date(`${desktopRelease.publishedAt}T12:00:00Z`).toLocaleDa
           <p v-if="platform.alternates.length" class="alts">
             Also:
             <template v-for="(alt, altIndex) in platform.alternates" :key="alt.assetName">
-              <a :href="assetUrl(alt.assetName)" :title="alt.detail">{{ alt.label }}<span class="rc-sr-only"> for {{ platform.name }}</span></a><span v-if="altIndex < platform.alternates.length - 1">·</span>
+              <a :href="assetUrl(alt.assetName)" :title="alt.detail">{{ alt.label }}<span class="rc-sr-only"> for {{ platform.name }}</span></a><span v-if="altIndex < platform.alternates.length - 1" aria-hidden="true">·</span>
             </template>
           </p>
 
@@ -90,35 +91,33 @@ const published = new Date(`${desktopRelease.publishedAt}T12:00:00Z`).toLocaleDa
         </article>
 
         <article class="mobile rc-reveal" style="--rc-delay: 100ms">
-          <div v-if="mobileRelease.published" class="mobile-copy">
-            <span class="soon">Android {{ mobileRelease.version }}</span>
+          <div class="mobile-copy">
+            <span class="tag">Android · {{ mobileRelease.version }}</span>
             <h3>Raticode Mobile</h3>
             <p>
               Talk to Rem, follow tasks and threads, read files and Git history, and run workflows from your
-              Android phone while your computer does the work. Android 10 or newer; signed APK, installed by hand.
+              Android phone while your computer does the work.
             </p>
+            <p class="req">Android 10 or newer · signed APK · pairs with Raticode on your computer</p>
             <a class="rc-btn rc-btn-primary" :href="mobileAssetUrl(mobileApk.assetName)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14" /></svg>
               {{ mobileApk.label }}
-              <span class="rc-sr-only">for Android</span>
+              <span class="rc-sr-only">for Android, Raticode Mobile {{ mobileRelease.version }}</span>
             </a>
+            <ol class="steps">
+              <li>Open the APK on your phone. If Android asks, allow your browser to install unknown apps.</li>
+              <li>On the computer, turn on <b>Settings › Developer › Feature Preview › Phone and desktop pairing</b>.</li>
+              <li>In <b>Settings › Devices</b>, create a QR code and scan it with the app.</li>
+            </ol>
             <p class="mobile-links">
               <a :href="mobileAssetUrl(mobileApk.checksums)">SHA-256 checksums</a> ·
               <a :href="mobileReleaseUrl">release notes</a> ·
-              <a :href="withBase('/docs/mobile/')">install guide</a>
+              <a :href="withBase('/docs/mobile/#install-the-app')">install guide</a>
             </p>
-          </div>
-          <div v-else class="mobile-copy">
-            <span class="soon">Coming soon</span>
-            <h3>Raticode Mobile</h3>
-            <p>
-              Talk to Rem, follow tasks and threads, read files and Git history, and run workflows from your
-              Android phone while your computer does the work. It's in testing and not published yet.
+            <p class="cert">
+              Signing certificate SHA-256
+              <code>{{ mobileSigningCertificate }}</code>
             </p>
-            <a class="rc-btn rc-btn-ghost" :href="allReleasesUrl">
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.34 1.08 2.91.83.09-.65.35-1.08.63-1.33-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.56 9.56 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2Z" /></svg>
-              Watch releases on GitHub
-            </a>
           </div>
           <div class="phone" aria-hidden="true">
             <div class="phone-screen">
@@ -199,7 +198,7 @@ const published = new Date(`${desktopRelease.publishedAt}T12:00:00Z`).toLocaleDa
   border-radius: 999px;
   background: var(--rc-cyan);
   font-family: var(--rc-font-pixel);
-  font-size: 10.5px;
+  font-size: 12px;
   letter-spacing: 0.06em;
   color: #06202a;
 }
@@ -249,7 +248,7 @@ h3 {
   gap: 8px;
   margin: -4px 0 0;
   font-size: 14px;
-  color: #8d88ad;
+  color: var(--rc-mist);
 }
 
 .alts a,
@@ -296,7 +295,7 @@ h3 {
 
 .kicker {
   font-family: var(--rc-font-pixel);
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--rc-cyan);
@@ -362,14 +361,14 @@ h3 {
     linear-gradient(170deg, rgba(27, 24, 64, 0.82), rgba(9, 8, 28, 0.94));
 }
 
-.soon {
+.tag {
   display: inline-block;
   padding: 4px 10px;
   border: 1px solid rgba(255, 182, 72, 0.5);
   border-radius: 999px;
   background: rgba(255, 182, 72, 0.1);
   font-family: var(--rc-font-pixel);
-  font-size: 10.5px;
+  font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--rc-amber);
@@ -381,9 +380,48 @@ h3 {
   font-size: 14.5px;
 }
 
+.mobile .req {
+  margin-top: 8px;
+  font-family: var(--rc-font-mono);
+  font-size: 12.5px;
+  color: var(--rc-periwinkle);
+}
+
+.mobile .steps {
+  margin: 18px 0 0;
+  padding-left: 1.3em;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--rc-mist);
+}
+
+.mobile .steps li + li {
+  margin-top: 4px;
+}
+
+.mobile .steps b {
+  font-weight: 600;
+  color: var(--rc-ivory-dim);
+}
+
 .mobile .mobile-links {
   margin-top: 14px;
   font-size: 13.5px;
+}
+
+.mobile .cert {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #9f9ac2;
+}
+
+.mobile .cert code {
+  display: block;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  font-family: var(--rc-font-mono);
+  font-size: 11px;
+  color: var(--rc-periwinkle);
 }
 
 .mobile .mobile-links a {

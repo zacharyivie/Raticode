@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import './landing.css'
 import LandingHero from './LandingHero.vue'
 import ProviderMarquee from './ProviderMarquee.vue'
+import AppTour from './AppTour.vue'
 import ProblemSection from './ProblemSection.vue'
 import HowItWorks from './HowItWorks.vue'
 import WorkflowShowcase from './WorkflowShowcase.vue'
@@ -41,6 +42,7 @@ onBeforeUnmount(() => observer?.disconnect())
     <LandingHero />
     <main id="main">
       <ProviderMarquee />
+      <AppTour />
       <ProblemSection />
       <HowItWorks />
       <WorkflowShowcase />

@@ -6,19 +6,19 @@ pageClass: docs-layout
 
 # Your first workflow
 
-Create a greeting and a summary, and see how Raticode connects source, graph, and execution.
+Build a two-step workflow that writes a greeting and a summary, and see how source, graph and runs fit together.
 
-This example uses file nodes, so it needs neither a coding provider nor a shell interpreter. It writes `reports/hello.txt` inside the chosen project when you run it.
+It uses file nodes only, so you need no coding provider and no shell interpreter. When you run it, it writes `reports/hello.txt` and `reports/summary.txt` in your project.
 
 ## Create a registered workflow
 
-Open a project in the studio and create a workflow in Workflows. From the CLI, the equivalent is:
+Open a project in the studio and create a workflow in **Workflows**. The CLI equivalent:
 
 ```bash
 Raticode rattish create "Hello Raticode" --project ./my-project --format json
 ```
 
-Use a real project folder. The JSON response's `workflow.sourcePath` is the exact file to edit. The ID is allocated by Raticode; do not assume it is the display name with spaces removed.
+Use a real project folder. The reply's `workflow.sourcePath` is the file to edit. Raticode picks the ID, so don't assume it's the name without spaces.
 
 ## Edit the source
 
@@ -44,13 +44,19 @@ Node write-summary:
   finish: pass
 ```
 
-`to` routes execution from the greeting writer to the summary writer. `needs` requires the first writer to complete before the second is ready. `finish: pass` marks the summary as a successful endpoint. Both writers create missing parent directories and replace existing files by default.
+| Line | What it does |
+| --- | --- |
+| `to: write-summary` | Routes from the greeting writer to the summary writer |
+| `needs: write-report` | The summary waits until the greeting is written |
+| `finish: pass` | The summary is a successful end point |
 
-Open the graph view. You should see two nodes connected by one route. Layout changes are editor metadata; the executable steps remain in Markdown-independent Rattish source.
+Both writers create missing parent folders and replace existing files by default.
+
+Open the graph view: two nodes joined by one route. Moving nodes only changes editor layout; the steps themselves live in the Rattish source.
 
 ## Validate without executing
 
-In the following commands, replace `WORKFLOW_PATH` with the returned source path:
+Replace `WORKFLOW_PATH` with the returned source path:
 
 ```bash
 Raticode rattish format WORKFLOW_PATH
@@ -58,20 +64,25 @@ Raticode rattish check WORKFLOW_PATH --format json
 Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
-`check` should return `ok: true`. Preflight checks the destination paths and their write policies. Neither validation command creates the reports.
+- `check` should return `ok: true`.
+- `preflight` checks the destination paths and their write rules.
+- Neither command writes the reports.
 
 ## Run when you are ready
 
-Review the path and the overwrite behavior, then choose **Run** in the studio. To execute it from the CLI:
+Check the paths and the overwrite behavior, then choose **Run** in the studio. From the CLI:
 
 ```bash
 Raticode rattish run WORKFLOW_PATH --format json
 ```
 
-This command performs the file write. It is separate from validation. Inspect the run status, then open `reports/hello.txt` in the editor. It should contain `Hello from Raticode!`.
+This one does write the files. Check the run status, then open `reports/hello.txt`. It should say `Hello from Raticode!`.
 
 ## Make the next change
 
-Change the writer's `content`, save, validate, and run again. You now have a repeatable process defined by a reviewable text file.
+Change the writer's `content`, save, validate and run again. The whole process is one text file you can review and rerun.
 
-Next, learn [Inputs and bindings](./workflows/inputs.md) to replace the fixed greeting with a workflow input, or use an [agent node](./nodes/agent.md) to generate a report from a project.
+Next:
+
+- [Inputs and bindings](./workflows/inputs.md): replace the fixed greeting with a workflow input.
+- [Agent node](./nodes/agent.md): have an agent write a report about a project.

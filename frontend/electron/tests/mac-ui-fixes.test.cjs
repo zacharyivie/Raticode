@@ -73,7 +73,7 @@ test("zsh integration uses the selected login shell, loads custom rc aliases, an
 test("restart and quit share a renderer handshake; a foreign or cancelled response cannot destroy the window", async () => {
   let handler, sent, stopped = 0, destroyed = 0, quits = 0;
   const owner = { id: 7, send: (_name, request) => { sent = request; }, once() {}, removeListener() {} };
-  const context = { crypto: { randomUUID: () => "request-1" }, mainWindow: { isDestroyed: () => false, webContents: owner, destroy: () => destroyed++ }, isSmokeTest: false,
+  const context = { crypto: { randomUUID: () => "request-1" }, mainWindow: { isDestroyed: () => false, webContents: owner, destroy: () => destroyed++ }, isSmokeTest: false, quitPending: false, backendStoppedDuringQuit: false, backendProcess: undefined, showBackendCrash() {},
     app: { on: (_event, fn) => { handler = fn; }, quit: () => quits++ }, Promise, archivesDrained: true, logsDrained: true, applicationLog: null,
     showMainWindow() {}, stopBackend: () => stopped++, browsers: { closeAll() {} }, removeLegacyAgentBrowserConnection() {}, getGoferDataDir: () => "/data", closeTerminalEditorServer() {}, closeAllTerminals() {}, backendErrorWindow: null,
     startBackend: async () => ({ apiBaseUrl: "fixture", apiToken: "token" }), createWindow() {}, createBackendErrorWindow: error => { throw error; } };

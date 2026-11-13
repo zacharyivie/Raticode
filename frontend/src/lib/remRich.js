@@ -1,7 +1,7 @@
 // Rich parts of Rem's chat: result cards, task progress, follow-ups and reply details.
 // The phone app has a Kotlin twin of these rules (RemRich.kt), so both say the same thing.
 
-import { plainMarkdown } from "./remHome.js";
+import { canRetryPrerequisite, plainMarkdown } from "./remHome.js";
 
 // Plan · Work · Check · Report, with the step a run is on.
 const STEP_KEYS = ["plan", "work", "check", "report"];
@@ -15,21 +15,22 @@ const ENDED = new Set(["failed", "blocked", "cancelled", "outcome_unknown"]);
 const STEP_INDEX = { plan: 0, work: 1, check: 2 };
 
 export function runSteps(state, { reachedCheck = false, step } = {}) {
+  const paused = state === "paused";
   const at = state === "succeeded" ? 4
-    : !(state in STEP_AT) && !ENDED.has(state) ? -1
+    : !(state in STEP_AT) && !ENDED.has(state) && !paused ? -1
       : STEP_INDEX[step] ?? STEP_AT[state] ?? (reachedCheck ? 2 : 1);
   if (at < 0) return [];
   const stopped = ENDED.has(state);
   return STEP_KEYS.map((key, index) => ({
     key,
     label: STEP_LABELS[key],
-    state: index < at ? "done" : index === at ? (stopped ? "stopped" : "current") : "todo",
+    state: index < at ? "done" : index === at ? (stopped ? "stopped" : paused ? "paused" : "current") : "todo",
   }));
 }
 
 // Words, not just color: "Plan done", "Work in progress", "Check not started".
 export function stepText(step) {
-  return `${step.label} ${{ done: "done", current: "in progress", stopped: "stopped", todo: "not started" }[step.state]}`;
+  return `${step.label} ${{ done: "done", current: "in progress", stopped: "stopped", paused: "paused", todo: "not started" }[step.state]}`;
 }
 
 export function elapsedLabel(fromIso, until = new Date()) {
@@ -170,12 +171,17 @@ export function resultActions(message, tasks = [], { live = true, reviewRetry = 
   // A task waiting for others: retry each prerequisite that didn't succeed, or start it now.
   if (task.dependency) {
     for (const item of task.dependency.prerequisites || []) {
-      if (item.retryable) actions.push({ id: `retry-after:${item.task_id}`, label: `Retry “${item.title}”`, task: { id: item.task_id } });
+      if (canRetryPrerequisite(item)) actions.push({ id: `retry-after:${item.task_id}`, label: `Retry “${item.title}”`, task: { id: item.task_id } });
     }
     actions.push({ id: "run", label: "Start now", task });
     return actions;
   }
   const run = task.last_run;
+  // Run on a paused task resumes that same run in its thread.
+  if (run?.state === "paused") {
+    actions.push({ id: "run", label: "Resume", task });
+    return actions;
+  }
   if (reviewRetry && run?.id === message.work.run_id && run.review_retryable === true) actions.push({ id: "retry", label: "Retry review", task, run });
   actions.push({ id: "run", label: "Run again", task });
   return actions;

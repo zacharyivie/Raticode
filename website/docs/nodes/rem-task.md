@@ -10,7 +10,7 @@ Run one of Rem's existing tasks and wait for its result.
 
 ## When to use it
 
-Use this node to chain Rem tasks: each task runs after the previous one finishes, and can be given the previous task's result. The run is the same as pressing Run on the task in Rem, with Rem's worker, independent review, project access checks and task thread.
+Use it to chain Rem tasks: each one runs after the previous one finishes and can be given its result. The run is the same as pressing Run on the task in Rem, with Rem's worker, independent review, project access checks and task thread.
 
 ## Example
 
@@ -34,25 +34,24 @@ Node publish:
   needs: draft
 ```
 
-In the workflow editor, choose the task by title from the Rem task list; you don't need to copy its ID. Quote IDs written by hand.
-
-`instructions` are added to the task's goal for this run only, as a follow-up would be. The task itself isn't changed, so its next scheduled run uses its own goal.
+- In the workflow editor, pick the task by title from Rem's task list; you don't need its ID. Quote IDs you write by hand.
+- `instructions` are added to the task's goal for this run only, like a follow-up. The task itself doesn't change, so its next scheduled run uses its own goal.
 
 ## Waiting, failures and stopping
 
 With `wait: true` (the default) the node waits until Rem finishes the run:
 
-- A run that succeeds passes its result to the next steps.
-- A run that fails, couldn't finish, was stopped in Rem or ended with an unknown result fails the node with the run's state and summary. Use `allow-fail` and a `when failed` route to continue anyway.
-- A task that needs your answer fails the node with `needs_user: true` in the error details. Answer it in Rem, then run the workflow again.
+| Run ends | Node |
+| --- | --- |
+| Succeeded | Passes the result to the next steps |
+| Failed, couldn't finish, stopped in Rem, or unknown result | Fails with the run's state and summary. Use `allow-fail` and a `when failed` route to carry on anyway. |
+| Needs your answer | Fails with `needs_user: true` in the error details. Answer in Rem, then run the workflow again. |
 
-When the node times out or the workflow is stopped, Rem stops the run the node started.
-
-With `wait: false` the node succeeds as soon as the run is queued and passes on `state: queued`. Stopping the workflow afterwards doesn't stop that run.
-
-A task that is already running for something else isn't taken over: the node fails with `RATTISH_REM_BUSY`. A resumed workflow whose node had started a run that is still going waits for that run instead of starting a second one; its output then has `attached: true`.
-
-Rem must be running. With no Raticode backend running Rem, the node fails with `RATTISH_REM_UNAVAILABLE` before queueing anything. If Rem stops for more than a minute while the node waits, the node fails and stops the run it started.
+- When the node times out or the workflow stops, Rem stops the run the node started.
+- With `wait: false` the node succeeds as soon as the run is queued, with `state: queued`. Stopping the workflow afterwards doesn't stop that run.
+- A task already running for something else isn't taken over; the node fails with `RATTISH_REM_BUSY`.
+- A resumed workflow whose node had started a run that's still going waits for that run instead of starting another. Its output then has `attached: true`.
+- Rem must be running. Without a Raticode backend running Rem, the node fails with `RATTISH_REM_UNAVAILABLE` before queueing anything. If Rem stops for more than a minute while the node waits, the node fails and stops the run it started.
 
 ## Configuration
 

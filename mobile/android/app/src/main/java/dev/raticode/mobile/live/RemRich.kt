@@ -11,11 +11,11 @@ import kotlin.math.roundToInt
  * reply details. The desktop has the same rules in frontend/src/lib/remRich.js, so both apps say the same thing.
  */
 object RemRich {
-    enum class StepState { DONE, CURRENT, STOPPED, TODO }
+    enum class StepState { DONE, CURRENT, STOPPED, PAUSED, TODO }
     data class Step(val key: String, val label: String, val state: StepState) {
         /** Said in words as well as shown, so the step never depends on color. */
-        val spoken get() = "$label " + when (state) { StepState.DONE -> "done"; StepState.CURRENT -> "in progress"; StepState.STOPPED -> "stopped"; StepState.TODO -> "not started" }
-        val symbol get() = when (state) { StepState.DONE -> "✓"; StepState.CURRENT -> "▶"; StepState.STOPPED -> "■"; StepState.TODO -> "○" }
+        val spoken get() = "$label " + when (state) { StepState.DONE -> "done"; StepState.CURRENT -> "in progress"; StepState.STOPPED -> "stopped"; StepState.PAUSED -> "paused"; StepState.TODO -> "not started" }
+        val symbol get() = when (state) { StepState.DONE -> "✓"; StepState.CURRENT -> "▶"; StepState.STOPPED -> "■"; StepState.PAUSED -> "⏸"; StepState.TODO -> "○" }
     }
 
     private val LABELS = listOf("plan" to "Plan", "work" to "Work", "check" to "Check", "report" to "Report")
@@ -32,7 +32,7 @@ object RemRich {
     fun steps(state: String, reachedCheck: Boolean = false, step: String = ""): List<Step> {
         val at = when {
             state == "succeeded" -> 4
-            state !in AT && state !in ENDED -> return emptyList()
+            state !in AT && state !in ENDED && state != RunPause.PAUSED -> return emptyList()
             step in STEP_AT -> STEP_AT.getValue(step)
             state in AT -> AT.getValue(state)
             else -> if (reachedCheck) 2 else 1
@@ -41,7 +41,7 @@ object RemRich {
         return LABELS.mapIndexed { index, (key, label) ->
             Step(key, label, when {
                 index < at -> StepState.DONE
-                index == at -> if (stopped) StepState.STOPPED else StepState.CURRENT
+                index == at -> if (stopped) StepState.STOPPED else if (state == RunPause.PAUSED) StepState.PAUSED else StepState.CURRENT
                 else -> StepState.TODO
             })
         }
@@ -171,11 +171,16 @@ object RemRich {
         if (task.state == "deleted" || task.activeRun?.active == true) return actions
         // A task waiting for others: retry each prerequisite that didn't succeed, or start it now.
         task.dependency?.let { dependency ->
-            dependency.prerequisites.filter { it.retryable }.forEach { actions.add(Action("retry-after:${it.taskId}", "Retry “${it.title}”", it.taskId)) }
+            dependency.prerequisites.filter { it.canRetry }.forEach { actions.add(Action("retry-after:${it.taskId}", "Retry “${it.title}”", it.taskId)) }
             actions.add(Action("run", "Start now", task.id))
             return actions
         }
         val run = task.lastRun
+        // Run on a paused task resumes that same run in its thread.
+        if (run != null && run.paused) {
+            actions.add(Action("run", "Resume", task.id))
+            return actions
+        }
         if (reviewRetry && run != null && run.id == work.runId && run.reviewRetryable) actions.add(Action("retry", "Retry review", task.id, run.id))
         actions.add(Action("run", "Run again", task.id))
         return actions

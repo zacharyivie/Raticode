@@ -10,7 +10,7 @@ Create, replace, or append a text file using authored content or a bound input.
 
 ## When to use it
 
-Use this node for reports and small generated artifacts. Review its path and replacement behavior before running it.
+Use it for reports and small generated files. Check the path and the overwrite setting before you run it.
 
 ## Example
 
@@ -28,13 +28,15 @@ Node step:
   finish: pass
 ```
 
-The default creates missing parent directories and allows replacement. This example sets `overwrite: false` so an existing report is preserved. Enable `append` only when adding text to an existing artifact is intended.
-
-Binding `with.stdin` replaces authored `content` for that activation. Non-append writes use an atomic replacement path and refuse a symlink destination. Output reports the actual action and byte/character counts.
+- By default the node creates missing parent folders and replaces an existing file. The example sets `overwrite: false` to keep an existing report.
+- Turn on `append` only when you mean to add to an existing file.
+- A value bound to `with.stdin` replaces `content` for that run of the node.
+- Writes that don't append replace the file atomically and refuse a symlink destination.
+- Output reports what the node did and the byte and character counts.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -47,13 +49,13 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
 | `stdin` | string |
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -62,12 +64,12 @@ Successful output fields use these exact selector names:
 | `bytes_written` | integer (min 0) |
 | `characters_written` | integer (min 0) |
 
-For example, refer to `node.step.output.path` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.path`.
 
 ## Preflight and limits
 
-The destination must satisfy the directory and overwrite policy, and the encoding must be supported. When the node has `needs`, a missing parent directory is allowed because an upstream step may create it. Validation never creates the report.
+The destination must fit the folder and overwrite settings, and the encoding must be supported. With `needs`, a missing parent folder is allowed, because an earlier step may create it. Validation never writes the file.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

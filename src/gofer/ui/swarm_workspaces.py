@@ -23,7 +23,11 @@ from typing import Any
 
 from gofer.utils.atomic_output import open_binary_input
 from gofer.utils.brand_compat import LEGACY_SWARM_BRANCH_PREFIX
-from gofer.utils.process import build_subprocess_env
+from gofer.utils.process import (
+    NO_REPOSITORY_PROGRAMS,
+    build_subprocess_env,
+    untrusted_repository_git_env,
+)
 
 # Untracked files that look like credentials stay out of the start snapshot.
 # The snapshot becomes branch history in the user's repository and can be pushed.
@@ -53,14 +57,19 @@ SECRET_FILE_PATTERNS = (
 SLOW_GIT_SECONDS = 600
 
 
+def _untrusted_env(root: Path, env: dict[str, str]) -> dict[str, str]:
+    try:
+        return untrusted_repository_git_env(root, env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # Unreadable settings: fail like any git error rather than run it unchecked.
+        raise ValueError(str(exc)) from exc
+
+
 def git(root: Path, *args: str, env: dict[str, str] | None = None, timeout: float = 30) -> str:
     result = subprocess.run(
         [
             "git",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
+            *NO_REPOSITORY_PROGRAMS,
             "-c",
             "commit.gpgsign=false",
             "-c",
@@ -70,7 +79,7 @@ def git(root: Path, *args: str, env: dict[str, str] | None = None, timeout: floa
             *args,
         ],
         cwd=root,
-        env=build_subprocess_env(env, inherit_parent=env is None),
+        env=_untrusted_env(root, build_subprocess_env(env, inherit_parent=env is None)),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -284,9 +293,17 @@ def cleanup_run(workspace: dict[str, Any], attempts: list[dict[str, Any]]) -> di
         git(path, "bundle", "create", str(bundle), "HEAD", timeout=SLOW_GIT_SECONDS)
         git(path, "bundle", "verify", str(bundle), timeout=SLOW_GIT_SECONDS)
         patch = subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "diff", "--binary", "HEAD"],
+            [
+                "git",
+                *NO_REPOSITORY_PROGRAMS,
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "HEAD",
+            ],
             cwd=path,
-            env=build_subprocess_env(),
+            env=_untrusted_env(path, build_subprocess_env()),
             capture_output=True,
             check=True,
         ).stdout

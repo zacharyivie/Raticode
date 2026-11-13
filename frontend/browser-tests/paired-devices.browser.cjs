@@ -109,7 +109,8 @@ async function main() {
   await evaluate("document.documentElement.classList.add('dark')");
   await screenshot("pending-dark");
   await evaluate("document.documentElement.classList.remove('dark')");
-  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).length"), 0);
+  // The only control before pairing is the suspicious-request guard's switch.
+  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => !i.closest('[aria-label=\"Suspicious phone requests\"]')).length"), 0);
   await click("Pair a device");
   // Controlled draft must tolerate focus -> clear -> type -> blur.
   await evaluate(`(() => { const input = document.querySelector('input'); input.focus(); Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, ''); input.dispatchEvent(new Event('input', {bubbles:true})); })()`);
@@ -267,8 +268,10 @@ async function main() {
   await click("Close setup");
   await click("Dismiss result");
   await evaluate("document.querySelectorAll('details').forEach(d => d.open = false)");
-  // Thread sync plus the remote-control, desktop-control and wake opt-ins, which start off.
-  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 4);
+  // Thread sync plus the remote-control, desktop-control and wake opt-ins, which start off,
+  // and the suspicious-request guard's switch below the device list, which starts on.
+  assert.equal(await evaluate("Array.from(document.querySelectorAll('input')).filter(i => i.checkVisibility()).length"), 5);
+  assert.equal(await evaluate("document.querySelector('[aria-label=\"Suspicious phone requests\"] input').checked"), true);
   assert.equal(await evaluate("document.querySelectorAll('input[type=checkbox]')[1].checked"), false);
   assert.equal(await evaluate("document.querySelectorAll('input[type=checkbox]')[2].checked"), false);
   await evaluate("document.querySelectorAll('input[type=checkbox]')[1].click()");

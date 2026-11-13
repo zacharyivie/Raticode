@@ -45,6 +45,7 @@ Desktop installers also carry it in their resources/third-party-licenses folder.
 ## Source and native release review
 
 Application source and build instructions: https://github.com/zacharyivie/Raticode.
+Website and documentation: https://raticode.dev/.
 Use the release's exact tag and commit, with docs/releasing.md and the lockfiles.
 The bundle includes exact source distributions for the MPL components certifi
 and tqdm in sources/, downloaded using the URLs in uv.lock and verified against

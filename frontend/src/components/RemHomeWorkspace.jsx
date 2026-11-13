@@ -11,7 +11,7 @@ import { ReplyFiles } from "./RemMedia.jsx";
 import { OutcomeGlyph, RemMenu, typeLabel } from "./RemHomeParts.jsx";
 import { FoldPinContext, FoldableText, revealFold, FollowUps, MessageActions, MessageDetails, NewMessagesPill, ProgressSteps, ReplyQuote, ResultActions, ResultCard } from "./RemRichParts.jsx";
 import { bodyWithoutCardLinks, latestRemMessageId, latestSuggestionMessageId, remPresence } from "../lib/remRich.js";
-import { chatRows, criteriaSummary, conversationMessages, messageStamp, messagesByDay, selfWorkBatchLine, statusLine, latestWorkMessageIds, workStatus } from "../lib/remHome.js";
+import { chatRows, criteriaSummary, conversationMessages, messageStamp, messagesByDay, selfWorkBatchLine, selfWorkReportItems, statusLine, latestWorkMessageIds, workStatus } from "../lib/remHome.js";
 import { cardTickets } from "../lib/ticketMentions.js";
 import { TicketPills } from "./TicketPill.jsx";
 import AwayReport from "./RemAwayReport.jsx";
@@ -205,7 +205,7 @@ function Conversation({ store, now, replying, avatar, onOpenLink, messageFocus, 
               const first = (before ? before.message?.role || "rem" : "") !== (row.message?.role || "rem");
               if (row.batch) return <SelfWorkBatch key={row.key} messages={row.messages} first={first} now={now} taskLists={taskLists} liveWork={liveWork} tickets={tickets} />;
               const message = row.message;
-              return <Message key={message.id} message={message} first={first} now={now} tasks={message.work ? taskLists.get(message.work.task_id) || NO_TASKS : NO_TASKS} tickets={tickets} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} newest={message.id === newestRem} onShowMessage={message.refers_to && shown.has(message.refers_to) ? onShowMessage : null} />;
+              return <Message key={message.id} message={message} first={first} now={now} tasks={message.work ? taskLists.get(message.work.task_id) || NO_TASKS : message.kind === "self_work_report" ? store.tasks : NO_TASKS} tickets={tickets} onOpenLink={onOpenLink} live={liveWork.has(message.id)} followUps={message.id === followUpsFor} newest={message.id === newestRem} onShowMessage={message.refers_to && shown.has(message.refers_to) ? onShowMessage : null} />;
             })}
           </div>) : <Welcome offline={offline} loading={store.status === "loading"} avatar={avatar} />}
         </FoldPinContext.Provider>
@@ -303,9 +303,10 @@ const Message = memo(function Message({ message, first, now, tasks, tickets = nu
     <div className="rem-msg-body">
       {quote}
       <FoldableText id={message.id} startOpen={newest}>
-        <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={message.file_mentions} tickets={tickets} value={message.result ? bodyWithoutCardLinks(message.body, message.result) : message.body} />
+        <MarkdownContent onOpenRelativeLink={onOpenLink} compact className="rem-markdown" fileMentions={message.file_mentions} loadWebImages={Boolean(message.sources?.length || message.result?.sources?.length)} tickets={tickets} value={message.result ? bodyWithoutCardLinks(message.body, message.result) : message.body} />
       </FoldableText>
       <MessageDetails details={message.details} fileMentions={message.file_mentions} tickets={tickets} onOpenLink={onOpenLink} />
+      {message.kind === "self_work_report" ? <SelfWorkReportItems message={message} tasks={tasks} /> : null}
       <ResultCard result={message.result} body={message.body} onOpenLink={onOpenLink} />
       {message.files?.length ? <ReplyFiles files={message.files} onOpenLink={onOpenLink} /> : null}
       {message.work ? <WorkCard work={message.work} tasks={tasks} live={live} tickets={tickets} /> : null}
@@ -334,6 +335,22 @@ const SelfWorkBatch = memo(function SelfWorkBatch({ messages, first, now, taskLi
     </div>
   </div>;
 });
+
+// What one self-work period did, under the report Rem posted when it ended: each thing it
+// worked on and how it went. A row opens its task, or its thread when the task is gone.
+function SelfWorkReportItems({ message, tasks }) {
+  const items = selfWorkReportItems(message, tasks);
+  if (!items.length) return null;
+  return <ul className="rem-sw-report" aria-label="What self-work did">
+    {items.map(item => {
+      const content = <><span className="rem-sw-report-title">{item.title}</span>{item.outcome ? <small>{item.outcome}</small> : null}</>;
+      const open = item.taskId ? () => openTaskSheet(item.taskId) : item.threadId ? () => openRemThread(item.threadId) : null;
+      return <li key={item.key} data-tone={item.tone}>
+        {open ? <button type="button" onClick={open} title={item.taskId ? "Task details" : "Open thread"}>{content}</button> : <span className="rem-sw-report-row">{content}</span>}
+      </li>;
+    })}
+  </ul>;
+}
 
 // Shows nothing when the message has no usable date.
 function MessageStamp({ iso, now }) {

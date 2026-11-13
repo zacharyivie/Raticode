@@ -6,13 +6,11 @@ pageClass: docs-layout
 
 # The Raticode guide
 
-Build workflows you can inspect. Work with Rem in your project. Keep the files, conversations, and execution on machines you control.
-
-Raticode brings a code editor, visual workflow graph, coding agent, terminal, and source control into one desktop workspace. Its `Raticode` CLI runs Rattish workflows without a desktop window. You can start with a shell command and add agents, branches, file operations, and review steps as your process grows.
+Raticode is a desktop workspace for agentic coding: an editor, a visual workflow graph, the Rem coding agent, a terminal and source control. The `Raticode` CLI runs the same Rattish workflows without a window. Your files, conversations and runs stay on machines you control.
 
 ## Start with a working project
 
-New to Raticode? Follow [Getting started](./getting-started.md) to install the desktop app, connect a provider, open a project, and create a workflow. You can also complete [Your first workflow](./first-workflow.md) without an AI subscription.
+New here? [Getting started](./getting-started.md) covers install, provider, project and a first workflow. [Your first workflow](./first-workflow.md) works without an AI subscription.
 
 | I want to… | Read this |
 | --- | --- |
@@ -22,20 +20,19 @@ New to Raticode? Follow [Getting started](./getting-started.md) to install the d
 | Chat in your own threads | [Chat and threads](./rem/chat.md) |
 | See every ticket in one place | [Global board and self-work](./rem/board.md) |
 | Build reusable automation | [Rattish language](./workflows/rattish.md) |
+| Run a workflow on a schedule, file change or webhook | [Triggers](./workflows/triggers.md) |
 | Choose the right workflow step | [Node reference](./nodes/index.md) |
+| Share a workflow with another computer | [Import and export](./studio/sharing.md) |
 | Save knowledge and reports | [Second Brain](./knowledge/second-brain.md) |
 | Run an agent organization | [Organizations](./advanced/organizations.md) |
 | Coordinate a team | [Swarms](./advanced/swarms.md) |
 | Use Raticode from your phone | [Raticode Mobile](./mobile/index.md) |
+| Find a setting | [Settings](./reference/settings.md) |
 | Fix a setup problem | [Troubleshooting](./reference/troubleshooting.md) |
 | Report a bug or get help | [Support](./support.md) |
 | Know what leaves your computer | [Privacy](./privacy.md) |
 
-## Find your way around
-
-The left sidebar is the wiki's page directory. Its sections follow the way you use Raticode: setup, the studio, Rem, workflows, knowledge, teams, and the phone app. Expand **Node reference** for a separate page on every built-in node. On a phone, choose **Browse docs** to open the same directory.
-
-Use the search button in the navbar to search page content. The outline on the right jumps between headings in the current article. Previous and next links continue through the guide.
+The sidebar lists every page, including one per built-in node under **Node reference**. On a phone, open it with **Browse docs**.
 
 ## What runs where
 
@@ -46,10 +43,10 @@ Use the search button in the navbar to search page content. The outline on the r
 | CLI workflows | The machine running `Raticode` | Files, interpreters, and provider access on that machine |
 | Raticode Mobile and fleet | Requests run on the paired computer | Phone and desktop pairing turned on, and per-device switches in **Settings > Devices** |
 
-Raticode does not require a Raticode account. AI providers and connected tools have their own accounts and data policies. Local execution does not mean an AI request is offline.
+There is no Raticode account. AI providers and connected tools have their own accounts and data policies, and an agent request still goes to its provider even when the workflow runs locally.
 
-::: info Current product documentation
-This website is the reference for Raticode, desktop and mobile. The guides describe the current Raticode source and Rattish 1 contracts, so the [published release](https://github.com/zacharyivie/Raticode/releases/latest) may precede a recently added feature. Rattish workflows start on a schedule, file change, or webhook through [triggers](./workflows/triggers.md). The automation guides identify the remaining legacy scheduler, watcher, and queue boundaries.
+::: info Docs track the current source
+These pages cover Raticode desktop and mobile as they are in the source. A recently added feature may not be in the [latest release](https://github.com/zacharyivie/Raticode/releases/latest) yet.
 :::
 
 ## Feature status
@@ -58,6 +55,6 @@ This website is the reference for Raticode, desktop and mobile. The guides descr
 | --- | --- |
 | **Available** in the desktop app | The studio (editors, Source control, terminal, the Browser plugin), Rem's home and tasks, threads, the global Kanban board and self-work, workflows and triggers, reports, and the `Raticode` CLI |
 | **Experimental**, off until you turn it on in **Settings > Developer > Feature Preview** | Phone and desktop pairing (and with it the desktop fleet), [Organizations](./advanced/organizations.md), [Swarms](./advanced/swarms.md), [Second Brain](./knowledge/second-brain.md) |
-| **Platform limits** | Raticode (gecko) runs on Linux only. Desktop builds are for Apple Silicon Macs, x64 Windows and x64 Linux. Windows builds are not code-signed. Mac builds from 0.5.3 on are signed with Raticode's Apple Developer ID and notarized by Apple; 0.5.2 and earlier are not ([installation](./installation.md#macos)). Wake computer from the phone needs a Linux computer. |
-| **Not released yet** | [Raticode Mobile](./mobile/index.md) is built and documented here, but has no public download. Signed Windows builds are planned. The AUR packages `raticode-bin` and `raticode-cli-bin` are ready but not published yet ([Arch Linux](./installation.md#arch-linux-aur)). |
+| **Platform limits** | Desktop builds: Apple Silicon Macs, x64 Windows, x64 Linux. Mac builds are signed and notarized from 0.5.3 on ([installation](./installation.md#macos)); Windows builds are not code-signed. Raticode (gecko) and waking a computer from the phone need Linux. |
+| **Not released yet** | Signed Windows builds are planned. The AUR packages `raticode-bin` and `raticode-cli-bin` are ready but unpublished ([Arch Linux](./installation.md#arch-linux-aur)). |
 

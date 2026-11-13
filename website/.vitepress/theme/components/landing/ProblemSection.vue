@@ -5,17 +5,17 @@ const pains = [
   {
     tag: 'Groundhog prompts',
     title: 'You type the same instructions every day.',
-    body: 'Run the tests. Fix what broke. Summarize the diff. Open the PR. Your agent is brilliant, but your process lives in your clipboard.',
+    body: 'Run the tests. Fix what broke. Open the PR. Your process lives in your clipboard.',
   },
   {
     tag: 'Context bloat',
     title: 'One endless chat carries everything.',
-    body: 'Every step drags the whole conversation along. Answers drift, tool calls pile up, and the bill grows with the scrollback.',
+    body: 'Every step drags the whole conversation along, so answers drift and costs grow.',
   },
   {
     tag: 'Black-box runs',
     title: 'When it goes sideways, you start over.',
-    body: 'There is no step to inspect, no failure to route around, no way to rerun just the part that went wrong.',
+    body: 'No step to inspect and no way to rerun only the part that failed.',
   },
 ]
 </script>
@@ -40,8 +40,7 @@ const pains = [
         <img class="rc-pixel" :src="withBase('/brand/rem-think.webp')" alt="" width="543" height="640" loading="lazy" />
         <p>
           <strong>Raticode turns that loop into a machine you can see.</strong>
-          Each step becomes a node with its own prompt, model and limits. Routes decide what happens next.
-          Your agents do the work; you review the result.
+          Each step is a node with its own prompt, model and limits. Routes decide what runs next.
         </p>
       </div>
     </div>
@@ -75,7 +74,7 @@ const pains = [
 
 .tag {
   font-family: var(--rc-font-pixel);
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--rc-rose);
@@ -86,8 +85,8 @@ h3 {
   font-family: var(--rc-font-display);
   font-size: 1.45rem;
   font-weight: 650;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
+  line-height: 1.22;
+  letter-spacing: -0.015em;
   color: var(--rc-ivory);
 }
 

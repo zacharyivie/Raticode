@@ -3,8 +3,8 @@ import { ArrowLeft, ChevronRight, Hourglass, MessageSquare, Plus, ShieldCheck, S
 import { OutcomeGlyph, TaskGlyph, TaskTypeIcon, taskActions, typeLabel } from "./RemHomeParts.jsx";
 import {
   CREATABLE_TYPES, TASK_TYPES, WEEKDAYS, afterChoices, afterEditable, changesActiveWork, criteriaSummary, describeSchedule,
-  draftTitle, draftToRequest, formatWhen, newTaskDraft, plainMarkdown, prerequisites, projectLabel, runState, scheduleIsEditable,
-  startsWhen, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, weekdayShort,
+  PAUSED_FOR_YOU, draftTitle, draftToRequest, formatWhen, newTaskDraft, plainMarkdown, pausedBy, prerequisites, projectLabel, runState, scheduleIsEditable,
+  runSleep, sleepBudget, startsWhen, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, weekdayShort,
 } from "../lib/remHome.js";
 import TaskChecks from "./RemTaskChecks.jsx";
 import { TicketPills } from "./TicketPill.jsx";
@@ -236,6 +236,7 @@ function TaskStatus({ task, activity, now }) {
         {STEPS.map(([key, label], index) => <li key={key} data-state={index < current ? "done" : index === current ? "current" : "next"} aria-current={index === current ? "step" : undefined}>{index === 1 && run.state === "repairing" ? "Fixing" : label}</li>)}
       </ol> : null}
       {run.state === "repairing" ? <TaskChecks criteria={run.criteria} label="What the review found" /> : null}
+      {runSleep(run) ? <p className="rem-status-note" data-sleep="true">{sleepBudget(runSleep(run))}. It holds no worker while it sleeps.</p> : null}
       <StatusActions run={run} controls={controls} />
     </section>;
   }
@@ -243,6 +244,16 @@ function TaskStatus({ task, activity, now }) {
     return <section className="rem-status" aria-label={task.dependency ? "Waiting for other tasks" : "Schedule"} data-tone={activity.tone}>
       <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{activity.kind === "idle" ? "Hasn’t run yet" : activity.label}</strong></div>
       {task.dependency ? <WaitsFor task={task} /> : null}
+      <StatusActions controls={controls} />
+    </section>;
+  }
+  if (last.state === "paused") {
+    const by = pausedBy(last);
+    return <section className="rem-status" aria-label="Paused run" data-tone="neutral">
+      <div className="rem-status-line"><TaskGlyph activity={activity} type={task.type} size={16} /><strong>{by === "priority" ? PAUSED_FOR_YOU : "Paused"}</strong>{last.paused?.at ? <small>{formatWhen(last.paused.at, now, { past: true })}</small> : null}</div>
+      <p className="rem-status-note">{by === "priority"
+        ? "Rem paused this self-work so your own work could run first. It picks up in the same thread once your work is done and you’ve been away 15 minutes."
+        : "Its thread and any worktree are kept. Resume continues in the same thread, where the worker checks what it already did."}</p>
       <StatusActions controls={controls} />
     </section>;
   }
@@ -257,13 +268,14 @@ function TaskStatus({ task, activity, now }) {
   </section>;
 }
 
-// Each task a waiting task needs, with where it stands. A title opens that task.
+// Everything a waiting task needs, with where it stands. A task's title opens that task;
+// a time, the self-work window or "nothing else running" is plain text.
 function WaitsFor({ task }) {
   const items = prerequisites(task);
   if (!items.length) return null;
   return <ul className="rem-waits-for" aria-label="Starts after">
-    {items.map(item => <li key={item.task_id} data-tone={item.tone}>
-      <button type="button" className="rem-after-open" onClick={() => openTaskSheet(item.task_id)}>{item.title}</button>
+    {items.map(item => <li key={item.key} data-tone={item.tone} data-kind={item.kind} title={item.kind === "task" ? undefined : item.reason || undefined}>
+      {item.opens ? <button type="button" className="rem-after-open" onClick={() => openTaskSheet(item.task_id)}>{item.title}</button> : <strong className="rem-after-condition">{item.title}</strong>}
       <span>{item.label}</span>
     </li>)}
   </ul>;

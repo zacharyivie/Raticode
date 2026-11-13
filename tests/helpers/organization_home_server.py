@@ -50,6 +50,8 @@ def seed(server: Any, root: Path, project: Path, brain: Path) -> dict[str, Any]:
             "slug": "studio",
             "description": "Builds Raticode",
             "remSecondBrain": {"enabled": True, "root": str(brain)},
+            # The seed's Backlog stays put while its one run goes; the test turns pulls on.
+            "pullBacklog": False,
             "employees": [
                 {
                     "id": "avery",

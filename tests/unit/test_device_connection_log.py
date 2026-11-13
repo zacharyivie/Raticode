@@ -91,7 +91,7 @@ async def _pair(tmp_path) -> tuple[DeviceRegistry, DeviceRegistry, DeviceListene
     invites = Invitations(a)
     listener = DeviceListener(a, invites)
     port = await listener.start()
-    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port})
+    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port}, role="desktop")
     task = asyncio.create_task(pair_desktop(b, payload["uri"]))
     async with asyncio.timeout(5):
         while not a.list():

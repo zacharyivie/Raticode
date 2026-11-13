@@ -5,9 +5,10 @@ name: Update AUR packages
 # release build computed from the packages it built, and an Arch container builds both
 # packages from the published files before anything is pushed.
 #
-# Pushing is opt-in. It happens only when an AUR_SSH_PRIVATE_KEY secret exists, ideally
-# in the aur-publish environment with a required reviewer. Without the secret, the run
-# renders and checks the packages and pushes nothing. See docs/releasing.md.
+# Pushing is opt-in. The push job runs only when the AUR_PUBLISH repository variable is
+# true, waits for the aur-publish environment's required reviewer, and pushes only when
+# an AUR_SSH_PRIVATE_KEY secret exists there. Otherwise the run renders and checks the
+# packages and pushes nothing. See docs/releasing.md.
 on:
   workflow_run:
     workflows: ["Publish release"]
@@ -31,7 +32,10 @@ jobs:
     name: Render packages from the published release
     if: >-
       github.repository == 'zacharyivie/Raticode' &&
-      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -137,6 +141,8 @@ jobs:
   publish:
     name: Push to the AUR
     needs: [render, verify]
+    # Opt-in, so a release doesn't leave an approval waiting for a push that has no key.
+    if: vars.AUR_PUBLISH == 'true'
     runs-on: ubuntu-24.04
     environment: aur-publish
     steps:

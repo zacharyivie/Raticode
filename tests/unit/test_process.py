@@ -240,9 +240,10 @@ def test_build_subprocess_env_removes_pyinstaller_library_paths(monkeypatch, ori
     assert env.get("LD_LIBRARY_PATH") == (None if original == "" else "/opt/user/lib")
     assert "LD_LIBRARY_PATH_ORIG" not in env
     assert "/tmp/_MEIchild" in os.environ["LD_LIBRARY_PATH"]
-    assert build_subprocess_env({"LD_LIBRARY_PATH": "/workflow/lib"})[
-        "LD_LIBRARY_PATH"
-    ] == "/workflow/lib"
+    assert (
+        build_subprocess_env({"LD_LIBRARY_PATH": "/workflow/lib"})["LD_LIBRARY_PATH"]
+        == "/workflow/lib"
+    )
 
 
 def test_build_subprocess_env_removes_actual_pyinstaller_bundle_root(monkeypatch):
@@ -734,3 +735,53 @@ async def test_stdout_observer_keeps_split_utf8_after_stderr_fills_log_budget() 
     assert "subprocess output truncated" in stderr
     assert stdout == ""
     assert "".join(observed) == "café"
+
+
+def test_sealed_desktop_credentials_never_reach_children_spawned_without_an_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain subprocess call (git, systemctl) can't hand the desktop's tokens on."""
+    import subprocess
+
+    from gofer.utils import process
+
+    monkeypatch.setattr(process, "_SEALED_CREDENTIALS", {})
+    monkeypatch.setenv("GOFER_UI_API_TOKEN", "desktop-api-token")
+    monkeypatch.setenv("GOFER_DESKTOP_GRANT_SECRET", "desktop-grant-secret")
+    monkeypatch.setenv("GOFER_BROWSER_ADMIN_TOKEN", "b" * 64)
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-key")
+
+    process.seal_credential_env()
+
+    leaked = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os; print(sorted(n for n in os.environ if n.startswith('GOFER_')))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert leaked == "[]"
+    assert os.environ["OPENAI_API_KEY"] == "provider-key"
+    assert process.credential_env("GOFER_BROWSER_ADMIN_TOKEN") == "b" * 64
+    assert process.credential_env("GOFER_UI_API_TOKEN") == "desktop-api-token"
+    assert process.credential_env("RATICODE_TOKEN") == ""
+
+
+def test_browser_service_still_found_after_credentials_are_sealed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gofer.ui.browser_tools import desktop_browser_service
+    from gofer.utils import process
+
+    monkeypatch.setattr(process, "_SEALED_CREDENTIALS", {})
+    monkeypatch.setenv("GOFER_BROWSER_SERVICE_URL", "http://127.0.0.1:45555/browser")
+    monkeypatch.setenv("GOFER_BROWSER_ADMIN_TOKEN", "c" * 64)
+
+    process.seal_credential_env()
+
+    assert "GOFER_BROWSER_ADMIN_TOKEN" not in os.environ
+    service = desktop_browser_service()
+    assert service is not None and service.admin_token == "c" * 64

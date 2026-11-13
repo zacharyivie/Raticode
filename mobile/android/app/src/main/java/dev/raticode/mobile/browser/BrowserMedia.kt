@@ -40,8 +40,6 @@ internal object BrowserMedia {
     var bar by mutableStateOf<Track?>(null); private set
     /** The tab the Browser page is showing, set by the page while it's on screen. */
     var inView: Key? = null; private set
-    /** A page is full screen, so the bar stays out of its way. */
-    var fullscreen by mutableStateOf(false)
     /** Thumbnails by [Track.artwork]. */
     val images = mutableStateMapOf<String, ImageBitmap>()
     /** The lock screen's media controls show the title and picture. Private tabs never do, and App lock hides them too. */

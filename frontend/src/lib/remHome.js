@@ -29,13 +29,48 @@ export const RUN_STATES = Object.freeze({
   failed: { label: "Didn't finish", tone: "danger", active: false, spinning: false },
   cancelled: { label: "Stopped", tone: "neutral", active: false, spinning: false },
   succeeded: { label: "Done", tone: "success", active: false, spinning: false },
+  // Neither running nor finished: kept with its thread and worktree until it is resumed.
+  paused: { label: "Paused", tone: "neutral", active: false, spinning: false },
   // Not run states: a task card for a task that waits for other tasks (task.dependency).
   waiting: { label: "Waiting for another task", tone: "neutral", active: false, spinning: false },
   held: { label: "On hold", tone: "attention", active: false, spinning: false },
 });
-export const runState = (state, needsUser) => state === "blocked" && needsUser === false
+export const runState = (state, needsUser, pausedBy) => state === "blocked" && needsUser === false
   ? { ...RUN_STATES.blocked, label: "Couldn't finish", tone: "danger" }
-  : RUN_STATES[state] || { label: "Status unavailable", tone: "neutral", active: false, spinning: false };
+  : state === "paused" && pausedBy === "priority"
+    ? { ...RUN_STATES.paused, label: PAUSED_FOR_YOU }
+    : RUN_STATES[state] || { label: "Status unavailable", tone: "neutral", active: false, spinning: false };
+// Self-work that made way for the user's own work; it resumes on its own afterwards.
+export const PAUSED_FOR_YOU = "Paused for your work";
+
+// Who paused a run: "user", "priority" (self-work making way for the user), or "" if it isn't.
+export const pausedBy = run => run?.state !== "paused" ? "" : (run.paused_by || run.paused?.by) === "priority" ? "priority" : "user";
+
+// What a task's controls can do with its current run: pause one that is going or waiting,
+// resume one that is paused. Stopping stays separate.
+export function runControls(task) {
+  const active = task?.active_run;
+  const last = task?.last_run;
+  if (active && runState(active.state).active && active.state !== "cancelling") return { pause: active.id };
+  if (last?.state === "paused") return { resume: last.id };
+  return {};
+}
+
+// A worker that parked itself while it waits for something outside Raticode, such as a
+// CI run (rem_home_sleep). It holds no worker and wakes in the same thread on its own.
+export const runSleep = run => (run?.state === "queued" && run.sleep?.asleep ? run.sleep : null);
+export function sleepLabel(sleep, now = new Date()) {
+  const next = formatWhen(sleep.until, now);
+  return `Sleeping · waiting for ${sleep.waiting_for || "an outside event"}${next ? `, next check ${next}` : ""}`;
+}
+// "Woke 2 times · 25 min of 12 h wait budget used", for the task sheet.
+export function sleepBudget(sleep) {
+  const span = minutes => (minutes >= 60 ? `${Math.round(minutes / 6) / 10} h` : `${Math.round(minutes)} min`);
+  const wakes = Number(sleep.wakes) || 0;
+  const used = (Number(sleep.slept_seconds) || 0) / 60;
+  const budget = (Number(sleep.budget_hours) || 12) * 60;
+  return `${wakes ? `Woke ${wakes} ${wakes === 1 ? "time" : "times"}` : "First sleep"} · ${span(used)} of ${span(budget)} wait budget used`;
+}
 
 // Queued work says why it is waiting; running work names its current phase.
 const activeLabel = run => (run?.state === "queued" && run.waiting_reason) || run?.phase_label || "";
@@ -45,6 +80,8 @@ const activeLabel = run => (run?.state === "queued" && run.waiting_reason) || ru
 export function taskActivity(task, now = new Date()) {
   const run = task?.active_run;
   if (run && runState(run.state).active) {
+    const sleep = runSleep(run);
+    if (sleep) return { kind: "queued", sleeping: true, label: sleepLabel(sleep, now), spinning: false, tone: "neutral" };
     const info = runState(run.state);
     return { kind: run.state === "queued" ? "queued" : "running", label: activeLabel(run) || info.label, spinning: info.spinning, tone: info.tone };
   }
@@ -59,7 +96,11 @@ export function taskActivity(task, now = new Date()) {
     const info = runState(last.state, last.needs_user);
     return { kind: "attention", label: plainMarkdown(last.summary_short) || info.label, spinning: false, tone: info.tone };
   }
-  if (task?.state === "paused") return { kind: "paused", label: "Paused", spinning: false, tone: "neutral" };
+  if (last?.state === "paused") {
+    const by = pausedBy(last);
+    return { kind: "paused", label: by === "priority" ? PAUSED_FOR_YOU : "Paused", spinning: false, tone: "neutral", pausedRun: true, pausedBy: by };
+  }
+  if (task?.state === "paused") return { kind: "paused", label: "Schedule paused", spinning: false, tone: "neutral" };
   if (task?.next_occurrence_at) return { kind: "scheduled", label: `Next ${formatWhen(task.next_occurrence_at, now)}`, spinning: false, tone: "neutral" };
   if (last?.state === "succeeded") return { kind: "done", label: `Done ${formatWhen(last.finished_at, now, { past: true })}`, spinning: false, tone: "success" };
   if (last) {
@@ -198,13 +239,16 @@ export function taskMessages(messages = [], taskId) {
 
 // Rem writes Markdown. Places that show its text as one plain line keep link
 // labels and drop the markup, so a link never shows as "[label](</long/path>)".
-const MARKDOWN_LINK = /(!?)\[([^\]]*)\]\((?:<[^>\n]*>|[^()\s]*(?:\([^()\s]*\)[^()\s]*)*)(?:\s+"[^"\n]*")?\)/g;
+// Each pattern caps how far one match may reach. Unbounded, a long reply full of
+// unclosed "[" or "**" made every opener rescan to the end, freezing the window
+// for seconds (CWE-1333). Real labels and bold runs are far shorter than the caps.
+const MARKDOWN_LINK = /(!?)\[([^\]]{0,500})\]\((?:<[^>\n]{0,2000}>|[^()\s]{0,2000}(?:\([^()\s]{0,500}\)[^()\s]{0,500})*)(?:\s+"[^"\n]{0,500}")?\)/g;
 export function plainMarkdown(text = "") {
   return String(text ?? "")
     .replace(MARKDOWN_LINK, (_, image, label) => label || (image ? "" : _))
     .replace(/<((?:https?|mailto):[^>\s]+)>/gi, "$1")
     .replace(/`([^`\n]+)`/g, "$1")
-    .replace(/(\*\*|__)(?=\S)([^\n]*?\S)\1/g, "$2")
+    .replace(/(\*\*|__)(?=\S)([^\n]{0,500}?\S)\1/g, "$2")
     .replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])/g, "$1$2")
     .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "");
 }
@@ -234,15 +278,31 @@ export function messagesByDay(messages = [], now = new Date()) {
 
 // The live state of work a message refers to, preferring current task data
 // over the snapshot stored with the message.
-// What a waiting task waits for, as the card and the task sheet list it.
+// What a waiting task waits for, as the card and the task sheet list it. Each entry is a
+// named task ("task", the default), a run that was going when the user asked ("run"), a
+// clock time ("time"), nothing else running ("idle") or the self-work window ending
+// ("self_work"). Only entries with a task can be opened, and only named tasks retried.
+const CONDITION_MET = Object.freeze({ run: "Finished", time: "Time reached", idle: "Nothing running", self_work: "Ended" });
+export const prerequisiteKind = item => item?.kind || "task";
+export const canRetryPrerequisite = item => Boolean(item?.retryable && item.task_id) && prerequisiteKind(item) === "task";
 export function prerequisites(task) {
-  return (task?.dependency?.prerequisites || []).map(item => ({
-    ...item,
-    label: item.state === "met" ? "Done"
-      : item.state === "held" ? (item.run_state ? runState(item.run_state).label : item.reason || "On hold")
-        : item.run_state && RUN_STATES[item.run_state]?.active ? "Running" : "Not started",
-    tone: item.state === "met" ? "success" : item.state === "held" ? "attention" : "neutral",
-  }));
+  return (task?.dependency?.prerequisites || []).map((item, index) => {
+    const kind = prerequisiteKind(item);
+    const named = kind === "task";
+    return {
+      ...item,
+      kind,
+      key: `${kind}-${item.task_id || item.run_id || item.title || ""}-${index}`,
+      opens: Boolean(item.task_id) && (named || kind === "run"),
+      retryable: canRetryPrerequisite(item),
+      label: item.state === "met" ? (named ? "Done" : CONDITION_MET[kind] || "Done")
+        : item.state === "held" ? (item.run_state ? runState(item.run_state).label : item.reason || "On hold")
+          : kind === "run" ? "Running"
+            : !named ? "Waiting"
+              : item.run_state && RUN_STATES[item.run_state]?.active ? "Running" : "Not started",
+      tone: item.state === "met" ? "success" : item.state === "held" ? "attention" : "neutral",
+    };
+  });
 }
 
 // The tasks a new or waiting task may wait for: one-time or repeating, never itself or deleted.
@@ -279,8 +339,11 @@ export function workStatus(work, tasks = []) {
     verificationThreadId: run?.verification_thread_id || work.verification_thread_id,
     criteria: run?.criteria || work.criteria || null,
     deleted: Boolean(work.task_id) && !task && Boolean(tasks.length),
-    ...runState(state, run?.needs_user ?? work.needs_user),
-    label: (runState(state).active && activeLabel(run)) || runState(state, run?.needs_user ?? work.needs_user).label,
+    // Paused by you, or by self-work making way for your own work.
+    pausedBy: state === "paused" ? (run ? pausedBy(run) : work.paused_by === "priority" ? "priority" : "user") : "",
+    ...runState(state, run?.needs_user ?? work.needs_user, run?.paused_by || run?.paused?.by || work.paused_by),
+    label: (runSleep(run) && sleepLabel(runSleep(run))) || (runState(state).active && activeLabel(run)) || runState(state, run?.needs_user ?? work.needs_user, run?.paused_by || run?.paused?.by || work.paused_by).label,
+    sleeping: Boolean(runSleep(run)),
   };
 }
 
@@ -296,6 +359,29 @@ export function chatRows(messages = []) {
     else rows.push(batch ? { key: message.id, batch, messages: [message] } : { key: message.id, message });
   }
   return rows.map(row => (row.batch && row.messages.length === 1 ? { key: row.key, message: row.messages[0] } : row));
+}
+
+// The report Rem posts when a self-work period ends: one row per thing it worked on, with
+// how that went. A row opens its task like a task card does, or its thread when the task
+// is gone. Messages without a report, from older desktops, have no rows.
+const REPORT_OUTCOMES = Object.freeze({
+  finished: ["Finished", "success"], running: ["Still running", "active"], paused: ["Paused", "neutral"],
+  blocked: ["Blocked", "attention"], failed: ["Failed", "danger"], stopped: ["Stopped", "neutral"],
+});
+export function selfWorkReportItems(message, tasks = []) {
+  if (message?.kind !== "self_work_report" || !Array.isArray(message.self_work_report?.items)) return [];
+  return message.self_work_report.items.filter(item => item && typeof item === "object").map((item, index) => {
+    const [outcome, tone] = REPORT_OUTCOMES[item.outcome] || [item.outcome ? String(item.outcome) : "", "neutral"];
+    const known = Boolean(item.task_id) && (!tasks.length || tasks.some(task => task.id === item.task_id && !task.deleted_at));
+    return {
+      key: `${item.run_id || item.task_id || "item"}-${index}`,
+      title: plainMarkdown(item.title) || "Task",
+      outcome,
+      tone,
+      taskId: known ? item.task_id : "",
+      threadId: known ? "" : item.thread_id || "",
+    };
+  });
 }
 
 const SELF_WORK_KINDS = [["ticket", "ticket", "tickets"], ["triage", "backlog ranking", "backlog rankings"], ["research", "research run", "research runs"]];
@@ -396,6 +482,9 @@ export function taskToDraft(task) {
     schedule: { local_time: "09:00", weekdays: ["monday"], cron: "", timezone: localTimezone(), ...schedule },
     criteria: (task.acceptance_criteria || []).map(item => ({ id: item.id, description: item.description, authored_by: item.authored_by })),
     after: [...(task.after || [])],
+    // Set by Rem from the user's words; the form shows them but doesn't edit them.
+    after_running: task.after_running || null,
+    after_self_work: Boolean(task.after_self_work),
   };
 }
 
@@ -450,9 +539,17 @@ export function draftToRequest(draft, task = null) {
 }
 
 // Changes that alter the work itself; Rem steers the running thread for these.
-// The draft's "When" summary: a task that waits starts once those tasks succeed.
+// The draft's "When" summary: a task that waits starts once all it waits for is met, the
+// tasks above succeeding and any condition Rem set from the user's words.
 export function startsWhen(draft, isNew) {
-  if ((draft.after || []).length && (draft.schedule.kind === "once" || draft.schedule.kind === "now")) return "Starts by itself once every task above finishes successfully.";
+  const once = draft.schedule.kind === "once" || draft.schedule.kind === "now";
+  const waits = once ? [
+    (draft.after || []).length ? "every task above finishes successfully" : "",
+    draft.after_running === "snapshot" ? "the tasks that were running when you asked have ended" : "",
+    draft.after_running === "idle" ? "nothing else is running" : "",
+    draft.after_self_work ? "the self-work window ends" : "",
+  ].filter(Boolean) : [];
+  if (waits.length) return `Starts by itself once ${listJoin(waits)}.`;
   return isNew ? "Starts as soon as you save." : "Runs once. Run it again any time.";
 }
 

@@ -101,8 +101,8 @@ h2 {
   font-family: var(--rc-font-display);
   font-size: clamp(2.6rem, 7vw, 5.4rem);
   font-weight: 800;
-  line-height: 0.95;
-  letter-spacing: -0.05em;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
   color: var(--rc-ivory);
 }
 

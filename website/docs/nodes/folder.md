@@ -1,16 +1,16 @@
 ---
 title: folder
-description: Expose a directory path and name as a workflow resource.
+description: Output a folder's path and name for other steps to use.
 pageClass: docs-layout
 ---
 
 # folder
 
-Expose a directory path and name as a workflow resource.
+Output a folder's path and name for other steps to use.
 
 ## When to use it
 
-Use this node to make a directory location available to another step. Use a directory loop for per-file iteration or local-vectorize to build a retrieval index.
+Use it to hand a folder location to another step. To process each file, use a directory [loop](./loop.md). To build a search index, use [local-vectorize](./local-vectorize.md).
 
 ## Example
 
@@ -26,13 +26,14 @@ Node step:
   finish: pass
 ```
 
-Create the directory before preflight, or give the node `needs` on the step that creates it. Bind fields such as `node.step.output.folder_path` downstream. This node does not recursively list or attach every file in the directory.
-
-A folder path is context for a consumer, not permission to ignore that consumer's own access controls.
+- Create the folder before preflight, or add `needs` on the step that creates it.
+- Bind fields such as `node.step.output.folder_path` downstream.
+- The node doesn't list the folder's files or attach them.
+- Passing a folder path gives no extra access. The step that uses it keeps its own access rules.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -40,9 +41,9 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -52,12 +53,12 @@ Successful output fields use these exact selector names:
 | `parent_path` | string |
 | `directory` | string |
 
-For example, refer to `node.step.output.path` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.path`.
 
 ## Preflight and limits
 
-The directory must exist and be accessible. When the node has `needs`, preflight skips the existence check because an upstream step may create it earlier in the run; the node then reports a missing directory when it runs. Its contents can still change before later steps read them.
+The folder must exist and be accessible. With `needs`, preflight skips the existence check, because an earlier step may create it. A missing folder then fails when the node runs. Its contents can still change before later steps read them.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

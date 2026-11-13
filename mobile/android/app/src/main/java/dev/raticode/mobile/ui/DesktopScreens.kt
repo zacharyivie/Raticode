@@ -229,7 +229,8 @@ internal fun RemPage(client: LiveClient, handoff: RemHandoff? = null, onHandoffT
                     tasksLabel = RemNav.tasksCount(listed)) {
                     if (home != null) IconButton(onClick = { searching = true }, modifier = Modifier.testTag("remSearch")) { Icon(ThreadIcons.Search, "Search chat") }
                     // An older desktop doesn't know the memory requests, so the button waits for its flag.
-                    if (home?.memories == true && client.desktopControl) TextButton(onClick = { nav = nav.copy(memories = true) }) { Text("Memory") }
+                    if (home?.memories == true && client.desktopControl) IconButton(onClick = { nav = nav.copy(memories = true) },
+                        modifier = Modifier.testTag("remMemory")) { Icon(ThreadIcons.Memory, "Memory") }
                 }
                 if (client.kanban == true && !searching) SelfWorkBanner(client, onSelfWork)
                 Box(Modifier.weight(1f)) {
@@ -352,13 +353,28 @@ private fun RemTaskView(client: LiveClient, id: String, onBack: () -> Unit, onTh
                     val p = JSONObject().put("task_id", task.id)
                     val active = task.activeRun?.takeIf { it.active }
                     // A held task offers to run each prerequisite that didn't succeed again; Start now drops what it waits for.
-                    if (active == null) task.dependency?.prerequisites?.filter { it.retryable }?.forEach { item ->
+                    if (active == null) task.dependency?.prerequisites?.filter { it.canRetry }?.forEach { item ->
                         OutlinedButton(onClick = { client.desktopAction("rem.task.run", JSONObject().put("task_id", item.taskId)) }, enabled = !busy) { Text("Retry “${item.title}”") }
                     }
-                    if (active == null) Button(onClick = { client.desktopAction("rem.task.run", p) }, enabled = !busy) { Text(if (task.dependency != null) "Start now" else "Run now") }
+                    // Only a desktop that reports the sleep takes Wake now.
+                    active?.sleep?.takeIf { active.state == "queued" }?.let {
+                        Button(onClick = { client.desktopAction(RemSleep.WAKE, JSONObject().put("run_id", active.id)) }, enabled = !busy,
+                            modifier = Modifier.testTag("remWakeNow")) { Text("Wake now") }
+                    }
+                    // Pausing a run keeps its thread and worktree; pausing a schedule only skips future runs.
+                    when (val control = RunPause.control(task, client.runPause)) {
+                        is RunPause.Control.Pause -> OutlinedButton(onClick = { client.desktopAction(RunPause.PAUSE, JSONObject().put("run_id", control.runId)) },
+                            enabled = !busy, modifier = Modifier.testTag("remRunPause")) { Text("Pause") }
+                        is RunPause.Control.Resume -> Button(onClick = { client.desktopAction(RunPause.RESUME, JSONObject().put("run_id", control.runId)) },
+                            enabled = !busy, modifier = Modifier.testTag("remRunResume")) { Text("Resume") }
+                        RunPause.Control.None -> Unit
+                    }
+                    val paused = task.lastRun?.takeIf { active == null && it.paused }
+                    if (paused != null) OutlinedButton(onClick = { client.desktopAction("rem.run.cancel", JSONObject().put("run_id", paused.id)) }, enabled = !busy) { Text("Stop") }
+                    else if (active == null) Button(onClick = { client.desktopAction("rem.task.run", p) }, enabled = !busy) { Text(if (task.dependency != null) "Start now" else "Run now") }
                     else OutlinedButton(onClick = { client.desktopAction("rem.run.cancel", JSONObject().put("run_id", active.id)) }, enabled = !busy) { Text("Stop run") }
-                    if (task.state == "paused") OutlinedButton(onClick = { client.desktopAction("rem.task.resume", p.put("expected_revision", task.revision)) }, enabled = !busy) { Text("Resume") }
-                    else if (task.schedule.kind != "once") OutlinedButton(onClick = { client.desktopAction("rem.task.pause", p) }, enabled = !busy) { Text("Pause") }
+                    if (task.state == "paused") OutlinedButton(onClick = { client.desktopAction("rem.task.resume", p.put("expected_revision", task.revision)) }, enabled = !busy) { Text("Resume schedule") }
+                    else if (task.schedule.kind != "once") OutlinedButton(onClick = { client.desktopAction("rem.task.pause", p) }, enabled = !busy) { Text("Pause schedule") }
                     task.lastRun?.takeIf { it.attention && task.activeRun == null }?.let { run ->
                         TextButton(onClick = { client.desktopAction("rem.run.acknowledge", JSONObject().put("run_id", run.id)) }, enabled = !busy) { Text("Dismiss") }
                     }
@@ -374,7 +390,7 @@ private fun RemTaskView(client: LiveClient, id: String, onBack: () -> Unit, onTh
                                     color = if (tone == RemTaskStatus.Tone.NEUTRAL) MaterialTheme.colorScheme.onSurfaceVariant else toneColor(tone))
                             }
                         }
-                        Note("It starts by itself once each of these finishes successfully.")
+                        Note(RemTaskStatus.startsAfterNote(dependency.prerequisites))
                     }
                 }
                 // Which checks failed or stayed unresolved, right under the controls, as on the desktop.
@@ -418,6 +434,14 @@ private fun RemTaskStatusCard(task: RemTask) {
                     color = if (activity.tone == RemTaskStatus.Tone.NEUTRAL) MaterialTheme.colorScheme.onSurface else tone)
             }
             task.activeRun?.takeIf { it.active }?.let { RemProgress(it) }
+            task.activeRun?.sleep?.takeIf { task.activeRun.state == "queued" }?.let { sleep ->
+                Text(RemTaskStatus.sleepBudget(sleep) + ". It holds no worker while it sleeps.", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("remSleepBudget"))
+            }
+            task.lastRun?.takeIf { task.activeRun?.active != true && it.paused }?.let { run ->
+                Text(RunPause.note(run.pausedBy), Modifier.testTag("remPausedNote"), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
@@ -797,6 +821,9 @@ internal fun UsagePage(client: LiveClient, onBack: (() -> Unit)?) {
     }
 }
 
+/** The website's privacy page, which is also the policy linked from the Google Play listing. */
+internal const val PRIVACY_POLICY_URL = "https://raticode.dev/docs/privacy"
+
 @RequiresApi(29)
 @Composable
 internal fun MorePage(client: LiveClient, bar: List<String> = LiveNavigation.DEFAULT, onOpen: (String) -> Unit) {
@@ -817,6 +844,10 @@ internal fun MorePage(client: LiveClient, bar: List<String> = LiveNavigation.DEF
             ConversationRow("Connection", "", if (client.connected) "Connected over ${client.route}" else "Reconnect or change the desktop address") { onOpen("Desktop") }
             ConversationRow("Bottom bar", "", "Choose which destinations the bar shows") { onOpen(LiveNavigation.NAV_BAR) }
             ConversationRow("People Rem can reach", "", "Who “brother” or “Mom” means on call and text cards. Kept on this phone") { onOpen(LiveNavigation.PEOPLE) }
+            // Google Play requires the privacy policy to be reachable from inside the app as well as from its listing.
+            ConversationRow("Privacy policy", "", "What Raticode keeps on this phone and what it sends. Opens in your browser") {
+                openInBrowser(context, PRIVACY_POLICY_URL)
+            }
             Spacer(Modifier.height(16.dp))
             Note(if (client.desktopControl) "This phone can use Raticode on your computer. Work runs there under its approval policies."
                 else DESKTOP_OFF)

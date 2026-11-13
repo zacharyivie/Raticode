@@ -118,8 +118,13 @@ class Recipe(BaseModel):
     after: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
         default_factory=list, max_length=10
     )
-    # With after, a reminder whose prompt goes back to Rem as the user's request when
-    # the prerequisites succeed, so Rem can plan work from what they found.
+    # Start condition: wait for the Rem runs going when the task is saved to end however
+    # they end ("snapshot"), or until no other run is going at all ("idle", a live check).
+    after_running: Literal["snapshot", "idle"] | None = None
+    # Start condition: wait for the self-work window running now (or the next one) to end.
+    after_self_work: bool = Field(default=False, strict=True)
+    # With a start condition, a reminder whose prompt goes back to Rem as the user's
+    # request when the conditions are met, so Rem can plan work from what they found.
     ask_rem: bool = Field(default=False, strict=True)
 
     @field_validator("after", mode="before")
@@ -154,9 +159,10 @@ class Recipe(BaseModel):
         self.after = list(dict.fromkeys(ref.strip() for ref in self.after))
         if any(not ref for ref in self.after):
             raise ValueError("Name each task to wait for by its ID")
-        if self.after and self.schedule.kind != "once":
+        waits = bool(self.after or self.after_running or self.after_self_work)
+        if waits and self.schedule.kind != "once":
             raise ValueError("Only a one-time task can wait for another task")
-        if self.ask_rem and (self.type != "reminder" or not self.after):
+        if self.ask_rem and (self.type != "reminder" or not waits):
             raise ValueError("ask_rem needs a reminder that waits for another task")
         if any(not c.description.strip() for c in self.acceptance_criteria):
             raise ValueError("Acceptance criteria must not be blank")
@@ -316,6 +322,78 @@ def completion_recap(summary: str) -> str:
     return short.rsplit(" ", 1)[0] + "…"
 
 
+# The end of a sentence or line, where a lead can stop without cutting a thought.
+LEAD_END = re.compile(r"[.!?](?=\s)|\n")
+SUGGESTION_CHARS = 300
+
+
+def split_lead(text: str, limit: int) -> tuple[str, str]:
+    """The longest opening of [text] within [limit] characters, and the rest of it.
+
+    The opening stops after a sentence or line when one ends past a third of the
+    limit, otherwise after a word with an ellipsis, which the rest then opens with.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text, ""
+    ends = [m.end() for m in LEAD_END.finditer(text[: limit + 1]) if m.end() <= limit]
+    if ends and ends[-1] > limit // 3:
+        return text[: ends[-1]].rstrip(), text[ends[-1] :].strip()
+    cut = text[: limit - 1]
+    head = cut.rsplit(None, 1)[0] if len(cut.split(None, 1)) > 1 else cut
+    return head.rstrip() + "…", "…" + text[len(head) :].strip()
+
+
+def _max_length(field: Any) -> int | None:
+    return next(
+        (m.max_length for m in field.metadata if isinstance(getattr(m, "max_length", None), int)),
+        None,
+    )
+
+
+def fit_lengths(
+    model: type[BaseModel], raw: Any, *, lead: str | None = None, prose: tuple[str, ...] = ()
+) -> Any:
+    """Shorten over-long prose in a model's JSON reply instead of rejecting all of it.
+
+    A model asked for a short summary sometimes writes a long one. Rejecting the
+    whole reply loses its details and suggestions too, so the [lead] field keeps
+    what fits, cut after a sentence, and the text cut from it opens details when
+    both fit there. Other [prose] fields are cut the same way, and suggestions
+    longer than a short line are dropped. Every other field is left to validation.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    raw = dict(raw)
+    fields = model.model_fields
+    keys = {
+        name: [name, *[c for c in getattr(fields[name].validation_alias, "choices", []) if c]]
+        for name in (*([lead] if lead else []), *prose)
+    }
+    if lead:
+        key = next((k for k in keys[lead] if isinstance(raw.get(k), str)), None)
+        limit = _max_length(fields[lead])
+        if key and limit and len(raw[key]) > limit:
+            raw[key], rest = split_lead(raw[key], limit)
+            details = raw.get("details")
+            room = _max_length(fields["details"]) if "details" in fields else None
+            if rest and room and (details is None or isinstance(details, str)):
+                joined = "\n\n".join(filter(None, [rest, (details or "").strip()]))
+                if len(joined) <= room or not (details or "").strip():
+                    raw["details"] = joined
+    for name in prose:
+        limit = _max_length(fields[name])
+        for key in keys[name]:
+            if limit and isinstance(raw.get(key), str) and len(raw[key]) > limit:
+                raw[key] = split_lead(raw[key], limit)[0]
+    if "suggestions" in fields and isinstance(raw.get("suggestions"), list):
+        count = _max_length(fields["suggestions"]) or 10
+        raw["suggestions"] = [
+            s for s in raw["suggestions"] if not isinstance(s, str) or len(s) <= SUGGESTION_CHARS
+        ][:count]
+    return raw
+
+
 def occurrence_context(run: dict[str, Any]) -> dict[str, Any] | None:
     """Where this run sits in a repeated task: its moment and what was already accepted.
 
@@ -458,6 +536,97 @@ class TicketRequest(BaseModel):
         return f"Updated {subject} on the board."
 
 
+class ClockTime(BaseModel):
+    """A moment the user named: an exact instant, or a wall-clock time in a time zone.
+
+    ``time`` is 24-hour ``HH:MM``. ``day`` is today, tonight or tomorrow as the user said it,
+    ``date`` an explicit local date; with neither, the next time that clock time comes round.
+    ``timezone`` is an IANA name; without one, the user's zone (this computer's) is used.
+    The backend turns it into an instant and refuses times that passed, don't exist, or
+    happen twice on a daylight-saving change.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    at: str | None = Field(default=None, max_length=64)
+    time: str | None = Field(default=None, pattern=r"^([01]?\d|2[0-3]):[0-5]\d$")
+    day: Literal["today", "tonight", "tomorrow"] | None = None
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    timezone: str | None = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def one_moment(self) -> ClockTime:
+        if bool(self.at) == bool(self.time):
+            raise ValueError("Give either an exact instant (at) or a clock time (time)")
+        if self.at and (self.day or self.date):
+            raise ValueError("An exact instant already has its date")
+        if self.day and self.date:
+            raise ValueError("Give day or date, not both")
+        return self
+
+
+class SelfWorkRequest(BaseModel):
+    """Change Rem's self-work because the user asked: on, off, a timed window, or a report.
+
+    ``enable``/``disable`` flip the Settings > Rem switch. ``schedule`` adds a window: from
+    ``start`` (now when absent) until ``end``, or ``until`` the tasks running now finish.
+    ``stop_at`` ends the self-work running now at ``end``. ``cancel_schedule`` drops the
+    windows. ``report`` posts what self-work did in its current or last period. The thread
+    limit, backlog pulling and Rem's projects never change here. The backend applies it and
+    writes the result into the reply.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    action: Literal[
+        "enable", "disable", "status", "schedule", "stop_at", "cancel_schedule", "report"
+    ]
+    start: ClockTime | None = None
+    end: ClockTime | None = None
+    until: Literal["running_done"] | None = None
+    # What the switch becomes when the window ends: back to what it was, or on or off.
+    after_end: Literal["restore", "on", "off"] = "restore"
+    # Inside the window, still wait for 15 minutes without a prompt before starting.
+    wait_for_idle: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def complete(self) -> SelfWorkRequest:
+        if self.action == "schedule" and not (self.end or self.until):
+            raise ValueError("A self-work window needs an end time or until")
+        if self.action == "schedule" and self.end and self.until:
+            raise ValueError("Give an end time or until, not both")
+        if self.action == "stop_at" and not self.end:
+            raise ValueError("stop_at needs the end time")
+        if self.action not in {"schedule", "stop_at"} and (self.start or self.end or self.until):
+            raise ValueError("Only schedule and stop_at take times")
+        if self.action == "stop_at" and self.start:
+            raise ValueError("stop_at takes only an end time")
+        return self
+
+
+class OrganizationApproval(BaseModel):
+    """Organizations requests the user, in the message Rem is answering, said to approve.
+
+    ``request_ids`` names them; ``all`` means every request in that organization that was
+    waiting when the user sent the message. ``reason`` is Rem's short note on why the
+    user's message, read with the conversation, is plainly their okay; it is recorded with
+    each approval. Raticode applies them (organization_auto) and writes what happened into
+    the reply.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    organization_id: str = Field(min_length=1, max_length=200)
+    request_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=20
+    )
+    all: bool = False
+    reason: str = Field(default="", max_length=300)
+
+    @model_validator(mode="after")
+    def names_requests(self) -> OrganizationApproval:
+        if bool(self.request_ids) == self.all:
+            raise ValueError("Name request_ids, or set all to true, not both")
+        return self
+
+
 class Decision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reply: str = Field(min_length=1, max_length=4000)
@@ -472,7 +641,7 @@ class Decision(BaseModel):
     # Optional depth under the short reply, shown behind a "Details" disclosure.
     details: str = Field(default="", max_length=6000)
     # Up to three follow-up prompts. They only fill the message box when tapped.
-    suggestions: list[Annotated[str, Field(max_length=300)]] = Field(
+    suggestions: list[Annotated[str, Field(max_length=SUGGESTION_CHARS)]] = Field(
         default_factory=list, max_length=10
     )
     # Cards for the phone that asked (rem_phone_actions); invalid ones are dropped, not fatal.
@@ -482,6 +651,10 @@ class Decision(BaseModel):
     open_projects: list[ProjectOpen] = Field(default_factory=list, max_length=3)
     # Changes to the global Kanban board the user asked for (rem_kanban).
     tickets: list[TicketRequest] = Field(default_factory=list, max_length=10)
+    # Turning self-work on or off, or asking whether it is on (rem_self_work).
+    self_work: SelfWorkRequest | None = None
+    # Organizations requests the user told Rem to approve in this message.
+    org_approvals: list[OrganizationApproval] = Field(default_factory=list, max_length=5)
 
     @model_validator(mode="after")
     def suggested_criteria(self) -> Decision:
@@ -500,7 +673,7 @@ class TaskUpdate(BaseModel):
     needs_user: bool = Field(default=False, strict=True)
     user_question: str = Field(default="", max_length=500)
     details: str = Field(default="", max_length=6000)
-    suggestions: list[Annotated[str, Field(max_length=300)]] = Field(
+    suggestions: list[Annotated[str, Field(max_length=SUGGESTION_CHARS)]] = Field(
         default_factory=list, max_length=10
     )
     # Absolute paths of files the user asked to be sent; used only for runs that

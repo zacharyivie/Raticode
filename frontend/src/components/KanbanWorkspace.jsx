@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Building2, Check, ExternalLink, FolderX, Plus, Search, Sparkles, X } from "lucide-react";
-import { COLUMNS, PRIORITIES, canDropOn, columnTickets, filterTickets, findRequestedTicket, modeLabel, onKanbanTicket, ownerFilters, participantOf, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, useKanban } from "../lib/remKanban.js";
+import { Building2, Check, ExternalLink, FolderX, PauseCircle, Play, Plus, Search, Sparkles, X } from "lucide-react";
+import { COLUMNS, PRIORITIES, canDropOn, columnTickets, filterTickets, findRequestedTicket, modeLabel, onKanbanTicket, ownerFilters, participantOf, pausedLabel, saveParticipant, scopeNote, selfWorkLine, sendTicket, takeKanbanTicket, useKanban } from "../lib/remKanban.js";
 import { openRemThread } from "../lib/remHomeStore.js";
 import KanbanPeople, { PersonAvatar } from "./KanbanPeople.jsx";
 import TicketTimeline from "./TicketTimeline.jsx";
@@ -92,7 +92,7 @@ export default function KanbanWorkspace() {
 
 function Card({ ticket, person, onOpen }) {
   const note = scopeNote(ticket);
-  return <article className={`oh-card ${ticket.running ? "is-running" : ""} ${ticket.status === "blocked" ? "flagged" : ""}`} draggable={!ticket.running && !ticket.proposed}
+  return <article className={`oh-card ${ticket.running ? "is-running" : ""} ${ticket.status === "blocked" && !ticket.paused ? "flagged" : ""} ${ticket.paused ? "is-paused" : ""}`} draggable={!ticket.running && !ticket.proposed}
     onDragStart={event => { event.dataTransfer.setData("text/plain", ticket.ticket_id); event.dataTransfer.effectAllowed = "move"; }}
     onClick={onOpen} onKeyDown={event => { if (event.key === "Enter") onOpen(); }} tabIndex={0} role="button" aria-label={`${ticket.key} ${ticket.title}`}>
     <div className="row1"><span className="oh-key">{ticket.key}</span><span>{ticket.project || (ticket.priority === "critical" || ticket.priority === "high" ? ticket.priority : "")}</span></div>
@@ -106,6 +106,7 @@ function Card({ ticket, person, onOpen }) {
       {ticket.scope === "rem" ? <span>Rem</span> : <span><Building2 size={12} />{ticket.assignee || ticket.organization_name}</span>}
       <span className="grow" />
       {ticket.proposed ? <span className="kb-proposed"><Sparkles size={11} />Your approval</span> : null}
+      {ticket.paused ? <span className="kb-paused"><PauseCircle size={11} aria-hidden="true" />{pausedLabel(ticket.paused)}</span> : null}
     </div>
   </article>;
 }
@@ -128,7 +129,7 @@ function TicketSheet({ ticket, board, act, onClose }) {
     <h2>{ticket.title}</h2>
     <p className="oh-sheet-sub"><span className={`oh-pill st-${ticket.status === "in_progress" ? "running" : ticket.status}`}>{COLUMNS.find(([key]) => key === ticket.status)?.[1] || ticket.status}</span><span>{ticket.scope === "rem" ? "Rem" : ticket.organization_name}</span>{ticket.assignee && ticket.scope !== "rem" ? <span>{ticket.assignee}</span> : null}{ticket.project ? <span>{ticket.project}</span> : null}</p>
     {note ? <p className="kb-scope" role="status"><FolderX size={13} aria-hidden="true" /><span>{note}</span></p> : null}
-    {ticket.scope === "rem" && !ticket.running && ["backlog", "todo", "blocked"].includes(ticket.status) ? <label className="kb-field"><span>Project</span>
+    {ticket.scope === "rem" && !ticket.running && !ticket.paused && ["backlog", "todo", "blocked"].includes(ticket.status) ? <label className="kb-field"><span>Project</span>
       <select className="kb-input" value={ticket.project_dir || ""} onChange={event => act({ ...base, action: "edit", project_dir: event.target.value || null })}>
         <option value="">No project</option>
         {[...new Set([...projects, ...(ticket.project_dir ? [ticket.project_dir] : [])])].map(root => <option key={root} value={root}>{projectLabel(board, root)}</option>)}
@@ -137,7 +138,7 @@ function TicketSheet({ ticket, board, act, onClose }) {
     {ticket.proposal_reason ? <div className="kb-section"><h3>Why Rem suggests this</h3><p>{ticket.proposal_reason}</p></div> : null}
     {ticket.skip_reason ? <div className="kb-section"><h3>Why Rem left this out</h3><p>{ticket.skip_reason}</p></div> : null}
     {ticket.summary ? <div className="kb-section"><h3>Result</h3><p>{ticket.summary}</p></div> : null}
-    {ticket.block_reason ? <div className="kb-section"><h3>Blocked</h3><p>{ticket.block_reason}</p></div> : null}
+    {ticket.block_reason ? <div className="kb-section"><h3>{ticket.paused ? pausedLabel(ticket.paused) : "Blocked"}</h3><p>{ticket.block_reason}</p></div> : null}
     {ticket.thread_id ? <button className="oh-btn" type="button" onClick={() => openRemThread(ticket.thread_id)}><ExternalLink size={13} />Open its thread</button> : null}
     {ticket.proposed ? <div className="kb-actions">
       <button className="oh-btn primary" type="button" onClick={() => act({ ...base, action: "approve" })}><Check size={14} />Approve for To do</button>
@@ -145,7 +146,7 @@ function TicketSheet({ ticket, board, act, onClose }) {
       <input id="kb-decline" className="kb-input" placeholder="Reason (optional)" value={reason} onChange={event => setReason(event.target.value)} />
       <button className="oh-btn danger" type="button" onClick={() => { act({ ...base, action: "decline", reason: reason.trim() || undefined }); onClose(); }}>Decline</button>
     </div> : null}
-    {ticket.scope === "rem" && !ticket.proposed && !ticket.running && ["backlog", "todo", "blocked"].includes(ticket.status) && board.organizations.length ? <div className="kb-section">
+    {ticket.scope === "rem" && !ticket.proposed && !ticket.running && !ticket.paused && ["backlog", "todo", "blocked"].includes(ticket.status) && board.organizations.length ? <div className="kb-section">
       <h3>Hand to an organization</h3>
       <div className="kb-actions">
         <label className="oh-sr" htmlFor="kb-org">Organization</label>
@@ -154,7 +155,10 @@ function TicketSheet({ ticket, board, act, onClose }) {
         <button className="oh-btn" type="button" disabled={!destination} onClick={() => { act({ ...base, action: "assign", to_organization_id: destination, assignee_id: worker }); onClose(); }}>Hand over</button>
       </div>
     </div> : null}
-    {!ticket.proposed && !ticket.running ? <div className="kb-section kb-move"><h3>Move</h3><div className="kb-actions">
+    {ticket.paused ? <div className="kb-section kb-move"><h3>Paused task</h3><div className="kb-actions">
+      <button className="oh-btn primary" type="button" onClick={() => act({ ...base, action: "move", column: "in_progress" })}><Play size={14} />Resume</button>
+    </div><p className="kb-hint">Resumes the same task in its thread. To end it instead, stop it from its task in Rem.</p></div> : null}
+    {!ticket.proposed && !ticket.running && !ticket.paused ? <div className="kb-section kb-move"><h3>Move</h3><div className="kb-actions">
       {ticket.status === "cancelled" ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "backlog" })}>Restore to Backlog</button> : <>
         {canDropOn(ticket, "todo") ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "todo" })}>To do</button> : null}
         {canDropOn(ticket, "in_progress") ? <button className="oh-btn" type="button" onClick={() => act({ ...base, action: "move", column: "in_progress" })}>Start now</button> : null}

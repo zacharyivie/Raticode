@@ -34,7 +34,12 @@ from gofer.ui.organization_store import (
     now,
     ticket_prefix,
 )
-from gofer.utils.process import build_subprocess_env, git_push_blocked_environment
+from gofer.utils.process import (
+    NO_REPOSITORY_PROGRAMS,
+    build_subprocess_env,
+    git_push_blocked_environment,
+    untrusted_repository_git_env,
+)
 
 KINDS = ("decision", "note", "report", "spec", "finding")
 EVIDENCE_KINDS = ("check", "quote", "commit", "file")
@@ -116,9 +121,13 @@ def _plan_config(org: dict[str, Any], params: dict[str, Any]) -> tuple[dict[str,
     if not isinstance(item, dict):
         raise ValueError("Supply the item to save")
     if kind == "operations":
-        allowed = {"operatingHours", "resumeAfterRestart", "workSchedule"}
+        allowed = {"operatingHours", "resumeAfterRestart", "workSchedule", "pullBacklog"}
         if not item or set(item) - allowed:
-            raise ValueError("Operations use operatingHours, workSchedule and resumeAfterRestart")
+            raise ValueError(
+                "Operations use operatingHours, workSchedule, resumeAfterRestart and pullBacklog"
+            )
+        if "pullBacklog" in item and not isinstance(item["pullBacklog"], bool):
+            raise ValueError("Say whether workers pull Backlog tickets")
         if "workSchedule" in item:
             from gofer.ui.organization_schedule import checked
 
@@ -132,8 +141,14 @@ def _plan_config(org: dict[str, Any], params: dict[str, Any]) -> tuple[dict[str,
                 ("workSchedule", "the work schedule"),
             )
             if key in item
-        ] or ["what happens after a restart"]
-        return config, "Changed " + " and ".join(changed)
+        ]
+        if set(item) == {"pullBacklog"}:
+            return config, (
+                "Workers pull Backlog tickets when they need work"
+                if item["pullBacklog"]
+                else "Workers leave Backlog tickets for you to move"
+            )
+        return config, "Changed " + " and ".join(changed or ["what happens after a restart"])
     if kind == "repository":
         enabled = item.get("enabled")
         if not isinstance(enabled, bool):
@@ -654,9 +669,15 @@ def _task_root(org: dict[str, Any], task: dict[str, Any]) -> str:
 
 
 def _git(root: str, *args: str) -> subprocess.CompletedProcess[str]:
+    command = ["git", *NO_REPOSITORY_PROGRAMS, "-C", root, *args]
+    try:
+        env = untrusted_repository_git_env(root, build_subprocess_env())
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # Unreadable settings: report a failed git call rather than run it unchecked.
+        return subprocess.CompletedProcess(command, 128, "", str(exc))
     return subprocess.run(
-        ["git", "-C", root, *args],
-        env=build_subprocess_env(),
+        command,
+        env=env,
         capture_output=True,
         text=True,
         timeout=20,

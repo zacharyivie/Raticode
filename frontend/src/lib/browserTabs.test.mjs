@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { browserTabEngine, browserTabOpening, geckoTabPath, viewedBrowserMedia, withBrowserTabEngines } from "./browserTabs.js";
+import { browserFamilyChoices, browserGroupHasNewTab, browserTabEngine, browserTabGroupKey, groupBrowserTabPaths, groupedBrowserPaths, browserTabOpening, geckoTabPath, viewedBrowserMedia, withBrowserTabEngines } from "./browserTabs.js";
 import { WEB_BROWSER_OPTIONS, controlledEngine, engineBadge, engineLabel, newTabEngine, webBrowserEngine } from "./browserEngines.js";
 import { mediaForBar } from "./browserMedia.js";
 
@@ -83,4 +83,38 @@ test("the media bar hides Gecko's player only while the Gecko tab is on screen",
   assert.equal(mediaForBar([chrome], gecko, viewedBrowserMedia(["g", "c"], tabs)), null);
   // Elsewhere in the app, both remain reachable.
   assert.equal(mediaForBar([chrome], gecko, viewedBrowserMedia([], tabs)).id, "s1");
+});
+
+test("the tab bar keeps each browser's tabs together, in the order each browser was first opened", () => {
+  const tabs = {
+    a: { engine: "gecko", url: "https://music.test/" },
+    b: { engine: "raticode", url: "https://one.test/" },
+    c: { engine: "chrome", url: "https://two.test/" },
+    d: { engine: "raticode", url: "https://three.test/" },
+    e: { engine: "raticode", private: true, url: "https://secret.test/" },
+    f: { agentSessionId: "rem-1", agentEngine: "chrome", url: "https://rem.test/" },
+    g: { engine: "raticode", private: true, url: "https://secret2.test/" },
+  };
+  const groups = groupBrowserTabPaths(["a", "b", "c", "d", "e", "f", "g"], tabs);
+  assert.deepEqual(groups.map((group) => [group.key, group.engine, group.private, group.paths]), [
+    ["gecko", "gecko", false, ["a"]],
+    ["raticode", "raticode", false, ["b", "d"]],
+    ["chrome", "chrome", false, ["c", "f"]],
+    ["private", "raticode", true, ["e", "g"]],
+  ]);
+  assert.deepEqual(groupedBrowserPaths(["a", "b", "c", "d", "e", "f", "g", "file.txt"], tabs), ["a", "b", "d", "c", "f", "e", "g", "file.txt"]);
+  // Tabs saved before per-tab browsers group under the default browser.
+  assert.equal(browserTabGroupKey({ url: "https://old.test/" }, "edge"), "edge");
+  assert.deepEqual(groupBrowserTabPaths([], tabs), []);
+
+  // One "+" per browser: Raticode (gecko) has Firefox's own "+", so its group
+  // gets none, and "+ Browser" keeps offering it (as a tab inside its window).
+  assert.deepEqual(groups.map((group) => [group.key, browserGroupHasNewTab(group)]), [["gecko", false], ["raticode", true], ["chrome", true], ["private", true]]);
+  assert.deepEqual(browserFamilyChoices(groups), { choices: ["gecko", "firefox", "edge"], inside: ["gecko"], offerPrivate: false });
+  assert.deepEqual(browserFamilyChoices([]), { choices: ["raticode", "gecko", "firefox", "chrome", "edge"], inside: [], offerPrivate: true });
+  // Every browser keeps a way to open another tab: its own "+" or a "+ Browser" choice.
+  for (const engine of ["raticode", "gecko", "firefox", "chrome", "edge"]) {
+    const only = groupBrowserTabPaths(["x"], { x: { engine } });
+    assert.ok(browserGroupHasNewTab(only[0]) !== browserFamilyChoices(only).choices.includes(engine), engine);
+  }
 });

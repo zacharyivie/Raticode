@@ -270,7 +270,7 @@ globalThis.__raticodeAgent ||= (() => {
     const covered = top && !inside && !top.contains(element)
       ? clean(top.localName + (top.id ? "#" + top.id : "") + " " + (top.innerText || ""), 80)
       : "";
-    return { element, receiver: inside ? top : element, x, y, covered, box: box(element) };
+    return { element, top, receiver: inside ? top : element, x, y, covered, box: box(element) };
   }
   function mouse(view, x, y, button, buttons, detail) {
     return { bubbles: true, cancelable: true, composed: true, view, clientX: x, clientY: y,
@@ -296,7 +296,12 @@ globalThis.__raticodeAgent ||= (() => {
   // Where a click would land, in top-level viewport coordinates, for
   // engines that deliver real input instead of page events.
   function point(arg) {
-    const { covered, box: area } = locate(arg);
+    const { top, covered, box: area } = locate(arg);
+    // Real input lands on whatever is on top. A frame on top would take a
+    // click that was checked against the element underneath.
+    if (covered && top && ["iframe", "frame", "embed", "object"].includes(top.localName)) {
+      throw new Error("A frame from another page covers that element, so a click would land in the frame instead. Take a new snapshot and click something that isn't covered.");
+    }
     return { x: area.x + area.width / 2, y: area.y + area.height / 2, covered, box: area };
   }
   function focusedName() {
@@ -314,15 +319,11 @@ globalThis.__raticodeAgent ||= (() => {
     if (button.localName === "button" && !["", "submit"].includes((button.getAttribute("type") || "").toLowerCase())) return null;
     return button.form ? button : null;
   }
-  // What a click or Enter would do, so risky actions can be confirmed first.
+  // What a click would do, so risky clicks can be confirmed first. Keys,
+  // including Enter, never ask: the user chose not to approve key presses.
   function intent(arg) {
-    const element = arg.focused ? deepActive() : target(arg);
+    const element = target(arg);
     const doc = element.ownerDocument;
-    if (arg.focused) {
-      const form = element.localName === "input" ? element.form : null;
-      return { consequential: Boolean(form), label: form ? "submit the form" : "press Enter",
-        url: doc.location.href, box: box(element) };
-    }
     const actionable = element.closest?.("button,a[href],input,[role=button],[role=link],[role=menuitem],summary") || element;
     const label = clean(labelText(actionable) || actionable.innerText || actionable.value || actionable.getAttribute?.("title") || "", 80);
     const submits = Boolean(submitButtonFor(element));
@@ -761,7 +762,6 @@ function createAgentBrowserController({
 
   async function press(session, request, { quiet = false } = {}) {
     const key = parseKey(request.key);
-    if (key.key === "Enter") await guard(session, "press Enter", await inPage(session, "intent", { focused: true }));
     if (!quiet) log(session, "press", request.key);
     const native = contentsOf(session).nativeInput;
     if (native) await native.press(key);

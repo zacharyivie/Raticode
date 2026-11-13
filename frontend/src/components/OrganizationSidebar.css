@@ -22,3 +22,4 @@
 .org-sidebar-error { color: #eb9f9b; }
 .org-sidebar-list small.org-sidebar-reason { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .org-sidebar-list > .org-sidebar-toggle { display: block; padding: 8px 9px; font-size: 11px; color: rgb(var(--color-muted)); }
+.org-sidebar-list small > .org-sidebar-waiting { color: rgb(var(--color-warning)); font-weight: 650; }

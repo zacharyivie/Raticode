@@ -1,6 +1,7 @@
 package dev.raticode.mobile.browser
 
 import dev.raticode.mobile.browser.BrowserControlsMotion.Companion.HIDE_AFTER_DP
+import dev.raticode.mobile.browser.BrowserControlsMotion.Companion.RESIZE_SETTLE_MS
 import dev.raticode.mobile.browser.BrowserControlsMotion.Companion.REVEAL_HOLD_MS
 import dev.raticode.mobile.browser.BrowserControlsMotion.Companion.SETTLE_MS
 import dev.raticode.mobile.browser.BrowserControlsMotion.Companion.SHOW_AFTER_DP
@@ -60,6 +61,30 @@ class BrowserControlsMotionTest {
         settle()
         scroll(600 - SHOW_AFTER_DP - 10 - SHOW_AFTER_DP)
         assertTrue("The user's own scrolling counts again", motion.expanded)
+    }
+
+    @Test fun theKeyboardOpeningDoesNotUnfoldThemOverTheFieldTheBrowserPlaced() {
+        // The user's report: a field at the end of a page, the address strip folded. The keyboard opens, Raticode's bar
+        // steps aside, and the page, now taller in its layout, pulls its position up by 76 dp, then scrolls the field
+        // into view. Unfolding then would push that field down behind the keyboard.
+        scroll(1054); scroll(1130); assertFalse(motion.expanded)
+        settle()
+        motion.resized(clock)
+        scroll(1054); scroll(1054 - SHOW_AFTER_DP); scroll(1079)
+        assertFalse("The page moving with its area isn't the user scrolling", motion.expanded)
+        // Once it has settled, the user's own scrolling works as before, from where the page now is.
+        clock += RESIZE_SETTLE_MS
+        scroll(1079 - SHOW_AFTER_DP + 1); assertFalse(motion.expanded)
+        scroll(1079 - SHOW_AFTER_DP); assertTrue(motion.expanded)
+    }
+
+    @Test fun theKeyboardOpeningDoesNotFoldOpenControlsEither() {
+        scroll(500); assertTrue(motion.expanded)
+        motion.resized(clock)
+        scroll(500); scroll(500 + HIDE_AFTER_DP * 3)
+        assertTrue(motion.expanded)
+        clock += RESIZE_SETTLE_MS
+        scroll(500 + HIDE_AFTER_DP * 3); scroll(500 + HIDE_AFTER_DP * 4); assertFalse("Scrolling down afterwards folds", motion.expanded)
     }
 
     @Test fun heldControlsStayOpenAndKeepTrackOfThePage() {

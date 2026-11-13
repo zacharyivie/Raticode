@@ -40,6 +40,8 @@ ROOT = Path(__file__).resolve().parent.parent
 RELEASE = ROOT / "frontend/release"
 NOTARY_PROFILE = "raticode-notary"
 KEYCHAIN_NAME = "raticode-signing.keychain-db"
+# Seconds of inactivity before the signing keychain locks itself (was six hours).
+KEYCHAIN_IDLE_LOCK = "7200"
 ROOT_CERTS_NAME = "raticode-apple-intermediates.keychain"
 # electron-builder ships Apple's Developer ID intermediate certificates in this keychain
 # and adds it to the search list when it imports a certificate itself. Raticode imports
@@ -288,7 +290,9 @@ def prepare(environ: Mapping[str, str]) -> dict[str, str]:
     bundle = temporary / "raticode-signing.p12"
     keychain_password = secrets.token_hex(32)
     run("/usr/bin/security", "create-keychain", "-p", keychain_password, keychain)
-    run("/usr/bin/security", "set-keychain-settings", "-lut", "21600", keychain)
+    # Locks after two idle hours or on sleep. A signed build uses it for about 15 minutes,
+    # and the cleanup step deletes it as soon as signing and notarization are done.
+    run("/usr/bin/security", "set-keychain-settings", "-lut", KEYCHAIN_IDLE_LOCK, keychain)
     run("/usr/bin/security", "unlock-keychain", "-p", keychain_password, keychain)
     try:
         fd = os.open(bundle, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

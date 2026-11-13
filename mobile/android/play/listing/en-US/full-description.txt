@@ -1,0 +1,29 @@
+Raticode Mobile is the phone companion to Raticode, the free desktop studio for agentic coding workflows. Pair your phone with Raticode on your own computer and keep working with Rem, its assistant, when you step away from your desk.
+
+You need Raticode running on a computer you own. The phone connects straight to it over your Wi-Fi, or over your own Tailscale network when you're away. There is no Raticode account and no Raticode server, and the connection is encrypted end to end.
+
+WHAT YOU CAN DO
+• Chat with Rem: send requests, follow its replies and stop a reply.
+• Follow Rem's tasks and threads, and answer approvals your computer asks for.
+• Attach photos, videos, PDFs and files, or share them to Rem from any app.
+• Ask Rem about a file, a commit or a web page you're reading.
+• Browse your projects' files and Source control history on the phone.
+• See the global board, Organizations, workflows and usage from your computer.
+• Get alerts when a task needs you or finishes, with quiet hours.
+
+VOICE
+• Dictate messages with Android's on-device speech recognition (Android 12 or newer). Audio never leaves the phone.
+• Make Raticode your digital assistant and hold the power button to talk to Rem over any app.
+• Simple phone commands work offline: timers, alarms, directions, opening apps, the flashlight, music, and calls and texts to people you saved, each with a moment to cancel.
+
+BUILT-IN BROWSER
+• Browse with Chromium or Gecko engines inside Raticode, with full-screen video and media controls.
+• Or keep using Firefox, Chrome or Edge as your browser.
+
+PRIVATE BY DESIGN
+• No ads, analytics or tracking.
+• Your history and pairing keys are encrypted on the phone and excluded from cloud backup.
+• App lock and Child lock keep Raticode covered until your screen lock confirms it's you.
+• Your computer decides what the phone may do. Work runs there, under the approval rules you set.
+
+Raticode Mobile requires Android 10 or newer and the Raticode desktop app (Windows, macOS or Linux), free from https://raticode.dev/.

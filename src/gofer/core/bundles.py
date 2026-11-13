@@ -33,6 +33,50 @@ MANIFEST_PATH = "manifest.json"
 WORKFLOW_PATH = "workflow.toml"
 ASSET_PREFIX = "assets/"
 IMPORTED_ASSET_PREFIX = "bundle-assets"
+# Raticode's own state in the data folder. A bundle asset may never land on these:
+# schedules.db is a pickled job store, and settings, tokens and records live beside it.
+INTERNAL_DATA_NAMES = frozenset(
+    {
+        "agent-memory",
+        "approvals",
+        "browser-grants",
+        "chat-attachments",
+        "chat-change-blobs",
+        "chat-change-sets",
+        "chat-context",
+        "chat-jobs",
+        "chat-provider-sessions",
+        "chat-steering",
+        "command-slots",
+        "devices",
+        "generation-jobs",
+        "headless",
+        "logs",
+        "organization-repositories",
+        "organization-runs",
+        "organization-shared-worktrees",
+        "organization-skills",
+        "organization-worktrees",
+        "radish",
+        "rattish-triggers",
+        "rem-work",
+        "rem-worktrees",
+        "run-state",
+        "second-brains",
+        # Rem's skill library: a planted SKILL.md would become instructions in Rem's threads.
+        "skills",
+        "speech-models",
+        "trash",
+        "usage-probe",
+        "verification",
+        "workflow-revisions",
+        "workspaces",
+    }
+)
+STATE_FILE_SUFFIXES = (".db", ".sqlite", ".sqlite3", "-wal", "-shm", "-journal", ".lock")
+# Top-level records beside the data folder's databases: settings and registries (.json),
+# the organization audit log's anchor (organization-audit-anchors.jsonl), and pid files.
+TOP_LEVEL_STATE_SUFFIXES = (".json", ".jsonl", ".pid")
 SECRET_TOKEN_PATTERN = re.compile(
     r"\{\{\s*secret\.([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}|secret:([A-Za-z_][A-Za-z0-9_.-]*)"
 )
@@ -144,6 +188,7 @@ class BundleManifest:
                 for key in ("path", "archivePath")
             ):
                 raise BundleError("Bundle manifest includedPaths entries need path and archivePath")
+            _refuse_internal_target(item["path"], item.get("kind"))
         workflow = data.get("workflow", {})
         return cls(
             format_version=int(data.get("formatVersion", 0)),
@@ -361,6 +406,9 @@ def import_workflow_bundle(
                     nested = None
                     if name != archive_path:
                         nested = PurePosixPath(name).relative_to(PurePosixPath(archive_path))
+                        _refuse_internal_target(
+                            _safe_archive_join(original_path, nested.as_posix()), item.get("kind")
+                        )
                     destination = _safe_destination(
                         base,
                         target_rel,
@@ -1719,6 +1767,24 @@ def _safe_relative_path(path: str) -> str:
     if pure.is_absolute() or not str(pure) or any(part in {"", ".", ".."} for part in pure.parts):
         raise BundleError(f"Unsafe bundle path: {path}")
     return pure.as_posix()
+
+
+def _refuse_internal_target(relative: str, kind: Any = None) -> None:
+    """Refuse an imported asset path that would replace or add Raticode's own state.
+
+    Assets are written relative to the data folder, so without this a bundle could plant
+    a schedules database (unpickled at import), settings or an extra scheduled workflow.
+    """
+    parts = PurePosixPath(_safe_relative_path(relative)).parts
+    name = parts[-1].lower()
+    if (
+        any(part.startswith(".") for part in parts)
+        or parts[0].lower() in INTERNAL_DATA_NAMES
+        or name.endswith(STATE_FILE_SUFFIXES)
+        or (len(parts) == 1 and name.endswith(TOP_LEVEL_STATE_SUFFIXES))
+        or (name.endswith(".toml") and kind != "subflow")
+    ):
+        raise BundleError(f"Bundle asset would replace Raticode's own data: {relative}")
 
 
 def _safe_archive_join(base: str, relative: str) -> str:

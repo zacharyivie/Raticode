@@ -435,10 +435,22 @@ def _status(view: dict[str, Any]) -> CommandResult:
     text = (
         f"Self-work is {state['mode']}: {state.get('detail', '')}\n"
         f"{state['active_threads']}/{state['thread_limit']} threads, "
+        f"{state.get('paused_threads', 0)} paused, "
         f"{state['todo_remaining']} to do, {state['proposals_waiting']} proposals waiting. "
         f"Settings r{settings['revision']}: enabled={settings['enabled']}, "
         f"max_threads={settings['max_threads']}, auto_pull_backlog={settings['auto_pull_backlog']}"
     )
+    schedule = view.get("schedule") or {}
+    if "saved_enabled" in settings and settings["saved_enabled"] != settings["enabled"]:
+        text += f" (switch saved as {'on' if settings['saved_enabled'] else 'off'})"
+    if schedule.get("active"):
+        window = schedule["active"]
+        text += f"\nWindow {window['id']}: {window['label']}, {window['after_label']}."
+    for window in schedule.get("upcoming") or []:
+        text += f"\nNext window {window['id']}: {window['label']}, {window['after_label']}."
+    if schedule.get("last_period"):
+        last = schedule["last_period"]
+        text += f"\nLast period {last['started_at']} to {last['ended_at']}: {last['summary']}"
     return CommandResult(data=view, text=text)
 
 
@@ -516,6 +528,115 @@ def selfwork_set(
     backend.run("selfwork set", output, (endpoint, token_file, data_dir), body)
 
 
+def _switch(enabled: bool, connection: tuple[Any, Any, Any], output: opts.Output) -> None:
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        backend.require_user("change Rem's self-work settings")
+        revision = int(_self_work(client)["settings"]["revision"])
+        return _put_settings(client, {"enabled": enabled}, revision)
+
+    backend.run(f"selfwork {'on' if enabled else 'off'}", output, connection, body)
+
+
+@selfwork_app.command("on")
+def selfwork_on(
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Turn self-work on, as telling Rem "turn on self-work" does. Other settings stay."""
+    _switch(True, (endpoint, token_file, data_dir), output)
+
+
+@selfwork_app.command("off")
+def selfwork_off(
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Turn self-work off. Work it already started keeps going; pause or stop it by run."""
+    _switch(False, (endpoint, token_file, data_dir), output)
+
+
+def _clock(value: str | None, when: str | None, timezone: str | None) -> dict[str, Any] | None:
+    """A time for a window: HH:MM with an optional date or today/tonight/tomorrow."""
+    if not value:
+        return None
+    moment: dict[str, Any] = {"time": value}
+    if when in {"today", "tonight", "tomorrow"}:
+        moment["day"] = when
+    elif when:
+        moment["date"] = when
+    if timezone:
+        moment["timezone"] = timezone
+    return moment
+
+
+@selfwork_app.command("window")
+def selfwork_window(
+    until: str | None = typer.Option(None, "--until", help="End time, 24-hour HH:MM"),
+    until_day: str | None = typer.Option(
+        None, "--until-day", help="today, tonight, tomorrow or YYYY-MM-DD for --until"
+    ),
+    start: str | None = typer.Option(None, "--from", help="Start time, HH:MM; now if left out"),
+    start_day: str | None = typer.Option(
+        None, "--from-day", help="today, tonight, tomorrow or YYYY-MM-DD for --from"
+    ),
+    timezone: str | None = typer.Option(
+        None, "--timezone", help="IANA time zone, such as Asia/Irkutsk; this computer's if left out"
+    ),
+    running_done: bool = typer.Option(
+        False, "--until-running-done", help="End when your tasks running now finish"
+    ),
+    then: str = typer.Option(
+        "restore", "--then", help="The switch after the window: restore, on or off"
+    ),
+    wait_for_idle: bool = typer.Option(
+        False, "--wait-for-idle", help="Inside the window, still wait for 15 quiet minutes"
+    ),
+    stop: bool = typer.Option(
+        False, "--stop", help="End the self-work running now at --until, then leave it off"
+    ),
+    cancel: str | None = typer.Option(None, "--cancel", help="Cancel or end this window ID"),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Run self-work for a stretch of time, end it at a time, or cancel a window."""
+
+    def body(client: ApiClient, out: Output) -> CommandResult:
+        backend.require_user("change Rem's self-work")
+        payload: dict[str, Any]
+        if cancel:
+            payload = {"action": "cancel", "window_id": cancel}
+        elif stop:
+            if not until or start or running_done:
+                raise backend.invalid("--stop takes --until only.")
+            payload = {"action": "stop_at", "end": _clock(until, until_day, timezone)}
+        else:
+            if bool(until) == running_done:
+                raise backend.invalid("Give --until or --until-running-done.")
+            if then not in {"restore", "on", "off"}:
+                raise backend.invalid("--then is restore, on or off.")
+            payload = {
+                "action": "schedule",
+                "after_end": then,
+                "wait_for_idle": wait_for_idle,
+            }
+            if running_done:
+                payload["until"] = "running_done"
+            else:
+                payload["end"] = _clock(until, until_day, timezone)
+            if start:
+                payload["start"] = _clock(start, start_day, timezone)
+        view = client.post("/rem/kanban/window", payload)["self_work"]
+        return _status(view)
+
+    backend.run("selfwork window", output, (endpoint, token_file, data_dir), body)
+
+
 @selfwork_app.command("export")
 def selfwork_export(
     endpoint: opts.EndpointUrl = None,
@@ -527,6 +648,8 @@ def selfwork_export(
     def body(client: ApiClient, out: Output) -> None:
         settings = _self_work(client)["settings"]
         wanted = {key: settings[key] for key in SELF_WORK_SETTINGS}
+        # The switch as saved, not as a timed window shows it right now.
+        wanted["enabled"] = settings.get("saved_enabled", settings["enabled"])
         out.stdout.write(json.dumps(wanted, indent=2) + "\n")
         out.stdout.flush()
 

@@ -140,6 +140,14 @@ class Rem:
         self.calls.append(("retry_review", (run, payload)))
         return {}
 
+    def pause_run(self, run: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("pause_run", (run, payload)))
+        return {}
+
+    def resume_run(self, run: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("resume_run", (run, payload)))
+        return {}
+
 
 @pytest.fixture
 def phone(application, tmp_path):
@@ -453,7 +461,7 @@ def test_organizations_use_the_desktop_manager(phone, tmp_path):
         assert paused["state"] == "paused"
         assert paused["pause_reason"] == "Paused by you"
         assert paused["usage"]["runs"] == 0 and paused["pending_requests"] == 0
-        # The phone can't review an unsandboxed roster, so it can't start one.
+        # A phone with Use Raticode from this phone on is the user (phone_guard.py).
         current = manager.store.get("", oid)
         manager.call(
             "",
@@ -476,11 +484,13 @@ def test_organizations_use_the_desktop_manager(phone, tmp_path):
                 },
             },
         )
-        refused = send(
+        # The phone is the user: it starts an organization with full-access workers too.
+        started = send(
             "desktop.action", "organizations.control", {"organization_id": oid, "state": "running"}
         )
-        assert refused["code"] == "unauthorized" and "desktop" in refused["detail"]
-        assert manager.store.get("", oid)["runtime"]["state"] == "paused"
+        assert started["ok"], started
+        assert manager.store.get("", oid)["runtime"]["state"] == "running"
+        send("desktop.action", "organizations.control", {"organization_id": oid, "state": "paused"})
         # Configuration, imports and secrets are not phone operations.
         assert (
             send(
@@ -1328,6 +1338,25 @@ def test_source_previews_are_fetched_by_the_desktop(phone, monkeypatch):
     assert preview["title"] == "A guide" and preview["url"] == url
     assert preview["image"].startswith("data:image/png;base64,")
     assert send("desktop.read", "media.preview", {"url": ""})["code"] == "invalid"
+
+
+def test_phone_pauses_and_resumes_a_run_on_a_desktop_that_says_so(phone):
+    app, peer, _, send = phone
+    app.desktop.enable(peer, True)
+    rem = app.desktop.rem
+    assert send("desktop.read", "overview")["value"]["run_pause"] is True
+    rem.store.task.update(
+        active_run=None,
+        last_run={"id": "run1", "state": "paused", "paused": {"by": "priority"}, "thread_id": "t"},
+    )
+    home = send("desktop.read", "rem.home")["value"]
+    assert home["run_pause"] is True
+    last = home["tasks"][0]["last_run"]
+    assert last["state"] == "paused" and last["paused_by"] == "priority"
+    assert send("desktop.action", "rem.run.pause", {"run_id": "run1"})["ok"]
+    assert rem.calls[-1][0] == "pause_run" and rem.calls[-1][1][0] == "run1"
+    assert send("desktop.action", "rem.run.resume", {"run_id": "run1"})["ok"]
+    assert rem.calls[-1][0] == "resume_run" and rem.calls[-1][1][0] == "run1"
 
 
 def test_phone_retries_a_review_and_reads_the_reply_as_it_grows(phone):
@@ -2551,6 +2580,8 @@ def test_a_task_waiting_for_others_shows_why_on_the_phone(phone):
             "reason": "“Audit” was blocked",
             "run_id": "audit-run",
             "run_state": "blocked",
+            # An older desktop sends no kind: it is a named task.
+            "kind": "task",
             "retryable": True,
         }
     ]

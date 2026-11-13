@@ -18,7 +18,8 @@ class DesktopScreensTest {
         assertEquals("Working", remActivity(task(active = run("executing"), last = run("failed"))))
         // The desktop's words: a failed run "didn't finish".
         assertEquals("Didn't finish", remActivity(task(last = run("failed"))))
-        assertEquals("Paused", remActivity(task(state = "paused", last = run("failed", acknowledged = true))))
+        // A paused schedule says so; a paused run says "Paused" (RemTaskStatusTest).
+        assertEquals("Schedule paused", remActivity(task(state = "paused", last = run("failed", acknowledged = true))))
         assertEquals("Not scheduled", remActivity(task()))
         // A desktop that names the step or the wait is quoted, as on the desktop's cards.
         assertEquals("Checking the work", remActivity(task(active = run("verifying").copy(phaseLabel = "Checking the work"))))

@@ -46,6 +46,8 @@ import androidx.compose.runtime.setValue
 import androidx.webkit.ProfileStore
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import androidx.webkit.WebViewRenderProcess
+import androidx.webkit.WebViewRenderProcessClient
 import dev.raticode.mobile.live.BrowserAddress
 import java.util.UUID
 
@@ -65,6 +67,8 @@ import java.util.UUID
 internal class BrowserRuntime private constructor(private val app: Application) {
     companion object {
         const val MAX_LIVE = 3
+        /** When to ask a full-screen page for its video's size, after it went full screen. */
+        private val SIZE_CHECKS_MS = longArrayOf(300L, 1500L)
         private const val PRIVATE_PROFILE_PREFIX = "raticode-private-"
         /** How often pages are asked whether they play sound while Raticode is away and a page plays. */
         const val SOUND_CHECK_MS = 4000L
@@ -88,6 +92,8 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         val canForward: Boolean = false,
         val problem: Problem? = null,
         val desktop: Boolean = false,
+        /** Counts automatic reloads after the page's process ended, so the page on screen draws the new one. */
+        val revived: Int = 0,
     )
 
     /** A page that couldn't show: why, in plain words, and what the user can do. */
@@ -112,7 +118,8 @@ internal class BrowserRuntime private constructor(private val app: Application) 
 
     data class LinkMenu(val tab: String, val link: String?, val image: String?)
     data class Chooser(val callback: ValueCallback<Array<Uri>>, val intent: Intent, val multiple: Boolean)
-    data class Fullscreen(val view: View, val callback: WebChromeClient.CustomViewCallback)
+    /** Tab [tab]'s page is full screen, showing [view] in place of the page until [callback] hears it ended. */
+    data class Fullscreen(val tab: String, val view: View, val callback: WebChromeClient.CustomViewCallback)
     data class Find(val query: String = "", val current: Int = 0, val total: Int = 0)
 
     var saved by mutableStateOf(BrowserStore.load(app)); private set
@@ -135,6 +142,9 @@ internal class BrowserRuntime private constructor(private val app: Application) 
     private var shown = false
     private var privateProfileName: String? = null
     private var leftoversChecked = false
+    /** Tabs whose page process ended. Each reloads by itself once on screen, not before its time (see [TabRecovery]). */
+    private val reviveAt = HashMap<String, Long>()
+    private val recovery = TabRecovery()
     /** The activity showing the browser, so page pop-ups such as `<select>` lists have a window. Never kept past detach. */
     private var host: java.lang.ref.WeakReference<Activity>? = null
 
@@ -185,6 +195,8 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         active = id
         // A tab playing sound goes on behind the others, as it does when Raticode leaves the screen.
         if (previous != id) { closeFind(); if (previous !in playing) views[previous]?.onPause() }
+        // Only the tab in view can be full screen, so a page Rem or a link brings to the front ends it.
+        if (VideoFullscreenRules.endsOnSelect(fullscreen?.let { VideoFullscreenRules.Video(BrowserMediaRules.Engine.CHROMIUM, it.tab) }, BrowserMediaRules.Engine.CHROMIUM, id)) exitFullscreen()
         update(saved.copy(active = id))
         if (shown) view(id)?.onResume()
     }
@@ -193,7 +205,7 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         val index = saved.tabs.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: return
         val tab = saved.tabs[index]
         destroy(id)
-        sleeping.remove(id); pages.remove(id); navigating.remove(id)
+        sleeping.remove(id); pages.remove(id); navigating.remove(id); reviveAt.remove(id); recovery.forget(id)
         if (ask?.tab == id) answerNo()
         val rest = saved.tabs - tab
         val closed = if (!tab.private && BrowserAddress.isWeb(tab.url)) (listOf(tab) + saved.closed).take(25) else saved.closed
@@ -269,6 +281,7 @@ internal class BrowserRuntime private constructor(private val app: Application) 
     }
 
     private fun load(id: String, url: String) {
+        reviveAt.remove(id); recovery.forget(id)
         if (url == BrowserRules.HOME) { destroy(id); sleeping.remove(id); setPage(id) { Page() }; saveTab(id, url, ""); return }
         setPage(id) { it.copy(url = url, problem = null, loading = true, progress = 5) }
         saveTab(id, url, null)
@@ -292,6 +305,10 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         val current = pages[id] ?: return
         when (current.problem?.kind) {
             Problem.Kind.INSECURE -> setPage(id) { it.copy(problem = null) }
+            // A page that kept stopping: try again from where it was, back/forward list included.
+            Problem.Kind.CRASHED -> if (views[id] == null && sleeping.containsKey(id)) {
+                recovery.forget(id); return setPage(id) { it.copy(problem = null, revived = it.revived + 1) }
+            } else { recovery.forget(id); setPage(id) { it.copy(problem = null) }; return load(id, current.problem.url) }
             null -> {}
             else -> { setPage(id) { it.copy(problem = null) }; return load(id, current.problem.url) }
         }
@@ -406,7 +423,13 @@ internal class BrowserRuntime private constructor(private val app: Application) 
 
     fun chooserResult(uris: Array<Uri>?) { chooser?.callback?.onReceiveValue(uris); chooser = null }
 
-    fun exitFullscreen() { fullscreen?.callback?.onCustomViewHidden(); fullscreen = null }
+    /** Ends full screen: the page gets its video back in place, still playing where it was, without a reload. */
+    fun exitFullscreen() {
+        val full = fullscreen ?: return
+        fullscreen = null
+        VideoFullscreen.leave(BrowserMediaRules.Engine.CHROMIUM, full.tab)
+        full.callback.onCustomViewHidden()
+    }
 
     /** The page's selected text, at most 2,000 characters, for Ask Rem. Read only when the user asks. */
     fun selection(done: (String) -> Unit) {
@@ -474,8 +497,13 @@ internal class BrowserRuntime private constructor(private val app: Application) 
     fun visible(on: Boolean) {
         if (on == shown) return
         shown = on
-        if (on) { views.values.firstOrNull()?.resumeTimers(); active?.let { views[it] }?.onResume(); checkSoundSoon() }
-        else { views.values.forEach { it.onPause() }; views.values.firstOrNull()?.pauseTimers(); exitFullscreen() }
+        if (on) {
+            views.values.firstOrNull()?.resumeTimers(); active?.let { views[it] }?.onResume(); checkSoundSoon()
+            // A page Android ended while Raticode was away reloads now that it's back on screen.
+            active?.takeIf { it in reviveAt }?.let { id -> setPage(id) { it.copy(revived = it.revived + 1) } }
+        }
+        // A full-screen video stays full screen, paused like the page, and is there again when Raticode comes back.
+        else { views.values.forEach { it.onPause() }; views.values.firstOrNull()?.pauseTimers() }
     }
 
     // Sound -----------------------------------------------------------------------------
@@ -493,7 +521,6 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         if (on) { checkSoundSoon(); return }
         if (playing.isEmpty()) { visible(false); return }
         views.forEach { (id, view) -> if (id !in playing) view.onPause() }
-        exitFullscreen()
         // Timers are shared by every page, so they keep running for the one playing; the others are paused.
         shown = false
     }
@@ -576,11 +603,21 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         val page = pages[id] ?: return null
         // Blank tabs show the start page; a problem shows until Reload or a new address wakes the tab.
         if (page.url == BrowserRules.HOME || page.problem != null) return null
+        // A page whose process ended reloads only on screen, and a page that keeps stopping waits a little longer each time.
+        reviveAt[id]?.let { at ->
+            if (!shown || System.currentTimeMillis() < at) return null
+            reviveAt.remove(id); recovery.restored(id)
+        }
         val view = create(id)
+        // Timers are shared by every page; ones paused while Raticode was away stay paused for a new page.
+        if (shown) view.resumeTimers()
         val state = sleeping.remove(id)
         if (state == null || view.restoreState(state) == null) view.loadUrl(page.url)
         return view
     }
+
+    /** Whether tab [id] has a live page now, without waking it. For tests. */
+    internal fun live(id: String) = views.containsKey(id)
 
     /** Puts [view] into [container], showing it as part of [activity]. */
     fun attach(container: ViewGroup, view: WebView, activity: Activity?) {
@@ -620,10 +657,19 @@ internal class BrowserRuntime private constructor(private val app: Application) 
 
     private fun destroy(id: String?) {
         val view = views.remove(id ?: return) ?: return
+        if (fullscreen?.tab == id) exitFullscreen()
         pageGone(id)
         (view.parent as? ViewGroup)?.removeView(view)
         view.stopLoading()
         view.destroy()
+    }
+
+    /** Asks tab [id]'s page how big its full-screen video is, so an upright video can stay upright. */
+    private fun measureFullscreen(id: String) {
+        if (fullscreen?.tab != id) return
+        views[id]?.evaluateJavascript(VideoFullscreenRules.SIZE_SCRIPT) { answer ->
+            VideoFullscreenRules.parseSize(answer)?.let { (width, height) -> VideoFullscreen.size(BrowserMediaRules.Engine.CHROMIUM, id, width, height) }
+        }
     }
 
     /** Told where the page in the active tab has scrolled to, in dp. */
@@ -664,6 +710,9 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         cookies.setAcceptThirdPartyCookies(view, false)
         view.webViewClient = PageClient(id)
         view.webChromeClient = ChromeClient(id)
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_VIEW_RENDERER_CLIENT_BASIC_USAGE)) {
+            runCatching { WebViewCompat.setWebViewRenderProcessClient(view, HangClient(id)) }
+        }
         view.setDownloadListener { url, agent, disposition, mime, length -> offerDownload(id, url, agent, disposition, mime, length) }
         // Keeps a page's own files readable for a minute after it revokes their addresses (see PageFiles).
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -698,7 +747,15 @@ internal class BrowserRuntime private constructor(private val app: Application) 
             return
         }
         val name = BrowserRules.safeName(URLUtil.guessFileName(url, disposition, mime))
-        ask = Ask.Download(id, url, name, mime.orEmpty(), length, BrowserRules.host(url), BrowserRules.risky(name, mime), agent)
+        offer(Ask.Download(id, url, name, mime.orEmpty(), length, BrowserRules.host(url), BrowserRules.risky(name, mime), agent))
+    }
+
+    /** Shows [next] unless another question is open; a question is never replaced while the user may be tapping it. */
+    private fun offer(next: Ask): Boolean {
+        val shown = BrowserRules.nextQuestion(ask, next)
+        if (shown == null) { notice = "Answer the open question first, then try again."; return false }
+        ask = shown
+        return true
     }
 
     // Files a page builds itself (see PageFiles) ---------------------------------
@@ -773,8 +830,7 @@ internal class BrowserRuntime private constructor(private val app: Application) 
 
     private fun offerPageBytes(id: String, name: String, mime: String, bytes: ByteArray, host: String) {
         if (id != active || saved.tabs.none { it.id == id }) return
-        pageFile = id to bytes
-        ask = Ask.Download(id, "", name, mime, bytes.size.toLong(), host, BrowserRules.risky(name, mime), "", fromPage = true)
+        if (offer(Ask.Download(id, "", name, mime, bytes.size.toLong(), host, BrowserRules.risky(name, mime), "", fromPage = true))) pageFile = id to bytes
     }
 
     private fun savePageFile(current: Ask.Download) {
@@ -821,6 +877,48 @@ internal class BrowserRuntime private constructor(private val app: Application) 
         if (saved.keepHistory && !isPrivate(id)) update(saved.copy(history = BrowserRules.record(saved.history, url, title, System.currentTimeMillis())))
     }
 
+    /**
+     * Tab [id]'s page process ended: Android freed its memory while Raticode was away, it crashed, or [HangClient] ended
+     * it. Nothing is shown. The back/forward list lives outside the page's process, so it's kept, and the tab reloads by
+     * itself once it's on screen. A page that keeps stopping gets a quiet Reload button instead (see [TabRecovery]).
+     */
+    private fun pageDied(id: String, view: WebView) {
+        val url = pages[id]?.url ?: BrowserRules.HOME
+        val state = runCatching { Bundle().takeIf { view.saveState(it) != null } }.getOrNull()
+        if (views[id] === view) views.remove(id)
+        if (fullscreen?.tab == id) runCatching { exitFullscreen() }
+        pageGone(id)
+        (view.parent as? ViewGroup)?.removeView(view)
+        view.destroy()
+        if (state != null) sleeping[id] = state
+        when (val decision = recovery.gone(id)) {
+            is TabRecovery.Decision.Restore -> {
+                reviveAt[id] = System.currentTimeMillis() + decision.delayMs
+                setPage(id) { it.copy(loading = false, progress = 0, problem = null, revived = it.revived + 1) }
+                if (decision.delayMs > 0) main.postDelayed({ if (id in reviveAt) setPage(id) { it.copy(revived = it.revived + 1) } }, decision.delayMs)
+            }
+            TabRecovery.Decision.GiveUp -> {
+                reviveAt.remove(id)
+                setPage(id) { it.copy(loading = false, problem = Problem(Problem.Kind.CRASHED, "This page keeps stopping",
+                    "Raticode reloaded it ${TabRecovery.MAX_RESTORES} times. Reload to try again.", url)) }
+            }
+        }
+    }
+
+    /**
+     * A page that stops answering taps. Pages that aren't on screen are left alone, with nothing shown; the one on screen
+     * gets [TabRecovery.HANG_GRACE_MS] and is then ended, which reloads it (see [pageDied]). Every Raticode (chromium) tab
+     * shares one page process, so nothing is ended while a page plays sound or a page file is being read.
+     */
+    private inner class HangClient(private val id: String) : WebViewRenderProcessClient() {
+        override fun onRenderProcessUnresponsive(view: WebView, renderer: WebViewRenderProcess?) {
+            val inView = id == active && shown && inFront
+            if (recovery.unresponsive(id, inView, busy = playing.isNotEmpty() || pageFileToken != null) == TabRecovery.Hang.END) renderer?.terminate()
+        }
+
+        override fun onRenderProcessResponsive(view: WebView, renderer: WebViewRenderProcess?) { recovery.responsive(id) }
+    }
+
     private inner class PageClient(private val id: String) : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             if (!request.isForMainFrame) return false
@@ -829,7 +927,7 @@ internal class BrowserRuntime private constructor(private val app: Application) 
                 is BrowserRules.Target.Insecure -> { showInsecure(id, target.url); true }
                 is BrowserRules.Target.App -> {
                     // A page can only offer another app after a tap, and the user still has to agree.
-                    if (request.hasGesture() && id == active) ask = Ask.OpenApp(id, target.url)
+                    if (request.hasGesture() && id == active) offer(Ask.OpenApp(id, target.url))
                     else if (id == active) notice = "Raticode's browser stopped this page from opening another app."
                     true
                 }
@@ -900,14 +998,7 @@ internal class BrowserRuntime private constructor(private val app: Application) 
 
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
             // Android ends the whole app unless the dead page is let go here.
-            val url = pages[id]?.url ?: BrowserRules.HOME
-            views.remove(id)
-            pageGone(id)
-            (view.parent as? ViewGroup)?.removeView(view)
-            view.destroy()
-            sleeping.remove(id)
-            setPage(id) { it.copy(loading = false, problem = Problem(Problem.Kind.CRASHED, "This page stopped working",
-                if (detail.didCrash()) "The page crashed. Reload to try again." else "Android closed it to free memory. Reload to show it again.", url)) }
+            pageDied(id, view)
             return true
         }
     }
@@ -984,10 +1075,17 @@ internal class BrowserRuntime private constructor(private val app: Application) 
 
         override fun onShowCustomView(view: View, callback: CustomViewCallback) {
             if (id != active) return callback.onCustomViewHidden()
-            fullscreen?.callback?.onCustomViewHidden()
-            fullscreen = Fullscreen(view, callback)
+            fullscreen?.takeIf { it.callback !== callback }?.callback?.onCustomViewHidden()
+            fullscreen = Fullscreen(id, view, callback)
+            VideoFullscreen.enter(BrowserMediaRules.Engine.CHROMIUM, id)
+            // The page marks its full-screen element a moment after this, and a video may still be loading its size.
+            for (delay in SIZE_CHECKS_MS) main.postDelayed({ measureFullscreen(id) }, delay)
         }
 
-        override fun onHideCustomView() { fullscreen = null }
+        override fun onHideCustomView() {
+            if (fullscreen?.tab != id) return
+            fullscreen = null
+            VideoFullscreen.leave(BrowserMediaRules.Engine.CHROMIUM, id)
+        }
     }
 }

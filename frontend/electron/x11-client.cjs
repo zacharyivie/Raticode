@@ -64,6 +64,13 @@ function readAuthority(number, { env = process.env, home = os.homedir(), hostnam
   return fallback;
 }
 
+// SHAPE extension request numbers and values.
+const SHAPE_RECTANGLES = 1;
+const SHAPE_MASK = 2;
+const SHAPE_SET = 0;
+const SHAPE_SUBTRACT = 3;
+const SHAPE_BOUNDING = 0;
+
 class X11Client extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -373,6 +380,42 @@ class X11Client extends EventEmitter {
     text.copy(body, 4);
     const reply = await this.request(98, 0, body);
     return reply[8] ? reply[9] : 0;
+  }
+
+  // SHAPE: cuts rectangles out of a window, so what Raticode draws over the
+  // Gecko tab (a menu) shows through a hole instead of the whole page hiding.
+  // rects are { x, y, width, height } relative to the window.
+  shapeWindow(major, window, width, height, rects) {
+    const encode = (list) => {
+      const body = Buffer.alloc(list.length * 8);
+      list.forEach((rect, index) => {
+        body.writeInt16LE(rect.x, index * 8);
+        body.writeInt16LE(rect.y, index * 8 + 2);
+        body.writeUInt16LE(rect.width, index * 8 + 4);
+        body.writeUInt16LE(rect.height, index * 8 + 6);
+      });
+      return body;
+    };
+    const request = (operation, list) => {
+      const head = Buffer.alloc(12);
+      head[0] = operation;
+      head[1] = SHAPE_BOUNDING;
+      head[2] = 0;
+      head.writeUInt32LE(window, 4);
+      return this.send(major, SHAPE_RECTANGLES, Buffer.concat([head, encode(list)]));
+    };
+    request(SHAPE_SET, [{ x: 0, y: 0, width, height }]);
+    if (rects.length) request(SHAPE_SUBTRACT, rects);
+  }
+
+  // Back to the window's own rectangle.
+  unshapeWindow(major, window) {
+    const body = Buffer.alloc(16);
+    body[0] = SHAPE_SET;
+    body[1] = SHAPE_BOUNDING;
+    body.writeUInt32LE(window, 4);
+    body.writeUInt32LE(0, 12);
+    return this.send(major, SHAPE_MASK, body);
   }
 
   // XTEST: real pointer and key input, for Raticode's real-display checks.

@@ -16,8 +16,10 @@ import androidx.annotation.RequiresApi
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import dev.raticode.mobile.browser.VideoFullscreen
 import dev.raticode.mobile.ui.ChildLockScreen
 import dev.raticode.mobile.ui.RaticodeTheme
+import dev.raticode.mobile.ui.VideoFullscreenBars
 
 /**
  * A see-through screen above everything Raticode shows. Being its own window on top of the app, it also covers pop-ups,
@@ -42,7 +44,11 @@ class ChildLockActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         // Back does nothing while locked.
         onBackPressedDispatcher.addCallback(this) { }
-        setContent { RaticodeTheme { ChildLockScreen(notice, asking, onUnlock = ::askForScreenLock, onOpenSettings = ::openSecuritySettings) } }
+        setContent { RaticodeTheme {
+            // A child watching a full-screen video keeps it full screen under the lock.
+            VideoFullscreenBars(VideoFullscreen.current != null)
+            ChildLockScreen(notice, asking, onUnlock = ::askForScreenLock, onOpenSettings = ::openSecuritySettings)
+        } }
     }
 
     override fun onResume() {

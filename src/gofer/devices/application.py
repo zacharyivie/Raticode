@@ -104,6 +104,10 @@ def _refusal(reason: str) -> tuple[str, str]:
         return "conflict", (
             "The desktop already has a different request with this number. Send it again."
         )
+    if reason in ("phone_locked", "suspicious_request"):
+        from gofer.devices.phone_guard import LOCKED_DETAIL
+
+        return "unauthorized", LOCKED_DETAIL
     if reason == "file_unavailable":
         return "not_found", (
             "This file is no longer available on the desktop. Ask Rem to send it again."
@@ -258,6 +262,9 @@ class DeviceApplication:
         from gofer.devices.desktop_control import DesktopControl
 
         self.desktop = DesktopControl(self)
+        from gofer.devices.phone_guard import PhoneLocks
+
+        self.locks = PhoneLocks(self)
 
     def _encode(self, peer: str, value: dict[str, Any]) -> bytes:
         raw = json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode()
@@ -340,6 +347,7 @@ class DeviceApplication:
                 "relay_origins",
             ):
                 db.execute(f"DELETE FROM {table} WHERE peer=?", (peer,))
+            self.locks.forget_peer(peer)
             db.execute("DELETE FROM endpoints WHERE device_id=?", (peer,))
             db.execute("DELETE FROM peer_names WHERE device_id=?", (peer,))
             db.execute("DELETE FROM peers WHERE device_id=?", (peer,))
@@ -452,6 +460,15 @@ class DeviceApplication:
         digest = hashlib.sha256(
             json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+        try:
+            # Screens a phone's request before anything else, Rem included, sees it.
+            blocked = self.locks.check(peer, event)
+        except PairingError as exc:
+            if str(exc) in _SESSION_ENDING:
+                raise
+            return self._refuse(peer, event, digest, str(exc))
+        if blocked:
+            return self._refuse(peer, event, digest, blocked)
         prepared = self._prepare_desktop_read(peer, event)
         try:
             return self._handle(peer, event, digest, prepared)

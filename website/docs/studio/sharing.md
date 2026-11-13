@@ -6,35 +6,44 @@ pageClass: docs-layout
 
 # Import and export
 
-Use a `.raticode` bundle to move a workflow and its packaged resources into another project.
+A `.raticode` bundle moves a workflow and its packaged resources into another project or onto another computer.
 
 ## Export a workflow
 
-Select a registered workflow and choose its export action. Pick an output directory and inspect the resulting bundle path. The export packages source and eligible workflow resources; it is not an export of your entire project or a backup of Rem conversations.
+Select a registered workflow, choose its export action, pick an output folder and note the bundle's path.
 
-Keep the original `workflow.rattish` and its referenced scripts in source control when you want ordinary Git review. Bundles are useful for portable handoff to another installation.
+- The bundle holds the workflow source and the resources it can package.
+- It isn't an export of your whole project, or a backup of Rem conversations.
+- For normal Git review, keep `workflow.rattish` and its scripts in source control. Bundles are for handing a workflow to another installation.
 
 ## Import a bundle
 
-Choose **Import** in Workflows, select a `.raticode` bundle, and choose its destination project. Raticode checks the bundle before adding it, then shows the imported workflow. Don't assume the bundle uses the same ID on every machine.
+Choose **Import** in Workflows, select a `.raticode` bundle and choose the destination project. Raticode checks the bundle, adds it and shows the workflow. The ID can differ from the sender's.
 
-After importing, open the source and graph. Read commands, agent prompts, child workflow references, file destinations, and network requests. Importing is not permission to run them.
+Before running it, open the source and graph and read:
 
-## Recheck the receiving machine
+- commands and agent prompts
+- child workflow references
+- file destinations
+- network requests
 
-Compile and run preflight in the destination environment. That machine still needs the required interpreters, provider CLIs, API profiles, and credentials. An export does not transfer your provider login or resolve secret references into plaintext.
+Importing a workflow isn't permission to run it.
 
-If a path or external resource cannot be included, arrange it explicitly on the receiving machine. Avoid expecting an arbitrary absolute path from the sender's computer to exist on yours.
+## Check the receiving computer
+
+Compile and run preflight on the destination. It still needs its own interpreters, provider CLIs, API profiles and credentials.
+
+- A bundle doesn't carry your provider login or turn secret references into plain text.
+- If a path or outside resource can't be packaged, set it up on the receiving computer. Don't expect an absolute path from the sender's computer to exist there.
 
 ## What to share separately
 
-| Item | Sharing method |
+| Item | How to share it |
 | --- | --- |
 | Workflow and packaged resources | `.raticode` workflow bundle |
-| Project code | Your repository or chosen file-transfer method |
-| Report design instructions | `.raticode-theme.json` export |
-| Conversation history | Configured conversation archive |
-| Provider login | Authenticate independently on the destination |
+| Project code | Your repository or another file transfer |
+| Report design | `.raticode-theme.json` export |
+| Conversation history | The conversation archive |
+| Provider login | Sign in again on the destination |
 
 See [Report themes](../knowledge/themes.md), [Conversation archive](../knowledge/archive.md), and [Validation and preflight](../workflows/validation.md).
-

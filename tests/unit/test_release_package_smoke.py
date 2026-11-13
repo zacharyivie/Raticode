@@ -172,6 +172,8 @@ def test_platform_extraction_and_evidence(
     monkeypatch.setattr(smoke, "probe_tree", trees)
     monkeypatch.setattr(smoke, "probe_speech_helper", speech)
     app_signing, dmg_signing, signing = Mock(), Mock(), Mock()
+    update_feed = Mock(return_value="github:zacharyivie/Raticode")
+    monkeypatch.setattr(smoke, "check_mac_update_feed", update_feed)
     monkeypatch.setattr(smoke, "check_mac_app_signing", app_signing)
     monkeypatch.setattr(smoke, "check_mac_dmg_signing", dmg_signing)
     monkeypatch.setattr(smoke, "mac_signing", Mock(return_value=signing))
@@ -193,8 +195,10 @@ def test_platform_extraction_and_evidence(
         )
         assert dmg_signing.call_args.args[0].name.endswith("-arm64.dmg")
         signing.require_developer_id.assert_called_once()
+        # Squirrel.Mac updates both copies from the feed baked into each app.
+        assert [c.args[0].parent.name for c in update_feed.call_args_list] == ["zip", "dmg-app"]
     else:
-        assert checked_apps == [] and not dmg_signing.called
+        assert checked_apps == [] and not dmg_signing.called and not update_feed.called
     commands = [c.args for c in run.call_args_list]
     if platform == "darwin":
         assert commands[-1][:2] == ("hdiutil", "detach")
@@ -202,8 +206,20 @@ def test_platform_extraction_and_evidence(
         assert commands[0][1] == "/S"
         assert commands[0][-1].startswith("/D=")
     else:
-        assert sum(c[0] == "dpkg-deb" for c in commands) == 2
-        assert sum(c[0] == "bsdtar" for c in commands) == 2
+        # Each package's modes are listed first, then the package is extracted.
+        assert [c[:2] for c in commands if c[0] == "dpkg-deb"] == [
+            ("dpkg-deb", "--contents"),
+            ("dpkg-deb", "--contents"),
+            ("dpkg-deb", "-x"),
+            ("dpkg-deb", "-x"),
+        ]
+        assert [c[:2] for c in commands if c[0] == "bsdtar"] == [
+            ("bsdtar", "-tvf"),
+            ("bsdtar", "-tvf"),
+            ("bsdtar", "-xf"),
+            ("bsdtar", "-xf"),
+        ]
+        assert "no group or world writable files" in recorded_scope(tmp_path)
     evidence = next(tmp_path.glob("package-tests-*.json"))
     recorded = json.loads(evidence.read_text())
     assert recorded["status"] == "passed"
@@ -211,8 +227,9 @@ def test_platform_extraction_and_evidence(
     assert "headless backend and client mode" in recorded["scope"]
     if platform == "darwin":
         assert (recorded["signing"], recorded["team_id"]) == ("developer-id", "ABCDE12345")
+        assert recorded["update_feed"] == "github:zacharyivie/Raticode"
     else:
-        assert "signing" not in recorded
+        assert "signing" not in recorded and "update_feed" not in recorded
     probe.side_effect = RuntimeError("broken backend")
     with pytest.raises(RuntimeError, match="broken backend"):
         smoke.main()
@@ -229,6 +246,7 @@ def test_macos_unmounts_after_probe_failure(
     monkeypatch.setattr(smoke, "probe_tree", Mock(side_effect=[None, RuntimeError("bad dmg")]))
     monkeypatch.setattr(smoke, "probe_speech_helper", Mock())
     monkeypatch.setattr(smoke, "check_mac_app_signing", Mock())
+    monkeypatch.setattr(smoke, "check_mac_update_feed", Mock())
     monkeypatch.setattr(smoke, "check_mac_dmg_signing", Mock())
     monkeypatch.setattr(smoke, "mac_signing", Mock())
     monkeypatch.setenv("RATICODE_MACOS_SIGNING", "unsigned")
@@ -376,3 +394,61 @@ def test_stopping_the_headless_backend_ends_its_whole_process_tree_on_windows(
     monkeypatch.setattr(smoke.os, "name", "posix")
     assert smoke._stop(process) == 1
     assert calls == []
+
+
+# Real lines from the published 0.5.3 packages, before the afterPack fix.
+DEB_0_5_3 = """\
+drwxr-xr-x root/root         0 2026-11-11 00:39 ./opt/Raticode/
+-rwxrwxrwx root/root 234458440 2026-11-11 00:39 ./opt/Raticode/gofer-flow
+-rw-rw-rw- root/root    568310 2026-11-11 00:39 ./opt/Raticode/chrome_100_percent.pak
+-rwxr-xr-x root/root  91232400 2026-11-11 00:39 ./opt/Raticode/resources/backend/Raticode
+"""
+RPM_0_5_3 = """\
+-rwxrwxrwx  0 0      0       15216 Nov 11 00:39 ./opt/Raticode/chrome-sandbox
+lrwxrwxrwx  0 0      0          28 Nov 11 00:43 ./usr/lib/.build-id/34/f6 -> ../../opt/gofer-flow
+drwxrwxr-x  0 0      0           0 Nov 11 00:39 ./opt/Raticode/locales
+-rw-r--r--  0 0      0      927734 Nov 11 00:39 ./opt/Raticode/resources.pak
+"""
+
+
+def recorded_scope(folder: Path) -> str:
+    return str(json.loads(next(folder.glob("package-tests-*.json")).read_text())["scope"])
+
+
+def test_package_listing_flags_group_and_world_writable_entries(smoke: ModuleType) -> None:
+    deb = smoke.writable_entries(DEB_0_5_3)
+    assert [line.rsplit(" ", 1)[1] for line in deb] == [
+        "./opt/Raticode/gofer-flow",
+        "./opt/Raticode/chrome_100_percent.pak",
+    ]
+    rpm = smoke.writable_entries(RPM_0_5_3)
+    # Symlinks are always lrwxrwxrwx and never count; a group-writable folder does.
+    assert [line.split()[-1] for line in rpm] == [
+        "./opt/Raticode/chrome-sandbox",
+        "./opt/Raticode/locales",
+    ]
+    assert smoke.writable_entries("dpkg-deb: warning: something\n\n") == []
+
+
+def test_linux_packages_with_writable_files_fail_the_smoke_test(
+    smoke: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(*args: object, **_: object) -> str:
+        calls.append(tuple(str(arg) for arg in args))
+        return DEB_0_5_3 if args[0] == "dpkg-deb" else RPM_0_5_3
+
+    monkeypatch.setattr(smoke, "run", fake_run)
+    with pytest.raises(RuntimeError, match="installs 2 group or world writable entries"):
+        smoke.check_package_modes(tmp_path / "Raticode-0.5.3-amd64.deb")
+    with pytest.raises(RuntimeError, match="gofer-flow|chrome-sandbox"):
+        smoke.check_package_modes(tmp_path / "Raticode-0.5.3-x86_64.rpm")
+    assert calls[0][:2] == ("dpkg-deb", "--contents")
+    assert calls[1][:2] == ("bsdtar", "-tvf")
+
+    monkeypatch.setattr(smoke, "run", lambda *a, **k: "-rwxr-xr-x root/root 1 x ./opt/a\n")
+    smoke.check_package_modes(tmp_path / "Raticode-0.5.3-amd64.deb")
+    # Every Linux package is checked before it is extracted.
+    source = (ROOT / "scripts/test-release-packages.py").read_text()
+    assert "for package in [*debs, *rpms]:\n                check_package_modes(package)" in source

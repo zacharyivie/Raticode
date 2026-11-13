@@ -23,11 +23,14 @@ export async function saveVoiceTidy(changes) {
   return payload;
 }
 
-// Always resolves: { text, tidied, reason }. A failed request keeps the heard words.
-export async function tidyTranscript(text, { signal } = {}) {
+// Always resolves: { text, tidied, reason }. A failed request keeps the heard words. before is
+// the end of the message already written when text continues it, so it reads on; only text
+// is tidied.
+export async function tidyTranscript(text, { before = "", signal } = {}) {
   try {
+    const body = before ? { text, before } : { text };
     const response = await fetch(apiUrl("/chat/voice-tidy"), {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }), signal,
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal,
     });
     const payload = await response.json();
     if (!response.ok || typeof payload.text !== "string") {

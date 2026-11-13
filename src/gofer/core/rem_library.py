@@ -31,6 +31,7 @@ RESERVED_MCP_NAMES = frozenset(
         "organizations",
         "rem_artifacts",
         "rem_threads",
+        "rem_wait",
         "reports",
         "second_brain",
         "swarm",

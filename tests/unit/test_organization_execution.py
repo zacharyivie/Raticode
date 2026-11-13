@@ -757,3 +757,53 @@ def test_http_gateway_uses_bounded_idempotent_protocol(monkeypatch: Any) -> None
     assert requests[0].headers["Authorization"] == "Bearer test-only-token"
     with pytest.raises(ValueError, match="redirect"):
         module.NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere.test")
+
+
+def test_webhook_receipts_older_than_a_day_are_pruned(setup: Any, monkeypatch: Any) -> None:
+    # B-O15 (12 Nov security review): receipts used to pile up forever.
+    manager, org, call = setup
+    from gofer.ui import organization_webhooks
+
+    class Secrets:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def get(self, account: str) -> str:
+            return "test-only-signing-key"
+
+    monkeypatch.setattr(organization_webhooks, "OSSecretStore", Secrets)
+    call("secret_reference", id="hook", account="test")
+    routine = call(
+        "routine_save",
+        routine={"name": "Hook", "task": {"title": "Fixed template", "assignee": "worker"}},
+    )
+    call(
+        "webhook_save", routineId=routine["id"], expectedRevision=1, secretRef="hook", enabled=True
+    )
+
+    def plant(current: dict[str, Any]) -> dict[str, Any]:
+        receipts = current["runtime"].setdefault("webhookReceipts", {})
+        receipts["old:1"] = {"id": "old:1", "sha256": "x", "receivedEpoch": time.time() - 90000}
+        receipts["recent:1"] = {"id": "recent:1", "sha256": "y", "receivedEpoch": time.time()}
+        return {}
+
+    manager.store.mutate(org["projectRoot"], org["id"], "user", "test_plant", plant)
+    body = b"{}"
+    timestamp = str(int(time.time()))
+    signature = hmac.new(
+        b"test-only-signing-key", timestamp.encode() + b".fresh." + body, hashlib.sha256
+    ).hexdigest()
+    receive(
+        manager,
+        org["id"],
+        routine["id"],
+        {
+            "X-Raticode-Timestamp": timestamp,
+            "X-Raticode-Delivery": "fresh",
+            "X-Raticode-Signature": "sha256=" + signature,
+        },
+        body,
+    )
+    receipts = manager.store.get("", org["id"])["runtime"]["webhookReceipts"]
+    assert "old:1" not in receipts
+    assert {"recent:1", routine["id"] + ":fresh"} <= set(receipts)

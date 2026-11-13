@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Settings2, SquareKanban } from "lucide-react";
 import { openRemThread } from "../lib/remHomeStore.js";
-import { activityLine, cappedThreads, markReportSeen, modeLabel, openSelfWorkSettings, selfWorkLine, useKanban } from "../lib/remKanban.js";
+import { activityLine, cappedThreads, markReportSeen, modeLabel, openSelfWorkSettings, selfWorkLine, selfWorkWindows, useKanban } from "../lib/remKanban.js";
 import SelfWorkReport from "./SelfWorkReport.jsx";
 import "./Kanban.css";
 
@@ -30,9 +30,13 @@ export default function KanbanSidebar({ active, open, onOpen }) {
 function SelfWorkPanel({ view }) {
   const { state } = view;
   const capped = cappedThreads(view);
+  // A window set for later; the running one is already in the line above.
+  const windows = selfWorkWindows(view);
+  const next = windows && !windows.active ? windows.upcoming[0] : null;
   return <div className="kb-card">
     <h3>Self-work <span className="kb-mode" data-mode={state.mode}>{modeLabel(state.mode)}</span></h3>
     <p className="kb-side-note">{selfWorkLine(view)}</p>
+    {next ? <p className="kb-hint" data-testid="self-work-next-window">Next: {next.label}</p> : null}
     {state.activity?.length ? <ul className="kb-activity" aria-label="Now working on">{state.activity.map(item => <li key={item.thread_id || activityLine(item)}>
       {item.thread_id ? <button type="button" onClick={() => openRemThread(item.thread_id)}>{activityLine(item)}</button> : <span>{activityLine(item)}</span>}
     </li>)}</ul> : null}

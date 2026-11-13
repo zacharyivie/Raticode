@@ -1,0 +1,3 @@
+# Direct dependencies of scripts/check-contract.py. Compile requirements.txt from this
+# file with hashes (see the command at the top of requirements.txt).
+jsonschema==4.26.0

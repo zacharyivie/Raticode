@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -379,6 +380,29 @@ def check_mac_app_signing(app: Path, mode: str, team_id: str, signing: Any) -> N
     print(f"Verified {app}: unsigned build with an ad-hoc signature")
 
 
+def publish_feed() -> str:
+    """The update feed every packaged app must use, from electron-builder's publish config."""
+    publish = json.loads((ROOT / "frontend/package.json").read_text())["build"]["publish"]
+    entry = publish[0] if isinstance(publish, list) else publish
+    return f"{entry['provider']}:{entry['owner']}/{entry['repo']}"
+
+
+def check_mac_update_feed(app: Path) -> str:
+    """Squirrel.Mac updates the app from the feed in its app-update.yml."""
+    config = app / "Contents/Resources/app-update.yml"
+    if not config.is_file():
+        raise RuntimeError(f"{app} has no app-update.yml, so it can't look for updates")
+    fields = {}
+    for line in config.read_text().splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key.strip()] = value.strip().strip("'\"")
+    feed = f"{fields.get('provider')}:{fields.get('owner')}/{fields.get('repo')}"
+    if feed != publish_feed():
+        raise RuntimeError(f"{app} looks for updates at {feed}, expected {publish_feed()}")
+    return feed
+
+
 def check_mac_dmg_signing(dmg: Path, mode: str, team_id: str, signing: Any) -> None:
     if mode != "developer-id":
         return
@@ -414,8 +438,40 @@ def linux_packages() -> tuple[list[Path], list[Path]]:
     return packages[:2], packages[2:]
 
 
+# An ``ls -l`` style mode at the start of a dpkg-deb --contents or bsdtar -tv line.
+_MODE = re.compile(r"[-dlcbps][-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT]")
+
+
+def writable_entries(listing: str) -> list[str]:
+    """Entries of an archive listing that accounts other than root could change."""
+    found = []
+    for line in listing.splitlines():
+        mode = line.split(maxsplit=1)[0] if line.strip() else ""
+        # A symlink's own mode is never used, so lrwxrwxrwx is normal.
+        if _MODE.fullmatch(mode) and mode[0] != "l" and "w" in (mode[5], mode[8]):
+            found.append(line.strip())
+    return found
+
+
+def check_package_modes(package: Path) -> None:
+    """Fail if a .deb or .rpm would install anything group or world writable."""
+    if package.suffix == ".deb":
+        listing = run("dpkg-deb", "--contents", package)
+    else:
+        listing = run("bsdtar", "-tvf", package)
+    writable = writable_entries(listing)
+    if writable:
+        shown = "\n".join(writable[:20])
+        raise RuntimeError(
+            f"{package.name} installs {len(writable)} group or world writable entries "
+            f"(see frontend/build-resources/after-pack.cjs):\n{shown}"
+        )
+    print(f"Verified that {package.name} installs nothing group or world writable", flush=True)
+
+
 def main() -> None:
     platform = {"win32": "windows", "darwin": "macos", "linux": "linux"}[sys.platform]
+    update_feed = ""
     evidence = RELEASE / f"package-tests-{platform}.json"
     evidence.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="raticode-package-test-") as temporary:
@@ -442,6 +498,7 @@ def main() -> None:
             probe_tree(root / "zip")
             probe_speech_helper(root / "zip")
             check_mac_app_signing(root / "zip/Raticode.app", mode, team_id, signing)
+            update_feed = check_mac_update_feed(root / "zip/Raticode.app")
             dmg = RELEASE / f"Raticode-{VERSION}-arm64.dmg"
             check_mac_dmg_signing(dmg, mode, team_id, signing)
             mount = root / "dmg"
@@ -452,6 +509,7 @@ def main() -> None:
                 probe_tree(root / "dmg-app")
                 probe_speech_helper(root / "dmg-app")
                 check_mac_app_signing(root / "dmg-app/Raticode.app", mode, team_id, signing)
+                check_mac_update_feed(root / "dmg-app/Raticode.app")
             finally:
                 run("hdiutil", "detach", mount)
         else:
@@ -462,6 +520,8 @@ def main() -> None:
             appimage.chmod(appimage.stat().st_mode | 0o111)
             run(appimage, "--appimage-extract", cwd=root)
             probe_tree(root / "squashfs-root")
+            for package in [*debs, *rpms]:
+                check_package_modes(package)
             for package in debs:
                 target = root / package.name
                 run("dpkg-deb", "-x", package, target)
@@ -479,8 +539,14 @@ def main() -> None:
         "scope": "Final distribution extraction/installation, backend version/help, and the "
         "standalone CLI's headless backend and client mode"
         + (
-            ", macOS speech helper status check, and signing, notarization and updater label"
+            ", macOS speech helper status check, signing, notarization and updater label,"
+            " and the update feed of the zip and DMG apps"
             if sys.platform == "darwin"
+            else ""
+        )
+        + (
+            ", and no group or world writable files in the .deb and .rpm packages"
+            if sys.platform.startswith("linux")
             else ""
         ),
     }
@@ -489,6 +555,7 @@ def main() -> None:
         result["signing"], team_id = mac_signing_mode()
         if team_id:
             result["team_id"] = team_id
+        result["update_feed"] = update_feed
     evidence.write_text(
         json.dumps(
             result,

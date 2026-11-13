@@ -112,13 +112,17 @@ final class Dictation {
     func handle(_ mine: Int, _ result: SFSpeechRecognitionResult?, _ error: Error?) {
         guard mine == segment else { return }
         if let result {
-            words = result.bestTranscription.formattedString
+            let heard = result.bestTranscription.formattedString
+            // On-device recognition can end a phrase after a pause with an empty result;
+            // the words heard before it still count. (A partial that drops the earlier
+            // words and carries on with new ones is handled by the backend, which keeps them.)
+            if !heard.isEmpty { words = heard }
             if result.isFinal {
                 quickFailures = 0
                 commit()
                 return
             }
-            emit(["type": "partial", "text": words])
+            if !heard.isEmpty { emit(["type": "partial", "text": words]) }
         }
         guard let error else { return }
         let heardSomething = !words.isEmpty

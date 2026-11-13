@@ -16,7 +16,7 @@ import packageMetadata from "../../package.json";
 import RaticodeMark from "./RaticodeMark.jsx";
 
 const THEME_STORAGE_KEY = "gofer-ui-theme";
-const ISSUE_URL = `${packageMetadata.homepage}/issues/new`;
+const ISSUE_URL = `${packageMetadata.bugs.url}/new`;
 
 function currentLocation() {
   return typeof window !== "undefined" && window.location?.href

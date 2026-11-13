@@ -43,7 +43,16 @@ def with_author(message: dict[str, Any]) -> dict[str, Any]:
     return {**message, "sender": "user"}
 
 
-RUN_STATES = ACTIVE | {"succeeded", "blocked", "cancelled", "failed", "outcome_unknown"}
+# ``paused`` is neither running nor finished: the run keeps its thread, provider session and
+# worktree and holds no worker until someone resumes it (see ``request_pause``).
+PAUSED = "paused"
+RUN_STATES = ACTIVE | {"succeeded", "blocked", "cancelled", "failed", "outcome_unknown", PAUSED}
+# What a paused run's worker is told when it picks up again in the same thread.
+RESUME_TEXT = (
+    "This task was paused and is resuming now in this same thread. The pause stopped your "
+    "last turn partway through, so first check what you already did (files, commits, commands "
+    "and saved reports) and don't repeat finished actions. Then continue the original task."
+)
 # Newest run first. Saving a run replaces its row, which gives it a new rowid,
 # so rowid order tracks the last update rather than when the run started.
 NEWEST_RUN = "json_extract(body, '$.created_at') DESC, rowid DESC"
@@ -213,6 +222,9 @@ def progress_step(run: dict[str, Any]) -> str:
     state = run.get("state")
     if state == "succeeded":
         return "report"
+    if state == PAUSED:
+        # Where it was when it paused; it picks up there.
+        return str((run.get("paused") or {}).get("step") or "work")
     if state == "queued":
         if run.get("resume_review"):
             return "check"
@@ -249,7 +261,8 @@ def current_cards(db: sqlite3.Connection, messages: list[dict[str, Any]]) -> Non
             "json_extract(body, '$.needs_user'), 'resume_review', "
             "json_extract(body, '$.resume_review'), 'started_at', "
             "json_extract(body, '$.started_at'), 'verification_thread_id', "
-            f"json_extract(body, '$.verification_thread_id')) FROM runs WHERE id IN ({marks})",
+            "json_extract(body, '$.verification_thread_id'), 'paused', "
+            f"json_extract(body, '$.paused')) FROM runs WHERE id IN ({marks})",
             sorted(wanted),
         )
     }
@@ -258,12 +271,22 @@ def current_cards(db: sqlite3.Connection, messages: list[dict[str, Any]]) -> Non
         run = current.get(str((work or {}).get("run_id") or ""))
         if run is None or not isinstance(work, dict):
             continue
+        if isinstance(run.get("paused"), str):
+            run["paused"] = json.loads(run["paused"])
         message["work"] = {
             **work,
             "state": run["state"],
             "needs_user": bool(run.get("needs_user")),
             "step": progress_step(run),
         }
+        message["work"].pop("paused_by", None)
+        if run["state"] == PAUSED:
+            message["work"]["paused_by"] = paused_by(run)
+
+
+def paused_by(run: dict[str, Any]) -> str:
+    """Who paused a run: ``user``, or ``priority`` when self-work made way for the user's work."""
+    return "priority" if (run.get("paused") or {}).get("by") == "priority" else "user"
 
 
 def ran_at(task: dict[str, Any]) -> str:
@@ -317,6 +340,10 @@ def begin_cycle(
         waiting_reason=None,
         waiting_for=None,
         proof_waits=0,
+        # A worker's sleep (rem_home_sleep) belongs to one stretch of work; a follow-up,
+        # edit, retry or recovery starts with no sleep pending and a fresh wait budget.
+        pending_sleep=None,
+        sleep=None,
     )
     run["criteria"] = [
         {"id": c["id"], "result": "unknown"} for c in run["recipe"]["acceptance_criteria"]
@@ -526,6 +553,10 @@ class RemHomeStore:
         task["next_occurrence_at"] = recipe.schedule.next(clock, initial=True)
         if recipe.after:
             task["prerequisites"] = after_tasks.resolve(db, task["id"], recipe.after, clock)
+        waits = after_tasks.conditions(db, task, clock)
+        if waits:
+            task["waits_for"] = waits
+        if after_tasks.pending(task):
             # The gate in due() starts it; a requested time only delays that further.
             task["next_occurrence_at"] = None
         self.put(db, "tasks", task)
@@ -535,7 +566,13 @@ class RemHomeStore:
     @staticmethod
     def starts_now(recipe: Recipe) -> bool:
         """A one-time task for now with nothing to wait for starts as it is created."""
-        return recipe.schedule.kind == "once" and not recipe.schedule.at and not recipe.after
+        return (
+            recipe.schedule.kind == "once"
+            and not recipe.schedule.at
+            and not recipe.after
+            and not recipe.after_running
+            and not recipe.after_self_work
+        )
 
     def add_run(
         self,
@@ -551,9 +588,10 @@ class RemHomeStore:
         message_extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Queue a task's next run; ``announce=False`` when the caller writes its own card."""
+        # A paused run is still this task's current run: nothing new starts beside it.
         active = db.execute(
             "SELECT body FROM runs WHERE task=? AND state IN ('queued','executing',"
-            "'verifying','repairing','cancelling')",
+            "'verifying','repairing','cancelling','paused')",
             (task["id"],),
         ).fetchone()
         if active:
@@ -648,6 +686,8 @@ class RemHomeStore:
         }
         if run.get("tickets"):
             card["tickets"] = run["tickets"]
+        if run["state"] == PAUSED:
+            card["paused_by"] = paused_by(run)
         # Work Rem started on its own (or for a ticket moved to In progress). Its phone
         # alerts come from the self-work report, so chat updates don't alert twice.
         if run.get("self_work"):
@@ -999,7 +1039,10 @@ class RemHomeStore:
                 ).fetchone()
                 old_run = json.loads(previous[0]) if previous else {}
                 run = (
-                    self.queue_review(db, old_run, config)
+                    # Run on a paused task picks the paused run back up in its thread.
+                    self.resume_paused(db, old_run, config, by="user")
+                    if old_run.get("state") == PAUSED
+                    else self.queue_review(db, old_run, config)
                     if self.interrupted_review(old_run)
                     and old_run["recipe"].get("revision") == task["revision"]
                     else self.add_run(db, task, f"manual:{payload['request_id']}", config)
@@ -1043,23 +1086,32 @@ class RemHomeStore:
                         raise ValueError("enabled must be boolean")
                     task["enabled"] = payload["enabled"]
                     task["state"] = "enabled" if task["enabled"] else "paused"
-                if "after" in payload:
+                conditions = {"after", "after_running", "after_self_work"} & set(payload)
+                if conditions:
                     if task.get("after_started"):
                         raise RemConflict(
                             "This task already started, so what it waits for is fixed"
                         )
                     if (
-                        not task.get("prerequisites")
+                        not after_tasks.pending(task)
                         and db.execute("SELECT 1 FROM runs WHERE task=?", (identity,)).fetchone()
                     ):
                         raise RemConflict("This task already ran, so it can't wait for another")
-                    task["prerequisites"] = after_tasks.resolve(
-                        db, identity, task["after"], datetime.now(UTC)
-                    )
+                    clock = datetime.now(UTC)
+                    if "after" in payload:
+                        task["prerequisites"] = after_tasks.resolve(
+                            db, identity, task["after"], clock
+                        )
+                    if {"after_running", "after_self_work"} & conditions:
+                        # Re-pinned now: "what's running" means what runs at this change.
+                        task.pop("waits_for", None)
+                        waits = after_tasks.conditions(db, task, clock)
+                        if waits:
+                            task["waits_for"] = waits
                 if (
                     "schedule" in payload
                     or payload.get("enabled") is True
-                    or ("after" in payload and not task["prerequisites"])
+                    or (conditions and not after_tasks.pending(task))
                 ):
                     task["schedule_revision"] += 1
                     task["next_occurrence_at"] = Schedule.model_validate(task["schedule"]).next(
@@ -1128,7 +1180,8 @@ class RemHomeStore:
     ) -> dict[str, Any]:
         busy = db.execute(
             "SELECT id FROM runs WHERE task=? AND id!=? AND state IN "
-            "('queued','executing','verifying','repairing','cancelling','outcome_unknown')",
+            "('queued','executing','verifying','repairing','cancelling','outcome_unknown',"
+            "'paused')",
             (run["task_id"], run["id"]),
         ).fetchone()
         if busy:
@@ -1149,8 +1202,12 @@ class RemHomeStore:
         def operation(db: sqlite3.Connection) -> dict[str, Any]:
             run = self.get(db, "runs", identity)
             if action == "cancel":
-                if run["state"] in ACTIVE:
+                if run["state"] in ACTIVE or run["state"] == PAUSED:
+                    # Stopping wins over a pause still settling, and ends a paused run.
+                    run.pop("pausing", None)
                     run.update(state="cancelling", epoch=run["epoch"] + 1)
+            elif action == "pause":
+                self.request_pause(run, by="user")
             elif action == "acknowledge":
                 if run["state"] not in NEEDS_ATTENTION:
                     raise RemConflict("Only an attention item can be dismissed")
@@ -1161,6 +1218,88 @@ class RemHomeStore:
             return {"run": run}
 
         return self.command(f"run.{action}:{identity}", payload, operation, db=db)
+
+    @staticmethod
+    def request_pause(run: dict[str, Any], *, by: str, reason: str = "") -> bool:
+        """Ask a running run to pause; returns whether this changed anything.
+
+        The run stops like a Stop would: its turn ends and its worker lets go. Instead of
+        finishing, it then settles as ``paused`` (``settle_pause``) with its thread, provider
+        session and worktree kept. A run already paused, or pausing, stays as it is.
+        """
+        if run["state"] == PAUSED or run.get("pausing"):
+            return False
+        if run["state"] not in ACTIVE or run["state"] == "cancelling":
+            raise RemConflict("Only a task that is running or waiting to start can be paused")
+        run["pausing"] = {
+            "by": by,
+            "at": now(),
+            "from_state": run["state"],
+            "step": progress_step(run),
+            "reason": reason[:500],
+        }
+        run.update(state="cancelling", epoch=run["epoch"] + 1)
+        return True
+
+    def settle_pause(self, db: sqlite3.Connection, run: dict[str, Any]) -> dict[str, Any]:
+        """Turn a stopped run that was asked to pause into a ``paused`` one.
+
+        ``resume`` records how it picks up again: ``queue`` puts back a run that hadn't
+        started, ``review`` checks a finished worker result again, and ``continue`` sends a
+        new turn into the same thread. Nothing here releases the run's worktree.
+        """
+        pausing = run.pop("pausing")
+        started = pausing.get("from_state") != "queued"
+        resume = (
+            "queue"
+            if not started
+            else "review"
+            if run.get("worker_result") and pausing.get("from_state") == "verifying"
+            else "continue"
+        )
+        run.update(
+            state=PAUSED,
+            paused={**pausing, "resume": resume},
+            active_turn_id=None,
+            active_thread_id=None,
+            waiting_reason=None,
+            phase_label=None,
+        )
+        self.put(db, "runs", run)
+        self.event(db, "run.paused", {"run_id": run["id"], "by": pausing.get("by")})
+        return run
+
+    def resume_paused(
+        self, db: sqlite3.Connection, run: dict[str, Any], config: dict[str, Any], *, by: str
+    ) -> dict[str, Any]:
+        """Queue a paused run again: the same run, thread and worktree, never a new run."""
+        if run["state"] != PAUSED:
+            if run["state"] in ACTIVE:
+                return run
+            raise RemConflict("Only a paused task can be resumed")
+        task = self.get(db, "tasks", run["task_id"])
+        if task.get("deleted_at"):
+            raise RemConflict("This task was deleted")
+        paused = run.pop("paused", None) or {}
+        how = paused.get("resume") or "continue"
+        feedback = str(run.get("review_feedback") or "").strip()
+        if how == "queue":
+            run.update(state="queued", epoch=run["epoch"] + 1)
+        elif how == "review":
+            begin_cycle(run, "review", config=config)
+            # The review it was in stopped partway; a fresh one starts from the saved result.
+            run["reset_review_session"] = True
+        else:
+            begin_cycle(run, "work", config=config)
+            run["follow_up_message"] = RESUME_TEXT + (
+                "\nThe review had asked for these changes when it paused:\n" + feedback
+                if feedback and paused.get("from_state") == "repairing"
+                else ""
+            )
+        run["resumed"] = {"at": now(), "by": by, "from": how}
+        self.put(db, "runs", run)
+        self.event(db, "run.resumed", {"run_id": run["id"], "by": by})
+        return run
 
     def due(self, clock: datetime) -> None:
         with self.connect() as db:
@@ -1200,7 +1339,7 @@ class RemHomeStore:
         """
         if not task.get("enabled", True) or task.get("deleted_at"):
             return
-        status = after_tasks.evaluate(db, task)
+        status = after_tasks.evaluate(db, task, clock=clock)
         if status["state"] == "held":
             body, identity = after_tasks.hold_notice(task, status)
             if not db.execute("SELECT 1 FROM messages WHERE id=?", (identity,)).fetchone():

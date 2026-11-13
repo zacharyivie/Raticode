@@ -204,7 +204,7 @@ async def test_refused_request_no_longer_blocks_the_real_session(tmp_path):
     invitations = Invitations(target)
     listener = DeviceListener(target, invitations, application)
     port = await listener.start()
-    invite = invitations.create("Test", {"host": "127.0.0.1", "port": port})
+    invite = invitations.create("Test", {"host": "127.0.0.1", "port": port}, role="desktop")
 
     async def confirm() -> None:
         while not target.list():

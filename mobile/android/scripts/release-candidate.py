@@ -21,12 +21,14 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,15 @@ PRODUCT_PATH = "mobile/android"
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 RELEASE_APK = ROOT / "app/build/outputs/apk/release/app-release.apk"
 UNSIGNED_APK = ROOT / "app/build/outputs/apk/release/app-release-unsigned.apk"
+# Gradle names the bundle the same whether it signed it or not.
+RELEASE_BUNDLE = ROOT / "app/build/outputs/bundle/release/app-release.aab"
+# Google Play's limit on a base module's compressed download (500 MB). Above 200 MB,
+# Play warns people on mobile data before they install.
+PLAY_DOWNLOAD_LIMIT = 500_000_000
+PLAY_MOBILE_DATA_WARNING = 200_000_000
+# Android 15+ devices can use 16 KB memory pages; Google Play requires 64-bit native
+# libraries to support them.
+PAGE_ALIGNMENT = 16 * 1024
 MAPPING = ROOT / "app/build/outputs/mapping/release/mapping.txt"
 
 
@@ -125,11 +136,17 @@ def apk_name(version: str) -> str:
     return f"raticode-mobile-{version}.apk"
 
 
-def required_files(version: str) -> dict[str, set[str]]:
-    return {
-        "android": {apk_name(version), "apk-checks.json", "device-tests.json", "checksums-android.txt"},
-        "audit-evidence": {"dependency-inventory.json", "dependency-audit.json"},
-    }
+def bundle_name(version: str) -> str:
+    return f"raticode-mobile-{version}.aab"
+
+
+def required_files(version: str, signed: bool = False) -> dict[str, set[str]]:
+    android = {apk_name(version), "apk-checks.json", "device-tests.json", "checksums-android.txt"}
+    if signed:
+        # The App Bundle for Google Play, signed with the same upload key. Unsigned
+        # candidates never carry one: Play refuses an unsigned upload.
+        android |= {bundle_name(version), "bundle-checks.json"}
+    return {"android": android, "audit-evidence": {"dependency-inventory.json", "dependency-audit.json"}}
 
 
 # Android tooling ----------------------------------------------------------------------
@@ -145,6 +162,13 @@ def sdk_tool(*parts: str) -> Path:
 
 def build_tool(name: str) -> Path:
     return sdk_tool("build-tools", os.environ.get("RATICODE_ANDROID_BUILD_TOOLS", "36.0.0"), name)
+
+
+def java_tool(name: str) -> Path:
+    home = os.environ.get("JAVA_HOME")
+    path = Path(home, "bin", name) if home else Path(shutil.which(name) or name)
+    require(path.is_file(), f"{name} not found; set JAVA_HOME to JDK 21")
+    return path
 
 
 def run(*args: Any, env: dict[str, str] | None = None) -> str:
@@ -181,6 +205,8 @@ def attribute_value(raw: str) -> Any:
     quoted = re.match(r'^"(.*?)"(?: \(Raw: .*\))?$', raw)
     if quoted:
         return quoted.group(1)
+    # A bundle's proto manifest prints booleans as `false (Raw: "false")`.
+    raw = re.sub(r' \(Raw: ".*"\)$', "", raw)
     if raw in ("true", "(type 0x12)0xffffffff"):
         return True
     if raw in ("false", "(type 0x12)0x0"):
@@ -252,33 +278,71 @@ def difference(label: str, actual: Any, expected: Any) -> str:
     )
 
 
-def check_apk(apk: Path, signed: bool, mapping: Path | None = None) -> dict[str, Any]:
-    """Check a release APK against version.properties and scripts/release-policy.json."""
-    require(apk.is_file() and apk.stat().st_size > 0, f"No APK at {apk}")
+def native_alignment(archive: Path, prefix: str = "lib/") -> dict[str, Any]:
+    """Every 64-bit native library's smallest LOAD segment alignment, read from its ELF header."""
+    problems, libraries = [], 0
+    with zipfile.ZipFile(archive) as bundle:
+        for entry in bundle.infolist():
+            if not (entry.filename.startswith(prefix) and entry.filename.endswith(".so")):
+                continue
+            with bundle.open(entry) as stream:
+                header = stream.read(64)
+                if len(header) < 64 or header[:4] != b"\x7fELF" or header[4] != 2:
+                    continue  # 32-bit or not ELF; this app ships 64-bit libraries only
+                endian = "<" if header[5] == 1 else ">"
+                phoff, = struct.unpack_from(endian + "Q", header, 0x20)
+                phentsize, phnum = struct.unpack_from(endian + "HH", header, 0x36)
+                stream.read(phoff - 64)
+                table = stream.read(phentsize * phnum)
+            libraries += 1
+            aligns = [
+                struct.unpack_from(endian + "Q", table, i * phentsize + 0x30)[0]
+                for i in range(phnum)
+                if struct.unpack_from(endian + "I", table, i * phentsize)[0] == 1
+            ]
+            if not aligns or min(aligns) < PAGE_ALIGNMENT:
+                problems.append(f"{entry.filename} ({min(aligns) if aligns else 'no LOAD'})")
+    require(
+        not problems,
+        f"Native libraries are not aligned for 16 KB memory pages, which Google Play requires: {problems}",
+    )
+    return {"libraries": libraries, "page_alignment": PAGE_ALIGNMENT}
+
+
+def manifest_policy(info: dict[str, Any], tree: dict[str, Any]) -> tuple[str, int, dict[str, str | None]]:
+    """The checks an APK and an App Bundle share: identity, SDK levels, permissions and exports."""
     version, code = versions()
     rules = policy()
-    info = badging(apk)
     require(info["package"] == rules["package"], f"Package is {info['package']}, not {rules['package']}")
     require(
         (info["version_name"], info["version_code"]) == (version, code),
-        f"APK is {info['version_name']} ({info['version_code']}); version.properties says {version} ({code})",
+        f"Build is {info['version_name']} ({info['version_code']}); version.properties says {version} ({code})",
     )
     require(
         (info["min_sdk"], info["target_sdk"]) == (rules["min_sdk"], rules["target_sdk"]),
-        f"APK targets SDK {info['min_sdk']}-{info['target_sdk']}, policy says "
+        f"Build targets SDK {info['min_sdk']}-{info['target_sdk']}, policy says "
         f"{rules['min_sdk']}-{rules['target_sdk']}",
     )
-    require(not info["debuggable"] and not info["test_only"], "Release APK is debuggable or test-only")
+    require(not info["debuggable"] and not info["test_only"], "Release build is debuggable or test-only")
     require(
         info["permissions"] == sorted(rules["permissions"]),
         difference("Permissions", info["permissions"], rules["permissions"]),
     )
-    tree = parse_manifest_tree(run(build_tool("aapt2"), "dump", "xmltree", "--file", "AndroidManifest.xml", apk))
     application, exported = exported_components(tree)
-    require(application.get("allowBackup") is False, "Release APK must set allowBackup=false")
-    require(application.get("usesCleartextTraffic") is False, "Release APK must set usesCleartextTraffic=false")
-    require(application.get("debuggable") is not True, "Release APK is debuggable")
+    require(application.get("allowBackup") is False, "Release build must set allowBackup=false")
+    require(application.get("usesCleartextTraffic") is False, "Release build must set usesCleartextTraffic=false")
+    require(application.get("debuggable") is not True, "Release build is debuggable")
     require(exported == rules["exported"], difference("Exported components", exported, rules["exported"]))
+    return version, code, exported
+
+
+def check_apk(apk: Path, signed: bool, mapping: Path | None = None) -> dict[str, Any]:
+    """Check a release APK against version.properties and scripts/release-policy.json."""
+    require(apk.is_file() and apk.stat().st_size > 0, f"No APK at {apk}")
+    info = badging(apk)
+    tree = parse_manifest_tree(run(build_tool("aapt2"), "dump", "xmltree", "--file", "AndroidManifest.xml", apk))
+    version, code, exported = manifest_policy(info, tree)
+    alignment = native_alignment(apk)
     verdict = signature(apk)
     certificate = None
     if signed:
@@ -315,6 +379,120 @@ def check_apk(apk: Path, signed: bool, mapping: Path | None = None) -> dict[str,
         "mapping_sha256": digest(mapping) if mapping else None,
         "permissions": info["permissions"],
         "exported": exported,
+        "native_alignment": alignment,
+    }
+
+
+def jar_signature(archive: Path) -> dict[str, Any] | None:
+    """jarsigner's verdict on an App Bundle, or None when it is unsigned or fails to verify.
+
+    Bundles carry a JAR (v1) signature; Play checks it against the registered upload key.
+    """
+    result = subprocess.run(
+        [str(java_tool("jarsigner")), "-verify", str(archive)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    if result.returncode != 0 or "jar verified." not in result.stdout:
+        return None
+    text = run(java_tool("keytool"), "-printcert", "-jarfile", archive)
+    owners = re.findall(r"^Owner: (.*)$", text, re.M)
+    certificates = [fingerprint(v) for v in re.findall(r"^\s*SHA256: ([0-9A-F:]{95})$", text, re.M)]
+    return {"signers": len(re.findall(r"^Signer #\d+:", text, re.M)), "names": owners, "certificates": certificates}
+
+
+def bundle_base(aab: Path, directory: Path) -> Path:
+    """The bundle's base module as a proto-format APK, which aapt2 can read like any APK."""
+    base = directory / "base-module.apk"
+    with zipfile.ZipFile(aab) as bundle, zipfile.ZipFile(base, "w") as output:
+        names = bundle.namelist()
+        require("base/manifest/AndroidManifest.xml" in names, "The bundle has no base module manifest")
+        for name in names:
+            if not name.startswith("base/") or name.endswith("/"):
+                continue
+            inner = name.removeprefix("base/")
+            inner = "AndroidManifest.xml" if inner == "manifest/AndroidManifest.xml" else inner
+            if inner.startswith(("res/", "resources.pb", "AndroidManifest.xml")):
+                output.writestr(inner, bundle.read(name))
+    return base
+
+
+def bundle_download_estimate(aab: Path) -> dict[str, Any]:
+    """Upper bound on what one phone downloads: every non-native file plus its largest ABI.
+
+    Play serves a phone only its own ABI's libraries, language and density, so the real
+    download is smaller. Native libraries are counted at their compressed size here.
+    """
+    shared, per_abi = 0, {}
+    with zipfile.ZipFile(aab) as bundle:
+        for entry in bundle.infolist():
+            parts = entry.filename.split("/")
+            if parts[0] == "BUNDLE-METADATA" or parts[0] == "META-INF":
+                continue
+            if len(parts) > 3 and parts[1] == "lib":
+                per_abi[parts[2]] = per_abi.get(parts[2], 0) + entry.compress_size
+            else:
+                shared += entry.compress_size
+    estimate = shared + max(per_abi.values(), default=0)
+    require(
+        estimate <= PLAY_DOWNLOAD_LIMIT,
+        f"The bundle could give a phone {estimate} bytes to download; Google Play allows {PLAY_DOWNLOAD_LIMIT}",
+    )
+    return {
+        "abis": sorted(per_abi),
+        "largest_download_estimate": estimate,
+        "limit": PLAY_DOWNLOAD_LIMIT,
+        "mobile_data_warning": estimate > PLAY_MOBILE_DATA_WARNING,
+    }
+
+
+def check_bundle(aab: Path, signed: bool, apk_certificate: str | None = None) -> dict[str, Any]:
+    """Check the release App Bundle with the APK's policy, plus Play's size and signing rules."""
+    require(aab.is_file() and aab.stat().st_size > 0, f"No App Bundle at {aab}")
+    with tempfile.TemporaryDirectory() as temporary:
+        base = bundle_base(aab, Path(temporary))
+        info = badging(base)
+        tree = parse_manifest_tree(
+            run(build_tool("aapt2"), "dump", "xmltree", "--file", "AndroidManifest.xml", base)
+        )
+    version, code, exported = manifest_policy(info, tree)
+    alignment = native_alignment(aab, prefix="base/lib/")
+    size = bundle_download_estimate(aab)
+    verdict = jar_signature(aab)
+    certificate = None
+    if signed:
+        require(verdict, "The App Bundle's signature does not verify")
+        assert verdict is not None
+        require(verdict["signers"] == 1 and len(verdict["certificates"]) == 1, "Expected exactly one bundle signer")
+        require(
+            not any("CN=Android Debug" in name for name in verdict["names"]),
+            "The App Bundle is signed with Android's debug key",
+        )
+        certificate = verdict["certificates"][0]
+        require(
+            certificate == expected_certificate(),
+            "The App Bundle is signed with a different certificate than ANDROID_SIGNING_CERT_SHA256",
+        )
+        require(
+            apk_certificate is None or certificate == apk_certificate,
+            "The App Bundle and the APK are signed with different keys",
+        )
+    else:
+        require(verdict is None, "Expected an unsigned App Bundle, but its signature verifies")
+    return {
+        "status": "passed",
+        "package": info["package"],
+        "version": version,
+        "version_code": code,
+        "min_sdk": info["min_sdk"],
+        "target_sdk": info["target_sdk"],
+        "signed": signed,
+        "certificate_sha256": certificate,
+        "aab_sha256": digest(aab),
+        "aab_size": aab.stat().st_size,
+        "permissions": info["permissions"],
+        "exported": exported,
+        "native_alignment": alignment,
+        "download": size,
     }
 
 
@@ -325,10 +503,17 @@ def collect(output: Path, signed: bool) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     require(not list(folder.iterdir()), f"{folder} must be empty")
     evidence = check_apk(apk, signed, MAPPING)
+    # The bundle is checked either way, so an unsigned run still proves it would pass.
+    bundle = check_bundle(RELEASE_BUNDLE, signed, evidence["certificate_sha256"])
     target = folder / apk_name(evidence["version"])
     shutil.copyfile(apk, target)
     require(digest(target) == evidence["apk_sha256"], "Copied APK differs from the checked one")
     (folder / "apk-checks.json").write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    if signed:
+        aab = folder / bundle_name(bundle["version"])
+        shutil.copyfile(RELEASE_BUNDLE, aab)
+        require(digest(aab) == bundle["aab_sha256"], "Copied App Bundle differs from the checked one")
+        (folder / "bundle-checks.json").write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n")
     return target
 
 
@@ -576,7 +761,7 @@ def seal(folder: Path) -> None:
 
 
 def verify_group(folder: Path, group: str, version: str, code: int, signed: bool = False) -> None:
-    expected = required_files(version)[group]
+    expected = required_files(version, signed)[group]
     actual = {p.name for p in folder.iterdir()}
     require(actual == expected, f"{group}: missing {sorted(expected - actual)}, unexpected {sorted(actual - expected)}")
     require(
@@ -616,6 +801,15 @@ def verify_group(folder: Path, group: str, version: str, code: int, signed: bool
     )
     if signed:
         fingerprint(checks.get("certificate_sha256"))
+        bundle = json.loads((folder / "bundle-checks.json").read_text())
+        require(
+            bundle.get("status") == "passed"
+            and (bundle.get("version"), bundle.get("version_code")) == (version, code)
+            and bundle.get("signed") is True
+            and bundle.get("certificate_sha256") == checks.get("certificate_sha256")
+            and bundle.get("aab_sha256") == digest(folder / bundle_name(version)),
+            f"{group}: App Bundle checks do not match this bundle, version and signing key",
+        )
     tests = json.loads((folder / "device-tests.json").read_text())
     instrumented = tests.get("instrumented") or {}
     # The launch of this exact APK must have succeeded and the instrumented tests must
@@ -686,7 +880,7 @@ def create_manifest(
             "release-launch",
             "dependency-audit",
         ]
-        + (["release-signature"] if signed else []),
+        + (["release-signature", "release-bundle-policy"] if signed else []),
         # Emulator results are recorded as they were; they never block a candidate.
         "instrumented_tests": instrumented,
         "files": files,
@@ -719,7 +913,11 @@ def validate_manifest(manifest: dict[str, Any], repo: str, sha: str, version: st
     else:
         require(manifest.get("certificate_sha256") is None, "Unsigned candidate names a certificate")
     files = manifest["files"]
-    for group, expected in required_files(version).items():
+    require(
+        ("release-bundle-policy" in manifest.get("checks", [])) == manifest["signed"],
+        "Signed candidates, and only they, carry a checked App Bundle",
+    )
+    for group, expected in required_files(version, manifest["signed"]).items():
         actual = {name for name, info in files.items() if info["group"] == group}
         require(actual == expected, f"Candidate {group} inventory mismatch")
     for name, info in files.items():
@@ -1096,6 +1294,10 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--apk", type=Path, help="defaults to the Gradle release output for --signing")
     check.add_argument("--signing", choices=("signed", "unsigned"), required=True)
     check.add_argument("--output", type=Path, help="write the evidence JSON here")
+    bundle = commands.add_parser("check-bundle", help="check a built release App Bundle against the release policy")
+    bundle.add_argument("--aab", type=Path, default=RELEASE_BUNDLE)
+    bundle.add_argument("--signing", choices=("signed", "unsigned"), required=True)
+    bundle.add_argument("--output", type=Path, help="write the evidence JSON here")
     gather = commands.add_parser("collect", help="check the release APK and copy it into a candidate folder")
     gather.add_argument("--output", type=Path, default=Path("candidate"))
     scan = commands.add_parser("audit", help="look up release dependencies in OSV")
@@ -1128,6 +1330,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{apk.name}: {evidence['version']} ({evidence['version_code']}), "
                   f"{'signed ' + evidence['certificate_sha256'] if signed else 'unsigned'}, "
                   f"sha256 {evidence['apk_sha256']}; release policy checks passed")
+        elif args.command == "check-bundle":
+            evidence = check_bundle(args.aab, args.signing == "signed")
+            if args.output:
+                args.output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+            print(f"{args.aab.name}: {evidence['version']} ({evidence['version_code']}), "
+                  f"{'signed ' + evidence['certificate_sha256'] if evidence['signed'] else 'unsigned'}, "
+                  f"{evidence['aab_size']} bytes, largest phone download at most "
+                  f"{evidence['download']['largest_download_estimate']} bytes; release policy checks passed")
         elif args.command == "collect":
             print(f"Collected {collect(args.output, signing_policy())}")
         elif args.command == "audit":

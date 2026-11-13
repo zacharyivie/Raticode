@@ -203,7 +203,7 @@ uses #18181a, #1e1e21, and #232327 surfaces.
 
 The workspace uses the persistent Second Brain API. Import/export, extraction, citations,
 reports, comparisons and research jobs show real task receipts and errors. Explicit fixtures
-are limited to tests. See [Second Brain workspace](docs/second-brain-workspace.md) for
+are limited to tests. See [Second Brain workspace](website/docs/knowledge/second-brain.md) for
 storage, provider privacy, runtime requirements and verification commands.
 
 ### Rem home
@@ -219,4 +219,4 @@ only running phases spin, and every state is written out.
 The task sheet keeps visible controls to the four task sections plus Done when. Run controls
 sit beside the run's threads in the status card, and Delete is a quiet icon that confirms inline.
 Do not add provider, budget, or permission knobs to this surface; they belong to the backend
-task recipe and its details. See [Rem home](docs/rem-home.md).
+task recipe and its details. See [Rem home](website/docs/rem/home.md).

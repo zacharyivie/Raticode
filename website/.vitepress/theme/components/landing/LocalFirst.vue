@@ -15,8 +15,7 @@ const promises = [
         <span class="rc-eyebrow">Local by design</span>
         <h2 id="local-title" class="rc-h2">Your machine.<br />Your keys.<br /><em>Your rules.</em></h2>
         <p class="rc-lede">
-          Raticode is a desktop app and an open-source CLI, not a hosted service. Each agent step gets its own prompt
-          and the inputs you wire into it, and you choose how much earlier context it keeps.
+          Raticode is a desktop app and an open-source CLI, not a hosted service.
         </p>
       </div>
 

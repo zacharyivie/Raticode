@@ -17,6 +17,7 @@ const { watchGeckoMedia } = require("./gecko-media.cjs");
 const { IMPORT_ITEMS, findFirefoxProfiles, importProfile, inspectProfile, prefLine } = require("./firefox-profile.cjs");
 
 const WINDOW_CLASS = "RaticodeGecko";
+const NEW_TAB_PAGE = "about:newtab";
 const WINDOW_TIMEOUT_MS = 45000;
 const STOP_TIMEOUT_MS = 8000;
 const POSIX_WATCHDOG = "while kill -0 \"$1\" 2>/dev/null && kill -0 \"$2\" 2>/dev/null; do sleep 2; done; kill -TERM \"$2\" 2>/dev/null";
@@ -61,6 +62,22 @@ function pageAddress(value) {
   }
 }
 
+// Holes for menus drawn over the Gecko tab, in window pixels: at most 16
+// rectangles, each kept inside the window.
+function cutoutsWithin(value, width, height) {
+  if (!Array.isArray(value)) return [];
+  const whole = (number) => (Number.isFinite(number) ? Math.round(number) : 0);
+  const rects = [];
+  for (const item of value.slice(0, 16)) {
+    const x = Math.min(Math.max(0, whole(item?.x)), width);
+    const y = Math.min(Math.max(0, whole(item?.y)), height);
+    const right = Math.min(Math.max(0, whole(item?.x) + whole(item?.width)), width);
+    const bottom = Math.min(Math.max(0, whole(item?.y) + whole(item?.height)), height);
+    if (right > x && bottom > y) rects.push({ x, y, width: right - x, height: bottom - y });
+  }
+  return rects;
+}
+
 function createGeckoWindow({
   dataDir,
   getWindow,
@@ -91,7 +108,10 @@ function createGeckoWindow({
   let pageFocused = false;
   let title = "";
   let lastError = "";
-  let placement = { x: 0, y: 0, width: 0, height: 0, visible: false };
+  let placement = { x: 0, y: 0, width: 0, height: 0, visible: false, cutouts: [] };
+  let shapeMajor = 0;
+  let shaped = false;
+  let pageClicks = 0;
   let watchedWindow = null;
   let resolveWindow = null;
   const considering = new Set();
@@ -167,6 +187,7 @@ function createGeckoWindow({
       next.on("event", (event) => handleEvent(event));
       next.on("closed", () => { if (client === next) { client = null; adopted = 0; } });
       next.selectInput(next.root, MASK.SubstructureNotify);
+      shapeMajor = await next.extension("SHAPE").catch(() => 0);
       client = next;
       return next;
     })().finally(() => { connecting = null; });
@@ -208,6 +229,10 @@ function createGeckoWindow({
           pageFocused = true;
         }
         client.allowClick();
+        // Raticode's page never sees this click, so a menu open over the
+        // Gecko tab hears about it this way and can close.
+        pageClicks += 1;
+        changed();
         return;
       default:
     }
@@ -261,11 +286,21 @@ function createGeckoWindow({
 
   function apply() {
     if (!adopted || !client) return;
-    if (!placement.visible || placement.width < 1 || placement.height < 1) {
+    // Without the SHAPE extension a menu over the page can only be shown by
+    // hiding the page.
+    const hidden = !placement.visible || placement.width < 1 || placement.height < 1 || (placement.cutouts.length > 0 && !shapeMajor);
+    if (hidden) {
       if (mapped) client.unmapWindow(adopted);
       return;
     }
     client.configureWindow(adopted, { x: placement.x, y: placement.y, width: placement.width, height: placement.height });
+    if (placement.cutouts.length) {
+      client.shapeWindow(shapeMajor, adopted, placement.width, placement.height, placement.cutouts);
+      shaped = true;
+    } else if (shaped) {
+      client.unshapeWindow(shapeMajor, adopted);
+      shaped = false;
+    }
     if (!mapped) client.mapWindow(adopted);
     tellPosition();
   }
@@ -280,7 +315,9 @@ function createGeckoWindow({
 
   function place(next = {}) {
     const whole = (value) => (Number.isFinite(value) ? Math.round(value) : 0);
-    placement = { x: whole(next.x), y: whole(next.y), width: Math.max(0, whole(next.width)), height: Math.max(0, whole(next.height)), visible: next.visible === true };
+    const width = Math.max(0, whole(next.width));
+    const height = Math.max(0, whole(next.height));
+    placement = { x: whole(next.x), y: whole(next.y), width, height, visible: next.visible === true, cutouts: cutoutsWithin(next.cutouts, width, height) };
     apply();
     return { placed: Boolean(adopted) };
   }
@@ -315,6 +352,7 @@ function createGeckoWindow({
       running: Boolean(child),
       placed: Boolean(adopted),
       title,
+      pageClicks,
       error: lastError,
       media: media.snapshot(),
       profile: state.current,
@@ -389,6 +427,19 @@ function createGeckoWindow({
     return status();
   }
 
+  // An empty Firefox tab, for the tab bar's +. A Firefox that isn't running
+  // starts with its own start page instead. The address is fixed: nothing from
+  // the page or the renderer reaches Firefox's command line here.
+  async function newTab() {
+    const { started } = await ensure("");
+    if (!started) {
+      const helper = spawn(status().executable, ["--class", WINDOW_CLASS, "--profile", profileDir(), "--new-tab", NEW_TAB_PAGE], { env: launchEnv(), stdio: "ignore", detached: true });
+      helper.on?.("error", (error) => log("warn", `Gecko could not open a new tab: ${error.message}`));
+      helper.unref?.();
+    }
+    return { ...status(), newTab: true };
+  }
+
   async function stop() {
     const running = child;
     if (!running) return;
@@ -440,6 +491,7 @@ function createGeckoWindow({
     switch (action) {
       case "status": return status();
       case "open": return open(options.url);
+      case "new-tab": return newTab();
       case "place": return place(options);
       case "focus-app": return focusApp();
       case "media-control": return media.control(options.command);
@@ -465,4 +517,4 @@ function createGeckoWindow({
   return { close, events, handle, status, get adoptedWindow() { return adopted; } };
 }
 
-module.exports = { PROFILE_PREFS, WINDOW_CLASS, createGeckoWindow, pageAddress, supportProblem };
+module.exports = { NEW_TAB_PAGE, PROFILE_PREFS, WINDOW_CLASS, createGeckoWindow, cutoutsWithin, pageAddress, supportProblem };

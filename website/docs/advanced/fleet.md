@@ -6,38 +6,48 @@ pageClass: docs-layout
 
 # Desktop fleet
 
-Use a paired desktop as an execution destination while keeping its project access and permissions explicit.
+Use a paired desktop to run work, while its project access and permissions stay explicit.
 
 ::: warning Device rollout
-Fleet depends on experimental device networking and compatible desktop versions. Pairing, transport, and release acceptance are separate checks. Do not assume a connected device is ready for unattended execution.
+Fleet depends on experimental device networking and compatible desktop versions. Pairing, connection and release checks are separate. A connected device isn't necessarily ready for unattended work.
 :::
 
 ## Pair another desktop
 
-Turn on **Phone and desktop pairing** on both installations (see [Pair and connect](../mobile/pairing.md#turn-on-pairing-on-the-computer)), choose **Pair a device** and pick **Another computer**, then complete mutual confirmation in **Settings > Devices**. Verify the fingerprint on both screens. Desktop fleet targets are desktops, not phones.
+1. Turn on **Phone and desktop pairing** on both computers (see [Pair and connect](../mobile/pairing.md#turn-on-pairing-on-the-computer)).
+2. Choose **Pair a device**, then **Another computer**.
+3. Confirm on both sides in **Settings > Devices**, checking that the fingerprints match.
 
-Both sides must retain their trusted identity and have a working route: the local network, or your own Tailscale network if you opt in. There is no internet relay. A working connection does not grant project access or execution permission.
+Fleet targets are desktops, not phones.
 
-**Run threads from this desktop**, on a paired desktop's entry, lets that desktop start Rem threads that run on this computer; they then choose this computer under **Run on**.
+- Both sides must keep their trusted identity and have a route: the local network, or your own Tailscale network if you opt in. There's no internet relay.
+- A working connection grants no project access and no permission to run anything.
+- **Run threads from this desktop**, on a paired desktop's entry, lets that desktop start Rem threads that run on this computer. They pick this computer under **Run on**.
 
-## Inspect before dispatch
+## Inspect before sending work
 
-With Fleet resources available, ask Rem to list paired desktops and obtain a fresh authenticated status snapshot. Check capabilities, the intended project, and the target's availability before asking it to do work.
+With Fleet tools on in a thread, ask Rem to list paired desktops and fetch a fresh authenticated status. Check capabilities, the intended project and whether the target is available.
 
-Status expires after 60 seconds. A missing status is unknown rather than healthy, and an unknown running-job count is not zero. Device summaries are not a public heartbeat or monitoring service.
+- Status expires after 60 seconds.
+- A missing status means unknown, not healthy. An unknown running-job count isn't zero.
+- Device summaries aren't a public heartbeat or monitoring service.
 
-## Grant a specific job
+## Allow a specific job
 
-Local Fleet execution permission and the target's own grants are both required. **Allow this thread to delegate work to paired desktops** is unchecked by default. A remote device cannot bypass its local project and tool restrictions because another desktop asked it to run something.
+Both are required:
 
-Specify the target, project, and task in the authorization. For example: "Run the agreed test command on the paired Linux desktop in this project, then return its result." Review the selected command and access before dispatch.
+- **Allow this thread to delegate work to paired desktops** in this thread. It's off by default.
+- The target's own grants. A remote device never bypasses its local project and tool restrictions because another desktop asked.
 
-Organizations can use a paired desktop as a managed execution destination. That path also binds an employee allowlist, granted thread, target project, and reservation. It does not make general fleet requests equivalent to organization-managed tasks.
+Name the target, project and task when you authorize, for example: "Run the agreed test command on the paired Linux desktop in this project, then return its result." Check the command and access before Rem sends it.
+
+Organizations can use a paired desktop as a managed execution destination. That path also binds an employee allowlist, a granted thread, the target project and a reservation. General fleet requests don't get those guarantees.
 
 ## Results and uncertainty
 
-Keep the returned job receipt. A lost reply can leave the outcome unknown even when the remote side started. Inspect the job and its workspace before retrying; repeating a new request can duplicate side effects.
-
-Remote file access uses scoped operations, size limits, and hashes where supported. Do not use it as a reason to distribute local credential files. **Stop** requests cancellation and needs a confirming result; it does not reverse completed actions.
+- Keep the returned job receipt.
+- A lost reply can leave the outcome unknown even when the remote side started. Inspect the job and its workspace before retrying; sending a new request can repeat side effects.
+- **Stop** asks for cancellation and needs a confirming result. It doesn't undo finished actions.
+- Remote file access uses scoped operations, size limits and, where supported, hashes. Don't use it to copy credential files around.
 
 See [Organizations](./organizations.md), [Pair and connect](../mobile/pairing.md), and [Permissions](./security.md).

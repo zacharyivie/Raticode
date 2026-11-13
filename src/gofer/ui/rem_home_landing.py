@@ -15,6 +15,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from gofer.utils.process import (
+    NO_REPOSITORY_PROGRAMS,
+    build_subprocess_env,
+    untrusted_repository_git_env,
+)
+
 INTEGRATION_BRANCH = "dev"
 GIT_TIMEOUT_SECONDS = 30
 # Branches that are never a single change's feature branch.
@@ -33,11 +39,12 @@ _OPT_OUT = re.compile(
 def _git(cwd: Path | str, *args: str) -> str | None:
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            ["git", *NO_REPOSITORY_PROGRAMS, "-C", str(cwd), *args],
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
+            env=untrusted_repository_git_env(cwd, build_subprocess_env()),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

@@ -10,11 +10,18 @@ pageClass: docs-layout
 These commands arrived in Raticode 0.5.3. Earlier versions don't have them.
 :::
 
-These commands let a script, a CI job or a remote box use Raticode without the desktop window. Each one sends a request to a running backend, the same API the desktop window and the phone use, so a run you start here appears in the app's Runs and the app's Stop button reaches it. The CLI never opens the backend's databases itself. The CLI finds a [headless backend](./headless.md) on its own. It can't find the desktop app's backend yet, because the app doesn't publish its address or token, so these commands can't reach it while only the desktop app is running.
+These commands let a script, a CI job or a remote box use Raticode without the desktop window.
 
-There are no menus, prompts or screens. A command makes one request, or a few, and prints the result. When something needs a decision from you, such as starting an organization, the command doesn't offer it and the app keeps it.
+- Each one sends a request to a running backend, through the same API the desktop window and the phone use. A run you start here shows in the app's Runs, and the app's Stop button reaches it.
+- The CLI never opens the backend's databases itself.
+- The CLI finds a [headless backend](./headless.md) on its own. It can't find the desktop app's backend yet, because the app doesn't publish its address or token. With only the desktop app running, these commands can't reach it.
+- There are no menus, prompts or screens. A command makes one request, or a few, and prints the result.
+- Decisions that need you, such as starting an organization, have no command. They stay in the app.
 
-[Rem, tickets and self-work from the CLI](./cli-rem.md) covers `Raticode rem`, `Raticode tickets` and `Raticode selfwork`. The [CLI reference](./cli.md#talk-to-a-running-backend) covers `Raticode api`, `Raticode wait`, how the CLI finds the backend and its token, and the exit codes.
+Related pages:
+
+- [Rem, tickets and self-work from the CLI](./cli-rem.md) covers `Raticode rem`, `Raticode tickets` and `Raticode selfwork`.
+- The [CLI reference](./cli.md#talk-to-a-running-backend) covers `Raticode api`, `Raticode wait`, how the CLI finds the backend and its token, and the exit codes.
 
 ## Before you start
 
@@ -25,13 +32,14 @@ Raticode serve --headless &
 Raticode org list
 ```
 
-Every command here takes the same connection options as `Raticode api`: `--endpoint`, `--token-file` and `--data-dir`. None of them accepts the token itself on the command line. Inside a Rem worker session the CLI doesn't pick up the owner token, so give agents a limited [agent token](./headless.md#agent-tokens) instead.
-
-Output is one JSON envelope on stdout by default: `{"ok", "command", "data", "error", "warnings"}`. Messages for people go to stderr. Add `--output text` for a readable table. Exit codes are the [backend client's codes](./cli.md#output-and-exit-codes): 0 done, 1 failed, 2 invalid input, 3 not found, 4 conflict or stale revision, 5 not allowed, 6 no backend, 7 waiting on you, 8 timed out.
+- Every command takes the same connection options as `Raticode api`: `--endpoint`, `--token-file` and `--data-dir`. None accepts the token itself on the command line.
+- Inside a Rem worker session the CLI doesn't pick up the owner token. Give agents a limited [agent token](./headless.md#agent-tokens) instead.
+- Output is one JSON envelope on stdout: `{"ok", "command", "data", "error", "warnings"}`. Messages for people go to stderr. `--output text` prints a readable table.
+- Exit codes are the [backend client's codes](./cli.md#output-and-exit-codes): 0 done, 1 failed, 2 invalid input, 3 not found, 4 conflict or stale revision, 5 not allowed, 6 no backend, 7 waiting on you, 8 timed out.
 
 ## Workflows
 
-Most `Raticode rattish` commands work on `workflow.rattish` files, and `rattish run` runs a workflow inside the CLI process. The commands below ask the backend instead. Their help starts with "(Backend)".
+Most `Raticode rattish` commands work on `workflow.rattish` files, and `rattish run` runs a workflow inside the CLI process. The commands below ask the backend instead. Their help starts with "(Backend)". `rattish list` reads the workflow registry from the data folder, and the others need the backend.
 
 ```bash
 Raticode rattish list --format json
@@ -44,7 +52,14 @@ Raticode rattish stop nightly-report --run RUN_ID
 Raticode rattish resume nightly-report RUN_ID --from-node build --wait
 ```
 
-`rattish list` reads the workflow registry from the data folder; the others need the backend. `start` starts the run and returns its ID straight away. Its nodes really run: agent nodes call providers, command nodes run commands. `--dry-run` only shows the plan. With `--wait`, the exit code is the run's: 0 it succeeded, 1 it failed or was stopped, 7 it stopped at an approval gate, 8 the timeout passed first. The run keeps going after a timeout. `--follow` waits too and prints each run event as it happens, one `{"kind": "event", "data": ...}` line each, then the result line. `Raticode rattish wait WORKFLOW RUN_ID` waits for a run you started earlier, with the same exit codes.
+`start` starts the run and returns its ID straight away. Its nodes really run: agent nodes call providers and command nodes run commands. `--dry-run` only shows the plan.
+
+| Option | What it does |
+| --- | --- |
+| `--wait` | Waits and exits with the run's result: 0 succeeded, 1 failed or stopped, 7 stopped at an approval gate, 8 the timeout passed first. The run keeps going after a timeout |
+| `--follow` | Waits too, and prints each run event as it happens, one `{"kind": "event", "data": ...}` line each, then the result line |
+
+`Raticode rattish wait WORKFLOW RUN_ID` waits for a run you started earlier, with the same exit codes.
 
 Approval gates:
 
@@ -63,9 +78,15 @@ Raticode rattish triggers export nightly-report -f triggers.json
 Raticode rattish triggers apply nightly-report -f triggers.json
 ```
 
-`apply` matches triggers by kind and label. It creates the missing ones and updates the ones that differ, so applying the same file twice changes nothing. `--prune` also removes triggers the file doesn't list. Trigger files never hold IDs or webhook tokens. A new webhook trigger gets a fresh token, which `apply` prints once.
+- `apply` matches triggers by kind and label. It creates missing ones and updates ones that differ, so applying the same file twice changes nothing.
+- `--prune` also removes triggers the file doesn't list.
+- Trigger files never hold IDs or webhook tokens. A new webhook trigger gets a fresh token, which `apply` prints once.
 
-`Raticode rattish export WORKFLOW -f nightly.raticode` writes a bundle, and `Raticode rattish import nightly.raticode --project PATH` adds it to a project. The backend only writes into folders it trusts: its own data folder or a project the desktop approved. A different folder is refused with exit 5. Export needs the backend on the same computer, because the backend writes the bundle into its data folder first and the CLI moves it to `-f`.
+Bundles:
+
+- `Raticode rattish export WORKFLOW -f nightly.raticode` writes a bundle. `Raticode rattish import nightly.raticode --project PATH` adds it to a project.
+- The backend only writes into folders it trusts: its own data folder or a project the desktop approved. Any other folder is refused with exit 5.
+- Export needs the backend on the same computer. The backend writes the bundle into its data folder first, and the CLI moves it to `-f`.
 
 ## Organizations
 
@@ -101,7 +122,9 @@ Raticode org knowledge read ORG_ID ENTRY_ID
 Raticode org knowledge save ORG_ID -f decision.json
 ```
 
-A new ticket starts in backlog, so a running organization doesn't pick it up until you move it to `todo`. `--request-id` makes `create` and `comment` safe to retry. `update` takes the ticket's `revision` and exits 4 if the ticket changed since.
+- A new ticket starts in backlog. It runs once it reaches `todo`: you move it, or a free worker [pulls it](../advanced/organizations.md#pull-from-backlog) when backlog pulls are on.
+- `--request-id` makes `create` and `comment` safe to retry.
+- `update` takes the ticket's `revision` and exits 4 if the ticket changed since.
 
 The work schedule:
 
@@ -111,6 +134,24 @@ Raticode org schedule apply ORG_ID -f schedule.json
 ```
 
 The file holds the blocks, the time zone and the revision it was read at. If the organization changed in between, `apply` exits 4 and changes nothing.
+
+Whether free workers pull accepted Backlog tickets into To do:
+
+```bash
+Raticode org backlog-pulls ORG_ID          # show the setting
+Raticode org backlog-pulls ORG_ID --off    # leave Backlog for you to move
+Raticode org backlog-pulls ORG_ID --on
+```
+
+[Auto mode](../advanced/organizations.md#auto-mode), where Rem decides the organization's
+requests. Only you can turn it on or off: the command refuses inside a Raticode agent turn, and
+`--on` needs `--yes` to confirm what it allows.
+
+```bash
+Raticode org auto-mode ORG_ID              # show it, why it stopped, and Rem's recent decisions
+Raticode org auto-mode ORG_ID --on --yes
+Raticode org auto-mode ORG_ID --off
+```
 
 ## Swarms
 
@@ -125,7 +166,9 @@ Raticode swarm apply --project ~/code/app -f reviewers.json
 Raticode swarm delete SWARM_ID --project ~/code/app --yes
 ```
 
-`apply` updates the swarm named in the file, or creates one when the file has no `swarmId`. A running swarm has to be paused in the app before its settings change. `delete` removes the swarm and its run records; its git worktrees and branches stay.
+- `apply` updates the swarm named in the file, or creates one when the file has no `swarmId`.
+- Pause a running swarm in the app before changing its settings.
+- `delete` removes the swarm and its run records. Its git worktrees and branches stay.
 
 ## Second Brain
 
@@ -138,7 +181,10 @@ Raticode brain save --brain BRAIN_ID --title "Deploy notes" -f notes.md
 Raticode brain projects --brain BRAIN_ID
 ```
 
-`save` writes the text into the brain's `Inbox` folder as a new note and waits until it's indexed. `--url` records where the text came from; the backend doesn't fetch it. Adding a brain folder needs the desktop's folder approval, so do that in the app. Note files are plain files, so a script on the same computer can also read them directly.
+- `save` writes the text into the brain's `Inbox` folder as a new note and waits until it's indexed.
+- `--url` records where the text came from. The backend doesn't fetch it.
+- Adding a brain folder needs the desktop's folder approval, so do it in the app.
+- Notes are plain files, so a script on the same computer can also read them directly.
 
 ## Providers, models and usage
 
@@ -151,7 +197,10 @@ Raticode usage show --days 7
 Raticode usage refresh
 ```
 
-`provider status` shows whether a provider is signed in. Signing in opens a browser, so do it on that computer with the provider's own CLI. `usage show` reads what the backend has recorded and asks no provider. `usage refresh` asks each signed-in provider for current numbers, so it runs their CLIs. The [provider profile](./cli.md#provider-profiles-and-health) commands are unchanged and still edit the profile store directly.
+- `provider status` shows whether a provider is signed in. Signing in opens a browser, so do it on that computer with the provider's own CLI.
+- `usage show` reads what the backend has recorded and asks no provider.
+- `usage refresh` asks each signed-in provider for current numbers, so it runs their CLIs.
+- The [provider profile](./cli.md#provider-profiles-and-health) commands are unchanged and still edit the profile store directly.
 
 ## Projects, devices and live threads
 
@@ -164,13 +213,15 @@ Raticode threads steer CONVERSATION_ID TURN_ID --text "Use the staging database"
 Raticode threads stop CONVERSATION_ID TURN_ID
 ```
 
-`projects list` lists the project folders that hold registered workflows. `devices list` shows paired phones and computers; pairing stays in Settings. `threads follow` prints a turn's events as they arrive and ends when the turn does.
-
-The list of threads lives in the desktop window, not the backend, so the CLI can't list threads or start one yet. Moving that list into the backend is a planned follow-up. Rem's own work threads are covered by `Raticode rem thread`.
+- `projects list` lists the project folders that hold registered workflows.
+- `devices list` shows paired phones and computers. Pairing stays in Settings.
+- `threads follow` prints a turn's events as they arrive and ends when the turn does.
+- The thread list lives in the desktop window, not the backend, so the CLI can't list or start threads yet. Moving that list into the backend is a planned follow-up.
+- For Rem's own work threads, use `Raticode rem thread`.
 
 ## Settings as files
 
-Each kind of setting has a pair of commands. The file from the first one can go in version control, be edited, and go back in with the second:
+Each kind of setting has a pair of commands. Write a file with the first, keep it in version control or edit it, and apply it with the second:
 
 | Settings | Write a file | Apply a file |
 | --- | --- | --- |
@@ -183,15 +234,30 @@ Each kind of setting has a pair of commands. The file from the first one can go 
 | Rem's settings | `Raticode rem settings export` | `Raticode rem settings apply -f rem.json` |
 | Self-work | `Raticode selfwork export` | `Raticode selfwork apply -f self-work.json` |
 
-`org config` records the revision it read. `org apply` sends it back, so applying an old file after someone else changed the organization fails with exit 4 instead of undoing their change. A file without an `organizationId` creates a new organization, paused. Applying a configuration never starts anything. Without `-f`, the export commands put the document in the envelope's `data`, and the apply commands accept either the plain document or a saved envelope.
+- `org config` records the revision it read, and `org apply` sends it back. Applying an old file after someone else changed the organization fails with exit 4 instead of undoing their change.
+- A file without an `organizationId` creates a new, paused organization. Applying a configuration never starts anything.
+- Without `-f`, the export commands put the document in the envelope's `data`. The apply commands accept the plain document or a saved envelope.
 
 ## Decisions that stay with you
 
-The backend treats every request that carries your token as you. So when one of these commands runs inside a Rem or worker turn, the CLI refuses it with exit 5 (error code `user_only`) and sends nothing: `rattish approve` and `reject`, the legacy `workflow approve` and `reject`, `org apply`, `org employees release`, `swarm apply` and `delete`, and `provider set`.
+The backend treats every request that carries your token as you. So inside a Rem or worker turn, the CLI refuses these commands with exit 5 (error code `user_only`) and sends nothing:
 
-`Raticode api` follows the same rule inside a Rem or worker turn. It sends only what a limited [agent token](./headless.md#agent-tokens) may do, and never an organization's start, pause, resume, consent decision, launch, review or credential action, whichever token it holds. Everything else is refused with exit 5 (`user_only`) before anything is sent. Run those from your own terminal or in the app.
+- `rattish approve` and `reject`, and the legacy `workflow approve` and `reject`
+- `org apply` and `org employees release`
+- `swarm apply` and `delete`
+- `provider set`
 
-Inside such a turn the CLI also refuses your owner token, whether it comes from the data folder, `RATICODE_TOKEN`, `RATICODE_TOKEN_FILE` or `--token-file`. These are guards, not a boundary: a worker runs as your account. Don't give agents a token that can act as you.
+`Raticode api` follows the same rule inside a Rem or worker turn:
+
+- It sends only what a limited [agent token](./headless.md#agent-tokens) may do.
+- It never sends an organization's start, pause, resume, consent decision, launch, review or credential action, whichever token it holds.
+- Everything else is refused with exit 5 (`user_only`) before anything is sent. Run those from your own terminal or in the app.
+
+Inside such a turn the CLI also refuses your owner token, whether it comes from the data folder, `RATICODE_TOKEN`, `RATICODE_TOKEN_FILE` or `--token-file`.
+
+::: warning Guards, not a boundary
+A worker runs as your account. Don't give agents a token that can act as you.
+:::
 
 ## What the CLI doesn't do
 
@@ -235,7 +301,7 @@ Anything else the backend serves that has no command of its own is still reachab
 | `Raticode org list`, `Raticode org show`, `Raticode org history`, `Raticode org events`, `Raticode org projects` | [Organizations](#organizations) |
 | `Raticode org config`, `Raticode org apply`, `Raticode org export`, `Raticode org import` | [Settings as files](#settings-as-files) |
 | `Raticode org employees list`, `Raticode org employees hold`, `Raticode org employees release` | [Organizations](#organizations) |
-| `Raticode org schedule show`, `Raticode org schedule apply` | [Organizations](#organizations) |
+| `Raticode org schedule show`, `Raticode org schedule apply`, `Raticode org backlog-pulls`, `Raticode org auto-mode` | [Organizations](#organizations) |
 | `Raticode org tickets list`, `Raticode org tickets create`, `Raticode org tickets update`, `Raticode org tickets comment`, `Raticode org tickets changes` | [Organizations](#organizations) |
 | `Raticode org knowledge search`, `Raticode org knowledge read`, `Raticode org knowledge save` | [Organizations](#organizations) |
 | `Raticode swarm list`, `Raticode swarm show`, `Raticode swarm history`, `Raticode swarm export`, `Raticode swarm apply`, `Raticode swarm delete` | [Swarms](#swarms) |
@@ -246,10 +312,10 @@ Anything else the backend serves that has no command of its own is still reachab
 | `Raticode rem say`, `Raticode rem messages`, `Raticode rem search`, `Raticode rem follow`, `Raticode rem notices` | [Rem from the CLI](./cli-rem.md) |
 | `Raticode rem settings show`, `Raticode rem settings export`, `Raticode rem settings apply` | [Rem from the CLI](./cli-rem.md) |
 | `Raticode rem memories list`, `Raticode rem memories add`, `Raticode rem memories edit`, `Raticode rem memories forget`, `Raticode rem memories mode`, `Raticode rem memories undo` | [Rem from the CLI](./cli-rem.md) |
-| `Raticode rem tasks list`, `Raticode rem tasks show`, `Raticode rem tasks create`, `Raticode rem tasks edit`, `Raticode rem tasks run`, `Raticode rem tasks pause`, `Raticode rem tasks resume`, `Raticode rem tasks delete`, `Raticode rem tasks wait` | [Rem from the CLI](./cli-rem.md) |
-| `Raticode rem runs show`, `Raticode rem runs cancel`, `Raticode rem runs acknowledge`, `Raticode rem runs retry-review`, `Raticode rem thread show`, `Raticode rem thread send` | [Rem from the CLI](./cli-rem.md) |
+| `Raticode rem tasks list`, `Raticode rem tasks show`, `Raticode rem tasks create`, `Raticode rem tasks edit`, `Raticode rem tasks run`, `Raticode rem tasks pause`, `Raticode rem tasks resume`, `Raticode rem tasks delete`, `Raticode rem tasks wait`, `Raticode rem tasks wake` | [Rem from the CLI](./cli-rem.md) |
+| `Raticode rem runs show`, `Raticode rem runs pause`, `Raticode rem runs resume`, `Raticode rem runs cancel`, `Raticode rem runs acknowledge`, `Raticode rem runs retry-review`, `Raticode rem runs wake`, `Raticode rem thread show`, `Raticode rem thread send` | [Rem from the CLI](./cli-rem.md) |
 | `Raticode tickets list`, `Raticode tickets show`, `Raticode tickets create`, `Raticode tickets edit`, `Raticode tickets move`, `Raticode tickets assign`, `Raticode tickets comment`, `Raticode tickets comments`, `Raticode tickets approve`, `Raticode tickets decline`, `Raticode tickets projects` | [Tickets from the CLI](./cli-rem.md#tickets) |
-| `Raticode selfwork status`, `Raticode selfwork report`, `Raticode selfwork set`, `Raticode selfwork export`, `Raticode selfwork apply` | [Self-work from the CLI](./cli-rem.md) |
+| `Raticode selfwork status`, `Raticode selfwork report`, `Raticode selfwork on`, `Raticode selfwork off`, `Raticode selfwork window`, `Raticode selfwork set`, `Raticode selfwork export`, `Raticode selfwork apply` | [Self-work from the CLI](./cli-rem.md) |
 
 ## Keeping the CLI in step with the app
 
@@ -259,6 +325,12 @@ Anything else the backend serves that has no command of its own is still reachab
 - every operation and message type a phone can send, and every reply the desktop sends back;
 - every request the desktop window sends to its own Electron process, so features that live only in the window are listed too.
 
-A test reads the backend's routing code, the phone protocol and the window's request table, and fails when something new has neither a command nor a reason, when the file names a command that doesn't exist, or when a backend command is missing from this page. Adding a feature to the app means adding its command or its reason in the same change.
+A test reads the backend's routing code, the phone protocol and the window's request table. It fails when:
+
+- something new has neither a command nor a reason,
+- the file names a command that doesn't exist, or
+- a backend command is missing from this page.
+
+So a new app feature adds its command or its reason in the same change.
 
 The [CLI command index](./cli-commands.md) is generated from the CLI itself, and the same test fails when it no longer matches the commands, their options or their help.

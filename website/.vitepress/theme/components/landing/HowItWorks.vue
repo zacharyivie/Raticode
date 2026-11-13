@@ -3,19 +3,19 @@ const steps = [
   {
     n: '01',
     title: 'Describe it',
-    body: 'Tell Rem what you want done. Rem drafts the workflow in Rattish, a small language you can read in one sitting, and checks it before you run anything.',
+    body: 'Tell Rem what you want. It drafts the workflow in Rattish, a small readable language, and checks it before anything runs.',
     visual: 'chat',
   },
   {
     n: '02',
     title: 'See it',
-    body: 'Every workflow is a graph. Wire routes, joins, branches, loops and review cycles on the canvas. The graph and its source stay in sync.',
+    body: 'Each workflow is a graph you can edit: routes, branches, loops and reviews. The graph and the file stay in sync.',
     visual: 'graph',
   },
   {
     n: '03',
     title: 'Run it anywhere',
-    body: 'Run from the studio, on a cron schedule, when files change, from a local webhook, or headless with the Raticode CLI on any machine. Every run keeps a snapshot you can inspect.',
+    body: 'Run it from the studio, on a schedule, when files change, from a local webhook, or with the CLI. Every run keeps a snapshot.',
     visual: 'cli',
   },
 ]

@@ -290,9 +290,13 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
+.canvas :deep(.graph-scroll) {
+  position: relative;
+}
+
 .canvas :deep(.graph) {
   position: relative;
-  max-width: 600px;
+  max-width: 660px;
   margin: 0 auto;
 }
 
@@ -314,7 +318,9 @@ onBeforeUnmount(() => {
 
 .log p {
   margin: 0;
+  overflow: hidden;
   white-space: pre;
+  text-overflow: ellipsis;
   color: var(--rc-mist);
 }
 
@@ -391,7 +397,7 @@ onBeforeUnmount(() => {
 
 .rem header small {
   font-family: var(--rc-font-mono);
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--rc-mist);
 }
 
@@ -452,7 +458,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--rc-line-strong);
   border-radius: 14px;
   font-size: 13px;
-  color: #77729a;
+  color: #a9a4c8;
 }
 
 .composer span {
@@ -480,6 +486,7 @@ onBeforeUnmount(() => {
   }
 
   .rail,
+  .lights,
   .tab:not(.is-active) {
     display: none;
   }
@@ -489,8 +496,16 @@ onBeforeUnmount(() => {
   }
 
   .log {
-    height: 104px;
-    font-size: 10.5px;
+    height: 148px;
+    font-size: 12px;
+  }
+
+  /* Wrap long messages instead of cutting them off; wrapped lines stay right of the status mark. */
+  .log p {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr);
+    flex-shrink: 0;
+    white-space: pre-wrap;
   }
 }
 

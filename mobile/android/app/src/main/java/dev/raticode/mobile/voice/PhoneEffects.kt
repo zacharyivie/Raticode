@@ -3,6 +3,7 @@ package dev.raticode.mobile.voice
 import android.Manifest
 import android.app.Activity
 import android.app.PendingIntent
+import android.app.role.RoleManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -33,9 +34,15 @@ import java.util.concurrent.atomic.AtomicInteger
  * the desktop.
  */
 @RequiresApi(29)
-class PhoneEffects(private val context: Context) {
+class PhoneEffects(private val context: Context, private val isAssistant: () -> Boolean = { holdsAssistantRole(context) }) {
     fun canCall(): Boolean = granted(Manifest.permission.CALL_PHONE)
-    fun canText(): Boolean = granted(Manifest.permission.SEND_SMS)
+
+    /**
+     * Google Play lets an app send texts itself only while it is the phone's default assistant, and it must stop as
+     * soon as it isn't. Otherwise a dictated text opens as a draft in the messaging app.
+     */
+    fun mayText(): Boolean = isAssistant()
+    fun canText(): Boolean = mayText() && granted(Manifest.permission.SEND_SMS)
     private fun granted(permission: String) = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
     fun hasTelephony(): Boolean = context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
@@ -147,6 +154,10 @@ class PhoneEffects(private val context: Context) {
     }
 
     companion object {
+        fun holdsAssistantRole(context: Context): Boolean = runCatching {
+            context.getSystemService(RoleManager::class.java)?.isRoleHeld(RoleManager.ROLE_ASSISTANT) == true
+        }.getOrDefault(false)
+
         private val next = AtomicInteger()
         const val SEND_WAIT_MS = 30_000L
         const val CALL_OFF = "Calling is off for Raticode in Android settings."

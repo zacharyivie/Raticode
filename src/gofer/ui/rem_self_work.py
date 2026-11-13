@@ -37,10 +37,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from gofer.core.command_slots import read_settings as slot_settings
 from gofer.core.command_slots import slots_root
+from gofer.ui import rem_self_work_windows as windows
+from gofer.ui import rem_task_after as after_tasks
 from gofer.ui import rem_ticket_activity as activity
-from gofer.ui.rem_home_models import ACTIVE, Criterion, Recipe, now
+from gofer.ui.rem_home_models import ACTIVE, Criterion, Recipe, SelfWorkRequest, now
 from gofer.ui.rem_home_results import result_card
-from gofer.ui.rem_home_store import NEWEST_RUN, encode
+from gofer.ui.rem_home_store import NEWEST_RUN, encode, paused_by
 from gofer.ui.rem_kanban import (
     DEFAULT_SETTINGS,
     MAX_THREADS,
@@ -201,6 +203,40 @@ def stored_settings(db: sqlite3.Connection, store: Any) -> dict[str, Any]:
     return {**DEFAULT_SETTINGS, **store.setting(db, "self_work")}
 
 
+def self_started(run: dict[str, Any]) -> bool:
+    """Whether Rem started this run on its own, rather than for something the user asked.
+
+    A ticket the user moved to In progress runs with ``origin: "user"``: that is the user's
+    work, even though the board started it.
+    """
+    started = run.get("self_work") or {}
+    return bool(started) and started.get("origin", "self_work") == "self_work"
+
+
+def _holds_thread(run: dict[str, Any], clock: datetime) -> bool:
+    """Whether a current run needs a thread now: not paused, not pausing, not waiting days."""
+    if run["state"] not in ACTIVE or run.get("pausing"):
+        return False
+    until = _instant(run.get("not_before")) if run.get("not_before") else None
+    # A review waiting for a proof event hours away doesn't need a worker meanwhile.
+    return not (run["state"] == "queued" and run.get("waiting_for") and until and until > clock)
+
+
+def _pause_order(run: dict[str, Any]) -> tuple[int, int, str]:
+    """Which self-work makes way first: work not started yet, then research, then tickets.
+
+    Within each, the newest goes first, so the least progress is set aside.
+    """
+    kind = (run.get("self_work") or {}).get("kind")
+    started = bool(run.get("started_at")) and run["state"] != "queued"
+    stage = 0 if not started else 1 if kind in {"research", "triage"} else 2
+    newest = str(run.get("started_at") or run.get("created_at") or "")
+    return stage, 0, "".join(chr(0x10FFFF - ord(c)) for c in newest)
+
+
+PRIORITY_REASON = "Paused so your own work could run first. Rem resumes it on its own."
+
+
 class SelfWork:
     def __init__(self, home: RemHome, *, clock: Callable[[], datetime] | None = None) -> None:
         self.home = home
@@ -210,6 +246,10 @@ class SelfWork:
         self.started_at = self.clock()
         # The pass of ``tick`` now running; the chat groups the cards one pass starts.
         self.batch: str | None = None
+        # Reports a chat request produced, posted after Rem's reply in the same transaction.
+        self._after_reply: list[dict[str, Any]] = []
+        # Tasks waiting for nothing else to run; self-work starts nothing new meanwhile.
+        self.holding_for: list[str] = []
 
     # The user's activity ------------------------------------------------------
 
@@ -237,22 +277,469 @@ class SelfWork:
         finally:
             self.batch = None
 
+    def _current_runs(self, db: sqlite3.Connection) -> list[dict[str, Any]]:
+        states = sorted(ACTIVE | {"paused"})
+        return [
+            json.loads(row[0])
+            for row in db.execute(
+                f"SELECT body FROM runs WHERE state IN ({','.join('?' * len(states))})", states
+            )
+        ]
+
+    def _occupancy(
+        self, runs: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Self-work runs holding a thread, and the user's runs holding one."""
+        clock = self.clock()
+        holding = [r for r in runs if _holds_thread(r, clock)]
+        return [r for r in holding if self_started(r)], [r for r in holding if not self_started(r)]
+
+    def _yield_to_user(
+        self, mine: list[dict[str, Any]], theirs: list[dict[str, Any]], limit: int
+    ) -> list[dict[str, Any]]:
+        """Pause the self-work that the user's own work needs room for; returns it.
+
+        The user's work counts against the thread limit ahead of self-work, so when both
+        together go over it, the newest self-work makes way: it stops like a Stop would
+        and settles as paused, with its thread, session and worktree kept. Self-work the
+        user resumed by hand is theirs to keep running.
+        """
+        excess = len(mine) + len(theirs) - limit
+        if excess <= 0 or not theirs:
+            return []
+        candidates = sorted(
+            (r for r in mine if (r.get("resumed") or {}).get("by") != "user"), key=_pause_order
+        )
+        paused: list[dict[str, Any]] = []
+        for candidate in candidates[:excess]:
+            with self.store.connect() as db:
+                run = self._run(db, candidate["id"])
+                if not run or run["state"] not in ACTIVE or run["state"] == "cancelling":
+                    continue
+                if self.store.request_pause(run, by="priority", reason=PRIORITY_REASON):
+                    self.store.put(db, "runs", run)
+                    paused.append(run)
+        if paused:
+            titles = [str(r["recipe"].get("title") or "a task") for r in paused]
+            named = ", ".join(f"“{t}”" for t in titles[:4]) + (
+                f" and {len(titles) - 4} more" if len(titles) > 4 else ""
+            )
+            text = (
+                f"Paused {count(len(paused), 'self-work task')} so your work runs first: "
+                f"{named}. "
+                + ("It picks" if len(paused) == 1 else "They pick")
+                + " up in the same thread once your work is done and you've been away 15 minutes."
+            )
+            log.info("Rem self-work: %s", text)
+            with self.store.connect() as db:
+                add_report(db, "note", text=text)
+                self.store.message(db, text, identity=f"yielded-{uuid4().hex}")
+        return paused
+
+    def _resume_priority(self, runs: list[dict[str, Any]], slots: int, usable: set[str]) -> int:
+        """Pick up self-work that made way for the user, oldest first; returns how many.
+
+        These go before anything new, so paused work is finished instead of abandoned.
+        """
+        waiting = sorted(
+            (
+                r
+                for r in runs
+                if r["state"] == "paused"
+                and self_started(r)
+                and (r.get("paused") or {}).get("by") == "priority"
+                and self._project_of(r) in usable
+            ),
+            key=lambda r: str((r.get("paused") or {}).get("at") or ""),
+        )
+        resumed: list[str] = []
+        for run in waiting[: max(slots, 0)]:
+            try:
+                self.home.resume_run(
+                    run["id"],
+                    {"request_id": f"self-work-resume-{run['id']}-{run['epoch']}"},
+                    by="rem",
+                )
+            except (ValueError, KeyError) as exc:
+                log.info("Rem self-work couldn't resume %s: %s", run["id"], exc)
+                continue
+            resumed.append(str(run["recipe"].get("title") or "a task"))
+        if resumed:
+            with self.store.connect() as db:
+                add_report(
+                    db,
+                    "note",
+                    text=f"Picked {count(len(resumed), 'paused task')} back up: "
+                    + ", ".join(f"“{t}”" for t in resumed[:4])
+                    + (f" and {len(resumed) - 4} more" if len(resumed) > 4 else "")
+                    + ".",
+                )
+        return len(resumed)
+
+    @staticmethod
+    def _project_of(run: dict[str, Any]) -> str | None:
+        target = (run.get("self_work") or {}).get("target")
+        return str(target) if target else run["recipe"].get("project_dir")
+
+    def set_enabled(self, enabled: bool) -> tuple[bool, dict[str, Any]]:
+        """Turn self-work on or off, as Settings > Rem's switch does; returns (changed, view).
+
+        Only the switch changes: the thread limit, backlog pulling and Rem's projects stay.
+        Read and written in one transaction, so it can't overwrite a change made meanwhile.
+        """
+        with self.store.connect() as db:
+            settings = stored_settings(db, self.store)
+            changed = settings["enabled"] is not enabled
+            if changed:
+                settings["enabled"] = enabled
+                settings["revision"] += 1
+                self.store.set_setting(db, "self_work", settings)
+        return changed, self.view()
+
+    def apply_chat(self, db: sqlite3.Connection, request: SelfWorkRequest | str) -> str:
+        """Carry out a chat request about self-work: on, off, a window, a report, or status.
+
+        Runs inside the transaction that stores Rem's reply, and returns the sentences that
+        reply ends with: the setting and windows as they now are, read back after the change.
+        A report this produces is posted just after the reply (``post_after_reply``).
+        """
+        if isinstance(request, str):
+            request = SelfWorkRequest(action=request)  # type: ignore[arg-type]
+        self._after_reply = []
+        clock = self.clock()
+        action = request.action
+        # Windows that are due end first, in this transaction, with their own report.
+        self._advance_in(db, clock)
+        settings = stored_settings(db, self.store)
+        before = windows.effective(settings["enabled"], windows.read(db), clock, db)
+        notes: list[str] = []
+        changed = False
+        try:
+            if action in {"enable", "disable"}:
+                wanted = action == "enable"
+                current = windows.active(windows.read(db), clock, db)
+                if current:
+                    # The switch now decides; the window running now no longer applies.
+                    windows.end_window(db, current["id"], clock, status="ended")
+                    if wanted:
+                        notes.append(
+                            "Its window's end no longer applies: it stays on until you turn it off."
+                        )
+                if settings["enabled"] is not wanted:
+                    settings["enabled"] = wanted
+                    settings["revision"] += 1
+                    self.store.set_setting(db, "self_work", settings)
+                changed = before is not wanted
+            elif action == "schedule":
+                window, how = windows.schedule_window(db, request, settings["enabled"], clock)
+                changed = True
+                notes.append(self._window_sentence(window, how, clock))
+            elif action == "stop_at":
+                stopping = windows.stop_at(db, request, settings["enabled"], clock)
+                if stopping is None:
+                    notes.append(
+                        "Self-work is off, so there's nothing to stop. Say “self-work until "
+                        "7 PM” (or any time) to run it until then."
+                    )
+                else:
+                    changed = True
+                    notes.append(
+                        f"Self-work stops at {stopping['end_label']} and stays off after that. "
+                        "I'll post a report of what it did then."
+                    )
+            elif action == "cancel_schedule":
+                schedule = windows.read(db)
+                dropped = list(schedule["windows"])
+                for window in dropped:
+                    windows.end_window(db, window["id"], clock, status="cancelled")
+                changed = bool(dropped)
+                notes.append(
+                    f"Cancelled {count(len(dropped), 'self-work window')}."
+                    if dropped
+                    else "There were no self-work windows to cancel."
+                )
+            elif action == "report":
+                notes.append(self._report_on_request(db, clock))
+        except windows.WindowRefused as exc:
+            return f"I didn't change self-work: {exc}"
+        ended = self._sync_period(db, clock, "user", defer=True)
+        if ended is not None:
+            notes.append(
+                "I posted a report of what self-work did below."
+                if ended
+                else "It didn't start or change anything while it was on."
+            )
+        return self._status_sentence(db, action, changed, clock, notes)
+
+    def _window_sentence(self, window: dict[str, Any], how: str, clock: datetime) -> str:
+        then = window["after_label"]
+        if how == "extended":
+            return (
+                f"That overlaps the self-work running now, so I extended it: "
+                f"{window['label'][0].lower()}{window['label'][1:]}, {then}."
+            )
+        starts_later = (windows.instant(window["start_at"]) or clock) > clock
+        lead = (
+            f"Self-work will run {window['label'][0].lower()}{window['label'][1:]}, {then}."
+            if starts_later
+            else f"Self-work is on {window['label'][0].lower()}{window['label'][1:]}, {then}."
+        )
+        tail = (
+            " Inside it, it still waits for 15 minutes without a prompt before starting."
+            if window["wait_for_idle"]
+            else " It starts work without waiting for you to go quiet."
+        )
+        return lead + tail
+
+    def _status_sentence(
+        self,
+        db: sqlite3.Connection,
+        action: str,
+        changed: bool,
+        clock: datetime,
+        notes: list[str],
+    ) -> str:
+        settings = stored_settings(db, self.store)
+        schedule = windows.read(db)
+        on = windows.effective(settings["enabled"], schedule, clock, db)
+        current = windows.active(schedule, clock, db)
+        config = self.store.setting(db, "config")
+        usable = usable_projects(config, rem_assignment(db, self.store))
+        runs = self._current_runs(db)
+        working = sum(1 for r in runs if self_started(r) and r["state"] in ACTIVE)
+        paused = sum(1 for r in runs if self_started(r) and r["state"] == "paused")
+        threads = count(self.limit(settings), "thread")
+        if action in {"schedule", "stop_at", "cancel_schedule", "report"}:
+            lead = ""
+        elif on:
+            lead = (
+                "Self-work is on now."
+                if changed and action == "enable"
+                else "Self-work was already on."
+                if action == "enable"
+                else "Self-work is on."
+            )
+        else:
+            lead = (
+                "Self-work is off now, so I won't start anything on my own."
+                if changed and action == "disable"
+                else "Self-work was already off."
+                if action == "disable"
+                else "Self-work is off."
+            )
+        tail = ""
+        if action in {"enable", "disable", "status"}:
+            if on:
+                if not usable:
+                    tail = "It won't start until you choose my projects in Settings > Rem."
+                elif working:
+                    tail = f"{count(working, 'task')} running, with up to {threads}."
+                elif current and not current.get("wait_for_idle"):
+                    tail = f"It uses up to {threads} in {count(len(usable), 'assigned project')}."
+                else:
+                    tail = (
+                        f"It starts after 15 minutes without a prompt and uses up to {threads} "
+                        f"in {count(len(usable), 'assigned project')}."
+                    )
+            elif working:
+                tail = (
+                    f"{count(working, 'task')} I already started "
+                    + ("keeps" if working == 1 else "keep")
+                    + " going; ask me to pause or stop "
+                    + ("it" if working == 1 else "them")
+                    + " if you want."
+                )
+            if current and action == "status":
+                described = windows.describe(current, clock, db)
+                tail += f" {described['label']}, {described['after_label']}."
+            later = windows.upcoming(schedule, clock)
+            if later and action != "enable":
+                described = windows.describe(later[0], clock, db)
+                tail += f" Next window: {described['label'][0].lower()}{described['label'][1:]}."
+        elif action in {"schedule", "stop_at"} and not usable:
+            tail = "It won't start until you choose my projects in Settings > Rem."
+        if paused:
+            tail += f" {count(paused, 'self-work task')} paused."
+        return " ".join(part for part in (lead, *notes, tail.strip()) if part)
+
+    def _report_on_request(self, db: sqlite3.Connection, clock: datetime) -> str:
+        """Post the report of the current period so far, or of the last one; returns a line."""
+        period = windows.current_period(db)
+        ended_by = "request"
+        until = clock
+        if period is None:
+            last = windows.read(db).get("last_period")
+            if not last:
+                return "Self-work hasn't run yet, so there's nothing to report."
+            period = {
+                "id": last["id"],
+                "started_at": last["started_at"],
+                "from_seq": last.get("from_seq", 0),
+            }
+            until = windows.instant(last["ended_at"]) or clock
+            ended_by = str(last.get("ended_by") or "user")
+        report = windows.build_report(db, period, until, windows.default_zone())
+        since = windows.when_label(
+            windows.instant(report["started_at"]) or clock, windows.default_zone(), clock
+        )
+        if windows.empty(report):
+            return f"Self-work hasn't started or changed anything since {since}."
+        self._after_reply.append(
+            {
+                "id": f"self-work-report-{uuid4().hex}",
+                "body": windows.report_text(report, clock, ended_by),
+                "kind": "self_work_report",
+                "self_work_report": {**report, "ended_by": ended_by},
+                "checked": False,
+            }
+        )
+        return "Here's what self-work did" + (
+            " so far." if ended_by == "request" else f" from {since}."
+        )
+
+    def post_after_reply(self, db: sqlite3.Connection) -> None:
+        """Post the reports a chat request produced, after its reply, in its transaction."""
+        pending, self._after_reply = self._after_reply, []
+        last = windows.read(db).get("last_period") or {}
+        for message in pending:
+            checked = message.pop("checked", True)
+            # A period report counts only if its period's end was kept in this transaction.
+            if checked and last.get("message_id") != message["id"]:
+                continue
+            body = message.pop("body")
+            identity = message.pop("id")
+            self.store.message(db, body, identity=identity, **message)
+
+    def _sync_period(
+        self, db: sqlite3.Connection, clock: datetime, ended_by: str, *, defer: bool = False
+    ) -> bool | None:
+        """Start or end the self-work period to match whether self-work is on now.
+
+        Returns None when no period ended, else whether a report was posted (or deferred).
+        """
+        settings = stored_settings(db, self.store)
+        on = windows.effective(settings["enabled"], windows.read(db), clock, db)
+        period = windows.current_period(db)
+        if on and not period:
+            windows.begin_period(db, clock)
+            return None
+        if on or not period:
+            return None
+        closed = windows.close_period(db, clock, ended_by)
+        if closed is None:
+            return None
+        report, message = closed
+        add_report(
+            db,
+            "note",
+            text=f"Self-work stopped ({windows.ENDED_BY.get(ended_by, 'it stopped')}): "
+            + windows.summary(report),
+        )
+        if not message:
+            return False
+        if defer:
+            self._after_reply.append(dict(message))
+        else:
+            body = message.pop("body")
+            identity = message.pop("id")
+            self.store.message(db, body, identity=identity, **message)
+        return True
+
+    def _advance_windows(self) -> None:
+        """Start and end due windows, and start or end the period to match; once each."""
+        clock = self.clock()
+        with self.store.connect() as db:
+            self._advance_in(db, clock)
+
+    def _advance_in(self, db: sqlite3.Connection, clock: datetime) -> None:
+        """``_advance_windows`` inside a transaction the caller holds."""
+        saved = stored_settings(db, self.store)
+        updated, events = windows.advance(db, saved, clock)
+        if updated is not saved:
+            self.store.set_setting(db, "self_work", updated)
+        ended_by = "window"
+        for kind, window in events:
+            described = windows.describe(window, clock, db)
+            name = str(window.get("timezone") or "UTC")
+            if kind == "started":
+                created = windows.instant(window.get("created_at")) or clock
+                start = windows.instant(window["start_at"]) or clock
+                if start - created > timedelta(minutes=1):
+                    label = described["label"]
+                    text = f"Self-work started for its window: {label[0].lower()}{label[1:]}."
+                    add_report(db, "note", text=text)
+                    self.store.message(db, text, identity=f"self-work-window-{window['id']}")
+            elif kind == "missed":
+                start = windows.instant(window["start_at"]) or clock
+                end = windows.instant(window.get("end_at")) or clock
+                text = (
+                    "Raticode wasn't running from "
+                    f"{windows.when_label(start, name, clock)} to "
+                    f"{windows.when_label(end, name, clock)}, so that self-work window was "
+                    "skipped."
+                )
+                add_report(db, "note", text=text)
+                self.store.message(db, text, identity=f"self-work-window-{window['id']}")
+            elif window.get("until") == "running_done":
+                ended_by = "condition"
+        self._sync_period(db, clock, ended_by)
+
+    def for_prompt(self) -> dict[str, Any]:
+        """What Rem's chat decision needs to know about self-work."""
+        view = self.view()
+        place = windows.zone(None)
+        local = self.clock().astimezone(place)
+        return {
+            "enabled": view["settings"]["enabled"],
+            "switch": view["settings"]["saved_enabled"],
+            "timezone": place.key,
+            "local_now": local.strftime("%A %Y-%m-%d %H:%M"),
+            "window": view["schedule"]["active"],
+            "upcoming_windows": view["schedule"]["upcoming"],
+            "last_period": view["schedule"]["last_period"],
+            "mode": view["state"]["mode"],
+            "detail": view["state"]["detail"],
+            "thread_limit": view["state"]["thread_limit"],
+            "active_threads": view["state"]["active_threads"],
+            "paused_threads": view["state"]["paused_threads"],
+        }
+
     def _tick(self) -> None:
+        self._advance_windows()
         clock = self.clock()
         self.reconcile()
         with self.store.read() as db:
             settings = stored_settings(db, self.store)
+            schedule = windows.read(db)
+            # Read with the runs: a window until the user's tasks finish is over as soon as
+            # the last of them has ended, even before the next tick takes it off the schedule.
+            window = windows.active(schedule, clock, db)
+            on = windows.effective(settings["enabled"], schedule, clock, db)
+            holding = after_tasks.idle_waiters(db, clock)
             state = self.store.setting(db, "self_work_state")
             config = self.store.setting(db, "config")
             tickets = read_tickets(db, *WORKING)
             usable = usable_projects(config, rem_assignment(db, self.store))
+            runs = self._current_runs(db)
+        self.holding_for = holding
         board = board_enabled(config)
         # Applies whether or not the user is here: taking a project away ends work in it.
-        self._stop_outside(usable, tickets, state)
+        self._stop_outside(usable, tickets, state, runs)
+        limit = self.limit(settings)
+        # The user's own work goes first, whether or not self-work is on or a session runs.
+        mine, theirs = self._occupancy(runs)
+        if self._yield_to_user(mine, theirs, limit):
+            return
         session = state.get("session")
-        if not settings["enabled"] or clock - self._idle_since(state) < IDLE_AFTER or not usable:
+        # A window the user set works straight away, unless they asked it to wait as usual.
+        waits = not window or bool(window.get("wait_for_idle"))
+        quiet = not waits or clock - self._idle_since(state) >= IDLE_AFTER
+        if not on or not quiet or not usable:
             if session:
                 self._end_session()
+            return
+        if holding:
+            # A task waits for nothing else to run: start nothing new, so it gets its turn.
             return
         if not self.home.has_context:
             return
@@ -264,13 +751,14 @@ class SelfWork:
             session = self._merge_once(session, usable)
             with self.store.read() as db:
                 tickets = read_tickets(db, *WORKING)
-        limit = self.limit(settings)
         # Tickets outside Rem's projects stay where they are and hold nothing else back.
-        outside = [t for t in tickets if t.get("project_dir") not in usable]
         tickets = [t for t in tickets if t.get("project_dir") in usable]
         passes = state.get("passes") or []
-        running = [t for t in tickets if t.get("claim")]
-        slots = limit - len(running) - len(passes) - sum(1 for t in outside if t.get("claim"))
+        # Every running thread counts, the user's first; paused work holds none.
+        slots = limit - len(mine) - len(theirs)
+        resumed = self._resume_priority(runs, slots, usable) if slots > 0 else 0
+        slots -= resumed
+        running = [t for t in tickets if t.get("claim") and not t.get("paused")]
         # Running tickets above still hold their threads, so turning the board off mid-session
         # never starts more work than the limit; only new ticket work stops.
         # Blocked tickets were already under way, so with the board on they come first.
@@ -302,8 +790,10 @@ class SelfWork:
         )
         started = unblocked + todos + pulled + triaging + researching
         if fresh:
-            self._note_started(todos, pulled + triaging, researching, unblocked, board=board)
-        if finished and not (started or running or passes or backlog_left):
+            self._note_started(
+                todos, pulled + triaging, researching, unblocked, board=board, timed=not waits
+            )
+        if finished and not (started or resumed or running or mine or passes or backlog_left):
             self._mark_exhausted(finished)
 
     def _fill(self, candidates: list[dict[str, Any]], slots: int, config: dict[str, Any]) -> int:
@@ -316,18 +806,26 @@ class SelfWork:
         return started
 
     def _note_started(
-        self, todos: int, backlog: int, research: int, unblocked: int = 0, *, board: bool = True
+        self,
+        todos: int,
+        backlog: int,
+        research: int,
+        unblocked: int = 0,
+        *,
+        board: bool = True,
+        timed: bool = False,
     ) -> None:
         """Leave a visible record that self-work started and what it took up first."""
+        cause = "for its window" if timed else "after 15 quiet minutes"
         text = (
             (
-                "Started after 15 quiet minutes: "
+                f"Started {cause}: "
                 + (f"{count(unblocked, 'blocked ticket')} picked up again, " if unblocked else "")
                 + f"{count(todos, 'to-do')}, "
                 f"{count(backlog, 'backlog job')}, {count(research, 'research run')}."
             )
             if board
-            else f"Started after 15 quiet minutes with the board off: "
+            else f"Started {cause} with the board off: "
             f"{count(research, 'research run')}, no tickets."
         )
         log.info("Rem self-work: %s", text)
@@ -348,7 +846,11 @@ class SelfWork:
         )
 
     def _stop_outside(
-        self, usable: set[str], tickets: list[dict[str, Any]], state: dict[str, Any]
+        self,
+        usable: set[str],
+        tickets: list[dict[str, Any]],
+        state: dict[str, Any],
+        runs: list[dict[str, Any]] | None = None,
     ) -> None:
         """End self-started work in a project Rem no longer has; requested work carries on."""
         for ticket in tickets:
@@ -358,12 +860,30 @@ class SelfWork:
         for record in state.get("passes") or []:
             if record.get("target") not in usable:
                 self._stop_run(record["run_id"])
+        # Self-work paused to make way for the user would otherwise wait there for good.
+        for run in runs or []:
+            if (
+                run["state"] == "paused"
+                and self_started(run)
+                and self._project_of(run) not in usable
+            ):
+                self._stop_run(run["id"])
 
     def _stop_run(self, identity: str) -> None:
         from gofer.ui.rem_home import Superseded  # rem_home imports this module
 
-        with self.store.read() as db:
+        with self.store.connect() as db:
             run = self._run(db, identity)
+            if run and run["state"] == "paused":
+                # A paused run has no turn to stop; it ends as soon as the loop sees it.
+                run.pop("pausing", None)
+                run.update(
+                    state="cancelling",
+                    stop_reason="Stopped because Rem is no longer assigned to this project.",
+                    epoch=run["epoch"] + 1,
+                )
+                self.store.put(db, "runs", run)
+                return
         if run and run["state"] in ACTIVE and run["state"] != "cancelling":
             try:
                 self.home._update(
@@ -972,11 +1492,20 @@ class SelfWork:
         ordered = [r for r in open_project_roots(config) if r in usable]
         pairs = [(root, angle) for angle in range(len(RESEARCH_ANGLES)) for root in ordered]
         recent = self._recent_ideas() if not board else set()
+        # A pass still open from an earlier session, say one paused for the user's work,
+        # covers its project and angle; another would repeat it.
+        held = {r.get("key") for r in passes} | {
+            f"{r.get('target')}#{angle}"
+            for r in passes
+            for angle, (title, _) in enumerate(RESEARCH_ANGLES)
+            if r.get("title") == title.format(name=Path(str(r.get("target") or "")).name)[:160]
+        }
         targets = [
             (root, angle)
             for root, angle in pairs[:MAX_RESEARCH_PASSES]
             if f"{root}#{angle}" not in session.get("researched", [])
             and f"{root}#{angle}" not in recent
+            and f"{root}#{angle}" not in held
         ]
         started = 0
         for target, angle in targets:
@@ -1130,6 +1659,7 @@ class SelfWork:
                     "thread_id": run["thread_id"],
                     "title": recipe.title,
                     "target": target,
+                    "key": key,
                     "session_id": session["id"],
                     # Whether it was shown the board and may propose tickets.
                     "board": board,
@@ -1475,10 +2005,11 @@ class SelfWork:
                 t["id"]: self._latest_run(db, t["task_id"]) for t in watched if t.get("task_id")
             }
             passes = list(state.get("passes") or [])
+            # A paused pass isn't finished: it holds its place until it is resumed or stopped.
             finished_passes = [
                 (record, self._run(db, record["run_id"]))
                 for record in passes
-                if (self._run(db, record["run_id"]) or {}).get("state") not in ACTIVE
+                if (self._run(db, record["run_id"]) or {}).get("state") not in ACTIVE | {"paused"}
             ]
         changed = [t for t in watched if self._ticket_change(t, latest.get(t["id"])) is not None]
         if not changed and not finished_passes:
@@ -1606,6 +2137,9 @@ class SelfWork:
         if run:
             update.update(run_id=run["id"], thread_id=run["thread_id"])
         active = run is not None and run["state"] in ACTIVE
+        paused = run is not None and run["state"] == "paused"
+        # A paused run still owns its ticket, so nothing else starts it; the board says why.
+        update["paused"] = {"by": paused_by(run)} if paused and run else None
         if target in {"in_progress", "in_review"} and run:
             # The run is still working; the ticket stays claimed, so no one moves it meanwhile.
             update["claim"] = (ticket.get("claim") or None) or {
@@ -1624,8 +2158,8 @@ class SelfWork:
         else:
             reason = activity.block_reason(run, clock)[1]
             update.update(
-                # A run waiting for proof still owns its ticket; one that ended doesn't.
-                claim=ticket.get("claim") if active else None,
+                # A run waiting for proof, or paused, still owns its ticket; one that ended doesn't.
+                claim=ticket.get("claim") if active or paused else None,
                 block_reason=reason[:1000],
                 summary=summary or ticket.get("summary", ""),
                 blocked_at=ticket.get("blocked_at") if before == "blocked" else now(),
@@ -1635,7 +2169,8 @@ class SelfWork:
         self._note(db, ticket, before, entry, run)
         if target == "blocked" and before == "blocked":
             return
-        if target == "blocked" and activity.run_phase(run, clock) == "waiting":
+        if target == "blocked" and activity.run_phase(run, clock) in {"waiting", "paused"}:
+            # Not stuck: it waits for an event, or for whoever paused it to resume it.
             return
         add_report(
             db,
@@ -1755,13 +2290,65 @@ class SelfWork:
             type(threads) is not int or not 1 <= threads <= MAX_THREADS
         ):
             raise KanbanRefused("invalid", f"Choose 1 to {MAX_THREADS} threads.")
+        clock = self.clock()
         with self.store.connect() as db:
             settings = stored_settings(db, self.store)
             if payload.get("expected_revision") != settings["revision"]:
                 raise KanbanRefused("conflict", "These settings changed. Check them and try again.")
-            settings.update({k: v for k, v in payload.items() if k != "expected_revision"})
+            changes = {k: v for k, v in payload.items() if k != "expected_revision"}
+            self._advance_in(db, clock)
+            settings = stored_settings(db, self.store)
+            schedule = windows.read(db)
+            shown = windows.effective(settings["enabled"], schedule, clock, db)
+            current = windows.active(schedule, clock, db)
+            if set(changes) == {"enabled"}:
+                # Only the switch: it decides from now on, as telling Rem in chat does, so
+                # the window running now ends (turning off ends it with its report).
+                if current:
+                    windows.end_window(db, current["id"], clock, status="ended")
+            elif "enabled" in changes and changes["enabled"] is shown:
+                # The switch shows self-work as on during a window; sending that back with
+                # other settings is no change, so the switch still returns after the window.
+                changes.pop("enabled")
+            elif changes.get("enabled") is False and current:
+                windows.end_window(db, current["id"], clock, status="ended")
+            settings.update(changes)
             settings["revision"] += 1
             self.store.set_setting(db, "self_work", settings)
+            self._sync_period(db, clock, "user")
+        return self.view()
+
+    def change_window(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The user's window change from Settings, the CLI or a client: schedule or cancel."""
+        clock = self.clock()
+        action = payload.get("action")
+        with self.store.connect() as db:
+            self._advance_in(db, clock)
+            if action == "cancel":
+                identity = payload.get("window_id")
+                if not isinstance(identity, str) or not identity:
+                    raise KanbanRefused("invalid", "Name the window to cancel.")
+                if windows.end_window(db, identity, clock, status="cancelled") is None:
+                    raise KanbanRefused("conflict", "That self-work window already ended.")
+            elif action in {"schedule", "stop_at"}:
+                fields = {k: v for k, v in payload.items() if k != "request_id"}
+                try:
+                    request = SelfWorkRequest.model_validate(fields)
+                except ValidationError as exc:
+                    raise KanbanRefused("invalid", "That isn't a self-work window.") from exc
+                settings = stored_settings(db, self.store)
+                try:
+                    if action == "schedule":
+                        windows.schedule_window(db, request, settings["enabled"], clock)
+                    elif windows.stop_at(db, request, settings["enabled"], clock) is None:
+                        raise KanbanRefused(
+                            "conflict", "Self-work is off, so there's nothing to stop."
+                        )
+                except windows.WindowRefused as exc:
+                    raise KanbanRefused("invalid", str(exc)) from exc
+            else:
+                raise KanbanRefused("invalid", "Choose schedule, stop_at or cancel.")
+            self._sync_period(db, clock, "user")
         return self.view()
 
     def mark_seen(self, updated_at: Any = None) -> dict[str, Any]:
@@ -1780,13 +2367,19 @@ class SelfWork:
         return self.view()
 
     def view(self) -> dict[str, Any]:
+        clock = self.clock()
         with self.store.read() as db:
             settings = stored_settings(db, self.store)
+            schedule = windows.read(db)
+            timed = windows.view(db, clock)
             state = self.store.setting(db, "self_work_state")
             tickets = read_tickets(db, *WORKING)
             report = self._report(db, state)
             config = self.store.setting(db, "config")
             usable = usable_projects(config, rem_assignment(db, self.store))
+            runs_now = self._current_runs(db)
+            on = windows.effective(settings["enabled"], schedule, clock, db)
+            current = windows.active(schedule, clock, db)
         board = board_enabled(config)
         # With the board off, tickets aren't self-work's to count.
         proposals = sum(1 for t in tickets if board and pending_proposal(t))
@@ -1799,7 +2392,25 @@ class SelfWork:
             and not pending_proposal(t)
         )
         passes = state.get("passes") or []
-        active = sum(1 for t in tickets if t.get("claim")) + len(passes)
+        runs = {r["id"]: r for r in runs_now}
+        claimed = [t for t in tickets if t.get("claim")]
+
+        def paused(run_id: Any) -> str:
+            """Who paused this run, or "" while it runs."""
+            run = runs.get(str(run_id or "")) or {}
+            if run.get("state") == "paused":
+                return paused_by(run)
+            return ""
+
+        stopped = sum(1 for t in claimed if paused(t["claim"].get("run_id"))) + sum(
+            1 for r in passes if paused(r.get("run_id"))
+        )
+        made_way = sum(
+            1
+            for r in runs.values()
+            if r.get("state") == "paused" and self_started(r) and paused_by(r) == "priority"
+        )
+        active = len(claimed) + len(passes) - stopped
         todo = sum(
             1
             for t in tickets
@@ -1811,7 +2422,7 @@ class SelfWork:
         session = state.get("session")
         last_prompt = state.get("last_prompt_at") or ""
         starts_at = (self._idle_since(state) + IDLE_AFTER).isoformat()
-        if not settings["enabled"]:
+        if not on:
             mode, detail = "off", "Self-work is off."
         elif not self.home.has_context:
             mode, detail = "paused", "Waiting for Raticode to connect."
@@ -1821,11 +2432,30 @@ class SelfWork:
             mode, detail = "waiting", session["exhausted"]
         elif session or active:
             mode, detail = "working", self._working_detail(active, todo)
+        elif current and not current.get("wait_for_idle"):
+            mode, detail = "waiting", "Starts work on its next check."
         else:
             mode, detail = "waiting", "Starts after 15 minutes without a prompt."
+        if timed["active"]:
+            detail += f" On {timed['active']['label'][0].lower()}{timed['active']['label'][1:]}."
+        if on and self.holding_for:
+            detail += (
+                " Starting nothing new so "
+                + ", ".join(f"“{t}”" for t in self.holding_for[:3])
+                + " can start once nothing else is running."
+            )
+        if made_way:
+            # Said once, in the status line, rather than as a message per task.
+            detail += (
+                f" {count(made_way, 'task')} paused so your work runs first; "
+                + ("it picks" if made_way == 1 else "they pick")
+                + " up after it."
+            )
         return {
             "settings": {
-                "enabled": settings["enabled"],
+                # On while a window runs, whatever the switch says; saved_enabled is the switch.
+                "enabled": on,
+                "saved_enabled": settings["enabled"],
                 "max_threads": settings["max_threads"],
                 "auto_pull_backlog": settings["auto_pull_backlog"],
                 "idle_minutes": int(IDLE_AFTER.total_seconds() / 60),
@@ -1835,6 +2465,9 @@ class SelfWork:
             "state": {
                 "mode": mode,
                 "active_threads": active,
+                # Paused self-work holds no thread; made_way paused for the user's own work.
+                "paused_threads": stopped,
+                "paused_for_you": made_way,
                 "thread_limit": self.limit(settings),
                 "todo_remaining": todo,
                 "proposals_waiting": proposals,
@@ -1850,9 +2483,9 @@ class SelfWork:
                             "title": t["title"],
                             "project": Path(t["project_dir"]).name if t.get("project_dir") else "",
                             "thread_id": t.get("thread_id") or "",
+                            "paused": paused(t["claim"].get("run_id")),
                         }
-                        for t in tickets
-                        if t.get("claim")
+                        for t in claimed
                     ),
                     *(
                         {
@@ -1860,15 +2493,19 @@ class SelfWork:
                             "title": record["title"],
                             "project": Path(record.get("target") or "").name,
                             "thread_id": record.get("thread_id") or "",
+                            "paused": paused(record.get("run_id")),
                         }
                         for record in passes
                     ),
                 ],
                 "last_prompt_at": last_prompt,
-                "starts_at": starts_at if mode == "waiting" and not session and usable else "",
+                "starts_at": starts_at
+                if mode == "waiting" and not session and usable and not current
+                else "",
                 "detail": detail,
             },
             "report": report,
+            "schedule": timed,
         }
 
     @staticmethod

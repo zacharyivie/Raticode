@@ -58,9 +58,13 @@ object PageFiles {
         "$scheme://$host:$port"
     }.getOrNull()
 
-    /** The site to name in the question: the blob's own origin, or the page showing a data: link. */
+    /**
+     * The site to name in the question: the blob's own origin. A data: link carries no origin, and a frame from
+     * another site inside the page may have made it, so it is only "a page on" the site in the address bar.
+     */
     fun host(url: String, pageUrl: String): String =
-        if (url.startsWith("blob:", ignoreCase = true)) BrowserRules.host(url.substring(5)) else BrowserRules.host(pageUrl)
+        if (url.startsWith("blob:", ignoreCase = true)) BrowserRules.host(url.substring(5))
+        else BrowserRules.host(pageUrl).takeIf { it.isNotBlank() }?.let { "a page on $it" }.orEmpty()
 
     // data: ---------------------------------------------------------------------------------------------------------
 

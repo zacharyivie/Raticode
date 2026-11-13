@@ -5,7 +5,9 @@ import {
   initialsOf, milestoneProgress, milestonesOfProject, milestonesServing, moveRule, needsYou, openTickets,
   orgMilestoneProgress, projectProgress, startHint, zoneTime, ticketsOfEpic, ago, timeAgo, workerStatus,
 } from "../lib/organizationModel.js";
-import { monthUsage, organizationRequest, plural } from "../lib/organizations.js";
+import { approveAllSummary, monthUsage, organizationRequest, plural } from "../lib/organizations.js";
+import ApproveAllRequests from "./OrganizationApproveAll.jsx";
+import AutoMode from "./OrganizationAutoMode.jsx";
 import { clockText, daySegments, describeBlock, zoneClock } from "../lib/organizationSchedule.js";
 
 const pct = value => Math.round(value * 100);
@@ -163,8 +165,10 @@ function NeedsYou({ model, busy, onOpen, onAct, onBoard }) {
   const [all, setAll] = useState(false);
   const everything = needsYou(model);
   const items = all ? everything : everything.slice(0, 6);
+  const requests = everything.filter(item => item.type === "request").map(item => item.request);
   return <section className="oh-panel oh-needs" aria-labelledby="oh-needs">
     <div className="oh-section-head"><h2 id="oh-needs">Needs you</h2><span className="oh-muted">{everything.length}</span></div>
+    <ApproveAllRequests requests={requests} busy={busy} onApprove={requestIds => onAct("request_approve_all", { requestIds }, data => approveAllSummary(data?.results))} />
     {items.length ? items.map(item => {
       if (item.type === "request") return <div className="oh-need" key={item.request.id}><span className="oh-icon-badge st-review"><ShieldCheck size={16} /></span>
         <span className="what"><b>Rem asks to: {item.request.summary}</b><small>Asked {ago(item.request.at)}. Nothing changes until you approve. Requests expire after a day.</small></span>
@@ -223,6 +227,7 @@ export function OverviewView({ model, events, busy, onOpen, onAct, go }) {
         <span><b>{Object.keys(model.knowledge).length}</b>notes</span>
       </div>
     </div>
+    {model.config.autoMode && <AutoMode organization={model.organization} busy={busy} onAct={onAct} />}
     <Timeline model={model} onOpen={onOpen} />
     <div className="oh-grid-2">
       <NeedsYou model={model} busy={busy} onOpen={onOpen} onAct={onAct} onBoard={() => go("issues", { mine: true })} />
@@ -237,6 +242,8 @@ export function OverviewView({ model, events, busy, onOpen, onAct, go }) {
     </div>
     <WorkSchedule model={model} onOpen={onOpen} />
     <WorkingHours model={model} onOpen={onOpen} />
+    <BacklogPulls model={model} busy={busy} onAct={onAct} />
+    {!model.config.autoMode && <AutoMode organization={model.organization} busy={busy} onAct={onAct} />}
     <SharedRepository model={model} busy={busy} onAct={onAct} />
   </>;
 }
@@ -254,6 +261,21 @@ export function WorkingHours({ model, onOpen }) {
       <button className="oh-btn small ghost" type="button" onClick={() => onOpen("new:hours")}><Clock size={14} />Change</button></div>
     <p className="oh-muted">{now}</p>
     <small className="oh-faint">{model.config.resumeAfterRestart ? "Keeps running after Raticode restarts." : "Pauses when Raticode restarts; you start it again."}</small>
+  </section>;
+}
+
+// Whether workers pull accepted Backlog tickets into To do when they run out of work.
+export function BacklogPulls({ model, busy, onAct }) {
+  const enabled = model.config.pullBacklog !== false;
+  const turn = on => onAct("plan_save", { kind: "operations", item: { pullBacklog: on }, expectedRevision: model.organization.revision },
+    on ? "Workers pull Backlog tickets when they need work." : "Workers leave Backlog tickets for you to move.");
+  return <section className="oh-panel oh-pulls" aria-labelledby="oh-pulls-h">
+    <div className="oh-section-head"><h2 id="oh-pulls-h">Backlog pulls</h2><span className="oh-muted">{enabled ? "On" : "Off"}</span><span className="grow" />
+      {enabled ? <button className="oh-btn small ghost" type="button" disabled={busy} onClick={() => turn(false)}>Turn off</button> : <button className="oh-btn small primary" type="button" disabled={busy} onClick={() => turn(true)}>Turn on</button>}</div>
+    <p className="oh-muted" style={{ margin: 0 }}>{enabled
+      ? "A worker with nothing it can start pulls one Backlog ticket into To do: its own, or an unassigned one in its projects, once the tickets it depends on are done. Highest priority goes first, then work that fits the current block, then the oldest."
+      : "Backlog tickets wait until you or Rem move them to To do."}</p>
+    <small className="oh-faint">Worker proposals, tickets waiting for approval and tickets moved back to Backlog by hand always stay there.</small>
   </section>;
 }
 

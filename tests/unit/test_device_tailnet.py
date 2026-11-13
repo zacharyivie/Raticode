@@ -174,7 +174,7 @@ async def test_extra_address_shares_authentication_and_closes_its_sessions(tmp_p
     port = await listener.start("127.0.0.1")
     # 127.0.0.2 stands in for the Tailscale address; both are on this machine only.
     await listener.add_host("127.0.0.2", port)
-    payload = invites.create("Desktop A", {"host": "127.0.0.2", "port": port})
+    payload = invites.create("Desktop A", {"host": "127.0.0.2", "port": port}, role="desktop")
     task = asyncio.create_task(pair_desktop(b, payload["uri"]))
     try:
         async with asyncio.timeout(5):
@@ -626,7 +626,7 @@ async def test_supersede_runs_only_after_the_phone_proves_its_identity(tmp_path,
     invites = Invitations(a)
     listener = DeviceListener(a, invites)
     port = await listener.start("127.0.0.1")
-    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port})
+    payload = invites.create("Desktop A", {"host": "127.0.0.1", "port": port}, role="desktop")
     task = asyncio.create_task(pair_desktop(b, payload["uri"]))
     try:
         async with asyncio.timeout(5):

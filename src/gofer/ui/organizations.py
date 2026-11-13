@@ -27,6 +27,17 @@ from zoneinfo import ZoneInfo
 from gofer.core.usage_ledger import record_invocation
 from gofer.subscriptions.usage import normalize_usage
 from gofer.ui import organization_repository as repository
+from gofer.ui.organization_auto import (
+    AUTO_ACTOR,
+    INSTRUCTED_ACTOR,
+    auto_on,
+    needs_review,
+    review_pass,
+    set_auto_mode,
+    waits_on_rem,
+)
+from gofer.ui.organization_backlog import apply_pulls, plan_pulls
+from gofer.ui.organization_consent import approve_all
 from gofer.ui.organization_execution import (
     OrganizationExecution,
     authorize_workflow,
@@ -110,7 +121,11 @@ from gofer.ui.rem_home_worktree import (
 from gofer.ui.rem_ticket_activity import HOURS_REASON, PAUSED_REASON, WAITING_REASONS
 from gofer.ui.swarm_tools import TOOL_FAILURE_HINT, SwarmToolServer
 from gofer.utils.atomic_output import atomic_binary_output, open_binary_input
-from gofer.utils.process import build_subprocess_env
+from gofer.utils.process import (
+    NO_REPOSITORY_PROGRAMS,
+    build_subprocess_env,
+    untrusted_repository_git_env,
+)
 
 log = logging.getLogger(__name__)
 HELP = """Organizations are persistent companies using the Agent Companies v1 draft format.
@@ -145,14 +160,22 @@ Actions:
 - archive: params.archived=true/false. Archiving a paused company hides it and releases its
   projects; restoring reclaims them. History and work records are kept.
 - request_decide: user-only requestId and decision=approve/decline for a consent request.
+- auto_mode: user-only. In an organization with Auto mode on, your requests get autoReview: true
+  and a separate Rem review step approves, changes or declines them; read the organization for
+  its decision. When the user tells you in chat to approve requests, return org_approvals in
+  your chat decision; you can't approve them with these tools.
 - run_events: taskId and turnId. The stored transcript events of one employee run.
 - audit_verify: checks the configuration history chain, the hash-linked activity log and the
   anchor file that records the log's head outside the database.
 - run_input: taskId and turnId. Exactly what one employee run was given, checked against
   the run's inputSha256.
-Staged work: create planned tasks with status=backlog. Start never runs backlog; move a task
-to todo to activate it. Express ordering with dependsOn task IDs, not prose, and do not write
-"not authorized" into descriptions of work you expect to run.
+Staged work: create planned tasks with status=backlog. Start never runs backlog directly.
+With pullBacklog on (the default), a worker with nothing it can take pulls one accepted
+Backlog ticket into To do: assigned to it, or unassigned in its assigned projects, with every
+dependsOn ticket done, highest priority first. Worker proposals, tickets awaiting approval and
+tickets moved back to Backlog by hand stay there. Set approvalRequired, or turn pullBacklog
+off, to hold staged work. Express ordering with dependsOn task IDs, not prose, and do not
+write "not authorized" into descriptions of work you expect to run.
 Limits: monthlyTurnLimit (default 200 runs; 0 is unlimited), monthlyTokenLimit and
 monthlyBudgetUsd at company, employee and initiative level. Codex does not report dollar
 cost, so prefer token or run limits for Codex employees. maxChildTasksPerTurn (default 5)
@@ -230,6 +253,8 @@ CONFIG_ACTIONS = {
     "import_github",
     "archive",
     "request_decide",
+    "request_approve_all",
+    "auto_mode",
 }
 # Everything a worker's organization tool offers. Workers manage their own tickets and
 # knowledge; organizations, swarms, workers, schedules and limits stay the user's.
@@ -314,8 +339,16 @@ def _dirty(root: str) -> bool:
     """Whether a Git checkout has uncommitted changes. Unknown counts as dirty."""
     try:
         result = subprocess.run(
-            ["git", "-C", root, "status", "--porcelain", "--untracked-files=normal"],
-            env=build_subprocess_env(),
+            [
+                "git",
+                *NO_REPOSITORY_PROGRAMS,
+                "-C",
+                root,
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ],
+            env=untrusted_repository_git_env(root, build_subprocess_env()),
             capture_output=True,
             text=True,
             timeout=30,
@@ -795,6 +828,38 @@ def starting_risks(config: dict[str, Any]) -> str:
     return "; ".join(risks)
 
 
+def starting_details(config: dict[str, Any], limit: int = 600) -> str:
+    """What a start also authorizes: check commands, project folders and MCP servers.
+
+    Shown on the start request so the user sees them before approving. Informational
+    only: Auto mode's danger rules use ``starting_risks``.
+    """
+    parts = []
+    checks = [
+        f"{c.get('name') or 'check'}: {c.get('command')}"
+        for p in config.get("projects", [])
+        for c in p.get("checks") or []
+        if isinstance(c, dict) and c.get("command")
+    ]
+    if checks:
+        parts.append("check commands Raticode runs outside the sandbox: " + "; ".join(checks))
+    roots = [str(r) for r in config.get("projectRoots", [])]
+    if roots:
+        parts.append("project folders: " + ", ".join(roots))
+    servers = sorted(
+        {
+            str(server.get("name") or server.get("url") or server.get("command"))
+            for e in config.get("employees", [])
+            for server in (e.get("resources") or {}).get("mcpServers", [])
+            if isinstance(server, dict) and server.get("enabled", True)
+        }
+    )
+    if servers:
+        parts.append("MCP servers: " + ", ".join(servers))
+    text = "; ".join(parts)
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
 def escalation(before: dict[str, Any], after: dict[str, Any]) -> str:
     """Describe configuration changes that widen what employees may do, or return "".
 
@@ -892,6 +957,8 @@ def escalation(before: dict[str, Any], after: dict[str, Any]) -> str:
         reasons.append("let employees work at more hours")
     if after.get("resumeAfterRestart") and not before.get("resumeAfterRestart"):
         reasons.append("keep the organization running after Raticode restarts")
+    if after.get("pullBacklog", True) is not False and before.get("pullBacklog", True) is False:
+        reasons.append("let workers pull Backlog tickets into To do by themselves")
     if before.get("blockGitPush", True) and after.get("blockGitPush", True) is False:
         reasons.append("allow git push")
     if (
@@ -968,6 +1035,11 @@ class OrganizationManager:
         self._cancel_reasons: dict[str, str] = {}
         self._dispatch_cursor = 0
         self._secret_values: dict[str, list[str]] = {}
+        # Rem's review step for organizations in Auto mode: (prompt, cancel) -> decision.
+        # The UI server wires Rem's own model (organization_auto.rem_reviewer); tests use fakes.
+        self.auto_review: Callable[[str, threading.Event], Any] | None = None
+        self._auto_busy: set[str] = set()
+        self._next_auto = 0.0
         self._http: SwarmToolServer | None = None
         self._thread: threading.Thread | None = None
         # Never replay work with unknown external effects after process loss.
@@ -1059,6 +1131,26 @@ class OrganizationManager:
                     self._cancel_reasons.setdefault(turn_id, reason)
                     cancel.set()
 
+    @staticmethod
+    def _keep_auto_mode(
+        project: str, org: dict[str, Any], action: str, params: dict[str, Any]
+    ) -> None:
+        """Rem's configuration changes keep Auto mode as it is; only the user switches it.
+
+        A configuration that leaves autoMode out keeps the current setting. Restores keep it
+        too (OrganizationStore.configure).
+        """
+        config = params.get("config")
+        if action != "configure" or not isinstance(config, dict):
+            return
+        current = bool(org["config"].get("autoMode"))
+        if "autoMode" not in config:
+            params["config"] = {**config, "autoMode": current}
+        elif bool(config["autoMode"]) != current:
+            raise ValueError(
+                "Only the user can turn Auto mode on or off, in the organization's settings"
+            )
+
     def _consent_reason(
         self, project: str, org: dict[str, Any], action: str, params: dict[str, Any]
     ) -> str:
@@ -1069,7 +1161,12 @@ class OrganizationManager:
             # Settings that came with the company, for example from Rem creating or
             # importing it, are named here, since nothing else asked about them.
             risky = starting_risks(org["config"])
-            return "Start the organization" + (f" ({risky})" if risky else "")
+            details = starting_details(org["config"])
+            return (
+                "Start the organization"
+                + (f" ({risky})" if risky else "")
+                + (f". It also uses {details}" if details else "")
+            )
         if action == "resume_all":
             return "Lift every employee hold"
         if action == "archive":
@@ -1179,6 +1276,8 @@ class OrganizationManager:
                     request.update(existing)
                     return {}
             request["fingerprint"] = fingerprint
+            # In Auto mode Rem's review decides it; otherwise it waits for the user.
+            request["route"] = "rem" if auto_on(current) else "user"
             pending = [r for r in requests.values() if r["status"] == "pending"]
             if len(pending) >= 20:
                 raise ValueError("Twenty requests already wait for the user's decision")
@@ -1192,6 +1291,19 @@ class OrganizationManager:
             return {"requestId": request["id"], "action": action, "summary": reason}
 
         self.store.mutate(org["projectRoot"], org["id"], actor, "consent_requested", record)
+        if request.get("route") == "rem":
+            self._wake.set()
+            return {
+                "needsUserConsent": False,
+                "autoReview": True,
+                "requestId": request["id"],
+                "summary": reason,
+                "message": (
+                    "Nothing changed yet. This organization is in Auto mode, so Rem's review "
+                    "decides this request shortly: it may approve it, approve a safer version "
+                    "or decline it. Read the organization to see the decision."
+                ),
+            }
         return {
             "needsUserConsent": True,
             "requestId": request["id"],
@@ -1202,11 +1314,38 @@ class OrganizationManager:
             ),
         }
 
-    def _decide(self, project: str, org: dict[str, Any], params: dict[str, Any]) -> Any:
+    def _decide(
+        self,
+        project: str,
+        org: dict[str, Any],
+        params: dict[str, Any],
+        *,
+        decider: str = "user",
+        note: str = "",
+        override: dict[str, Any] | None = None,
+        instruction: dict[str, Any] | None = None,
+    ) -> Any:
+        """Approve or decline one consent request.
+
+        ``decider`` is "user" for the user's own click. Two other deciders exist, both
+        reached only from inside Raticode, never through an action: Rem in Auto mode
+        (organization_auto) and Rem on the user's chat instruction, which carries the
+        user's message ID in ``instruction``. ``override`` is the safer parameters Rem
+        approved instead of the ones asked for.
+        """
         decision = params.get("decision")
         if decision not in {"approve", "decline"}:
             raise ValueError("Choose approve or decline")
+        if decider not in {"user", AUTO_ACTOR, INSTRUCTED_ACTOR}:
+            raise ValueError("Only the user can approve or decline Rem's requests")
+        if decider == INSTRUCTED_ACTOR and not (instruction or {}).get("messageId"):
+            raise ValueError("Rem needs the user's own message to approve on their behalf")
         claimed: dict[str, Any] = {}
+        by = {
+            "user": "you",
+            AUTO_ACTOR: "Rem (Auto mode)",
+            INSTRUCTED_ACTOR: "Rem, on your instruction",
+        }[decider]
 
         def claim(current: dict[str, Any]) -> dict[str, Any]:
             # Claim the request in one transaction so a double click can't apply it twice.
@@ -1216,58 +1355,109 @@ class OrganizationManager:
             if item and item["status"] == "pending":
                 item["status"] = "applying" if decision == "approve" else "declined"
                 item["decidedAt"] = now()
+                item["decidedBy"] = by
+                if note:
+                    item["decisionNote"] = note[:2000]
+                if override is not None:
+                    item["appliedParams"] = copy.deepcopy(override)
+                if instruction:
+                    item["instruction"] = dict(instruction)
                 claimed.update(copy.deepcopy(item))
             return {"expired": expired} if expired else {}
 
-        self.store.mutate(project, org["id"], "user", "consent_checked", claim)
+        self.store.mutate(project, org["id"], decider, "consent_checked", claim)
         if not claimed:
             raise ValueError(
                 "This request is no longer waiting. It was decided already or is more than a "
                 "day old; ask Rem again if you still want it."
             )
         request = claimed
+        detail: dict[str, Any] = {
+            "decidedBy": by,
+            **({"reason": note[:2000]} if note else {}),
+            **({"instructedBy": instruction} if instruction else {}),
+        }
         if decision == "decline":
             self.store.mutate(
                 project,
                 org["id"],
-                "user",
+                decider,
                 "consent_decided",
-                lambda _: {"requestId": request["id"], "decision": decision, "error": ""},
+                lambda _: {
+                    "requestId": request["id"],
+                    "decision": decision,
+                    "error": "",
+                    **detail,
+                },
             )
+            self._after_user_decision(project, org["id"], request, decider)
             return self.public(self.store.get(project, org["id"]))
         error = ""
-        if decision == "approve":
-            try:
-                self.call(
-                    project,
-                    "user",
-                    {
-                        "action": request["action"],
-                        "organizationId": org["id"],
-                        "params": request["params"],
-                    },
-                )
-            except ValueError as exc:
-                error = str(exc)
+        try:
+            self.call(
+                project,
+                "user" if decider == "user" else decider,
+                {
+                    "action": request["action"],
+                    "organizationId": org["id"],
+                    "params": override if override is not None else request["params"],
+                },
+                consented=decider != "user",
+            )
+        except ValueError as exc:
+            error = str(exc)
 
         def settle(current: dict[str, Any]) -> dict[str, Any]:
             item = current["runtime"].get("consentRequests", {}).get(request["id"])
             if item:
                 item.update(status="failed" if error else "approved", decidedAt=now(), error=error)
-            return {"requestId": request["id"], "decision": decision, "error": error}
+            return {"requestId": request["id"], "decision": decision, "error": error, **detail}
 
-        self.store.mutate(project, org["id"], "user", "consent_decided", settle)
+        self.store.mutate(project, org["id"], decider, "consent_decided", settle)
+        self._after_user_decision(project, org["id"], request, decider)
         if error:
             raise OrganizationConflict(
                 f"Rem's request could not be applied: {error}. It has been closed; ask Rem again."
             )
         return self.public(self.store.get(project, org["id"]))
 
+    def _after_user_decision(
+        self, project: str, oid: str, request: dict[str, Any], decider: str
+    ) -> None:
+        """Deciding the request Auto mode stopped for lifts the stop.
+
+        The organization picks up where it was: running again if it was running.
+        """
+        if decider == AUTO_ACTOR:
+            return
+        resume: list[bool] = []
+
+        def lift(current: dict[str, Any]) -> dict[str, Any]:
+            halt = current["runtime"].get("autoHalt")
+            if not halt or halt.get("requestId") != request["id"]:
+                return {}
+            current["runtime"].pop("autoHalt", None)
+            resume.append(bool(halt.get("resume")) and current["runtime"]["state"] == "paused")
+            return {"requestId": request["id"], "resume": resume[0]}
+
+        self.store.mutate(project, oid, decider, "auto_mode_halt_lifted", lift)
+        if resume and resume[0]:
+            try:
+                with self._lock:
+                    self.store.control(project, oid, "user", "running")
+                self._wake.set()
+            except ValueError as exc:
+                log.info("Couldn't resume %s after its Auto mode stop: %s", oid, exc)
+
     @staticmethod
     def public(org: dict[str, Any]) -> dict[str, Any]:
         result = copy.deepcopy(org)
         files = result["config"].pop("packageFiles", {})
         result["runtime"].pop("requests", None)
+        # Who each waiting request waits on: Rem's review in Auto mode, or the user.
+        for request in (result["runtime"].get("consentRequests") or {}).values():
+            if request.get("status") == "pending":
+                request["waitingOn"] = "rem" if waits_on_rem(org, request) else "you"
         result["diagnostics"] = diagnostics(org)
         result["version"] = hashlib.sha256(json.dumps(org, sort_keys=True).encode()).hexdigest()
         result["packageFileCount"] = len(files)
@@ -1309,10 +1499,23 @@ class OrganizationManager:
             name = str(org["config"].get("name") or "")
             at = str(row["at"])
             payload = row["payload"]
+            if row["kind"] == "auto_mode_halted":
+                halt = org["runtime"].get("autoHalt") or {}
+                if halt.get("requestId") == payload.get("requestId"):
+                    found[(row["organization"], f"halt-{halt.get('requestId')}")] = {
+                        "id": f"organization-halt-{hashed(str(halt.get('requestId')))}",
+                        "reason": "needs_you",
+                        "title": "Auto mode stopped: " + str(halt.get("summary") or "")[:200],
+                        "organization": name,
+                        "at": at,
+                    }
+                continue
             if row["kind"] == "consent_requested":
                 request = str(payload.get("requestId") or "")
                 requests = org["runtime"].get("consentRequests") or {}
-                if (requests.get(request) or {}).get("status") == "pending":
+                item = requests.get(request) or {}
+                # Requests Rem's Auto mode review decides don't need the user.
+                if item.get("status") == "pending" and not waits_on_rem(org, item):
                     found[(row["organization"], request)] = {
                         "id": f"organization-consent-{hashed(request)}",
                         "reason": "needs_you",
@@ -1349,7 +1552,14 @@ class OrganizationManager:
         read_only: bool = False,
         workspace_paths: set[str] | None = None,
         run_id: str | None = None,
+        consented: bool = False,
     ) -> Any:
+        """Run one organization action for ``actor``.
+
+        ``consented`` is set only by ``_decide`` when Rem applies a request it was allowed
+        to decide (Auto mode, or the user's chat instruction); no caller outside Raticode
+        can set it.
+        """
         if not self.enabled:
             raise ValueError(
                 "Organizations is experimental and disabled. "
@@ -1379,6 +1589,8 @@ class OrganizationManager:
             "comment": {"taskId", "body"},
             "wake": {"employeeId", "message"},
             "self_work_projects": {"employeeId", "projects", "expectedRevision"},
+            "request_approve_all": {"requestIds"},
+            "auto_mode": {"enabled"},
         }
         # Check privilege before inspecting configuration payloads from employees.
         if employee_id and action in CONFIG_ACTIONS:
@@ -1542,6 +1754,26 @@ class OrganizationManager:
             if actor != "user":
                 raise ValueError("Only the user can approve or decline Rem's requests")
             return self._decide(project, org, params)
+        if action == "request_approve_all":
+            # Approve all: only the user's own click, with the exact list they confirmed.
+            if actor != "user":
+                raise ValueError("Only the user can approve or decline Rem's requests")
+            return approve_all(
+                self,
+                project,
+                oid,
+                params.get("requestIds"),
+                ttl_seconds=CONSENT_TTL.total_seconds(),
+            )
+        if action == "auto_mode":
+            # Only the user's own switch; Rem, workers and agent tokens are refused.
+            if actor != "user":
+                raise ValueError(
+                    "Only the user can turn Auto mode on or off, in the organization's settings"
+                )
+            return set_auto_mode(self, project, org, params)
+        if actor != "user" and action in {"configure", "restore"}:
+            self._keep_auto_mode(project, org, action, params)
         if action == "secret_store" and actor != "user":
             raise ValueError(
                 "Enter credential values in the Organizations tab. Rem can only reference "
@@ -1550,6 +1782,7 @@ class OrganizationManager:
         if (
             actor != "user"
             and not employee_id
+            and not consented
             and action in CONSENT_ACTIONS
             and (reason := self._consent_reason(project, org, action, params))
         ):
@@ -1862,6 +2095,7 @@ class OrganizationManager:
                 check_recurring(None, task, employee_id)
                 if employee_id:
                     task["parentRunId"] = run_id
+                    task["proposedBy"] = employee_id
                     if task["status"] not in {"backlog", "todo"}:
                         raise ValueError("Employees must create pending work")
                     # Work created during a run inherits the rules of the run's own ticket,
@@ -2558,6 +2792,7 @@ class OrganizationManager:
         while not self._closed.is_set():
             try:
                 self.dispatch()
+                self._auto_reviews()
                 if time.monotonic() >= next_reconcile:
                     with self.store.connect() as db:
                         rows = db.execute("SELECT project, id FROM organizations").fetchall()
@@ -2577,6 +2812,34 @@ class OrganizationManager:
                 log.exception("Organization dispatch failed")
             self._wake.wait(2)
             self._wake.clear()
+
+    def _auto_reviews(self) -> None:
+        """Start Rem's review for organizations in Auto mode with something waiting.
+
+        One review at a time per organization, in its own thread, so a slow model never
+        holds up dispatching work.
+        """
+        if self.auto_review is None or time.monotonic() < self._next_auto:
+            return
+        self._next_auto = time.monotonic() + 5
+        for org in self.store.list_organizations():
+            oid = org["id"]
+            with self._lock:
+                if oid in self._auto_busy or self._closed.is_set() or not needs_review(org):
+                    continue
+                self._auto_busy.add(oid)
+
+            def run(project: str = org["projectRoot"], oid: str = oid) -> None:
+                try:
+                    review_pass(self, project, oid, self._closed)
+                except Exception:
+                    log.exception("Auto mode review failed for %s", oid)
+                finally:
+                    with self._lock:
+                        self._auto_busy.discard(oid)
+                    self._wake.set()
+
+            threading.Thread(target=run, daemon=True, name=f"org-auto-{oid[:8]}").start()
 
     def _task_worktree(
         self, project: str, oid: str, task: dict[str, Any], root: str, turn_id: str
@@ -3115,6 +3378,9 @@ class OrganizationManager:
             ):
                 return
             instant = datetime.now(UTC)
+            # A worker with nothing it can take pulls accepted Backlog work into To do first,
+            # so it gets that work instead of a check-in.
+            org = self._pull_backlog(project, oid, org, instant)
             runtime = org["runtime"]
             # Avoid activity noise on every scheduler tick: only claim when something can move.
             if not (
@@ -3181,6 +3447,42 @@ class OrganizationManager:
             except Exception as exc:
                 chosen["setup_error"] = str(exc)
                 self._run(chosen, cancel)
+
+    def _pull_backlog(
+        self, project: str, oid: str, org: dict[str, Any], instant: datetime
+    ) -> dict[str, Any]:
+        """Pull Backlog tickets for free workers, in one write. Returns the organization.
+
+        Called with ``self._lock`` held, so the count of runs under way can't change.
+        Planned on the copy read for this pass first, so a pass with nothing to pull writes
+        nothing, then planned again on the fresh copy inside the write.
+        """
+        running = sum(active_oid == oid for active_oid, _, _ in self._active.values())
+        owned: dict[str, bool] = {}
+
+        def owns(root: str) -> bool:
+            if root not in owned:
+                owned[root] = self.store.owns_project(oid, root)
+            return owned[root]
+
+        def reviewing(current: dict[str, Any]) -> set[str]:
+            # A worker with blocked tickets to look at does that before anything new.
+            return {
+                e["id"]
+                for e in current["config"]["employees"]
+                if self_work_roots(current, e["id"]) and blocked_for_review(current, e["id"])
+            }
+
+        if not plan_pulls(org, running=running, owns=owns, instant=instant, skip=reviewing(org)):
+            return org
+
+        def pull(current: dict[str, Any]) -> dict[str, Any]:
+            moved = apply_pulls(
+                current, running=running, owns=owns, instant=instant, skip=reviewing(current)
+            )
+            return {"pulled": moved} if moved else {}
+
+        return self.store.mutate(project, oid, "system", "backlog_pull", pull)
 
     def _run(self, chosen: dict[str, Any], cancel: threading.Event) -> None:
         org, task, employee = chosen["org"], chosen["task"], chosen["employee"]
@@ -3657,10 +3959,19 @@ class OrganizationManager:
                     )
                 if existing["claim"] != turn_id:
                     return {"turnId": turn_id, "discarded": True, "reason": "Configuration changed"}
-                if final:
-                    existing["comments"].append(
-                        {"actor": f"employee:{employee['id']}", "at": now(), "body": final}
-                    )
+                author = f"employee:{employee['id']}"
+                started = str((attempt or {}).get("startedAt") or "")
+                # A worker that already posted its report as a comment during this run
+                # doesn't get the same words added again as its final message.
+                if final and not any(
+                    c.get("actor") == author
+                    and c.get("kind") != "status"
+                    and str(c.get("body") or "").strip() == final.strip()
+                    and started
+                    and str(c.get("at") or "") >= started
+                    for c in existing["comments"]
+                ):
+                    existing["comments"].append({"actor": author, "at": now(), "body": final})
                 failed = error or cancelled or not final
                 # A worker that already marked its ticket Done or ready for review keeps that
                 # result when the run ends badly afterwards; the conversation says so.

@@ -253,6 +253,10 @@ def task_reason(org: dict[str, Any], task: dict[str, Any], at: datetime | None =
         return "Waiting for plan approval"
     if waiting := dependency_reason(org, task):
         return waiting
+    if task["status"] == "backlog":
+        from gofer.ui.organization_backlog import backlog_reason
+
+        return backlog_reason(org, task)
     if task["status"] != "todo":
         return str(task.get("blockReason") or task["status"].replace("_", " "))
     if hold := plan_hold(config, task):
