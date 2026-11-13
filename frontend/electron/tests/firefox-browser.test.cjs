@@ -516,7 +516,8 @@ test("a real Firefox reports files a page builds (blob: and data: links) with ma
     contents.close();
     engine.stop();
     server.close();
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    // stop() doesn't wait for Firefox to exit, and it writes its profile while it shuts down.
+    fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 });
   }
 });
 
