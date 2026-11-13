@@ -6,29 +6,43 @@
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isStable, readSourceVersions, setMobileEntry } from './versions.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const args = process.argv.slice(2)
 
-// `npm run set-release -- --mobile X.Y.Z` points the site's Raticode Mobile download at that
-// version's APK. Run it only after the `mobile-vX.Y.Z` tag has published a signed release;
-// `npm run check:downloads` then confirms the APK is there.
+const repoRoot = join(root, '..')
+
+// `npm run set-release -- --mobile [X.Y.Z]` points the site's Raticode Mobile download at the
+// version in mobile/android/version.properties, the version its `mobile-vX.Y.Z` tag must
+// match. Naming a different version is refused. The desktop form below does this too.
 if (args[0] === '--mobile') {
-  const mobileVersion = args[1]
-  if (!mobileVersion || !/^\d+\.\d+\.\d+$/.test(mobileVersion)) {
-    console.error('Usage: npm run set-release -- --mobile X.Y.Z')
+  let source
+  try {
+    source = readSourceVersions(repoRoot).mobile
+  } catch (error) {
+    console.error(error.message)
+    process.exit(2)
+  }
+  const mobileVersion = args[1] ?? source
+  if (!isStable(mobileVersion)) {
+    console.error(`Usage: npm run set-release -- --mobile [X.Y.Z] (version.properties has ${source}; the site links stable releases only)`)
+    process.exit(2)
+  }
+  if (mobileVersion !== source) {
+    console.error(`mobile/android/version.properties is ${source}, not ${mobileVersion}. Bump it with scripts/version.py first.`)
     process.exit(2)
   }
   const path = join(root, 'data/releases.ts')
-  const source = readFileSync(path, 'utf8')
-  const line = /^export const mobileRelease = \{[^\n]*\}$/m
-  if (!line.test(source)) {
-    console.error('data/releases.ts has no one-line `export const mobileRelease = { ... }`')
+  try {
+    writeFileSync(path, setMobileEntry(readFileSync(path, 'utf8'), mobileVersion))
+  } catch (error) {
+    console.error(error.message)
     process.exit(2)
   }
-  const entry = `export const mobileRelease = { version: '${mobileVersion}', tag: 'mobile-v${mobileVersion}', published: true }`
-  writeFileSync(path, source.replace(line, entry))
-  console.log(`The site's Raticode Mobile download now points at mobile-v${mobileVersion}. Run \`npm run check:downloads\`.`)
+  console.log(
+    `The site's Raticode Mobile download now points at mobile-v${mobileVersion}. It deploys once that release is public.`,
+  )
   process.exit(0)
 }
 const version = args.find((arg) => !arg.startsWith('--'))
@@ -66,6 +80,20 @@ manifest = setField(manifest, 'publishedAt', `'${date}'`)
 // Every desktop release after 0.5.2 is Developer ID signed and notarized; the release
 // workflow refuses to publish one that isn't (docs/releasing.md).
 manifest = setField(manifest, 'macNotarized', newer(version, '0.5.2') ? 'true' : 'false')
+// The phone app ships with every desktop release, so the site also names the phone version
+// the release commit carries. Its deploy then waits for both releases to be public.
+let mobileNote = ''
+try {
+  const mobileVersion = readSourceVersions(repoRoot).mobile
+  if (isStable(mobileVersion)) {
+    manifest = setMobileEntry(manifest, mobileVersion)
+    mobileNote = ` Raticode Mobile download: mobile-v${mobileVersion}.`
+  } else {
+    mobileNote = ` Raticode Mobile is at prerelease ${mobileVersion}; its download was left as it was.`
+  }
+} catch (error) {
+  fail(error.message)
+}
 writeFileSync(manifestPath, manifest)
 
 // Versioned file names in shell examples, such as ./Raticode-0.5.2-x86_64.AppImage.
@@ -93,7 +121,7 @@ for (const file of [join(root, 'index.md'), ...markdownFiles(join(root, 'docs'))
   })
 }
 
-console.log(`Site moved from ${current} to ${version} (published ${date}); ${renamedCount} file name(s) renamed in docs/installation.md.`)
+console.log(`Site moved from ${current} to ${version} (published ${date}); ${renamedCount} file name(s) renamed in docs/installation.md.${mobileNote}`)
 if (leftovers.length) {
   console.log(`\nThese lines still mention ${current}. Reword any that describe the newest release:`)
   console.log(leftovers.join('\n'))

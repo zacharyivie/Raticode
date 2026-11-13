@@ -178,8 +178,51 @@ export const dangerousPermission = mode => DANGEROUS_MODES.has(mode);
 // What needs the user right now, for the overview strip.
 // Rem's requests expire after a day; older ones can no longer be approved.
 export const CONSENT_TTL_MS = 24 * 60 * 60 * 1000;
+// Requests waiting on the user. In Auto mode, Rem's review decides the rest (waitingOn "rem").
 export function pendingRequests(runtime = {}, now = Date.now()) {
-  return Object.values(runtime.consentRequests || {}).filter(request => request.status === "pending" && now - Date.parse(request.at) < CONSENT_TTL_MS);
+  return Object.values(runtime.consentRequests || {}).filter(request => request.status === "pending" && request.waitingOn !== "rem" && now - Date.parse(request.at) < CONSENT_TTL_MS);
+}
+
+// Auto mode: Rem decides the organization's requests (gofer/ui/organization_auto.py).
+export const AUTO_MODE_EXPLAINED = "Rem approves, changes or declines this organization's requests instead of you: Rem's own requests, plans and proposals waiting for approval, and finished work waiting for your review. Something dangerous gets declined or made safe first. The organization stops only when something is dangerous and Rem can't make it safe without stopping everything, or when it can't go on without you, such as a missing credential, a sign-in only you can do, missing hardware or no internet.";
+export const AUTO_MODE_STAYS_YOURS = "Budget and run-limit increases, git push and folder-isolation policy, and Auto mode itself stay yours: those requests wait for you while work goes on.";
+export const AUTO_DECISION_LABEL = { approve: "Approved", modify: "Approved with changes", decline: "Declined", halt: "Stopped for you", left_for_you: "Left for you" };
+export function reviewingRequests(runtime = {}, now = Date.now()) {
+  return Object.values(runtime.consentRequests || {}).filter(request => request.status === "pending" && request.waitingOn === "rem" && now - Date.parse(request.at) < CONSENT_TTL_MS);
+}
+export function autoDecisions(runtime = {}, limit = 5) {
+  return [...(runtime.autoDecisions || [])].reverse().slice(0, limit);
+}
+export function decidedBy(request = {}) {
+  return request.decidedBy || "you";
+}
+
+// Approve all applies requests in this order (gofer/ui/organization_consent.py): changes
+// bound to the organization's revision first, oldest revision first; then other changes
+// in the order Rem asked; starting the organization, then archiving, last.
+const REVISION_BOUND = new Set(["configure", "restore", "resume_all"]);
+const LAST = { control: 1, archive: 2 };
+export function approvalOrder(requests = []) {
+  const rank = request => {
+    const expected = request.params?.expectedRevision;
+    if (LAST[request.action]) return [2, LAST[request.action], 0];
+    if (REVISION_BOUND.has(request.action)) return [0, 0, Number.isInteger(expected) ? expected : 0];
+    return [1, 0, 0];
+  };
+  return [...requests].sort((a, b) => {
+    const left = rank(a), right = rank(b);
+    for (let i = 0; i < 3; i += 1) if (left[i] !== right[i]) return left[i] - right[i];
+    return String(a.at).localeCompare(String(b.at));
+  });
+}
+
+// Plain words for Approve all's per-request results.
+export const APPROVE_RESULT = { approved: "Approved", failed: "Failed", skipped: "Left waiting", declined: "Declined" };
+export function approveAllSummary(results = []) {
+  const count = status => results.filter(item => item.status === status).length;
+  const approved = count("approved"), failed = count("failed"), skipped = count("skipped");
+  if (!failed && !skipped) return `Approved all ${plural(approved, "request")}.`;
+  return [`Approved ${approved} of ${results.length}`, failed && `${failed} failed`, skipped && `${plural(skipped, "request")} left waiting`].filter(Boolean).join(", ") + ".";
 }
 
 // What a run used and produced, as short labels for its record.
@@ -235,7 +278,7 @@ const FIELD_LABELS = {
   skills: "Skills", paused: "Paused", heartbeatSeconds: "Heartbeat", memory: "Persistent memory",
   monthlyBudgetUsd: "Monthly budget", monthlyTurnLimit: "Monthly run limit", maxConcurrency: "Concurrent employees",
   maxTaskTurns: "Runs per task", turnTimeoutSeconds: "Run time limit", monthlyTokenLimit: "Monthly token limit",
-  maxChildTasksPerTurn: "Tasks one run can create", maxDelegationDepth: "Delegation depth", workspaceIsolation: "Workspace isolation", blockGitPush: "Block git push", remSecondBrain: "Second Brain",
+  maxChildTasksPerTurn: "Tasks one run can create", maxDelegationDepth: "Delegation depth", workspaceIsolation: "Workspace isolation", blockGitPush: "Block git push", pullBacklog: "Pull from Backlog", remSecondBrain: "Second Brain",
   remReportTheme: "Report theme", packageFiles: "Package files", metadata: "Metadata", owner: "Owner",
   manager: "Manager", workspacePath: "Workspace folder", mcpServers: "MCP servers", shell: "Run commands", web: "Search the web",
 };
@@ -283,8 +326,12 @@ export function activityEntries(events, tasks = []) {
     if (event.kind === "organization_control") entry.text = payload.state === "running" ? "Started work" : "Paused work";
     if (event.kind === "runtime_recovered") Object.assign(entry, { text: "Paused after Raticode restarted", detail: payload.reason || "" });
     if (event.kind === "consent_requested") Object.assign(entry, { text: "Asked for your approval", detail: payload.summary || "" });
-    if (event.kind === "consent_decided") Object.assign(entry, { text: payload.decision === "approve" ? "Approved Rem's request" : "Declined Rem's request", detail: payload.error || "" });
+    if (event.kind === "consent_decided") Object.assign(entry, { text: `${payload.decision === "approve" ? "Approved" : "Declined"} Rem's request${payload.decidedBy && payload.decidedBy !== "you" ? ` (${payload.decidedBy})` : ""}`, detail: payload.error || payload.reason || "" });
+    if (event.kind === "auto_decision" && payload.auto) Object.assign(entry, { text: `Rem in Auto mode: ${AUTO_DECISION_LABEL[payload.auto.decision] || payload.auto.decision} “${payload.auto.summary || "a request"}”`, detail: [payload.auto.reason, payload.auto.recommendation && `Recommended: ${payload.auto.recommendation}`, payload.auto.error].filter(Boolean).join(" ") });
+    if (event.kind === "auto_mode_halted") Object.assign(entry, { text: "Auto mode stopped the organization", detail: [payload.halt?.reason, payload.halt?.userAction && `To continue: ${payload.halt.userAction}`].filter(Boolean).join(" ") });
+    if (event.kind === "auto_mode_set") Object.assign(entry, { text: payload.autoMode ? "Turned Auto mode on" : "Turned Auto mode off", detail: "" });
     if (event.kind === "state_updated") Object.assign(entry, { text: "Updated work automatically", detail: (payload.taskChanges || []).map(change => `“${change.title}”: ${STATUS_LABELS[change.from] || "new"} → ${STATUS_LABELS[change.to] || change.to}`).join("; ") });
+    if (event.kind === "backlog_pull") Object.assign(entry, { text: `Pulled ${plural(payload.pulled?.length || 0, "Backlog ticket")} into To do`, detail: (payload.pulled || []).map(item => `${item.key ? `${item.key} ` : ""}“${item.title}” for ${item.employee}`).join("; ") });
     if (event.kind === "consent_checked") Object.assign(entry, { text: "Closed expired requests from Rem", detail: plural(payload.expired?.length || 0, "request") });
     if (event.kind === "organization_archived") entry.text = "Archived the organization";
     if (event.kind === "organization_restored") entry.text = "Restored the organization from the archive";

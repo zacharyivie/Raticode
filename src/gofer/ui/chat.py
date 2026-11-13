@@ -1063,6 +1063,7 @@ async def run_workflow_chat(
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
     trusted_rem_artifacts_url: str | None = None,
+    trusted_rem_wait_url: str | None = None,
     conversation_id: str | None = None,
     reset_session: bool = False,
 ) -> dict[str, Any]:
@@ -1085,6 +1086,7 @@ async def run_workflow_chat(
             trusted_rem_threads_url=trusted_rem_threads_url,
             trusted_organization_url=trusted_organization_url,
             trusted_rem_artifacts_url=trusted_rem_artifacts_url,
+            trusted_rem_wait_url=trusted_rem_wait_url,
             conversation_id=conversation_id,
             reset_session=reset_session,
         )
@@ -1200,6 +1202,7 @@ async def run_workflow_chat(
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
         trusted_rem_artifacts_url=trusted_rem_artifacts_url,
+        trusted_rem_wait_url=trusted_rem_wait_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
         second_brain_cli_path=(
             gofer_cli_path
@@ -1364,6 +1367,7 @@ async def stream_workflow_chat(
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
     trusted_rem_artifacts_url: str | None = None,
+    trusted_rem_wait_url: str | None = None,
     trusted_scratch_dir: Path | None = None,
     unlimited_output: bool = False,
     include_agent_messages: bool = False,
@@ -1543,6 +1547,7 @@ async def stream_workflow_chat(
         trusted_rem_threads_url=trusted_rem_threads_url,
         trusted_organization_url=trusted_organization_url,
         trusted_rem_artifacts_url=trusted_rem_artifacts_url,
+        trusted_rem_wait_url=trusted_rem_wait_url,
         resources=AgentResources.model_validate((workflow or {}).get("remResources") or {}),
         second_brain_cli_path=(
             gofer_cli_path
@@ -2868,6 +2873,7 @@ def _build_chat_command(
     trusted_rem_threads_url: str | None = None,
     trusted_organization_url: str | None = None,
     trusted_rem_artifacts_url: str | None = None,
+    trusted_rem_wait_url: str | None = None,
     network_access: bool = False,
     read_only: bool = False,
     trust_data_dir: bool = True,
@@ -3001,6 +3007,21 @@ def _build_chat_command(
                     f'mcp_servers.{output_server}.enabled_tools=["save_report"]',
                     "-c",
                     f'mcp_servers.{output_server}.tools.save_report.approval_mode="approve"',
+                ]
+            # A worker's sleep tool (rem_home_sleep), served for this one turn only.
+            if trusted_rem_wait_url is not None and any(
+                server.enabled
+                and server.name == "rem_wait"
+                and server.type == "http"
+                and server.url == trusted_rem_wait_url
+                for server in resources.mcpServers
+            ):
+                wait_server = codex_mcp_server_names(resources, working_dir)["rem_wait"]
+                command += [
+                    "-c",
+                    f'mcp_servers.{wait_server}.enabled_tools=["sleep"]',
+                    "-c",
+                    f'mcp_servers.{wait_server}.tools.sleep.approval_mode="approve"',
                 ]
             if trusted_organization_url is not None and any(
                 server.enabled

@@ -12,6 +12,11 @@ object ShareIntake {
     const val MAX_TEXT = 4000
     /** Below the phone's 50 MiB file store, so a full share still leaves room for the upload. */
     const val MAX_TOTAL = 40L * 1024 * 1024
+    /**
+     * Shared items whose names and sizes are looked up. Each lookup waits on the sharing app, so a share of thousands
+     * of items can't start thousands of lookups; the rest are reported as left out.
+     */
+    const val MAX_DESCRIBED = MAX_FILES * 4
 
     /**
      * A shared item as Android describes it. [own] is a URI served by this app, which is never sent; [unreadable]
@@ -54,11 +59,11 @@ object ShareIntake {
         .replace("\r", "").trim()
 
     /** Which shared items to offer for review, and a plain reason for each one left out. */
-    fun plan(subject: CharSequence?, text: CharSequence?, streams: List<Stream>): Plan {
+    fun plan(subject: CharSequence?, text: CharSequence?, streams: List<Stream>, notDescribed: Int = 0): Plan {
         val (body, shortened) = text(subject, text)
         val accepted = mutableListOf<Int>()
         val refused = mutableListOf<String>()
-        var own = 0; var notContent = 0; var unreadable = 0; var unsupported = 0; var extra = 0
+        var own = 0; var notContent = 0; var unreadable = 0; var unsupported = 0; var extra = notDescribed.coerceAtLeast(0)
         streams.forEachIndexed { index, stream ->
             when {
                 stream.scheme?.lowercase() != "content" -> notContent++
@@ -83,10 +88,23 @@ object ShareIntake {
      * The name Rem sees. The desktop picks a file's type from its extension, so a name without one gets the
      * extension for its type. The phone never writes a file under this name.
      */
-    fun name(display: String?, extension: String?, index: Int): String {
+    fun name(display: String?, extension: String?, index: Int, type: String = "", typeOfExtension: (String) -> String? = { null }): String {
         val safe = FileMetadata.safeName(display.orEmpty()).let { if (it == "attachment") "shared-${index + 1}" else it }
         val ext = extension?.lowercase()?.filter { it.isLetterOrDigit() }?.take(10)?.takeIf { it.isNotEmpty() }
-        return if (ext != null && !safe.substringAfterLast('/').contains('.')) "$safe.$ext".take(160) else safe
+        val own = safe.substringAfterLast('/').substringAfterLast('.', "").lowercase()
+        val needsExt = own.isEmpty() || disguised(own, type, typeOfExtension)
+        return if (ext != null && needsExt && own != ext) "$safe.$ext".take(160) else safe
+    }
+
+    /**
+     * True when a name's extension says a different kind of file than the type it was accepted as, such as `run.exe`
+     * shared as a picture. Unknown extensions are fine on text, so `notes.kt` stays as it is.
+     */
+    private fun disguised(own: String, type: String, typeOfExtension: (String) -> String?): Boolean {
+        val family = type.lowercase().substringBefore('/').trim()
+        if (family.isEmpty()) return false
+        val named = runCatching { typeOfExtension(own) }.getOrNull()?.lowercase()
+        return if (named == null) family != "text" else named.substringBefore('/') != family || (family == "application" && named != type.lowercase())
     }
 
     /** Why a reviewed file can't go, or null when it can. Sizes a provider doesn't report are checked while reading. */

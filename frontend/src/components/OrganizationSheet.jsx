@@ -3,11 +3,12 @@ import { AlertTriangle, ArrowLeft, Brain, Check, ChevronDown, ChevronRight, Flas
 import {
   COLUMN_LABELS, EVIDENCE_LABELS, KINDS, describeHours, entity, epicProgress, epicsOfMilestone, evidenceState, formatDate, knowledgeEdges,
   milestoneProgress, milestonesOfProject, milestonesServing, openTickets, orgMilestoneProgress, reviewCaution, runSteps,
-  removeWorker, startHint, ticketsOfEpic, zoneTime, ago, timeAgo, usedBy, workerStatus,
+  removeWorker, startHint, ticketsOfEpic, visibleCommand, zoneTime, ago, timeAgo, usedBy, workerStatus,
 } from "../lib/organizationModel.js";
 import { dangerousPermission, organizationRequest, plural, runProvenance, transcriptEntries } from "../lib/organizations.js";
 import { providerPermissionDefault, providerPermissionOptions } from "../lib/providerPermissions.js";
 import { CADENCES, DAY_NAMES, LONG_DAYS, ORDINALS, blockId, blockProblem, cleanBlock, describeBlock, keywordsText, parseKeywords, scheduleProblem, withCadence } from "../lib/organizationSchedule.js";
+import { statusLine, visibleComments } from "../lib/ticketConversation.js";
 import { ProviderModelEffortFields, useProviderCapabilities } from "./ProviderModelEffortFields.jsx";
 import { Avatar, Bar, Chip, Pill } from "./OrganizationViews.jsx";
 
@@ -18,9 +19,17 @@ const Muted = ({ children }) => <span className="oh-muted">{children}</span>;
 function Confirm({ label, message, confirmLabel, onConfirm, busy, className = "oh-btn", danger = false }) {
   const [asking, setAsking] = useState(false);
   if (!asking) return <button className={className} type="button" disabled={busy} onClick={() => setAsking(true)}>{label}</button>;
-  return <span className="oh-confirm" role="group" aria-label={`Confirm: ${label}`}><span role="status">{message}</span>
+  return <span className="oh-confirm" role="group" aria-label={`Confirm: ${typeof label === "string" ? label : confirmLabel}`}><span role="status">{message}</span>
     <button className={`oh-btn ${danger ? "danger" : "primary"}`} type="button" disabled={busy} onClick={async () => { setAsking(false); await onConfirm(); }}>{confirmLabel}</button>
     <button className="oh-btn" type="button" onClick={() => setAsking(false)}>Keep as is</button></span>;
+}
+
+// A command shown in full: every line, with hidden characters spelled out.
+function CommandText({ command }) {
+  const shown = visibleCommand(command);
+  return <><pre className="oh-out" aria-label="Command">{shown.text}</pre>
+    {shown.lines > 1 && <small className="oh-faint">{plural(shown.lines, "line")}. </small>}
+    {shown.hidden > 0 && <small className="oh-warn-text" role="note">{plural(shown.hidden, "hidden character")}, shown as ⟨U+…⟩, could make this command look different from what runs. </small>}</>;
 }
 
 function useLoad(load, deps) {
@@ -55,12 +64,16 @@ function ClaimSheet({ model, claim, ctx }) {
     <Rec label="Claim"><p>{claim.text}</p>{ticket && <Chip model={model} refId={`ticket:${ticket.id}`} onOpen={ctx.onOpen} />}</Rec>
     <Rec label="State"><Pill state={{ ok: "done", warn: "review", bad: "blocked" }[state] || "todo"}>{EVIDENCE_LABELS[state] || state}</Pill>{evidence.note && <> <Muted>{evidence.note}</Muted></>}</Rec>
     {evidence.kind === "check" && <>
-      <Rec label="Command"><code>{evidence.command}</code>{evidence.checkName ? <small className="oh-faint"> Project check “{evidence.checkName}”</small> : <small className="oh-faint"> Not one of the project&apos;s checks, so Raticode didn&apos;t run it on its own.</small>}</Rec>
+      <Rec label="Command"><CommandText command={evidence.command} />{evidence.checkName ? <small className="oh-faint">Project check “{evidence.checkName}”</small> : <small className="oh-faint">Written by the worker. It isn&apos;t one of the project&apos;s checks, so Raticode didn&apos;t run it on its own.</small>}</Rec>
       {evidence.reported && <Rec label="Agent said"><Muted>{evidence.reported}</Muted></Rec>}
       {"exitCode" in evidence && <Rec label="Result"><span className={`oh-ev ${evidence.exitCode ? "bad" : "ok"}`}>Exit {evidence.exitCode}</span> <Muted>{evidence.ranBy === "you" ? "You ran it" : "Raticode reran it"} in the ticket&apos;s worktree, {ago(evidence.ranAt)}{evidence.seconds != null ? `, ${evidence.seconds}s` : ""}</Muted></Rec>}
       {evidence.output && <Rec label="Output"><pre className="oh-out">{evidence.output}</pre></Rec>}
-      {state !== "running" && <Rec label="You"><Confirm busy={ctx.busy} label={<><FlaskConical size={14} />{"exitCode" in evidence ? "Run again" : "Run this check"}</>} confirmLabel="Run it"
-        message={`Runs “${evidence.command}” in the ticket's worktree as you. The worker wrote this branch's code.`} onConfirm={() => ctx.onAct("check_run", { claimId: claim.id }, "Running the check. Its result appears here.")} /></Rec>}
+      {state !== "running" && <Rec label="You"><Confirm busy={ctx.busy} danger={!evidence.checkName} label={<><FlaskConical size={14} />{"exitCode" in evidence ? "Run again" : "Run this check"}</>}
+        confirmLabel={evidence.checkName ? "Run it" : "Run the worker's command"}
+        message={evidence.checkName
+          ? <>Runs the project check “{evidence.checkName}” in the ticket&apos;s worktree as you. The worker wrote this branch&apos;s code.</>
+          : <>Runs this command, exactly as shown, in the ticket&apos;s worktree as you, with your access. The worker wrote it, not your project&apos;s checks, so read all of it first:<CommandText command={evidence.command} /></>}
+        onConfirm={() => ctx.onAct("check_run", { claimId: claim.id }, "Running the check. Its result appears here.")} /></Rec>}
     </>}
     {evidence.kind === "quote" && <>
       <Rec label="Source"><Chip model={model} refId={`kb:${evidence.entryId}`} onOpen={ctx.onOpen} /></Rec>
@@ -84,6 +97,7 @@ function Files({ files }) {
 function TicketSheet({ model, ticket, ctx }) {
   const epic = model.epics[ticket.epicId];
   const milestone = epic && model.milestones[epic.milestoneId];
+  const conversation = visibleComments(ticket.comments || []);
   const [comment, setComment] = useState("");
   const [note, setNote] = useState("");
   const [editing, setEditing] = useState(false);
@@ -158,13 +172,23 @@ function TicketSheet({ model, ticket, ctx }) {
         {!["running", "done"].includes(ticket.column) && ticket.status !== "cancelled" && <Confirm busy={ctx.busy} label="Cancel ticket" confirmLabel="Cancel it" danger message="Cancelled tickets leave the board; their records stay." onConfirm={() => update({ status: "cancelled" }, `${ticket.key} cancelled`)} />}
       </div>}
     </Rec>
-    <details className="oh-fold oh-conversation"><summary>Conversation ({ticket.comments.length})</summary>
-      {ticket.comments.slice(-12).map((item, index) => <div key={index} className="oh-comment"><b>{actorName(model, item.actor)}</b> <time>{timeAgo(item.at)}</time>{item.decision && <> <Pill state={item.decision === "accept" ? "done" : "review"}>{item.decision}</Pill></>}<p className="oh-prose">{item.body}</p></div>)}
+    <details className="oh-fold oh-conversation"><summary>Conversation ({conversation.length})</summary>
+      {conversation.slice(-12).map((item, index) => item.kind === "status"
+        ? <StatusEntry key={index} model={model} item={item} />
+        : <div key={index} className="oh-comment"><b>{actorName(model, item.actor)}</b> <time>{timeAgo(item.at)}</time>{item.decision && <> <Pill state={item.decision === "accept" ? "done" : "review"}>{item.decision}</Pill></>}<p className="oh-prose">{item.body}</p></div>)}
       <form className="oh-row" onSubmit={async event => { event.preventDefault(); if (comment.trim() && await ctx.onAct("comment", { taskId: ticket.id, body: comment.trim() }, "Comment saved")) setComment(""); }}>
         <label className="oh-sr" htmlFor="oh-comment">Comment</label><input id="oh-comment" className="oh-note-input" placeholder="Comment for the worker" value={comment} onChange={e => setComment(e.target.value)} /><button className="oh-btn small" type="submit" disabled={ctx.busy || !comment.trim()}>Send</button>
       </form>
     </details>
   </>;
+}
+
+// A status change in the conversation: a short line, not a second copy of the comment above.
+function StatusEntry({ model, item }) {
+  const { title, move } = statusLine(item);
+  const who = item.actor && item.actor !== "system" ? ` · ${actorName(model, item.actor)}` : "";
+  return <div className="oh-comment oh-status-entry"><span className="oh-status-title">{title}</span> <time>{timeAgo(item.at)}{who}</time>
+    {move && <span className="oh-muted"> · {move}</span>}{item.body && <p className="oh-prose">{item.body}</p>}</div>;
 }
 
 function actorName(model, actor = "") {

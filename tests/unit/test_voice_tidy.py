@@ -230,6 +230,39 @@ def test_tidy_sends_the_instructions_and_context_and_returns_the_tidied_words(tm
     assert "secret" not in seen["prompt"]
 
 
+def test_a_continuation_sends_the_text_before_it_but_tidies_only_the_new_words(tmp_path):
+    seen: dict[str, Any] = {}
+
+    def run(prompt, config, cancel, data_dir, **options):
+        seen["prompt"] = prompt
+        return "and invite the whole team."
+
+    before = "x" * 500 + " Book a room for Friday."
+    result = tidying.tidy("and invite the whole team", ON, tmp_path, before=before, run=run)
+    assert result == {**result, "text": "and invite the whole team.", "tidied": True}
+    written = seen["prompt"].split("<written>\n", 1)[1].split("\n</written>", 1)[0]
+    # Only the end of the text before goes, enough to read on from.
+    assert written.endswith("Book a room for Friday.")
+    assert len(written) == tidying.BEFORE_CHARS
+    assert seen["prompt"].index("</written>") < seen["prompt"].index("<message>")
+    assert "<message>\nand invite the whole team\n</message>" in seen["prompt"]
+    # Without it, the prompt is as before.
+    tidying.tidy("and invite the whole team", ON, tmp_path, run=run)
+    assert "<written>" not in seen["prompt"]
+
+
+def test_a_dictation_too_long_to_tidy_comes_back_whole(tmp_path):
+    heard = " ".join(f"word{index}" for index in range(900))
+    assert len(heard) > tidying.MAX_CHARS
+
+    def run(*_args, **_options):
+        raise AssertionError("not sent")
+
+    result = tidying.tidy(heard, ON, tmp_path, run=run)
+    assert result["tidied"] is False and result["text"] == heard
+    assert "too long" in result["reason"]
+
+
 @pytest.mark.parametrize(
     "chosen,failure,reason",
     [

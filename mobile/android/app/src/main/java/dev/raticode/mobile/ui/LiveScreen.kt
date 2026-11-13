@@ -326,12 +326,24 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     }
     val attachmentHost = remember(client, openFile) { AttachmentHost.of(client, openFile) }
     CompositionLocalProvider(LocalChatImages provides imageSource, LocalChatLinks provides links, LocalAttachments provides attachmentHost) {
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+    // A video full screen in either built-in browser gets the whole phone: no bars of Raticode's or Android's, no
+    // padding for them or a camera cutout, and the screen turns to landscape (portrait for an upright video).
+    val video = dev.raticode.mobile.browser.VideoFullscreen.current
+    val fullscreenVideo = dev.raticode.mobile.browser.VideoFullscreenRules.covers(video, page)
+    VideoFullscreenWindow(dev.raticode.mobile.browser.VideoFullscreenRules.takesWindow(video, page, appLocked),
+        dev.raticode.mobile.browser.VideoFullscreenRules.orientation(video, page, appLocked))
+    // Full screen belongs to the Browser page; a notification or Rem taking the user elsewhere ends it.
+    LaunchedEffect(page, video) {
+        if (video != null && page != dev.raticode.mobile.browser.VideoFullscreenRules.BROWSER_PAGE) {
+            dev.raticode.mobile.browser.BrowserRuntime.peek()?.exitFullscreen()
+            dev.raticode.mobile.browser.GeckoBrowser.peek()?.exitFullscreen()
+        }
+    }
+    Surface(Modifier.fillMaxSize(), color = if (fullscreenVideo) androidx.compose.ui.graphics.Color.Black else MaterialTheme.colorScheme.background) {
+        Column(if (fullscreenVideo) Modifier.fillMaxSize().testTag("videoFullscreen") else Modifier.fillMaxSize().safeDrawingPaddingOnce(keyboardAtTarget = KeyboardInsets.resizesOnce(page))) {
             // Above every page while a tab plays, except over the tab that plays: the Browser page already shows it.
             // Full-screen video and a keyboard on a short screen need the room more.
             val mediaTrack = dev.raticode.mobile.browser.BrowserMedia.bar
-            val fullscreenVideo = dev.raticode.mobile.browser.BrowserMedia.fullscreen && page == "Browser"
             if (mediaTrack != null && !fullscreenVideo && !compactTyping && !(typing && shortScreen))
                 BrowserMediaBar(mediaTrack, onOpen = { dev.raticode.mobile.browser.BrowserMedia.reveal(context, it); page = "Browser" })
             if (page == "Desktop" || page == "Files" || !client.paired) StudioHeader(if (client.paired) { if (client.connected) "Encrypted ${client.route}" else "Offline" } else "Mobile companion") {
@@ -341,7 +353,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                 }
             }
             if (page == "Desktop" || !client.paired) ConnectionStatus(client.connected, client.status, Modifier.fillMaxWidth())
-            if (dev.raticode.mobile.live.WakeOnLan.showsBanner(client.paired, client.cantConnect, client.wakeAvailable, typing, page, topLevel)) WakeBanner(client)
+            if (!fullscreenVideo && dev.raticode.mobile.live.WakeOnLan.showsBanner(client.paired, client.cantConnect, client.wakeAvailable, typing, page, topLevel)) WakeBanner(client)
             Column(Modifier.weight(1f).fillMaxWidth()) {
                 if (!client.loaded) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -630,7 +642,7 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
                     }
                 }
             }
-            if (client.paired && page in topLevel && !typing) RaticodeBottomBar(Modifier.testTag("desktopNavigation")) {
+            if (client.paired && page in topLevel && !typing && !fullscreenVideo) RaticodeBottomBar(Modifier.testTag("desktopNavigation")) {
                 // Waiting approvals show on Approvals when it is on the bar, otherwise on More.
                 val badged = if ("Approvals" in bar) "Approvals" else LiveNavigation.MORE
                 LiveNavigation.tabs(bar).forEach { (target, label) ->
@@ -645,6 +657,12 @@ fun LiveScreen(onBack: () -> Unit = {}, initialThread: String? = null, liveClien
     // Opened from the launcher: offer to make Rem the phone's assistant (Android 12+; voice mode needs on-device speech).
     if (offerVoiceSetup && client.loaded && android.os.Build.VERSION.SDK_INT >= 31)
         VoiceSetupOffer(client.paired, onDone = consumeVoiceOffer, onOpenVoicePage = { page = "Voice" })
+    // A plain locked state: the desktop's suspicious-request guard refuses everything until the user unlocks it there.
+    var lockNoticeSeen by remember { mutableStateOf(false) }
+    LaunchedEffect(client.lockedByDesktop) { if (!client.lockedByDesktop) lockNoticeSeen = false }
+    if (client.lockedByDesktop && !lockNoticeSeen && client.requestError == null) AlertDialog(onDismissRequest = { lockNoticeSeen = true },
+        title = { Text("Phone locked") }, text = { Text(dev.raticode.mobile.live.PhoneLock.SHOWN) },
+        confirmButton = { TextButton(onClick = { lockNoticeSeen = true }) { Text("OK") } })
     client.requestError?.let { error -> AlertDialog(onDismissRequest = client::dismissRequestError, title = { Text("Desktop request") }, text = { Text(error) }, confirmButton = { TextButton(onClick = { client.dismissRequestError(); client.refresh() }) { Text("OK") } }) }
     if (modelPicker) AlertDialog(onDismissRequest = { modelPicker = false }, title = { Text("Thread settings") },
         text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {

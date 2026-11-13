@@ -70,6 +70,7 @@ from gofer.rattish.storage import migrate_legacy_directory, workflow_owned_direc
 from gofer.subscriptions.base import Subscription
 from gofer.utils.atomic_output import atomic_binary_output, mkdir_without_links, open_binary_input
 from gofer.utils.logging import get_logger
+from gofer.utils.open_target import checked_open_target
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
 
@@ -1915,6 +1916,11 @@ async def _open_resource_handler(
         if resource_type == "folder" and not resolved.is_dir():
             raise NotADirectoryError(resolved)
         target = str(resolved)
+    target = checked_open_target(target, resource_type)
+    if sys.platform == "win32" and resource_type != "app":
+        # Not ``cmd /c start``: cmd reads & and | in a templated target as more commands.
+        os.startfile(target)  # type: ignore[attr-defined]
+        return HandlerResult(True, {"target": target, "resource_type": resource_type})
     command = _open_resource_command(target, resource_type, configuration["args"])
     returncode, stdout, stderr = await run_subprocess(
         command,
@@ -2634,8 +2640,6 @@ def _shell_command_args(command: str) -> list[str]:
 def _open_resource_command(target: str, resource_type: str, args: list[str]) -> list[str]:
     if resource_type == "app":
         return [target, *args]
-    if sys.platform == "win32":
-        return ["cmd", "/c", "start", "", target]
     if sys.platform == "darwin":
         return ["open", target]
     return ["xdg-open", target]

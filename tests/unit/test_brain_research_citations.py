@@ -235,3 +235,53 @@ def test_formatting_recovery_publishes_original_quote_and_selector_without_an_ex
     citation = library.entity("reports", result["reportId"])["citations"][0]
     assert len(calls) == 1
     assert citation["quote"] == citation["selector"]["exact"] == doc["blocks"][0]["text"]
+
+
+FEED = (
+    "<rss><channel>"
+    "<item><link>https://example.com/a</link></item>"
+    "<item><link>javascript:alert(1)</link></item>"
+    "<item><link>https://example.com/a</link></item>"
+    "<item><link>http://example.org/b</link></item>"
+    "</channel></rss>"
+)
+
+
+def test_web_sources_reads_links_from_a_plain_feed(monkeypatch):
+    from gofer.ui import brain_research
+
+    monkeypatch.setattr(brain_research, "fetch_public_page", lambda url, cancel: FEED)
+    assert brain_research.web_sources("q", threading.Event()) == [
+        "https://example.com/a",
+        "http://example.org/b",
+    ]
+
+
+@pytest.mark.parametrize(
+    "feed",
+    [
+        # Entity expansion ("billion laughs").
+        '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "aaaaaaaaaa">'
+        '<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]>'
+        "<rss><channel><item><link>https://x.test/&b;</link></item></channel></rss>",
+        # External entity pointing at a local file.
+        '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]>'
+        "<rss><channel><item><link>&x;</link></item></channel></rss>",
+        # A bare document type with no entities.
+        '<!DOCTYPE rss SYSTEM "http://attacker.test/rss.dtd">' + FEED,
+    ],
+)
+def test_web_sources_refuses_feeds_with_a_document_type(monkeypatch, feed):
+    from gofer.ui import brain_research
+
+    monkeypatch.setattr(brain_research, "fetch_public_page", lambda url, cancel: feed)
+    with pytest.raises(ValueError, match="document type"):
+        brain_research.web_sources("q", threading.Event())
+
+
+def test_web_sources_reports_a_broken_feed_plainly(monkeypatch):
+    from gofer.ui import brain_research
+
+    monkeypatch.setattr(brain_research, "fetch_public_page", lambda url, cancel: "<rss><channel>")
+    with pytest.raises(ValueError, match="valid feed"):
+        brain_research.web_sources("q", threading.Event())

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from gofer.devices.desktop_control import Refused
+from gofer.utils.process import NO_REPOSITORY_PROGRAMS, untrusted_repository_git_env
 
 READS = frozenset(
     {
@@ -87,10 +88,20 @@ def git(root: str, *args: str, codes: tuple[int, ...] = (0,)) -> str:
     """Run one read-only Git command in ``root`` and return its output."""
     try:
         done = subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "-c", "core.quotepath=false", "-C", root, *args],
+            # Status runs clean filters on changed files; the repository's own filter
+            # commands are blanked like the desktop's (git-status.cjs).
+            [
+                "git",
+                *NO_REPOSITORY_PROGRAMS,
+                "-c",
+                "core.quotepath=false",
+                "-C",
+                root,
+                *args,
+            ],
             capture_output=True,
             timeout=TIMEOUT,
-            env=_environment(),
+            env=untrusted_repository_git_env(root, _environment()),
             stdin=subprocess.DEVNULL,
             check=False,
         )

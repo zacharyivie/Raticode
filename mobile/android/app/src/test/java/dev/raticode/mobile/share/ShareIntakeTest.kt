@@ -75,6 +75,29 @@ class ShareIntakeTest {
         assertEquals(listOf("Rem takes 8 files at a time, so 3 more were left out."), plan.refused)
     }
 
+    /** Items past the lookup cap are never read but still counted, so the user sees how many were left out. */
+    @Test fun hugeSharesAreCountedWithoutLookingEveryItemUp() {
+        val plan = ShareIntake.plan(null, null, List(ShareIntake.MAX_DESCRIBED) { content("image/png") }, notDescribed = 5000)
+        assertEquals(ShareIntake.MAX_FILES, plan.accepted.size)
+        assertEquals(listOf("Rem takes 8 files at a time, so ${ShareIntake.MAX_DESCRIBED - ShareIntake.MAX_FILES + 5000} more were left out."), plan.refused)
+    }
+
+    /** A name can't disguise the kind of file it was accepted as, since the desktop types files by extension. */
+    @Test fun aNameThatDisagreesWithItsTypeGetsTheTypesExtension() {
+        val types = mapOf("png" to "image/png", "jpg" to "image/jpeg", "exe" to "application/x-msdownload", "desktop" to "application/x-desktop",
+            "pdf" to "application/pdf", "zip" to "application/zip", "txt" to "text/plain", "py" to "text/x-python")
+        val typeOf = { ext: String -> types[ext] }
+        assertEquals("payload.exe.png", ShareIntake.name("payload.exe", "png", 0, "image/png", typeOf))
+        assertEquals("x.desktop.txt", ShareIntake.name("x.desktop", "txt", 0, "text/plain", typeOf))
+        assertEquals("a.zip.pdf", ShareIntake.name("a.zip", "pdf", 0, "application/pdf", typeOf))
+        assertEquals("clip.weird.mp4", ShareIntake.name("clip.weird", "mp4", 0, "video/mp4", typeOf))
+        // Names that already match their kind stay as they are, and unknown extensions are fine on text.
+        assertEquals("photo.png", ShareIntake.name("photo.png", "jpg", 0, "image/jpeg", typeOf))
+        assertEquals("doc.pdf", ShareIntake.name("doc.pdf", "pdf", 0, "application/pdf", typeOf))
+        assertEquals("notes.kt", ShareIntake.name("notes.kt", "txt", 0, "text/plain", typeOf))
+        assertEquals("script.py", ShareIntake.name("script.py", "txt", 0, "text/plain", typeOf))
+    }
+
     @Test fun wildcardTypesFromTheSenderStillMatchTheirFamily() {
         assertTrue(ShareIntake.supported("image/*"))
         assertFalse(ShareIntake.supported("*/*"))

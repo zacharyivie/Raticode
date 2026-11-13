@@ -9,7 +9,6 @@ import java.net.InetAddress
 /**
  * Wake-on-LAN for a sleeping desktop. The packet is unencrypted by design and holds only the
  * network card's hardware address. It has no reply, so nothing here can say whether it worked.
- * See "Wake the computer" in docs/architecture.md for the security note.
  */
 internal object WakeOnLan {
     /** The field in the desktop's `overview` answer. Present only while the desktop setting is on. */

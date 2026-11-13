@@ -7,6 +7,14 @@ import org.junit.Test
 
 /** What Raticode's Gecko browser saves and what it may install. */
 class GeckoRulesTest {
+    /** A page, even one in a background tab, can't bury the browser in dialogs Back doesn't close. */
+    @Test fun onlyTheTabOnScreenAsksAndOnlyAFewQuestionsWait() {
+        assertTrue(GeckoRules.mayAsk(activeTab = true, waiting = 0))
+        assertTrue(GeckoRules.mayAsk(activeTab = true, waiting = GeckoRules.MAX_WAITING_ASKS - 1))
+        assertFalse(GeckoRules.mayAsk(activeTab = true, waiting = GeckoRules.MAX_WAITING_ASKS))
+        assertFalse(GeckoRules.mayAsk(activeTab = false, waiting = 0))
+    }
+
     @Test fun savedStateRoundTripsAndKeepsProfilesApart() {
         val work = GeckoRules.Profile("w1", "Work")
         val saved = GeckoRules.Saved(
@@ -59,6 +67,37 @@ class GeckoRulesTest {
         assertEquals(listOf("Alpha", "Plain"), results.map { it.name })
         assertTrue(results[0].android); assertFalse(results[1].android)
         assertEquals(emptyList<GeckoRules.Listing>(), GeckoRules.parseSearch("nope"))
+    }
+
+    @Test fun openPressesTheButtonOrOpensSettingsOrSaysWhyNot() {
+        val options = "moz-extension://abc/options.html"
+        fun open(enabled: Boolean = true, button: Boolean = true, on: Boolean? = true, settings: String? = null, private: Boolean = false) =
+            GeckoRules.extensionOpen("uBlock", enabled, button, on, settings, private)
+        // A toolbar button is pressed, whether or not there is a settings page, and when the extension didn't say it's on.
+        assertEquals(GeckoRules.ExtensionOpen.Button, open())
+        assertEquals(GeckoRules.ExtensionOpen.Button, open(settings = options))
+        assertEquals(GeckoRules.ExtensionOpen.Button, open(on = null))
+        // No button: its settings page; a button that's off for this page: settings if there are any.
+        assertEquals(GeckoRules.ExtensionOpen.Options(options), open(button = false, on = null, settings = options))
+        assertEquals(GeckoRules.ExtensionOpen.Options(options), open(on = false, settings = options))
+        // Nothing to open, said in words and never silently.
+        for (refused in listOf(open(enabled = false), open(on = false), open(button = false, on = null), open(private = true), open(private = true, settings = options)))
+            assertTrue("$refused", refused is GeckoRules.ExtensionOpen.Refused && (refused as GeckoRules.ExtensionOpen.Refused).message.contains("uBlock"))
+        assertTrue((open(enabled = false) as GeckoRules.ExtensionOpen.Refused).message.startsWith("Turn uBlock on"))
+        assertTrue((open(on = false) as GeckoRules.ExtensionOpen.Refused).message.contains("off on this page"))
+        assertTrue((open(button = false, on = null) as GeckoRules.ExtensionOpen.Refused).message.contains("nothing to open"))
+        // Extensions don't run in private tabs, so a button press there is refused; a settings-only extension still opens them.
+        assertTrue((open(private = true) as GeckoRules.ExtensionOpen.Refused).message.contains("private tabs"))
+        assertEquals(GeckoRules.ExtensionOpen.Options(options), open(button = false, on = null, settings = options, private = true))
+        assertTrue(GeckoRules.extensionActedOnPage("uBlock").contains("page you're viewing"))
+    }
+
+    @Test fun extensionsAreToldOnlyAboutTheRegularTabInView() {
+        assertEquals("a", GeckoRules.extensionTab("a", private = false, live = true))
+        // A private tab is never named to extensions, a tab without a page session can't be, and nor can no tab.
+        assertEquals(null, GeckoRules.extensionTab("a", private = true, live = true))
+        assertEquals(null, GeckoRules.extensionTab("a", private = false, live = false))
+        assertEquals(null, GeckoRules.extensionTab(null, private = false, live = true))
     }
 
     @Test fun installErrorsAreInPlainWords() {

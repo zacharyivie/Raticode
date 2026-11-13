@@ -68,3 +68,70 @@ test('dev launcher starts when the profile lock is stale or from another host', 
     assert.equal(outcome.spawned.command, '/electron');
   }
 });
+
+// Runs the launcher with event-emitting fakes for the process and Electron.
+function launchWithSignals() {
+  const { EventEmitter } = require('node:events');
+  const fakeProcess = new EventEmitter();
+  Object.assign(fakeProcess, {
+    env: { XDG_CONFIG_HOME: '/tmp/raticode-dev-fixture/config' }, argv: ['node', 'dev-runner.cjs'],
+    stderr: Object.assign(new EventEmitter(), { write() {} }), stdout: new EventEmitter(),
+    raised: [], exits: [],
+    kill(pid, signal) { fakeProcess.raised.push(signal); },
+    exit(code) { fakeProcess.exits.push(code); },
+  });
+  const child = new EventEmitter();
+  Object.assign(child, { exitCode: null, signalCode: null, killed: [], kill(signal) { child.killed.push(signal); } });
+  const filtered = { piped: [], resumed: false, pipe(target) { filtered.piped.push(target); }, unpipe(target) { filtered.piped = filtered.piped.filter(item => item !== target); }, resume() { filtered.resumed = true; } };
+  child.stderr = { pipe: () => filtered };
+  vm.runInNewContext(source, {
+    require(name) {
+      if (name === 'electron') return '/electron';
+      if (name === './chromium-stderr.cjs') return { createChromiumStderrFilter: () => ({}) };
+      if (name === './gecko-display.cjs') return require('../gecko-display.cjs');
+      if (name === 'node:child_process') return { spawn: () => child };
+      return require(name);
+    },
+    process: fakeProcess,
+  });
+  return { fakeProcess, child, filtered };
+}
+
+test('dev launcher stays until Electron has quit after Ctrl+C and never passes the signal on', () => {
+  const { fakeProcess, child } = launchWithSignals();
+  // Ctrl+C reaches both processes; leaving now would close Electron's stderr under it.
+  fakeProcess.emit('SIGINT', 'SIGINT');
+  assert.deepEqual(fakeProcess.exits, []);
+  assert.deepEqual(fakeProcess.raised, []);
+  // Electron only handles the first signal; a second one would kill it outright.
+  assert.deepEqual(child.killed, []);
+  child.emit('close', 0, null);
+  assert.deepEqual(fakeProcess.exits, [0]);
+  assert.equal(fakeProcess.listenerCount('SIGINT'), 0);
+});
+
+test('a second Ctrl+C ends the dev launcher at once', () => {
+  const { fakeProcess, child } = launchWithSignals();
+  fakeProcess.emit('SIGINT', 'SIGINT');
+  fakeProcess.emit('SIGINT', 'SIGINT');
+  assert.deepEqual(fakeProcess.raised, ['SIGINT']);
+  assert.equal(fakeProcess.listenerCount('SIGINT'), 0);
+  assert.deepEqual(child.killed, []);
+});
+
+test('dev launcher re-raises the signal that ended Electron once its own handlers are gone', () => {
+  const { fakeProcess, child } = launchWithSignals();
+  child.emit('close', null, 'SIGTERM');
+  assert.deepEqual(fakeProcess.raised, ['SIGTERM']);
+  assert.equal(fakeProcess.listenerCount('SIGTERM'), 0);
+});
+
+test('dev launcher keeps draining Electron stderr after the terminal stops reading', () => {
+  const { fakeProcess, filtered } = launchWithSignals();
+  assert.deepEqual(filtered.piped, [fakeProcess.stderr]);
+  fakeProcess.stderr.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+  assert.deepEqual(filtered.piped, []);
+  assert.equal(filtered.resumed, true);
+  // A broken stdout is not an uncaught error either.
+  assert.doesNotThrow(() => fakeProcess.stdout.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })));
+});

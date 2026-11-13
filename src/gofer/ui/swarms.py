@@ -833,6 +833,7 @@ class SwarmManager:
         expected_configuration: dict[str, Any] | None = None,
         expected_configuration_hash: str | None = None,
         confirm_full_access: bool = False,
+        confirmed_by: str = "user",
     ) -> dict[str, Any]:
         if not isinstance(task, str) or not task.strip():
             raise SwarmError("A nonempty run task is required")
@@ -898,7 +899,9 @@ class SwarmManager:
                 run["organization"] = copy.deepcopy(organization_scope)
                 run["configuration"]["maxConcurrency"] = 1
             if unrestricted:
-                self._event(run, "full_access_confirmed", "user", {"agents": unrestricted})
+                # Credit whoever confirmed: the audit trail must not show Rem's own
+                # confirmation as the user's.
+                self._event(run, "full_access_confirmed", confirmed_by, {"agents": unrestricted})
             run["state"] = "paused"
             self._save(swarm)
             try:

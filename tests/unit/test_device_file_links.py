@@ -542,3 +542,26 @@ def test_phones_get_the_full_paths_rem_wrote_and_can_open_them(linked, tmp_path,
         "desktop.action", "files.link", {"source": "rem", "message_id": "mine", "href": str(clip)}
     )
     assert mine["code"] == "not_found"
+
+
+def test_a_piece_cut_from_a_longer_link_is_refused(linked):
+    """A link must be whole in Rem's message, not any substring of it (security review B-O18)."""
+    app, _, _, send, report, _ = linked
+    parent = str(report.parent)
+    rem = app.desktop.rem
+    rem.store.messages.append(
+        {"id": "reply-3", "role": "rem", "body": f"See {report} and more.", "created_at": "t6"}
+    )
+    for piece in (parent, str(report)[:-3], str(report)[1:]):
+        refused = send(
+            "desktop.action",
+            "files.link",
+            {"source": "rem", "message_id": "reply-3", "href": piece},
+        )
+        assert refused["code"] == "not_found", piece
+    whole = send(
+        "desktop.action",
+        "files.link",
+        {"source": "rem", "message_id": "reply-3", "href": str(report)},
+    )
+    assert whole["ok"], whole

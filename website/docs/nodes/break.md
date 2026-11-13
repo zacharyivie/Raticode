@@ -10,7 +10,7 @@ Close pending iterations of a named loop without cancelling branches already run
 
 ## When to use it
 
-Use a break node inside the targeted loop's body when a condition says enough work has been done. Use workflow Stop when you mean cancellation of the whole run.
+Put it inside the loop's body for when a condition says enough work is done. To cancel the whole run, use the workflow's Stop instead.
 
 ## Example
 
@@ -34,13 +34,15 @@ Node step:
   message: Enough work has been done.
 ```
 
-The target must be an existing loop in the applicable activation lineage. A break node cannot have outgoing `to` routes. It stops pending iterations of that loop activation; active branches finish, and completion routes settle after they do.
-
-This example breaks an infinite loop as soon as its first body activation reaches the break node. Real workflows usually route to it conditionally. The message explains the decision in the result.
+- `loop` must name a loop this node runs inside, in the same activation lineage.
+- A break node can't have outgoing `to` routes.
+- It cancels that loop's pending iterations. Running branches finish first, then the loop's completion routes fire.
+- The example stops an infinite loop on its first iteration. Real workflows usually route to a break on a condition.
+- `message` records why the loop stopped in the result.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -49,21 +51,21 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
 | `loop` | string |
 | `message` | string |
 
-For example, refer to `node.step.output.loop` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.loop`.
 
 ## Preflight and limits
 
-The compiler validates the loop target and control-flow placement. There is no separate executable or credential dependency.
+The compiler checks the loop target and where the break sits in the graph. It needs no executable or credentials.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

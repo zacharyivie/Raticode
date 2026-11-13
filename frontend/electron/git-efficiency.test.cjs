@@ -9,9 +9,12 @@ const childProcess = require("node:child_process");
 test("Git status reuses repository locations and still detects external branch changes", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "raticode-git-cache-"));
   const calls = [];
+  // Reads first list the repository's own command settings (filters, diff drivers)
+  // so they can be blanked. That config read is cached, so count it separately.
+  const configProbes = [];
   const module = { exports: {} };
   const localRequire = (name) => name === "node:child_process" ? {
-    execFile(...args) { calls.push(args[1]); return childProcess.execFile(...args); },
+    execFile(...args) { (args[1].includes("--show-scope") ? configProbes : calls).push(args[1]); return childProcess.execFile(...args); },
   } : require(name);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "git-status.cjs"), "utf8"), { require: localRequire, module, process, Buffer });
   const { readGitStatus } = module.exports;
@@ -28,6 +31,7 @@ test("Git status reuses repository locations and still detects external branch c
     assert.equal(second.branch, "external");
     assert.equal(calls.length, 4);
     assert.ok(calls.every((args) => !args.includes("rev-parse")));
+    assert.equal(configProbes.length, 1, "repository command settings are read once per refresh window");
     assert.deepEqual(JSON.parse(JSON.stringify(first.entries)), JSON.parse(JSON.stringify(second.entries)));
     calls.length = 0;
     fs.writeFileSync(path.join(root, '.git', 'MERGE_HEAD'), 'external-operation');

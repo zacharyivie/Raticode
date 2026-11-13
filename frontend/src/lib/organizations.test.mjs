@@ -191,3 +191,58 @@ test("automatic updates name the tasks that changed", () => {
   assert.equal(entry.text, "Updated work automatically");
   assert.equal(entry.detail, "“Build”: To do → Blocked");
 });
+
+test("the activity log says which Backlog tickets workers pulled", () => {
+  const [entry] = activityEntries([{ sequence: 1, kind: "backlog_pull", actor: "system", at: "2026-11-11T00:00:00Z", payload: { pulled: [{ taskId: "t", key: "STU-6", title: "Build", employee: "Mira Santos" }, { taskId: "u", key: "", title: "Plan", employee: "Avery Lane" }] } }]);
+  assert.equal(entry.text, "Pulled 2 Backlog tickets into To do");
+  assert.equal(entry.detail, "STU-6 “Build” for Mira Santos; “Plan” for Avery Lane");
+});
+
+test("approve all applies configuration changes oldest revision first and starting last", async () => {
+  const { approvalOrder } = await import("./organizations.js");
+  const ordered = approvalOrder([
+    { id: "start", action: "control", at: "2026-11-11T20:00:00Z" },
+    { id: "archive", action: "archive", at: "2026-11-11T19:00:00Z" },
+    { id: "ticket", action: "task_update", at: "2026-11-11T20:01:00Z", params: { expectedRevision: 9 } },
+    { id: "late", action: "configure", at: "2026-11-11T20:02:00Z", params: { expectedRevision: 4 } },
+    { id: "early", action: "configure", at: "2026-11-11T20:05:00Z", params: { expectedRevision: 3 } },
+    { id: "holds", action: "resume_all", at: "2026-11-11T20:03:00Z", params: { expectedRevision: 4 } },
+  ]);
+  assert.deepEqual(ordered.map(r => r.id), ["early", "late", "holds", "ticket", "start", "archive"]);
+});
+test("approve all results read as one plain sentence", async () => {
+  const { approveAllSummary } = await import("./organizations.js");
+  assert.equal(approveAllSummary([{ status: "approved" }, { status: "approved" }]), "Approved all 2 requests.");
+  assert.equal(approveAllSummary([{ status: "approved" }, { status: "failed" }, { status: "skipped" }]), "Approved 1 of 3, 1 failed, 1 request left waiting.");
+});
+
+test("in Auto mode only requests that wait on the user count as needing you", async () => {
+  const { pendingRequests, reviewingRequests, autoDecisions, AUTO_DECISION_LABEL } = await import("./organizations.js");
+  const at = new Date().toISOString();
+  const runtime = {
+    consentRequests: {
+      a: { id: "a", status: "pending", at, waitingOn: "rem" },
+      b: { id: "b", status: "pending", at, waitingOn: "you" },
+      c: { id: "c", status: "pending", at },
+      d: { id: "d", status: "approved", at },
+    },
+    autoDecisions: [{ requestId: "x", decision: "approve" }, { requestId: "y", decision: "halt" }],
+  };
+  assert.deepEqual(pendingRequests(runtime).map(r => r.id), ["b", "c"]);
+  assert.deepEqual(reviewingRequests(runtime).map(r => r.id), ["a"]);
+  assert.deepEqual(autoDecisions(runtime).map(d => d.requestId), ["y", "x"]);
+  assert.equal(AUTO_DECISION_LABEL.modify, "Approved with changes");
+});
+
+test("the activity log says what Rem decided in Auto mode and why it stopped", async () => {
+  const { activityEntries } = await import("./organizations.js");
+  const entries = activityEntries([
+    { sequence: 1, kind: "auto_decision", actor: "Rem:auto", at: "2026-11-11T20:00:00Z", payload: { auto: { decision: "decline", summary: "Give Avery full access", reason: "Not needed.", recommendation: "Use workspace-write." } } },
+    { sequence: 2, kind: "auto_mode_halted", actor: "Rem:auto", at: "2026-11-11T20:01:00Z", payload: { halt: { reason: "Needs a sign-in.", userAction: "Sign in." } } },
+  ], []);
+  const decided = entries.find(e => e.kind === "auto_decision"), halted = entries.find(e => e.kind === "auto_mode_halted");
+  assert.equal(decided.text, "Rem in Auto mode: Declined “Give Avery full access”");
+  assert.match(decided.detail, /Recommended: Use workspace-write\./);
+  assert.equal(halted.text, "Auto mode stopped the organization");
+  assert.match(halted.detail, /To continue: Sign in\./);
+});

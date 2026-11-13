@@ -303,3 +303,35 @@ def test_a_general_worktree_skill_never_holds_a_task_for_dev(
     first = turns[0]["agent_instructions"]
     assert "with one exception: landing" in first
     assert "isn't finished until its branch has landed" not in first
+
+
+def test_backend_git_in_agent_folders_runs_no_repository_programs(tmp_path, monkeypatch) -> None:
+    """A worker that edits .git/config can't get fsmonitor or hooks run by the backend."""
+    import subprocess
+
+    from gofer.ui import rem_home_landing, rem_home_worktree, rem_threads
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    marker = tmp_path / "ran"
+    script = tmp_path / "program.sh"
+    script.write_text(f"#!/bin/sh\nenv > '{marker}'\n")
+    script.chmod(0o700)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "post-commit").write_text(script.read_text())
+    (hooks / "post-commit").chmod(0o700)
+    for key, value in (("core.fsmonitor", str(script)), ("core.hooksPath", str(hooks))):
+        subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
+    (repo / "a.txt").write_text("a\n")
+    monkeypatch.setenv("GOFER_DESKTOP_GRANT_SECRET", "desktop-grant-secret")
+
+    rem_home_worktree._git(repo, "status", "--porcelain")
+    rem_home_worktree._git(repo, "add", "-A")
+    rem_home_worktree._git(
+        repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"
+    )
+    rem_home_landing._git(repo, "status", "--porcelain")
+    rem_threads._git_worktrees(repo)
+
+    assert not marker.exists()

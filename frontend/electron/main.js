@@ -73,6 +73,7 @@ const { PARTITIONS: BROWSER_PARTITIONS } = require("./browser-policy.cjs");
 const { searchProject, replaceProject } = require("./project-search.cjs");
 const { createAppLog, redactLog } = require("./app-log.cjs");
 const { createBackendOutput } = require("./backend-log.cjs");
+const { createMainErrorHandler, createTerminalOutput, describeError, rejectionLevel } = require("./main-errors.cjs");
 const util = require("node:util");
 const { createArchiveQueue } = require("./archive-queue.cjs");
 const conversationArchives = createArchiveQueue();
@@ -156,12 +157,43 @@ let updateState = {
   available: false,
   checking: false,
   downloading: false,
+  verifying: false,
   downloaded: false,
   error: "",
   info: null,
   progress: null,
 };
 let installUpdateAfterDownload = false;
+
+// Set as soon as a quit starts, before unsaved files are checked. Ctrl+C in the
+// terminal starts one: Electron turns SIGINT, SIGTERM and SIGHUP into app.quit()
+// itself (listeners on process never run), and the same keypress stops the backend.
+let quitPending = false;
+let backendStoppedDuringQuit = false;
+// How long a backend that stopped by itself waits for a quit to start before it is
+// reported as a crash. Ctrl+C reaches the backend and Electron at the same moment.
+const BACKEND_CRASH_GRACE_MS = 2000;
+
+// Before the app log opens, entries go to stderr, which may itself be closed.
+function logMainError(level, message) {
+  if (applicationLog?.write(level, "desktop", message)) return;
+  if (level === "info" || level === "debug") return;
+  try { fs.writeSync(2, `${redactLog(message).slice(0, 4096)}\n`); } catch { /* stderr may be closed. */ }
+}
+// Ctrl+C in the terminal closes the pipes behind stdout and stderr while the backend
+// is still logging. Stop echoing then instead of failing every write.
+const terminalOutput = createTerminalOutput({ stdout: process.stdout, stderr: process.stderr, log: logMainError });
+// Replaces Electron's default handler, which showed a dialog for every error,
+// including each failed write to a closed terminal.
+process.on("uncaughtException", createMainErrorHandler({
+  quitting: () => isQuitting || quitPending,
+  log: logMainError,
+  show: error => dialog.showErrorBox("A JavaScript error occurred in the main process", `Uncaught Exception:\n${describeError(error)}`),
+}));
+process.on("unhandledRejection", (error) => logMainError(
+  rejectionLevel(error, { quitting: isQuitting || quitPending }),
+  `Unhandled rejection: ${error?.stack || util.inspect(error, { depth: 3 })}`,
+));
 
 // Gecko's window can only be placed inside Raticode's over X11. The dev runner
 // adds the switch itself, since it has to stay Electron's parent.
@@ -187,8 +219,10 @@ if (!singleInstanceLock) {
 
 let lastWindowArgs = null;
 const shownWindows = new WeakSet();
-function createWindow(apiBaseUrl, apiToken = "", { show = true } = {}) {
-  lastWindowArgs = [apiBaseUrl, apiToken];
+// The UI's API token never goes on the renderer's command line, where other local
+// accounts can read it from /proc. The renderer asks for it over gofer:api-session.
+function createWindow(apiBaseUrl, { show = true } = {}) {
+  lastWindowArgs = [apiBaseUrl];
   legacyProjectMigrationToken = "";
   try {
     if (!trustedProjectStore().read().legacyRecentProjectsMigrated) legacyProjectMigrationToken = crypto.randomUUID();
@@ -211,7 +245,6 @@ function createWindow(apiBaseUrl, apiToken = "", { show = true } = {}) {
       backgroundThrottling: false,
       additionalArguments: [
         `--gofer-api-base-url=${apiBaseUrl}`,
-        `--gofer-api-token=${apiToken}`,
         `--gofer-browser-preload=${pathToFileURL(browserPreloadPath)}`,
         ...(legacyProjectMigrationToken ? [`--gofer-legacy-project-migration=${legacyProjectMigrationToken}`] : []),
       ],
@@ -467,7 +500,8 @@ function startBackend(port = 0) {
       write: (level, source, message, component) => applicationLog?.write(level, source, message, component),
       echo: (line) => {
         stderrBuffer = (stderrBuffer + line + "\n").slice(-65536);
-        process.stderr.write(`[gofer-backend] ${line}\n`);
+        // Stops quietly once the terminal closes; the app log keeps every line.
+        terminalOutput.stderr(`[gofer-backend] ${line}\n`);
       },
     });
     child.stdout.on("data", handleOutput);
@@ -480,29 +514,36 @@ function startBackend(port = 0) {
     });
     child.on("exit", (code, signal) => {
       backendOutput.end();
-      const expected = isQuitting || expectedBackendStops.has(child);
       const ran = ((Date.now() - backendStarted) / 1000).toFixed(1);
-      applicationLog?.write(expected ? "info" : "error", "backend", expected
-        ? `Backend stopped after ${ran} s (${signal ? `signal ${signal}` : `exit code ${code}`})`
-        : `Backend ${settled ? "stopped unexpectedly" : "exited before it was ready"} after ${ran} s (${signal ? `signal ${signal}` : `exit code ${code}`})`);
+      const how = signal ? `signal ${signal}` : `exit code ${code}`;
       if (backendProcess === child) {
         backendPathGrants.reset();
         loggedPathGrants.clear();
         backendProcess = undefined;
         closeBackendLogStream();
       }
-      if (isQuitting || expectedBackendStops.has(child)) {
+      const stoppedForQuit = () => {
+        applicationLog?.write("info", "backend", `Backend stopped after ${ran} s (${how})`);
+        // A quit that unsaved files then cancel leaves Raticode without its backend.
+        if (!isQuitting && !expectedBackendStops.has(child)) backendStoppedDuringQuit = true;
+      };
+      if (isQuitting || quitPending || expectedBackendStops.has(child)) {
+        stoppedForQuit();
         return;
       }
       const detail = stderrBuffer.trim() || `Backend exited with code ${code ?? signal}.`;
-      // The exit and its output are already in the log above.
+      // Its output is already in the log; the exit line follows below.
       const exitError = Object.assign(new Error(detail), { backendExit: true });
       if (!settled) {
+        applicationLog?.write("error", "backend", `Backend exited before it was ready after ${ran} s (${how})`);
         fail(exitError);
         return;
       }
-
-      showBackendCrash(exitError);
+      setTimeout(() => {
+        if (isQuitting || quitPending) { stoppedForQuit(); return; }
+        applicationLog?.write("error", "backend", `Backend stopped unexpectedly after ${ran} s (${how})`);
+        showBackendCrash(exitError);
+      }, BACKEND_CRASH_GRACE_MS);
     });
   });
 }
@@ -700,8 +741,6 @@ app.whenReady().then(async () => {
     const helper = describeSpeechHelper(macosSpeechHelperPath());
     applicationLog.write(helper.startsWith("present") ? "info" : "warn", "desktop", `macOS speech helper ${helper}`);
   }
-  process.on("uncaughtExceptionMonitor", (error) => applicationLog.emergency(error.stack || error.message));
-  process.on("unhandledRejection", (error) => applicationLog.write("error", "desktop", `Unhandled rejection: ${error?.stack || util.inspect(error, { depth: 3 })}`));
   app.on("web-contents-created", (_event, contents) => {
     contents.once("destroyed", () => { mediaPreviews.closeOwner(contents.id); gitWatcher.closeOwner(contents.id); });
     contents.on("render-process-gone", () => { mediaPreviews.closeOwner(contents.id); gitWatcher.closeOwner(contents.id); });
@@ -829,10 +868,17 @@ function prepareLifecycle(reason) {
   return promise.finally(() => owner.removeListener("destroyed", cancel));
 }
 app.on("before-quit", (event) => {
+  quitPending = true;
   if (!lifecycleApproved && mainWindow && !mainWindow.isDestroyed() && !isSmokeTest) {
     event.preventDefault();
     void prepareLifecycle("quit Raticode").then(approved => {
-      if (approved) { lifecycleApproved = true; app.quit(); }
+      if (approved) { lifecycleApproved = true; app.quit(); return; }
+      quitPending = false;
+      // Ctrl+C in the terminal also stopped the backend; say so now that Raticode stays open.
+      if (backendStoppedDuringQuit && !backendProcess) {
+        backendStoppedDuringQuit = false;
+        showBackendCrash(Object.assign(new Error("The backend stopped while Raticode was asked to quit, and the quit was cancelled to keep unsaved files."), { backendExit: true }));
+      }
     });
     return;
   }
@@ -1431,6 +1477,8 @@ function closeAllTerminals() {
 // package manager instead. The .deb and .rpm builds write "deb" and "rpm" and keep
 // updating themselves through electron-updater.
 let installedPackageManager;
+let macVerifyTimer = null;
+const MAC_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
 function systemPackageManager() {
   if (installedPackageManager === undefined) {
     installedPackageManager = "";
@@ -1448,11 +1496,103 @@ function systemPackageManager() {
 
 function supportsAutoUpdates() {
   return app.isPackaged && !isSmokeTest && !systemPackageManager()
-    && (process.platform !== "darwin" || raticodeReleaseSigning === "signed");
+    && (process.platform !== "darwin" || (raticodeReleaseSigning === "signed" && !macUpdateBlocker()));
+}
+
+// macOS installs updates through Squirrel.Mac, which swaps the whole Raticode.app in
+// place. A copy opened straight from the DMG, or from Downloads under App
+// Translocation, runs from a read-only mount that nothing can replace. A copy the
+// account merely can't write is left to Squirrel.Mac, which asks for an
+// administrator's password in that case.
+function macUpdateBlocker() {
+  if (process.platform !== "darwin" || !app.isPackaged || isSmokeTest || raticodeReleaseSigning !== "signed") return "";
+  const bundle = path.resolve(process.execPath, "..", "..", "..");
+  const fromCopy = "Quit Raticode, drag it into Applications, and open it from there to get automatic updates.";
+  if (bundle.includes("/AppTranslocation/")) {
+    return `macOS is running Raticode from a temporary read-only copy, so it can't replace itself. ${fromCopy}`;
+  }
+  try {
+    fs.accessSync(bundle, fs.constants.W_OK);
+  } catch (error) {
+    if (error?.code === "EROFS") return `Raticode is running from the disk image, so it can't replace itself. ${fromCopy}`;
+  }
+  return "";
+}
+
+// Why this copy offers a manual download instead of installing the update itself.
+function manualUpdateReason() {
+  if (supportsAutoUpdates() || systemPackageManager() || isSmokeTest) return "";
+  if (!app.isPackaged) return "Development builds don't install updates themselves.";
+  if (process.platform !== "darwin") return "";
+  if (raticodeReleaseSigning !== "signed") {
+    return "This copy isn't signed with Raticode's Apple Developer ID, so macOS won't let it replace itself. Install this update by hand once; signed copies install later updates themselves.";
+  }
+  return macUpdateBlocker();
+}
+
+// electron-updater and Squirrel.Mac report low-level errors. Say what happened and
+// whether anything was installed. Messages Raticode wrote itself pass through.
+function describeUpdateError(error) {
+  const message = typeof error?.message === "string" ? error.message : String(error || "");
+  if (error?.userFacing) return message;
+  const code = String(error?.code || "");
+  const status = Number(error?.statusCode || 0) || Number(message.match(/HttpError: (\d{3})\b/)?.[1] || 0);
+  if (code === "ERR_CHECKSUM_MISMATCH" || /checksum mismatch/i.test(message)) {
+    return "The downloaded update didn't match the checksum published with the release, so Raticode discarded it. Nothing was installed. Try again.";
+  }
+  if (/code signature|did not pass validation|failed to satisfy|code requirement/i.test(message)) {
+    return "macOS refused the downloaded update because its signature doesn't match this copy of Raticode. Nothing was installed. Download the installer from the release page and replace the app by hand.";
+  }
+  if (/read-only volume/i.test(message)) {
+    return "Raticode is running from a read-only location, so macOS can't replace it. Quit Raticode, drag it into Applications, and open it from there.";
+  }
+  if (code === "ERR_UPDATER_ZIP_FILE_NOT_FOUND") {
+    return "This release has no Mac update package for this computer. Download the installer from the release page.";
+  }
+  if (code === "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND") {
+    return "The newest release doesn't list its update files yet. GitHub may still be publishing it; try again in a few minutes.";
+  }
+  if (status === 403 || status === 429 || /rate limit/i.test(message)) {
+    return "GitHub is limiting update requests from this network. Wait a few minutes and try again. A VPN, proxy or firewall can also cause this.";
+  }
+  if (/net::ERR_(INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|CONNECTION_\w+|NETWORK_\w+|ADDRESS_UNREACHABLE|TIMED_OUT|PROXY_\w+)|\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH)\b|socket hang up/.test(message)) {
+    return "Couldn't reach GitHub to update Raticode. Check your internet connection and try again.";
+  }
+  if (status >= 500) return `GitHub returned HTTP ${status} while updating Raticode. Try again in a few minutes.`;
+  return message || "The update failed without an error message.";
+}
+
+function nativeMacUpdater() {
+  return require("electron").autoUpdater;
+}
+
+function stopMacVerifyTimer() {
+  if (macVerifyTimer) clearTimeout(macVerifyTimer);
+  macVerifyTimer = null;
+}
+
+function markUpdateReady(info) {
+  stopMacVerifyTimer();
+  setUpdateState({
+    available: true,
+    checking: false,
+    downloaded: true,
+    downloading: false,
+    verifying: false,
+    error: "",
+    ...(info ? { info: updateInfoPayload(info) } : {}),
+    progress: { percent: 100 },
+  });
+  if (installUpdateAfterDownload) {
+    installUpdateAfterDownload = false;
+    setImmediate(() => { void installDownloadedUpdate().catch(error => { logUpdaterError(error); setUpdateState({ error: describeUpdateError(error) }); }); });
+  }
 }
 
 function setupAutoUpdater() {
   autoUpdater.autoDownload = false;
+  // On macOS this also hands each download to Squirrel.Mac right away, which checks
+  // its signature and installs it when Raticode quits.
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.allowDowngrade = false;
   autoUpdater.allowPrerelease = false;
@@ -1466,6 +1606,7 @@ function setupAutoUpdater() {
       checking: false,
       downloaded: false,
       downloading: false,
+      verifying: false,
       error: "",
       info: updateInfoPayload(info),
       progress: null,
@@ -1477,6 +1618,7 @@ function setupAutoUpdater() {
       checking: false,
       downloaded: false,
       downloading: false,
+      verifying: false,
       error: "",
       info: updateInfoPayload(info),
       progress: null,
@@ -1494,22 +1636,39 @@ function setupAutoUpdater() {
     });
   });
   autoUpdater.on("update-downloaded", (info) => {
-    setUpdateState({
-      available: true,
-      checking: false,
-      downloaded: true,
-      downloading: false,
-      error: "",
-      info: updateInfoPayload(info),
-      progress: { percent: 100 },
-    });
-    if (installUpdateAfterDownload) {
-      installUpdateAfterDownload = false;
-      setImmediate(() => { void installDownloadedUpdate().catch(error => { logUpdaterError(error); setUpdateState({ error: error.message }); }); });
+    if (process.platform === "darwin") {
+      // The zip is saved and matched latest-mac.yml's sha512, but Squirrel.Mac still
+      // has to unpack it and check its code signature. Raticode keeps running, with
+      // its backend, until Squirrel accepts the update or reports why it didn't.
+      setUpdateState({
+        available: true,
+        checking: false,
+        downloaded: false,
+        downloading: false,
+        verifying: true,
+        error: "",
+        info: updateInfoPayload(info),
+        progress: { percent: 100 },
+      });
+      // Squirrel.Mac normally answers within a minute. Don't leave the button stuck.
+      stopMacVerifyTimer();
+      macVerifyTimer = setTimeout(() => {
+        macVerifyTimer = null;
+        if (!updateState.verifying) return;
+        installUpdateAfterDownload = false;
+        setUpdateState({ verifying: false, error: "macOS didn't finish checking the downloaded update, so nothing was installed. Check for updates to try again." });
+      }, MAC_VERIFY_TIMEOUT_MS);
+      macVerifyTimer.unref?.();
+      return;
     }
+    markUpdateReady(info);
   });
+  if (process.platform === "darwin") {
+    nativeMacUpdater().on("update-downloaded", () => markUpdateReady());
+  }
   autoUpdater.on("error", (error) => {
     installUpdateAfterDownload = false;
+    stopMacVerifyTimer();
     if (isNoPublishedVersionsError(error)) {
       setNoReleasesUpdateState();
       return;
@@ -1518,7 +1677,8 @@ function setupAutoUpdater() {
     setUpdateState({
       checking: false,
       downloading: false,
-      error: error instanceof Error ? error.message : String(error),
+      verifying: false,
+      error: describeUpdateError(error),
     });
   });
 }
@@ -1544,7 +1704,8 @@ async function checkForUpdates() {
     setUpdateState({
       checking: false,
       downloading: false,
-      error: error instanceof Error ? error.message : String(error),
+      verifying: false,
+      error: describeUpdateError(error),
     });
   }
   return getUpdateState();
@@ -1563,13 +1724,15 @@ async function downloadAndInstallUpdate() {
   }
 
   installUpdateAfterDownload = true;
-  setUpdateState({ downloading: true, error: "" });
+  setUpdateState({ downloading: true, verifying: false, error: "" });
   try {
     await autoUpdater.downloadUpdate();
   } catch (error) {
     installUpdateAfterDownload = false;
-    setUpdateState({ downloading: false, error: error instanceof Error ? error.message : String(error) });
-    throw error;
+    logUpdaterError(error);
+    const message = describeUpdateError(error);
+    setUpdateState({ downloading: false, verifying: false, error: message });
+    throw new Error(message);
   }
   return getUpdateState();
 }
@@ -1577,6 +1740,11 @@ async function downloadAndInstallUpdate() {
 async function installDownloadedUpdate() {
   if (!supportsAutoUpdates()) {
     return getUpdateState();
+  }
+  // Squirrel.Mac must accept the update before Raticode stops anything; quitting
+  // earlier would leave a failed update with no backend.
+  if (process.platform === "darwin" && !updateState.downloaded) {
+    throw new Error("macOS is still checking the downloaded update. Raticode restarts when it's ready.");
   }
   if (!await prepareLifecycle("install the update")) return getUpdateState();
   lifecycleApproved = true;
@@ -1599,6 +1767,7 @@ function getUpdateState() {
     arch: process.arch,
     supported: supportsAutoUpdates(),
     managedBy: systemPackageManager(),
+    manualReason: manualUpdateReason(),
   };
 }
 
@@ -1615,6 +1784,7 @@ function setNoReleasesUpdateState() {
     checking: false,
     downloaded: false,
     downloading: false,
+    verifying: false,
     error: "",
     info: {
       noReleases: true,
@@ -1655,7 +1825,7 @@ async function checkLatestReleaseFallback() {
     });
   } catch (error) {
     const reason = error?.cause?.message || error?.message || String(error);
-    throw new Error(`Could not reach GitHub to check for updates: ${reason}`);
+    throw Object.assign(new Error(`Could not reach GitHub to check for updates: ${reason}`), { userFacing: true });
   }
   if (response.status === 404) {
     return {
@@ -1673,11 +1843,11 @@ async function checkLatestReleaseFallback() {
     };
   }
   if (!response.ok) {
-    throw new Error(updateCheckHttpError(response));
+    throw Object.assign(new Error(updateCheckHttpError(response)), { userFacing: true });
   }
   const release = parseUpdateMetadata(await response.text());
   if (!release.version) {
-    throw new Error("GitHub returned update information without a version.");
+    throw Object.assign(new Error("GitHub returned update information without a version."), { userFacing: true });
   }
   return {
     available: compareVersions(release.version, normalizeVersion(currentVersion)) > 0,
@@ -2587,7 +2757,7 @@ async function replaceBackendWindow() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.destroy();
     }
-    createWindow(backend.apiBaseUrl, backend.apiToken);
+    createWindow(backend.apiBaseUrl);
   } catch (error) {
     createBackendErrorWindow(error);
   }

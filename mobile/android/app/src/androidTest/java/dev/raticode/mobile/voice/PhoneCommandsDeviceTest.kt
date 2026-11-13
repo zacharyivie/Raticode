@@ -28,6 +28,9 @@ class PhoneCommandsDeviceTest {
         instrumentation.uiAutomation.grantRuntimePermission(app.packageName, Manifest.permission.SEND_SMS)
         instrumentation.runOnMainSync {
             controller = VoiceRuntime.controller(app)
+            // Direct texts need the assistant role. Swapping the real role from inside the test process can end it,
+            // so the role check is stood in for here.
+            controller.effects = PhoneEffects(app) { true }
             controller.attach()
             PeopleStore.load(app)
             PeopleStore.update(app) { emptyList() }
@@ -69,6 +72,16 @@ class PhoneCommandsDeviceTest {
         // The system recorded it as a sent text, as it does for any app's text.
         val sent = shell("content query --uri content://sms/sent --projection address:body")
         assertTrue(sent, sent.contains("5550100001") || sent.contains("555-010-0001") || sent.contains("running late"))
+    }
+
+    @Test fun withoutTheAssistantRoleATextOpensAsADraft() {
+        instrumentation.runOnMainSync {
+            controller.effects = PhoneEffects(app) { false }
+            controller.send("Text Emily I'm running late")
+        }
+        val launch = step() as CommandStep.Launch
+        assertEquals(VoiceController.NOT_ASSISTANT_DRAFT, launch.doing)
+        instrumentation.runOnMainSync { controller.cancel() }
     }
 
     @Test fun callsArePlacedAfterTheCountdown() {

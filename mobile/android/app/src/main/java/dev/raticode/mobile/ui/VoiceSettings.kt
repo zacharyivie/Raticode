@@ -20,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -137,13 +138,14 @@ private fun VoiceSwitch(title: String, detail: String, checked: Boolean, tag: St
 @Composable
 private fun SpeechStatus() {
     val context = LocalContext.current
-    val language = Locale.getDefault()
+    // Compose's locale, so the status follows a change of the phone's language.
+    val language = LocalLocale.current.platformLocale
     val available = remember { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }
     var support by remember { mutableStateOf<String?>(null) }
     val recognizer = remember { if (available && Build.VERSION.SDK_INT >= 33) SpeechRecognizer.createOnDeviceSpeechRecognizer(context) else null }
     DisposableEffect(recognizer) { onDispose { recognizer?.destroy() } }
-    val request = remember { Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.toLanguageTag()) }
-    LaunchedEffect(recognizer) {
+    val request = remember(language) { Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.toLanguageTag()) }
+    LaunchedEffect(recognizer, request) {
         if (recognizer != null && Build.VERSION.SDK_INT >= 33) runCatching {
             recognizer.checkRecognitionSupport(request, context.mainExecutor, object : RecognitionSupportCallback {
                 override fun onSupportResult(result: RecognitionSupport) { support = speechSupport(result, language) }

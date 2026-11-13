@@ -38,6 +38,9 @@
 .rem-progress-steps li[data-state=current]::before { background: linear-gradient(90deg, var(--rem-accent) 50%, var(--rem-soft-line) 50%); background-size: 200% 100%; animation: rem-progress 1.6s ease-in-out infinite alternate; }
 .rem-progress-steps li[data-state=stopped] { color: var(--rem-danger); }
 .rem-progress-steps li[data-state=stopped]::before { background: var(--rem-danger); }
+/* Paused: held where it was, not failed. Striped so it reads without color too. */
+.rem-progress-steps li[data-state=paused] { color: var(--rem-ink); font-weight: 600; }
+.rem-progress-steps li[data-state=paused]::before { background: repeating-linear-gradient(90deg, var(--rem-accent) 0 6px, var(--rem-soft-line) 6px 10px); }
 @media (prefers-reduced-motion: reduce) { .rem-progress-steps li[data-state=current]::before { animation: none; background: var(--rem-accent); opacity: .6; } }
 .rem-progress-time { color: var(--rem-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rem-work:has(.rem-progress) { flex-wrap: wrap; }

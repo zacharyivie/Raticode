@@ -56,7 +56,8 @@ function updateCheck(response) {
   const context = { useCallback: fn => fn, window: { goferUpdates: { check: async () => response } }, Error,
     setUpdateState: patch => Object.assign(state, typeof patch === "function" ? patch(state) : patch), setUpdateNotice: notice => notices.push(notice) };
   vm.createContext(context);
-  vm.runInContext(appSource.slice(appSource.indexOf("  const checkForUpdates = useCallback"), appSource.indexOf("  useEffect(() => {\n    if (!window.goferUpdates?.onState")) + "\nglobalThis.check = checkForUpdates;", context);
+  const notice = appSource.slice(appSource.indexOf("export function updateCheckNotice("), appSource.indexOf("function opensMacInstaller(")).replace(/^export /, "");
+  vm.runInContext(notice + appSource.slice(appSource.indexOf("  const checkForUpdates = useCallback"), appSource.indexOf("  useEffect(() => {\n    if (!window.goferUpdates?.onState")) + "\nglobalThis.check = checkForUpdates;", context);
   return { state, notices, check: context.check };
 }
 test("failed update responses remain errors; manual and ready states preserve their full contract", async () => {

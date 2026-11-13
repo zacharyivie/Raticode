@@ -24,12 +24,14 @@ const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1
 // Same list Chromium uses for its "may harm your computer" warning, trimmed to
 // types that run code when opened.
 const DANGEROUS_EXTENSIONS = new Set([
-  "action", "apk", "app", "appimage", "application", "appref-ms", "bas", "bat", "bin", "cab", "chm",
-  "cmd", "com", "command", "cpl", "crx", "deb", "desktop", "dll", "dmg", "docm", "exe", "gadget",
-  "hta", "inf", "ins", "isp", "jar", "jnlp", "js", "jse", "ko", "lnk", "mht", "mhtml", "mjs", "msc",
-  "msi", "msp", "mst", "pif", "pkg", "pl", "plugin", "ps1", "ps1xml", "ps2", "psc1", "py", "pyc",
-  "pyw", "rb", "reg", "rpm", "run", "scf", "scr", "sct", "service", "sh", "shb", "shs", "so", "sys",
-  "url", "vb", "vbe", "vbs", "vsix", "workflow", "ws", "wsc", "wsf", "wsh", "xbap", "xlsm", "xpi",
+  "action", "apk", "app", "appimage", "application", "appref-ms", "appx", "appxbundle", "bas", "bat",
+  "bin", "cab", "chm", "cmd", "com", "command", "cpl", "crx", "deb", "desktop", "diagcab", "dll", "dmg",
+  "docm", "dotm", "exe", "flatpakref", "gadget", "hta", "img", "inf", "ins", "iso", "isp", "jar", "jnlp",
+  "js", "jse", "ko", "library-ms", "lnk", "mht", "mhtml", "mjs", "msc", "msi", "msix", "msixbundle",
+  "msp", "mst", "one", "pif", "pkg", "pl", "plugin", "potm", "ppam", "pptm", "ps1", "ps1xml", "ps2",
+  "psc1", "py", "pyc", "pyw", "rb", "reg", "rpm", "run", "scf", "scr", "sct", "search-ms",
+  "service", "settingcontent-ms", "sh", "shb", "shs", "snap", "so", "sys", "url", "vb", "vbe", "vbs",
+  "vhd", "vhdx", "vsix", "wim", "workflow", "ws", "wsc", "wsf", "wsh", "xbap", "xlam", "xll", "xlsm", "xpi",
 ]);
 
 // Granted without a prompt, as Chromium does after a user gesture.
@@ -120,6 +122,41 @@ function cookieMatchesSite(cookieDomain, site) {
   const target = normalizeSitePattern(site);
   if (!domain || !target) return false;
   return domain === target || domain.endsWith(`.${target}`) || target.endsWith(`.${domain}`);
+}
+
+// Two-label endings such as co.uk are public suffixes, where no cookie can be set.
+const SECOND_LEVEL_SUFFIX = /^(?:ac|co|com|edu|go|gob|gov|ltd|mil|ne|net|nhs|or|org|plc|sch)\.[a-z]{2}$/;
+
+// Every domain whose cookies sharing a site may copy: the site and each parent
+// domain short of a public suffix. Sharing mail.example.com copies cookies set
+// for example.com, which sign Rem in on every example.com subdomain too.
+function signInDomains(site) {
+  const host = normalizeSitePattern(site);
+  if (!host) return [];
+  if (host.includes(":") || /^[\d.]+$/.test(host)) return [host];
+  const labels = host.split(".");
+  const domains = [host];
+  for (let index = 1; index < labels.length - 1; index += 1) {
+    const parent = labels.slice(index).join(".");
+    if (SECOND_LEVEL_SUFFIX.test(parent)) break;
+    domains.push(parent);
+  }
+  return domains;
+}
+
+// Whether a page may carry a sign-in the user shared with Rem.
+function remSignedInHost(host, sites = []) {
+  return Boolean(host) && sites.some((site) => signInDomains(site).some((domain) => hostMatches(host, domain)));
+}
+
+// A web address without its query string or fragment, which often carry
+// tokens. Used where an address lands on a process's command line.
+function addressWithoutQuery(value) {
+  const url = urlOf(value);
+  if (!url || !["http:", "https:"].includes(url.protocol)) return String(value ?? "");
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function isLocalhost(host) {
@@ -256,7 +293,9 @@ function externalProtocolOf(details = {}) {
 
 // Returns "allow", "deny" or "prompt" for one permission request.
 function permissionDecision({ permission, details = {}, stored = {}, agent = false } = {}) {
-  if (AUTO_ALLOWED_PERMISSIONS.has(permission)) return agent && permission !== "clipboard-sanitized-write" ? "deny" : "allow";
+  // Rem's own tabs get none of these, so a page Rem reads can't write to
+  // the user's clipboard.
+  if (AUTO_ALLOWED_PERMISSIONS.has(permission)) return agent ? "deny" : "allow";
   if (agent || !PROMPT_PERMISSIONS.has(permission)) return "deny";
   if (permission === "openExternal" && !externalProtocolOf(details)) return "deny";
   const keys = permission === "openExternal" ? [`openExternal:${externalProtocolOf(details)}`] : permissionKeys(permission, details);
@@ -354,7 +393,7 @@ function remSiteAllowed(url, policy = DEFAULT_BROWSER_POLICY) {
 function remNeedsConfirmation({ policy = DEFAULT_BROWSER_POLICY, url, sharedByUser = false, consequential = false } = {}) {
   if (!consequential || policy.remConfirm === "never") return false;
   if (policy.remConfirm === "always") return true;
-  return sharedByUser || matchesAnySite(hostOf(url), policy.remSignInSites || []);
+  return sharedByUser || remSignedInHost(hostOf(url), policy.remSignInSites || []);
 }
 
 // A small token bucket stops pages from flooding the studio with tabs.
@@ -370,6 +409,7 @@ function allowPageTab(session, now = Date.now()) {
 }
 
 module.exports = {
+  addressWithoutQuery,
   AUTO_ALLOWED_PERMISSIONS,
   BROWSER_PARTITIONS,
   DEFAULT_BROWSER_POLICY,
@@ -398,7 +438,9 @@ module.exports = {
   permissionLabel,
   popupDecision,
   remNeedsConfirmation,
+  remSignedInHost,
   remSiteAllowed,
+  signInDomains,
   sanitizeBrowserPolicy,
   sanitizeFilename,
   securityState,

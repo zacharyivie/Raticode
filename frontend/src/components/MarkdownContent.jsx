@@ -21,6 +21,10 @@ function MarkdownContent({
   compact = false,
   fileMentions = null,
   inverse = false,
+  // Web images load by themselves only where the text can't use them to send data
+  // out: a turn that already used web tools, or a file the user opened. Elsewhere a
+  // reply could hide a secret in an image address, so the image waits for a click.
+  loadWebImages = false,
   onOpenRelativeLink,
   sourcePath = "",
   tickets = null,
@@ -130,7 +134,7 @@ function MarkdownContent({
     img({ alt = "", src = "" }) {
       // Web images load through the desktop backend, so the site never sees this
       // window's request. They open full size in a browser tab.
-      if (isExternalUrl(src)) return <Suspense fallback={imagePlaceholder}><WebImage alt={alt} src={websiteLinkHref(src)} /></Suspense>;
+      if (isExternalUrl(src)) return <Suspense fallback={imagePlaceholder}><WebImage alt={alt} autoLoad={loadWebImages} src={websiteLinkHref(src)} /></Suspense>;
       // A broken local image hides.
       return (
         <img
@@ -181,7 +185,7 @@ function MarkdownContent({
     ul({ children, className: listClassName = "" }) {
       return <ul className={`${listClassName} ml-6 list-disc space-y-1`}>{children}</ul>;
     },
-  }), [handleLinkClick, inverse, sourcePath, ticketIndex]);
+  }), [handleLinkClick, inverse, loadWebImages, sourcePath, ticketIndex]);
 
   return (
     <div

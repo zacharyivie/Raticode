@@ -219,15 +219,28 @@ object BrowserRules {
         name.substringAfterLast('.', "").lowercase() in RISKY ||
             mime.orEmpty().lowercase() in setOf("application/vnd.android.package-archive", "application/x-msdownload", "application/x-sh")
 
-    /** A name safe to save in Downloads: no folders, controls or hidden-file dots, at most 120 characters. */
+    /**
+     * A name safe to save in Downloads: no folders, controls or hidden-file dots, at most 120 characters. Invisible
+     * format characters go too, so a right-to-left mark can't make `invoice\u202Efdp.apk` read as `invoicekpa.pdf`.
+     */
     fun safeName(name: String): String {
-        val base = name.substringAfterLast('/').substringAfterLast('\\').filter { it >= ' ' && it != '\u007f' && it !in "<>:\"|?*" }
+        val base = name.substringAfterLast('/').substringAfterLast('\\').filter { it >= ' ' && it != '\u007f' && it !in "<>:\"|?*" && visible(it) }
             .trim().trimStart('.')
         if (base.isEmpty()) return "download"
         if (base.length <= 120) return base
         val ext = base.substringAfterLast('.', "").take(10)
         return if (ext.isEmpty()) base.take(120) else base.take(119 - ext.length) + "." + ext
     }
+
+    private fun visible(c: Char) = Character.getType(c).toByte().let {
+        it != Character.FORMAT && it != Character.LINE_SEPARATOR && it != Character.PARAGRAPH_SEPARATOR
+    }
+
+    /**
+     * The question a tab may show next. A page can't swap a new question, such as a download or another app, in under
+     * the user's finger while one is open: [offered] waits its turn and the page is told to try again.
+     */
+    fun <T : Any> nextQuestion(open: T?, offered: T): T? = if (open == null) offered else null
 
     fun size(bytes: Long): String = when {
         bytes <= 0 -> "Unknown size"

@@ -219,7 +219,11 @@ export function BlockedPopupsBar({ popups, onOpen, onAllow, onDismiss }) {
 // ---------------------------------------------------------------------------
 // Page overlays: load errors, certificate interstitial, crashes
 
-export function PageOverlay({ state, onRetry, onBack, onProceed, onReload, onDismissUnresponsive }) {
+// A Raticode (chromium) page whose process ended, or that stopped answering,
+// isn't shown as an error: the tab reloads by itself (browserRecovery.js), and
+// [showCrash] is false meanwhile. A page that [keepsStopping], and Rem's,
+// Firefox's, Chrome's and Edge's tabs, show the crash panel.
+export function PageOverlay({ state, showCrash = true, keepsStopping = false, onRetry, onBack, onProceed, onReload }) {
   if (state.certificateError && state.loadError?.kind === "certificate") {
     const failure = state.certificateError;
     return (
@@ -239,9 +243,10 @@ export function PageOverlay({ state, onRetry, onBack, onProceed, onReload, onDis
     );
   }
   if (state.crashed) {
+    if (!showCrash) return null;
     return (
-      <Overlay title="This page crashed" icon={TriangleAlert}>
-        <p>The page stopped unexpectedly ({state.crashed.reason}).</p>
+      <Overlay title={keepsStopping ? "This page keeps stopping" : "This page crashed"} icon={TriangleAlert}>
+        <p>{keepsStopping ? "Raticode reloaded it a few times and it stopped again." : `The page stopped unexpectedly (${state.crashed.reason}).`}</p>
         <div className="mt-4"><button className={PRIMARY} type="button" onClick={onReload}>Reload</button></div>
       </Overlay>
     );
@@ -260,15 +265,6 @@ export function PageOverlay({ state, onRetry, onBack, onProceed, onReload, onDis
       <Overlay title="Could not display this page" icon={Globe}>
         <p>{state.error}</p>
       </Overlay>
-    );
-  }
-  if (state.unresponsive) {
-    return (
-      <div role="alert" className="absolute inset-x-0 top-0 z-20 flex items-center gap-2 border-b border-line bg-amber-50 px-3 py-2 text-xs text-ink">
-        <span className="flex-1">This page isn&apos;t responding.</span>
-        <button className={BUTTON} type="button" onClick={onDismissUnresponsive}>Wait</button>
-        <button className={PRIMARY} type="button" onClick={onReload}>Reload</button>
-      </div>
     );
   }
   return null;

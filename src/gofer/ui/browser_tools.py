@@ -31,6 +31,7 @@ from gofer.core.prompt_envelope import (
     with_browser,
 )
 from gofer.ui.second_brain import ToolContent, serve_stdio
+from gofer.utils.process import credential_env
 
 SERVICE_URL_ENV = "GOFER_BROWSER_SERVICE_URL"
 ADMIN_TOKEN_ENV = "GOFER_BROWSER_ADMIN_TOKEN"
@@ -233,7 +234,7 @@ _TURN_GRANTS: ContextVar[list[BrowserGrant] | None] = ContextVar("browser_grants
 def desktop_browser_service() -> BrowserService | None:
     """Return the desktop app's browser service when this backend was started by it."""
     url = os.environ.get(SERVICE_URL_ENV, "")
-    token = os.environ.get(ADMIN_TOKEN_ENV, "")
+    token = credential_env(ADMIN_TOKEN_ENV)
     if not _SERVICE_URL.fullmatch(url) or not _SECRET.fullmatch(token):
         return None
     return BrowserService(url=url, admin_token=token)

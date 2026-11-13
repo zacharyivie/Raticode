@@ -143,6 +143,9 @@ object Kanban {
 
     /** Rem's tickets reach Review on their own while their run's review checks the work, and only you mark one done by hand. */
     private fun remMove(ticket: KanbanTicket, column: String): OrganizationModel.Move? {
+        // A paused ticket keeps its run: moving it to In progress resumes that run, nothing else.
+        if (ticket.paused.isNotBlank()) return if (column == "running") OrganizationModel.Move.Allowed(column, pull = true)
+            else OrganizationModel.Move.Refused("This ticket's task is paused. Move it to In progress to resume it, or stop its run first.")
         if (column(ticket) == column) return null
         if (ticket.running) return OrganizationModel.Move.Refused("This ticket is running. Stop its run or wait for it to finish.")
         return when (column) {
@@ -379,7 +382,8 @@ object Kanban {
         t.optString("organization_name"), t.optString("key"), t.optString("title"), t.optString("description"), t.optString("status"),
         t.optString("priority", "medium").let { if (it == "urgent") "critical" else it }, t.optString("assignee_id"), t.optString("assignee"), t.optBoolean("proposed"), t.optString("proposal_reason"),
         t.optString("duplicate_of"), t.optString("created_by"), t.optString("created_at"), t.optString("updated_at"), t.optLong("revision", 1),
-        t.optBoolean("running"), t.optString("block_reason"), t.optString("summary"), t.optString("type"), t.optString("project"), t.optString("project_id"), t.optString("self_work_scope"))
+        t.optBoolean("running"), t.optString("block_reason"), t.optString("summary"), t.optString("type"), t.optString("project"), t.optString("project_id"), t.optString("self_work_scope"),
+        RunPause.by(t.optString("paused")))
 
     fun parseSelfWork(json: JSONObject): SelfWorkView {
         val s = json.optJSONObject("settings"); val l = json.optJSONObject("limits"); val st = json.optJSONObject("state"); val r = json.optJSONObject("report")
@@ -387,21 +391,59 @@ object Kanban {
         val high = (l?.optInt("max_threads_max", 8) ?: 8).coerceAtLeast(low)
         return SelfWorkView(
             SelfWorkSettings(s?.optBoolean("enabled") == true, (s?.optInt("max_threads", low) ?: low), s?.optBoolean("auto_pull_backlog") == true,
-                s?.optInt("idle_minutes", 15) ?: 15, s?.optLong("revision", 0) ?: 0),
+                s?.optInt("idle_minutes", 15) ?: 15, s?.optLong("revision", 0) ?: 0,
+                // An older desktop has no windows, so the saved switch is the one in effect.
+                (s?.opt("saved_enabled") as? Boolean) ?: (s?.optBoolean("enabled") == true)),
             SelfWorkLimits(low, high),
             SelfWorkState(st?.optString("mode", "off") ?: "off", st?.optInt("active_threads") ?: 0, st?.optInt("todo_remaining") ?: 0,
                 st?.optString("last_prompt_at").orEmpty(), st?.optString("starts_at").orEmpty(), st?.optString("detail").orEmpty(),
                 st?.optInt("thread_limit", 0)?.takeIf { it > 0 } ?: (s?.optInt("max_threads", low) ?: low), st?.optInt("proposals_waiting") ?: 0,
                 st?.takeIf { it.has("assigned_projects") }?.optInt("assigned_projects"), st?.optInt("outside_projects") ?: 0,
                 // An older desktop doesn't say, and always worked with the board.
-                st?.optBoolean("board_enabled", true) ?: true),
+                st?.optBoolean("board_enabled", true) ?: true,
+                st?.optInt("paused_threads") ?: 0, st?.optInt("paused_for_you") ?: 0),
             r?.let { report -> SelfWorkReport(report.optString("since"), report.optString("updated_at"), report.optBoolean("unseen"), report.optString("summary"),
                 report.objects("tickets_added").map { ReportTicket(it.optString("ticket_id"), it.optString("title"), it.optString("scope"),
                     it.optString("organization_id"), it.optString("organization_name"), it.optBoolean("proposed"), it.optString("at")) },
                 report.objects("work_done").map { ReportWork(it.optString("ticket_id"), it.optString("title"), it.optString("state"), it.optString("summary"),
                     it.optString("thread_id"), it.optString("at")) },
                 report.objects("duplicates_merged").map { ReportMerged(it.optString("ticket_id"), it.optString("title"), it.optString("kept_title"), it.optString("reason"), it.optString("at")) },
-                report.objects("notes").map { ReportNote(it.optString("text"), it.optString("at")) }) })
+                report.objects("notes").map { ReportNote(it.optString("text"), it.optString("at")) }) },
+            json.optJSONObject("schedule")?.let(::schedule))
+    }
+
+    /** Timed self-work windows. An older desktop sends none, and the page shows nothing new. */
+    private fun schedule(s: JSONObject) = SelfWorkSchedule(s.optString("timezone").take(64), s.optJSONObject("active")?.let(::window)?.takeIf { it.id.isNotBlank() },
+        s.objects("upcoming").take(5).map(::window).filter { it.id.isNotBlank() },
+        s.optJSONObject("last_period")?.let { p -> SelfWorkPeriod(p.optString("id").take(128), p.optString("started_at").take(80), p.optString("ended_at").take(80),
+            p.optString("ended_by").take(20), p.optString("summary").take(600), p.optString("message_id").take(160)) }?.takeIf { it.id.isNotBlank() })
+
+    private fun window(w: JSONObject) = SelfWorkWindow(w.optString("id").take(128), w.optString("start_at").take(80),
+        w.optString("end_at").takeUnless { w.isNull("end_at") }.orEmpty().take(80), w.optString("until").take(40), w.optString("timezone").take(64),
+        w.optString("after_end", "restore").take(20), w.optBoolean("wait_for_idle"), w.optString("label").take(160), w.optString("end_label").take(160),
+        w.optString("after_label").take(80))
+
+    // Self-work windows -------------------------------------------------------------------------------------------------
+
+    /** Said while a timed window keeps self-work on although its switch is saved off; null otherwise or from an older desktop. */
+    fun windowNote(view: SelfWorkView): String? {
+        val s = view.settings
+        if (s.savedEnabled == s.enabled || !s.enabled) return null
+        return if (view.schedule?.active?.afterEnd == "on") "On for this window; stays on after it." else "On for this window; goes back to off after it."
+    }
+
+    /** A window's second line: when it ends and what the switch does then, as the desktop words them. */
+    fun windowDetail(window: SelfWorkWindow, idleMinutes: Int): String = listOfNotNull(
+        listOfNotNull(window.endLabel.takeIf { it.isNotBlank() }?.let { "Ends $it" }, window.afterLabel.takeIf { it.isNotBlank() })
+            .joinToString(", ").takeIf { it.isNotBlank() },
+        if (window.waitForIdle) "Waits for $idleMinutes quiet minutes first" else null).joinToString(" · ")
+
+    /** How a period of self-work ended, in words. */
+    fun periodEnd(period: SelfWorkPeriod): String = when (period.endedBy) {
+        "window" -> "Its window ended"
+        "user" -> "Turned off"
+        "condition" -> "Its running tasks finished"
+        else -> "Ended"
     }
 
     private fun JSONObject.objects(key: String): List<JSONObject> = optJSONArray(key)?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) } }.orEmpty()
@@ -431,7 +473,9 @@ data class KanbanTicket(val id: String, val scope: String, val organizationId: S
                         /** The project's ID in this phone's catalog, when it has one. */
                         val projectId: String = "",
                         /** Whether self-work can take it: `assigned`, `unassigned`, `unavailable` or `no_project`. Empty on organization tickets. */
-                        val selfWorkScope: String = "") {
+                        val selfWorkScope: String = "",
+                        /** Its task is paused: "user", or "priority" when self-work made way for the user's own work. */
+                        val paused: String = "") {
     val isRem get() = scope == Kanban.SCOPE_REM
     /** Ticket IDs are unique only within their organization; this one is unique on the board. */
     val uid get() = "$organizationId/$id"
@@ -454,7 +498,24 @@ data class KanbanParticipant(val id: String, val kind: String, val name: String,
                              val unavailable: List<String> = emptyList()) {
     val isRem get() = id == Kanban.REM
 }
-data class SelfWorkSettings(val enabled: Boolean, val maxThreads: Int, val autoPull: Boolean, val idleMinutes: Int, val revision: Long)
+/**
+ * [enabled] is the state in effect, on while a timed window runs; [savedEnabled] is the switch as saved, what self-work
+ * returns to after the window.
+ */
+data class SelfWorkSettings(val enabled: Boolean, val maxThreads: Int, val autoPull: Boolean, val idleMinutes: Int, val revision: Long,
+                            val savedEnabled: Boolean = enabled)
+/**
+ * A timed self-work window. [endAt] is empty when it ends on a condition: [until] `running_done` waits for the tasks that ran
+ * when it was set. [afterEnd] is `restore`, `on` or `off`. The labels come formatted from the desktop and show as they are.
+ */
+data class SelfWorkWindow(val id: String, val startAt: String, val endAt: String, val until: String, val timezone: String, val afterEnd: String,
+                          val waitForIdle: Boolean, val label: String, val endLabel: String, val afterLabel: String)
+/** The last period of self-work: [endedBy] is `window`, `user` or `condition`; [messageId] is the Rem chat message with the full report. */
+data class SelfWorkPeriod(val id: String, val startedAt: String, val endedAt: String, val endedBy: String, val summary: String, val messageId: String)
+/** [active] runs now; [upcoming] haven't started, soonest first. */
+data class SelfWorkSchedule(val timezone: String, val active: SelfWorkWindow?, val upcoming: List<SelfWorkWindow>, val lastPeriod: SelfWorkPeriod?) {
+    val isEmpty get() = active == null && upcoming.isEmpty() && lastPeriod == null
+}
 data class SelfWorkLimits(val min: Int, val max: Int)
 /** [mode] is `off`, `waiting`, `working` or `paused`. */
 data class SelfWorkState(val mode: String, val activeThreads: Int, val todoRemaining: Int, val lastPromptAt: String, val startsAt: String, val detail: String,
@@ -465,7 +526,11 @@ data class SelfWorkState(val mode: String, val activeThreads: Int, val todoRemai
                          /** To-dos and backlog tickets waiting outside Rem's projects. */
                          val outsideProjects: Int = 0,
                          /** Whether the desktop shows the Kanban board. Off, self-work runs research tasks and leaves tickets alone. */
-                         val boardEnabled: Boolean = true)
+                         val boardEnabled: Boolean = true,
+                         /** Self-work tasks paused now; they hold no thread. */
+                         val pausedThreads: Int = 0,
+                         /** Of those, the ones that made way for the user's own work and resume on their own. */
+                         val pausedForYou: Int = 0)
 data class ReportTicket(val id: String, val title: String, val scope: String, val organizationId: String, val organizationName: String, val proposed: Boolean, val at: String)
 data class ReportWork(val ticketId: String, val title: String, val state: String, val summary: String, val threadId: String, val at: String)
 data class ReportMerged(val ticketId: String, val title: String, val keptTitle: String, val reason: String, val at: String)
@@ -475,4 +540,6 @@ data class SelfWorkReport(val since: String, val updatedAt: String, val unseen: 
     /** The desktop always writes a summary, even with nothing to report. */
     val isEmpty get() = ticketsAdded.isEmpty() && workDone.isEmpty() && duplicatesMerged.isEmpty() && notes.isEmpty()
 }
-data class SelfWorkView(val settings: SelfWorkSettings, val limits: SelfWorkLimits, val state: SelfWorkState, val report: SelfWorkReport?)
+/** [schedule] is null from a desktop without timed windows. */
+data class SelfWorkView(val settings: SelfWorkSettings, val limits: SelfWorkLimits, val state: SelfWorkState, val report: SelfWorkReport?,
+                        val schedule: SelfWorkSchedule? = null)

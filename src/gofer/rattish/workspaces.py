@@ -42,6 +42,9 @@ WORKSPACE_DIRECTORY = ".raticode"
 WORKFLOW_ENTRYPOINT = "workflow.rattish"
 WORKFLOW_METADATA = "workflow.metadata.json"
 WORKFLOW_IGNORE = ".raticodeignore"
+# Permission bits a copied or imported workflow file may keep: owner bits and group/other
+# read and execute. Never setuid/setgid/sticky, and never group/other write.
+SAFE_FILE_MODE_MASK = 0o755
 DEFAULT_RATICODE_IGNORE = """# Sensitive local configuration
 .env
 .env.*
@@ -200,7 +203,7 @@ def install_registered_workflow(
                 ):
                     shutil.copyfileobj(input_file, output, 1024 * 1024)
                     if os.name != "nt":
-                        os.fchmod(output.fileno(), source.stat().st_mode & 0o777)
+                        os.fchmod(output.fileno(), source.stat().st_mode & SAFE_FILE_MODE_MASK)
         shutil.rmtree(staged_root)
         entrypoint = workflow_root / WORKFLOW_ENTRYPOINT
         if not (workflow_root / WORKFLOW_METADATA).is_file():

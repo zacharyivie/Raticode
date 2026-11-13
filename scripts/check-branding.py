@@ -22,7 +22,7 @@ COMPATIBILITY_FILES = {
 # packaged workflow-builder skill. Raw test evidence keeps its recorded output.
 DOC_SUFFIXES = {".md", ".vue", ".ts"}
 DOC_PREFIXES = ("website/", "skills/", "rattish/")
-DOC_EXCLUDED_PREFIXES = ("docs/security/evidence/", "website/node_modules/")
+DOC_EXCLUDED_PREFIXES = ("website/node_modules/",)
 FORMER_NAMES = re.compile(
     r"gofer[ _-]?flow|goferflow|gopher[ _-]?flow|go[ _-]?for[ _-]?flow"
     r"|taskurotta|taskerota|murina[ _-]?code",
@@ -34,7 +34,6 @@ OLD_COMMAND = re.compile(r"(?<![\w.-])gof(?![\w.-])|\bgof-(?:linux|macos|windows
 # manifest name the earlier command on purpose.
 OLD_COMMAND_ALLOWED = {
     "CHANGELOG.md",
-    "docs/branding.md",
     "website/docs/installation.md",
     "website/data/releases.ts",
 }

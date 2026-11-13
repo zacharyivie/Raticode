@@ -83,10 +83,24 @@ def test_site_address_comes_from_repository_variables(website: dict[str, Any]) -
     assert setup["with"]["node-version-file"] == ".nvmrc"
 
 
-def test_deploy_follows_a_published_release(website: dict[str, Any]) -> None:
+def test_build_reads_full_history_for_sitemap_dates(website: dict[str, Any]) -> None:
+    # A shallow clone makes every page look as new as the last commit, and the sitemap
+    # would then leave lastmod out; check-links.mjs requires it outside a shallow clone.
+    checkout = _steps(website["jobs"]["build"])["Check out repository"]
+    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["persist-credentials"] is False
+
+
+def test_deploy_follows_a_published_desktop_or_phone_release(website: dict[str, Any]) -> None:
     trigger = website["on"]["workflow_run"]
-    assert trigger == {"workflows": ["Publish release"], "types": ["completed"]}
+    assert trigger == {
+        "workflows": ["Publish release", "Publish mobile release"],
+        "types": ["completed"],
+    }
+    # The names must be the publish workflows' own names, or workflow_run never fires.
     assert _workflow("release.yml")["name"] == "Publish release"
+    assert _workflow("mobile-release.yml")["name"] == "Publish mobile release"
+    assert _workflow("mobile-release.yml")["on"]["push"]["tags"] == ["mobile-v*"]
     changes = website["jobs"]["changes"]
     assert "github.event.workflow_run.conclusion == 'success'" in changes["if"]
     assert website["on"]["push"]["branches"] == ["main", "dev"]
@@ -103,6 +117,8 @@ def test_deploy_follows_a_published_release(website: dict[str, Any]) -> None:
         (0, "workflow_dispatch", "refs/heads/dev", 0, "false"),
         (0, "schedule", "refs/heads/main", 0, "false"),
         (3, "push", "refs/heads/main", 0, "false"),
+        (3, "workflow_run", "refs/heads/main", 0, "false"),
+        (3, "schedule", "refs/heads/main", 0, "false"),
         (1, "push", "refs/heads/main", 1, None),
         (1, "workflow_run", "refs/heads/main", 1, None),
     ],
@@ -180,17 +196,22 @@ def _site_location(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
 @pytest.mark.parametrize(
     ("env", "expected"),
     [
-        ({}, {"url": "https://zacharyivie.github.io/Raticode/", "base": "/Raticode/"}),
-        (
-            {"WEBSITE_URL": "", "WEBSITE_BASE": ""},
-            {"url": "https://zacharyivie.github.io/Raticode/", "base": "/Raticode/"},
-        ),
+        ({}, {"url": "https://raticode.dev/", "base": "/"}),
+        ({"WEBSITE_URL": "", "WEBSITE_BASE": ""}, {"url": "https://raticode.dev/", "base": "/"}),
         ({"WEBSITE_URL": "https://raticode.dev"}, {"url": "https://raticode.dev/", "base": "/"}),
         (
             {"WEBSITE_URL": "https://raticode.dev/", "WEBSITE_BASE": "/"},
             {"url": "https://raticode.dev/", "base": "/"},
         ),
-        ({"WEBSITE_BASE": "/"}, {"url": "https://zacharyivie.github.io/", "base": "/"}),
+        ({"WEBSITE_BASE": "/"}, {"url": "https://raticode.dev/", "base": "/"}),
+        (
+            {"WEBSITE_BASE": "/Raticode/"},
+            {"url": "https://raticode.dev/Raticode/", "base": "/Raticode/"},
+        ),
+        (
+            {"WEBSITE_URL": "https://zacharyivie.github.io/Raticode/"},
+            {"url": "https://zacharyivie.github.io/Raticode/", "base": "/Raticode/"},
+        ),
         (
             {"WEBSITE_URL": "https://example.org/docs/site/"},
             {"url": "https://example.org/docs/site/", "base": "/docs/site/"},
@@ -219,3 +240,65 @@ def test_site_location_rejects_bad_or_conflicting_values(env: dict[str, str]) ->
     result = _site_location(env)
     assert result.returncode != 0
     assert "WEBSITE_" in result.stderr
+
+
+def _new_address(pathname: str, base: str = "/") -> str | None:
+    assert NODE is not None
+    module = (REPO_ROOT / "website" / ".vitepress" / "theme" / "oldAddress.ts").as_uri()
+    code = (
+        f"import {{ newAddress }} from {json.dumps(module)};"
+        "const page = new URL(process.argv[1], 'https://raticode.dev');"
+        "const target = newAddress(page, process.argv[2]);"
+        "if (target !== null && new URL(target, page.origin).origin !== page.origin)"
+        "  throw new Error('left the site: ' + target);"
+        "console.log(JSON.stringify(target))"
+    )
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", code, pathname, base],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    value = json.loads(result.stdout)
+    assert value is None or isinstance(value, str)
+    return value
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node 22.18 or newer, which runs TypeScript")
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("/Raticode/docs/installation", "/docs/installation"),
+        ("/Raticode/docs/setup?x=1#provider", "/docs/setup?x=1#provider"),
+        ("/Raticode/", "/"),
+        ("/docs/missing", None),
+        ("/Raticodex/docs/", None),
+        ("/Raticode", None),
+    ],
+)
+def test_old_raticode_addresses_move_to_the_same_page(address: str, expected: str | None) -> None:
+    assert _new_address(address) == expected
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node 22.18 or newer, which runs TypeScript")
+@pytest.mark.parametrize(
+    "address",
+    [
+        "/Raticode//evil.example",
+        "/Raticode//evil.example/x?y=1",
+        "/Raticode/\\evil.example",
+        "/Raticode/%5Cevil.example",
+        "/Raticode///evil.example",
+    ],
+)
+def test_old_address_forwarding_never_leaves_the_site(address: str) -> None:
+    # The 404 page serves every unknown path; an address the browser would read as another
+    # host must not be followed, or raticode.dev becomes an open redirect.
+    target = _new_address(address)
+    assert target is None or (target.startswith("/") and not target.startswith(("//", "/\\")))
+
+
+@pytest.mark.skipif(NODE is None, reason="needs Node 22.18 or newer, which runs TypeScript")
+def test_old_address_forwarding_is_off_for_another_base() -> None:
+    assert _new_address("/Raticode/docs/installation", "/Raticode/") is None

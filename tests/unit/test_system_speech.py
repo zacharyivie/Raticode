@@ -33,6 +33,17 @@ if mode == "check":
     say(type="status", available=False, reason="Turn on Dictation.", language="en-US")
     sys.exit(0)
 say(type="ready", language="en-US")
+if mode == "script":
+    # One scripted batch of recognizer events per chunk of audio, then the rest at the end.
+    script = json.loads(os.environ["FAKE_SPEECH_SCRIPT"])
+    while script and sys.stdin.buffer.read1(65536):
+        for event in script.pop(0):
+            say(**event)
+    for batch in script:
+        for event in batch:
+            say(**event)
+    say(type="done")
+    sys.exit(0)
 heard = 0
 while True:
     chunk = sys.stdin.buffer.read1(65536)
@@ -48,11 +59,40 @@ say(type="done")
 """
 
 
-def fake_engine(mode: str, engine_id: str = "macos") -> system_speech.SystemEngine:
+def fake_engine(
+    mode: str, engine_id: str = "macos", script: list[list[dict[str, str]]] | None = None
+) -> system_speech.SystemEngine:
     command = (sys.executable, "-c", FAKE_HELPER, mode)
+    env = (("FAKE_SPEECH_SCRIPT", json.dumps(script)),) if script is not None else ()
     return system_speech.SystemEngine(
-        engine_id, "macOS speech recognition", command=command, check_command=command
+        engine_id, "macOS speech recognition", command=command, check_command=command, env=env
     )
+
+
+def partial(text: str) -> dict[str, str]:
+    return {"type": "partial", "text": text}
+
+
+def final(text: str) -> dict[str, str]:
+    return {"type": "final", "text": text}
+
+
+def run_script(
+    script: list[list[dict[str, str]]], engine_id: str = "macos"
+) -> tuple[list[str], str]:
+    """Feeds one chunk per batch; returns the session's text after each, and at the end."""
+    speech = system_speech.SystemSpeechSession(fake_engine("script", engine_id, script))
+    seen: list[str] = []
+    for batch in script:
+        speech.push(b"\x01\x00")
+        expected = next((e["text"] for e in reversed(batch) if e.get("text")), None)
+        if expected:
+            wait_for(lambda expected=expected: speech.text().endswith(expected))
+        else:
+            # Nothing to wait for on screen; give the helper a moment so chunks don't merge.
+            time.sleep(0.3)
+        seen.append(speech.text())
+    return seen, speech.finish()
 
 
 def wait_for(predicate, timeout: float = 5.0) -> None:
@@ -146,6 +186,106 @@ def test_helper_session_streams_words_and_keeps_every_phrase() -> None:
     assert speech.replay() == []
     assert speech.finish() == "first phrase all 12 bytes"
     assert speech.failure == ""
+
+
+def test_macos_dropping_a_phrase_after_a_pause_keeps_its_words() -> None:
+    # Recent macOS versions answer a pause by starting the phrase over with only the new
+    # words, with no final result between; the text a dictation shows must only grow.
+    seen, text = run_script(
+        [
+            [partial("book a room")],
+            [partial("book a room for friday")],
+            [partial("and")],
+            [partial("and invite the team")],
+            [partial("then")],
+            [partial("then send the agenda")],
+        ]
+    )
+    assert seen == [
+        "book a room",
+        "book a room for friday",
+        "book a room for friday and",
+        "book a room for friday and invite the team",
+        "book a room for friday and invite the team then",
+        "book a room for friday and invite the team then send the agenda",
+    ]
+    assert text == "book a room for friday and invite the team then send the agenda"
+
+
+def test_macos_revising_the_phrase_in_progress_is_not_a_new_phrase() -> None:
+    seen, text = run_script(
+        [
+            [partial("I scream for")],
+            [partial("Ice cream for everyone")],
+            [partial("Ice cream for everyone. The team")],
+            # A shorter revision that keeps most of the words.
+            [partial("Ice cream for everyone the")],
+        ]
+    )
+    assert seen[-1] == "Ice cream for everyone the"
+    assert text == "Ice cream for everyone the"
+
+
+def test_an_empty_final_after_a_pause_keeps_the_phrases_words() -> None:
+    seen, text = run_script(
+        [
+            [partial("check the build")],
+            [final("")],
+            [partial("and the tests")],
+            [final("and the tests")],
+        ]
+    )
+    assert seen[1] == "check the build"
+    assert text == "check the build and the tests"
+
+
+def test_other_recognizers_keep_their_partials_as_they_are() -> None:
+    # Windows ends each phrase with a final result; only macOS restarts a phrase silently.
+    seen, text = run_script(
+        [[partial("book a room for friday")], [partial("hello")], [final("hello there")]],
+        engine_id="windows",
+    )
+    assert seen[1] == "hello"
+    assert text == "hello there"
+
+
+@pytest.mark.parametrize(
+    ("previous", "latest", "expected"),
+    [
+        ("how are you", "fine", True),
+        ("book a room for friday", "and", True),
+        ("book a room for friday", "and invite", True),
+        ("Book a room. For Friday", "Fine, thanks", True),
+        ("book a room for friday", "book a room for", False),
+        ("to day is nice", "today is nice", False),
+        ("book a room", "book a room for friday", False),
+        ("hello", "hollow", False),
+        ("", "anything", False),
+        ("anything", "", False),
+    ],
+)
+def test_a_restart_is_a_shorter_phrase_that_shares_few_words(previous, latest, expected) -> None:
+    assert system_speech.restarted(previous, latest) is expected
+
+
+def test_dictation_text_from_macos_only_grows_across_a_pause(monkeypatch, tmp_path) -> None:
+    script = [[partial("open the logs")], [partial("please")], [final("please")]]
+    monkeypatch.setattr(
+        system_speech, "system_engine", lambda: fake_engine("script", script=script)
+    )
+    started = chat_media.start_chat_transcription(data_dir=tmp_path)
+    session_id = started["sessionId"]
+    speech = chat_media._transcription_sessions[session_id].speech
+    chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))
+    wait_for(lambda: speech.text() == "open the logs")
+    chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))
+    wait_for(lambda: speech.text() == "open the logs please")
+    assert chat_media.stream_chat_transcription(chunk(session_id, b"\x01\x00"))["text"] == (
+        "open the logs please"
+    )
+    assert chat_media.finish_chat_transcription({"sessionId": session_id}) == {
+        "text": "open the logs please"
+    }
 
 
 def test_helper_secrets_are_not_passed_to_the_recognizer(monkeypatch) -> None:

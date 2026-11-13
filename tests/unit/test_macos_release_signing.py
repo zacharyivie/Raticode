@@ -311,6 +311,9 @@ def test_prepare_imports_into_a_temporary_keychain_and_validates_notarization(
     assert store[store.index("--team-id") + 1] == TEAM
     assert store[store.index("--keychain") + 1] == keychain
     assert "--no-validate" not in store
+    # The keychain locks itself after two idle hours, not six, and on sleep.
+    settings = next(c for c in tools.commands if c[1:2] == ["set-keychain-settings"])
+    assert settings[2:] == ["-lut", "7200", keychain]
     # The re-encoded identity was imported, then its temporary file deleted.
     assert tools.imported is not None
     assert not (tmp_path / "raticode-signing.p12").exists()
@@ -555,6 +558,37 @@ def test_package_check_asserts_how_each_mac_app_is_signed(
     else:
         packages.check_mac_app_signing(app, mode, TEAM, Signing)
         assert checked == ([f"developer-id {TEAM}"] if mode == "developer-id" else [])
+
+
+@pytest.mark.parametrize(
+    ("config", "error"),
+    [
+        (
+            "owner: zacharyivie\nrepo: Raticode\nprovider: github\n"
+            "updaterCacheDirName: gofer-flow-ui-updater\n",
+            None,
+        ),
+        (
+            "owner: zacharyivie\nrepo: gofer-flow\nprovider: github\n",
+            "looks for updates at github:zacharyivie/gofer-flow",
+        ),
+        (None, "has no app-update.yml"),
+    ],
+)
+def test_package_check_reads_the_update_feed_baked_into_the_app(
+    packages: Any, tmp_path: Path, config: str | None, error: str | None
+) -> None:
+    app = tmp_path / "Raticode.app"
+    resources = app / "Contents/Resources"
+    resources.mkdir(parents=True)
+    if config is not None:
+        # The first case is the app-update.yml of the published 0.5.3 zip.
+        (resources / "app-update.yml").write_text(config)
+    if error:
+        with pytest.raises(RuntimeError, match=error):
+            packages.check_mac_update_feed(app)
+    else:
+        assert packages.check_mac_update_feed(app) == "github:zacharyivie/Raticode"
 
 
 @pytest.mark.parametrize(

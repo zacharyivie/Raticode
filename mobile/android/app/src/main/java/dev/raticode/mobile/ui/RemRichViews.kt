@@ -270,6 +270,8 @@ internal fun RemProgress(run: RemRun) {
                         RemRich.StepState.DONE -> accent
                         RemRich.StepState.CURRENT -> accent.copy(alpha = .55f)
                         RemRich.StepState.STOPPED -> MaterialTheme.colorScheme.error
+                        // Held where it was, not failed; the ⏸ and "paused" say it without color.
+                        RemRich.StepState.PAUSED -> accent.copy(alpha = .35f)
                         RemRich.StepState.TODO -> track
                     }))
                     Text("${step.symbol} ${step.label}", style = MaterialTheme.typography.labelSmall,

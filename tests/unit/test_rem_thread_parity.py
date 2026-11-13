@@ -17,7 +17,8 @@ from gofer.ui.rem_home import RemHome
 from tests.unit import test_rem_home
 from tests.unit.test_rem_home import git, recipe, wait_run
 
-REM_MANAGED = {"rem_artifacts"}
+# Rem serves these per turn itself: the research report service and the worker sleep tool.
+REM_MANAGED = {"rem_artifacts", "rem_wait"}
 
 
 @pytest.fixture

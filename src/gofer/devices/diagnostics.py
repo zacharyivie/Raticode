@@ -36,6 +36,7 @@ _REASONS = {
     "inbox_quota": "the desktop's record of this device's requests is full",
     "identity_missing": "the device did not present its identity",
     "invalid_role": "the device asked for an unsupported role",
+    "invitation_role_mismatch": "the pairing code was made for another kind of device",
     "application_transport_not_enabled": "a request arrived before sign-in finished",
 }
 # Endings that are normal for a phone: it slept, lost the network or closed the app.

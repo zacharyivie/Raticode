@@ -405,7 +405,7 @@ def test_rem_asks_before_changing_routines_managers_tools_or_starting_risky_setu
     # Before the fix only the server's name was compared, so this went through silently.
     assert "give Mira Santos more tools" in swapped["summary"]
     started = act(manager, org, "control", "Rem:thread", state="running")
-    assert started["summary"] == "Start the organization (git push allowed)"
+    assert started["summary"].startswith("Start the organization (git push allowed)")
     manager.close()
 
 
@@ -712,3 +712,30 @@ def test_shared_changes_are_never_merged_into_a_branch_someone_checked_out(
         ).returncode
         == 0
     )
+
+
+def test_start_request_names_checks_folders_and_mcp_servers():
+    # B-O4 (12 Nov security review): the start card names what else the start authorizes.
+    from gofer.ui.organizations import starting_details
+
+    config = {
+        "projectRoots": ["/work/desk"],
+        "projects": [{"id": "p", "checks": [{"name": "tests", "command": "pytest -q"}]}],
+        "employees": [
+            {
+                "id": "e",
+                "resources": {
+                    "mcpServers": [
+                        {"name": "files", "command": "/usr/bin/files"},
+                        {"name": "off", "command": "x", "enabled": False},
+                    ]
+                },
+            }
+        ],
+    }
+    details = starting_details(config)
+    assert "tests: pytest -q" in details
+    assert "/work/desk" in details
+    assert "MCP servers: files" in details and "off" not in details
+    assert len(starting_details(config, limit=40)) == 40
+    assert starting_details({}) == ""

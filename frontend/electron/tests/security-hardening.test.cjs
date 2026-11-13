@@ -733,3 +733,45 @@ test("packaged builds encrypt the built-in browser's cookies with the OS key sto
   // The terminal editor launcher runs Electron as Node; keep that fuse untouched.
   assert.equal(build.electronFuses?.runAsNode, undefined);
 });
+
+test("the UI's API token never travels on the renderer command line", () => {
+  // Renderer argv is world-readable in /proc on Linux, so another local account could
+  // read a token placed there and drive the backend. After a backend restart
+  // createWindow used to add --gofer-api-token=<token> to every renderer process.
+  let options;
+  const createWindow = mainFunction("createWindow", {
+    BrowserWindow: function BrowserWindow(value) { options = value; throw new Error("stop after options"); },
+    trustedProjectStore: () => ({ read: () => ({ legacyRecentProjectsMigrated: true }) }),
+    logTrustedRegistryFailure() {}, crypto: { randomUUID: () => "id" }, path, app: { isPackaged: false },
+    __dirname: path.join(__dirname, ".."), pathToFileURL, browserPreloadPath: "/preload.cjs", isSmokeTest: false,
+    lastWindowArgs: null, legacyProjectMigrationToken: "", mainWindow: null,
+  });
+  assert.throws(() => createWindow("http://127.0.0.1:8765", "secret-session-token"), /stop after options/);
+  const args = options.webPreferences.additionalArguments;
+  assert.ok(args.includes("--gofer-api-base-url=http://127.0.0.1:8765"));
+  assert.equal(args.some(value => /token/i.test(value) || value.includes("secret-session-token")), false);
+  assert.doesNotMatch(mainSource, /createWindow\([^)]*apiToken/);
+
+  // A stale argument from an older main process is not exposed to the page either.
+  const exposed = {};
+  const source = fs.readFileSync(path.join(__dirname, "../preload.cjs"), "utf8");
+  vm.runInNewContext(source, {
+    URL, process: { argv: ["--gofer-api-token=secret-session-token"] },
+    window: { addEventListener() {}, localStorage: { getItem: () => null } },
+    require: () => ({ contextBridge: { exposeInMainWorld(key, value) { exposed[key] = value; } },
+      ipcRenderer: { sendSync() {}, on() {} }, webFrame: {}, webUtils: {} }),
+  });
+  assert.ok(exposed.goferDesktop.apiSession, "the renderer still gets the token over gofer:api-session");
+  assert.equal(JSON.stringify(exposed).includes("secret-session-token"), false);
+});
+
+test("packaged builds ignore NODE_OPTIONS and --inspect so a local process can't inject code", () => {
+  // Without these fuses anything that can start Raticode can load a script into the
+  // main process with NODE_OPTIONS=--require or attach a debugger with --inspect.
+  // Raticode never sets either; runAsNode helpers get their script on the command line.
+  const build = require("../../package.json").build;
+  assert.equal(build.electronFuses?.enableNodeOptionsEnvironmentVariable, false);
+  assert.equal(build.electronFuses?.enableNodeCliInspectArguments, false);
+  // The app loads its pages from file://, so that fuse must keep its default.
+  assert.equal(build.electronFuses?.grantFileProtocolExtraPrivileges, undefined);
+});

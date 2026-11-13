@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { changesActiveWork, checkGroups, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus, prerequisites, afterChoices, afterEditable, startsWhen } from "./remHome.js";
+import { changesActiveWork, checkGroups, conversationMessages, criteriaSummary, finishedRunNotifications, latestWorkMessageIds, describeSchedule, draftTitle, draftToRequest, formatClock, formatWhen, groupTasks, messageStamp, messagesByDay, newTaskDraft, plainMarkdown, statusLine, taskActivity, taskMessages, taskRecap, taskToDraft, validateDraft, workStatus, prerequisites, afterChoices, afterEditable, startsWhen, runSleep, sleepBudget, canRetryPrerequisite, selfWorkReportItems } from "./remHome.js";
 
 const NOW = new Date(2026, 9, 7, 10, 0); // Wednesday, 7 October 2026, 10:00 local
 const at = (days, hour, minute = 0) => new Date(2026, 9, 7 + days, hour, minute).toISOString();
@@ -25,6 +25,23 @@ test("relative times stay short and human", () => {
   assert.equal(formatWhen(at(0, 9, 55), NOW, { past: true }), "5 min ago");
   assert.equal(formatWhen(at(-1, 9), NOW, { past: true }), "yesterday 9 AM");
   assert.equal(formatWhen("not a date", NOW), "");
+});
+
+test("a sleeping worker reads as sleeping with its next check, and only while parked", () => {
+  const sleep = { asleep: true, waiting_for: "CI run 4294", until: at(0, 10, 20), wakes: 2, slept_seconds: 25 * 60, budget_hours: 12 };
+  const task = { id: "ci", active_run: { id: "run", state: "queued", waiting_reason: "Sleeping until 10:20 UTC · waiting for CI run 4294", sleep } };
+  const activity = taskActivity(task, NOW);
+  assert.deepEqual([activity.kind, activity.sleeping, activity.spinning, activity.tone], ["queued", true, false, "neutral"]);
+  assert.equal(activity.label, "Sleeping · waiting for CI run 4294, next check in 20 min");
+  assert.equal(groupTasks([task], NOW)[0].id, "now");
+  assert.equal(sleepBudget(sleep), "Woke 2 times · 25 min of 12 h wait budget used");
+  assert.equal(sleepBudget({ wakes: 0, slept_seconds: 0, budget_hours: 1.5 }), "First sleep · 0 min of 1.5 h wait budget used");
+  // Awake again, or from a desktop without sleeps, it reads as before.
+  assert.equal(runSleep({ ...task.active_run, state: "executing" }), null);
+  assert.equal(taskActivity({ active_run: { state: "queued", waiting_reason: "Waiting for a free worker" } }, NOW).sleeping, undefined);
+  const card = workStatus({ task_id: "ci", run_id: "run" }, [task]);
+  assert.equal(card.sleeping, true);
+  assert.match(card.label, /^Sleeping · waiting for CI run 4294/);
 });
 
 test("running, verifying and repairing spin; queued and blocked do not", () => {
@@ -213,6 +230,17 @@ test("check groups stay quiet until a review looked at a check", () => {
   assert.deepEqual(checkGroups([{ result: "pass" }, { result: "fail", evidence: "Broke." }]).failed.map(item => [item.key, item.title]), [["check-1", "Check 2"]]);
 });
 
+test("one-line recaps stay fast on long replies full of unclosed markup", () => {
+  // Unbounded patterns rescanned to the end from every "[" or "**", so these took
+  // two to three seconds each and froze the task list while it rendered.
+  for (const text of ["[".repeat(50_000), "**a ".repeat(25_000), `[${"x".repeat(60_000)}`, `**${"y ".repeat(40_000)}`]) {
+    const started = performance.now();
+    plainMarkdown(text);
+    assert.ok(performance.now() - started < 400, `took ${Math.round(performance.now() - started)} ms`);
+  }
+  assert.equal(plainMarkdown(`**${"word ".repeat(20)}done** and [${"label ".repeat(30)}](https://example.com)`), `${"word ".repeat(20)}done and ${"label ".repeat(30)}`);
+});
+
 test("one-line recaps show Rem's link labels instead of Markdown", () => {
   const report = "/home/me/Projects/second-brain/reports/rem/Reports/Raticode/launch plan.html";
   assert.equal(plainMarkdown(`The [cited report](<${report}>) covers it.`), "The cited report covers it.");
@@ -322,4 +350,79 @@ test("a hold card stays live until a card for the task's run follows it", () => 
   assert.deepEqual([...latestWorkMessageIds([held, other])].sort(), ["h", "o"]);
   const started = { id: "s", work: { task_id: "fix", run_id: "r1" } };
   assert.deepEqual([...latestWorkMessageIds([held, other, started])].sort(), ["o", "s"]);
+});
+
+test("a paused run reads as paused, by you or to make way for your work, with the right controls", async () => {
+  const { runControls, pausedBy, runState, PAUSED_FOR_YOU } = await import("./remHome.js");
+  const paused = { id: "r1", state: "paused", paused_by: "user", finished_at: null };
+  const task = { id: "t", title: "Audit", state: "enabled", active_run: null, last_run: paused };
+  const activity = taskActivity(task, NOW);
+  assert.equal(activity.kind, "paused");
+  assert.equal(activity.label, "Paused");
+  assert.equal(groupTasks([task], NOW)[0].id, "paused");
+  assert.deepEqual(runControls(task), { resume: "r1" });
+  const yielded = { ...task, last_run: { ...paused, paused_by: "priority" } };
+  assert.equal(taskActivity(yielded, NOW).label, PAUSED_FOR_YOU);
+  assert.equal(pausedBy(yielded.last_run), "priority");
+  assert.equal(runState("paused", false, "priority").label, PAUSED_FOR_YOU);
+  // A run going can be paused; one stopping can't; a paused schedule says so plainly.
+  assert.deepEqual(runControls({ active_run: { id: "r2", state: "executing" } }), { pause: "r2" });
+  assert.deepEqual(runControls({ active_run: { id: "r2", state: "cancelling" } }), {});
+  assert.equal(taskActivity({ ...task, state: "paused", last_run: null }, NOW).label, "Schedule paused");
+  // A chat card follows the run, and an older card without the run uses its own field.
+  const card = workStatus({ task_id: "t", run_id: "r1", state: "queued" }, [yielded]);
+  assert.equal(card.state, "paused");
+  assert.equal(card.label, PAUSED_FOR_YOU);
+  assert.equal(card.pausedBy, "priority");
+  assert.equal(workStatus({ task_id: "gone", run_id: "x", state: "paused", paused_by: "user" }, []).label, "Paused");
+});
+
+test("start conditions other than tasks read as plain waits that can't be opened or retried", () => {
+  const task = { id: "fix", title: "Fix", state: "enabled", schedule: { kind: "once" }, active_run: null, last_run: null,
+    dependency: { state: "waiting", reason: "Waiting for 1 running task to finish and until 7:00 AM Fri (Asia/Irkutsk)", prerequisites: [
+      { kind: "run", task_id: "audit", run_id: "r1", title: "Audit", state: "waiting", reason: "Waiting for “Audit” (running when you asked) to finish", retryable: false },
+      { kind: "time", task_id: "", title: "7:00 AM Fri (Asia/Irkutsk)", state: "waiting", reason: "Waiting until 7:00 AM Fri (Asia/Irkutsk)", retryable: false },
+      { kind: "self_work", task_id: "", title: "Self-work window", state: "met", retryable: false },
+      { kind: "idle", task_id: "", title: "Nothing else running", state: "waiting", retryable: true },
+      { task_id: "old", title: "Old", state: "held", reason: "“Old” failed", run_state: "failed", retryable: true },
+    ] } };
+  const items = prerequisites(task);
+  assert.deepEqual(items.map(item => [item.kind, item.label, item.opens, item.retryable]), [
+    ["run", "Running", true, false],
+    ["time", "Waiting", false, false],
+    ["self_work", "Ended", false, false],
+    ["idle", "Waiting", false, false],
+    ["task", "Didn't finish", true, true],
+  ]);
+  assert.equal(new Set(items.map(item => item.key)).size, items.length, "rows have their own keys even without a task");
+  assert.equal(taskActivity(task, NOW).label, "Waiting for 1 running task to finish and until 7:00 AM Fri (Asia/Irkutsk)");
+  assert.equal(canRetryPrerequisite({ kind: "task", task_id: "", retryable: true }), false);
+  assert.equal(canRetryPrerequisite({ task_id: "x", retryable: true }), true);
+});
+
+test("the When note lists every start condition Rem set", () => {
+  const draft = { ...newTaskDraft({ timezone: "UTC" }), prompt: "Fix it" };
+  assert.equal(startsWhen({ ...draft, after_running: "snapshot" }, false), "Starts by itself once the tasks that were running when you asked have ended.");
+  assert.equal(startsWhen({ ...draft, after: ["a"], after_running: "idle", after_self_work: true }, false),
+    "Starts by itself once every task above finishes successfully, nothing else is running and the self-work window ends.");
+  const task = { id: "fix", title: "Fix it", type: "research", prompt: "Fix it", schedule: { kind: "once", timezone: "UTC" }, acceptance_criteria: [], revision: 2, after: [], after_running: "snapshot", after_self_work: true };
+  assert.equal(taskToDraft(task).after_running, "snapshot");
+  // The form never sends conditions it can't edit.
+  assert.deepEqual(draftToRequest(taskToDraft(task), task), {});
+});
+
+test("a self-work report lists what each task did and opens the task, or its thread once the task is gone", () => {
+  const message = { id: "self-work-period-p1", role: "rem", kind: "self_work_report", body: "Done.", self_work_report: { period_id: "p1", items: [
+    { task_id: "t1", run_id: "r1", thread_id: "th1", title: "Fix **export**", outcome: "finished" },
+    { task_id: "t2", run_id: "r2", thread_id: "th2", title: "Audit", outcome: "blocked" },
+    { task_id: "", run_id: "", thread_id: "", title: "Rank backlog", outcome: "mystery" },
+  ] } };
+  const items = selfWorkReportItems(message, [{ id: "t1" }]);
+  assert.deepEqual(items.map(item => [item.title, item.outcome, item.tone, item.taskId, item.threadId]), [
+    ["Fix export", "Finished", "success", "t1", ""],
+    ["Audit", "Blocked", "attention", "", "th2"],
+    ["Rank backlog", "mystery", "neutral", "", ""],
+  ]);
+  assert.deepEqual(selfWorkReportItems({ ...message, kind: "task_update" }), []);
+  assert.deepEqual(selfWorkReportItems({ ...message, self_work_report: undefined }), []);
 });

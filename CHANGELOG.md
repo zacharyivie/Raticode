@@ -3,6 +3,90 @@
 This file records the major user-facing changes in Raticode. Releases through
 version 0.1.3 used an earlier product name.
 
+## 0.5.4 - 2026-11-12
+
+Changes since the `v0.5.3` tag. Raticode Mobile 0.34.0 ships alongside it as
+the first signed Android APK, released from its own `mobile-v0.34.0` tag.
+
+### Added
+
+- The website offers the signed Raticode Mobile APK for direct download, with
+  its version, checksums, signing certificate fingerprint, the Android 10
+  requirement and install steps. Android visitors get **Download for Android**
+  as the main button. The site goes live only once the APK release is public,
+  so it never links a missing file.
+- Rem tasks can be paused and resumed in the same thread from the desktop, the
+  phone, chat and the CLI, keeping the run, its session and its worktree.
+  Self-work pauses to make room for work you start and picks up again after.
+  Telling Rem "turn on self-work" or "stop self-work" changes the real setting.
+- Self-work windows: tell Rem "enable self-work until 7 PM tonight", "from
+  11 PM to 7 AM" or "until running tasks finish", and get one report of what
+  it did when the window ends. One-time tasks can wait for a clock time, for
+  everything running to finish, or for the window's end.
+- Rem workers can sleep through long outside waits such as CI, freeing their
+  slot and waking in the same thread. Sleeping tasks show a moon, what they
+  wait for and the next check, with **Wake now** on the desktop, phone and CLI.
+- Organizations: workers pull approved Backlog tickets into To do when they run
+  out of work (on by default, with a setting); **Approve all** handles every
+  waiting Rem request in one click on the computer and the phone; and an
+  opt-in **Auto mode** lets Rem decide requests, stopping only for danger it
+  can't make safe or for what only you can do. Telling Rem in chat to approve
+  requests counts as your approval.
+- Your paired phone is trusted like you. Every phone request is checked with
+  fixed rules before Rem sees it, and a request for credentials or credential
+  files, or one that looks like a payload, locks the phone until you choose
+  **Unlock** in Settings > Devices. Screenshots, attachments and shared screens
+  are never checked.
+- On the phone, long text pasted or spoken to Rem goes as an attached text
+  file instead of hitting the 4,000-character limit.
+
+### Changed
+
+- Mac updates wait for macOS to accept the new app's signature before Raticode
+  stops its backend and restarts. The button reads **Verifying update** in
+  between, a rejected update leaves Raticode running and says why, and update
+  errors name their cause. A copy running from the DMG or a read-only location
+  offers the Mac installer and explains how to fix it. 0.5.3 updates itself to
+  0.5.4 with 0.5.3's own flow; this safer flow runs from 0.5.4 onward.
+- The Browser tab bar groups each browser's tabs with a **+** after each group,
+  drops the tab-list dropdown, and menus over a Raticode (gecko) tab no longer
+  blank the page.
+- Rem no longer asks before pressing Enter or other keys in a browser tab;
+  clicks on submit, Send, Delete and similar buttons still ask. Rem judges
+  your okay in chat without magic words.
+- Releases wait for the owner's approval in GitHub before anything is
+  published, for the desktop, the phone app and the AUR packages.
+- The website and docs are easier to read, with real screenshots of the app.
+- The website's address is now [raticode.dev](https://raticode.dev/). Package
+  homepages, the README and the phone app's privacy policy link point there,
+  old `/Raticode/` addresses forward to the same page, and an unknown address
+  shows a page of links back into the docs.
+
+### Fixed
+
+- The Linux `.deb` and `.rpm` packages no longer install files that other
+  accounts on the computer can change. 0.5.3 shipped the app's main program
+  writable by everyone; see Installation for the one-line fix for 0.5.3.
+- Security fixes from a static review of the desktop, backend and phone app:
+  local file reads, leaked tokens, hidden data sends, workflow bundles that
+  could install scripts other accounts can rewrite or replace Raticode's own
+  settings, shell steps that looped data could steer, git hooks and filters a
+  repository could plant in Raticode's own git commands, pairing attempts used
+  up by someone who never saw the QR code, and page, file and dialog tricks
+  against the phone app.
+- Browser tabs that stopped while you were away reload by themselves.
+- Desktop dictation keeps tidied text and adds new speech after it instead of
+  rewriting it.
+- Ticket conversations show each comment once, and a long Rem summary no
+  longer throws away its task update.
+- Ctrl+C in a terminal running `npm run electron:dev` no longer floods the
+  screen with error popups.
+- On the phone: videos in the built-in browsers go truly full screen in
+  landscape, typing into a page keeps the field above the keyboard, Rem's chat
+  keeps the message box on the keyboard, a Raticode (gecko) extension's
+  **Open** shows its popup, and the Gecko browser gets the engine security
+  fixes from Firefox 160.
+
 ## 0.5.3 - 2026-11-11
 
 Changes since the `v0.5.2` tag.
@@ -1296,7 +1380,7 @@ Changes since the `v0.3.0` tag.
   documentation, Rattish contracts, and release artifacts.
 - Write new workflows and bundles with the `.raticode` names while retaining
   reads of previous workflows, bundles, and saved preferences. See the
-  [naming and compatibility guide](docs/branding.md).
+  naming and compatibility guide.
 
 ### Added
 

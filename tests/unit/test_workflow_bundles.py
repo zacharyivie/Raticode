@@ -1307,3 +1307,97 @@ def test_import_bundle_rejects_before_partial_asset_writes(tmp_path: Path) -> No
         )
 
     assert not target_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("path", "kind"),
+    [
+        ("schedules.db", None),
+        ("runner-queue.db-wal", None),
+        ("provider-profiles.json", None),
+        ("headless/owner-token", None),
+        (".gofer-trusted-bin/Raticode", None),
+        ("devices/devices.sqlite3", None),
+        ("sidecar.toml", None),
+        # Real data-folder names the first list missed (combined report X-2).
+        ("organization-audit-anchors.jsonl", None),
+        ("scheduler.pid", None),
+        ("skills/worktree-dev-flow/SKILL.md", None),
+        ("agent-memory/other-workflow/node.json", None),
+        ("organization-repositories/o/knowledge/notes/a.md", None),
+        ("organization-worktrees/o/t/file.py", None),
+        ("organization-shared-worktrees/o/file.py", None),
+        ("rem-worktrees/run/file.py", None),
+        ("generation-jobs/job.json", None),
+        ("run-state/wf.stop", None),
+        ("speech-models/model/conf", None),
+        ("usage-probe/probe.txt", None),
+    ],
+)
+@pytest.mark.parametrize("replace", [False, True])
+def test_import_bundle_never_writes_raticode_state(
+    tmp_path: Path, path: str, kind: str | None, replace: bool
+) -> None:
+    """Assets land in the data folder, so a bundle must not plant Raticode's own state."""
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "schedules.db").write_bytes(b"original")
+    bundle_path = tmp_path / "planted.zip"
+    item = {"path": path, "archivePath": f"assets/{path}"}
+    if kind:
+        item["kind"] = kind
+    _write_minimal_bundle(bundle_path, included_paths=[item], files={f"assets/{path}": b"planted"})
+
+    with pytest.raises(BundleError, match="Raticode's own data"):
+        import_workflow_bundle(bundle_path, data_dir=target, replace=replace)
+
+    assert (target / "schedules.db").read_bytes() == b"original"
+    assert not (target / path).exists() or path == "schedules.db"
+
+
+def test_import_bundle_refuses_state_files_nested_in_an_asset_folder(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    bundle_path = tmp_path / "nested.zip"
+    _write_minimal_bundle(
+        bundle_path,
+        included_paths=[{"path": "data", "archivePath": "assets/data"}],
+        files={"assets/data/notes.md": "ok\n", "assets/data/cache.sqlite3": b"x"},
+    )
+
+    with pytest.raises(BundleError, match="Raticode's own data"):
+        import_workflow_bundle(bundle_path, data_dir=target)
+
+
+def test_import_bundle_still_imports_ordinary_assets_and_subflows(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    bundle_path = tmp_path / "ok.zip"
+    _write_minimal_bundle(
+        bundle_path,
+        included_paths=[
+            {"path": "prompts/review.md", "archivePath": "assets/prompts/review.md"},
+            {"path": "data/rows.json", "archivePath": "assets/data/rows.json"},
+        ],
+        files={"assets/prompts/review.md": "Review\n", "assets/data/rows.json": "[]\n"},
+    )
+
+    import_workflow_bundle(bundle_path, data_dir=target)
+
+    assert (target / "prompts" / "review.md").read_text() == "Review\n"
+    assert (target / "data" / "rows.json").read_text() == "[]\n"
+
+
+def test_every_data_folder_the_backend_creates_is_refused() -> None:
+    """Folders named in code as data_dir / "<name>" can't be bundle targets (X-2)."""
+    from gofer.core.bundles import INTERNAL_DATA_NAMES
+
+    for name in (
+        "generation-jobs",
+        "organization-repositories",
+        "organization-shared-worktrees",
+        "organization-worktrees",
+        "rem-worktrees",
+        "skills",
+        "speech-models",
+        "usage-probe",
+    ):
+        assert name in INTERNAL_DATA_NAMES

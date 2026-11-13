@@ -257,6 +257,63 @@ test("declined approvals stop Rem's script", async () => {
   assert.equal(commands.includes("Runtime.evaluate"), false);
 });
 
+// A tab whose page answers each in-page call from a table, recording the calls.
+function scriptedTab(answers) {
+  const calls = [];
+  const contents = {
+    isDestroyed: () => false,
+    getURL: () => "https://mail.example.com/",
+    getTitle: () => "Mail",
+    isLoading: () => false,
+    setBackgroundThrottling: () => {},
+    debugger: { isAttached: () => true, sendCommand: async () => ({}) },
+    executeJavaScriptInIsolatedWorld: async (_world, [{ code }]) => {
+      const method = code.match(/__raticodeAgent\("(\w+)"/)[1];
+      calls.push(method);
+      return { value: answers[method] };
+    },
+  };
+  return { tab: { id: "t", agent: { id: AGENT, shared: true }, contents }, calls };
+}
+
+test("Enter never asks for approval, even on a shared signed-in tab", async () => {
+  const { tab, calls } = scriptedTab({ press: { focused: "input#q" }, type: { value: "hello", box: null } });
+  const asked = [];
+  const controller = createAgentBrowserController({
+    openTab: () => null,
+    agentTabs: () => [tab],
+    closeTab: () => {},
+    normalizeUrl: normalizeBrowserUrl,
+    policy: () => ({ remConfirm: "always", remSignInSites: ["mail.example.com"] }),
+    confirm: async (_session, details) => { asked.push(details); return false; },
+  });
+  assert.equal((await controller.handle({ agent: AGENT, action: "press", key: "Enter" })).focused, "input#q");
+  await controller.handle({ agent: AGENT, action: "press", key: "Shift+Enter" });
+  // Typing with submit presses Enter afterwards, which doesn't ask either.
+  await controller.handle({ agent: AGENT, action: "type", selector: "#q", text: "hello", submit: true });
+  assert.deepEqual(asked, []);
+  assert.equal(calls.includes("intent"), false);
+  assert.deepEqual(calls.filter((method) => method === "press").length, 3);
+});
+
+test("clicks on consequential controls still ask on a signed-in tab", async () => {
+  const { tab, calls } = scriptedTab({ intent: { consequential: true, label: "Delete account", url: "https://mail.example.com/" } });
+  const asked = [];
+  const controller = createAgentBrowserController({
+    openTab: () => null,
+    agentTabs: () => [tab],
+    closeTab: () => {},
+    normalizeUrl: normalizeBrowserUrl,
+    policy: () => ({ remConfirm: "signed-in", remSignInSites: ["mail.example.com"] }),
+    confirm: async (_session, details) => { asked.push(details); return false; },
+  });
+  await assert.rejects(controller.handle({ agent: AGENT, action: "click", selector: "#delete" }), /did not approve "Delete account"/);
+  assert.deepEqual(asked.map((details) => [details.action, details.label]), [["click", "Delete account"]]);
+  // The declined click never reached the page.
+  assert.equal(calls.includes("click"), false);
+  assert.equal(calls.includes("point"), false);
+});
+
 test("full access lets Rem act without approval prompts, even in shared tabs", async () => {
   const commands = [];
   const tab = { id: "t", agent: { id: AGENT, shared: true }, contents: {

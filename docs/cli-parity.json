@@ -353,8 +353,14 @@
     "POST /api/devices#enable": {
       "excluded": "pairing"
     },
+    "POST /api/devices#flagged_requests": {
+      "excluded": "pairing"
+    },
     "POST /api/devices#fleet_status": {
       "cli": "api"
+    },
+    "POST /api/devices#forget_flagged": {
+      "excluded": "pairing"
     },
     "POST /api/devices#host_template": {
       "excluded": "pairing"
@@ -369,6 +375,9 @@
       "excluded": "pairing"
     },
     "POST /api/devices#pair": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#phone_guard": {
       "excluded": "pairing"
     },
     "POST /api/devices#preview": {
@@ -408,6 +417,9 @@
       "excluded": "pairing"
     },
     "POST /api/devices#thread_history": {
+      "excluded": "pairing"
+    },
+    "POST /api/devices#unlock_phone": {
       "excluded": "pairing"
     },
     "POST /api/devices#unpair": {
@@ -451,6 +463,9 @@
     },
     "POST /api/organizations#audit_verify": {
       "cli": "api"
+    },
+    "POST /api/organizations#auto_mode": {
+      "cli": "org auto-mode"
     },
     "POST /api/organizations#backup": {
       "cli": "api"
@@ -550,7 +565,10 @@
       "cli": "api"
     },
     "POST /api/organizations#plan_save": {
-      "cli": "org schedule apply"
+      "cli": [
+        "org schedule apply",
+        "org backlog-pulls"
+      ]
     },
     "POST /api/organizations#providers": {
       "cli": "api"
@@ -572,6 +590,9 @@
     },
     "POST /api/organizations#repository": {
       "cli": "api"
+    },
+    "POST /api/organizations#request_approve_all": {
+      "excluded": "org-run-control"
     },
     "POST /api/organizations#request_decide": {
       "excluded": "org-run-control"
@@ -737,6 +758,9 @@
         "tickets comments"
       ]
     },
+    "POST /api/rem/kanban/window": {
+      "cli": "selfwork window"
+    },
     "POST /api/rem/memories": {
       "cli": "rem memories add"
     },
@@ -755,8 +779,17 @@
     "POST /api/rem/runs/*/cancel": {
       "cli": "rem runs cancel"
     },
+    "POST /api/rem/runs/*/pause": {
+      "cli": "rem runs pause"
+    },
+    "POST /api/rem/runs/*/resume": {
+      "cli": "rem runs resume"
+    },
     "POST /api/rem/runs/*/retry_review": {
       "cli": "rem runs retry-review"
+    },
+    "POST /api/rem/runs/*/wake": {
+      "cli": "rem runs wake"
     },
     "POST /api/rem/tasks": {
       "cli": "rem tasks create"
@@ -977,7 +1010,9 @@
     "PUT /api/rem/kanban/settings": {
       "cli": [
         "selfwork set",
-        "selfwork apply"
+        "selfwork apply",
+        "selfwork on",
+        "selfwork off"
       ]
     },
     "PUT /api/rem/memory-mode": {
@@ -1041,6 +1076,9 @@
     "organizations.control": {
       "excluded": "org-run-control"
     },
+    "organizations.requests": {
+      "excluded": "org-run-control"
+    },
     "organizations.knowledge": {
       "cli": "org knowledge save"
     },
@@ -1052,6 +1090,12 @@
     },
     "organizations.read": {
       "cli": "org show"
+    },
+    "organizations.backlog_pull": {
+      "cli": "org backlog-pulls"
+    },
+    "organizations.auto_mode": {
+      "cli": "org auto-mode"
     },
     "organizations.schedule": {
       "cli": "org schedule apply"
@@ -1120,8 +1164,17 @@
     "rem.run.cancel": {
       "cli": "rem runs cancel"
     },
+    "rem.run.pause": {
+      "cli": "rem runs pause"
+    },
+    "rem.run.resume": {
+      "cli": "rem runs resume"
+    },
     "rem.run.retry_review": {
       "cli": "rem runs retry-review"
+    },
+    "rem.run.wake": {
+      "cli": "rem runs wake"
     },
     "rem.search": {
       "cli": "rem search"
@@ -1585,6 +1638,8 @@
     "doctor": "offline",
     "licenses": "offline",
     "org apply": "backend",
+    "org backlog-pulls": "backend",
+    "org auto-mode": "backend",
     "org config": "backend",
     "org employees hold": "backend",
     "org employees list": "backend",
@@ -1668,7 +1723,10 @@
     "rem resources": "offline",
     "rem runs acknowledge": "backend",
     "rem runs cancel": "backend",
+    "rem runs pause": "backend",
+    "rem runs resume": "backend",
     "rem runs retry-review": "backend",
+    "rem runs wake": "backend",
     "rem runs show": "backend",
     "rem say": "backend",
     "rem search": "backend",
@@ -1689,6 +1747,7 @@
     "rem tasks run": "backend",
     "rem tasks show": "backend",
     "rem tasks wait": "backend",
+    "rem tasks wake": "backend",
     "rem thread send": "backend",
     "rem thread show": "backend",
     "runner cancel": "legacy",
@@ -1705,9 +1764,12 @@
     "schema": "offline",
     "selfwork apply": "backend",
     "selfwork export": "backend",
+    "selfwork off": "backend",
+    "selfwork on": "backend",
     "selfwork report": "backend",
     "selfwork set": "backend",
     "selfwork status": "backend",
+    "selfwork window": "backend",
     "serve": "offline",
     "swarm apply": "backend",
     "swarm delete": "backend",

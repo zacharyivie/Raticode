@@ -39,6 +39,8 @@ USER_ONLY_ORG_ACTIONS = frozenset(
         "resume_all",
         "heartbeat_resume",
         "request_decide",
+        "request_approve_all",
+        "auto_mode",
         # consent-gated
         "archive",
         "execution_resolve",
@@ -98,6 +100,7 @@ API_PATHS = (
     "/rem/kanban/settings",
     "/rem/kanban/ticket",
     "/rem/kanban/timeline",
+    "/rem/kanban/window",
     "/rem/memories",
     "/rem/memory-mode",
     "/rem/messages",

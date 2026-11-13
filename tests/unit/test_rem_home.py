@@ -1837,8 +1837,26 @@ def test_conversation_controls_existing_task_instead_of_duplicating(home: RemHom
     home.submit_message({"request_id": "pause-message", "body": "Pause that task"})
     home._reply()
     assert len(home.store.tasks()) == 1
+    # Pausing a task with a run going pauses that run, in its thread; it used to only
+    # turn off the schedule and leave the run going.
+    home.tick()
+    listed = home.store.tasks()[0]
+    assert listed["state"] == "enabled"
+    assert listed["active_run"] is None and listed["last_run"]["state"] == "paused"
+    assert len(listed["recent_runs"]) == 1
+
+
+def test_conversation_pauses_a_schedule_when_nothing_is_running(home: RemHome, tmp_path: Path):
+    daily = {**recipe(tmp_path), "schedule": {"kind": "daily", "local_time": "09:00"}}
+    task = home.create_task({"request_id": "create", **daily})["task"]
+    home.generate = lambda p, c, e: {
+        "reply": "Paused.",
+        "controls": [{"task_id": task["id"], "action": "pause"}],
+    }
+    home.submit_message({"request_id": "pause-message", "body": "Pause the daily task"})
+    home._reply()
     assert home.store.tasks()[0]["state"] == "paused"
-    assert home.store.tasks()[0]["active_run"]["state"] == "queued"
+    assert not home.store.tasks()[0]["recent_runs"]
 
 
 def test_access_revocation_drains_worker_and_blocks_completion(home: RemHome, tmp_path: Path):

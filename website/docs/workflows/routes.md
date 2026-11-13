@@ -6,11 +6,12 @@ pageClass: docs-layout
 
 # Routes, branches and joins
 
-Separate where execution goes from the conditions a node needs before it can begin.
+Routes say where execution goes. Readiness says what a node waits for. Rattish keeps the two apart.
 
 ## Routes and readiness
 
-`to` sends an activation to another node. `needs` declares one-time readiness requirements. A dependency does not by itself replace an explicit route.
+- `to` sends an activation to another node.
+- `needs` lists what must finish before a node can begin. A dependency alone doesn't create a route.
 
 ```rattish
 Rattish: 1
@@ -50,13 +51,22 @@ Node join:
   finish: pass
 ```
 
-The outgoing routes make both branches eligible. A route target with no `needs` also runs when the workflow starts, so give each target `needs` on its source to run it only after that source; the compiler warns with `RATTISH_ROUTE_TARGET_AUTO_STARTS` otherwise. The join waits for its declared readiness conditions. Do not use a dependency on an unreachable branch: the compiler checks whether the required node can participate in the activation lineage.
+How this runs:
+
+- `prepare` routes to both branches, so `left` and `right` become eligible.
+- A route target without `needs` also runs when the workflow starts. Give each target `needs` on its source so it runs only after that source. Otherwise the compiler warns with `RATTISH_ROUTE_TARGET_AUTO_STARTS`.
+- `join` waits until everything in its `needs` is ready.
+- Don't depend on a branch that can't be reached. The compiler checks that the required node can take part in the same activation lineage.
 
 ## Conditional routes
 
-Routes can have `when` predicates and an `otherwise` fallback. All matching conditional routes are eligible. A list is not a first-match switch. `otherwise` matches only when no conditional route from that completion matched; unconditional routes fire independently.
+Routes can have `when` predicates and an `otherwise` fallback.
 
-For operation failures, set `allow-fail: true` before routing `when failed`. Without it, the compiler rejects the route as unreachable (`RATTISH_UNREACHABLE_FAILURE_ROUTE`).
+- Every matching conditional route fires. A list is not a first-match switch.
+- `otherwise` matches only when no conditional route from that completion matched.
+- Unconditional routes fire independently.
+
+To route `when failed`, set `allow-fail: true` on the node. Without it, the compiler rejects the route as unreachable (`RATTISH_UNREACHABLE_FAILURE_ROUTE`).
 
 ```rattish
 Rattish: 1
@@ -87,15 +97,22 @@ Node record-success:
   finish: pass
 ```
 
-Structured output predicates such as `node.review.output.approved` require a successful producer and a declared compatible output schema. They do not read an agent's prose as a Boolean.
+Structured predicates such as `node.review.output.approved` need a successful producer with a compatible output schema. They don't read an agent's prose as a Boolean.
 
 ## Cycles and limits
 
-A route can return to an earlier node. Set a workflow or node `max-runs` limit, a timeout, or both so a repair/review cycle cannot repeat forever accidentally. `retry-count` repeats an operation attempt inside a node run; a routed cycle creates additional node runs.
+A route can loop back to an earlier node. Set a workflow or node `max-runs`, a timeout, or both, so a repair and review cycle can't repeat forever.
+
+| Setting | What repeats |
+| --- | --- |
+| `retry-count` | The operation, inside one node run |
+| A routed cycle | The whole node, as new node runs |
 
 ## Start and finish
 
-`start: true` is an optional start assertion and presentation hint; it cannot have `needs`. `finish: pass` and `finish: fail` mark endpoints and prohibit outgoing routes. Use these fields instead of inventing start, pass, or fail node types.
+- `start: true` is an optional start assertion and layout hint. A start node can't have `needs`.
+- `finish: pass` and `finish: fail` mark endpoints. An endpoint can't have outgoing routes.
 
-See [Loops](./loops.md), [Inputs and bindings](./inputs.md), and [Runs](../studio/runs.md).
+There are no start, pass or fail node types. Use these fields instead.
 
+See [Loops](./loops.md), [Inputs and bindings](./inputs.md) and [Runs](../studio/runs.md).

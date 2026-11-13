@@ -73,6 +73,9 @@ async function main() {
   await click("Start organization"); await wait("document.querySelector('.org-start') === null");
   await click("Work"); await wait("document.querySelector('.org-work-group')?.textContent.includes('In review')");
   await evaluate("document.querySelector('.org-task-open').click()"); await wait("document.querySelector('.org-conversation')?.textContent.includes('test provider')");
+  // The worker's report shows once; the move to In review is a short status line, not a copy of it.
+  await wait("document.querySelector('.org-status-entry')?.textContent.includes('Work complete, moved to In review')");
+  assert.equal(await evaluate("document.querySelector('.org-conversation').textContent.split('Verified the assigned task using a test provider.').length - 1"), 1);
   // Each run can be opened, and its record names what ran.
   await wait("document.querySelector('.org-attempt')?.textContent.includes('workspace-write')");
   await click("Open run"); await wait("document.querySelector('.org-transcript')?.textContent.includes('Final answer')");

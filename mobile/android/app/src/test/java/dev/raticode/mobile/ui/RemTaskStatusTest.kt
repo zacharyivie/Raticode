@@ -2,6 +2,7 @@ package dev.raticode.mobile.ui
 
 import dev.raticode.mobile.live.RemRun
 import dev.raticode.mobile.live.RemSchedule
+import dev.raticode.mobile.live.RemSleep
 import dev.raticode.mobile.live.RemTask
 import dev.raticode.mobile.ui.RemTaskStatus.Kind
 import dev.raticode.mobile.ui.RemTaskStatus.Tone
@@ -35,6 +36,24 @@ class RemTaskStatusTest {
         assertEquals("Result unclear", RemTaskStatus.run("outcome_unknown").label)
         assertEquals(Tone.SUCCESS, RemTaskStatus.run("succeeded").tone)
         assertEquals("Status unavailable", RemTaskStatus.run("something_new").label)
+    }
+
+    @Test fun aSleepingWorkerReadsAsTheDesktopSaysIt() {
+        val sleep = RemSleep("CI run 4294", "2026-11-11T02:45:00+00:00", 2, 25, 720)
+        val asleep = activity(task("z", active = run("queued").copy(waitingReason = "Sleeping until 02:45 UTC · waiting for CI run 4294", sleep = sleep)))
+        assertEquals(Kind.QUEUED, asleep.kind); assertFalse(asleep.spinning); assertEquals(Tone.NEUTRAL, asleep.tone)
+        assertEquals("Sleeping · waiting for CI run 4294, next check on 2026-11-11T02:45:00+00:00", asleep.label)
+        assertEquals(RemTaskStatus.SLEEPING, asleep.state)
+        assertEquals("Woke 2 times · 25 min of 12 h wait budget used", RemTaskStatus.sleepBudget(sleep))
+        assertEquals("First sleep · 0 min of 1.5 h wait budget used", RemTaskStatus.sleepBudget(RemSleep("x", "", 0, 0, 90)))
+        // An older desktop sends no sleep: the phone shows its waiting reason, as before.
+        val older = activity(task("o", active = run("queued").copy(waitingReason = "Waiting for CI run 4294 before checking again")))
+        assertEquals("Waiting for CI run 4294 before checking again", older.label); assertEquals("queued", older.state)
+        // A sleep only counts while the run is parked.
+        assertEquals(Kind.RUNNING, activity(task("a", active = run("executing").copy(sleep = sleep))).kind)
+        assertEquals(null, RemSleep.parse(null))
+        assertEquals(sleep, RemSleep.parse(org.json.JSONObject().put("waiting_for", "CI run 4294").put("until", "2026-11-11T02:45:00+00:00")
+            .put("wakes", 2).put("slept_minutes", 25).put("budget_minutes", 720)))
     }
 
     @Test fun activityTellsWorkingStoppedBlockedAndDoneApart() {
@@ -91,5 +110,24 @@ class RemTaskStatusTest {
         assertEquals("Still needs you", reportStatus("still_blocked").second.label)
         assertEquals("blocked", reportStatus("still_blocked").first)
         assertEquals("Needs you", reportStatus("blocked").second.label)
+    }
+
+    @Test fun aPausedRunReadsAsPausedByYouOrForYourWorkAndOffersResume() {
+        val paused = run("paused").copy(pausedBy = "user")
+        val byYou = task("a", last = paused)
+        assertEquals(Kind.PAUSED, activity(byYou).kind)
+        assertEquals("Paused", activity(byYou).label)
+        assertEquals("Paused for your work", activity(task("b", last = paused.copy(pausedBy = "priority"))).label)
+        assertEquals(listOf("Paused"), RemTaskStatus.groups(listOf(byYou), stamp).map { it.label })
+        // Neither attention nor finished, and the run controls pause what runs and resume what is paused.
+        assertFalse(RemTaskStatus.run("paused").active)
+        assertEquals(dev.raticode.mobile.live.RunPause.Control.Resume(paused.id), dev.raticode.mobile.live.RunPause.control(byYou, supported = true))
+        assertEquals(dev.raticode.mobile.live.RunPause.Control.Pause("r-executing"),
+            dev.raticode.mobile.live.RunPause.control(task("c", active = run("executing")), supported = true))
+        assertEquals(dev.raticode.mobile.live.RunPause.Control.None,
+            dev.raticode.mobile.live.RunPause.control(task("d", active = run("cancelling")), supported = true))
+        // An older desktop can't pause runs, so the phone offers nothing.
+        assertEquals(dev.raticode.mobile.live.RunPause.Control.None,
+            dev.raticode.mobile.live.RunPause.control(task("c", active = run("executing")), supported = false))
     }
 }

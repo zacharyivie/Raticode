@@ -460,6 +460,28 @@ def test_rattish_bundle_round_trip_preserves_script_permissions(tmp_path: Path, 
     assert restored.stat().st_mode & 0o7777 == 0o751
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+@pytest.mark.parametrize(("mode", "expected"), [(0o777, 0o755), (0o666, 0o644), (0o4775, 0o755)])
+def test_rattish_bundle_import_never_installs_group_or_world_writable_files(
+    tmp_path: Path, mode: int, expected: int
+) -> None:
+    """A bundle can't leave a script that another local account may rewrite."""
+    source = tmp_path / "source"
+    source.mkdir()
+    registry = tmp_path / "source-registry"
+    workflow = create_registered_workflow(source, "Review", registry_dir=registry)
+    script = workflow.workflow_root / "run.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    script.chmod(mode)
+    crafted = tmp_path / "crafted.raticode"
+    export_rattish_bundle("review", crafted, registry_dir=registry)
+    (tmp_path / "target").mkdir()
+
+    imported = import_rattish_bundle(crafted, tmp_path / "target", registry_dir=tmp_path / "t")
+
+    assert (imported.workflow_root / "run.sh").stat().st_mode & 0o7777 == expected
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Creating symlinks needs Windows developer mode")
 @pytest.mark.parametrize("swap_parent", [False, True])
 def test_rattish_bundle_export_rejects_file_swapped_after_scan(

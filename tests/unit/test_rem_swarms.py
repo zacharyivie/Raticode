@@ -378,3 +378,33 @@ def test_rem_completion_uses_runtime_checks(access: RemSwarmAccess) -> None:
                 delivery["state"] = "completed"
         access.manager._save(swarm)
     assert invoke(access, "complete", sid)["run"]["state"] == "completed"
+
+
+def test_rem_starts_full_access_agents_without_asking_and_logs_it(
+    access: RemSwarmAccess,
+) -> None:
+    # The user's decision: Rem doesn't ask again before a full-access start. The run's
+    # activity still names the agents and credits Rem, not the user.
+    sid = str(
+        invoke(
+            access,
+            "create",
+            name="Open team",
+            agents=[
+                {"id": "lead", "name": "Lead", "role": "Coordinate", "isOrchestrator": True},
+                {
+                    "id": "worker",
+                    "name": "Builder",
+                    "role": "Build",
+                    "provider": "codex",
+                    "permissionMode": "danger-full-access",
+                },
+            ],
+        )["id"]
+    )
+    invoke(access, "start", sid, task="Build")
+    run = access.manager.get(access.project, sid)["run"]
+    confirmed = [e for e in run["events"] if e["kind"] == "full_access_confirmed"]
+    assert [e["actorId"] for e in confirmed] == ["rem"]
+    assert confirmed[0]["payload"]["agents"] == ["Builder"]
+    assert "confirmFullAccess=true" not in SWARM_HELP

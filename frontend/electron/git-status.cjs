@@ -116,16 +116,64 @@ function readPorcelain(projectRoot, runner, includeBranch = false) {
   return pending;
 }
 
-function runGit(args, options = {}) {
+// A folder's own .git/config can name commands that reads run: `git status` and
+// `git diff` run a clean filter or process filter on any file whose timestamps changed,
+// and diff drivers can name textconv or external commands. An unpacked archive or
+// synced folder can carry such a config, so automatic reads blank every command a
+// repository-scoped setting names (CWE-78). Filters from the user's global or system
+// config, and git-lfs set up with `git lfs install --local`, still run.
+const REPOSITORY_COMMAND_KEYS = "^(filter\\..+\\.(clean|smudge|process)|diff\\..+\\.(textconv|command))$";
+const TRUSTED_FILTER_COMMAND = /^git-lfs (?:filter-process|clean -- %f|smudge -- %f)$/;
+const REPOSITORY_SCOPES = new Set(["local", "worktree"]);
+const commandOverrideReads = new Map();
+const COMMAND_OVERRIDE_MAX_AGE_MS = 15000;
+
+function parseRepositoryCommandConfig(output) {
+  const parts = String(output || "").split("\0");
+  const overrides = new Set();
+  for (let index = 0; index + 1 < parts.length; index += 2) {
+    const scope = parts[index];
+    const newline = parts[index + 1].indexOf("\n");
+    const key = newline < 0 ? parts[index + 1] : parts[index + 1].slice(0, newline);
+    const value = newline < 0 ? "" : parts[index + 1].slice(newline + 1);
+    if (!REPOSITORY_SCOPES.has(scope) || !key) continue;
+    if (key.startsWith("filter.") && TRUSTED_FILTER_COMMAND.test(value.trim())) continue;
+    overrides.add(key);
+    // A required filter with no command fails the read; mark it optional instead.
+    if (key.startsWith("filter.")) overrides.add(`${key.slice(0, key.lastIndexOf("."))}.required`);
+  }
+  return [...overrides].flatMap(key => ["-c", key.endsWith(".required") ? `${key}=false` : `${key}=`]);
+}
+
+function repositoryCommandOverrides(args, options, execFileImpl) {
+  const directory = path.resolve(args[0] === "-C" ? String(args[1]) : options.cwd || process.cwd());
+  const now = Date.now();
+  const existing = commandOverrideReads.get(directory);
+  if (existing && now - existing.at < COMMAND_OVERRIDE_MAX_AGE_MS) return existing.pending;
+  const pending = new Promise(resolve => {
+    // Reading config runs nothing. Exit code 1 means no such keys.
+    execFileImpl("git", ["-C", directory, "config", "--show-scope", "-z", "--get-regexp", REPOSITORY_COMMAND_KEYS],
+      { encoding: "utf8", maxBuffer: 1024 * 1024, windowsHide: true, timeout: 30000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+      (_error, stdout) => resolve(parseRepositoryCommandConfig(stdout)));
+  });
+  commandOverrideReads.set(directory, { at: now, pending });
+  if (commandOverrideReads.size > 64) commandOverrideReads.delete(commandOverrideReads.keys().next().value);
+  return pending;
+}
+
+async function runGit(args, options = {}) {
   const execFileImpl = options.execFileImpl || execFile;
   const mutates = !isGitRead(args);
+  // Raticode's own writes, such as `git config`, can change which commands apply.
+  if (mutates) commandOverrideReads.clear();
+  const overrides = mutates ? [] : await repositoryCommandOverrides(args, options, execFileImpl);
   if (mutates) gitReadGeneration += 1;
   return new Promise((resolve, reject) => {
     execFileImpl(
       "git",
       // Status/index reads can execute core.fsmonitor even with optional locks
       // disabled. Automatic refreshes must inspect files without running it.
-      mutates ? args : ["-c", "core.fsmonitor=false", ...args],
+      mutates ? args : ["-c", "core.fsmonitor=false", ...overrides, ...args],
       {
         cwd: options.cwd,
         encoding: options.encoding || "utf8",
@@ -533,6 +581,7 @@ async function readGitLocation(projectRoot, options = {}) {
 // Another process changed repository metadata. Cached branch lists must be reread.
 function invalidateGitReads() {
   gitReadGeneration += 1;
+  commandOverrideReads.clear();
 }
 
 async function readGitWorktrees(projectRoot, options = {}) {
@@ -713,6 +762,7 @@ module.exports = {
   readGitWorktrees,
   addGitWorktree,
   removeGitWorktree,
+  parseRepositoryCommandConfig,
   runGit,
   sourceControlStatus,
 };

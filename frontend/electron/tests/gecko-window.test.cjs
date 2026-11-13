@@ -8,7 +8,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { EVENT } = require("../x11-client.cjs");
 const { readAuthority, parseDisplay } = require("../x11-client.cjs");
-const { PROFILE_PREFS, WINDOW_CLASS, createGeckoWindow, pageAddress, supportProblem } = require("../gecko-window.cjs");
+const { NEW_TAB_PAGE, PROFILE_PREFS, WINDOW_CLASS, createGeckoWindow, pageAddress, supportProblem } = require("../gecko-window.cjs");
 const { X11_SWITCH, relaunchNeeded, setWantsX11, wantsX11 } = require("../gecko-display.cjs");
 
 const ROOT = 1;
@@ -42,6 +42,9 @@ class FakeClient extends EventEmitter {
   allowClick() { this.record("allow"); }
   sendConfigureNotify(...args) { this.record("notify", ...args); }
   async translate() { return { x: 100, y: 50 }; }
+  async extension(name) { return name === "SHAPE" ? this.shapeMajor ?? 129 : 0; }
+  shapeWindow(...args) { this.record("shape", ...args); }
+  unshapeWindow(...args) { this.record("unshape", ...args); }
   async text(window, name) { return this.props.get(`${window}:${name}`) || ""; }
   close() { this.record("close"); }
 }
@@ -175,6 +178,43 @@ test("the window follows the slot, hides when asked, and reports its screen posi
   gecko.close();
 });
 
+test("a menu over the page cuts a hole in Firefox's window instead of hiding it", async (t) => {
+  const context = setup();
+  t.after(context.done);
+  await started(context);
+  const { client, gecko } = context;
+  client.emit("event", mapped(77));
+  const hides = client.named("unmap").length;
+  await gecko.handle("place", { x: 0, y: 40, width: 800, height: 600, visible: true, cutouts: [{ x: 500, y: -10, width: 400, height: 200 }, { x: 900, y: 0, width: 5, height: 5 }, "junk"] });
+  // Kept inside the window; anything outside it or malformed is dropped.
+  assert.deepEqual(client.named("shape").at(-1), ["shape", 129, 77, 800, 600, [{ x: 500, y: 0, width: 300, height: 190 }]]);
+  assert.equal(client.named("unmap").length, hides, "the page stays on screen");
+  await gecko.handle("place", { x: 0, y: 40, width: 800, height: 600, visible: true, cutouts: [] });
+  assert.deepEqual(client.named("unshape").at(-1), ["unshape", 129, 77]);
+  const many = Array.from({ length: 40 }, (_, index) => ({ x: index, y: 0, width: 1, height: 1 }));
+  await gecko.handle("place", { x: 0, y: 40, width: 800, height: 600, visible: true, cutouts: many });
+  assert.equal(client.named("shape").at(-1)[5].length, 16);
+  // A click in the page is counted, so Raticode can close a menu open over it.
+  const before = gecko.status().pageClicks;
+  client.emit("event", clicked(77));
+  assert.equal(gecko.status().pageClicks, before + 1);
+  assert.equal(context.states.at(-1).pageClicks, before + 1);
+  gecko.close();
+});
+
+test("without the SHAPE extension, a menu over the page hides the window as before", async (t) => {
+  const context = setup();
+  t.after(context.done);
+  context.client.shapeMajor = 0;
+  await started(context);
+  const { client, gecko } = context;
+  client.emit("event", mapped(77));
+  await gecko.handle("place", { x: 0, y: 40, width: 800, height: 600, visible: true, cutouts: [{ x: 10, y: 10, width: 50, height: 50 }] });
+  assert.deepEqual(client.named("unmap").at(-1), ["unmap", 77]);
+  assert.equal(client.named("shape").length, 0);
+  gecko.close();
+});
+
 test("clicks give Firefox the keyboard; Raticode's interface and window focus take it back correctly", async (t) => {
   const context = setup();
   t.after(context.done);
@@ -212,6 +252,39 @@ test("a running Gecko opens addresses as new tabs, and only web addresses", asyn
   await gecko.handle("open", { url: "javascript:alert(1)" });
   assert.equal(spawned.length, before);
   gecko.close();
+});
+
+test("the tab bar's + opens an empty Firefox tab, with a fixed address the renderer can't change", async (t) => {
+  const context = setup();
+  t.after(context.done);
+  await started(context);
+  const { spawned, gecko } = context;
+  const result = await gecko.handle("new-tab", { url: "javascript:alert(1)", args: ["--headless"] });
+  assert.equal(result.newTab, true);
+  const helper = spawned.at(-1);
+  assert.deepEqual(helper.args.slice(-2), ["--new-tab", NEW_TAB_PAGE]);
+  assert.equal(NEW_TAB_PAGE, "about:newtab");
+  assert.ok(!helper.args.includes("--new-instance"));
+  assert.ok(!helper.args.some((arg) => /javascript|headless/.test(arg)));
+  gecko.close();
+});
+
+test("+ on a Gecko tab whose Firefox isn't running starts Firefox instead of a second helper", async (t) => {
+  const context = setup();
+  t.after(context.done);
+  const opening = context.gecko.handle("new-tab");
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  browserWindow(context.client);
+  context.client.emit("event", created(77));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  await opening;
+  const firefox = context.spawned.filter((item) => item.command === "/usr/bin/firefox");
+  assert.equal(firefox.length, 1);
+  assert.ok(firefox[0].args.includes("--new-instance"));
+  assert.ok(!firefox[0].args.includes("--new-tab"));
+  context.gecko.close();
 });
 
 test("a window that never appears, or a Firefox that exits, is reported", async (t) => {

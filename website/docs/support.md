@@ -11,7 +11,7 @@ Raticode is built by one developer, in the open. Help happens on GitHub.
 ## Check the guides first
 
 - [Troubleshooting](./reference/troubleshooting.md) covers installation, providers, workflow validation, saved state and paired devices.
-- [Installation](./installation.md) has the unsigned-build prompts for macOS and Windows, and how to check a download against its checksum.
+- [Installation](./installation.md) has the unsigned-build prompts for macOS and Windows, and how to [verify a download](./installation.md#verify-a-download).
 - Search these guides with the search box at the top of the page.
 
 ## Report a bug or ask for a feature

@@ -1,16 +1,16 @@
 ---
 title: agent
-description: Ask a coding provider to perform a task with explicit prompt, model, effort, and resource choices.
+description: Ask a coding provider to do a task, with an explicit prompt, model, effort and resources.
 pageClass: docs-layout
 ---
 
 # agent
 
-Ask a coding provider to perform a task with explicit prompt, model, effort, and resource choices.
+Ask a coding provider to do a task, with an explicit prompt, model, effort and resources.
 
 ## When to use it
 
-Use an agent node for open-ended analysis or implementation. The provider can use its native tools according to its own permissions, so review both the task and the deployment profile before execution.
+Use it for open-ended analysis or implementation. The provider can use its own tools within its own permissions, so review the task and the deployment profile before you run it.
 
 ## Example
 
@@ -29,15 +29,15 @@ Node step:
   finish: pass
 ```
 
-Provider IDs come from the Rattish provider contracts; for example, use `claude-code` rather than the legacy subscription name `claude_code`. When model or effort is omitted, compilation resolves the provider contract default. A deployment profile supplies compatible runtime settings without overriding authored provider/model/effort choices.
-
-Use inline `prompt` or a `prompt-path`; they are mutually exclusive. Bind values through `with` and refer to locals in prompt text as `{{name}}`. `memory` selects `"none"`, `run`, or `all`; quote `"none"` so it is a string rather than an absence literal. This field does not turn on Second Brain.
-
-The default successful output is text. Declare `output-schema` or `output-schema-path` for typed structured output, and use only one schema source. `repair-attempts` allows zero to three attempts to repair invalid structured output, which can incur additional provider usage.
+- **Provider IDs** come from the Rattish provider contracts. Write `claude-code`, not the legacy name `claude_code`.
+- **Model and effort** default to the provider contract's choice when you leave them out. A deployment profile adds runtime settings but never overrides the provider, model or effort you wrote.
+- **Prompt.** Use inline `prompt` or `prompt-path`, not both. Bind values through `with` and use them in the prompt as `{{name}}`.
+- **Memory** is `"none"`, `run` or `all`. Quote `"none"` so it reads as a string, not the absence literal. It does not turn on Second Brain.
+- **Output** is text by default. For typed output, declare one schema source: `output-schema` or `output-schema-path`. `repair-attempts` (0 to 3) retries invalid structured output, and each retry uses the provider again.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -60,14 +60,14 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Additional local bindings are supported. See [Inputs and bindings](../workflows/inputs.md) for delivery and type rules.
+You can bind other locals too. [Inputs and bindings](../workflows/inputs.md) covers delivery and types.
 
-Successful output is a string by default, or the value validated by the declared output schema. Select downstream fields only when the schema declares them.
+Output is a string, or the value that passed the declared output schema. Select fields downstream only when the schema declares them.
 
 ## Preflight and limits
 
-The provider must be installed/authenticated as needed, the working directory must exist, and selected prompt/profile resources must be valid. Preflight does not guarantee account allowance or that a provider will complete the task.
+Preflight checks that the provider is installed and signed in where needed, the working directory exists, and the prompt and profile resources are valid. It can't promise that your account has allowance left or that the provider will finish the task.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

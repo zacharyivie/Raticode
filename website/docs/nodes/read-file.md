@@ -10,7 +10,7 @@ Read a text file and pass its content and path metadata to downstream nodes.
 
 ## When to use it
 
-Use this node when another step needs actual text. The file node returns metadata only and is not a substitute for reading contents.
+Use it when a later step needs the file's text. The [file](./file.md) node returns metadata only.
 
 ## Example
 
@@ -28,13 +28,14 @@ Node step:
   finish: pass
 ```
 
-Create `notes/input.txt` before preflight, or give the node `needs` on the step that creates it. UTF-8 with strict decoding is the default. Select the encoding that matches the file; suppressing decoding failures can conceal damaged input. File reads are bounded by the runtime resource limits.
-
-Bind `node.step.output.content` downstream to consume the text. Output selectors preserve underscore field names such as `file_name`.
+- Create `notes/input.txt` before preflight, or add `needs` on the step that creates it.
+- The default is UTF-8 with strict decoding. Pick the file's real encoding. Ignoring decode errors can hide damaged input.
+- The runtime's resource limits cap how much a read can load.
+- Bind `node.step.output.content` downstream to use the text. Selectors keep underscores, as in `file_name`.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -44,9 +45,9 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -57,12 +58,12 @@ Successful output fields use these exact selector names:
 | `file_extension` | string |
 | `directory` | string |
 
-For example, refer to `node.step.output.content` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.content`.
 
 ## Preflight and limits
 
-The path must exist and be readable, and the encoding/error policy must be supported. When the node has `needs`, preflight skips the existence check because an upstream step may create the file earlier in the run; the node then reports a missing file when it runs.
+The path must exist and be readable, and the encoding and error policy must be supported. With `needs`, preflight skips the existence check, because an earlier step may create the file. A missing file then fails when the node runs.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

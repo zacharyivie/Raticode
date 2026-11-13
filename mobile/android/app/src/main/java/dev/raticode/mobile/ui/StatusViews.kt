@@ -50,6 +50,7 @@ internal fun toneColor(tone: Tone): Color {
 /** A task's leading glyph, as the desktop's TaskGlyph: a turning ring while work runs, else its outcome or type. */
 internal fun taskGlyph(activity: RemTaskStatus.Activity, type: String): ImageVector = when {
     activity.spinning -> ThreadIcons.Running
+    activity.state == RemTaskStatus.SLEEPING -> ThreadIcons.Moon
     activity.kind == RemTaskStatus.Kind.QUEUED -> ThreadIcons.Queued
     activity.kind == RemTaskStatus.Kind.PAUSED -> ThreadIcons.PauseCircle
     activity.kind == RemTaskStatus.Kind.WAITING -> ThreadIcons.Queued
@@ -65,6 +66,7 @@ internal fun runGlyph(state: String): ImageVector = when (state) {
     "blocked", "outcome_unknown" -> ThreadIcons.Waiting
     "queued" -> ThreadIcons.Queued
     "executing", "verifying", "repairing" -> ThreadIcons.Running
+    "paused" -> ThreadIcons.PauseCircle
     else -> ThreadIcons.NotStarted
 }
 

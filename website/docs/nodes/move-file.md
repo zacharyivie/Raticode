@@ -10,7 +10,7 @@ Move or rename a file, directory, or symlink, removing it from its original loca
 
 ## When to use it
 
-Use this node to publish a prepared artifact to its final location. Choose copy-file when you need the source to remain.
+Use it to move a finished file to its final place. To keep the source, use [copy-file](./copy-file.md).
 
 ## Example
 
@@ -28,13 +28,14 @@ Node step:
   finish: pass
 ```
 
-Create the source before preflight, or give the node `needs` on the step that creates it. The destination policy defaults to creating parents and refusing overwrite. Successful output includes both resolved paths and the resource kind.
-
-Moving is a side effect: a later node failure does not automatically put the resource back. Review paths and preserve a recovery copy when appropriate.
+- Create the source before preflight, or add `needs` on the step that creates it.
+- By default the node creates missing parent folders and won't overwrite an existing destination.
+- Output includes both resolved paths and the resource kind.
+- A later failure doesn't move anything back. Check the paths, and keep a backup copy when it matters.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -45,9 +46,9 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -58,12 +59,12 @@ Successful output fields use these exact selector names:
 | `destination_directory` | string |
 | `path_kind` | `file`, `directory`, `symlink` |
 
-For example, refer to `node.step.output.source_path` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.source_path`.
 
 ## Preflight and limits
 
-The source and its parent must permit moving, and the destination must satisfy the directory/overwrite policy. When the node has `needs`, preflight skips the existence check because an upstream step may create the source earlier in the run; the node then reports a missing source when it runs. Invalid containment or type combinations fail.
+The source and its parent folder must allow the move, and the destination must fit the folder and overwrite settings. With `needs`, preflight skips the existence check, because an earlier step may create the source. A missing source then fails when the node runs. Invalid nesting or resource types fail.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

@@ -172,6 +172,7 @@ from gofer.ui.headless import (
     agent_request_refusal,
 )
 from gofer.ui.link_previews import LinkPreviews, PreviewError, chat_image
+from gofer.ui.organization_auto import rem_reviewer
 from gofer.ui.organization_operations import READ_OPERATIONS
 from gofer.ui.organization_packages import read_directory
 from gofer.ui.organization_store import OrganizationConflict
@@ -182,6 +183,7 @@ from gofer.ui.rem_kanban import KanbanRefused, message_ticket_keys, task_ticket_
 from gofer.ui.swarms import SwarmManager
 from gofer.utils.logging import configure_backend_logging, get_logger, reset_backend_logging
 from gofer.utils.paths import get_data_dir, restrict_to_owner
+from gofer.utils.process import seal_credential_env
 
 log = get_logger(__name__)
 CONTINUOUS_RUN_POLL_SECONDS = 1.0
@@ -598,6 +600,8 @@ class GoferUiServer(ThreadingHTTPServer):
         self.rem_home.brain_library = self.second_brains
         # The global Kanban shows every organization's tickets beside Rem's own.
         self.rem_home.organizations = self.organizations
+        # Organizations in Auto mode ask Rem's own model to decide their requests.
+        self.organizations.auto_review = rem_reviewer(self.rem_home._current_config, data_dir)
         organizations = self.organizations
         # The Second Brain shows which organization tickets read or quoted a note.
         self.second_brains.organization_source = lambda: (
@@ -1194,10 +1198,25 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     known,
                 )
             elif method == "GET" and len(parts) == 2 and parts[0] == "threads":
-                result = rem_poll_result(service.store.thread(parts[1]), known)
+                thread = service.store.thread(parts[1])
+                if self._agent_token_name:
+                    # Thread tools carry MCP server URLs and arguments, which can hold keys;
+                    # agent tokens can't read them on /api/rem-resources either.
+                    thread["metadata"] = {
+                        key: value
+                        for key, value in thread["metadata"].items()
+                        if key != "resources"
+                    }
+                result = rem_poll_result(thread, known)
             elif method == "GET" and len(parts) == 2 and parts[0] == "runs":
                 with service.store.connect() as db:
-                    result = {"run": service.store.get(db, "runs", parts[1])}
+                    run = service.store.get(db, "runs", parts[1])
+                if self._agent_token_name:
+                    # A run keeps Rem's whole configuration: projects with their folder
+                    # grants, MCP servers and Second Brain grants, all denied to agent
+                    # tokens on /api/rem/context.
+                    run = {key: value for key, value in run.items() if key != "config"}
+                result = {"run": run}
             elif method == "GET" and parts == ["search"]:
                 # Words to find in the whole saved chat; no model is involved.
                 query = parse_qs(parsed.query)
@@ -1291,6 +1310,19 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 and parts[2] == "retry_review"
             ):
                 result = service.retry_review(parts[1], self._read_json())
+            elif (
+                method == "POST" and len(parts) == 3 and parts[0] == "runs" and parts[2] == "pause"
+            ):
+                # Stops the run's turn and keeps it paused with its thread and worktree.
+                result = service.pause_run(parts[1], self._read_json())
+            elif (
+                method == "POST" and len(parts) == 3 and parts[0] == "runs" and parts[2] == "resume"
+            ):
+                # Picks a paused run back up in the same thread, never as a fresh run.
+                result = service.resume_run(parts[1], self._read_json())
+            elif method == "POST" and len(parts) == 3 and parts[0] == "runs" and parts[2] == "wake":
+                # Wake now: a sleeping worker resumes in its thread without waiting out its time.
+                result = service.wake_run(parts[1], self._read_json())
             elif method == "DELETE" and len(parts) == 2 and parts[0] == "tasks":
                 request_id = parse_qs(parsed.query).get("request_id", [""])[0]
                 result = service.edit_task(parts[1], {"request_id": request_id}, "delete")
@@ -1324,6 +1356,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
             service.self_work.update_settings(self._read_json())
         elif method == "POST" and parts == ["report", "seen"]:
             service.self_work.mark_seen(self._read_json().get("updated_at"))
+        elif method == "POST" and parts == ["window"]:
+            # A timed self-work window: schedule one, end one at a time, or cancel one.
+            service.self_work.change_window(self._read_json())
         else:
             raise KeyError(method)
         return {"board": service.kanban.board(), "self_work": service.self_work.view()}
@@ -2926,6 +2961,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                 heard = body.get("text")
                 if not isinstance(heard, str):
                     raise ValueError("text must be a string")
+                before = body.get("before", "")
+                if not isinstance(before, str):
+                    raise ValueError("before must be a string")
                 default = body.get("defaultProvider")
                 chosen = voice_tidy.current(
                     default if isinstance(default, str) and default else None,
@@ -2937,7 +2975,9 @@ class GoferUiRequestHandler(BaseHTTPRequestHandler):
                     else ""
                 )
                 data_dir = self._request_data_dir(parse_qs(parsed.query))
-                self._send_json(voice_tidy.tidy(heard, chosen, data_dir, context=context))
+                self._send_json(
+                    voice_tidy.tidy(heard, chosen, data_dir, context=context, before=before)
+                )
             except (ValueError, json.JSONDecodeError) as exc:
                 self._send_json({"error": str(exc)}, status=400)
             return
@@ -4530,12 +4570,26 @@ def serve(
     session: HeadlessSession | None = None
     if headless:
         session = HeadlessSession.prepare(host, data_dir or get_data_dir(), token_file)
+    elif not headless_support.is_loopback_host(host):
+        # A developer option (browser development); the API then answers other computers.
+        log.warning(
+            "Listening on %s, which other computers can reach. Raticode's API holds your "
+            "workflows, folder grants and Rem; use 127.0.0.1 unless you need this.",
+            host,
+        )
+        print(
+            f"Warning: Raticode is listening on {host}, which other computers can reach. "
+            "Use --host 127.0.0.1 unless you need this.",
+            file=sys.stderr,
+        )
     server = create_server(
         host=host,
         port=port,
         data_dir=data_dir,
         api_token=session.token if session else None,
     )
+    # The server has read its tokens; nothing spawned from here on may inherit them.
+    seal_credential_env()
     if session is not None:
         session.attach(server, rem_settings)
     server.scheduler.start(paused=True)

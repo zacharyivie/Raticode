@@ -26,14 +26,28 @@
   margin-left: -10px;
 }
 .docs-layout .vp-doc table { display: block; width: 100%; overflow-x: auto; font-size: .9rem; }
-.docs-layout .vp-doc th { white-space: nowrap; }
-.docs-layout .vp-doc .custom-block { border-radius: 8px; }
+.docs-layout .vp-doc th, .docs-layout .vp-doc td { vertical-align: top; }
+.docs-layout .vp-doc td { line-height: 1.6; }
+/* Callouts: the default 14px is cramped for multi-line notes. */
+.docs-layout .vp-doc .custom-block { border-radius: 8px; font-size: 15px; line-height: 1.7; }
+.docs-layout .vp-doc .custom-block p, .docs-layout .vp-doc .custom-block li { line-height: 1.7; }
+.docs-layout .vp-doc .custom-block ul { margin: 8px 0; }
+.docs-layout .vp-doc .custom-block li + li { margin-top: 4px; }
 .docs-layout .vp-doc div[class*='language-'] { border: 1px solid var(--vp-c-divider); }
-.docs-layout :focus-visible { outline: 2px solid var(--vp-c-brand-1); outline-offset: 3px; }
+.docs-layout :focus-visible,
+.VPLocalSearchBox :focus-visible:not(input) { outline: 2px solid var(--vp-c-brand-1); outline-offset: 3px; }
+/* Shiki's github comment grey is under 4.5:1 on both code backgrounds. */
+.docs-layout .vp-code span[style*='--shiki-light:#6A737D'] { --shiki-light: #57606a !important; }
+.docs-layout .vp-code span[style*='--shiki-dark:#6A737D'] { --shiki-dark: #959da5 !important; }
+/* github-light's red (4.24:1) and green (4.28:1) also miss AA on the light code background. */
+.docs-layout .vp-code span[style*='--shiki-light:#D73A49'] { --shiki-light: #b31d28 !important; }
+.docs-layout .vp-code span[style*='--shiki-light:#22863A'] { --shiki-light: #116329 !important; }
 .docs-layout .VPDocFooter { margin-top: 56px; }
 @media (max-width: 767px) {
   .docs-layout .vp-doc h1 { font-size: 2rem; }
+  .docs-layout .vp-doc h1 + p { font-size: 1.05rem; line-height: 1.65; }
   .docs-layout .vp-doc table { font-size: .84rem; }
+  .docs-layout .vp-doc th, .docs-layout .vp-doc td { padding: 8px 12px; }
 }
 @media print {
   .Layout.docs-layout {
@@ -53,3 +67,7 @@
   .docs-layout .vp-doc tr { break-inside: avoid; }
   .docs-layout .vp-doc pre code, .docs-layout .vp-doc pre code span { color: #19132c !important; }
 }
+
+/* Let long headings wrap in the "On this page" outline instead of ending in "…". The padding keeps
+   the first line where VitePress's active-heading marker expects a 32px row. */
+.docs-layout .VPDocAsideOutline .outline-link { white-space: normal; line-height: 18px; padding: 7px 0; }

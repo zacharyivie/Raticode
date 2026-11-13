@@ -1,4 +1,6 @@
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermission
 import java.util.Properties
 
 plugins {
@@ -8,20 +10,63 @@ plugins {
 
 // Unconfigured release builds are unsigned. Partial configuration is an error,
 // never a reason to fall back to the debug key.
+// CI sets the four RATICODE_RELEASE_* variables. A local build can instead point
+// RATICODE_RELEASE_SIGNING_PROPERTIES at an owner-only properties file outside the
+// repository (storeFile, keyAlias, passwordFile), so no password sits in the environment.
 val releaseSigningNames = listOf(
     "RATICODE_RELEASE_STORE_FILE", "RATICODE_RELEASE_STORE_PASSWORD",
     "RATICODE_RELEASE_KEY_ALIAS", "RATICODE_RELEASE_KEY_PASSWORD",
 )
-val releaseSigning = releaseSigningNames.associateWith { providers.environmentVariable(it).orNull }
+val signingEnvironment = releaseSigningNames.associateWith { providers.environmentVariable(it).orNull }
+val signingPropertiesPath = providers.environmentVariable("RATICODE_RELEASE_SIGNING_PROPERTIES").orNull
+
+fun ownerOnly(file: File, label: String) {
+    val posix: Set<PosixFilePermission> = runCatching { Files.getPosixFilePermissions(file.toPath()) }.getOrNull() ?: return
+    require(posix.none { permission -> permission.name.startsWith("GROUP_") || permission.name.startsWith("OTHERS_") }) {
+        "$label must be readable by its owner only (chmod 600)."
+    }
+}
+
+val releaseSigning: Map<String, String?> = if (signingPropertiesPath == null) {
+    signingEnvironment
+} else {
+    require(signingEnvironment.values.all { it == null }) {
+        "Use RATICODE_RELEASE_SIGNING_PROPERTIES or the RATICODE_RELEASE_* variables, not both."
+    }
+    val propertiesFile = File(signingPropertiesPath)
+    require(propertiesFile.isAbsolute && propertiesFile.isFile && propertiesFile.canRead()) {
+        "RATICODE_RELEASE_SIGNING_PROPERTIES must be the absolute path of a readable file."
+    }
+    ownerOnly(propertiesFile, "The signing properties file")
+    val values = Properties().apply { propertiesFile.reader().use { load(it) } }
+    val folder = propertiesFile.parentFile
+    fun resolve(name: String): File? =
+        values.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }?.let { File(it).takeIf(File::isAbsolute) ?: File(folder, it) }
+    val passwordFile = resolve("passwordFile")
+    require(passwordFile != null && passwordFile.isFile && passwordFile.canRead()) {
+        "The signing properties file needs passwordFile, a readable file holding the keystore password."
+    }
+    ownerOnly(passwordFile, "The keystore password file")
+    val password = passwordFile.readText().trimEnd('\r', '\n')
+    mapOf(
+        "RATICODE_RELEASE_STORE_FILE" to resolve("storeFile")?.path,
+        "RATICODE_RELEASE_STORE_PASSWORD" to password,
+        "RATICODE_RELEASE_KEY_ALIAS" to values.getProperty("keyAlias")?.trim(),
+        // PKCS12 keystores keep the key under the store's password.
+        "RATICODE_RELEASE_KEY_PASSWORD" to password,
+    )
+}
 val hasReleaseSigning = releaseSigning.values.any { it != null }
 if (hasReleaseSigning) {
     require(releaseSigning.values.all { !it.isNullOrBlank() }) {
-        "Release signing requires all four RATICODE_RELEASE_* signing variables."
+        "Release signing requires all four RATICODE_RELEASE_* signing variables, or storeFile, keyAlias and " +
+            "passwordFile in the RATICODE_RELEASE_SIGNING_PROPERTIES file."
     }
     val keyStore = File(releaseSigning.getValue("RATICODE_RELEASE_STORE_FILE")!!)
     require(keyStore.isAbsolute && keyStore.isFile && keyStore.canRead()) {
         "Release keystore must be a readable file."
     }
+    ownerOnly(keyStore, "The release keystore")
 }
 
 // version.properties is the only place the version is written; docs/versioning.md
@@ -40,8 +85,10 @@ require(appVersionCode in 1..2_100_000_000) {
 
 android {
     namespace = "dev.raticode.mobile"
-    // GeckoView needs API 37 to compile against. The app still targets 36, so its behaviour on phones is unchanged.
+    // GeckoView needs API 37.2 to compile against (AGP 9.5 checks the minor level too). The app still
+    // targets 36, so its behaviour on phones is unchanged.
     compileSdk = 37
+    compileSdkMinor = 2
 
     defaultConfig {
         applicationId = "dev.raticode.mobile"
@@ -58,6 +105,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true }
+    // Security checks that fail lint instead of warning. A web view without onRenderProcessGone lets a crashing
+    // page end the whole app.
+    lint { error += listOf("MissingOnRenderProcessGone") }
     // GeckoView's engine is large; compressed in the APK it takes about half the download.
     packaging { jniLibs { useLegacyPackaging = true } }
     sourceSets.getByName("test").resources.directories.add("../protocol/v1/fixtures")

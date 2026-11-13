@@ -11,7 +11,7 @@ Tagging publishes the already staged files. It never starts a build.
 | Prepare candidate | Push to `stage`, or manual **Prepare release candidate** on `stage` | Windows x64, macOS arm64 and Linux x64 packages; macOS always Developer ID signed, notarized and stapled, Windows signed only when configured; native tests, signing checks and distribution backend tests |
 | Stage exact files | Successful preparation in the same run | Attested manifest, complete draft release, release notes and verified remote hashes |
 | Squash merge | You merge `stage` into `main` | No workflow; `main` gets one new commit with the staged files |
-| Publish | Push of `vX.Y.Z` | Verify the matching successful candidate, refuse it unless its Mac packages are signed, and make its existing draft public |
+| Publish | Push of `vX.Y.Z`, then your approval of the `release-publish` deployment | Verify the matching successful candidate, refuse it unless its Mac packages are signed by the release team, and make its existing draft public |
 
 Pushes to `main` no longer build or stage anything. A pull request from `stage` into
 `main`, such as the one GitHub's **Squash and merge** button uses, still runs
@@ -32,7 +32,8 @@ Raticode Mobile lives in `mobile/android` and has its own guide, `mobile/android
 - The desktop updater reads the repository's latest release, so desktop releases set `make_latest` to `true` and phone releases always set it to `false`. After publishing a phone release, confirm `/releases/latest` still names a `v*` tag.
 - Each app's "same files" check compares only that app. A fix to one app leaves the other app's candidate valid.
 - Phone signing uses `ANDROID_RELEASE_SIGNING` and the `android-release-*` environments, so it never affects desktop builds.
-- The phone candidate's instrumented emulator tests are recorded but don't block it: the APK is still built, checked, launched and staged, and failures show in the build job's summary and a separate **Emulator tests (non-blocking)** job. Only signed phone candidates can be published. After a `mobile-vX.Y.Z` release is public, `npm run set-release -- --mobile X.Y.Z` in `website/` turns on the site's APK download (see `mobile/android/docs/releasing.md`).
+- The phone candidate's instrumented emulator tests are recorded but don't block it: the APK is still built, checked, launched and staged, and failures show in the build job's summary and a separate **Emulator tests (non-blocking)** job. Only signed phone candidates can be published.
+- Every desktop release ships with a downloadable phone APK. The website always links the signed APK of the version in `mobile/android/version.properties`, and it deploys only once both the desktop and phone releases it names are public (see [The website](#the-website)). A desktop release whose phone version has no public release leaves the old site live until that phone release is published.
 - The phone app's own commit history was not carried into this repository: it arrived as part of one squashed commit (`bc75634c`). The old phone repository and its backups remain the record of that history, so `main` takes ordinary squash merges like any other release.
 
 ## The website
@@ -43,29 +44,39 @@ The public site in `website/` deploys to GitHub Pages from the **Website docs** 
 
 - **What deploys.** Only `main`. The deploy job runs after `npm run check` (type check,
   build, internal links and anchors, sitemap and robots.txt) and `npm run check:downloads`
-  (every download link exists on the newest published desktop release) both pass. Pull
+  (every desktop download exists on the newest published desktop release, and the signed
+  APK, its checksums and `apk-checks.json` exist on the phone release the site names, with
+  the signing certificate the site shows) both pass. Pull
   requests and `dev` pushes build and check the site but never deploy it, and neither
   does the weekly scheduled check.
 - **When it deploys.** On a push to `main` that changes `website/`, when **Publish
-  release** finishes successfully, and from **Run workflow** with `main` selected.
+  release** or **Publish mobile release** finishes successfully, and from **Run
+  workflow** with `main` selected.
+- **Versions.** `data/releases.ts` names the desktop and phone versions the site links.
+  `npm run check` fails unless they equal `frontend/package.json` and
+  `mobile/android/version.properties`, the files each publish job checks its tag against.
 - **Releases.** While preparing a release (step 1 below), run
   `npm run set-release -- X.Y.Z` in `website/`. It moves `data/releases.ts` and the
-  versioned file names in the install guide to the new version and lists other lines that
-  mention the old one, to reword by hand. After the squash merge, the push to `main`
-  finds that `vX.Y.Z` isn't published yet; the job records "Website waits for its
-  release", keeps the old site live and succeeds. The deploy happens when the tag's
-  **Publish release** run finishes. If a release is published without moving the site,
-  the download check fails and the old site stays up until you run `set-release` and
-  push.
+  versioned file names in the install guide to the new version, points the phone APK at
+  the version in `mobile/android/version.properties`, and lists other lines that mention
+  the old desktop version, to reword by hand. After the squash merge, the push to `main`
+  finds that `vX.Y.Z` or `mobile-vX.Y.Z` isn't published yet; `check:downloads` exits 3,
+  the job records "Website waits for its release", keeps the old site live and succeeds.
+  Each publish run starts the workflow again; the first one to find both releases public
+  deploys. If a release is published without moving the site, the download check fails
+  and the old site stays up until you run `set-release` and push.
 - **One-time setup (repository owner).** In **Settings > Pages > Build and deployment**,
   set **Source** to **GitHub Actions**. GitHub creates the `github-pages` environment on
   the first deploy; its deployment rule should allow `main` only. Until Pages is turned
   on, the deploy job fails while the build and checks still pass.
-- **Address.** The site builds for `https://zacharyivie.github.io/Raticode/`. Two optional
+- **Address.** The site lives at `https://raticode.dev/`, which is also what it builds for
+  when nothing is set. Two optional
   repository variables change that (**Settings > Secrets and variables > Actions >
   Variables**): `WEBSITE_URL`, the full address, and `WEBSITE_BASE`, the path it is
   served from, which defaults to the path of `WEBSITE_URL`. The sitemap, robots.txt,
-  canonical links and the social preview image use the full address.
+  canonical links and the social preview image use the full address. The repository sets
+  `WEBSITE_URL=https://raticode.dev/`; a fork serving project Pages would set
+  `WEBSITE_URL=https://<owner>.github.io/<repo>/`.
 - **Custom domain.** Verify the domain under your profile's **Settings > Pages** first,
   add it in the repository's **Settings > Pages > Custom domain**, then create the DNS
   records GitHub lists (apex `A`/`AAAA` records to GitHub's Pages addresses, or a `www`
@@ -100,6 +111,9 @@ What the macOS job does, in order:
    app-specific password and team with Apple, so bad credentials fail here, before the
    build. Later steps receive only the identity's SHA-1 hash, the team ID, the keychain
    path and the profile name.
+   The keychain locks itself after two idle hours or on sleep (it was six hours). The
+   renderer (`npm run build`) is built before this step, so Vite and its plugins never
+   run beside an unlocked signing keychain.
 2. **Build backend**: PyInstaller signs the backend and the standalone CLI with that
    identity, the hardened runtime, a secure timestamp and
    `frontend/build-resources/entitlements.mac.plist`.
@@ -120,12 +134,21 @@ What the macOS job does, in order:
    CLI. Apple's receipts are saved as `notarization-macos-dmg.json` and
    `notarization-macos-cli.json`; if Apple rejects a file, the step prints Apple's log.
 5. **Delete temporary macOS signing keychain**, which runs even when a step failed.
+   **Test native terminal and Electron security on packaged runtime version**
+   (`npm run test:platform`) runs only after this, because it runs third-party test
+   code.
 6. **Verify final updater hashes** checks every `latest-*.yml` hash and every blockmap
-   against the final files, and **Smoke-test final distributions** repeats the
+   against the final files, and that `latest-mac.yml` names the ZIP (with its
+   blockmap) as the update. **Smoke-test final distributions** repeats the
    signature, staple and Gatekeeper checks on the app extracted from the ZIP and from
-   the DMG, checks that the app's updater label says `signed`, and records
-   `"signing": "developer-id"` and the team in `package-tests-macos.json`. The manifest
-   step refuses Mac evidence that doesn't match the candidate's policy.
+   the DMG, checks that the app's updater label says `signed` and that its
+   `app-update.yml` points at the publish feed in `frontend/package.json`, and records
+   `"signing": "developer-id"`, the team and `"update_feed"` in
+   `package-tests-macos.json`. The manifest step refuses Mac evidence that doesn't
+   match the candidate's policy, refuses a team other than `MACOS_TEAM_ID` in
+   `scripts/release-candidate.py` (`UG6K997W6C`, read from the published 0.5.3 evidence,
+   so a certificate from any other team in the secrets can't produce a release), and re-reads every `latest-*.yml` against the
+   uploaded files before it writes the attested manifest.
 
 The entitlements are the same for the app and everything inside it: JIT and unsigned
 executable memory (Electron and Python's native libraries), disabled library
@@ -178,16 +201,39 @@ Actions > Repository secrets). Environment secrets with the same names in the
 
 ### Updates and permissions
 
-electron-updater installs Mac updates from the ZIP and checks it against
-`latest-mac.yml`. macOS's updater (Squirrel.Mac) only accepts an update signed with the
-same team as the running app, and Raticode only installs Mac updates itself when the
-app's packaged label `raticodeReleaseSigning` is `signed`. Signed builds carry that
-label, so after the first signed release, updates download and install automatically.
+User-facing behavior is documented on the website under
+[Installation > Mac updates](../website/docs/installation.md#mac-updates). How it works:
 
+- electron-updater reads `latest-mac.yml` from the newest release, downloads the ZIP it
+  names (in pieces, using the ZIP's blockmap and the previous update's cached ZIP) and
+  checks the file's SHA-512 against the metadata.
+- It then serves the ZIP to macOS's updater, Squirrel.Mac, through a local server.
+  Squirrel.Mac unpacks it and accepts it only if the new app satisfies the running
+  app's code-signing requirement: same bundle ID (`com.goferflow.desktop`) and same
+  Developer ID team. Only then does Electron's native `update-downloaded` fire.
+- Raticode waits for that native event before it asks about unsaved files, stops its
+  backend and calls `quitAndInstall`. electron-updater's own `update-downloaded`
+  fires earlier, when the ZIP is saved; from 0.5.4 the UI shows **Verifying update**
+  in between, and a rejection leaves Raticode and its backend running with the reason.
+  ShipIt then replaces `Raticode.app` in place and opens the new version. Because
+  `autoInstallOnAppQuit` is on, an accepted update also installs on a normal quit.
+- Raticode only takes this path when the app's packaged label `raticodeReleaseSigning`
+  is `signed` and the app isn't on a read-only mount (translocated, or run from the
+  DMG). Otherwise it falls back to **Download Mac installer**, and from 0.5.4 its
+  tooltip says why. A bundle the user can't write is left to Squirrel.Mac, which
+  launches ShipIt with privileges after an administrator password prompt (unverified).
+- Settings and data live in `~/Library/Application Support` and the user's project
+  folders, outside the bundle, so an update doesn't touch them.
+
+**Bootstrap.** The code that runs an update is the code of the copy already installed.
 Copies installed from an unsigned release (0.5.2 or earlier) are labelled unsigned, so
-they keep offering **Download Mac installer**. Users of those copies install the first
-signed DMG by hand once: quit Raticode, open the DMG and drag Raticode into
-Applications to replace the old copy. Release notes of signed releases say so.
+they keep offering **Download Mac installer** and need one manual install of 0.5.3 or
+later: quit Raticode, open the DMG and drag Raticode into Applications to replace the
+old copy. Release notes of signed releases say so. 0.5.3, the first signed release,
+already updates itself in place, using 0.5.3's flow (which stops the backend before
+Squirrel.Mac's signature check). The safer flow described above (waiting for that
+check, location checks, specific error messages) first ships in 0.5.4, so it runs
+for updates from 0.5.4 to 0.5.5 onward.
 
 macOS keys microphone and speech recognition permissions to the app's bundle ID
 (`com.goferflow.desktop`) and its code signature. An ad-hoc signature changes with every
@@ -198,21 +244,40 @@ dictation still fails, run `tccutil reset Microphone com.goferflow.desktop` and
 `tccutil reset SpeechRecognition com.goferflow.desktop`, then use **Test speech
 recognition** in Settings > Devices.
 
-### Still unverified until the first signed run
+### Still unverified on a real Mac
 
-These were written and tested against fake Apple tools and a stand-in certificate on
-Linux; no real Mac signing or notarization has run yet:
+The 0.5.3 candidate proved the CI side: the keychain import, notarytool, Apple's
+acceptance of the app, DMG and CLI, stapling, and the codesign, stapler and spctl
+checks all passed on the `macos-15` runner, and its `latest-mac.yml` hashes match the
+published ZIP. Never run on a real Mac by a maintainer:
 
-- that `security import` accepts the re-encoded identity and `find-identity` trusts it
-  on the `macos-15` runner, and that notarytool accepts the stored profile;
-- that Apple accepts the app, DMG and CLI (for example, that nothing inside the
-  PyInstaller backend trips notarization) and that stapling succeeds;
-- that the hardened-runtime backend, speech helper and dictation work on a real Mac;
-- that the codesign, stapler and spctl output parsed by the checks matches the
-  runner's tools;
-- Gatekeeper on a downloaded copy, the manual move from an unsigned copy, an automatic
-  update between two signed releases, and microphone and speech permissions surviving
-  that update.
+- an automatic update between two signed releases (download, Squirrel.Mac's signature
+  check, replacement and relaunch), and the **Verifying update** step and fallback
+  messages of 0.5.4;
+- microphone and speech permissions surviving that update, and the hardened-runtime
+  backend, speech helper and dictation;
+- Gatekeeper on a freshly downloaded copy;
+- an update by a standard (non-admin) account of a copy an administrator installed,
+  where Squirrel.Mac should ask for an administrator's password.
+
+To check an update on a Mac, with two consecutive signed releases A and B (for
+example 0.5.4 then 0.5.5, which tests the new flow; 0.5.3 to 0.5.4 tests 0.5.3's flow):
+
+1. Install A from its DMG into Applications, open it from Applications, and check
+   **Version** under **Settings > Developer**.
+2. Add a test project and change a setting, so you can see them survive.
+3. Publish B. In A, click **Check for updates**, then **Update B**.
+4. Expect **Downloading N%**, then (from 0.5.4) **Verifying update**, then the unsaved
+   files prompt if any, then Raticode quits and reopens by itself within a minute.
+5. Confirm the version is B, the project and setting are still there, `codesign -dv
+   --verbose=2 /Applications/Raticode.app` shows team `UG6K997W6C`, and dictation still
+   works without a new permission prompt.
+6. If it fails, copy the message, the `updater` lines of the app log (**Settings >
+   Developer**, or **Open logs folder** there), and
+   `~/Library/Caches/com.goferflow.desktop.ShipIt/ShipIt_stderr.log`.
+7. Optional fallback check: open A straight from the mounted DMG and confirm the
+   button reads **Download Mac installer** with a tooltip saying to move it into
+   Applications.
 
 ## Windows signing is optional
 
@@ -320,7 +385,10 @@ show its reason under Settings > Devices.
 
 1. Bump versions before preparation, move the website to the new version
    (`npm run set-release -- X.Y.Z` in `website/`, then `npm run check`), and commit the
-   release notes and code. Push to `origin/stage`. Every stage push prepares the current package version, even if you
+   release notes and code. Bump the phone version in the same commit when the phone app
+   ships with this release (see `mobile/android/docs/releasing.md`), and run `set-release`
+   after it so the site names that version. The desktop candidate ignores a later
+   website-only push, and its same-files check would then refuse the tag. Push to `origin/stage`. Every stage push prepares the current package version, even if you
    are not ready to publish it. This costs native build time and, when enabled, signing service use.
 2. Wait for the whole **Prepare release candidate** run to finish successfully. Open
    the draft linked in **Stage exact files**' job summary. It is identified by the
@@ -339,8 +407,9 @@ show its reason under Settings > Devices.
    On macOS they also check the Developer ID signatures, hardened runtime, stapled
    tickets and Gatekeeper assessment of both app copies and the DMG, and Apple's
    notarization receipts are part of the draft.
-   Linux DEB/RPM checks cover extraction and startup, not package-manager dependency
-   resolution or maintainer scripts. Full desktop launch, clean-machine installation
+   Linux DEB/RPM checks cover extraction, startup and file modes (no file in a desktop
+   or CLI `.deb` or `.rpm` may be group or world writable), not package-manager
+   dependency resolution or maintainer scripts. Full desktop launch, clean-machine installation
    and an update from 0.2.5 remain manual review tasks. No user workflow runs in these tests.
 4. Squash merge `stage` into `main`. The squash commit is new, so it has a different
    SHA from the reviewed one, but it must contain exactly the same files. Check before
@@ -362,7 +431,15 @@ show its reason under Settings > Devices.
    git push origin refs/tags/vX.Y.Z
    ```
 
-6. The publish job verifies package/tag versions, the remote tag's commit, that the
+   When the phone app releases from the same commit, tag `mobile-vA.B.C` there too and
+   push both tags in one command:
+   `git push origin refs/tags/mobile-vA.B.C refs/tags/vX.Y.Z`. Each tag starts its own
+   publish run, and each waits for your approval.
+
+6. The tag starts **Publish release**, which waits for your approval (see
+   [Release approval](#release-approval)). Open the run from the Actions tab, choose
+   **Review deployments**, tick `release-publish` and choose **Approve and deploy**.
+   The publish job then verifies package/tag versions, the remote tag's commit, that the
    tagged commit has the candidate's exact file tree, the manifest's GitHub
    attestation for the staged commit, the successful stage preparation run and attempt,
    the complete asset inventory and every remote SHA-256. It changes the existing
@@ -377,6 +454,64 @@ Do not click **Publish release** in the web UI, which
 would bypass the tag workflow and could publish the internal candidate identifier.
 Repository maintainers with release-write access can bypass workflow policy, so
 protect workflow changes and `v*` tag creation with repository rules.
+
+## Release approval
+
+From the first release tagged at a commit that includes these workflow changes,
+pushing a tag doesn't publish on its own. Three GitHub environments hold their
+publishing job until a required reviewer (the repository owner) approves it, and a tag
+ruleset limits who can create release tags.
+
+| Setting | Used by | Required reviewer | Allowed to deploy |
+| --- | --- | --- | --- |
+| `release-publish` environment | `release.yml` publish job (`v*` tags) | zacharyivie | tags matching `v*` only |
+| `mobile-release-publish` environment | `mobile-release.yml` publish job (`mobile-v*` tags) | zacharyivie | tags matching `mobile-v*` only |
+| `aur-publish` environment | `aur.yml` push job, only when the `AUR_PUBLISH` variable is `true` | zacharyivie | the `main` branch only |
+| **Release tags** ruleset (tag ruleset 27133359) | `refs/tags/v*` and `refs/tags/mobile-v*` | Only the Repository admin role may create, move or delete them | |
+
+Self-review is allowed (you push the tag and approve it) and admins can bypass the
+environments, so the owner can't be locked out. A workflow's own `GITHUB_TOKEN`, a
+GitHub App or another collaborator can't create, move or delete a release tag, and
+can't publish without your approval. Candidate drafts use `candidate-*` and
+`mobile-candidate-*` names, which the ruleset doesn't match, and **Prepare release
+candidate** never enters these environments, so `stage` pushes never wait.
+
+To approve a release, open the **Publish release** (or **Publish mobile release**) run
+for the tag in the Actions tab. It shows "Waiting for review". Choose **Review
+deployments**, tick the environment, optionally add a comment, and choose **Approve and
+deploy**. **Reject** stops the run without publishing. To try again later, use **Re-run
+jobs** on that run. The website deploy follows the publish run as before. An approval GitHub
+doesn't receive within 30 days fails the run.
+
+This gate stops other people, apps and compromised workflow steps. It doesn't stop
+something that already holds your own GitHub login, such as a stolen token from this
+computer's `gh` keyring: an admin token can push tags and approve deployments itself.
+
+The settings were applied on 2026-11-12 with `gh api`. To recreate them (Settings is
+`https://github.com/zacharyivie/Raticode/settings`):
+
+1. **Environments > New environment**, name `release-publish`. Tick **Required
+   reviewers** and add `zacharyivie`. Leave **Prevent self-review** off. Under
+   **Deployment branches and tags** choose **Selected branches and tags**, then **Add
+   deployment branch or tag rule**, **Ref type: Tag**, pattern `v*`. Save.
+2. Repeat for `mobile-release-publish` with the tag pattern `mobile-v*`.
+3. Open `aur-publish`: add `zacharyivie` as a required reviewer and a **Branch** rule for
+   `main`.
+4. **Rules > Rulesets > New ruleset > New tag ruleset**. Name `Release tags`,
+   enforcement **Active**. Under **Bypass list** add **Repository admin** (Always
+   allow). Under **Target tags** add `v*` and `mobile-v*` (include by pattern). Tick
+   **Restrict creations**, **Restrict updates** and **Restrict deletions**. Create.
+   Don't edit the separate **Protected Set** branch ruleset.
+
+GitHub creates any environment a workflow names on first use, with no protection. If
+these settings are ever removed, recreate them before the next tag reaches GitHub,
+or that tag publishes without asking.
+
+The Apple signing secrets are repository secrets, readable by any workflow job in this
+repository that asks for them. Moving them into the `release-signing` environment and
+restricting that environment to the `stage` branch (see the setup checklist above)
+would keep them away from every other branch. That is a secrets change and is left to
+you.
 
 ## AUR packages
 
@@ -428,16 +563,22 @@ succeeds, or when started by hand with a version, it:
    `ssh://aur@aur.archlinux.org/<package>.git` on `master`, trusting only the host
    keys pinned in `packaging/aur/known_hosts`.
 
-Step 4 runs only when an `AUR_SSH_PRIVATE_KEY` secret exists. Without it the job logs
-"AUR publishing is off" and pushes nothing. To turn publishing on:
+Step 4 runs only when the repository variable `AUR_PUBLISH` is `true`, so releases
+don't leave an approval waiting while publishing is off. It then waits for the
+`aur-publish` reviewer, and pushes only when an `AUR_SSH_PRIVATE_KEY` secret exists;
+without the secret the job logs "AUR publishing is off" and pushes nothing. To turn
+publishing on:
 
 1. Make a key used only by this workflow (`ssh-keygen -t ed25519 -N '' -f aur-ci`)
    and add `aur-ci.pub` to your AUR account (My Account > SSH Public Key, one key per
    line, next to your personal key).
-2. In GitHub, Settings > Environments, create `aur-publish`, add yourself as a
-   required reviewer and allow only the `main` branch (both triggers run there). Add the private
-   key (`aur-ci`) there as the secret `AUR_SSH_PRIVATE_KEY`, then delete the local copy.
-3. Optional: repository variables `AUR_COMMIT_NAME` and `AUR_COMMIT_EMAIL` change the
+2. In GitHub, Settings > Environments, open `aur-publish`. It already has you as the
+   required reviewer and allows only the `main` branch (both triggers run there); see
+   [Release approval](#release-approval). Add the private key (`aur-ci`) there as the
+   secret `AUR_SSH_PRIVATE_KEY`, then delete the local copy.
+3. Settings > Secrets and variables > Actions > Variables: add the repository variable
+   `AUR_PUBLISH` with the value `true`.
+4. Optional: repository variables `AUR_COMMIT_NAME` and `AUR_COMMIT_EMAIL` change the
    AUR commit author (default: Zack Ivie, publisheddoonk@gmail.com).
 
 The AUR asks maintainers to keep checking automated updates by hand, so keep the
@@ -496,6 +637,33 @@ partial publication are the guarantees this design can enforce.
 - [Code-signing hardware requirement](https://knowledge.digicert.com/general-information/new-private-key-storage-requirement-for-standard-code-signing-certificates-november-2022)
 - [Microsoft Artifact Signing](https://learn.microsoft.com/en-us/azure/artifact-signing/overview)
 - [Pinned runner OS and architecture labels](https://github.com/actions/runner-images)
+
+## Linux package file modes
+
+Electron's release zip stores its files as 0777 and 0666, and those modes survive
+extraction. Up to 0.5.3, the desktop `.deb` and `.rpm` installed `/opt/Raticode/gofer-flow`,
+`libffmpeg.so`, `chrome-sandbox`, the `.pak` files and the locales writable by every
+account (70 files and folders in each of the 0.5.3 `.deb` and `.rpm`; the CLI packages
+were fine).
+The AUR package already worked around it with `chmod -R go-w`.
+
+`frontend/build-resources/after-pack.cjs` is electron-builder's `afterPack` hook. It
+removes group and world write access from everything in the app folder on Linux and
+macOS, before packages are built and before Mac signing. **Smoke-test final
+distributions** lists every `.deb` (`dpkg-deb --contents`) and `.rpm` (`bsdtar -tvf`)
+and fails on any group or world writable entry. A local `.deb` build with the hook on
+2026-11-12 had none. The `.rpm` and Mac builds with the hook haven't run yet. Keep the
+AUR workaround: it costs nothing and covers older `.deb` files.
+
+## Build caches and hashed installs
+
+- `scripts/build-backend-binary.sh` and `.cjs` keep uv's cache in the git-ignored
+  `.uv-cache` in the repository unless `UV_CACHE_DIR` is set. A fixed `/tmp` path could
+  be created, and filled, by another account.
+- Every `pip install` in a workflow uses `--require-hashes --no-deps`. The phone's
+  protocol check installs `mobile/android/protocol/requirements.txt`, compiled with
+  hashes from `requirements.in`. To change a version, edit `requirements.in` and run the
+  `uv pip compile` command at the top of `requirements.txt` in that folder.
 
 ## Third-party notices
 

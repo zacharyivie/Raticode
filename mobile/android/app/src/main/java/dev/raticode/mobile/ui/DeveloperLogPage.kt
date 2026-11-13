@@ -122,8 +122,12 @@ internal fun DeveloperLogPage(client: LiveClient, onBack: (() -> Unit)?, onAskRe
     }
     fun copy(entries: List<LogEntry>) {
         if (entries.isEmpty()) return
-        context.getSystemService(android.content.ClipboardManager::class.java)
-            ?.setPrimaryClip(android.content.ClipData.newPlainText("Raticode log", DeveloperLog.selectionText(entries)))
+        val clip = android.content.ClipData.newPlainText("Raticode log", DeveloperLog.selectionText(entries))
+        // Log entries can name projects and hosts: keep them out of the clipboard preview and keyboard suggestions.
+        clip.description.extras = android.os.PersistableBundle().apply {
+            putBoolean(if (android.os.Build.VERSION.SDK_INT >= 33) android.content.ClipDescription.EXTRA_IS_SENSITIVE else "android.content.extra.IS_SENSITIVE", true)
+        }
+        context.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(clip)
         notice = "Copied ${count(entries.size)}"
     }
     fun askRem(entries: List<LogEntry>) {

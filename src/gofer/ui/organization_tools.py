@@ -83,6 +83,14 @@ ACTION_HELP = {
         "or restore it. History is kept. From Rem, archiving needs user consent."
     ),
     "request_decide": "User-only requestId, decision=approve/decline for Rem's consent requests.",
+    "auto_mode": (
+        "User-only enabled (bool), confirm (true to turn on). Auto mode: Rem's review decides "
+        "this organization's requests; Rem, employees and agent tokens are refused."
+    ),
+    "request_approve_all": (
+        "User-only requestIds: the exact list the user confirmed in Approve all. Approves them "
+        "in a safe order and reports each; Rem and employees are refused."
+    ),
     "run_events": "taskId, turnId (an attempt ID). Stored transcript events of one employee run.",
     "run_input": "taskId, turnId. The stored input of one employee run and whether it matches.",
     "audit_verify": (
@@ -158,7 +166,7 @@ ACTION_HELP = {
         "blocked check-in tickets and schedules the next one now."
     ),
     "plan_save": (
-        "kind=mission/project/milestone/epic, item, expectedRevision, optional reason. "
+        "kind=mission/project/milestone/epic/operations, item, expectedRevision, optional reason. "
         "Saves one plan item as a configuration revision. mission: {mission}. project: "
         "{id?, name, description, owner, color, workspacePath, checks: [{name, command}], "
         "autoRunChecks}. Checks are commands Raticode runs in the ticket's worktree to "
@@ -167,7 +175,9 @@ ACTION_HELP = {
         "(YYYY-MM-DD), projectId (empty for organization milestones), parentId (the "
         "organization milestone a project milestone serves), status}. epic: {id?, title, "
         "milestoneId (a project milestone), owner, description, status}. Tickets are tasks "
-        "with epicId."
+        "with epicId. operations: any of {operatingHours, workSchedule, resumeAfterRestart, "
+        "pullBacklog}; pullBacklog (default true) lets a worker with nothing to do pull an "
+        "accepted Backlog ticket into To do, and turning it on from Rem needs consent."
     ),
     "plan_delete": (
         "kind=project/milestone/epic, id, expectedRevision. Refused while tickets, epics or "

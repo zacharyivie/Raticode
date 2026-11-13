@@ -1,16 +1,16 @@
 ---
 title: common-llm-task
-description: Use a task-specific prompt pattern for reviewing, summarizing, explaining, extracting, rewriting, or classifying.
+description: Use a ready-made prompt to review, summarize, explain, extract, rewrite or classify text.
 pageClass: docs-layout
 ---
 
 # common-llm-task
 
-Use a task-specific prompt pattern for reviewing, summarizing, explaining, extracting, rewriting, or classifying.
+Use a ready-made prompt to review, summarize, explain, extract, rewrite or classify text.
 
 ## When to use it
 
-Choose this node when the task family is clear and you want a compact declaration. Choose an agent node when you need a bespoke prompt and its broader configuration fields.
+Use it when the job fits one of the six task types and a short declaration is enough. For a custom prompt or the extra fields, use [agent](./agent.md).
 
 ## Example
 
@@ -29,13 +29,14 @@ Node step:
   finish: pass
 ```
 
-`task` accepts `review`, `summarize`, `explain`, `extract`, `rewrite`, and `classify`, defaulting to `summarize`. `target` is the text to work on; `instructions` adds the criteria. Bind upstream content and use prompt locals where appropriate.
-
-Model and effort follow the selected provider contract when omitted. The output is text unless you declare one compatible output schema. Structured-output repair has the same bounded-attempt policy as agent nodes.
+- `task` is `review`, `summarize`, `explain`, `extract`, `rewrite` or `classify`. The default is `summarize`.
+- `target` is the text to work on. `instructions` adds your criteria. You can bind upstream content and use prompt locals.
+- Model and effort default to the provider contract's choice.
+- Output is text unless you declare one output schema. `repair-attempts` works as on [agent](./agent.md).
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -54,14 +55,14 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Additional local bindings are supported. See [Inputs and bindings](../workflows/inputs.md) for delivery and type rules.
+You can bind other locals too. [Inputs and bindings](../workflows/inputs.md) covers delivery and types.
 
-Successful output is a string by default, or the value validated by the declared output schema. Select downstream fields only when the schema declares them.
+Output is a string, or the value that passed the declared output schema. Select fields downstream only when the schema declares them.
 
 ## Preflight and limits
 
-The chosen provider and working directory must be available. A task label is not an assurance that the provider cannot change files through its own tools; use compatible permissions.
+The provider and working directory must be available. The task type doesn't stop the provider from changing files with its own tools, so set permissions to match.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

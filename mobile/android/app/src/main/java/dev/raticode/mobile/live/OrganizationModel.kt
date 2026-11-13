@@ -20,7 +20,13 @@ data class OrgWorker(val id: String, val persona: String, val responsibilities: 
 data class OrgNote(val id: String, val kind: String, val title: String, val summary: String, val topic: String, val projectId: String,
                    val links: List<String>, val author: String, val updatedAt: String, val secondBrain: Boolean, val changed: Boolean)
 data class OrgNoteLink(val from: String, val to: String, val state: String)
-data class OrgRequest(val summary: String, val at: String)
+/**
+ * One of Rem's waiting requests. [id] is blank from a desktop older than `organizations.requests`. [waitingOn] is `rem`
+ * while Auto mode's review decides it, otherwise `you`.
+ */
+data class OrgRequest(val summary: String, val at: String, val id: String = "", val waitingOn: String = "you") {
+    val reviewedByRem: Boolean get() = waitingOn == "rem"
+}
 data class OrgHours(val mode: String, val open: Boolean, val opensAt: String, val closesAt: String)
 data class OrgCommit(val sha: String, val at: String, val author: String, val subject: String)
 data class OrgRepository(val exists: Boolean, val files: Int, val branches: Int, val commits: List<OrgCommit>)
@@ -34,7 +40,13 @@ data class TicketExtras(val key: String, val assigneeId: String, val epicId: Str
 data class OrgPlan(val mission: String, val ticketPrefix: String, val milestones: List<OrgMilestone>, val epics: List<OrgEpic>,
                    val projects: List<OrgProject>, val workers: Map<String, OrgWorker>, val notes: List<OrgNote>, val noteLinks: List<OrgNoteLink>,
                    val requests: List<OrgRequest>, val hours: OrgHours, val repository: OrgRepository?, val archived: Boolean, val revision: Long,
-                   val usage: OrgUsage, val schedule: OrgSchedule? = null)
+                   val usage: OrgUsage, val schedule: OrgSchedule? = null,
+                   /** Whether workers pull accepted Backlog tickets into To do; null on a desktop that doesn't say. */
+                   val pullBacklog: Boolean? = null,
+                   /** Whether Auto mode is on; null on a desktop that doesn't say. */
+                   val autoMode: Boolean? = null,
+                   val autoHalt: AutoMode.Halt? = null,
+                   val autoDecisions: List<AutoMode.Decision> = emptyList())
 /** One note with its body, read on its own. */
 data class OrgNoteDetail(val id: String, val kind: String, val title: String, val summary: String, val topic: String, val projectId: String,
                          val body: String, val truncated: Boolean, val links: List<String>, val author: String, val createdAt: String,
@@ -190,10 +202,11 @@ object OrganizationModel {
         return Move.Allowed(column)
     }
 
-    /** Why a To do ticket hasn't started, in the desktop's words. */
+    /** Why a To do ticket hasn't started, or what happens to a Backlog ticket, in the desktop's words. */
     fun startHint(task: OrganizationTask, org: Organization): String {
         val reason = task.extras?.startHint.orEmpty()
         val worker = org.employees.firstOrNull { it.id == task.extras?.assigneeId }?.name ?: "its worker"
+        if (task.status == "backlog") return BacklogPulls.hint(reason, worker, org.state == "running", org.plan?.pullBacklog)
         return when {
             reason.isBlank() -> ""
             reason == "Ready" -> if (org.state == "running") "Starts next: $worker picks it up within a few seconds." else "Ready. It starts when you start the organization."
@@ -213,6 +226,7 @@ object OrganizationModel {
      */
     fun startTone(task: OrganizationTask, org: Organization): String {
         val reason = task.extras?.startHint.orEmpty()
+        if (task.status == "backlog") return BacklogPulls.tone(reason, org.plan?.pullBacklog)
         return when {
             reason.isBlank() -> ""
             reason == "Ready" -> if (org.state == "running") "run" else "you"
@@ -225,6 +239,46 @@ object OrganizationModel {
     }
 
     /** A comment's author in words, as the desktop's actorName: You, Raticode, Rem or the worker's name. */
+    /** How close together an older desktop wrote a comment and the status entry that copied it. */
+    private const val COPY_WINDOW_SECONDS = 5L
+
+    /**
+     * A ticket's conversation as the desktop shows it. A current desktop already left out repeats and marks status
+     * changes; an older one sent each status change as a plain comment that copied the one above it (the worker's
+     * report, or "Accepted" under the review). Without a kind to tell them apart, an entry by the same author within a
+     * few seconds whose text only repeats the entry above is that copy and is left out.
+     */
+    fun visibleComments(comments: List<OrganizationComment>): List<OrganizationComment> {
+        val shown = mutableListOf<OrganizationComment>()
+        for (comment in comments) {
+            val previous = shown.lastOrNull()
+            if (comment.kind.isEmpty() && comment.decision.isEmpty() && previous != null && previous.kind.isEmpty() &&
+                previous.actor == comment.actor && repeats(comment.body, previous.body) && closeTogether(previous.at, comment.at)) continue
+            shown += comment
+        }
+        return shown
+    }
+
+    /** Whether [body] only repeats [said]: the same text or its opening, as the desktop's recaps clip it. */
+    fun repeats(body: String, said: String): Boolean {
+        val text = body.trim().removeSuffix("…").trimEnd()
+        return text.isNotEmpty() && said.trim().startsWith(text)
+    }
+
+    private fun closeTogether(first: String, second: String): Boolean {
+        val a = runCatching { java.time.OffsetDateTime.parse(first).toInstant() }.getOrNull() ?: return false
+        val b = runCatching { java.time.OffsetDateTime.parse(second).toInstant() }.getOrNull() ?: return false
+        return kotlin.math.abs(java.time.Duration.between(a, b).seconds) <= COPY_WINDOW_SECONDS
+    }
+
+    /** A status entry's headline, such as "Work complete, moved to In review", and its move, such as "In progress → In review". */
+    fun statusHeadline(comment: OrganizationComment): String = comment.title.ifBlank {
+        if (comment.to.isNotBlank()) "Moved to ${Kanban.STATUS_LABELS[comment.to] ?: comment.to}" else "Status changed"
+    }
+
+    fun statusMove(comment: OrganizationComment): String = if (comment.from.isNotBlank() && comment.to.isNotBlank())
+        "${Kanban.STATUS_LABELS[comment.from] ?: comment.from} → ${Kanban.STATUS_LABELS[comment.to] ?: comment.to}" else ""
+
     fun actorName(actor: String, org: Organization): String = when {
         actor == "user" -> "You"
         actor == "system" -> "Raticode"
@@ -304,14 +358,18 @@ object OrganizationModel {
                 it.optString("topic", "General"), it.optString("project_id"), it.strings("links"), it.optString("author"), it.optString("updated_at"),
                 it.optBoolean("second_brain"), it.optBoolean("changed")) },
             json.objects("note_links").map { OrgNoteLink(it.optString("from"), it.optString("to"), it.optString("state", "ok")) },
-            json.objects("requests").map { OrgRequest(it.optString("summary"), it.optString("at")) },
+            json.objects("requests").map { OrgRequest(it.optString("summary"), it.optString("at"), it.optString("request_id"), it.optString("waiting_on", "you")) },
             OrgHours(hours?.optString("mode").orEmpty(), hours?.optBoolean("open", true) ?: true, hours?.optString("opens_at").orEmpty(),
                 hours?.optString("closes_at").orEmpty()),
             repository?.let { r -> OrgRepository(r.optBoolean("exists"), r.optInt("files"), r.optInt("branches"),
                 r.objects("commits").map { OrgCommit(it.optString("sha"), it.optString("at"), it.optString("author"), it.optString("subject")) }) },
             json.optBoolean("archived"), json.optLong("revision"), OrgUsage(usage?.optInt("runs") ?: 0, usage?.optLong("tokens") ?: 0),
             // An older desktop has no work schedule.
-            WorkSchedule.parse(json.optJSONObject("schedule")))
+            WorkSchedule.parse(json.optJSONObject("schedule")),
+            // An older desktop doesn't send it, and its workers never pull.
+            BacklogPulls.parse(json),
+            // An older desktop has no Auto mode.
+            AutoMode.parse(json), AutoMode.parseHalt(json), AutoMode.parseDecisions(json))
     }
 
     fun parseNote(json: JSONObject) = OrgNoteDetail(json.optString("note_id"), json.optString("kind", "note"), json.optString("title"),

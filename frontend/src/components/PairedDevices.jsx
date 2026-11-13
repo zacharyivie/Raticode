@@ -82,6 +82,9 @@ export default function PairedDevices() {
   const [showPairing, setShowPairing] = useState(false);
   const [pairingMode, setPairingMode] = useState("phone");
   const [copied, setCopied] = useState(false);
+  // Flagged phone requests the user opened for review, by device ID.
+  const [flagged, setFlagged] = useState({});
+  const [unlock, setUnlock] = useState(null);
   // The action and device of the change being saved, so its switch can say so.
   const [saving, setSaving] = useState("");
   useEffect(() => {
@@ -128,6 +131,9 @@ export default function PairedDevices() {
       if (body.action === "cancel_invitation") setInvite(null);
       if (body.action === "revoke") setRevoke(null);
       if (body.action === "unpair") setUnpair(null);
+      if (body.action === "unlock_phone") setUnlock(null);
+      if (body.action === "flagged_requests") setFlagged(current => ({ ...current, [body.device_id]: result.requests || [] }));
+      if (body.action === "forget_flagged") setFlagged(current => ({ ...current, [body.device_id]: [] }));
       if (["send", "work_status", "fleet_status", "offer_file"].includes(body.action)) setResult(result);
       await refresh();
       return result;
@@ -146,6 +152,7 @@ export default function PairedDevices() {
   const grants = status?.grants || [];
   const fleet = status?.fleet || [];
   const indirect = fleet.filter(device => device.state === "indirect");
+  const guard = status?.phone_guard || { enabled: true, locked: [], flagged: {} };
   // Pairing is a Feature Preview. While it is off, nothing here is shown.
   if (!status?.experimental_network) return null;
   return <section className="space-y-4 pt-4 text-xs leading-5" aria-label="Paired devices">
@@ -190,7 +197,7 @@ export default function PairedDevices() {
             <Step number={1} title="Scan the QR code with your phone">
               {!invite ? <>
                 <p className="text-muted">In the Raticode app, choose Scan QR code.</p>
-                <button type="button" className={primaryButton} disabled={busy || !status.lan_available || Boolean(status.error)} onClick={() => action({ action: "invite", name })}>Create QR code</button>
+                <button type="button" className={primaryButton} disabled={busy || !status.lan_available || Boolean(status.error)} onClick={() => action({ action: "invite", name, device: "phone" })}>Create QR code</button>
               </> : <div className="flex flex-wrap items-start gap-4">
                 {/* Always black on white so phone cameras can read it in dark mode. */}
                 <div className="pairing-qr shrink-0 rounded-lg p-2"><img src={invite.qr} width="240" height="240" className="block max-w-full" alt="One-time pairing invitation QR code" /></div>
@@ -198,7 +205,7 @@ export default function PairedDevices() {
                   <p><span className="font-medium">Expires in {countdown(invite.expires_at - now / 1000)}</span>
                     <span className="block text-muted">Works once. Keep this code private.</span></p>
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" className={button} disabled={busy} onClick={() => action({ action: "invite", name })}>New QR code</button>
+                    <button type="button" className={button} disabled={busy} onClick={() => action({ action: "invite", name, device: "phone" })}>New QR code</button>
                     <button type="button" className={button} disabled={busy} onClick={() => action({ action: "cancel_invitation" })}>Cancel invitation</button>
                   </div>
                   <details><summary className="cursor-pointer text-muted">Can&apos;t scan? Use the link</summary>
@@ -232,6 +239,8 @@ export default function PairedDevices() {
             const evidence = fleet.find(device => device.device_id === peer.device_id) || {};
             const [tone, label] = peerState(peer);
             const needsSync = sharing ? "" : "Turn on thread sync first.";
+            const lock = (guard.locked || []).find(item => item.device_id === peer.device_id);
+            const flaggedCount = (guard.flagged || {})[peer.device_id] || 0;
             return <li className={`${card} space-y-3 ${peer.state === "pending" ? "border-warning/60" : ""}`} key={peer.device_id}>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0"><h5 className="text-sm font-semibold">{peer.name || `${deviceName(peer)}${activePeers.length > 1 ? ` ${index + 1}` : ""}`}</h5>
@@ -245,6 +254,8 @@ export default function PairedDevices() {
                 <button type="button" className={primaryButton} disabled={busy} onClick={() => action({ action: "confirm", device_id: peer.device_id, fingerprint: peer.fingerprint })}>Identity matches, confirm pairing</button>
               </div>}
               {peer.state === "confirmed" && <p className="text-muted">Confirmed, waiting for acknowledgment. Keep the phone open to finish pairing.</p>}
+              {peer.role === "controller" && <PhoneLock peer={peer} lock={lock} count={flaggedCount} requests={flagged[peer.device_id]} busy={busy}
+                confirming={unlock === peer.device_id} setConfirming={value => setUnlock(value ? peer.device_id : null)} action={action} />}
               {peer.state === "active" && peer.role === "controller" && <div className="border-t border-line">
                 <div className="divide-y divide-line">
                   <Toggle checked={sharing} disabled={busy} saving={saving === `share_workspace:${peer.device_id}`} title="Sync desktop threads with this phone"
@@ -258,7 +269,7 @@ export default function PairedDevices() {
                     hint={needsSync || (desktopControl ? "Included with Use Raticode from this phone." : "")}
                     onChange={event => action({ action: "remote_control", device_id: peer.device_id, enabled: event.target.checked })} />
                   <Toggle checked={desktopControl} disabled={busy || !sharing} saving={saving === `desktop_control:${peer.device_id}`} title="Use Raticode from this phone"
-                    description="Also talk to Rem and manage its tasks, run organizations, start swarms, view, run and stop workflows, check source control, browse and open files in your open projects, check usage and change display settings. Work still runs on this computer under its approval policies. Editing files, files that may hold passwords or keys, terminals, the browser, credentials and agent permissions stay here."
+                    description="Also talk to Rem and manage its tasks, run organizations, start swarms, view, run and stop workflows, check source control, browse and open files in your open projects, check usage and change display settings. This phone counts as you: it can approve what you can approve here, including requests that give agents full access. Work still runs on this computer. Editing files, files that may hold passwords or keys, terminals, the browser and provider sign-ins stay here."
                     hint={needsSync}
                     onChange={event => action({ action: "desktop_control", device_id: peer.device_id, enabled: event.target.checked })} />
                   <Toggle checked={wakeComputer} disabled={busy || !canWake} saving={saving === `wake_computer:${peer.device_id}`} title="Let this phone wake this computer"
@@ -307,6 +318,12 @@ export default function PairedDevices() {
           })}
         </ul>
       </div>
+      <section aria-label="Suspicious phone requests" className="border-t border-line">
+        <Toggle checked={guard.enabled !== false} disabled={busy} saving={saving === "phone_guard:"} title="Lock a phone that sends a suspicious request"
+          description="Raticode checks every request from a paired phone before Rem or any model sees it. A request for passwords, keys or other credentials, one that reads or sends a file that usually holds them (such as signing keys and certificates), insisting after Rem held such files back, or one carrying something to run (such as a download piped into a shell) is stopped, and that phone is locked until you unlock it here. Rem never sends keys or passwords to a phone, and a phone that asks for them is locked too. Pictures, screenshots, files and shared screens are never checked or blocked."
+          hint={guard.enabled === false ? "Off. Phones that are already locked stay locked until you unlock them." : "On by default. The check uses fixed rules on this computer, not a model."}
+          onChange={event => action({ action: "phone_guard", enabled: event.target.checked })} />
+      </section>
       {indirect.length > 0 && <section aria-label="Through other desktops" className="space-y-2 border-t border-line pt-3">
         <h4 className="font-semibold">Through other desktops</h4>
         <p className="text-muted">Paired with another desktop in your fleet, not with this one. Your phone sees them too. Pair directly to send them work from here.</p>
@@ -357,6 +374,40 @@ export default function PairedDevices() {
       </div>}
     </>}
   </section>;
+}
+
+function when(seconds) {
+  return seconds ? new Date(seconds * 1000).toLocaleString() : "";
+}
+
+// A phone the suspicious-request guard locked, and the requests it flagged.
+export function PhoneLock({ peer, lock, count, requests, busy, confirming, setConfirming, action }) {
+  if (!lock && !count) return null;
+  const name = peer.name || "this phone";
+  return <div className={`space-y-2 rounded-md p-3 ${lock ? "bg-danger-soft" : "bg-surface-muted"}`} aria-label={`Suspicious requests from ${name}`}>
+    {lock ? <>
+      <p role="alert" className="font-medium text-danger">Locked {when(lock.locked_at)}. Raticode stopped a request from {name} because it {(lock.reasons || []).join(" and ") || "looked suspicious"}.</p>
+      <p className="text-muted">Every request from this phone is refused until you unlock it. If you didn&apos;t send that request, your phone may be in someone else&apos;s hands: revoke this phone instead.</p>
+    </> : <p className="text-muted">{count} flagged {count === 1 ? "request" : "requests"} from {name} kept for review.</p>}
+    <div className="flex flex-wrap gap-2">
+      {lock && !confirming && <button type="button" className={primaryButton} disabled={busy} onClick={() => setConfirming(true)}>Unlock…</button>}
+      <button type="button" className={button} disabled={busy} onClick={() => action({ action: "flagged_requests", device_id: peer.device_id })}>{requests ? "Refresh flagged requests" : "Review flagged requests"}</button>
+    </div>
+    {lock && confirming && <div role="group" aria-label="Confirm unlocking" className="space-y-2 rounded-md bg-white/60 p-2 dark:bg-black/20">
+      <p>Unlock {name}? Only do this if you sent the flagged request yourself. Its requests reach Rem again right away.</p>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className={primaryButton} disabled={busy} onClick={() => action({ action: "unlock_phone", device_id: peer.device_id, confirm: true })}>Unlock phone</button>
+        <button type="button" className={button} onClick={() => setConfirming(false)}>Keep locked</button>
+      </div>
+    </div>}
+    {requests && (requests.length ? <ul className="space-y-2" aria-label="Flagged requests">
+      {requests.map(item => <li key={item.id} className="space-y-1 rounded border border-line bg-white p-2 dark:bg-transparent">
+        <p className="text-[11px] text-muted">{when(item.at)} · {item.op || item.kind} · {(item.reasons || []).join("; ")}</p>
+        <pre className="max-h-40 select-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-ink">{item.text}</pre>
+      </li>)}
+      <li><button type="button" className={button} disabled={busy} onClick={() => action({ action: "forget_flagged", device_id: peer.device_id })}>Delete these records</button></li>
+    </ul> : <p className="text-muted">No flagged requests kept.</p>)}
+  </div>;
 }
 
 // What the backend found when it last checked this computer's Tailscale.
@@ -463,12 +514,12 @@ function DesktopPairing({ status, invite, now, busy, name, copied, uri, preview,
       <ol className="space-y-4">
         <Step number={1} title="Create an invitation link">
           {!invite ? <button type="button" className={primaryButton} disabled={busy || !status.lan_available || Boolean(status.error)}
-            onClick={() => action({ action: "invite", name })}>Create invitation link</button>
+            onClick={() => action({ action: "invite", name, device: "desktop" })}>Create invitation link</button>
             : <div className="space-y-2">
               <textarea aria-label="Desktop invitation link" readOnly className={`${input} font-mono`} value={invite.uri} rows={3} onFocus={event => event.target.select()} />
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" className={primaryButton} onClick={copyInvitation}>{copied ? "Copied" : "Copy invitation link"}</button>
-                <button type="button" className={button} disabled={busy} onClick={() => action({ action: "invite", name })}>New link</button>
+                <button type="button" className={button} disabled={busy} onClick={() => action({ action: "invite", name, device: "desktop" })}>New link</button>
                 <button type="button" className={button} disabled={busy} onClick={() => action({ action: "cancel_invitation" })}>Cancel invitation</button>
               </div>
               <p className="text-muted">Expires in {countdown(invite.expires_at - now / 1000)}. Works once. Send it only to your own computer.</p>

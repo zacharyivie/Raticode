@@ -785,3 +785,36 @@ async def test_fan_out_fail_fast_cancels_pending_iterations(tmp_path: Path) -> N
 
     assert not result.success
     assert 1 <= len(started) < 6
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("name", "NAME"),
+        ("build_mode", "BUILD_MODE"),
+        ("_row", "_ROW"),
+        ("path", None),
+        ("bash_env", None),
+        ("BASH_FUNC_x%%", None),
+        ("env", None),
+        ("ld_preload", None),
+        ("dyld_insert_libraries", None),
+        ("git_ssh_command", None),
+        ("git_config_key_0", None),
+        ("pythonpath", None),
+        ("node_options", None),
+        ("perl5opt", None),
+        ("ifs", None),
+        ("gofer_ui_api_token", None),
+        ("build-mode", None),
+        ("a=b", None),
+        ("", None),
+    ],
+)
+def test_loop_item_fields_never_become_shell_or_loader_variables(
+    key: str, expected: str | None
+) -> None:
+    """Webhook or CSV field names can't set BASH_ENV, LD_PRELOAD, GIT_* and similar."""
+    from gofer.core.executor import loop_item_env_name
+
+    assert loop_item_env_name(key) == expected

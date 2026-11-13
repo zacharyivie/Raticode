@@ -51,6 +51,7 @@ internal class BrowserControlsState {
     fun scrolledTo(y: Int) { motion.scrolled(y, now()); sync() }
     fun reveal() { motion.reveal(now()); sync() }
     fun pageChanged() { motion.pageChanged(now()); sync() }
+    fun resized() { motion.resized(now()); sync() }
     fun touched() = motion.touched(now())
     fun hold(on: Boolean) { motion.hold(on, now()); sync() }
     fun idleRemaining(timeout: Long) = motion.idleRemaining(now(), timeout)

@@ -11,7 +11,10 @@ without its location. Note bodies are read one at a time with ``organizations.no
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
+
+from gofer.ui.organization_auto import waits_on_rem
 
 # The phone's dangerous-permission check reads these labels; anything else is sandboxed.
 PERMISSION_LABELS = {
@@ -30,6 +33,17 @@ MAX_NOTE_BODY = 40_000
 
 def _text(value: Any, limit: int) -> str:
     return str(value or "")[:limit]
+
+
+def _waiting(request: Any) -> bool:
+    """A consent request that can still be approved: pending and less than a day old."""
+    if not isinstance(request, dict) or request.get("status") != "pending":
+        return False
+    try:
+        asked = datetime.fromisoformat(str(request.get("at")))
+    except ValueError:
+        return False
+    return (datetime.now(UTC) - asked).total_seconds() < 24 * 3600
 
 
 def _strings(values: Any, limit: int, size: int) -> list[str]:
@@ -228,11 +242,17 @@ def extend(
         ],
         "requests": [
             {
+                # The ID lets the phone approve or decline exactly this request.
+                "request_id": _text(r.get("id"), 100),
                 "summary": _text(r.get("summary"), 400),
                 "at": _text(r.get("at"), 80),
+                # "rem" while Auto mode's review decides it, "you" when it waits on the user.
+                "waiting_on": "rem" if waits_on_rem(org, r) else "you",
             }
-            for r in (runtime.get("consentRequests") or {}).values()
-            if isinstance(r, dict) and r.get("status") == "pending"
+            for r in sorted(
+                filter(_waiting, (runtime.get("consentRequests") or {}).values()),
+                key=lambda r: str(r.get("at")),
+            )
         ][:20],
         "hours": {
             "mode": _text(hours.get("mode"), 20),
@@ -242,7 +262,38 @@ def extend(
         },
         "repository": repository_summary(repository) if config.get("sharedRepository") else None,
         "archived": bool(runtime.get("archived")),
+        # Whether a worker with nothing to do pulls accepted Backlog tickets into To do.
+        "pull_backlog": config.get("pullBacklog", True) is not False,
+        # Auto mode: Rem decides requests; why it stopped, and its recent decisions.
+        "auto_mode": bool(config.get("autoMode")),
+        "auto_halt": auto_halt_view(runtime.get("autoHalt")),
+        "auto_decisions": [
+            {
+                "summary": _text(d.get("summary"), 400),
+                "decision": _text(d.get("decision"), 20),
+                "reason": _text(d.get("reason"), 1000),
+                "recommendation": _text(d.get("recommendation"), 600),
+                "applied": bool(d.get("applied")),
+                "error": _text(d.get("error"), 400),
+                "at": _text(d.get("at"), 80),
+            }
+            for d in reversed((runtime.get("autoDecisions") or [])[-10:])
+            if isinstance(d, dict)
+        ],
         "schedule": schedule_view(config, diagnostics.get("schedule") or {}, employees),
+    }
+
+
+def auto_halt_view(halt: Any) -> dict[str, Any] | None:
+    if not isinstance(halt, dict):
+        return None
+    return {
+        "summary": _text(halt.get("summary"), 400),
+        "kind": _text(halt.get("kind"), 20),
+        "reason": _text(halt.get("reason"), 1000),
+        "user_action": _text(halt.get("userAction"), 600),
+        "request_id": _text(halt.get("requestId"), 100),
+        "at": _text(halt.get("at"), 80),
     }
 
 

@@ -1,0 +1,13 @@
+# Links shown when someone opens a new issue. Blank issues stay open, and the desktop
+# app's crash screen still opens a prefilled issue directly.
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://raticode.dev/docs/
+    about: Guides for the desktop app, the CLI and Raticode Mobile.
+  - name: Troubleshooting
+    url: https://raticode.dev/docs/reference/troubleshooting
+    about: Fixes for common setup and provider problems.
+  - name: Support and security reports
+    url: https://raticode.dev/docs/support
+    about: What to include in a bug report, and how to report a security problem privately.

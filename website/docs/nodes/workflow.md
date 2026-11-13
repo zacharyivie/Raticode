@@ -10,7 +10,7 @@ Reuse another workflow through its declared public inputs and outputs.
 
 ## When to use it
 
-Choose this node for a maintained sub-process with a stable interface. It does not expose the child's private internal node results to the parent.
+Use it for a maintained sub-process with a stable interface. The parent sees only the child's public outputs, never its internal node results.
 
 ## Example
 
@@ -29,13 +29,15 @@ Node step:
   finish: pass
 ```
 
-Select exactly one of `workflow-id` or `workflow-path`. The optional `version` chooses the public interface version, not the application release version. The compiler resolves and freezes the selected child interface.
-
-`with` binds the child's public inputs. Parent output fields are the child's declared public outputs. Changing a child interface can invalidate callers, so validate both after editing. The child source shown below must exist before checking the parent.
+- Set exactly one of `workflow-id` or `workflow-path`.
+- `version` picks the child's interface version, not a Raticode release. The compiler resolves the child interface and freezes it.
+- `with` binds the child's public inputs. The node's output fields are the child's public outputs.
+- Changing a child's interface can break its callers. Validate both after an edit.
+- The child source below must exist before you check the parent.
 
 ## Child source
 
-Save this as `child/workflow.rattish` relative to the parent's project/source root before validating the parent:
+Save this as `child/workflow.rattish`, relative to the parent's project or source root:
 
 ```rattish
 Rattish: 1
@@ -62,7 +64,7 @@ Node save:
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -72,14 +74,12 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Input ports and output fields come from the referenced child workflow's public interface.
-
-Successful output follows the child's declared public output schema.
+Input ports and output fields come from the child workflow's public interface. Output follows the child's declared output schema.
 
 ## Preflight and limits
 
-Compilation requires a resolvable child interface. Preflight recursively checks its resources. Nested calls do not remove the need to review the child's commands, paths, and provider settings.
+Compiling needs a child interface it can resolve. Preflight checks the child's resources too. You still need to review the child's commands, paths and provider settings.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

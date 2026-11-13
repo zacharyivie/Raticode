@@ -56,6 +56,7 @@ export default [
       "*.config.js",
       "benchmarks/*.{js,cjs}",
       "browser-tests/run-*.cjs",
+      "build-resources/*.cjs",
       "electron/**/*.{cjs,js}",
     ],
     languageOptions: {

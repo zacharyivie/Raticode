@@ -301,6 +301,9 @@ def test_aur_workflow_runs_after_publication_and_checks_before_pushing() -> None
     publish = jobs["publish"]
     assert publish["needs"] == ["render", "verify"]
     assert publish["environment"] == "aur-publish"
+    # Opt-in by variable, so the environment's required reviewer is asked only once
+    # publishing is set up, not after every release.
+    assert publish["if"] == "vars.AUR_PUBLISH == 'true'"
     assert "permissions" not in publish  # inherits contents: read only
     # The key reaches only the push step, never the jobs that run release code.
     for name, job in jobs.items():

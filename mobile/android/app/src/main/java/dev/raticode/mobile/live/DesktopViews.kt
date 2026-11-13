@@ -11,15 +11,15 @@ object DesktopViews {
     const val MAX_PARTS = 48
     val READS = setOf("overview", "media.image", "media.preview", "rem.home", "rem.draft", "rem.memories", "rem.notices", "rem.task", "rem.thread", RemSearch.SEARCH, RemSearch.HISTORY, "organizations.list", "organizations.read", OrganizationModel.NOTE, "settings.get", "usage.overview", DeveloperLog.OP, DesktopBrowser.TABS) + Kanban.READS + Workflows.READS + SourceControl.READS + FileExplorer.READS
     val ACTIONS = setOf("rem.message", "rem.instruct", "rem.task.create", "rem.task.run", "rem.task.pause", "rem.task.resume",
-        "rem.task.delete", "rem.run.cancel", "rem.run.acknowledge", "rem.run.retry_review",
-        "rem.memory.add", "rem.memory.edit", "rem.memory.forget", "rem.memory.mode", "rem.memory.undo", VoiceTidy.KEY, "organizations.control", "organizations.task", OrganizationModel.KNOWLEDGE, OrganizationModel.WORKER, WorkSchedule.OP, "swarms.start", "settings.update", "files.link", FileExplorer.OPEN, RemAttachments.OP, DesktopBrowser.OPEN) + Kanban.ACTIONS + Workflows.ACTIONS
+        "rem.task.delete", "rem.run.cancel", "rem.run.acknowledge", "rem.run.retry_review", RunPause.PAUSE, RunPause.RESUME, RemSleep.WAKE,
+        "rem.memory.add", "rem.memory.edit", "rem.memory.forget", "rem.memory.mode", "rem.memory.undo", VoiceTidy.KEY, "organizations.control", "organizations.task", OrganizationModel.KNOWLEDGE, OrganizationModel.WORKER, WorkSchedule.OP, BacklogPulls.OP, OrgRequests.OP, AutoMode.OP, "swarms.start", "settings.update", "files.link", FileExplorer.OPEN, RemAttachments.OP, DesktopBrowser.OPEN) + Kanban.ACTIONS + Workflows.ACTIONS
     val OPERATIONS = READS + ACTIONS
 
     /** The screen a read or action result refreshes. */
     fun key(op: String, params: JSONObject): String = when (op) {
         "rem.task" -> "rem.task:" + params.optString("task_id")
         "rem.thread", "rem.instruct" -> "rem.thread:" + params.optString("thread_id")
-        "organizations.read", "organizations.control", "organizations.task", OrganizationModel.KNOWLEDGE, OrganizationModel.WORKER, WorkSchedule.OP ->
+        "organizations.read", "organizations.control", "organizations.task", OrganizationModel.KNOWLEDGE, OrganizationModel.WORKER, WorkSchedule.OP, BacklogPulls.OP, OrgRequests.OP, AutoMode.OP ->
             "organizations.read:" + params.optString("organization_id")
         OrganizationModel.NOTE -> OrganizationModel.NOTE + ":" + params.optString("organization_id") + ":" + params.optString("note_id")
         "settings.update" -> "settings.get"
@@ -55,7 +55,11 @@ object DesktopViews {
             json.optBoolean("source_control_history"), json.optBoolean("attachment_files"), json.optBoolean("developer_log"),
             json.optBoolean("organizations_v2"), json.optBoolean("file_explorer"), browser = json.optBoolean("browser"), kanban = json.optBoolean("kanban"), kanbanParticipants = json.optBoolean("kanban_participants"),
             kanbanComments = json.optBoolean("kanban_comments"), organizationSchedule = json.optBoolean("organization_schedule"),
-            remNoticesFilter = json.optBoolean("rem_notices_filter"), wakeMac = json.opt(WakeOnLan.FIELD) as? String)
+            organizationBacklogPull = json.optBoolean("organization_backlog_pull"),
+            organizationRequests = json.optBoolean("organization_requests"),
+            organizationAutoMode = json.optBoolean("organization_auto_mode"),
+            remNoticesFilter = json.optBoolean("rem_notices_filter"), wakeMac = json.opt(WakeOnLan.FIELD) as? String,
+            runPause = json.optBoolean("run_pause"))
         Kanban.BOARD -> Kanban.parseBoard(json)
         Kanban.SELF_WORK -> Kanban.parseSelfWork(json)
         Kanban.TIMELINE -> Kanban.parseTimeline(json)
@@ -77,7 +81,7 @@ object DesktopViews {
             json.optString("turn_label"), json.optString("draft_reply"), json.optBoolean("rich_results"),
             json.optBoolean("draft_deltas"), json.optBoolean("review_retry"), json.optBoolean("memories"),
             json.optBoolean("screen_context"), json.optBoolean("replies"), json.optBoolean("voice_tidy"), json.optBoolean("attachment_files"),
-            TicketMentions.parseIndex(json.optJSONObject("tickets")), json.optBoolean("search"))
+            TicketMentions.parseIndex(json.optJSONObject("tickets")), json.optBoolean("search"), json.optBoolean("run_pause"))
         "rem.memories" -> RemMemories(json.optString("mode", "on"), json.objects("memories").map {
             RemMemory(it.optString("id"), it.optString("text"), it.optString("created_at"), it.optString("edited_at"), it.optBoolean("added_by_user")) })
         "rem.task" -> remTask(json).copy(ticketIndex = TicketMentions.parseIndex(json.optJSONObject("tickets")))
@@ -97,8 +101,9 @@ object DesktopViews {
                 t.optString("status"), t.optString("priority"), t.optString("assignee"), t.optLong("revision", 1), t.optBoolean("running"),
                 t.optBoolean("needs_approval"), t.optBoolean("needs_review"), t.optBoolean("attention"), t.optString("block_reason"),
                 t.optString("evidence"), t.optString("due_at"),
-                t.objects("comments").map { OrganizationComment(it.optString("actor"), it.optString("at"), it.optString("body"), it.optString("decision")) },
-                OrganizationModel.parseExtras(t)) }, OrganizationModel.parsePlan(json), json.optString("pause_reason"), json.optInt("pending_requests"))
+                t.objects("comments").map { OrganizationComment(it.optString("actor"), it.optString("at"), it.optString("body"), it.optString("decision"),
+                    it.optString("kind"), it.optString("title"), it.optString("from"), it.optString("to")) },
+                OrganizationModel.parseExtras(t), t.optInt("comment_count")) }, OrganizationModel.parsePlan(json), json.optString("pause_reason"), json.optInt("pending_requests"))
         "settings.get" -> DesktopSettings(json.optBoolean("available"), json.optInt("pending"),
             json.optJSONObject("values")?.let { v -> v.keys().asSequence().associateWith { k -> v.opt(k)?.takeUnless { it == JSONObject.NULL } } }.orEmpty(),
             json.objects("settings").map { s -> DesktopSetting(s.optString("key"), s.optString("group"), s.optString("label"), s.optString("kind"),
@@ -115,7 +120,7 @@ object DesktopViews {
     private fun remMessage(m: JSONObject) = RemMessage(m.optString("id"), m.optString("role"), m.optString("body"), m.optString("created_at"),
         m.optJSONObject("work")?.let { RemWork(it.optString("task_id"), it.optString("run_id"), it.optString("thread_id"), it.optString("title"),
             it.optBoolean("task_available", true), it.optBoolean("thread_available", true), TicketMentions.parseRefs(it.optJSONArray("tickets")),
-            it.optString("self_work").take(20)) },
+            it.optString("self_work").take(20), RunPause.by(it.optString("paused_by"))) },
         m.optString("state"),
         m.objects("attachments").map { RemFile(it.optString("file_id"), it.optString("name"), it.optLong("size")) },
         m.objects("files").map { RemFile(it.optString("file_id"), it.optString("name"), it.optLong("size")) },
@@ -128,7 +133,15 @@ object DesktopViews {
         // Full paths of files the desktop found in Rem's text; tapping one still goes through files.link.
         if (m.optString("role") == "user") emptyList() else ChatLinks.mentions(m.strings("file_mentions")),
         TicketMentions.parseSelfWork(m.optJSONObject("self_work")).takeIf { m.optJSONObject("work") != null },
-        if (m.optString("role") == "user") m.strings("queued_after").filter { it.isNotBlank() }.take(10).map { it.take(160) } else emptyList())
+        if (m.optString("role") == "user") m.strings("queued_after").filter { it.isNotBlank() }.take(10).map { it.take(160) } else emptyList(),
+        if (m.optString("role") == "user") null else m.optJSONObject("self_work_report")?.let(::selfWorkReport))
+
+    /** What one period of self-work did, under its report message. An older desktop sends none, and only the body shows. */
+    private fun selfWorkReport(r: JSONObject) = RemSelfWorkReport(r.optString("period_id").take(128), r.optString("started_at").take(80),
+        r.optString("ended_at").take(80), r.optString("ended_by").take(20),
+        r.optJSONObject("counts")?.let { c -> c.keys().asSequence().take(20).mapNotNull { k -> (c.opt(k) as? Number)?.let { k.take(40) to it.toInt().coerceAtLeast(0) } }.toMap() }.orEmpty(),
+        r.objects("items").take(30).map { RemSelfWorkItem(it.optString("task_id").take(128), it.optString("run_id").take(128), it.optString("thread_id").take(128),
+            it.optString("title").take(160), it.optString("kind").take(20), it.optString("outcome").take(20), TicketMentions.parseRefs(it.optJSONArray("tickets"))) })
 
     /** What a reply shows of the message it refers to. The desktop builds it; the phone only bounds it. */
     private fun remReference(id: String, r: JSONObject): RemReference? = when {
@@ -163,7 +176,9 @@ object DesktopViews {
         // Each check with its reason, sent only by a desktop that has them and only for a task's newest runs.
         if (it.has("criteria")) it.objects("criteria").take(40).map { c ->
             RemCheck(c.optString("id").take(128), c.optString("description").take(600), c.optString("result").take(20), c.optString("evidence").take(1500))
-        } else null, TicketMentions.parseRefs(it.optJSONArray("tickets")), it.optString("step").take(20)) }
+        } else null, TicketMentions.parseRefs(it.optJSONArray("tickets")), it.optString("step").take(20),
+        RunPause.by(it.optString("paused_by")),
+        RemSleep.parse(it.optJSONObject("sleep"))) }
 
     private fun remTask(t: JSONObject) = RemTask(t.optString("task_id"), t.optString("title"), t.optString("type"), t.optString("state"),
         t.optLong("revision", 1), t.optJSONObject("schedule").let { s -> RemSchedule(s?.optString("kind") ?: "once", s?.optString("at").orEmpty(),
@@ -177,7 +192,7 @@ object DesktopViews {
     private fun remDependency(d: JSONObject) = RemDependency(d.optString("state").take(20), d.optString("reason").take(600),
         d.objects("prerequisites").take(10).map { RemPrerequisite(it.optString("task_id").take(128), it.optString("title").take(160),
             it.optString("state").take(20), it.optString("reason").take(300), it.optString("run_id").take(128), it.optString("run_state").take(40),
-            it.optBoolean("retryable")) })
+            it.optBoolean("retryable"), it.optString("kind").take(20).ifBlank { RemPrerequisite.TASK }) })
 
     private fun JSONObject.objects(key: String): List<JSONObject> = optJSONArray(key)?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) } }.orEmpty()
     private fun JSONObject.strings(key: String): List<String> = optJSONArray(key)?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
@@ -200,10 +215,40 @@ internal class DesktopParts(private val limit: Int = 16) {
         while (pending.size > limit) pending.remove(pending.keys.first())
         if (parts.any { it == null }) return null
         pending.remove(request)
-        return JSONObject(parts.joinToString(""))
+        val body = parts.joinToString("")
+        // Android's org.json recurses once per level with no limit, and a stack overflow is an Error the sync loop
+        // doesn't catch, so a deeply nested body would end the app. Too deep is refused like any malformed result.
+        require(nestingWithin(body, MAX_DEPTH)) { "Result nested too deeply" }
+        return JSONObject(body)
     }
 
     fun drop(request: String) { pending.remove(request) }
+
+    companion object {
+        /** Far deeper than any desktop view nests. */
+        const val MAX_DEPTH = 64
+
+        /** True when [text]'s objects and arrays nest at most [limit] deep, counted without recursion. */
+        fun nestingWithin(text: String, limit: Int): Boolean {
+            var depth = 0
+            var inString = false
+            var escaped = false
+            for (c in text) {
+                if (inString) {
+                    when {
+                        escaped -> escaped = false
+                        c == '\\' -> escaped = true
+                        c == '"' -> inString = false
+                    }
+                } else when (c) {
+                    '"' -> inString = true
+                    '{', '[' -> if (++depth > limit) return false
+                    '}', ']' -> depth--
+                }
+            }
+            return true
+        }
+    }
 }
 
 data class DesktopOverview(val projects: List<Pair<String, String>>, val rem: Boolean, val organizations: Boolean, val swarms: Boolean,
@@ -238,10 +283,18 @@ data class DesktopOverview(val projects: List<Pair<String, String>>, val rem: Bo
                            val kanbanComments: Boolean = false,
                            /** Organization reads carry the work schedule, and the desktop takes `organizations.schedule`. */
                            val organizationSchedule: Boolean = false,
+                           /** Organization reads say whether workers pull Backlog tickets, and the desktop takes `organizations.backlog_pull`. */
+                           val organizationBacklogPull: Boolean = false,
+                           /** Organization reads list Rem's requests with IDs, and the desktop takes `organizations.requests`. */
+                           val organizationRequests: Boolean = false,
+                           /** Organization reads carry Auto mode and Rem's decisions, and the desktop takes `organizations.auto_mode`. */
+                           val organizationAutoMode: Boolean = false,
                            /** `rem.notices` takes `include` and `mark`, for alerts about work the phone didn't start. */
                            val remNoticesFilter: Boolean = false,
                            /** Set only while the desktop's wake setting is on. */
-                           val wakeMac: String? = null)
+                           val wakeMac: String? = null,
+                           /** The desktop takes `rem.run.pause` and `rem.run.resume`, and runs can be `paused`. */
+                           val runPause: Boolean = false)
 /**
  * Rem's reply text added since the phone's last `rem.draft` read; [reset] means [text] is the whole draft. [attempt] numbers
  * Rem's model calls within a reply, so a later read can say which one the phone's text came from; an older desktop omits it.
@@ -257,7 +310,9 @@ data class RemWork(val taskId: String, val runId: String, val threadId: String, 
                    /** Board tickets the run created, worked on or changed, as they were when the message was written. */
                    val tickets: List<RemTicketRef> = emptyList(),
                    /** "ticket", "triage" or "research" for work Rem started on its own; blank for requested work. */
-                   val selfWork: String = "")
+                   val selfWork: String = "",
+                   /** For a paused card: "user", or "priority" when self-work made way for the user's own work. */
+                   val pausedBy: String = "")
 /** A file on a Rem chat message: one the phone attached, or one the desktop offered to this phone. */
 data class RemFile(val id: String, val name: String, val size: Long)
 /**
@@ -277,7 +332,18 @@ data class RemMessage(val id: String, val role: String, val body: String, val cr
                       /** Set on the card of work Rem started on its own; cards of one pass share its batch. */
                       val selfWork: RemSelfWork? = null,
                       /** On a request the user queued behind other tasks: the titles of those tasks. Rem got it once they succeeded. */
-                      val queuedAfter: List<String> = emptyList())
+                      val queuedAfter: List<String> = emptyList(),
+                      /** On the message posted when self-work stops: the tasks it started in that period. */
+                      val selfWorkReport: RemSelfWorkReport? = null)
+/**
+ * One period of self-work, from when it started to when it stopped. [endedBy] is `window`, `user` or `condition`; [counts]
+ * holds `started`, `finished`, `paused`, `blocked`, `tickets_created`, `tickets_moved` and `proposals`.
+ */
+data class RemSelfWorkReport(val periodId: String, val startedAt: String, val endedAt: String, val endedBy: String,
+                             val counts: Map<String, Int>, val items: List<RemSelfWorkItem>)
+/** A task self-work started: [kind] is `ticket`, `research` or `triage`; [outcome] `finished`, `running`, `paused`, `blocked`, `failed` or `stopped`. */
+data class RemSelfWorkItem(val taskId: String, val runId: String, val threadId: String, val title: String, val kind: String, val outcome: String,
+                           val tickets: List<RemTicketRef> = emptyList())
 /**
  * The message a reply refers to: who wrote it, when, and its opening words. [unavailable] means it is no longer in
  * Rem's chat, such as after the history was cleared; the reply itself stays.
@@ -313,9 +379,29 @@ data class RemRun(val id: String, val state: String, val createdAt: String, val 
                   /** Board tickets this run created, worked on or changed. */
                   val tickets: List<RemTicketRef> = emptyList(),
                   /** "plan", "work" or "check" from the desktop; blank from an older one, where [state] decides. */
-                  val step: String = "") {
+                  val step: String = "",
+                  /** For a paused run: "user", or "priority" when self-work made way for the user's own work. */
+                  val pausedBy: String = "",
+                  /** The worker's sleep while it waits for something outside Raticode; null when awake or from an older desktop. */
+                  val sleep: RemSleep? = null) {
+    /** Neither running nor finished: kept with its thread and worktree until it is resumed. */
+    val paused get() = state == RunPause.PAUSED
     val active get() = state in setOf("queued", "executing", "verifying", "repairing", "cancelling")
     val attention get() = state in setOf("blocked", "failed", "outcome_unknown") && !acknowledged
+}
+/**
+ * A worker that parked itself while it waits for something outside Raticode, such as a CI run. It holds no worker on
+ * the desktop and wakes in the same thread at [until]. Only a desktop that sends this accepts [WAKE], so its presence
+ * is what offers Wake now; an older desktop sends none and the phone shows its waiting reason instead.
+ */
+data class RemSleep(val waitingFor: String, val until: String, val wakes: Int, val sleptMinutes: Int, val budgetMinutes: Int) {
+    companion object {
+        const val WAKE = "rem.run.wake"
+        fun parse(json: JSONObject?): RemSleep? = json?.let {
+            RemSleep(it.optString("waiting_for").take(160), it.optString("until").take(80), it.optInt("wakes").coerceIn(0, 1000),
+                it.optInt("slept_minutes").coerceAtLeast(0), it.optInt("budget_minutes").coerceAtLeast(0))
+        }
+    }
 }
 data class RemSchedule(val kind: String, val at: String, val localTime: String, val weekdays: List<String>, val everyMinutes: Int)
 data class RemTask(val id: String, val title: String, val type: String, val state: String, val revision: Long, val schedule: RemSchedule,
@@ -330,9 +416,26 @@ data class RemTask(val id: String, val title: String, val type: String, val stat
 data class RemDependency(val state: String, val reason: String, val prerequisites: List<RemPrerequisite>) {
     val held get() = state == "held"
 }
-/** One task a waiting task needs. [retryable] means Run now on it would try it again. */
+/**
+ * One condition a waiting task needs. [kind] is `task` (a named task that must succeed, and what an older desktop sends),
+ * `run` (a run that was going when the user asked, which only has to end), `idle` (nothing else running), `time` or
+ * `self_work` (the self-work window ending). [retryable] means Run now on it would try it again.
+ */
 data class RemPrerequisite(val taskId: String, val title: String, val state: String, val reason: String, val runId: String,
-                           val runState: String, val retryable: Boolean)
+                           val runState: String, val retryable: Boolean, val kind: String = TASK) {
+    /** Only a named task can be run again, and only one the desktop names. */
+    val canRetry get() = retryable && kind == TASK && taskId.isNotBlank()
+    /** The task behind it, to open; a time, self-work or idle condition has none. */
+    val opensTask get() = taskId.isNotBlank() && (kind == TASK || kind == RUN)
+
+    companion object {
+        const val TASK = "task"
+        const val RUN = "run"
+        const val IDLE = "idle"
+        const val TIME = "time"
+        const val SELF_WORK = "self_work"
+    }
+}
 
 /**
  * The phone's Rem task list: whatever ran most recently first, without one-time tasks that already finished.
@@ -383,7 +486,9 @@ data class RemHome(val turnState: String, val provider: String, val model: Strin
                    /** Board tickets named in these messages and on these tasks, by key. Only these keys show as ticket pills. */
                    val tickets: Map<String, RemTicket> = emptyMap(),
                    /** The desktop searches its whole saved chat (`rem.search`) and pages back through it (`rem.history`). */
-                   val search: Boolean = false)
+                   val search: Boolean = false,
+                   /** The desktop takes `rem.run.pause` and `rem.run.resume`. */
+                   val runPause: Boolean = false)
 /** One merged tool or thinking step from a worker's thoughts, as the desktop's thought list shows it. */
 data class RemThreadStep(val kind: String, val title: String, val detail: String, val body: String, val command: String, val status: String)
 /** A work thread entry. Kind `thoughts` is one run of steps: [count] in all, the newest of them in [steps]. */
@@ -395,12 +500,16 @@ data class RemThread(val id: String, val title: String, val running: Boolean, va
 data class OrganizationSummary(val id: String, val name: String, val state: String, val employees: Int, val openTasks: Int, val projects: List<String>)
 data class OrganizationEmployee(val id: String, val name: String, val title: String, val provider: String, val model: String, val paused: Boolean,
                                 val reportsTo: String = "")
-data class OrganizationComment(val actor: String, val at: String, val body: String, val decision: String)
+/** One entry of a ticket's conversation. A status change has [kind] `status`, a headline and its move; an older desktop sends no kind. */
+data class OrganizationComment(val actor: String, val at: String, val body: String, val decision: String,
+                               val kind: String = "", val title: String = "", val from: String = "", val to: String = "")
 data class OrganizationTask(val id: String, val title: String, val description: String, val status: String, val priority: String,
                             val assignee: String, val revision: Long, val running: Boolean, val needsApproval: Boolean, val needsReview: Boolean,
                             val attention: Boolean, val blockReason: String, val evidence: String, val dueAt: String, val comments: List<OrganizationComment>,
                             /** Key, epic, evidence and notes; null from an older desktop. */
-                            val extras: TicketExtras? = null)
+                            val extras: TicketExtras? = null,
+                            /** How many entries the whole conversation shows on the desktop; 0 from an older desktop. */
+                            val commentCount: Int = 0)
 /** [plan] holds the five-section view's parts; an older desktop sends tasks and employees only. */
 data class Organization(val id: String, val name: String, val description: String, val state: String, val projects: List<String>,
                         val employees: List<OrganizationEmployee>, val tasks: List<OrganizationTask>, val plan: OrgPlan? = null,

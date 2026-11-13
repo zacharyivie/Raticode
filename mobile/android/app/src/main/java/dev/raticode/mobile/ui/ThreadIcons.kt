@@ -28,6 +28,11 @@ internal object ThreadIcons {
     val Log = lucide("Log", "M15 12h-5", "M15 8h-5", "M19 17V5a2 2 0 0 0-2-2H4",
         "M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3")
     val Plus = lucide("Plus", "M5 12h14", "M12 5v14")
+    // Lucide Brain, the desktop's Memory icon.
+    val Memory = lucide("Memory", "M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z",
+        "M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z", "M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4",
+        "M17.599 6.5a3 3 0 0 0 .399-1.375", "M6.003 5.125A3 3 0 0 0 6.401 6.5", "M3.477 10.896a4 4 0 0 1 .585-.396",
+        "M19.938 10.5a4 4 0 0 1 .585.396", "M6 18a4 4 0 0 1-1.967-.516", "M19.967 17.484A4 4 0 0 1 18 18")
     // Desktop rail: MessageSquare, RatFaceIcon, Building2 and RatSwarmIcon; More is Lucide's Ellipsis.
     val Threads = lucide("Threads", "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z")
     val Rem = lucide("Rem",
@@ -121,6 +126,8 @@ internal object ThreadIcons {
         "M2.182 13.9a10 10 0 0 1 0-3.8", "M20.279 17.609a10 10 0 0 1-2.7 2.69", "M21.818 10.1a10 10 0 0 1 0 3.8", "M3.721 6.391a10 10 0 0 1 2.7-2.69",
         "M6.391 20.279a10 10 0 0 1-2.69-2.7")
     val PauseCircle = lucide("PauseCircle", RING, "M10 15V9", "M14 15V9")
+    // A Rem task whose worker sleeps while it waits for something outside Raticode (lucide Moon).
+    val Moon = lucide("Moon", "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z")
     // Rem task types, as the desktop's task list draws them (lucide Telescope, Wrench, Hammer, MousePointerClick, BellRing).
     val Research = lucide("Research", "m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44",
         "m13.56 11.747 4.332-.924", "m16 21-3.105-6.21",

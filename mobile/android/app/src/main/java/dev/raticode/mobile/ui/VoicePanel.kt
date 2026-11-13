@@ -40,6 +40,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
+import dev.raticode.mobile.data.LongText
 import dev.raticode.mobile.live.PhoneAction
 import dev.raticode.mobile.live.RemHome
 import dev.raticode.mobile.live.FileKinds
@@ -222,13 +223,13 @@ private fun Body(controller: VoiceController, state: VoiceState, actions: VoiceA
             Surface(color = Look.Raised, shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                 Box(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
                     if (text.isEmpty()) Text("Message Rem", style = MaterialTheme.typography.bodyLarge, color = Look.Muted)
-                    BasicTextField(text, { text = it.take(VoiceLogic.MAX_CHARS) },
+                    BasicTextField(text, { text = it.take(LongText.MAX_CHARS) },
                         Modifier.fillMaxWidth().heightIn(min = 24.dp).focusRequester(focus).testTag("voiceInput")
                             .semantics { contentDescription = "Message to Rem" },
                         textStyle = MaterialTheme.typography.bodyLarge.merge(TextStyle(color = Look.Ink)), cursorBrush = SolidColor(Look.AccentLight), maxLines = 8)
                 }
             }
-            if (text.length > VoiceLogic.MAX_CHARS - 200) Note("${text.length} / ${VoiceLogic.MAX_CHARS}")
+            VoiceLogic.lengthNote(text.length)?.let { Note(it, tag = "voiceLength") }
             Context(controller)
             Controls(actions, extra = {
                 // Keeps what is in the box and adds the new words after it.
@@ -258,13 +259,13 @@ private fun Body(controller: VoiceController, state: VoiceState, actions: VoiceA
                 end = { Pill("Unlock to send", "voiceUnlock", onClick = actions::unlock) })
         }
         is VoiceState.Sending -> {
-            Said(state.text)
+            Said(state.text, controller.sentAsFile)
             Context(controller)
             Thinking()
             if (controller.readiness().let { it == DeskReadiness.LOADING || it == DeskReadiness.CONNECTING }) Note("Connecting…")
         }
         is VoiceState.Waiting -> {
-            Said(state.text)
+            Said(state.text, controller.sentAsFile)
             val draft = controller.client.remDraft
             val locked = context.getSystemService(KeyguardManager::class.java).isDeviceLocked
             if (draft.isNotBlank() && VoiceLogic.showReply(locked, VoicePrefs.whileLocked(context))) Text(draft, style = MaterialTheme.typography.bodyLarge)
@@ -274,7 +275,7 @@ private fun Body(controller: VoiceController, state: VoiceState, actions: VoiceA
             Controls(actions, extra = { Tool(VoiceIcons.Chat, "Open Rem's chat", "voiceOpenChat", onClick = actions::openRem) })
         }
         is VoiceState.Replied -> {
-            Said(state.text)
+            Said(state.text, controller.sentAsFile)
             if (state.hidden) {
                 Controls(actions, extra = { Icon(VoiceIcons.Lock, null, Modifier.padding(12.dp).size(22.dp), tint = Look.Muted) },
                     end = { Pill("Unlock to see", "voiceUnlockReply", onClick = actions::unlock) })
@@ -531,11 +532,17 @@ private fun Note(text: String, error: Boolean = false, tag: String = "") {
 
 /** The user's own words, as a bubble on the right. */
 @Composable
-private fun Said(text: String) {
+private fun Said(text: String, asFile: Boolean = false) {
     if (text.isBlank()) return
+    // Long words go to Rem as a text file; their first words stand for them here, as in the message box.
+    val long = VoiceLogic.asFile(text)
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
         Surface(color = Look.Raised, shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)) {
-            Text(text, Modifier.padding(horizontal = 14.dp, vertical = 10.dp).testTag("voiceSaid"), style = MaterialTheme.typography.bodyLarge)
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(if (long) "“${LongText.preview(text)}”" else text, Modifier.testTag("voiceSaid"), style = MaterialTheme.typography.bodyLarge)
+                if (long && asFile) Text("${LongText.characters(text.trim().length)}, attached as a text file", Modifier.testTag("voiceSaidFile"),
+                    style = MaterialTheme.typography.labelSmall, color = Look.Muted)
+            }
         }
     }
 }

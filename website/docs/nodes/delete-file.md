@@ -10,7 +10,7 @@ Remove a selected file, directory, or symlink with an explicit trash and recursi
 
 ## When to use it
 
-Use this node only when cleanup is part of the reviewed workflow. Avoid broad generated paths or unreviewed directory targets.
+Use it only when cleanup is a reviewed part of the workflow. Avoid broad generated paths and folders you haven't checked.
 
 ## Example
 
@@ -29,13 +29,14 @@ Node step:
   finish: pass
 ```
 
-Trash is enabled by default. Set `use-trash: false` only for deliberate permanent deletion. `recursive` defaults to false, and `missing-ok` defaults to false. This example allows an already absent temporary file.
-
-Output distinguishes `trashed`, `deleted`, and `missing`, and includes a trash path when applicable. Do not assume every platform or runtime has usable trash storage.
+- `use-trash` is on by default. Set it to `false` only when you mean to delete for good.
+- `recursive` and `missing-ok` both default to `false`. The example allows the temporary file to be gone already.
+- Output says `trashed`, `deleted` or `missing`, with the trash path when there is one.
+- Not every platform or runtime has a usable trash.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -46,9 +47,9 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -57,12 +58,12 @@ Successful output fields use these exact selector names:
 | `disposition` | `trashed`, `deleted`, `missing` |
 | `trash_path` | string or null |
 
-For example, refer to `node.step.output.path` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.path`.
 
 ## Preflight and limits
 
-The target must satisfy the missing/recursive policy, and trash must be available when requested. When the node has `needs`, preflight skips the existence check because an upstream step may create the target earlier in the run; the node then reports a missing target when it runs. Stop or a downstream failure does not undo deletion.
+The target must fit the `missing-ok` and `recursive` settings, and trash must be available when you ask for it. With `needs`, preflight skips the existence check, because an earlier step may create the target. A missing target then fails when the node runs. Stopping the run or a later failure doesn't undo a deletion.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

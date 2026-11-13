@@ -9,7 +9,7 @@ export const docsSidebar: DefaultTheme.SidebarItem[] = [
   },
   {
     text: 'The studio', collapsed: false,
-    items: [page('Projects & workspaces', 'studio/projects'), page('Code & graph editors', 'studio/editors'), page('Source control', 'studio/source-control'), page('Terminal', 'studio/terminal'), page('Integrated browser', 'studio/browser'), page('Runs & approvals', 'studio/runs'), page('Import & export', 'studio/sharing')],
+    items: [page('Projects & workspaces', 'studio/projects'), page('Code & graph editors', 'studio/editors'), page('Source control', 'studio/source-control'), page('Terminal', 'studio/terminal'), page('Browser', 'studio/browser'), page('Runs & approvals', 'studio/runs'), page('Import & export', 'studio/sharing')],
   },
   {
     text: 'Working with Rem', collapsed: false,

@@ -41,7 +41,9 @@ def wait(condition: Callable[[], Any], timeout: float = 15) -> Any:
 def pair(initiator: DeviceControl, responder: DeviceControl, name: str = "Desk B") -> None:
     """``initiator`` pastes ``responder``'s invitation, as in Pair another desktop."""
     assert responder.invitations is not None and responder.port is not None
-    invite = responder.invitations.create(name, {"host": "127.0.0.1", "port": responder.port})
+    invite = responder.invitations.create(
+        name, {"host": "127.0.0.1", "port": responder.port}, role="desktop"
+    )
     preview = initiator.action({"action": "preview", "uri": invite["uri"]})
     initiator.action(
         {"action": "pair", "uri": invite["uri"], "fingerprint": preview["fingerprint"]}

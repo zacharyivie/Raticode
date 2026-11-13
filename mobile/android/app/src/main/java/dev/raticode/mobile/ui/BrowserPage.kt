@@ -36,6 +36,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -53,7 +54,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -117,6 +117,7 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
     // user is in Rem or Threads. When Raticode leaves the screen (here, and in MainActivity.onStop) they stop, except a
     // page playing sound, which goes on with a notification.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val hostActivity = context.findActivity()
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_START) browser.visible(true)
@@ -124,7 +125,8 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
         }
         lifecycle.addObserver(observer)
         if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) browser.visible(true)
-        onDispose { lifecycle.removeObserver(observer); browser.exitFullscreen() }
+        // Leaving the page ends full screen; turning the phone or Android rebuilding the screen doesn't.
+        onDispose { lifecycle.removeObserver(observer); if (hostActivity?.isChangingConfigurations != true) browser.exitFullscreen() }
     }
     // One collector for the page's life: clearing the notice must not cancel the snackbar it started.
     val noticeScope = rememberCoroutineScope()
@@ -165,6 +167,8 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
             else -> browser.back()
         }
     }
+    // Last, so it goes first: Back ends full screen before anything else.
+    BackHandler(enabled = browser.fullscreen != null) { browser.exitFullscreen() }
 
     val controls = remember { BrowserControlsState() }
     DisposableEffect(browser) {
@@ -175,8 +179,12 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
         held = editing || browser.find != null || sheet != null || historyOf != null || browser.menu != null || browser.ask != null || page.problem != null || page.url == BrowserRules.HOME)
     val forwardFits = BrowserControlsMotion.forwardFits(LocalConfiguration.current.screenWidthDp, onBack != null)
 
-    Box(Modifier.fillMaxSize()) {
+    // The keyboard, Raticode's bar or the phone turning resizes the whole browser; the controls folding doesn't.
+    Box(Modifier.fillMaxSize().onSizeChanged { controls.resized() }) {
+    val full = browser.fullscreen
     Column(Modifier.fillMaxSize()) {
+        // While a video is full screen the page stays where it is under it, and its controls step aside.
+        if (full == null) {
         BrowserToolbar(controls, controlsOpen, "browser", page.url, page.desktop, page.loading, page.progress, page.canBack, page.canForward,
             canReload = page.url != BrowserRules.HOME || page.problem != null, tabCount = allTabs(browser, gecko, BrowserTabs.CHROMIUM).size, showForward = forwardFits, onPageBack = onBack, onEdit = ::startEditing,
             onBack = { browser.back() }, onForward = { browser.forward() }, onStop = { browser.stop() }, onReload = { browser.reload() }, onTabs = { sheet = "tabs" }, onMenu = { sheet = "menu" },
@@ -194,6 +202,7 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
                         .onFocusChanged { if (it.isFocused) focused = true else if (focused && editing && address.text.isEmpty()) editing = false })
             }))
         browser.find?.let { find -> FindBar(find, browser) }
+        }
 
         Box(Modifier.weight(1f).fillMaxWidth().testTag("browserContent")) {
             val problem = page.problem
@@ -206,7 +215,9 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
                     ShowingMediaOf(BrowserMediaRules.Key(BrowserMediaRules.Engine.CHROMIUM, activeId))
                     AndroidView(factory = { FrameLayout(it) }, modifier = Modifier.fillMaxSize().testTag("browserPage"),
                         update = { container ->
-                            // Reading the address here redraws when a blank tab starts loading.
+                            // Reading the address here redraws when a blank tab starts loading, and reading revived when a
+                            // page whose process ended reloads by itself.
+                            page.revived.hashCode()
                             if (page.url != BrowserRules.HOME) browser.view(activeId)?.let { browser.attach(container, it, activity) }
                                 ?: browser.detach(container)
                         }, onRelease = { browser.detach(it) })
@@ -215,6 +226,18 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
         }
     }
     SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp))
+    // The page's full-screen view, over the page and its controls. The screen around it (LiveScreen) gives this page the
+    // whole phone while it shows; Raticode's child lock handle and app lock stay above it (MainActivity).
+    if (full != null) key(full) {
+        AndroidView(factory = { FrameLayout(it).apply { setBackgroundColor(android.graphics.Color.BLACK) } },
+            modifier = Modifier.fillMaxSize().testTag("browserFullscreen").semantics { contentDescription = "Full-screen video. Back to exit" },
+            update = { container ->
+                if (full.view.parent !== container) {
+                    (full.view.parent as? android.view.ViewGroup)?.removeView(full.view)
+                    container.addView(full.view, android.view.ViewGroup.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+                }
+            }, onRelease = { it.removeAllViews() })
+    }
     }
 
     when (sheet) {
@@ -229,15 +252,6 @@ private fun RaticodeBrowser(client: LiveClient, browser: BrowserRuntime, onBack:
     historyOf?.let { direction -> BackForwardSheet(browser, direction) { historyOf = null } }
     browser.menu?.let { menu -> LinkMenuSheet(menu, browser, client, context) { browser.menu = null } }
     browser.ask?.let { ask -> AskDialog(ask, browser, context) }
-    browser.fullscreen?.let { full ->
-        Dialog(onDismissRequest = { browser.exitFullscreen() }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-            Box(Modifier.fillMaxSize()) {
-                AndroidView(factory = { FrameLayout(it).apply { setBackgroundColor(android.graphics.Color.BLACK); (full.view.parent as? android.view.ViewGroup)?.removeView(full.view); addView(full.view) } },
-                    modifier = Modifier.fillMaxSize().semantics { contentDescription = "Full-screen video. Back to exit" })
-                ChildLockControl(Modifier.align(Alignment.CenterEnd))
-            }
-        }
-    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         browser.chooserResult(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
     }

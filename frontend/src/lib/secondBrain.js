@@ -334,3 +334,12 @@ export const RECIPES = [
   ["digest", "Prepare a research digest", "Collect recent additions into one cited digest."],
   ["refresh-comparison", "Refresh a comparison when sources change", "Draft a revised comparison for review when cited sources change."],
 ];
+
+// A note's source address comes from its own metadata, so only web addresses become
+// links. React renders a javascript: href as given.
+export function webSourceUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch { return ""; }
+}

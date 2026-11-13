@@ -382,6 +382,16 @@ def test_org_config_apply_employees_schedule_and_conflicts(backend) -> None:
     assert updated["timezone"] == "Europe/Paris"
     code, _, _ = run("org", "schedule", "apply", org_id, "-f", str(backend.tmp / "s.json"))
     assert code == 4
+    # Backlog pulls: on unless turned off; setting the current value changes nothing.
+    assert ok("org", "backlog-pulls", org_id) == {"organizationId": org_id, "pullBacklog": True}
+    before = ok("org", "show", org_id)["revision"]
+    assert ok("org", "backlog-pulls", org_id, "--on")["pullBacklog"] is True
+    assert ok("org", "show", org_id)["revision"] == before
+    assert ok("org", "backlog-pulls", org_id, "--off")["pullBacklog"] is False
+    assert ok("org", "show", org_id)["config"]["pullBacklog"] is False
+    assert ok("org", "history", org_id)[0]["reason"] == (
+        "Workers leave Backlog tickets for you to move"
+    )
     # Configuration never starts an organization.
     assert ok("org", "list")[0]["state"] == "paused"
 

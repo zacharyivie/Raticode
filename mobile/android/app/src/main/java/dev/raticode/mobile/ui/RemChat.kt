@@ -52,6 +52,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.raticode.mobile.data.AttachPlan
+import dev.raticode.mobile.data.LongText
 import dev.raticode.mobile.live.*
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -251,6 +252,15 @@ internal fun RemConversation(client: LiveClient, home: RemHome, onTask: (String)
         if (rows.isEmpty()) return@LaunchedEffect
         if (pinned) { list.scrollToItem(last); seenId = newestId } else unseen = messagesAfter(messages, seenId)
     }
+    // The keyboard opening, or the message box growing, shortens the chat from below; at the end, it stays at the end.
+    val latestLast by rememberUpdatedState(last)
+    LaunchedEffect(list) {
+        var height = 0
+        snapshotFlow { list.layoutInfo.viewportSize.height }.collect { now ->
+            if (now in 1 until height && pinned && !list.isScrollInProgress) list.scrollToItem(latestLast)
+            height = now
+        }
+    }
     // A reply's quote scrolls up to the message it refers to, when that message is in the phone's part of the chat.
     val show: (String) -> Unit = { id -> rowIndex(rows, id).takeIf { it >= 0 }?.let { index -> pinned = false; scope.launch { list.animateScrollToItem(index) } } }
     LaunchedEffect(showRequest) { showRequest?.let { show(it.first) } }
@@ -446,6 +456,7 @@ private fun RemMessageRow(client: LiveClient, home: RemHome, row: MessageRow, on
                 val body = remember(message.body, message.result) { RemRich.bodyWithoutCardLinks(message.body, message.result) }
                 if (body.isNotBlank()) FoldableText(startOpen = newest, toggleColor = MaterialTheme.colorScheme.primary, onFolded = onFolded, reveal = reveal) { SelectionContainer { ChatMarkdown(body, source = source, mentions = message.fileMentions) } }
                 RemDetails(message.details, source, message.fileMentions)
+                message.selfWorkReport?.takeIf { it.items.isNotEmpty() }?.let { SelfWorkReportList(it, onTask, onThread) }
                 message.result?.let { RemResultCard(client, it, message.id, onThread) }
                 message.files.forEach { file ->
                     // Pictures and videos show inline and open full screen; other files keep their row.
@@ -650,10 +661,54 @@ private fun WorkCard(home: RemHome, work: RemWork, onTask: (String) -> Unit, onT
     }
 }
 
+/**
+ * The tasks a period of self-work started, under its report message: each title with its outcome. Tapping one opens its
+ * task as a task card does, or its work thread when the desktop named no task. Long lists fold after [SELF_WORK_REPORT_SHOWN].
+ */
+@Composable
+private fun SelfWorkReportList(report: RemSelfWorkReport, onTask: (String) -> Unit, onThread: (String) -> Unit) {
+    var all by rememberSaveable(report.periodId) { mutableStateOf(false) }
+    val shown = if (all) report.items else report.items.take(SELF_WORK_REPORT_SHOWN)
+    Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.widthIn(max = 520.dp).testTag("remSelfWorkReport")) {
+        Column {
+            shown.forEachIndexed { index, item ->
+                if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                val open: (() -> Unit)? = when {
+                    item.taskId.isNotBlank() -> { { onTask(item.taskId) } }
+                    item.threadId.isNotBlank() -> { { onThread(item.threadId) } }
+                    else -> null
+                }
+                val (glyph, info) = RemTaskStatus.selfWorkOutcome(item.outcome)
+                val color = toneColor(info.tone)
+                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                    .then(if (open != null) Modifier.clickable(onClickLabel = if (item.taskId.isNotBlank()) "Open task" else "Open work thread", onClick = open) else Modifier)
+                    .padding(horizontal = 12.dp, vertical = 6.dp).testTag("remSelfWorkReportItem"),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusIcon(runGlyph(glyph), color, size = 16.dp)
+                    Text(item.title.ifBlank { "Task" }, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (info.label.isNotBlank()) Text(info.label, style = MaterialTheme.typography.labelMedium,
+                        color = if (info.tone == RemTaskStatus.Tone.NEUTRAL) MaterialTheme.colorScheme.onSurfaceVariant else color)
+                    if (open != null) Icon(ThreadIcons.ChevronRight, null, Modifier.size(16.dp))
+                }
+            }
+            if (report.items.size > SELF_WORK_REPORT_SHOWN) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                TextButton(onClick = { all = !all }, Modifier.padding(horizontal = 4.dp).testTag("remSelfWorkReportMore")) {
+                    Text(if (all) "Show fewer" else "Show all ${report.items.size}")
+                }
+            }
+        }
+    }
+}
+
+private const val SELF_WORK_REPORT_SHOWN = 8
+
 /** A work card's status: the task's live state, a note once the desktop removed it, or none for a task that left the list. */
 internal fun workStatus(work: RemWork, task: RemTask?): String? = when {
     !work.taskAvailable -> "Removed from your desktop"
-    task == null -> null
+    task == null -> work.pausedBy.takeIf { it.isNotBlank() }?.let(RunPause::label)
     else -> remActivity(task)
 }
 
@@ -680,16 +735,36 @@ internal fun RemComposer(client: LiveClient, home: RemHome?, draft: String, repl
     }
     var notice by remember { mutableStateOf<AttachNotice?>(null) }
     val context = LocalContext.current
+    // Long text sent as a file, by attachment ID, so its chip previews it and can put it back in the message.
+    // In memory only: it can be large, and the file itself is the copy that matters.
+    val texts = remember { mutableStateMapOf<String, String>() }
+    val latestDraft by rememberUpdatedState(draft)
+    val setDraft by rememberUpdatedState(onDraft)
     val reader = remember(client) { ImportQueue<Picked> { picked, done ->
         val main = android.os.Handler(android.os.Looper.getMainLooper())
-        // Done once the file is attached or refused; a camera photo is deleted either way.
+        // Done once the file is attached or refused; a camera photo or text file is deleted either way.
         val finish = { picked.photo?.delete(); done() }
+        // Text that couldn't become a file goes back in the message, as much as fits, so it isn't lost.
+        var gaveUp = false
+        val keepText = { reason: String ->
+            val text = picked.text
+            if (text == null) notice = AttachNotice(reason)
+            else {
+                val joined = listOf(latestDraft.trimEnd(), text).filter { it.isNotEmpty() }.joinToString("\n\n")
+                val back = LongText.edit(latestDraft, joined, canFile = false) as LongText.Edit.Keep
+                setDraft(back.text)
+                notice = AttachNotice("Couldn't send the text as a file. $reason" + if (back.cut > 0) " ${LongText.cutNote(back.cut, null)}" else "")
+            }
+        }
         // A safety net: the import itself gives up after 30 seconds, but a stopped connection answers neither way.
-        val late = Runnable { notice = AttachNotice(AttachPlan.TOO_SLOW); finish() }
+        val late = Runnable { gaveUp = true; keepText(AttachPlan.TOO_SLOW); finish() }
         main.postDelayed(late, 45_000)
-        client.importRemFile(picked.uri, picked.name, onFailed = { reason -> main.removeCallbacks(late); notice = AttachNotice(reason); finish() }) { id ->
+        client.importRemFile(picked.uri, picked.name, onFailed = { reason -> main.removeCallbacks(late); if (!gaveUp || picked.text == null) { keepText(reason); finish() } }) { id ->
             main.removeCallbacks(late)
+            // Text already put back in the message mustn't go a second time as a file.
+            if (gaveUp && picked.text != null) { client.cancelFile(id); return@importRemFile }
             if (notice?.text == AttachPlan.TOO_SLOW) notice = null
+            picked.text?.let { texts[id] = it }
             attachments = (attachments + id).distinct().take(AttachPlan.MAX_FILES); finish()
         }
     } }
@@ -699,13 +774,38 @@ internal fun RemComposer(client: LiveClient, home: RemHome?, draft: String, repl
     var field by remember { mutableStateOf(TextFieldValue(draft, TextRange(draft.length))) }
     if (field.text != draft) field = TextFieldValue(draft, TextRange(draft.length))
     // Files and words handed over by another screen join what is there; the text typed so far stays, and nothing is sent.
-    val latestDraft by rememberUpdatedState(draft)
+    val fileBlocked = LongText.blocked(client.connected, home?.filesThread != null, room)
+    /** Sends [text] as a file with this message. False when the phone couldn't write it, so the words stay where they are. */
+    fun attachText(text: String, kind: LongText.Kind): Boolean {
+        val picked = pickedText(context, text, kind) ?: run { notice = AttachNotice(LongText.FILE_FAILED); return false }
+        notice = null
+        reader.add(listOf(picked))
+        return true
+    }
+    /** A paste, a keyboard's dictation or typing. A long addition goes as a file; otherwise the box stops at Rem's limit and says so. */
+    fun typed(value: TextFieldValue) {
+        val edit = LongText.edit(field.text, value.text, canFile = fileBlocked == null)
+        if (edit is LongText.Edit.ToFile && attachText(edit.file, LongText.Kind.PASTED)) {
+            field = TextFieldValue(edit.text, TextRange(edit.cursor)); onDraft(edit.text); return
+        }
+        val keep = edit as? LongText.Edit.Keep ?: LongText.edit(field.text, value.text, canFile = false) as LongText.Edit.Keep
+        field = if (keep.cursor == null) value else TextFieldValue(keep.text, TextRange(keep.cursor))
+        onDraft(keep.text)
+        if (keep.cut > 0) notice = AttachNotice(LongText.cutNote(keep.cut, fileBlocked))
+    }
     LaunchedEffect(handoff?.id) {
         val incoming = handoff ?: return@LaunchedEffect
-        if (incoming.text.isNotBlank()) onDraft(listOf(latestDraft.trimEnd(), incoming.text.trim()).filter { it.isNotEmpty() }.joinToString("\n\n").plus("\n\n").take(4000))
-        val (kept, note) = AttachPlan.fit(incoming.files, room)
+        val words = incoming.text.trim()
+        // Long words from another screen go as a file, as a paste does.
+        if (words.isNotEmpty() && !(LongText.asFile(words) && fileBlocked == null && attachText(words.take(LongText.MAX_CHARS), LongText.Kind.PASTED))) {
+            val joined = listOf(latestDraft.trimEnd(), words).filter { it.isNotEmpty() }.joinToString("\n\n").plus("\n\n")
+            val keep = LongText.edit(latestDraft, joined, canFile = false) as LongText.Edit.Keep
+            onDraft(keep.text)
+            if (keep.cut > 0) notice = AttachNotice(LongText.cutNote(keep.cut, fileBlocked))
+        }
+        val (kept, note) = AttachPlan.fit(incoming.files, AttachPlan.room(attachments.size, reader.waiting.size))
         (incoming.files - kept.toSet()).forEach { it.photo?.delete() }
-        notice = note?.let { AttachNotice(it) }
+        if (note != null) notice = AttachNotice(note)
         reader.add(kept)
         onHandoffTaken()
         runCatching { focus.requestFocus() }
@@ -717,6 +817,8 @@ internal fun RemComposer(client: LiveClient, home: RemHome?, draft: String, repl
     // Files still uploading don't hold up Send; one that stopped has to be removed or attached again first.
     val ready = attachments.all { id -> client.files.any { it.id == id && it.state in setOf("offered", "receiving", "available") } }
     val held = client.remHeld != null
+    // Forget text whose file left the message, except a waiting message's, which Edit can bring back.
+    LaunchedEffect(attachments, client.remHeld) { texts.keys.retainAll((attachments + client.remHeld?.fileIds.orEmpty()).toSet()) }
     Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 2.dp) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             replyTo?.let { target -> Box(Modifier.padding(start = 8.dp)) {
@@ -733,15 +835,22 @@ internal fun RemComposer(client: LiveClient, home: RemHome?, draft: String, repl
                     })
                 }
             }
+            LongTextFiles(attachments.mapNotNull { id -> texts[id]?.let { id to it } }, draft, onPutBack = { id, text ->
+                LongText.putBack(draft, text)?.let { joined ->
+                    attachments = attachments - id; texts.remove(id)
+                    client.files.firstOrNull { it.id == id }?.let { file -> if (file.direction == "upload" && file.state in setOf("offered", "receiving")) client.cancelFile(id) }
+                    onDraft(joined); runCatching { focus.requestFocus() }
+                }
+            })
             if (reader.waiting.isNotEmpty()) Row(Modifier.padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                Text(reader.waiting.size.let { if (it == 1) "Reading 1 file…" else "Reading $it files…" }, style = MaterialTheme.typography.labelSmall,
+                Text(reader.waiting.size.let { if (it == 1) (if (reader.waiting[0].text != null) "Attaching the text as a file…" else "Reading 1 file…") else "Reading $it files…" }, style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 AttachButton(canAttach, room, onPicked = { reader.add(it) }, onNotice = { notice = it })
-                OutlinedTextField(field, { field = it; onDraft(it.text.take(4000)) }, Modifier.weight(1f).focusRequester(focus).testTag("remComposer").semantics { contentDescription = "Message Rem" },
+                OutlinedTextField(field, ::typed, Modifier.weight(1f).focusRequester(focus).testTag("remComposer").semantics { contentDescription = "Message Rem" },
                     placeholder = { Text(when {
                         !client.connected -> "Rem isn't connected"
                         held -> "Your message sends once its files upload"
@@ -761,6 +870,7 @@ internal fun RemComposer(client: LiveClient, home: RemHome?, draft: String, repl
                     Icon(ThreadIcons.Send, null, Modifier.size(20.dp))
                 }
             }
+            LongTextCounter(draft.length, fileBlocked, onToFile = { if (draft.isNotBlank() && attachText(draft.trim(), LongText.Kind.MESSAGE)) onDraft("") })
             notice?.let { shown -> Row(Modifier.fillMaxWidth().padding(start = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
                 verticalAlignment = Alignment.CenterVertically) {
                 Text(shown.text, Modifier.weight(1f).testTag("remAttachNotice"), style = MaterialTheme.typography.labelSmall,

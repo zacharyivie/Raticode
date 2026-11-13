@@ -10,7 +10,7 @@
       "advisory": "GHSA-3g3m-2fjr-6pw4",
       "package": "glob",
       "expires": "2026-12-15",
-      "reason": "Fixed in glob 14.0.2, but @electron/asar 4.3.0, its newest release, requires glob 13. Reached only through electron-builder at build time, where asar does not pass an AbortSignal, and not packaged into the app."
+      "reason": "Fixed in glob 14.0.2, but @electron/asar 4.3.1, the version in the lockfile, still requires glob 13. Reached only through electron-builder at build time, where asar does not pass an AbortSignal, and not packaged into the app."
     }
   ]
 }

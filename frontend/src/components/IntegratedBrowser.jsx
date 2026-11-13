@@ -45,6 +45,7 @@ import {
   usePopupMenu,
 } from "./BrowserPanels.jsx";
 import { askRemPageText } from "../lib/browserAskRem.js";
+import { createTabRecovery, hangAction, HANG_GRACE_MS } from "../lib/browserRecovery.js";
 import { browserChromeShortcutAction } from "../lib/browserShortcuts.js";
 import { attachFirefoxView } from "../lib/firefoxStreamView.js";
 import { engineLabel, isStreamedEngine, withArticle } from "../lib/browserEngines.js";
@@ -135,6 +136,11 @@ export default function IntegratedBrowser({
   const [downloadArrivals, setDownloadArrivals] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const [discarded, setDiscarded] = useState(false);
+  // A page that stopped or got stuck reloads by itself (see browserRecovery.js).
+  const recoveryRef = useRef(null);
+  if (!recoveryRef.current) recoveryRef.current = createTabRecovery();
+  const [keepsStopping, setKeepsStopping] = useState(false);
+  const windowVisible = useWindowVisible();
   const [state, setState] = useState({
     canGoBack: false,
     canGoForward: false,
@@ -351,6 +357,47 @@ export default function IntegratedBrowser({
     }, discardAfterMs);
     return () => window.clearTimeout(timer);
   }, [active, bridge, discardAfterMs, discarded, isRemTab, localPath, state.audible, state.prompts, state.ready, state.url]);
+
+  // A page whose process ended reloads by itself once its tab is on screen,
+  // with nothing shown; one that keeps stopping gets a Reload button instead.
+  // Rem's tabs are left to Rem. A Firefox, Chrome or Edge tab keeps its own
+  // message, which can mean the browser is open in a window for signing in.
+  const onScreen = active && windowVisible;
+  const streamed = isStreamedEngine(state.engine || engineRef.current || agentEngine);
+  const recovers = !isRemTab && !streamed;
+  useEffect(() => {
+    if (!state.crashed || !onScreen || discarded || !recovers || keepsStopping) return undefined;
+    const decision = recoveryRef.current.gone();
+    if (decision.giveUp) {
+      setKeepsStopping(true);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      const id = sessionIdRef.current;
+      if (!id || !bridge?.reload) return;
+      recoveryRef.current.restored();
+      void bridge.reload(id).catch(() => {});
+    }, decision.delayMs);
+    return () => window.clearTimeout(timer);
+  }, [bridge, discarded, keepsStopping, onScreen, recovers, state.crashed]);
+
+  // A page that stopped answering is left alone while it isn't on screen. On
+  // screen it gets a moment to answer, then its stuck page process ends and it
+  // reloads, keeping its back/forward list; a page playing sound is left alone.
+  useEffect(() => {
+    if (!state.unresponsive || discarded || !recovers || hangAction({ onScreen, audible: state.audible }) !== "end") return undefined;
+    const timer = window.setTimeout(() => {
+      const id = sessionIdRef.current;
+      if (id && bridge?.recover) void bridge.recover(id).catch(() => {});
+    }, HANG_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, [bridge, discarded, onScreen, recovers, state.audible, state.unresponsive]);
+
+  function reloadByUser() {
+    recoveryRef.current.forget();
+    setKeepsStopping(false);
+    return run("reload");
+  }
 
   useEffect(() => {
     if (!bridge?.onDownloads) return undefined;
@@ -673,7 +720,7 @@ export default function IntegratedBrowser({
         </span>
         <BrowserButton
           label={state.loading ? "Stop loading" : "Reload"}
-          onClick={(event) => run(state.loading ? "stop" : event?.shiftKey ? "reloadHard" : "reload")}
+          onClick={(event) => (state.loading ? run("stop") : event?.shiftKey ? run("reloadHard") : reloadByUser())}
         >{state.loading ? <X size={14} /> : <RefreshCw size={14} />}</BrowserButton>
         <form className="relative mx-1 flex min-w-0 flex-1" onSubmit={navigate}>
           <div className="relative min-w-0 flex-1">
@@ -824,11 +871,12 @@ export default function IntegratedBrowser({
         ) : (
           <PageOverlay
             state={state}
+            showCrash={!recovers || keepsStopping}
+            keepsStopping={recovers && keepsStopping}
             onBack={() => (state.canGoBack ? run("back") : run("home"))}
-            onDismissUnresponsive={() => setState((current) => ({ ...current, unresponsive: false }))}
             onProceed={() => run("allowCertificate")}
-            onReload={() => run("reload")}
-            onRetry={() => run("reload")}
+            onReload={reloadByUser}
+            onRetry={reloadByUser}
           />
         )}
       </div>
@@ -1077,4 +1125,17 @@ export function isIntegratedBrowserShortcut(event) {
   if (event.repeat || !event.altKey || event.shiftKey) return false;
   if (!event.ctrlKey && !event.metaKey) return false;
   return event.code === "Slash" || event.key === "/";
+}
+
+// Whether Raticode's window is showing. A minimized or hidden window counts as
+// away, like a tab that isn't in front.
+function useWindowVisible() {
+  const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState !== "hidden");
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const update = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  return visible;
 }

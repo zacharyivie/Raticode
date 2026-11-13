@@ -164,6 +164,7 @@ function createBrowserSessions({
     app.userAgentFallback = identity.userAgent;
     installedIdentity = identity;
     for (const kind of ["user", "rem"]) installProfile(kind, identity);
+    installPreviewFileGuard();
     removeStrayQuarantine();
     sampleUserAgentMetadata();
     const user = profile("user");
@@ -214,6 +215,32 @@ function createBrowserSessions({
       if (request.errorCode === 0 && request.certificate) verifiedCertificates.set(request.hostname, certificateSummary(request.certificate));
       callback(-3);
     });
+  }
+
+  // Local HTML previews run as file:// pages, and Electron lets those read any other
+  // file:// URL (grantFileProtocolExtraPrivileges). Without a check a previewed page
+  // could fetch ~/.ssh or list folders and send the result to a website (CWE-552).
+  // Every file:// request in the preview profile, the page itself included, must be
+  // inside the folder an open preview was granted.
+  function installPreviewFileGuard() {
+    const webRequest = profile("preview")?.webRequest;
+    if (typeof webRequest?.onBeforeRequest !== "function") return;
+    webRequest.onBeforeRequest({ urls: ["file://*/*"] }, (details, callback) => {
+      callback({ cancel: !previewFileAllowed(details?.url) });
+    });
+  }
+
+  function previewFileAllowed(value) {
+    let target;
+    try { target = fileURLToPath(value); } catch { return false; }
+    for (const session of sessions.values()) {
+      if (session.kind !== "preview") continue;
+      try {
+        resolvePath(target, { grantId: session.grantId, mustExist: true });
+        return true;
+      } catch { /* Not inside this preview's grant. */ }
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -742,6 +769,14 @@ function createBrowserSessions({
       update();
     });
     contents.on("render-process-gone", (_event, details) => {
+      // Raticode ended a stuck page to reload it (reload's recover): reload it
+      // now that its page process is gone, without reporting a crash.
+      if (session.reloadWhenGone) {
+        const hard = session.reloadWhenGone === "hard";
+        session.reloadWhenGone = "";
+        reload(session, hard);
+        return;
+      }
       session.crashed = { reason: details?.reason || "crashed" };
       session.error = `Browser renderer stopped: ${session.crashed.reason}`;
       update();
@@ -829,9 +864,19 @@ function createBrowserSessions({
     }
   }
 
-  function reload(session, hard) {
+  // recover: the tab's page stopped answering and its owner chose to start it
+  // again. A stuck page can't reload itself, so its page process is ended
+  // first and the page reloads once it's gone (render-process-gone), keeping
+  // the back/forward list (see browserRecovery.js).
+  function reload(session, hard, recover = false) {
     const contents = liveContents(session);
     if (!contents) return;
+    if (recover && session.unresponsive && !isStreamed(contents) && typeof contents.forcefullyCrashRenderer === "function") {
+      session.unresponsive = false;
+      session.reloadWhenGone = hard ? "hard" : "soft";
+      contents.forcefullyCrashRenderer();
+      return;
+    }
     // A failed load leaves nothing to reload; retry its address instead.
     const failed = session.loadError?.url || (!contents.getURL() || contents.getURL() === "about:blank" ? session.initialUrl : "");
     session.crashed = null;
@@ -970,6 +1015,11 @@ function createBrowserSessions({
       popupsAllowed: siteOf(session, origin).popups === "allow",
     });
     if (decision.kind === "same-tab") {
+      // loadURL skips will-navigate, so Rem's site rules are checked here.
+      if (!isAllowedNavigation(session, details.url)) {
+        log("warn", "Blocked a page from opening a site Rem may not open.");
+        return { action: "deny" };
+      }
       void run(session, () => contents.loadURL(details.url));
       return { action: "deny" };
     }
@@ -1957,13 +2007,15 @@ function createBrowserSessions({
   }
 
   // Where to sign in from a tab: Google's sign-in page after its refusal,
-  // otherwise the page the tab shows.
+  // otherwise the page the tab shows. The address goes on the browser's
+  // command line, which other accounts on this computer can read, so the
+  // page's query string and fragment are left off.
   function signInAddress(contents) {
     const current = contents.getURL();
-    if (!GOOGLE_REJECTED.test(current)) return /^https?:/i.test(current) ? current : "https://accounts.google.com/";
+    if (!GOOGLE_REJECTED.test(current)) return /^https?:/i.test(current) ? policyRules.addressWithoutQuery(current) : "https://accounts.google.com/";
     const earlier = contents.navigationHistory.getAllEntries().map((entry) => entry.url).reverse().find((url) => /^https?:/i.test(url) && hostOf(url) !== "accounts.google.com");
     return earlier && /(?:^|\.)(?:google\.[a-z.]+|youtube\.com)$/i.test(hostOf(earlier))
-      ? `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(earlier)}`
+      ? `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(policyRules.addressWithoutQuery(earlier))}`
       : "https://accounts.google.com/";
   }
 
@@ -2048,7 +2100,7 @@ function createBrowserSessions({
       findResult: session.findResult || null,
       loading: contents.isLoading(),
       // Rem is using a shared sign-in on this page.
-      remSignIn: Boolean(session.agent && !session.agent.shared && policyRules.matchesAnySite(hostOf(currentUrl), policy.remSignInSites)),
+      remSignIn: Boolean(session.agent && !session.agent.shared && policyRules.remSignedInHost(hostOf(currentUrl), policy.remSignInSites)),
       security: securityState({ url: displayUrl === RATICODE_HOME_URL ? "about:blank" : currentUrl, certificateException: session.certificateException, certificateError: session.certificateError }),
       title: contents.getTitle(),
       url: displayUrl,
@@ -2234,7 +2286,7 @@ function createBrowserSessions({
         session.findRequestId = null;
         break;
       case "reload":
-        reload(session, options.hard === true);
+        reload(session, options.hard === true, options.recover === true);
         break;
       case "stop":
         contents.stop();
@@ -2348,7 +2400,7 @@ function createBrowserSessions({
       })),
       popups: settings.popups || "ask",
       zoom: session.pageZoomFactor,
-      remSignIn: Boolean(host && policy.remSignInSites.some((site) => host === site || host.endsWith(`.${site}`))),
+      remSignIn: policyRules.remSignedInHost(host, policy.remSignInSites),
     };
   }
 

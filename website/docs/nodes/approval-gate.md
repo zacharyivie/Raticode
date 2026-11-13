@@ -10,7 +10,7 @@ Wait for a human decision and route the result explicitly.
 
 ## When to use it
 
-Use this node before a consequential operation that should require review. It is separate from a provider's native tool approvals.
+Put it before a step that should need review. It is separate from a provider's own tool approvals.
 
 ## Example
 
@@ -29,15 +29,15 @@ Node step:
   finish: pass
 ```
 
-`message` is required. `subject` can identify the artifact and `approvers` records intended reviewers. With no `decision-timeout`, the gate has no authored decision deadline. A deadline can produce `timeout` or `reject`, as configured.
-
-A rejected or timed-out decision is a successful gate output with `approved: false`, not an operation exception. Branch on `node.step.output.approved` before any action that should require approval. An unconditional route would proceed after rejection too. Notification is optional and defaults off.
-
-If the gate is stopped, or its run ends for another reason while the decision is still pending, the request is closed as cancelled. A cancelled request no longer times out and refuses late decisions.
+- `message` is required. `subject` names the thing under review, and `approvers` records who should review it.
+- Without `decision-timeout`, the gate waits with no deadline. With one, the deadline produces `timeout` or `reject`, whichever you set.
+- A rejection or timeout is still a successful gate run, with `approved: false`. Branch on `node.step.output.approved` before the guarded step. A route without a condition goes ahead after a rejection too.
+- `notify` is off by default.
+- If the gate is stopped, or its run ends while the decision is pending, the request closes as cancelled. A cancelled request no longer times out and refuses late decisions.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -51,14 +51,14 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-Bind these declared ports through `with`:
+Input ports, bound through `with`:
 
 | Port | Value type |
 | --- | --- |
 | `message` | string |
 | `subject` | string |
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
@@ -69,12 +69,12 @@ Successful output fields use these exact selector names:
 | `message` | string |
 | `subject` | string or null |
 
-For example, refer to `node.step.output.decision` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.decision`.
 
 ## Preflight and limits
 
-The approval request store must be writable. Approval still requires someone to answer through the supported runtime UI; compilation cannot provide the decision.
+The approval request store must be writable. Someone still has to answer in the app or another supported place. Compiling can't supply the decision.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

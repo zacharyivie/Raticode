@@ -105,6 +105,7 @@ test("every Vite dev server in a test uses its own cache, not the running app's"
     .filter(name => /\.test\.m?js$/.test(name)).map(name => `${dir}/${name}`));
   const servers = [...scripts(), ...unitTests].filter(file => /import\(\s*["']vite["']\s*\)|import\s*\{[^}]*\bcreateServer\b[^}]*\}\s*from\s*["']vite["']/.test(fs.readFileSync(path.join(frontend, file), "utf8")));
   assert.ok(servers.length >= 17, `found only ${servers.length} Vite test servers`);
-  const shared = servers.filter(file => !/createServer\(\{[^]*?\bcacheDir\b/.test(fs.readFileSync(path.join(frontend, file), "utf8")));
+  // A test that only bundles with Vite's build() needs its own cache too.
+  const shared = servers.filter(file => !/(?:createServer|build)\(\{[^]*?\bcacheDir\b/.test(fs.readFileSync(path.join(frontend, file), "utf8")));
   assert.deepEqual(shared, []);
 });

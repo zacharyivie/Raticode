@@ -62,6 +62,10 @@ test("downloads get safe, unique names and dangerous types are flagged", () => {
   assert.equal(policy.uniqueDownloadPath("/d", "notes", () => false), path.join("/d", "notes"));
   for (const name of ["setup.exe", "run.SH", "x.AppImage", "macro.docm", "tool.jar"]) assert.equal(policy.isDangerousDownload(name), true, name);
   for (const name of ["photo.png", "report.pdf", "archive.zip", "data.csv"]) assert.equal(policy.isDangerousDownload(name), false, name);
+  // Disk images and app packages mount or install code when opened.
+  for (const name of ["disk.iso", "boot.img", "drive.vhd", "drive.VHDX", "app.msix", "app.appx", "notes.one", "addin.xll", "query.search-ms"]) {
+    assert.equal(policy.isDangerousDownload(name), true, name);
+  }
 });
 
 test("popups need a user gesture and sized popups become windows", () => {
@@ -99,7 +103,8 @@ test("permissions prompt per site, remember decisions and deny Rem", () => {
   assert.equal(policy.permissionDecision({ permission: "hid" }), "deny");
   assert.equal(policy.permissionDecision({ permission: "notifications", agent: true }), "deny");
   assert.equal(policy.permissionDecision({ permission: "fullscreen", agent: true }), "deny");
-  assert.equal(policy.permissionDecision({ permission: "clipboard-sanitized-write", agent: true }), "allow");
+  // A page in Rem's own tab can't write to the user's clipboard.
+  assert.equal(policy.permissionDecision({ permission: "clipboard-sanitized-write", agent: true }), "deny");
   assert.equal(policy.permissionDecision({ permission: "openExternal", details: { externalURL: "mailto:a@example.com" } }), "prompt");
   assert.equal(policy.permissionDecision({ permission: "openExternal", details: { externalURL: "mailto:a@example.com" }, stored: { "openExternal:mailto:": "allow" } }), "allow");
   // Handlers abused for code execution are never offered.
@@ -152,6 +157,31 @@ test("Rem's site lists gate navigation", () => {
   assert.equal(policy.remSiteAllowed("https://y.com/", { remAllowedSites: ["x.com"] }), false);
   assert.equal(policy.remSiteAllowed("https://pay.x.com/", { remAllowedSites: ["x.com"], remBlockedSites: ["pay.x.com"] }), false);
   assert.equal(policy.remNeedsConfirmation({ policy: { remConfirm: "signed-in", remSignInSites: ["x.com"] }, url: "https://x.com/", consequential: true }), true);
+});
+
+test("addresses for command lines lose their query string and fragment", () => {
+  assert.equal(policy.addressWithoutQuery("https://example.com/a/b?token=secret#x"), "https://example.com/a/b");
+  assert.equal(policy.addressWithoutQuery("http://example.com"), "http://example.com/");
+  assert.equal(policy.addressWithoutQuery("about:preferences#sync"), "about:preferences#sync");
+});
+
+test("approval covers every site a shared sign-in's cookies reach", () => {
+  assert.deepEqual(policy.signInDomains("mail.example.com"), ["mail.example.com", "example.com"]);
+  assert.deepEqual(policy.signInDomains("github.com"), ["github.com"]);
+  // Public suffixes such as co.uk can't hold cookies, so they aren't covered.
+  assert.deepEqual(policy.signInDomains("a.shop.example.co.uk"), ["a.shop.example.co.uk", "shop.example.co.uk", "example.co.uk"]);
+  assert.deepEqual(policy.signInDomains("127.0.0.1"), ["127.0.0.1"]);
+  const signedIn = { remConfirm: "signed-in", remSignInSites: ["mail.example.com"] };
+  const asks = (url) => policy.remNeedsConfirmation({ policy: signedIn, url, consequential: true });
+  // Sharing mail.example.com copies example.com cookies, which also sign Rem in on docs.example.com.
+  assert.equal(asks("https://mail.example.com/"), true);
+  assert.equal(asks("https://docs.example.com/"), true);
+  assert.equal(asks("https://example.com/"), true);
+  assert.equal(asks("https://example.org/"), false);
+  assert.equal(asks("https://notexample.com/"), false);
+  assert.equal(policy.remNeedsConfirmation({ policy: { remConfirm: "signed-in", remSignInSites: ["shop.example.co.uk"] }, url: "https://other.co.uk/", consequential: true }), false);
+  assert.equal(policy.remSignedInHost("docs.example.com", ["mail.example.com"]), true);
+  assert.equal(policy.remSignedInHost("", ["mail.example.com"]), false);
 });
 
 test("pages cannot flood the studio with tabs", () => {

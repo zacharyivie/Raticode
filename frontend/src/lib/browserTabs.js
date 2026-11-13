@@ -1,4 +1,4 @@
-import { newTabEngine, webBrowserEngine } from "./browserEngines.js";
+import { WEB_BROWSER_OPTIONS, newTabEngine, webBrowserEngine } from "./browserEngines.js";
 
 // The Browser plugin's tabs: one tab bar for every browser. Each tab records
 // the browser it runs in (`engine`). Raticode (chromium) and the streamed
@@ -72,4 +72,59 @@ export function splitBrowserPaths(paths = [], tabs = {}) {
   const files = [];
   for (const path of paths) (tabs[path] ? browser : files).push(path);
   return { browser, files };
+}
+
+// The tab bar keeps each browser's tabs together. Private tabs form their own
+// group, since a new tab beside them is private too. Groups appear in the order
+// their first tab was opened; tabs keep their order inside a group.
+export function browserTabGroupKey(tab, defaultEngine = "raticode") {
+  return tab?.private ? "private" : browserTabEngine(tab, defaultEngine);
+}
+
+export function groupBrowserTabPaths(paths = [], tabs = {}, defaultEngine = "raticode") {
+  const groups = [];
+  const byKey = new Map();
+  for (const path of paths) {
+    const tab = tabs[path];
+    if (!tab) continue;
+    const key = browserTabGroupKey(tab, defaultEngine);
+    let group = byKey.get(key);
+    if (!group) {
+      group = { key, engine: key === "private" ? "raticode" : key, private: key === "private", paths: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.paths.push(path);
+  }
+  return groups;
+}
+
+// Paths in the order the tab bar shows them.
+export function groupedBrowserPaths(paths = [], tabs = {}, defaultEngine = "raticode") {
+  const grouped = groupBrowserTabPaths(paths, tabs, defaultEngine).flatMap((group) => group.paths);
+  // Anything that isn't a web tab keeps its place at the end.
+  return [...grouped, ...paths.filter((path) => !tabs[path])];
+}
+
+// Raticode (gecko) is Firefox's own window with its own tab strip and "+", so
+// its group gets no "+" of ours: two side by side would do the same thing. Its
+// new-tab action stays in "+ Browser" instead.
+export function browserGroupHasNewTab(group) {
+  return Boolean(group) && (group.private || group.engine !== "gecko");
+}
+
+// Browsers "+ Browser" offers: the ones with no group in the tab bar yet, and
+// any whose group has no "+" of its own (Raticode (gecko), listed in inside),
+// so every browser always has one way to open another tab from the tab bar.
+export function browserFamilyChoices(groups = []) {
+  const present = new Map(groups.map((group) => [group.key, group]));
+  const inside = [];
+  const choices = WEB_BROWSER_OPTIONS.map(([value]) => value).filter((value) => {
+    const group = present.get(value);
+    if (!group) return true;
+    if (browserGroupHasNewTab(group)) return false;
+    inside.push(value);
+    return true;
+  });
+  return { choices, inside, offerPrivate: !present.has("private") };
 }

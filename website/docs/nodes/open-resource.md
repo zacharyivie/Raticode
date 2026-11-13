@@ -1,16 +1,16 @@
 ---
 title: open-resource
-description: Ask the platform to open a file, folder, URL, or selected application.
+description: Ask the operating system to open a file, folder, URL or application.
 pageClass: docs-layout
 ---
 
 # open-resource
 
-Ask the platform to open a file, folder, URL, or selected application.
+Ask the operating system to open a file, folder, URL or application.
 
 ## When to use it
 
-Use this node to present a local artifact or open a destination after a workflow completes. Use HTTP request for reading a web response inside the workflow.
+Use it to show someone a local file or open a page when a workflow finishes. To read a web response inside the workflow, use [http-request](./http-request.md).
 
 ## Example
 
@@ -27,13 +27,16 @@ Node step:
   finish: pass
 ```
 
-`resource-type` can be `auto`, `file`, `folder`, `url`, or `app`. Set it explicitly when the interpretation matters. `args` supplies arguments for supported application opening.
-
-Opening a URL launches the configured application; it does not return the page content. A successful launch is not proof that a person read it. Headless machines may lack a usable desktop opener.
+- `resource-type` is `auto`, `file`, `folder`, `url` or `app`. Set it when the guess could go wrong.
+- `args` passes arguments to an application, where supported.
+- Opening a URL launches the configured app. The node doesn't return the page, and a successful launch doesn't mean anyone read it.
+- A URL must start with `http`, `https` or `mailto`. Open a local file with `resource-type: file` instead of a `file://` address.
+- Targets other than `app` can't start with `-` or contain control characters, because a target filled in from a trigger, a loop row or another node could otherwise pass options to the system opener.
+- Headless machines may have no desktop opener.
 
 ## Configuration
 
-Configuration fields use hyphens. These are the node-specific fields; [shared execution fields](./index.md#shared-node-fields) apply separately.
+Fields for this node only. The [shared node fields](./index.md#shared-node-fields) also apply.
 
 | Field | Type | Required / default | Meaning |
 | --- | --- | --- | --- |
@@ -43,21 +46,21 @@ Configuration fields use hyphens. These are the node-specific fields; [shared ex
 
 ## Inputs and output
 
-This node has no declared input ports. Configure its authored fields directly.
+No input ports. Set its fields directly.
 
-Successful output fields use these exact selector names:
+Output fields, with their exact selector names:
 
 | Field | Value type |
 | --- | --- |
 | `target` | string |
 | `resource_type` | `file`, `folder`, `url`, `app` |
 
-For example, refer to `node.step.output.target` from a compatible downstream binding.
+Downstream, select a field as `node.step.output.target`.
 
 ## Preflight and limits
 
 The target must match its resource type, and the platform opener or application must be available.
 
-Use `Raticode rattish check` and `Raticode rattish preflight` before choosing to run the example. The installed contract is available through `Raticode rattish docs --format json`.
+Check the example with `Raticode rattish check` and `Raticode rattish preflight` before you run it. `Raticode rattish docs --format json` prints the installed contract.
 
 Continue with [Node reference](./index.md), [Routes and joins](../workflows/routes.md), or [Runs and approvals](../studio/runs.md).

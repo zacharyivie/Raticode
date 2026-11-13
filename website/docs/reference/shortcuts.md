@@ -53,9 +53,9 @@ Editor-only commands require a relevant editor to be focused. The in-app **File*
 | Zoom out | - |
 | Fit workflow | F |
 
-## Integrated browser
+## Browser
 
-Inside the Browser plugin, `Ctrl+Tab` and `Ctrl+Shift+Tab` move between tabs of every browser, and the file close shortcut closes the selected web tab. `Ctrl+T` inside a tab opens a new tab in the same browser.
+In the Browser plugin, `Ctrl+Tab` and `Ctrl+Shift+Tab` move between tabs of every browser, and the file close shortcut closes the selected web tab. `Ctrl+T` inside a tab opens a new tab in the same browser.
 
 These always work in a browser tab:
 

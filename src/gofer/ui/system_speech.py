@@ -13,7 +13,8 @@ Audio arrives from the desktop window as 16 kHz mono 16-bit PCM and is piped to 
 helper's stdin; the helper answers with one JSON object per line on stdout:
 ``ready``, ``partial`` (the words of the current phrase so far), ``final`` (a finished
 phrase), ``error`` (a code and a plain-language message) and ``done``. Nothing is
-written to disk and no audio leaves the computer.
+written to disk and no audio leaves the computer. A session's text only grows: words of
+a phrase that macOS drops after a pause are kept (see ``restarted``).
 
 The log records how each dictation went (which recognizer, why one was skipped, when
 the helper started, got ready, failed or exited) but never audio or recognized words.
@@ -34,6 +35,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import IO, Any
 
@@ -515,9 +517,16 @@ class SystemSpeechSession:
                 self._replay_bytes = 0
                 self._ready.set()
             elif kind == "partial":
-                self._partial = _clip(event.get("text"), 20_000)
-            elif kind == "final":
                 text = _clip(event.get("text"), 20_000)
+                if self.engine.id == "macos" and restarted(self._partial, text):
+                    # macOS dropped the phrase in progress and began again with only the
+                    # new words: keep the dropped words, as a finished phrase would be.
+                    self._committed.append(self._partial)
+                if text:
+                    self._partial = text
+            elif kind == "final":
+                # An empty final (macOS sends one after a pause) keeps the phrase's words.
+                text = _clip(event.get("text"), 20_000) or self._partial
                 if text:
                     self._committed.append(text)
                 self._partial = ""
@@ -614,6 +623,32 @@ def _parse_event(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return event if isinstance(event, dict) else None
+
+
+def restarted(previous: str, latest: str) -> bool:
+    """Whether ``latest`` begins a new phrase instead of revising ``previous``.
+
+    Apple's recognizer reports the phrase in progress again with every partial result,
+    revising its last words as it hears more. After a pause, recent macOS and iOS
+    versions instead drop everything said so far and carry on with only the new words,
+    without a final result in between. A revision keeps most of the words; a restart is
+    shorter and shares few of them. An unclear case counts as a revision, as before.
+    """
+    before = _words(previous)
+    after = _words(latest)
+    if not before or not after or len(after) >= len(before):
+        return False
+    matcher = SequenceMatcher(None, before, after, autojunk=False)
+    kept = sum(block.size for block in matcher.get_matching_blocks())
+    return kept * 2 < len(before)
+
+
+def _words(text: str) -> list[str]:
+    return [word for word in (_bare(part) for part in str(text or "").split()) if word]
+
+
+def _bare(word: str) -> str:
+    return "".join(char for char in word.casefold() if char.isalnum())
 
 
 def _clip(value: Any, limit: int = 400) -> str:

@@ -123,6 +123,8 @@ object TaskProgress {
     /** What to show for [runs], or null for nothing. Without the Show Rem's words opt-in it never names a task. */
     fun frame(runs: List<Run>, showWords: Boolean): Frame? {
         val run = runs.firstOrNull() ?: return null
+        // A paused run isn't working, so it has no "Rem is working" notification.
+        if (run.state == RunPause.PAUSED) return null
         val steps = RemRich.steps(run.state, run.reachedCheck, run.step)
         if (steps.isEmpty()) return null
         val generic = if (runs.size == 1) "Rem is working on your task" else "Rem is working on ${runs.size} tasks"

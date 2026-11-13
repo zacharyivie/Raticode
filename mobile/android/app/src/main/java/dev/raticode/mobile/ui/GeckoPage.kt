@@ -28,6 +28,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -50,6 +51,7 @@ import dev.raticode.mobile.browser.BrowserTabs
 import dev.raticode.mobile.browser.GeckoBrowser
 import dev.raticode.mobile.browser.GeckoImport
 import dev.raticode.mobile.browser.GeckoRules
+import dev.raticode.mobile.browser.TabRecovery
 import dev.raticode.mobile.live.DesktopBrowser
 import dev.raticode.mobile.live.LiveClient
 import kotlinx.coroutines.launch
@@ -99,12 +101,16 @@ internal fun GeckoPage(client: LiveClient, chromium: BrowserRuntime, onBack: (()
     fun startEditing() { address = if (page.url == BrowserRules.HOME) "" else page.url; editing = true }
     BackHandler(enabled = editing || finding || page.canBack || gecko.fullscreen) {
         when {
+            gecko.fullscreen -> gecko.exitFullscreen()
             editing -> { editing = false; focus.clearFocus() }
             finding -> { finding = false; gecko.endFind() }
-            gecko.fullscreen -> gecko.exitFullscreen()
             else -> gecko.back()
         }
     }
+    // Leaving the page (another browser shown, or another Raticode page) ends full screen; turning the phone or
+    // Android rebuilding the screen doesn't.
+    val activity = context.findActivity()
+    DisposableEffect(gecko) { onDispose { if (activity?.isChangingConfigurations != true) gecko.exitFullscreen() } }
 
     val controls = remember { BrowserControlsState() }
     DisposableEffect(gecko) {
@@ -115,7 +121,8 @@ internal fun GeckoPage(client: LiveClient, chromium: BrowserRuntime, onBack: (()
         held = editing || finding || sheet != null || gecko.menu != null || gecko.popup != null || gecko.asks.isNotEmpty() || page.url == BrowserRules.HOME)
     val forwardFits = BrowserControlsMotion.forwardFits(LocalConfiguration.current.screenWidthDp, onBack != null)
 
-    Box(Modifier.fillMaxSize().testTag("geckoPage")) {
+    // The keyboard, Raticode's bar or the phone turning resizes the whole browser; the controls folding doesn't.
+    Box(Modifier.fillMaxSize().onSizeChanged { controls.resized() }.testTag("geckoPage")) {
         Column(Modifier.fillMaxSize()) {
             if (!gecko.fullscreen) {
                 BrowserToolbar(controls, controlsOpen, "gecko", page.url, gecko.saved.settings.desktopSites, page.loading, page.progress, page.canBack, page.canForward,
@@ -137,12 +144,14 @@ internal fun GeckoPage(client: LiveClient, chromium: BrowserRuntime, onBack: (()
                 when {
                     editing -> Suggestions(gecko, address) { submit(it) }
                     page.url == BrowserRules.HOME -> GeckoStart(gecko) { sheet = it }
+                    page.stopped -> StoppedPage(page.url) { gecko.reload() }
                     else -> {
                         val active = gecko.active
                         active?.let { ShowingMediaOf(BrowserMediaRules.Key(BrowserMediaRules.Engine.GECKO, it)) }
                         AndroidView(factory = { GeckoView(it) }, modifier = Modifier.fillMaxSize().testTag("geckoView"), update = { view ->
                             // Reading these redraws when the tab changes or a blank tab starts loading.
-                            active.hashCode(); page.url.hashCode()
+                            // Reading revived redraws when a page whose process ended reloads by itself.
+                            active.hashCode(); page.url.hashCode(); page.revived.hashCode()
                             val session = gecko.activeSession()
                             if (view.session !== session) { view.releaseSession(); if (session != null) view.setSession(session) }
                         }, onRelease = { it.releaseSession() })
@@ -304,21 +313,32 @@ private fun ListingRow(gecko: GeckoBrowser, item: GeckoRules.Listing) {
     }
 }
 
+/**
+ * One installed extension. Open presses its toolbar button, or opens its settings page when it has no button; the Extensions
+ * sheet then closes so the popup or page shows. When nothing can open, the reason shows under the row, where the sheet
+ * doesn't cover it.
+ */
 @Composable
 private fun InstalledRow(gecko: GeckoBrowser, item: GeckoBrowser.Extension, onDismiss: () -> Unit) {
+    var message by remember(item.id) { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).testTag("geckoExtension-${item.id}")) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(item.name, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(item.version + (item.action?.badgeText?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Switch(item.enabled, { gecko.setEnabled(item, it) }, Modifier.semantics { contentDescription = "${item.name} on" })
+            Switch(item.enabled, { message = null; gecko.setEnabled(item, it) }, Modifier.semantics { contentDescription = "${item.name} on" })
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (item.action != null && item.enabled) TextButton(onClick = { item.action.click() }, Modifier.testTag("geckoOpen-${item.id}")) { Text("Open") }
-            item.options?.takeIf { item.enabled }?.let { url -> TextButton(onClick = { gecko.openOptions(url); onDismiss() }) { Text("Settings") } }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            val canOpen = item.enabled && (item.action != null || item.options != null)
+            if (canOpen) TextButton(onClick = { message = gecko.openExtension(item); if (message == null) onDismiss() }, Modifier.testTag("geckoOpen-${item.id}")) { Text("Open") }
+            // Settings gets its own button only when Open shows the popup instead.
+            if (item.enabled && item.action != null) item.options?.let { url -> TextButton(onClick = { gecko.openOptions(url); onDismiss() }) { Text("Settings") } }
             TextButton(onClick = { gecko.uninstall(item) }) { Text("Remove") }
+            if (item.enabled && !canOpen) Text("Nothing to open", Modifier.padding(start = 4.dp).testTag("geckoNothingToOpen-${item.id}"),
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        message?.let { Text(it, Modifier.padding(horizontal = 12.dp).testTag("geckoOpenMessage-${item.id}"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
 }
 
@@ -326,7 +346,11 @@ private fun InstalledRow(gecko: GeckoBrowser, item: GeckoBrowser.Extension, onDi
 @Composable
 private fun PopupSheet(gecko: GeckoBrowser, popup: GeckoBrowser.Popup) {
     ModalBottomSheet(onDismissRequest = { gecko.closePopup() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), modifier = Modifier.testTag("geckoPopup")) {
-        AndroidView(factory = { GeckoView(it).apply { setSession(popup.session) } }, modifier = Modifier.fillMaxWidth().height(480.dp), onRelease = { it.releaseSession() })
+        if (!gecko.popupLoaded) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+        // A second popup replaces the first in place, so the view is rebuilt for its session.
+        key(popup.session) {
+            AndroidView(factory = { GeckoView(it).apply { setSession(popup.session) } }, modifier = Modifier.fillMaxWidth().height(480.dp).testTag("geckoPopupView"), onRelease = { it.releaseSession() })
+        }
     }
 }
 
@@ -473,5 +497,16 @@ private fun AskDialog(gecko: GeckoBrowser, ask: GeckoBrowser.Ask) {
             }
         }, confirmButton = { TextButton(onClick = { gecko.answered(ask); ask.answer(true) }, Modifier.testTag("geckoInstallAllow")) { Text("Add") } },
             dismissButton = { TextButton(onClick = { gecko.answered(ask); ask.answer(false) }) { Text("Cancel") } })
+    }
+}
+
+/** A page that kept stopping after Raticode reloaded it (see TabRecovery): a quiet note in the tab, never a dialog. */
+@Composable
+private fun StoppedPage(url: String, onReload: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(24.dp).testTag("geckoStopped"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("This page keeps stopping", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
+        Text("Raticode reloaded it ${TabRecovery.MAX_RESTORES} times. Reload to try again.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        Button(onClick = onReload, Modifier.fillMaxWidth()) { Text("Reload") }
     }
 }

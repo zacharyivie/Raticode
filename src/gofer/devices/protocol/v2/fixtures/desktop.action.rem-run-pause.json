@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "thread_id": null,
+  "request_id": "00000000-0000-4000-8000-000000000204",
+  "id": "10000000-0000-4000-8000-000000000204",
+  "sequence": 204,
+  "type": "desktop.action",
+  "payload": {
+    "op": "rem.run.pause",
+    "params": {
+      "run_id": "20000000-0000-4000-8000-000000000204"
+    }
+  }
+}

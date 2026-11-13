@@ -255,11 +255,23 @@ async function main() {
   await wait("document.querySelector('.oh-folders').innerText.includes('brain')", "added folder");
   assert.ok((await api("read")).config.projectRoots.includes(extra));
   await tab("Organization");
-  await click("Turn on");
+  await click("Turn on", "document.querySelector('.oh-repo')");
   await wait("document.querySelector('.oh-repo')?.innerText.includes('README.md')", "repository on");
   const shared = await api("repository");
   assert.equal(shared.exists, true);
   assert.ok(shared.commits.some(item => item[3].startsWith("Save decision: The board has five fixed columns")));
+
+  // Backlog pulls: the seed turned them off so its Backlog stays put. The switch saves a
+  // revision that says what changed. The organization is paused, so nothing is pulled.
+  const pullState = "document.querySelector('.oh-pulls .oh-section-head .oh-muted')?.textContent";
+  await wait(`${pullState} === 'Off'`, "backlog pulls off");
+  await click("Turn on", "document.querySelector('.oh-pulls')");
+  await wait(`${pullState} === 'On'`, "backlog pulls on");
+  assert.equal((await api("read")).config.pullBacklog, true);
+  assert.equal((await api("history"))[0].reason, "Workers pull Backlog tickets when they need work");
+  await click("Turn off", "document.querySelector('.oh-pulls')");
+  await wait(`${pullState} === 'Off'`, "backlog pulls off again");
+  assert.equal((await api("read")).config.pullBacklog, false);
 
   // Working hours: closed hours show in the header and the panel, and 24/7 comes back.
   const clock = Date.now();

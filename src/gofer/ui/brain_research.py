@@ -10,13 +10,18 @@ import re
 import socket
 import ssl
 import threading
+import time
 import unicodedata
 from html import escape
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import quote, urljoin, urlparse
-from xml.etree import ElementTree
+
+# parse_search_feed refuses DTDs and entity declarations before expat expands them.
+from xml.etree import ElementTree  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
+from xml.parsers import expat  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 
 from gofer.ui.brain_documents import MAX_TEXT
+from gofer.utils.http_read import read_before
 
 REPORT_QUERY_STOP_WORDS = frozenset(
     "a about also an and are as at be been by can could did do does for from had has have how i in "
@@ -80,10 +85,21 @@ def source_selection_description(report: dict[str, Any]) -> str:
     )
 
 
-def fetch_public_page(url: str, cancel: threading.Event, redirects: int = 0) -> str:
-    """Pin a validated public address for each redirect; no cookies, proxy or LAN access."""
+# A slow source can't hold a capture open longer than this, redirects included.
+CAPTURE_DEADLINE_SECONDS = 60
+
+
+def fetch_public_page(
+    url: str, cancel: threading.Event, redirects: int = 0, deadline: float | None = None
+) -> str:
+    """Pin a validated public address for each redirect; no cookies, proxy or LAN access.
+
+    The whole capture, redirects included, ends after CAPTURE_DEADLINE_SECONDS.
+    """
     if redirects > 4 or cancel.is_set():
         raise ValueError("Capture cancelled or redirect limit exceeded")
+    if deadline is None:
+        deadline = time.monotonic() + CAPTURE_DEADLINE_SECONDS
     parsed = urlparse(url)
     if (
         parsed.scheme not in {"https", "http"}
@@ -119,7 +135,7 @@ def fetch_public_page(url: str, cancel: threading.Event, redirects: int = 0) -> 
         response = connection.getresponse()
         if response.status in {301, 302, 303, 307, 308}:
             return fetch_public_page(
-                urljoin(url, response.getheader("Location") or ""), cancel, redirects + 1
+                urljoin(url, response.getheader("Location") or ""), cancel, redirects + 1, deadline
             )
         if response.status != 200:
             raise ValueError(f"The source returned HTTP {response.status}")
@@ -133,7 +149,10 @@ def fetch_public_page(url: str, cancel: threading.Event, redirects: int = 0) -> 
             "application/rss+xml",
         }:
             raise ValueError("Capture supports web pages and text; use import for other files")
-        data = response.read(MAX_TEXT + 1)
+        try:
+            data = read_before(response, MAX_TEXT + 1, deadline, sock)
+        except TimeoutError as exc:
+            raise ValueError("The source took too long to send the page") from exc
         if len(data) > MAX_TEXT:
             raise ValueError("Captured page exceeds 2 MB")
         if cancel.is_set():
@@ -144,11 +163,37 @@ def fetch_public_page(url: str, cancel: threading.Event, redirects: int = 0) -> 
         connection.close()
 
 
+def parse_search_feed(text: str) -> ElementTree.Element:
+    """Parse a search RSS feed, refusing document types and entity declarations.
+
+    A feed never needs a DTD. Refusing one keeps entity-expansion and
+    external-entity tricks out, whatever expat version the build ships.
+    """
+
+    def refuse(*_args: object) -> NoReturn:
+        raise ValueError("Web search returned a page with a document type, which isn't allowed")
+
+    builder = ElementTree.TreeBuilder()
+    parser = expat.ParserCreate()
+    parser.StartDoctypeDeclHandler = refuse
+    parser.EntityDeclHandler = refuse
+    parser.UnparsedEntityDeclHandler = refuse
+    parser.ExternalEntityRefHandler = refuse
+    parser.StartElementHandler = builder.start
+    parser.EndElementHandler = builder.end
+    parser.CharacterDataHandler = builder.data
+    try:
+        parser.Parse(text, True)
+        return builder.close()
+    except (expat.ExpatError, AssertionError) as exc:
+        raise ValueError("Web search returned a page that isn't a valid feed") from exc
+
+
 def web_sources(question: str, cancel: threading.Event) -> list[str]:
     response = fetch_public_page(
         "https://www.bing.com/search?format=rss&q=" + quote(question[:300]), cancel
     )
-    root = ElementTree.fromstring(response)
+    root = parse_search_feed(response)
     urls = [item.findtext("link") or "" for item in root.findall("./channel/item")]
     if not urls:
         raise ValueError(

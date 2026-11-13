@@ -1,8 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { deviceBounds, isCovered, sameBounds } from "../lib/geckoView.js";
+import { coverCutouts, deviceBounds, sameBounds } from "../lib/geckoView.js";
 
 const POSITION_CHECK_MS = 200;
 const BUTTON = "h-8 rounded-md border border-line bg-white px-3 text-xs font-semibold text-ink transition hover:bg-slate-50";
+
+// Menus and dialogs that are open and overlap the slot. They may be small
+// enough to sit between the points checked for covering.
+function openOverlays(rect) {
+  if (typeof document.querySelectorAll !== "function") return [];
+  return [...document.querySelectorAll("[role=menu], [role=dialog], [role=alertdialog], [role=listbox], [role=tooltip]")].filter((element) => {
+    if (element.closest?.("[aria-hidden=true], [inert]") || window.getComputedStyle?.(element)?.visibility === "hidden") return false;
+    const box = element.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && box.right > rect.left && box.left < rect.right && box.bottom > rect.top && box.top < rect.bottom;
+  });
+}
 
 function cleanError(cause) {
   return String(cause?.message || cause || "Raticode (gecko) could not start.").replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
@@ -38,7 +49,7 @@ function rememberHandedOver(tabId, url) {
 // and extensions. The Browser plugin keeps one such tab; addresses opened in
 // Raticode (gecko) after it started arrive in pendingUrls and open as Firefox
 // tabs, and onPendingOpened reports which ones Firefox has.
-export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pendingUrls = [], onPendingOpened, onStateChange }) {
+export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pendingUrls = [], newTabRequests = 0, onPendingOpened, onStateChange }) {
   const bridge = window.goferBrowser;
   const slotRef = useRef(null);
   const openedRef = useRef(false);
@@ -105,6 +116,38 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, opened, pendingKey, tabId]);
 
+  // The tab bar's + for Raticode (gecko): an empty tab inside Firefox. Requests
+  // made before this tab was mounted (a restored count) are not replayed, and a
+  // request that arrives before Firefox has started is met by starting it.
+  const newTabsHandledRef = useRef(newTabRequests);
+  useEffect(() => {
+    if (newTabRequests <= newTabsHandledRef.current) return;
+    if (!active || !ready) return;
+    newTabsHandledRef.current = newTabRequests;
+    if (!opened) return;
+    setError("");
+    void bridge.gecko("new-tab").then((next) => { if (next) setStatus(next); })
+      .catch((cause) => setError(cleanError(cause)));
+    // bridge is fixed for the window's life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, ready, opened, newTabRequests]);
+
+  // A click in Firefox's page never reaches Raticode's page, so menus open over
+  // the tab wouldn't close. Pass it on as a click on the tab's slot.
+  const pageClicksRef = useRef(null);
+  useEffect(() => {
+    const clicks = status?.pageClicks;
+    if (!Number.isInteger(clicks)) return;
+    const previous = pageClicksRef.current;
+    pageClicksRef.current = clicks;
+    if (previous === null || clicks <= previous || !active) return;
+    const slot = slotRef.current;
+    if (!slot) return;
+    const init = { bubbles: true, cancelable: true, composed: true, button: 0 };
+    slot.dispatchEvent(typeof PointerEvent === "function" ? new PointerEvent("pointerdown", init) : new MouseEvent("pointerdown", init));
+    slot.dispatchEvent(new MouseEvent("mousedown", init));
+  }, [active, status?.pageClicks]);
+
   useEffect(() => {
     if (status?.title) onStateChangeRef.current?.({ title: status.title });
   }, [status?.title]);
@@ -117,9 +160,17 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
       const slot = slotRef.current;
       if (!slot) return;
       const rect = slot.getBoundingClientRect();
-      const visible = rect.width > 1 && rect.height > 1 && !document.hidden
-        && !isCovered(slot, rect, (x, y) => document.elementFromPoint(x, y));
-      const next = { ...deviceBounds(rect, window.devicePixelRatio || 1), visible };
+      const ratio = window.devicePixelRatio || 1;
+      const shown = rect.width > 1 && rect.height > 1 && !document.hidden;
+      const cutouts = shown ? coverCutouts(slot, rect, {
+        elementAt: (x, y) => document.elementFromPoint(x, y),
+        positionOf: (element) => window.getComputedStyle?.(element)?.position || "",
+        rectOf: (element) => element.getBoundingClientRect(),
+        extra: openOverlays(rect),
+        ratio,
+      }) : [];
+      const visible = shown && cutouts !== null;
+      const next = { ...deviceBounds(rect, ratio), visible, cutouts: visible ? cutouts : [] };
       if (sameBounds(last, next)) return;
       last = next;
       void bridge.gecko("place", next).catch(() => {});
@@ -130,7 +181,11 @@ export default function GeckoBrowser({ active, tabId = "", initialUrl = "", pend
     if (slotRef.current) observer?.observe(slotRef.current);
     window.addEventListener("resize", report);
     // Clicking Raticode's own interface takes the keyboard back from Firefox.
-    const takeFocusBack = () => { void bridge.gecko("focus-app").catch(() => {}); };
+    // The click passed on from Firefox's page below isn't one of those.
+    const takeFocusBack = (event) => {
+      if (!event.isTrusted) return;
+      void bridge.gecko("focus-app").catch(() => {});
+    };
     window.addEventListener("pointerdown", takeFocusBack, true);
     return () => {
       window.clearInterval(timer);

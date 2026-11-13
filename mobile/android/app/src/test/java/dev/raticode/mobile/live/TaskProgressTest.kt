@@ -156,6 +156,8 @@ class TaskProgressTest {
     }
 
     @Test fun anUnknownRunStateShowsNothing() {
+        assertNull(TaskProgress.frame(listOf(TaskProgress.Run("r", "T", "mystery", after, false)), false))
+        // Paused isn't working: no "Rem is working" notification for it.
         assertNull(TaskProgress.frame(listOf(TaskProgress.Run("r", "T", "paused", after, false)), false))
         assertNull(TaskProgress.frame(emptyList(), true))
     }

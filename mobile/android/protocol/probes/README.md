@@ -15,6 +15,5 @@ The `expired` and `p384` certificates intentionally violate the selected profile
 They must fail even when their SPKI pin matches. `other` is a valid but untrusted
 identity for wrong-pin tests.
 
-See [probe instructions](../../docs/protocol-probes.md) and
-[the v2 candidate](../../docs/mobile-desktop-v2.md). No real messages, paid model
+The schemas are in `src/gofer/devices/protocol/v2` at the repository root. No real messages, paid model
 calls, public relay traffic or workflow execution occurs in these probes.

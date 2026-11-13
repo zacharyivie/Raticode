@@ -208,10 +208,15 @@ is deleted even when the build fails.
 
 The package check then repeats the signature, staple and Gatekeeper checks on the app
 extracted from the ZIP (which the updater installs) and from the DMG, checks that the
-app's updater label says `signed`, and records the signing mode and team in
-`package-tests-macos.json`. The manifest step refuses Mac evidence that doesn't match
-the policy. The final updater check compares every `latest-*.yml` hash and every
-blockmap with the final files.
+app's updater label says `signed`, checks that both copies' `app-update.yml` point at
+the GitHub feed in `frontend/package.json`, and records the signing mode, team and
+update feed in `package-tests-macos.json`. The manifest step refuses Mac evidence that
+doesn't match the policy. The final updater check compares every `latest-*.yml` hash
+and every blockmap with the final files, and requires `latest-mac.yml` to name the
+ZIP, with its blockmap, as the update (Squirrel.Mac can't install a DMG). The manifest
+step repeats that comparison on the uploaded artifacts: each `latest-*.yml` must name
+its platform's updater file and match every file it lists, so the attested manifest
+only covers update feeds that installed copies can use.
 
 An unsigned Mac build (forks only) is ad-hoc signed so it runs, labelled unsigned in
 the workflow log and in its updater metadata, and checked as ad-hoc. It has no

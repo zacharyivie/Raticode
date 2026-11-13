@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import codecs
 import os
+import re
 import signal
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
 import anyio
@@ -43,6 +46,30 @@ CREDENTIAL_ENV_VARS = (
 )
 
 
+# Credentials moved out of os.environ by seal_credential_env(), readable only in-process.
+_SEALED_CREDENTIALS: dict[str, str] = {}
+
+
+def seal_credential_env() -> None:
+    """Move the desktop's credentials out of this process's environment.
+
+    build_subprocess_env() strips them, but a spawn that passes no env (a plain
+    ``git status``, ``systemctl`` or ``pdftoppm`` call) inherits os.environ, and git
+    runs configured helpers such as ``core.fsmonitor`` from a repository a worker can
+    edit. Once sealed, no child can inherit them; read them with credential_env().
+    """
+    _SEALED_CREDENTIALS.clear()
+    for name in CREDENTIAL_ENV_VARS:
+        value = os.environ.pop(name, None)
+        if value is not None:
+            _SEALED_CREDENTIALS[name] = value
+
+
+def credential_env(name: str) -> str:
+    """A desktop credential from the environment, or the sealed copy."""
+    return os.environ.get(name) or _SEALED_CREDENTIALS.get(name, "")
+
+
 def build_subprocess_env(
     overrides: dict[str, str] | None = None, *, inherit_parent: bool = True
 ) -> dict[str, str]:
@@ -59,6 +86,131 @@ def build_subprocess_env(
     # refuses to read the headless owner token (gofer.ui.headless).
     env["RATICODE_AGENT_SESSION"] = "1"
     return env
+
+
+# For git commands the backend runs itself in folders agents can edit: repository config
+# could otherwise name an fsmonitor program or hooks that run outside any sandbox.
+NO_REPOSITORY_PROGRAMS = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+# Repository-scoped settings that name commands git runs on file contents: clean, smudge
+# and process filters (``add``, ``status``, ``checkout``/``worktree add``), diff textconv
+# and external diff drivers, and merge drivers (rebase, merge). Same list as the desktop's
+# git-status.cjs, plus merge drivers, which the backend's landing step can reach. The lfs
+# keys name programs git-lfs runs from inside its own filter.
+_REPOSITORY_COMMAND_KEYS = (
+    r"^(filter\..+\.(clean|smudge|process)|diff\..+\.(textconv|command)|merge\..+\.driver"
+    r"|lfs\.customtransfer\..+\.path|lfs\.standalonetransferagent"
+    r"|lfs\.extension\..+\.(clean|smudge))$"
+)
+_TRUSTED_FILTER_COMMAND = re.compile(r"^git-lfs (?:filter-process|clean -- %f|smudge -- %f)$")
+_REPOSITORY_SCOPES = {"local", "worktree"}
+# What replaces each planted command. An empty filter means no filter, but an empty
+# textconv, external diff or merge driver makes git fail, so those get programs that read
+# nothing from the repository: textconv ``cat`` leaves the text unchanged, an external
+# diff ``true`` prints nothing (the backend's diffs pass --no-ext-diff anyway), and merge
+# driver ``false`` reports a conflict instead of silently keeping one side.
+_HARMLESS_COMMAND = {
+    "clean": "",
+    "smudge": "",
+    "process": "",
+    "textconv": "cat",
+    "command": "true",
+    "driver": "false",
+}
+_LFS_FILTER_KEYS = ("filter.lfs.clean", "filter.lfs.smudge", "filter.lfs.process")
+
+
+def _repository_command_overrides(output: str) -> dict[str, str]:
+    entries = []
+    parts = output.split("\0")
+    for index in range(0, len(parts) - 1, 2):
+        scope, entry = parts[index], parts[index + 1]
+        key, _, value = entry.partition("\n")
+        if scope in _REPOSITORY_SCOPES and key:
+            entries.append((key, value))
+    # git-lfs reads lfs.customtransfer, standalonetransferagent and extensions from the
+    # repository's own config and runs what they name. With any of those set, no git-lfs
+    # filter is trusted here, including one from the user's global config.
+    lfs_programs = any(key.startswith("lfs.") for key, _ in entries)
+    overrides: dict[str, str] = {}
+    for key, value in entries:
+        if key.startswith("lfs."):
+            continue
+        if (
+            not lfs_programs
+            and key.startswith("filter.")
+            and _TRUSTED_FILTER_COMMAND.match(value.strip())
+        ):
+            continue
+        overrides[key] = _HARMLESS_COMMAND[key.rsplit(".", 1)[1]]
+    if lfs_programs:
+        overrides.update(dict.fromkeys(_LFS_FILTER_KEYS, ""))
+    # A required filter with no command fails the operation; make it optional.
+    for key in [k for k in overrides if k.startswith("filter.")]:
+        overrides[f"{key.rsplit('.', 1)[0]}.required"] = "false"
+    return overrides
+
+
+def untrusted_repository_git_env(directory: Path | str, env: dict[str, str]) -> dict[str, str]:
+    """``env`` for git in a checkout an agent can edit: no repository-named programs.
+
+    Pair it with NO_REPOSITORY_PROGRAMS on the command line. It overrides every filter,
+    textconv, external diff and merge driver command the repository's own config (local or
+    worktree scope) names, so ``git add -A``, ``status``, ``worktree add`` and merges the
+    backend runs itself can't run them outside the sandbox (CWE-78). Filters from the
+    user's global or system config, and git-lfs installed with ``git lfs install --local``,
+    still run, unless the repository names its own git-lfs programs.
+
+    The overrides go in GIT_CONFIG_COUNT/KEY/VALUE, not ``-c key=value``: git splits ``-c``
+    at the first ``=``, and a subsection name such as ``filter."x=y".clean`` may contain
+    one. Reading config runs nothing; exit code 1 means no such keys. If the settings
+    can't be read this raises OSError (or TimeoutExpired), never letting git run unchecked.
+    """
+    result = subprocess.run(
+        [
+            "git",
+            *NO_REPOSITORY_PROGRAMS,
+            "-C",
+            str(directory),
+            "config",
+            "--show-scope",
+            "-z",
+            "--get-regexp",
+            _REPOSITORY_COMMAND_KEYS,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        # The command's own environment, so the read sees the same repository.
+        env={**env, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    # A timeout propagates as TimeoutExpired, like the git command's own would.
+    if result.returncode not in (0, 1):
+        raise OSError(
+            "Couldn't read the repository's git settings: "
+            + (result.stderr.strip() or f"git exited with {result.returncode}")
+        )
+    return with_git_config(env, _repository_command_overrides(result.stdout))
+
+
+def with_git_config(env: dict[str, str], settings: dict[str, str]) -> dict[str, str]:
+    """A copy of ``env`` with ``settings`` added after any GIT_CONFIG_COUNT entries in it.
+
+    These have command-line precedence, above every config file, and their keys may
+    contain ``=``.
+    """
+    merged = dict(env)
+    try:
+        index = max(0, int(merged.get("GIT_CONFIG_COUNT", "0")))
+    except ValueError:
+        index = 0
+    for key, value in settings.items():
+        merged[f"GIT_CONFIG_KEY_{index}"] = key
+        merged[f"GIT_CONFIG_VALUE_{index}"] = value
+        index += 1
+    merged["GIT_CONFIG_COUNT"] = str(index)
+    return merged
 
 
 GIT_PUSH_BLOCKED_HELPER = "raticode-push-blocked-ask-the-user"

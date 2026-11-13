@@ -381,6 +381,14 @@ class OrganizationConfig(BaseModel):
     # Keep running after Raticode restarts instead of pausing. Interrupted tickets still
     # wait for review either way.
     resumeAfterRestart: bool = False
+    # Workers with nothing to do pull accepted Backlog tickets into To do. Proposals, tickets
+    # waiting for approval and tickets moved back to Backlog by hand stay. See
+    # organization_backlog.
+    pullBacklog: bool = True
+    # Auto mode: Rem's review decides this organization's requests instead of the user,
+    # and stops the organization only for danger it can't fix or what only the user can
+    # do. Off by default; only the user turns it on or off. See organization_auto.
+    autoMode: bool = False
 
     @model_validator(mode="after")
     def validate_graph(self) -> OrganizationConfig:
@@ -509,6 +517,22 @@ def validate_plan(config: OrganizationConfig, employees: set[str]) -> None:
             raise ValueError(f"Epic {epic.title} has an unknown owner")
 
 
+def hold_backlog(org: dict[str, Any], statuses: dict[str, str], actor: str) -> None:
+    """Keep tickets someone moved back to Backlog there; release them once they leave it.
+
+    Raticode itself never moves work back to Backlog, so any such move is a person's or a
+    worker's choice, and pulling it out again would undo it.
+    """
+    for task in org["runtime"]["tasks"]:
+        was = statuses.get(task["id"])
+        if was is None:
+            continue
+        if task["status"] == "backlog" and was != "backlog" and actor != "system":
+            task["keepInBacklog"] = True
+        elif task["status"] != "backlog" and task.get("keepInBacklog"):
+            task["keepInBacklog"] = False
+
+
 def ticket_prefix(config: dict[str, Any]) -> str:
     if config.get("ticketPrefix"):
         return str(config["ticketPrefix"])
@@ -618,6 +642,12 @@ class Task(BaseModel):
     selfWork: bool = False
     # When a worker, you or Rem asked to work on this next ("move to In progress").
     pulledAt: str | None = None
+    # Someone moved it back to Backlog, so workers don't pull it until it leaves Backlog again.
+    keepInBacklog: bool = False
+    # When a worker last pulled it from Backlog into To do.
+    backlogPulledAt: str | None = None
+    # The worker who created it: a proposal until the user accepts it.
+    proposedBy: str | None = None
     # Ticket fields: the epic this belongs to, its number in PREFIX-n, what done means,
     # and knowledge entries the plan links to.
     epicId: str | None = None
@@ -841,6 +871,21 @@ class OrganizationStore:
                     "employees": len(config["employees"]),
                     "projectRoots": config.get("projectRoots", []),
                     "openTasks": row["open_tasks"],
+                    # Rem's requests still waiting for the user (they expire after a day).
+                    # In Auto mode, requests Rem's review decides don't count.
+                    "waitingRequests": sum(
+                        1
+                        for r in (runtime.get("consentRequests") or {}).values()
+                        if r.get("status") == "pending"
+                        and _recent(r.get("at"))
+                        and not (
+                            config.get("autoMode")
+                            and not runtime.get("autoHalt")
+                            and r.get("route") != "user"
+                        )
+                    ),
+                    "autoMode": bool(config.get("autoMode")),
+                    "autoHalt": runtime.get("autoHalt") or None,
                 }
             )
         return result
@@ -950,13 +995,16 @@ class OrganizationStore:
                     "WHERE body != excluded.body",
                     (oid, kind, key, json.dumps(value, sort_keys=True)),
                 )
-        # Idempotency records are the only kind that expires; other records are permanent.
-        if "requests" in runtime:
-            kept = list(runtime["requests"])
+        # Idempotency records and webhook receipts are the kinds that expire; other records
+        # are permanent.
+        for expiring in ("requests", "webhookReceipts"):
+            if expiring not in runtime:
+                continue
+            kept = list(runtime[expiring])
             db.execute(
-                "DELETE FROM organization_records WHERE organization=? AND kind='requests' "
+                "DELETE FROM organization_records WHERE organization=? AND kind=? "
                 f"AND id NOT IN ({','.join('?' * len(kept))})",
-                (oid, *kept),
+                (oid, expiring, *kept),
             )
         body = json.dumps({k: v for k, v in runtime.items() if k not in collections})
         db.execute(
@@ -973,6 +1021,12 @@ class OrganizationStore:
     ) -> dict[str, Any]:
         config = {"projectRoots": [project] if project else [], **config}
         validated = OrganizationConfig.model_validate(config).model_dump()
+        if validated["autoMode"] and actor != "user":
+            # Auto mode lets Rem decide the organization's requests, so only the user's own
+            # switch turns it on, never a company Rem, a token or a package creates.
+            raise ValueError(
+                "Only the user can turn Auto mode on or off, in the organization's settings"
+            )
         check_heartbeats([], validated["employees"])
         self._warm_project_ownership(validated)
         oid = str(uuid4())
@@ -1017,6 +1071,15 @@ class OrganizationStore:
                 )
             if "projectRoots" not in config:
                 validated["projectRoots"] = current["config"].get("projectRoots", [])
+            # Auto mode is the user's own switch: a configuration without it, and any
+            # restore, keeps it as it is, and nobody else may change it.
+            was_auto = bool(current["config"].get("autoMode"))
+            if restored_from is not None or "autoMode" not in config:
+                validated["autoMode"] = was_auto
+            elif validated["autoMode"] != was_auto and actor != "user":
+                raise ValueError(
+                    "Only the user can turn Auto mode on or off, in the organization's settings"
+                )
             self._set_project_ownership(db, oid, validated)
             if dry_run:
                 # Validation only, so a request that would fail is refused before it waits.
@@ -1117,6 +1180,9 @@ class OrganizationStore:
                 runtime["pauseReason"] = reason or "Paused"
             else:
                 runtime.pop("pauseReason", None)
+                if actor == "user":
+                    # The user starting it again is their answer to an Auto mode stop.
+                    runtime.pop("autoHalt", None)
             runtime["state"] = state
             self._write_runtime(db, oid, runtime)
             self.event(
@@ -1251,6 +1317,7 @@ class OrganizationStore:
             payload = callback(organization)
             if before == json.dumps(organization["runtime"]) and not payload:
                 return organization
+            hold_backlog(organization, statuses, actor)
             # Each ticket's timeline says why its status changed, in the same write.
             note_organization_transitions(organization, statuses, actor)
             self._write_runtime(db, oid, organization["runtime"])
@@ -1600,6 +1667,13 @@ class OrganizationStore:
                 raise ValueError("Task dueAt needs a timezone")
         if task["recurring"] and task["intervalSeconds"] and task["intervalSeconds"] < 60:
             raise ValueError("Recurring intervals must be at least 60 seconds")
+
+
+def _recent(at: Any, seconds: float = 24 * 3600) -> bool:
+    try:
+        return (datetime.now(UTC) - datetime.fromisoformat(str(at))).total_seconds() < seconds
+    except ValueError:
+        return False
 
 
 def config_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:

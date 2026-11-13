@@ -53,6 +53,8 @@ class ShareSession(app: Application) : AndroidViewModel(app) {
     /** Waiting for the desktop to say it has the queued message. */
     var watching by mutableStateOf(false); private set
     private var job: Job? = null
+    /** Shared items beyond [ShareIntake.MAX_DESCRIBED], never looked up. */
+    private var notDescribed = 0
     private var surfaces = 0
 
     /** The share screen is visible. Connects without marking any thread read. */
@@ -72,6 +74,8 @@ class ShareSession(app: Application) : AndroidViewModel(app) {
             Intent.ACTION_SEND_MULTIPLE -> IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty().filterNotNull()
             else -> emptyList()
         }.ifEmpty { if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE) clipUris(intent) else emptyList() }.distinct()
+            .let { all -> all.take(ShareIntake.MAX_DESCRIBED) to all.size - minOf(all.size, ShareIntake.MAX_DESCRIBED) }
+            .let { (kept, skipped) -> notDescribed = skipped; kept }
         val subject = if (action == null) null else intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT)
         val body = if (action == null) null else intent.getCharSequenceExtra(Intent.EXTRA_TEXT)
         val resolver = getApplication<Application>().contentResolver
@@ -87,12 +91,13 @@ class ShareSession(app: Application) : AndroidViewModel(app) {
             }
             withTimeoutOrNull(META_MS) { pending.forEach { it.await() } }
             val described = pending.mapIndexed { i, out -> if (out.isCompleted) out.getCompleted() else unreadable(uris[i]) }
-            val plan = ShareIntake.plan(subject, body, described.map { it.first })
+            val plan = ShareIntake.plan(subject, body, described.map { it.first }, notDescribed)
             text = plan.text; shortened = plan.shortened
             items = plan.accepted.map { index ->
                 val (_, meta) = described[index]
                 val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(meta.type)
-                Item(index, uris[index], ShareIntake.name(meta.name, extension, index), meta.size, meta.type, ShareIntake.sizeProblem(meta.size))
+                val name = ShareIntake.name(meta.name, extension, index, meta.type) { MimeTypeMap.getSingleton().getMimeTypeFromExtension(it) }
+                Item(index, uris[index], name, meta.size, meta.type, ShareIntake.sizeProblem(meta.size))
             }
             notices = plan.refused + listOfNotNull(if (action !in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) NOTHING else null)
             if (text.isEmpty() && items.isEmpty() && notices.isEmpty()) notices = listOf(NOTHING)

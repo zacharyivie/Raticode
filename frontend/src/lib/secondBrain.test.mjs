@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
-import { EMPTY_FILTERS, describeQuery, matchesFilters, parseDateBound, parseQuery, queryText, searchLibrary, wordDiff } from "./secondBrain.js";
+import { EMPTY_FILTERS, describeQuery, matchesFilters, parseDateBound, parseQuery, queryText, searchLibrary, webSourceUrl, wordDiff } from "./secondBrain.js";
 import * as store from "./secondBrainStore.js";
 
 const doc = (fields) => ({ id: fields.id, brainId: "b", title: "Untitled", path: `${fields.id}.md`, folder: "", type: "note", tags: [], origin: "authored", extraction: "ready", reading: { read: true }, dates: { added: "2026-01-01", modified: "2026-01-01", published: "" }, blocks: [], concepts: [], ...fields });
@@ -152,4 +152,12 @@ test("brain clauses resolve display names as well as stable identities", () => {
   const brain = current.brains.find(item => item.id === document.brainId);
   assert.equal(matchesFilters(document, EMPTY_FILTERS, parseQuery(`brain:"${brain.name}"`), library), true);
   assert.equal(matchesFilters(document, EMPTY_FILTERS, parseQuery('brain:"Unknown library"'), library), false);
+});
+
+test("a note's Source link only ever points at a web address", () => {
+  assert.equal(webSourceUrl("https://example.com/a?b=1"), "https://example.com/a?b=1");
+  assert.equal(webSourceUrl("http://example.com"), "http://example.com/");
+  for (const value of ["javascript:alert(1)", " JavaScript:alert(1)", "data:text/html,<b>x</b>", "file:///etc/passwd", "", null, "not a url"]) {
+    assert.equal(webSourceUrl(value), "", String(value));
+  }
 });

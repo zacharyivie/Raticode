@@ -24,12 +24,14 @@ node fix:
   prompt: |
     Run npm test, find the root cause of each failure and fix it.
     Keep the diff small.
+  needs: run-tests
   to: review
 
 node review:
   type: agent
   provider: codex
   prompt: Review the diff. Approve only if it fixes the cause.
+  needs: fix
   output-schema: {"properties": {"approved": {"type": "boolean"}}, "required": ["approved"], "type": "object"}
   to:
     - run-tests when node.review.output.approved
@@ -60,19 +62,20 @@ export interface GraphEdge {
   ly?: number
 }
 
+// Laid out in a 660 x 300 view box. Nodes are 200 x 58, wide enough for 12.5px detail text.
 export const graphNodes: GraphNode[] = [
-  { id: 'run-tests', x: 12, y: 121, glyph: '$', kind: 'bash command', detail: 'bash · npm test' },
-  { id: 'fix', x: 232, y: 18, glyph: '✦', kind: 'agent', detail: 'agent · Claude Code' },
-  { id: 'review', x: 452, y: 121, glyph: '✦', kind: 'agent', detail: 'agent · Codex' },
-  { id: 'open-pr', x: 232, y: 224, glyph: '$', kind: 'bash command', detail: 'bash · gh pr create' },
+  { id: 'run-tests', x: 10, y: 121, glyph: '$', kind: 'bash command', detail: 'bash · npm test' },
+  { id: 'fix', x: 230, y: 18, glyph: '✦', kind: 'agent', detail: 'agent · Claude Code' },
+  { id: 'review', x: 450, y: 121, glyph: '✦', kind: 'agent', detail: 'agent · Codex' },
+  { id: 'open-pr', x: 230, y: 224, glyph: '$', kind: 'bash command', detail: 'bash · gh pr create' },
 ]
 
 export const graphEdges: GraphEdge[] = [
-  { id: 'tests-fix', from: 'run-tests', to: 'fix', d: 'M100 121C100 72 156 47 224 47', label: 'when failed', lx: 110, ly: 72 },
-  { id: 'fix-review', from: 'fix', to: 'review', d: 'M408 47C488 47 540 70 540 113' },
-  { id: 'review-fix', from: 'review', to: 'fix', d: 'M452 140C400 140 350 124 336 84', label: 'otherwise', lx: 404, ly: 126 },
-  { id: 'review-tests', from: 'review', to: 'run-tests', d: 'M452 166C380 194 270 194 196 166', label: 'approved', lx: 322, ly: 188 },
-  { id: 'tests-pr', from: 'run-tests', to: 'open-pr', d: 'M100 179C100 230 156 253 224 253', label: 'otherwise', lx: 110, ly: 228 },
+  { id: 'tests-fix', from: 'run-tests', to: 'fix', d: 'M110 121C110 72 166 47 222 47', label: 'when failed', lx: 122, ly: 72 },
+  { id: 'fix-review', from: 'fix', to: 'review', d: 'M430 47C510 47 550 70 550 113' },
+  { id: 'review-fix', from: 'review', to: 'fix', d: 'M450 140C400 140 352 124 338 84', label: 'otherwise', lx: 400, ly: 124 },
+  { id: 'review-tests', from: 'review', to: 'run-tests', d: 'M450 166C380 194 290 194 218 166', label: 'approved', lx: 334, ly: 188 },
+  { id: 'tests-pr', from: 'run-tests', to: 'open-pr', d: 'M110 179C110 230 166 253 222 253', label: 'otherwise', lx: 122, ly: 228 },
 ]
 
 // Which lines of the source belong to each node, for linked highlighting.

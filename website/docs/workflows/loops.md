@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Loops and fan-out
 
-Use a loop when the amount of work depends on a count, a table, or the files available at runtime.
+Use a loop when the amount of work depends on a count, a table or the files present at run time.
 
 ## Choose a source
 
@@ -18,7 +18,7 @@ Use a loop when the amount of work depends on a count, a table, or the files ava
 | `trigger-events` | Event objects supplied when the run starts |
 | `infinite` | Iterations until the loop is stopped or limited |
 
-Agent nodes do not own fan-out. Put the iteration source on a `loop` node and route its activations into the work you want repeated.
+Agent nodes don't fan out on their own. Put the source on a `loop` node and route its activations into the work you want repeated.
 
 ## A count loop
 
@@ -44,21 +44,32 @@ Node check:
   needs: repeat
 ```
 
-`source.max-concurrency` sets overlapping iterations. The common node `max-concurrency` controls overlapping activations of that node. They are separate limits. Start with sequential work when iterations write to the same files.
+Two separate concurrency limits apply:
+
+| Setting | Limits |
+| --- | --- |
+| `source.max-concurrency` | Iterations of this loop running at once |
+| The node's `max-concurrency` | Activations of that one node running at once |
+
+Start with one at a time when iterations write to the same files.
 
 ## Use iteration data
 
-Bind from `node.<loop-id>.output` in the body. Rattish has no `loop.*` alias. Available iteration fields depend on the source type. Use the loop contract and compiler to confirm a selector before putting it in a command or prompt.
-
-Directory and tabular sources are opened when the loop activates, so an earlier node can create them. An empty directory or a glob matching no files succeeds with zero body activations. A missing or unreadable directory fails at activation.
+- Bind from `node.<loop-id>.output` in the loop body. There is no `loop.*` alias.
+- The available fields depend on the source type. Confirm a selector with the loop contract and the compiler before using it in a command or prompt.
+- Directory and tabular sources open when the loop activates, so an earlier node can create them.
+- An empty folder, or a glob that matches nothing, succeeds with zero iterations. A missing or unreadable folder fails.
 
 ## Failure and break
 
-Set `fail-fast` deliberately. Decide whether one failed item should prevent further work or whether you need per-item recovery routes. Retries inside a body node do not change the number of authored source items.
+Decide on `fail-fast` up front: should one failed item stop the rest, or do you want per-item recovery routes? Retries inside a body node don't change how many items the source produces.
 
-A `break` node targets the owning loop ID. It closes that loop activation's pending iterations; already running branches finish. There is no option to cancel running iterations through `break`. Its completion routes settle after those branches finish.
+A `break` node targets its loop's ID.
 
-Infinite sources and routed cycles need explicit limits. A loop is not a background scheduler: it still belongs to one workflow run.
+- It closes that loop activation's pending iterations.
+- Iterations already running finish. `break` can't cancel them.
+- The break's own routes settle after those iterations finish.
 
-See [Loop reference](../nodes/loop.md), [Break reference](../nodes/break.md), and [Routes](./routes.md).
+Infinite sources and routed cycles need explicit limits. A loop isn't a background scheduler; it belongs to one workflow run.
 
+See [Loop reference](../nodes/loop.md), [Break reference](../nodes/break.md) and [Routes](./routes.md).

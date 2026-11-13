@@ -30,6 +30,8 @@
   --vp-c-brand-2: #6353d5;
   --vp-c-brand-3: #6353d5;
   --vp-c-brand-soft: rgba(99, 83, 213, 0.14);
+  /* VitePress's faintest text (code language labels, hints) fails 4.5:1; lift it to AA. */
+  --vp-c-text-3: #5f5c70;
 }
 
 .dark {
@@ -39,6 +41,7 @@
   --vp-c-bg-soft: #12102d;
   --vp-c-text-1: #f3eee6;
   --vp-c-text-2: #b8b3d4;
+  --vp-c-text-3: #9a95bd;
   --vp-c-brand-1: #a59bff;
   --vp-c-brand-2: #8f82ff;
   --vp-c-brand-3: #6353d5;

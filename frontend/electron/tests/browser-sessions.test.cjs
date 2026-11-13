@@ -35,6 +35,7 @@ class FakeProfile extends EventEmitter {
     this.webRequest = {
       onBeforeSendHeaders: (filter, listener) => { this.beforeSendHeaders = { filter, listener }; },
       onHeadersReceived: (filter, listener) => { this.headersReceived = { filter, listener }; },
+      onBeforeRequest: (filter, listener) => { this.beforeRequest = { filter, listener }; },
     };
   }
   getUserAgent() { return this.userAgent || "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Raticode/0.3.9 Chrome/156.0.8078.49 Electron/45.1.0 Safari/537.36"; }
@@ -106,7 +107,7 @@ class FakeContents extends EventEmitter {
   input(type = "mouseDown") { this.emit("input-event", {}, { type }); }
 }
 
-function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs = null, firefox = null, chrome = null, chromium = {}, quarantine = "", beforeInstall = null } = {}) {
+function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs = null, firefox = null, chrome = null, chromium = {}, quarantine = "", beforeInstall = null, resolvePath = null } = {}) {
   const profiles = Object.fromEntries(Object.values(PARTITIONS).map((name) => [name, new FakeProfile(name)]));
   const owner = Object.assign(new EventEmitter(), {
     id: 1,
@@ -145,10 +146,10 @@ function harness({ policy, dialog: dialogOverrides = {}, openWith = null, logs =
     session: { fromPartition: (name) => profiles[name] },
     webContents: { fromId: (id) => contentsById.get(id) },
     getMainWindow: () => mainWindow,
-    resolvePath: (target) => {
+    resolvePath: resolvePath || ((target) => {
       if (!fs.existsSync(target)) throw new Error(`Path does not exist: ${target}`);
       return target;
-    },
+    }),
     store,
     openWith,
     quarantineDir: quarantine || path.join(directory, "quarantine"),
@@ -421,6 +422,19 @@ test("popups need real user input; sign-in popups become windows", () => {
   browsers.browserAction(event, { id: web.id, action: "allow-popups" });
   assert.deepEqual(sent("gofer:browser-open-tab").at(-1), { url: "https://ads.test/", background: false, engine: "raticode" });
   assert.equal(browsers.browserAction(event, { id: web.id, action: "site-info" }).popups, "allow");
+});
+
+test("a page in Rem's tab can't use window.open to reach a site Rem may not open", () => {
+  const { openRem } = harness({ policy: { remBlockedSites: ["bank.test"] } });
+  const rem = openRem();
+  const loaded = [];
+  const load = rem.contents.loadURL.bind(rem.contents);
+  rem.contents.loadURL = (url) => { loaded.push(url); return load(url); };
+  const handler = rem.contents.openHandler;
+  assert.deepEqual(handler({ url: "https://bank.test/transfer", disposition: "foreground-tab", features: "" }), { action: "deny" });
+  assert.deepEqual(loaded, []);
+  assert.deepEqual(handler({ url: "https://example.com/next", disposition: "foreground-tab", features: "" }), { action: "deny" });
+  assert.deepEqual(loaded, ["https://example.com/next"]);
 });
 
 test("page links open in the background for Rem and are rate limited", () => {
@@ -816,6 +830,9 @@ test("Rem tabs say when they use a shared sign-in", () => {
   assert.equal(sent("gofer:browser-state").at(-1).remSignIn, true);
   void rem.contents.loadURL("https://example.com/");
   assert.equal(sent("gofer:browser-state").at(-1).remSignIn, false);
+  // github.com cookies reach gist.github.com too, so it says so there.
+  void rem.contents.loadURL("https://gist.github.com/");
+  assert.equal(sent("gofer:browser-state").at(-1).remSignIn, true);
   void browsers;
 });
 
@@ -1415,7 +1432,8 @@ test("after Google refuses a Firefox tab, the user can sign in from a Firefox wi
   const state = browsers.createBrowser(event, { url: "https://www.youtube.com/" });
   await settle();
   const contents = firefox.contexts.get("context-1-user");
-  contents.commitUrl("https://www.youtube.com/");
+  // The address goes on Firefox's command line, so its query and fragment are left off.
+  contents.commitUrl("https://www.youtube.com/?token=secret#frag");
   await settle();
   contents.commitUrl("https://accounts.google.com/v3/signin/rejected?epd=abc");
   await settle();
@@ -1445,4 +1463,82 @@ test("Rem's Firefox tabs neither flag Google's refusal nor open a sign-in window
   assert.equal(browsers.browserAction(event, { id: rem.id, action: "stop" }).firefoxSignInBlocked, false);
   assert.throws(() => browsers.browserAction(event, { id: rem.id, action: "firefox-sign-in-window" }), /Rem's tabs keep separate sign-ins/);
   assert.equal(firefox.calls.some(([name]) => name === "sign-in-window"), false);
+});
+
+test("a stuck or ended page reloads with its history kept, and only its owner can end a stuck page", () => {
+  const { browsers, event, open, sent } = harness();
+  const web = open({ clientId: "browser:https://example.com/", url: "https://example.com/" });
+  web.contents.loadURL("https://example.com/next");
+  let crashes = 0;
+  web.contents.forcefullyCrashRenderer = () => { crashes += 1; web.contents.emit("render-process-gone", {}, { reason: "killed" }); };
+
+  // Stopping answering only flags the tab: there is no dialog, and nothing ends while it answers again.
+  web.contents.emit("unresponsive");
+  assert.equal(sent("gofer:browser-state").at(-1).unresponsive, true);
+  web.contents.emit("responsive");
+  assert.equal(sent("gofer:browser-state").at(-1).unresponsive, false);
+  browsers.browserAction(event, { id: web.id, action: "reload", recover: true });
+  assert.equal(crashes, 0, "a page that answers isn't ended");
+  assert.equal(web.contents.reloaded, "soft");
+
+  // A stuck page is ended, then reloaded in place, so its back/forward list stays.
+  web.contents.reloaded = "";
+  web.contents.emit("unresponsive");
+  assert.throws(() => browsers.browserAction({ sender: { id: 99 } }, { id: web.id, action: "reload", recover: true }), /not found/);
+  assert.equal(crashes, 0, "another window can't end it");
+  browsers.browserAction(event, { id: web.id, action: "reload", recover: true });
+  assert.equal(crashes, 1);
+  assert.equal(web.contents.reloaded, "soft");
+  assert.deepEqual(web.contents.loaded, ["https://example.com/next"], "reloaded, not loaded from scratch");
+  assert.equal(web.contents.index, 1);
+
+  // Ending it isn't reported as a crash: the reload is already under way.
+  assert.equal(sent("gofer:browser-state").some((item) => item.crashed), false);
+  assert.equal(sent("gofer:browser-state").at(-1).unresponsive, false);
+
+  // A page process that ends by itself is reported to the tab, which reloads it once it's in front (IntegratedBrowser).
+  web.contents.emit("render-process-gone", {}, { reason: "oom" });
+  assert.deepEqual(sent("gofer:browser-state").at(-1).crashed, { reason: "oom" });
+  web.contents.reloaded = "";
+  browsers.browserAction(event, { id: web.id, action: "reload" });
+  assert.equal(web.contents.reloaded, "soft");
+  assert.equal(crashes, 1, "a plain reload never ends the page process");
+});
+
+test("a local HTML preview can only read files inside the folder it was granted", () => {
+  // Electron lets file:// pages read other file:// URLs. A previewed page used to be
+  // able to fetch ~/.ssh or list the home folder and post the result to a website.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "preview-guard-"));
+  const project = path.join(root, "project");
+  const secret = path.join(root, "secret.txt");
+  fs.mkdirSync(project);
+  fs.writeFileSync(path.join(project, "index.html"), "<p>report</p>");
+  fs.writeFileSync(path.join(project, "style.css"), "p{}");
+  fs.writeFileSync(secret, "private");
+  const grants = new Map([["grant-1", project]]);
+  const resolvePath = (target, { grantId } = {}) => {
+    const allowed = grants.get(grantId);
+    if (!fs.existsSync(target)) throw new Error(`Path does not exist: ${target}`);
+    if (!allowed || path.relative(allowed, target).startsWith("..")) throw new Error("outside");
+    return target;
+  };
+  try {
+    const { open, profiles } = harness({ resolvePath });
+    const guard = profiles[PARTITIONS.preview].beforeRequest;
+    assert.deepEqual(guard.filter.urls, ["file://*/*"]);
+    const decide = (url) => { let result; guard.listener({ url }, (value) => { result = value; }); return result; };
+    // Before any preview opens, nothing on disk is reachable.
+    assert.deepEqual(decide(pathToFileURL(path.join(project, "index.html")).href), { cancel: true });
+    open({ path: path.join(project, "index.html"), grantId: "grant-1" });
+    assert.deepEqual(decide(pathToFileURL(path.join(project, "index.html")).href), { cancel: false });
+    assert.deepEqual(decide(pathToFileURL(path.join(project, "style.css")).href), { cancel: false });
+    assert.deepEqual(decide(pathToFileURL(secret).href), { cancel: true });
+    assert.deepEqual(decide(pathToFileURL(root).href + "/"), { cancel: true });
+    assert.deepEqual(decide("file:///etc/passwd"), { cancel: true });
+    assert.deepEqual(decide("not a url"), { cancel: true });
+    // The user and Rem profiles never get this guard; their pages can't load file:// at all.
+    assert.equal(profiles[PARTITIONS.user].beforeRequest, undefined);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

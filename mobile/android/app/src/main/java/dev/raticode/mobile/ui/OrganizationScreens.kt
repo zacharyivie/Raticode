@@ -335,7 +335,10 @@ private fun OverviewTab(client: LiveClient, org: Organization, plan: OrgPlan, na
             val (ink, fill) = orgColors(OrgTone.ACCENT)
             Surface(color = fill, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("MISSION", style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp), color = ink)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("MISSION", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp), color = ink)
+                        if (plan.autoMode == true) Pill("Auto", OrgTone.ACCENT, Modifier.testTag("orgAutoBadge"))
+                    }
                     Text(plan.mission.ifBlank { org.description.ifBlank { "No mission yet. Write one in Organizations on your computer." } },
                         style = MaterialTheme.typography.titleMedium, color = if (plan.mission.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else ink)
                 }
@@ -351,10 +354,15 @@ private fun OverviewTab(client: LiveClient, org: Organization, plan: OrgPlan, na
                 Fact("${plan.notes.size}", "Notes") { nav.tab("knowledge") }
             }
         }
-        if (org.pauseReason.isNotBlank() && org.state != "running") item { Note(org.pauseReason.let { if (it.startsWith("Paused")) it else "Paused: $it" }) }
-        item { SectionTitle("Needs you${if (needs.isNotEmpty()) " · ${needs.size}" else ""}") }
-        if (needs.isEmpty()) item { Note("Nothing needs you right now.") }
-        items(needs.take(12)) { need -> NeedRow(org, need, nav) }
+        plan.autoHalt?.let { halt -> item { AutoHaltCard(halt) } }
+        if (plan.autoHalt == null && org.pauseReason.isNotBlank() && org.state != "running") item { Note(org.pauseReason.let { if (it.startsWith("Paused")) it else "Paused: $it" }) }
+        // Requests Rem's Auto mode review decides are shown but don't count as needing you.
+        val needsCount = needs.count { !(it is OrganizationModel.NeedsYou.Request && it.request.reviewedByRem) }
+        item { SectionTitle("Needs you${if (needsCount > 0) " · $needsCount" else ""}") }
+        client.organizationRequestResults?.takeIf { it.first == org.id }?.let { (_, results) -> item { RequestResultsCard(client, results) } }
+        if (needsCount == 0) item { Note("Nothing needs you right now.") }
+        if (client.organizationRequests == true && OrgRequests.offerAll(plan.requests)) item { ApproveAllCard(client, org, plan.requests, busy) }
+        items(needs.take(12)) { need -> NeedRow(client, org, need, nav, busy) }
         item { SectionTitle("Work schedule") }
         item { ScheduleCard(client, org, plan, nav, busy) }
         val orgMilestones = plan.milestones.filter { it.projectId.isBlank() }.sortedBy { it.dueAt.ifBlank { "9999" } }
@@ -388,6 +396,11 @@ private fun OverviewTab(client: LiveClient, org: Organization, plan: OrgPlan, na
             item { Note(if (hours.open) "Open now${hours.closesAt.takeIf { it.isNotBlank() }?.let { ", closes ${whenText(it)}" }.orEmpty()}"
                 else "Closed${hours.opensAt.takeIf { it.isNotBlank() }?.let { ", opens ${whenText(it)}" }.orEmpty()}. Work waits for working hours.") }
         }
+        item { SectionTitle("Auto mode") }
+        item { AutoModeCard(client, org, plan, busy) }
+        if (plan.autoDecisions.isNotEmpty()) item { AutoDecisionsCard(plan.autoDecisions) }
+        item { SectionTitle("Backlog pulls") }
+        item { BacklogPullsCard(client, org, plan, busy) }
         plan.repository?.let { repo ->
             item { SectionTitle("Shared repository") }
             item {
@@ -409,6 +422,80 @@ private fun OverviewTab(client: LiveClient, org: Organization, plan: OrgPlan, na
     }
 }
 
+/** Auto mode's switch. Turning it on first shows exactly what it allows; turning it off goes straight away. */
+@RequiresApi(29)
+@Composable
+private fun AutoModeCard(client: LiveClient, org: Organization, plan: OrgPlan, busy: Boolean) {
+    val enabled = plan.autoMode
+    if (enabled == null || client.organizationAutoMode == false) { Note(AutoMode.UPDATE_DESKTOP, Modifier.testTag("orgAutoModeUpdate")); return }
+    var confirming by remember(org.id) { mutableStateOf(false) }
+    OrgCard(null, Modifier.testTag("orgAutoMode"), stripe = if (enabled) orgColors(OrgTone.ACCENT).first else null) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Rem decides requests", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+            Switch(checked = enabled, enabled = client.organizationAutoMode == true && !busy, modifier = Modifier.testTag("orgAutoModeSwitch")
+                .semantics { contentDescription = if (enabled) "Auto mode on" else "Auto mode off" },
+                onCheckedChange = { on -> if (on) confirming = true else client.desktopAction(AutoMode.OP, AutoMode.params(org.id, plan.revision, false)) })
+        }
+        Text(if (enabled) AutoMode.ON else AutoMode.OFF, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (confirming) AlertDialog(onDismissRequest = { confirming = false }, title = { Text("Turn on Auto mode?") },
+        text = { Text(AutoMode.CONFIRM, Modifier.testTag("orgAutoModeConfirmText")) },
+        confirmButton = { TextButton(modifier = Modifier.testTag("orgAutoModeConfirm"), onClick = {
+            client.desktopAction(AutoMode.OP, AutoMode.params(org.id, plan.revision, true)); confirming = false
+        }) { Text("Turn on") } },
+        dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } })
+}
+
+/** Why Auto mode stopped the organization, and the one thing that lets it continue. */
+@Composable
+private fun AutoHaltCard(halt: AutoMode.Halt) {
+    OrgCard(null, Modifier.testTag("orgAutoHalt"), stripe = orgColors(OrgTone.BAD).first) {
+        Pill("Auto mode stopped the organization", OrgTone.BAD)
+        if (halt.summary.isNotBlank()) Text(halt.summary, style = MaterialTheme.typography.titleSmall)
+        Text(halt.reason, style = MaterialTheme.typography.bodyMedium)
+        Text(AutoMode.toContinue(halt), style = MaterialTheme.typography.bodyMedium, color = orgColors(OrgTone.BAD).first)
+    }
+}
+
+/** Rem's most recent Auto mode decisions, with its reasons. */
+@Composable
+private fun AutoDecisionsCard(decisions: List<AutoMode.Decision>) {
+    OrgCard(null, Modifier.testTag("orgAutoDecisions")) {
+        Text("Rem's recent decisions", style = MaterialTheme.typography.titleSmall)
+        decisions.take(5).forEach { d ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                Pill(AutoMode.label(d.decision), when (d.decision) { "approve", "modify" -> OrgTone.DONE; "halt" -> OrgTone.BAD; "decline" -> OrgTone.WAIT; else -> OrgTone.IDLE })
+                Column(Modifier.weight(1f)) {
+                    Text(d.summary.ifBlank { "A request" }, style = MaterialTheme.typography.bodySmall)
+                    if (d.reason.isNotBlank()) Text(d.reason, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (d.recommendation.isNotBlank()) Text("Recommended: ${d.recommendation}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (d.error.isNotBlank()) Text(d.error, style = MaterialTheme.typography.labelSmall, color = orgColors(OrgTone.BAD).first)
+                }
+            }
+        }
+    }
+}
+
+/** Whether workers pull accepted Backlog tickets into To do, with a switch when this desktop takes the change. */
+@RequiresApi(29)
+@Composable
+private fun BacklogPullsCard(client: LiveClient, org: Organization, plan: OrgPlan, busy: Boolean) {
+    val enabled = plan.pullBacklog
+    if (enabled == null) { Note(BacklogPulls.UPDATE_DESKTOP, Modifier.testTag("orgBacklogPullsUpdate")); return }
+    val editable = client.organizationBacklogPull != false
+    OrgCard(null, Modifier.testTag("orgBacklogPulls")) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Workers pull from Backlog", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+            Switch(checked = enabled, enabled = editable && !busy, modifier = Modifier.testTag("orgBacklogPullsSwitch")
+                .semantics { contentDescription = if (enabled) "Backlog pulls on" else "Backlog pulls off" },
+                onCheckedChange = { client.desktopAction(BacklogPulls.OP, BacklogPulls.params(org.id, plan.revision, it)) })
+        }
+        Text(if (enabled) BacklogPulls.ON else BacklogPulls.OFF, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(BacklogPulls.KEPT, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!editable) Note(BacklogPulls.UPDATE_DESKTOP)
+    }
+}
+
 @Composable
 private fun Fact(value: String, label: String, onClick: (() -> Unit)?) {
     val content: @Composable () -> Unit = {
@@ -422,13 +509,83 @@ private fun Fact(value: String, label: String, onClick: (() -> Unit)?) {
     else Surface(shape = RoundedCornerShape(10.dp), modifier = modifier) { content() }
 }
 
+/** Approve all: the first tap shows exactly what will be approved; only those requests are sent. */
+@RequiresApi(29)
 @Composable
-private fun NeedRow(org: Organization, need: OrganizationModel.NeedsYou, nav: OrgNav) {
+private fun ApproveAllCard(client: LiveClient, org: Organization, requests: List<OrgRequest>, busy: Boolean) {
+    var shown by remember(org.id) { mutableStateOf<List<OrgRequest>?>(null) }
+    val waiting = OrgRequests.forYou(requests).filter { it.id.isNotBlank() }
+    OrgCard(null, Modifier.testTag("orgApproveAll"), stripe = orgColors(OrgTone.WAIT).first) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("${plural(waiting.size, "request")} from Rem are waiting", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Button(onClick = { shown = waiting }, enabled = !busy, modifier = Modifier.testTag("orgApproveAllButton")) { Text("Approve all ${waiting.size}") }
+        }
+    }
+    shown?.let { list ->
+        val listed = list.map { it.id }.toSet()
+        val newer = waiting.count { it.id !in listed }
+        AlertDialog(onDismissRequest = { shown = null }, title = { Text("Approve these ${plural(list.size, "request")}?") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()).testTag("orgApproveAllList"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    list.forEach { request ->
+                        Column {
+                            Text(request.summary, style = MaterialTheme.typography.bodyMedium)
+                            Text("Asked ${whenText(request.at, past = true)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    Text(OrgRequests.ORDER, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(OrgRequests.LATER, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (newer > 0) Text("${plural(newer, "newer request")} arrived and ${if (newer == 1) "isn't" else "aren't"} in this list.",
+                        style = MaterialTheme.typography.bodySmall, color = orgColors(OrgTone.WAIT).first)
+                }
+            },
+            confirmButton = { TextButton(modifier = Modifier.testTag("orgApproveAllConfirm"), onClick = {
+                client.desktopAction(OrgRequests.OP, OrgRequests.params(org.id, OrgRequests.frozen(list), "approve")); shown = null
+            }) { Text("Approve these ${list.size}") } },
+            dismissButton = { TextButton(onClick = { shown = null }) { Text("Cancel") } })
+    }
+}
+
+/** Each request's result from the last approve or decline, as the desktop reported it. */
+@RequiresApi(29)
+@Composable
+private fun RequestResultsCard(client: LiveClient, results: List<OrgRequests.Result>) {
+    OrgCard(null, Modifier.testTag("orgRequestResults")) {
+        Text(OrgRequests.summary(results), style = MaterialTheme.typography.titleSmall)
+        results.forEach { result ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+                Pill(OrgRequests.label(result.status), when (result.status) { "approved" -> OrgTone.DONE; "failed" -> OrgTone.BAD; "skipped" -> OrgTone.WAIT; else -> OrgTone.IDLE })
+                Column(Modifier.weight(1f)) {
+                    Text(result.summary.ifBlank { "A request from Rem" }, style = MaterialTheme.typography.bodySmall)
+                    if (result.message.isNotBlank()) Text(result.message, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        TextButton(onClick = client::dismissOrganizationRequestResults) { Text("Done") }
+    }
+}
+
+@RequiresApi(29)
+@Composable
+private fun NeedRow(client: LiveClient, org: Organization, need: OrganizationModel.NeedsYou, nav: OrgNav, busy: Boolean) {
     when (need) {
         is OrganizationModel.NeedsYou.Request -> Card(null, stripe = orgColors(OrgTone.WAIT).first) {
+            var approving by remember(need.request.id) { mutableStateOf(false) }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) { Pill("Rem asks", OrgTone.WAIT); Text(whenText(need.request.at, past = true), style = MaterialTheme.typography.labelSmall) }
             Text(need.request.summary, style = MaterialTheme.typography.bodyMedium)
-            Note("Approve or decline it in Organizations on your computer, where you can review what it changes.")
+            if (need.request.reviewedByRem) Note(AutoMode.REVIEWING, Modifier.testTag("orgRequestReviewing"))
+            else if (client.organizationRequests == true && need.request.id.isNotBlank()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { approving = true }, enabled = !busy, modifier = Modifier.testTag("orgRequestApprove")) { Text("Approve") }
+                OutlinedButton(onClick = { client.desktopAction(OrgRequests.OP, OrgRequests.params(org.id, listOf(need.request.id), "decline")) },
+                    enabled = !busy, modifier = Modifier.testTag("orgRequestDecline")) { Text("Decline") }
+            }
+            else Note(if (client.organizationRequests == null) "Approve or decline it in Organizations on your computer, where you can review what it changes." else OrgRequests.UPDATE_DESKTOP)
+            if (approving) AlertDialog(onDismissRequest = { approving = false }, title = { Text("Approve this request?") },
+                text = { Text(need.request.summary) },
+                confirmButton = { TextButton(modifier = Modifier.testTag("orgRequestApproveConfirm"), onClick = {
+                    client.desktopAction(OrgRequests.OP, OrgRequests.params(org.id, listOf(need.request.id), "approve")); approving = false
+                }) { Text("Approve") } },
+                dismissButton = { TextButton(onClick = { approving = false }) { Text("Cancel") } })
         }
         is OrganizationModel.NeedsYou.Review -> Card({ nav.push("ticket:${need.task.id}") }, stripe = orgColors(OrgTone.WAIT).first) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -783,8 +940,8 @@ private fun TicketPage(client: LiveClient, org: Organization, plan: OrgPlan, tas
                 if (task.dueAt.isNotBlank()) Pill("Due ${whenText(task.dueAt)}", OrgTone.IDLE)
             }
             OrganizationModel.flag(task).takeIf { it.isNotBlank() }?.let { Text(it, color = orgColors(OrgTone.BAD).first, style = MaterialTheme.typography.bodyMedium) }
-            if (column == "todo") OrganizationModel.startHint(task, org).takeIf { it.isNotBlank() }?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = startHintColor(task, org))
+            if (column == "todo" || column == "backlog") OrganizationModel.startHint(task, org).takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = startHintColor(task, org), modifier = Modifier.testTag("orgStartHint"))
             }
             // The actions this ticket allows now.
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -835,10 +992,22 @@ private fun TicketPage(client: LiveClient, org: Organization, plan: OrgPlan, tas
             if (used.isNotEmpty()) SettingsGroup("Notes it uses") {
                 used.forEach { n -> NoteLine(n, if (n.id in extras!!.readNotes) "Read by a run" else "Planned") { nav.push("note:${n.id}") } }
             }
-            SettingsGroup("Conversation") {
-                if (task.comments.isEmpty()) Note("No comments yet.")
-                // The desktop's last 12, each with its author's name and avatar; a long comment keeps to a few lines until opened.
-                task.comments.takeLast(12).forEach { c ->
+            val conversation = OrganizationModel.visibleComments(task.comments)
+            SettingsGroup(if (task.commentCount > 0) "Conversation (${task.commentCount})" else "Conversation") {
+                if (conversation.isEmpty()) Note("No comments yet.")
+                // The newest entries, each comment with its author's name and avatar; a long comment keeps to a few lines until
+                // opened. A status change is one short line, so it never reads as a second copy of the comment above it.
+                conversation.takeLast(12).forEach { c ->
+                    if (c.kind == "status") {
+                        Column(Modifier.testTag("orgStatusEntry"), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(OrganizationModel.statusHeadline(c), style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold))
+                            val line = listOf(OrganizationModel.statusMove(c), c.at.takeIf { it.isNotBlank() }?.let { whenText(it, past = true) }.orEmpty())
+                                .filter { it.isNotBlank() }.joinToString(" · ")
+                            if (line.isNotBlank()) Text(line, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (c.body.isNotBlank()) ClampedText(c.body, 3)
+                        }
+                        return@forEach
+                    }
                     val name = OrganizationModel.actorName(c.actor, org)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Avatar(name, c.actor.removePrefix("employee:"), 20.dp)
@@ -1001,11 +1170,11 @@ private fun WorkerPage(client: LiveClient, org: Organization, plan: OrgPlan, emp
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Button(onClick = { ask = true }, enabled = !busy && !e.paused) { Text("Ask") }
-                if (e.paused) OutlinedButton(onClick = { hold = false }, enabled = !busy && client.organizationsV2 != false && worker?.fullAccess != true,
+                if (e.paused) OutlinedButton(onClick = { hold = false }, enabled = !busy && client.organizationsV2 != false,
                     modifier = Modifier.testTag("orgRelease")) { Text("Release hold") }
                 else OutlinedButton(onClick = { hold = true }, enabled = !busy && client.organizationsV2 != false, modifier = Modifier.testTag("orgHold")) { Text("Hold") }
             }
-            if (e.paused && worker?.fullAccess == true) Note("This worker runs without a sandbox, so its hold is released on your computer, where you can review its access.")
+            if (e.paused && worker?.fullAccess == true) Note("This worker runs without a sandbox. Releasing its hold lets it work with full access, as it would from your computer.")
             worker?.persona?.takeIf { it.isNotBlank() }?.let { SettingsGroup("Persona") { ClampedText(it, 6, style = MaterialTheme.typography.bodyMedium) } }
             if (!worker?.responsibilities.isNullOrEmpty()) SettingsGroup("Responsibilities") {
                 worker!!.responsibilities.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }

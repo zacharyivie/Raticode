@@ -509,7 +509,7 @@ def test_collection_exact_limit_is_accepted(collection) -> None:
 def test_canonical_mobile_contract_manifest() -> None:
     manifest = (CONTRACT / "SHA256SUMS").read_bytes()
     assert hashlib.sha256(manifest).hexdigest() == (
-        "1bf624cf8c01f93fbb0c680d7691f55f1430e190635467697bf308d34fa10215"
+        "6ce757361c6139c7d00fbac7ace18f59bdce36d7074236bf6a0ff8702b26746a"
     )
     for line in manifest.decode().splitlines():
         digest, relative = line.split("  ", 1)

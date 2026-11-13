@@ -484,6 +484,122 @@ def apply_schedule(
     finish(current, apply, lambda d: "Saved the work schedule.")
 
 
+@app.command("backlog-pulls")
+def backlog_pulls(
+    organization_id: str = typer.Argument(...),
+    enabled: bool | None = typer.Option(
+        None,
+        "--on/--off",
+        help="Turn pulling on or off. Without either, show the setting.",
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Show or set whether free workers pull accepted Backlog tickets into To do."""
+    current = session("org backlog-pulls", output, endpoint, token_file, data_dir)
+
+    def run(backend: Backend, out: Output) -> dict[str, Any]:
+        org = _read(backend, organization_id)
+        on = (org.get("config") or {}).get("pullBacklog", True) is not False
+        if enabled is not None and enabled != on:
+            saved = call(
+                backend,
+                "plan_save",
+                organization_id,
+                kind="operations",
+                item={"pullBacklog": enabled},
+                expectedRevision=org.get("revision"),
+            )
+            if isinstance(saved, dict) and saved.get("needsUserConsent"):
+                return {"organizationId": organization_id, "pullBacklog": on, **saved}
+            on = enabled
+        return {"organizationId": organization_id, "pullBacklog": on}
+
+    def text(data: dict[str, Any]) -> str:
+        if data.get("needsUserConsent"):
+            return str(data.get("message") or "Waiting for the user's approval.")
+        return (
+            "Workers pull accepted Backlog tickets when they need work."
+            if data["pullBacklog"]
+            else "Workers leave Backlog tickets for you to move."
+        )
+
+    finish(current, run, text)
+
+
+AUTO_MODE_EXPLAINED = (
+    "Auto mode lets Rem approve, change or decline this organization's requests instead of "
+    "you. It stops the organization only when something is dangerous and Rem can't make it "
+    "safe without stopping everything, or when it can't go on without you (a missing "
+    "credential, sign-in, hardware or internet). Budget and run-limit increases, git push "
+    "and folder-isolation policy, and Auto mode itself stay yours."
+)
+
+
+@app.command("auto-mode")
+def auto_mode(
+    organization_id: str = typer.Argument(...),
+    enabled: bool | None = typer.Option(
+        None,
+        "--on/--off",
+        help="Turn Auto mode on or off. Without either, show it, its stop reason and Rem's "
+        "recent decisions.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Confirm what Auto mode allows. Needed with --on."
+    ),
+    output: opts.Output = opts.OutputFormat.json,
+    endpoint: opts.EndpointUrl = None,
+    token_file: opts.TokenFile = None,
+    data_dir: opts.DataDir = None,
+) -> None:
+    """Show or set Auto mode, where Rem decides the organization's requests."""
+    current = session("org auto-mode", output, endpoint, token_file, data_dir)
+    if enabled is not None:
+        require_user("turn Auto mode on or off")
+    if enabled and not yes:
+        res.invalid(current, AUTO_MODE_EXPLAINED + " Add --yes to turn it on.")
+
+    def run(backend: Backend, out: Output) -> dict[str, Any]:
+        org = _read(backend, organization_id)
+        on = bool((org.get("config") or {}).get("autoMode"))
+        if enabled is not None and enabled != on:
+            org = call(
+                backend,
+                "auto_mode",
+                organization_id,
+                enabled=enabled,
+                confirm=enabled,
+                expectedRevision=org.get("revision"),
+            )
+        runtime = org.get("runtime") or {}
+        return {
+            "organizationId": organization_id,
+            "autoMode": bool((org.get("config") or {}).get("autoMode")),
+            "halt": runtime.get("autoHalt") or None,
+            "recentDecisions": list(reversed((runtime.get("autoDecisions") or [])[-10:])),
+        }
+
+    def text(data: dict[str, Any]) -> str:
+        lines = [
+            "Auto mode is on: Rem decides requests."
+            if data["autoMode"]
+            else "Auto mode is off: requests wait for you."
+        ]
+        halt = data.get("halt")
+        if halt:
+            lines.append(
+                f"Stopped: {halt.get('reason', '')} To continue: {halt.get('userAction', '')}"
+            )
+        for item in data["recentDecisions"][:5]:
+            lines.append(f"- {item.get('decision')}: {item.get('summary')}: {item.get('reason')}")
+        return "\n".join(lines)
+
+    finish(current, run, text)
+
+
 # Projects --------------------------------------------------------------------------
 
 

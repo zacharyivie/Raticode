@@ -127,3 +127,49 @@ test('a destroyed window comes back hidden, and opening it from the tray maximiz
   vm.runInNewContext(`${source.slice(showStart, showEnd)}\nshowMainWindow(); showMainWindow();`, opened);
   assert.deepEqual([maximized, shown], [1, 2]);
 });
+
+// Ctrl+C in the terminal: Electron runs before-quit and the backend stops on the
+// same signal. The backend's exit must read as part of the quit, and a quit that
+// unsaved files cancel must then say the backend is gone.
+function quitHarness() {
+  const start = source.indexOf('let lifecycleApproved = false;');
+  const end = source.indexOf('app.on("window-all-closed",', start);
+  const listeners = {};
+  const sent = [];
+  const crashes = [];
+  const owner = { id: 7, send: (...args) => sent.push(args), once() {}, removeListener() {} };
+  const context = {
+    mainWindow: { isDestroyed: () => false, webContents: owner }, isSmokeTest: false, crypto: require('node:crypto'),
+    showMainWindow() {}, app: { on: (name, callback) => { listeners[name] = callback; }, quit() {} },
+    isQuitting: false, quitPending: false, backendStoppedDuringQuit: false, backendProcess: undefined,
+    archivesDrained: false, conversationArchives: { close: () => new Promise(() => {}) },
+    showBackendCrash: error => crashes.push(error), logMainError() {}, Promise,
+  };
+  vm.runInNewContext(source.slice(start, end), context);
+  context.completeLifecycle({ sender: owner }, { requestId: 'renderer-ready', ready: true });
+  return { context, listeners, sent, crashes, owner };
+}
+
+test('a quit from the terminal marks itself pending before unsaved files are checked', async () => {
+  const { context, listeners, sent, crashes, owner } = quitHarness();
+  listeners['before-quit']({ preventDefault() {} });
+  assert.equal(context.quitPending, true);
+  assert.equal(context.isQuitting, false);
+  // The backend stopped on the same Ctrl+C meanwhile, then the user kept their unsaved files.
+  context.backendStoppedDuringQuit = true;
+  context.completeLifecycle({ sender: owner }, { requestId: sent[0][1].requestId, approved: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.quitPending, false);
+  assert.equal(crashes.length, 1);
+  assert.match(crashes[0].message, /quit was cancelled to keep unsaved files/);
+});
+
+test('an approved quit after Ctrl+C shows no crash window', async () => {
+  const { context, listeners, sent, crashes, owner } = quitHarness();
+  listeners['before-quit']({ preventDefault() {} });
+  context.backendStoppedDuringQuit = true;
+  context.completeLifecycle({ sender: owner }, { requestId: sent[0][1].requestId, approved: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(crashes.length, 0);
+  assert.equal(context.quitPending, true);
+});

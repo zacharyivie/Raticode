@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import secrets
@@ -17,7 +18,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from gofer.devices.binding import SessionBinding
-from gofer.devices.framing import strict_json
+from gofer.devices.framing import FrameError, strict_json
 from gofer.devices.registry import DeviceRegistry, PairingError, device_id
 
 # Protocol v2 still requires relay and topic fields. Devices connect only over the
@@ -82,6 +83,9 @@ class Invitation:
     raw: bytes = field(repr=False)
     expires: float
     deadline: float
+    # The kind of device the user chose to pair: "controller" (a phone) or "desktop".
+    # A claim with any other role is refused, so the claimer can't pick its own role.
+    role: str = "controller"
     failures: int = 0
     consumed: bool = False
 
@@ -99,7 +103,11 @@ class Invitations:
         self.lock = threading.RLock()
         self.current: Invitation | None = None
 
-    def create(self, name: str, endpoint: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create(
+        self, name: str, endpoint: dict[str, Any] | None = None, *, role: str
+    ) -> dict[str, Any]:
+        if role not in ("controller", "desktop"):
+            raise PairingError("invalid_role")
         with self.lock:
             now = self.registry.clock()
             data: dict[str, Any] = {
@@ -118,7 +126,7 @@ class Invitations:
                 "lan_endpoint": lan_endpoint(endpoint),
             }
             raw = json.dumps(data, separators=(",", ":")).encode()
-            self.current = Invitation(raw, data["expires_at"], self.monotonic() + 300)
+            self.current = Invitation(raw, data["expires_at"], self.monotonic() + 300, role)
             return self.current.payload()
 
     def cancel(self) -> None:
@@ -136,11 +144,22 @@ class Invitations:
                 or invite.deadline <= self.monotonic()
             ):
                 raise PairingError("invitation_unavailable")
+            # Only someone who saw the QR code knows its hash. A peer that doesn't can't
+            # use up the invitation's five attempts and block pairing for the user.
+            supplied = record.get("invitation_sha256")
+            if not isinstance(supplied, str) or not hmac.compare_digest(
+                supplied.encode("utf-8", "surrogatepass"),
+                hashlib.sha256(invite.raw).hexdigest().encode(),
+            ):
+                raise FrameError("session_binding")
             invite.failures += 1
             data = strict_json(invite.raw)
             peer, role = device_id(record.get("initiator_id")), record.get("initiator_role")
             if not isinstance(role, str):
                 raise PairingError("invalid_role")
+            if not hmac.compare_digest(role.encode("utf-8", "surrogatepass"), invite.role.encode()):
+                # A phone QR code can't pair a desktop, and a desktop link can't pair a phone.
+                raise PairingError("invitation_role_mismatch")
             expected = SessionBinding(
                 session_id,
                 "pair",

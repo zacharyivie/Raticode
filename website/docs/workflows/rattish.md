@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Rattish language
 
-Rattish is the text format for current Raticode workflows. One source file defines the workflow, its nodes, and the routes between them.
+Rattish is the text format for Raticode workflows. One file holds the workflow, its nodes and the routes between them.
 
 ## A complete workflow
 
@@ -24,13 +24,21 @@ Node save-note:
   finish: pass
 ```
 
-This source writes a file only when executed. The version directive chooses the language version. The Workflow block names the process and can set execution limits. Each Node block has a stable ID and a built-in `type`.
+| Part | What it does |
+| --- | --- |
+| `Rattish: 1` | Picks the language version |
+| `Workflow:` | Names the process and can set limits such as `timeout` |
+| `Node save-note:` | One step, with a stable ID and a built-in `type` |
+
+The file writes `reports/note.txt` only when you run it.
 
 ## Source conventions
 
-Use `.rattish` files, two-space indentation, and kebab-case node IDs and field names. Keywords are case-insensitive; formatting canonicalizes their spelling. Prompts, commands, paths, model IDs, and data strings preserve case. Comments begin with `#`.
-
-Quote a string that would otherwise be a language literal. For example, `memory: "none"` selects the string value; unquoted `none` represents absence.
+- Save files as `.rattish`, indented with two spaces.
+- Use kebab-case for node IDs and field names.
+- Keywords are case-insensitive, and `format` normalizes their spelling. Prompts, commands, paths, model IDs and data strings keep their case.
+- Comments start with `#`.
+- Quote a string that would otherwise read as a literal. `memory: "none"` is the string; unquoted `none` means no value.
 
 Use a block string for a multiline command or prompt:
 
@@ -40,19 +48,29 @@ prompt: |
   Give the smallest useful fix.
 ```
 
-Rattish is its own language. YAML-looking layout does not mean every YAML construct or guessed field is accepted. The node contract decides the legal fields.
+Rattish looks like YAML but isn't YAML. Each node's contract decides which fields are legal, so a guessed field fails validation.
 
 ## Workflow location
 
-Create a registered workflow with `Raticode rattish create "Name" --project PROJECT --format json`. Edit its returned `workflow.sourcePath`. Standalone `.rattish` files are also accepted by the CLI.
+Create a registered workflow with `Raticode rattish create "Name" --project PROJECT --format json`, then edit the `workflow.sourcePath` it returns. The CLI also accepts standalone `.rattish` files.
 
-Registered workflows resolve relative paths from their registered project root. For an unregistered source, its directory is the default root. Authored filesystem paths can also be absolute or home-relative; workflow file nodes follow OS permissions. Prefer project-relative resources for portability and review any path outside the project.
+- A registered workflow resolves relative paths from its project root.
+- An unregistered file resolves them from its own folder.
+- Absolute and home-relative paths also work, and file nodes follow OS permissions.
+
+Prefer project-relative paths so the workflow moves with the project. Review any path outside it.
 
 ## Routes and data
 
-`to` routes execution, `needs` declares readiness, and `with` binds values for a node activation. Workflow inputs use `input.<name>`. A node's successful result uses `node.<id>.output`; its status and error have separate namespaces.
+| Field or reference | Meaning |
+| --- | --- |
+| `to` | Where execution goes next |
+| `needs` | What must finish before a node is ready |
+| `with` | Values bound for one node activation |
+| `input.<name>` | A workflow input |
+| `node.<id>.output` | A node's successful result. Status and error have their own namespaces. |
 
-Read [Routes](./routes.md), [Inputs and bindings](./inputs.md), and [Loops](./loops.md) before adding more complex control flow.
+Read [Routes](./routes.md), [Inputs and bindings](./inputs.md) and [Loops](./loops.md) before adding more complex control flow.
 
 ## Find the exact contract
 
@@ -63,6 +81,6 @@ Raticode rattish check WORKFLOW_PATH --format json
 Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
-Installed docs and machine contracts match the CLI doing the compilation. Its diagnostics take precedence over an example for a different version. The [node reference](../nodes/index.md) lists all 24 built-in types.
+The installed docs and contracts match the CLI that compiles your workflow. When an example written for another version disagrees, trust the CLI's diagnostics. The [node reference](../nodes/index.md) lists all 24 built-in types.
 
-Current authoring uses Rattish. Older TOML workflow commands are compatibility features and should not be used to create new workflows for these guides.
+Write new workflows in Rattish. The older TOML workflow commands remain only for compatibility.

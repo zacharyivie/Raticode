@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, ChevronDown, ChevronUp, Copy, ExternalLink, Eye, EyeOff, FileClock, Highlighter, Library, ListTree, MessageSquareQuote, MoreHorizontal, PanelLeft, Plus, Quote, Search, Sparkles, Star, Trash2, X, ZoomIn, ZoomOut, Link2, CircleCheck } from "lucide-react";
-import { extractionLabel, formatCitation, formatDay, formatTime, formatBytes, originLabel, parseQuery, typeLabel } from "../lib/secondBrain.js";
+import { extractionLabel, formatCitation, formatDay, formatTime, formatBytes, originLabel, parseQuery, typeLabel, webSourceUrl } from "../lib/secondBrain.js";
 import { activateTab, closeTab, pinTab, openDocument, toggleReading, saveCitation, removeCitation, addToCollection, evidenceItem, openDialog, notify, libraryFor, documentById, navigate } from "../lib/secondBrainStore.js";
 import { Empty, Menu, Pill, Segmented, TypeIcon, askRem } from "./SecondBrainParts.jsx";
 import Connections from "./SecondBrainConnections.jsx";
@@ -52,7 +52,7 @@ function DocumentDetails({ doc, store }) {
   const reportsUsing = store.reports.filter(report => report.sourceVersions.some(source => source.docId === doc.id));
   const versions = [{ hash: doc.version, at: doc.dates.modified, note: "Current source" }, ...doc.versions.filter(version => version.hash !== doc.version)];
   const facts = [["Path", <code className="sb-mono" key="p">{doc.path}</code>], ["Type", typeLabel(doc.type)], ["Author", doc.author || "Unknown"], ["Project in file or set by you", doc.project || "None"], ["Tags", doc.tags.length ? doc.tags.join(", ") : "None"],
-    ["Source", doc.source?.url ? <a key="s" href={doc.source.url} onClick={event => { event.preventDefault(); window.open(doc.source.url, "_blank", "noopener"); }}>{doc.source.domain}</a> : "None"], ["DOI", doc.source?.doi || "None"],
+    ["Source", webSourceUrl(doc.source?.url) ? <a key="s" href={webSourceUrl(doc.source.url)} rel="noreferrer" onClick={event => { event.preventDefault(); window.open(webSourceUrl(doc.source.url), "_blank", "noopener,noreferrer"); }}>{doc.source.domain}</a> : "None"], ["DOI", doc.source?.doi || "None"],
     ["Added", formatDay(doc.dates.added)], ["Modified", formatDay(doc.dates.modified)], ["Published", doc.dates.published ? formatDay(doc.dates.published) : "Unknown"], ...(doc.dates.captured ? [["Captured", formatTime(doc.dates.captured)]] : []),
     ["Origin", originLabel(doc.origin)], ["Extraction", extractionLabel(doc.extraction)], ["Size", formatBytes(doc.size)], ["Document ID", <code className="sb-mono" key="i">{doc.id}</code>]];
   return <div className="sb-details">

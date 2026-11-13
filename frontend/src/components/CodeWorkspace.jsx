@@ -17,6 +17,7 @@ import { installRemActions } from "../lib/editorRem.js";
 import { askRemAboutFiles, copyFilesForPaste } from "../lib/fileAttachments.js";
 import { installConflictControls } from "../lib/mergeConflicts.js";
 import {
+  Fragment,
   forwardRef,
   lazy,
   Suspense,
@@ -63,7 +64,8 @@ import { Dialog } from "./Dialog.jsx";
 import MarkdownContent from "./MarkdownContent.jsx";
 import IntegratedBrowser, { HtmlModeToggle } from "./IntegratedBrowser.jsx";
 import GeckoBrowser from "./GeckoBrowser.jsx";
-import { BrowserEngineBadge, NewBrowserTabButton } from "./BrowserTabControls.jsx";
+import { BrowserEngineBadge, BrowserFamilyChooser, BrowserGroupNewTab, BrowserTabNotice, useBrowserEngineStatus } from "./BrowserTabControls.jsx";
+import { browserFamilyChoices, geckoTabPath, groupBrowserTabPaths, groupedBrowserPaths } from "../lib/browserTabs.js";
 import { pendingRemApprovals } from "../lib/browserUi.js";
 import { WEB_BROWSER_OPTIONS, webBrowserEngine } from "../lib/browserEngines.js";
 
@@ -135,6 +137,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
   onHiddenApprovalChange,
 }, ref) {
   const browserVariant = variant === "browser";
+  const browserStatus = useBrowserEngineStatus(browserVariant);
+  const [browserNotice, setBrowserNotice] = useState(null);
+  const dismissBrowserNotice = useCallback(() => setBrowserNotice(null), []);
   const textEditorRefs = useRef(new Map());
   const workspaceRef = useRef(null);
   const tabMenuRef = useRef(null);
@@ -563,7 +568,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
       return;
     }
     if (action === "next-tab" || action === "previous-tab") {
-      const groupPaths = splitPaths.includes(currentPath) ? splitPaths : primaryGroupPaths;
+      const groupPaths = shownTabOrder(splitPaths.includes(currentPath) ? splitPaths : primaryGroupPaths);
       const nextPath = adjacentCodeTab(
         groupPaths,
         currentPath,
@@ -600,16 +605,48 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
     });
   }
 
-  function renderTabStrip(paths, activeForGroup, isSplit, column) {
+  // The Browser plugin shows each browser's tabs together.
+  function shownTabOrder(paths) {
+    return browserVariant ? groupedBrowserPaths(paths, browserTabs, defaultBrowserEngine) : paths;
+  }
+
+  // A new tab from the tab bar. Says why when a browser can't open one, and
+  // that Raticode (gecko)'s extra tabs open inside its one Firefox window.
+  function openBrowserTabIn({ engine, private: privateTab = false } = {}) {
+    if (privateTab) {
+      onOpenBrowser?.({ newTab: true, private: true });
+      return;
+    }
+    const value = webBrowserEngine(engine);
+    const reason = browserStatus.reasonFor(value);
+    if (reason) {
+      setBrowserNotice({ tone: "error", text: reason });
+      browserStatus.refresh();
+      return;
+    }
+    if (value === "gecko" && geckoTabPath(openPaths, browserTabs)) {
+      setBrowserNotice({ text: "Raticode (gecko) is one Firefox window, so the new tab opens inside it. Switch between its tabs with Firefox's own tab strip." });
+    } else {
+      setBrowserNotice(null);
+    }
+    onOpenBrowser?.({ newTab: true, engine: value });
+  }
+
+  function renderTabStrip(groupOrderPaths, activeForGroup, isSplit, column) {
+    const paths = shownTabOrder(groupOrderPaths);
+    const browserGroups = browserVariant ? groupBrowserTabPaths(paths, browserTabs, defaultBrowserEngine) : [];
+    const groupEnds = new Map(browserGroups.map((group) => [group.paths.at(-1), group]));
+    const family = browserFamilyChoices(browserGroups);
     const projectRoots = [...new Set([workflow?.projectRoot, ...Object.values(workflowTabs).map(item => item.projectRoot)].filter(Boolean))].sort((left, right) => right.length - left.length);
     return (
       <div
-        className={`relative flex min-w-0 border-b border-line bg-slate-50 ${column === 2 ? "border-l" : ""}`}
+        className={`relative flex min-w-0 flex-col border-b border-line bg-slate-50 ${column === 2 ? "border-l" : ""}`}
         style={{ gridColumn: column, gridRow: 1 }}
       >
+      <div className="flex min-w-0">
       <div
         aria-label={browserVariant ? (isSplit ? "Split browser tabs" : "Browser tabs") : isSplit ? "Split editor tabs" : "Editor tabs"}
-        className="tab-strip-scrollbar flex h-9 min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden"
+        className={`tab-strip-scrollbar flex h-9 min-w-0 items-center overflow-x-auto overflow-y-hidden ${browserVariant ? "flex-initial" : "flex-1"}`}
         role="tablist"
         onDragOver={(event) => {
           if (!draggedPathRef.current) return;
@@ -640,9 +677,10 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           const title = commitDiff ? `${label}\n${commitDiff.projectRoot}\n${commitDiff.hash}` : workflowTab ? [label, workflowTab.sourcePath, workflowTab.statusLabel].filter(Boolean).join("\n") : tabMetadata
             ? [label, tabMetadata.url].filter(Boolean).join("\n")
             : isTerminalTabPath(path) ? label : path;
+          const groupEnd = groupEnds.get(path);
           return (
+            <Fragment key={path}>
             <div
-              key={path}
               className={`group relative flex h-full w-48 shrink-0 items-center border-r border-line text-xs ${selected ? "bg-white font-semibold text-ink" : "text-muted hover:bg-white/70 hover:text-ink"}`}
               title={title}
               onContextMenu={(event) => openTabMenu(event, path, paths)}
@@ -719,11 +757,23 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               ><X size={12} /></button>
               {selected ? <span className="pointer-events-none absolute inset-x-0 top-0 h-0.5 bg-brand" /> : null}
             </div>
+            {groupEnd ? <BrowserGroupNewTab group={groupEnd} onNewTab={(group) => openBrowserTabIn({ engine: group.engine, private: group.private })} /> : null}
+            </Fragment>
           );
         })}
       </div>
-      {browserVariant && !isSplit ? <NewBrowserTabButton defaultEngine={defaultBrowserEngine} onNewTab={(options) => onOpenBrowser?.({ newTab: true, ...options })} /> : null}
-      <EditorTabsMenu
+      {/* Outside the scrolling tabs, so it stays in view right after the last tab. */}
+      {browserVariant && !isSplit ? (
+        <BrowserFamilyChooser
+          choices={family.choices}
+          inside={family.inside}
+          offerPrivate={family.offerPrivate}
+          reasonFor={browserStatus.reasonFor}
+          onChoose={openBrowserTabIn}
+          onOpen={browserStatus.refresh}
+        />
+      ) : null}
+      {browserVariant ? null : <EditorTabsMenu
         activePath={activeForGroup}
         label={browserVariant ? (isSplit ? "All split browser tabs" : "All browser tabs") : isSplit ? "All split editor tabs" : "All editor tabs"}
         entries={paths.map((path) => {
@@ -733,7 +783,9 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
           return { path, tab, browser, projectRoot, label: tab?.name || codeTabLabel(path, browserViewTabMetadata(browser, browserViewStates[path])) };
         })}
         onActivate={onActivePathChange}
-      />
+      />}
+      </div>
+      {browserVariant && !isSplit ? <BrowserTabNotice notice={browserNotice} onDismiss={dismissBrowserNotice} /> : null}
       </div>
     );
   }
@@ -791,6 +843,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               tabId={path}
               initialUrl={browserTab.url}
               pendingUrls={browserTab.pendingUrls || []}
+              newTabRequests={browserTab.geckoNewTabs || 0}
               onPendingOpened={(urls) => onGeckoPendingOpened?.(path, urls)}
               onStateChange={(nextState) => onBrowserStateChange?.(path, nextState)}
             />
@@ -823,7 +876,7 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               showModeToggle={html}
               onClose={() => closeWorkspacePath(path)}
               onCycleTab={(direction) => {
-                const nextPath = adjacentCodeTab(groupPaths, path, direction);
+                const nextPath = adjacentCodeTab(shownTabOrder(groupPaths), path, direction);
                 if (nextPath) onActivePathChange?.(nextPath);
               }}
               onNewTab={() => onOpenBrowser?.({ newTab: true, ...(browserTab && !browserTab.agentSessionId && !browserTab.private && browserTab.engine ? { engine: browserTab.engine } : {}) })}
@@ -998,12 +1051,16 @@ const CodeWorkspace = forwardRef(function CodeWorkspace({
               <p className="mt-3 text-sm font-semibold text-ink">No web tabs open</p>
               <p className="mt-1 text-xs leading-5 text-muted">Tabs from every browser share this tab bar. Pick one to start.</p>
               <div className="mt-4 flex flex-wrap justify-center gap-2">
-                {WEB_BROWSER_OPTIONS.map(([value, label]) => (
-                  <button key={value} type="button" className="flex items-center gap-1.5 rounded-md border border-line bg-white px-2.5 py-1.5 text-xs text-ink hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={() => onOpenBrowser?.({ newTab: true, engine: value })}>
-                    <BrowserEngineBadge engine={value} />{label}{value === webBrowserEngine(defaultBrowserEngine) ? <span className="text-[10px] text-muted">(default)</span> : null}
-                  </button>
-                ))}
+                {WEB_BROWSER_OPTIONS.map(([value, label]) => {
+                  const reason = browserStatus.reasonFor(value);
+                  return (
+                    <button key={value} type="button" aria-disabled={reason ? "true" : undefined} title={reason || undefined} data-browser-family={value} className={`flex items-center gap-1.5 rounded-md border border-line bg-white px-2.5 py-1.5 text-xs text-ink hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand ${reason ? "opacity-50" : ""}`} onClick={() => openBrowserTabIn({ engine: value })}>
+                      <BrowserEngineBadge engine={value} />{label}{value === webBrowserEngine(defaultBrowserEngine) ? <span className="text-[10px] text-muted">(default)</span> : null}
+                    </button>
+                  );
+                })}
               </div>
+              {browserNotice ? <div className="mt-3 overflow-hidden rounded-md border border-line text-left"><BrowserTabNotice notice={browserNotice} onDismiss={dismissBrowserNotice} /></div> : null}
             </div>
           </div>
         ) : !currentPath ? emptyContent || (
@@ -1952,6 +2009,7 @@ export function MarkdownPreview({ content, path, onEdit, onOpenRelativeLink }) {
     >
       <MarkdownContent
         className="mx-auto w-full max-w-[76ch]"
+        loadWebImages
         sourcePath={path}
         value={content}
         onOpenRelativeLink={onOpenRelativeLink}

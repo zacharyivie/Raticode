@@ -271,6 +271,15 @@ class DeviceControl:
                 "outbound": outbound,
                 "invitation_available": bool(self.invitations and self.invitations.current),
                 "tailnet": self._tailnet_status(),
+                # The suspicious-request guard (phone_guard.py). Flagged text is fetched
+                # separately with the flagged_requests action.
+                "phone_guard": {
+                    "enabled": self.application.locks.enabled(),
+                    "locked": self.application.locks.locks(),
+                    "flagged": self.application.locks.counts(),
+                }
+                if self.application
+                else {"enabled": True, "locked": [], "flagged": {}},
             }
 
     def _tailnet_status(self) -> dict[str, Any]:
@@ -647,6 +656,29 @@ class DeviceControl:
                     raise PairingError("invalid_desktop_control_choice")
                 self.application.desktop.enable(str(body.get("device_id", "")), body["enabled"])
                 return self.status()
+            if action in ("unlock_phone", "phone_guard", "flagged_requests", "forget_flagged"):
+                # The user's own clicks in Paired devices. Agent tokens can't reach
+                # /api/devices (headless._AGENT_DENIED_PREFIXES), and neither Rem nor its
+                # workers have a tool that calls it.
+                assert self.application is not None
+                locks = self.application.locks
+                peer = str(body.get("device_id", ""))
+                if action == "phone_guard":
+                    if not isinstance(body.get("enabled"), bool):
+                        raise PairingError("invalid_phone_guard_choice")
+                    locks.set_enabled(body["enabled"])
+                    return self.status()
+                with self.registry.lock:
+                    self.registry._row(peer)
+                if action == "flagged_requests":
+                    return {"device_id": peer, "requests": locks.flagged(peer)}
+                if action == "forget_flagged":
+                    locks.forget_flagged(peer)
+                    return self.status()
+                if body.get("confirm") is not True:
+                    raise PairingError("unlock_confirmation_required")
+                locks.unlock(peer)
+                return self.status()
             if action == "wake_computer":
                 assert self.application is not None
                 if not isinstance(body.get("enabled"), bool):
@@ -733,9 +765,14 @@ class DeviceControl:
                 # Phones connect only over the local network, so a QR must carry its address.
                 if self.port is None or ipaddress.ip_address(self.host).is_loopback:
                     raise PairingError("local_network_address_required")
+                # The device the user chose to pair, which fixes the role a claim must have.
+                kind = body.get("device", "phone")
+                if kind not in ("phone", "desktop"):
+                    raise PairingError("invalid_role")
                 result = self.invitations.create(
                     str(body.get("name", "Raticode Desktop")),
                     {"host": self.host, "port": self.port},
+                    role="controller" if kind == "phone" else "desktop",
                 )
                 import segno
 
@@ -873,6 +910,9 @@ class DeviceControl:
         remote.decide_workflow = self.services.get("decide_workflow")
         desktop = self.application.desktop
         desktop.rem = self.services.get("rem")
+        if desktop.rem is not None:
+            # Rem tells the guard when it holds back files a phone asked for.
+            desktop.rem.phone_guard = self.application.locks
         desktop.organizations = self.services.get("organizations")
         desktop.usage = self.services.get("usage")
 
@@ -936,5 +976,8 @@ class DeviceControl:
             self.loop.call_soon_threadsafe(self.loop.stop)
             self.thread.join(timeout=10)
             self.loop.close()
+            rem = self.services.get("rem")
+            if rem is not None:
+                rem.phone_guard = None
             if self.registry is not None:
                 self.registry.close()

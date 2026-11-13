@@ -656,3 +656,45 @@ def test_legacy_workflow_writers_work_offline_after_the_backend_stops(tmp_path) 
     renamed = _invoke("workflow", "rename", workflow_id, "--name", "Offline name", *flags)
     assert renamed.exit_code == 0, renamed.output
     assert "Offline name" in renamed.stdout
+
+
+def test_agent_tokens_cannot_read_rems_config_through_run_or_thread_details(
+    tmp_path, headless_serve
+) -> None:
+    """MCP URLs and folder grants stay hidden, as on /api/rem/context."""
+    data_dir = tmp_path / "data"
+    token_out = tmp_path / "ci.token"
+    assert (
+        _invoke(
+            "tokens", "create", "ci", "--output", str(token_out), "--data-dir", str(data_dir)
+        ).exit_code
+        == 0
+    )
+    agent = token_out.read_text(encoding="utf-8").strip()
+    server = headless_serve(data_dir)
+    owner = (data_dir / "headless" / "owner-token").read_text(encoding="utf-8").strip()
+    secret_url = "https://mcp.example/sse?key=hidden-mcp-key"
+    config = {
+        "projects": [{"root": str(tmp_path), "grantId": "grant-secret-id"}],
+        "resources": {"mcpServers": [{"name": "kb", "url": secret_url}]},
+    }
+    store = server.rem_home.store
+    with store.connect() as db:
+        store.put(
+            db,
+            "runs",
+            {"id": "run-1", "task_id": "t", "occurrence": "o", "state": "queued", "config": config},
+        )
+        store.put(
+            db,
+            "threads",
+            {"id": "thread-1", "managedRunId": "run-1", "resources": config["resources"]},
+        )
+
+    for path in ("/api/rem/runs/run-1", "/api/rem/threads/thread-1"):
+        status, payload = _request(server, "GET", path, agent)
+        assert status == 200, payload
+        text = json.dumps(payload)
+        assert "hidden-mcp-key" not in text and "grant-secret-id" not in text
+        status, payload = _request(server, "GET", path, owner)
+        assert status == 200 and "hidden-mcp-key" in json.dumps(payload)

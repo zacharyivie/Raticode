@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityLine, assignmentLine, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, scopeNote, selfWorkLine, visibleEntries, withProject } from "./remKanban.js";
+import { activityLine, assignmentLine, autoPullHint, avatarColor, boardOn, cappedThreads, canDropOn, checksLine, columnTickets, entryHeadline, entryTone, filterTickets, initials, modeLabel, ownerFilters, participantOf, remProjectChoices, savedSwitchNote, scopeNote, selfWorkLine, selfWorkWindows, visibleEntries, windowDetail, withProject } from "./remKanban.js";
 
 const ticket = (fields = {}) => ({ ticket_id: "t", key: "REM-1", title: "Export", scope: "rem", organization_id: "", status: "todo", priority: "medium", proposed: false, running: false, created_at: "2026-11-01", ...fields });
 
@@ -167,4 +167,34 @@ test("Rem's project choices list what it can have and keep what it has", () => {
   assert.deepEqual(withProject(["/a"], "/b", true), ["/a", "/b"]);
   assert.deepEqual(withProject(["/a", "/b"], "/a", true), ["/a", "/b"]);
   assert.deepEqual(withProject(["/a", "/b"], "/a", false), ["/b"]);
+});
+
+test("a paused ticket can only go back to In progress, which resumes it", () => {
+  const paused = ticket({ status: "blocked", paused: "priority" });
+  assert.equal(canDropOn(paused, "in_progress"), true);
+  for (const column of ["todo", "backlog", "done"]) assert.equal(canDropOn(paused, column), false);
+  assert.equal(activityLine({ title: "Fix export", project: "app", paused: "priority" }), "Fix export · app · Paused for your work");
+  assert.equal(activityLine({ title: "Fix export", project: "app", paused: "user" }), "Fix export · app · Paused");
+  assert.equal(activityLine({ title: "Fix export", project: "app", paused: "" }), "Fix export · app");
+});
+
+test("timed self-work windows show only when the desktop sends a schedule", () => {
+  const settings = { idle_minutes: 15, enabled: true };
+  const active = { id: "w1", label: "Until 7:00 PM today (Asia/Irkutsk)", end_label: "7:00 PM Thu 12 Nov (Asia/Irkutsk)", after_label: "then back to off", after_end: "restore" };
+  const upcoming = { id: "w2", label: "11:00 PM today to 7:00 AM Fri", end_label: "when 2 running tasks finish", after_label: "" };
+  // Older desktops send no schedule and no saved switch: nothing new shows.
+  assert.equal(selfWorkWindows({ settings, state: {} }), null);
+  assert.equal(savedSwitchNote({ settings, state: {} }), "");
+  const view = { settings: { ...settings, saved_enabled: false }, state: { mode: "waiting", starts_at: "x", detail: "" },
+    schedule: { timezone: "Asia/Irkutsk", active, upcoming: [upcoming], last_period: { id: "p", ended_at: "2026-11-12T11:00:00Z", summary: "Started 3 tasks, finished 2." } } };
+  assert.deepEqual(selfWorkWindows(view), { active, upcoming: [upcoming], last: view.schedule.last_period });
+  assert.equal(selfWorkWindows({ schedule: { active: null, upcoming: [], last_period: { summary: "" } } }).last, null);
+  assert.equal(windowDetail(active), "Ends 7:00 PM Thu 12 Nov (Asia/Irkutsk), then back to off");
+  assert.equal(windowDetail(upcoming), "Ends when 2 running tasks finish");
+  // Waiting for quiet minutes inside a window still says when the window ends.
+  assert.equal(selfWorkLine(view), "Starts after 15 quiet minutes · ends 7:00 PM Thu 12 Nov (Asia/Irkutsk)");
+  // The switch shows the window; a note says what it goes back to.
+  assert.equal(savedSwitchNote(view), "On for this window; goes back to off after it.");
+  assert.equal(savedSwitchNote({ ...view, schedule: { ...view.schedule, active: { ...active, after_end: "on" } } }), "On for this window; stays on after it.");
+  assert.equal(savedSwitchNote({ ...view, settings: { ...settings, saved_enabled: true } }), "");
 });

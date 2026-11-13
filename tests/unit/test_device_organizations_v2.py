@@ -1,5 +1,6 @@
 """The five-section Organizations view and its actions from a paired phone."""
 
+import copy
 import json
 from typing import Any
 
@@ -266,9 +267,10 @@ def test_workers_are_held_and_released_but_never_widened(org):
             },
         },
     )
-    refused = worker("dev", False)
-    assert refused["code"] == "unauthorized" and "desktop" in refused["detail"]
-    assert manager.store.get("", oid)["config"]["employees"][1]["paused"] is True
+    # The phone is the user: it releases a full-access worker's hold as the desktop can.
+    released = worker("dev", False)["value"]
+    assert {e["employee_id"]: e["paused"] for e in released["employees"]}["dev"] is False
+    assert manager.store.get("", oid)["config"]["employees"][1]["paused"] is False
     assert worker("nobody", True)["code"] == "not_found"
     assert (
         send(
@@ -368,3 +370,207 @@ def test_the_phone_gets_whole_current_and_next_blocks_and_plain_refusals(org):
         "Lunch and Lunch overlap and neither takes precedence: they repeat on the same "
         "cadence and last equally long. Change one's times, or its cadence."
     )
+
+
+def test_the_phone_turns_backlog_pulls_on_and_off(org):
+    _, _, _, send, manager, oid = org
+    overview = send("desktop.read", "overview", {})["value"]
+    assert overview["organization_backlog_pull"] is True
+    before = read(send, oid)
+    # On unless turned off.
+    assert before["pull_backlog"] is True
+    saved = send(
+        "desktop.action",
+        "organizations.backlog_pull",
+        {"organization_id": oid, "expected_revision": before["revision"], "enabled": False},
+    )
+    assert saved["ok"] is True and saved["value"]["pull_backlog"] is False
+    assert manager.store.get("", oid)["config"]["pullBacklog"] is False
+    history = manager.call("", "user", {"action": "history", "organizationId": oid, "params": {}})
+    assert history[0]["reason"] == (
+        "Workers leave Backlog tickets for you to move, set from the phone"
+    )
+    # A stale revision and a value that isn't true or false are refused plainly.
+    stale = send(
+        "desktop.action",
+        "organizations.backlog_pull",
+        {"organization_id": oid, "expected_revision": before["revision"], "enabled": True},
+    )
+    assert stale["ok"] is False and stale["code"] == "conflict"
+    vague = send(
+        "desktop.action",
+        "organizations.backlog_pull",
+        {"organization_id": oid, "expected_revision": saved["value"]["revision"], "enabled": "on"},
+    )
+    assert vague["ok"] is False and vague["code"] == "invalid"
+    again = send(
+        "desktop.action",
+        "organizations.backlog_pull",
+        {"organization_id": oid, "expected_revision": saved["value"]["revision"], "enabled": True},
+    )
+    assert again["ok"] is True and again["value"]["pull_backlog"] is True
+
+
+def _ask(manager: OrganizationManager, oid: str, action: str, **params: Any) -> str:
+    asked = manager.call(
+        "", "Rem:thread", {"action": action, "organizationId": oid, "params": params}
+    )
+    assert asked["needsUserConsent"] is True
+    return str(asked["requestId"])
+
+
+def _requests(manager: OrganizationManager, oid: str) -> Any:
+    return manager.store.get("", oid)["runtime"]["consentRequests"]
+
+
+def test_the_phone_approves_exactly_the_requests_it_showed(org):
+    _, _, _, send, manager, oid = org
+    assert send("desktop.read", "overview", {})["value"]["organization_requests"] is True
+    task = manager.call(
+        "",
+        "user",
+        {
+            "action": "task_create",
+            "organizationId": oid,
+            "params": {"title": "Charter", "assignee": "lead", "approvalRequired": True},
+        },
+    )
+    start = _ask(manager, oid, "control", state="running")
+    ungate = _ask(
+        manager,
+        oid,
+        "task_update",
+        taskId=task["id"],
+        expectedRevision=task["revision"],
+        changes={"approvalRequired": False},
+    )
+    view = read(send, oid)
+    # Oldest first, each with the ID the phone sends back.
+    assert [r["request_id"] for r in view["requests"]] == [start, ungate]
+    shown = [r["request_id"] for r in view["requests"]]
+    later = _ask(manager, oid, "archive", archived=True)
+
+    done = send(
+        "desktop.action",
+        "organizations.requests",
+        {"organization_id": oid, "decision": "approve", "request_ids": shown},
+    )
+
+    assert done["ok"] is True
+    results = done["value"]["request_results"]
+    # The ticket change applied before the start, and each says how it went.
+    assert [(r["request_id"], r["status"]) for r in results] == [
+        (ungate, "approved"),
+        (start, "approved"),
+    ]
+    assert done["value"]["state"] == "running"
+    assert [r["request_id"] for r in done["value"]["requests"]] == [later]
+    assert _requests(manager, oid)[later]["status"] == "pending"
+    manager.call(
+        "", "user", {"action": "control", "organizationId": oid, "params": {"state": "paused"}}
+    )
+
+
+def test_the_phone_decides_requests_like_the_desktop_including_unsandboxed_ones(org):
+    _, _, _, send, manager, oid = org
+    current = manager.store.get("", oid)
+    config = json.loads(json.dumps(current["config"]))
+    config["employees"][0]["permissionMode"] = "danger-full-access"
+    risky = _ask(
+        manager, oid, "configure", config=config, expectedRevision=current["revision"], reason="x"
+    )
+    start = _ask(manager, oid, "control", state="running")
+    other = _ask(manager, oid, "resume_all", expectedRevision=current["revision"])
+
+    declined = send(
+        "desktop.action",
+        "organizations.requests",
+        {"organization_id": oid, "decision": "decline", "request_ids": [other]},
+    )
+    assert declined["value"]["request_results"] == [
+        {"request_id": other, "summary": "", "status": "declined", "message": ""}
+    ]
+    assert _requests(manager, oid)[other]["status"] == "declined"
+
+    done = send(
+        "desktop.action",
+        "organizations.requests",
+        {"organization_id": oid, "decision": "approve", "request_ids": [start, risky]},
+    )
+    by_id = {r["request_id"]: r for r in done["value"]["request_results"]}
+    # A phone with Use Raticode from this phone on is the user: no phone-only holds.
+    assert by_id[risky]["status"] == "approved", by_id[risky]
+    assert by_id[start]["status"] == "approved", by_id[start]
+    after = manager.store.get("", oid)
+    assert after["runtime"]["state"] == "running"
+    assert after["config"]["employees"][0].get("permissionMode") == "danger-full-access"
+    assert _requests(manager, oid)[risky]["status"] == "approved"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"decision": "approve", "request_ids": []},
+        {"decision": "approve", "request_ids": ["a", "a"]},
+        {"decision": "approve", "request_ids": "a"},
+        {"decision": "maybe", "request_ids": ["a"]},
+    ],
+)
+def test_the_phone_request_list_is_checked(org, params):
+    _, _, _, send, _, oid = org
+    refused = send("desktop.action", "organizations.requests", {"organization_id": oid, **params})
+    assert refused["ok"] is False and refused["code"] == "invalid"
+
+
+def test_the_phone_turns_auto_mode_on_only_after_confirming(org):
+    _, _, _, send, manager, oid = org
+    overview = send("desktop.read", "overview", {})["value"]
+    assert overview["organization_auto_mode"] is True
+    before = read(send, oid)
+    assert before["auto_mode"] is False and before["auto_halt"] is None
+    assert before["auto_decisions"] == []
+    unconfirmed = send(
+        "desktop.action",
+        "organizations.auto_mode",
+        {"organization_id": oid, "expected_revision": before["revision"], "enabled": True},
+    )
+    assert unconfirmed["ok"] is False and unconfirmed["code"] == "invalid"
+    assert manager.store.get("", oid)["config"]["autoMode"] is False
+    on = send(
+        "desktop.action",
+        "organizations.auto_mode",
+        {
+            "organization_id": oid,
+            "expected_revision": before["revision"],
+            "enabled": True,
+            "confirm": True,
+        },
+    )
+    assert on["ok"] is True and on["value"]["auto_mode"] is True
+    # Rem's requests now wait on Rem's review, and the phone says so.
+    config = copy.deepcopy(manager.store.get("", oid)["config"])
+    config.pop("packageFiles", None)
+    config["employees"][0]["paused"] = not config["employees"][0].get("paused")
+    asked = manager.call(
+        "",
+        "Rem:thread",
+        {
+            "action": "configure",
+            "organizationId": oid,
+            "params": {
+                "config": config,
+                "expectedRevision": on["value"]["revision"],
+                "reason": "x",
+            },
+        },
+    )
+    shown = read(send, oid)
+    if asked.get("requestId"):
+        request = next(r for r in shown["requests"] if r["request_id"] == asked["requestId"])
+        assert request["waiting_on"] == "rem"
+    off = send(
+        "desktop.action",
+        "organizations.auto_mode",
+        {"organization_id": oid, "expected_revision": shown["revision"], "enabled": False},
+    )
+    assert off["ok"] is True and off["value"]["auto_mode"] is False

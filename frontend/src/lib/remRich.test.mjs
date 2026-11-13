@@ -169,6 +169,22 @@ test("a hold notice offers to retry what it waits for or start it now", () => {
   ] } };
   assert.deepEqual(resultActions(message, [task]).map(action => [action.id, action.label]), [["retry-after:audit", "Retry “Audit”"], ["run", "Start now"]]);
   assert.deepEqual(resultActions(message, [task])[0].task, { id: "audit" });
+  // Times, the self-work window and runs that were going can't be retried.
+  const conditions = { id: "fix", dependency: { state: "waiting", prerequisites: [
+    { kind: "time", task_id: "", title: "7:00 AM", state: "waiting", retryable: true },
+    { kind: "run", task_id: "audit", title: "Audit", state: "waiting", retryable: true },
+  ] } };
+  assert.deepEqual(resultActions(message, [conditions]).map(action => action.id), ["run"]);
   // Once it runs, the card offers nothing while the run is going.
   assert.deepEqual(resultActions(message, [{ ...task, dependency: undefined, active_run: { id: "r", state: "queued" } }]), []);
+});
+
+test("a paused run holds its step without reading as stopped, and offers Resume", () => {
+  const steps = runSteps("paused", { step: "work" });
+  assert.deepEqual(steps.map(step => step.state), ["done", "paused", "todo", "todo"]);
+  assert.equal(stepText(steps[1]), "Work paused");
+  assert.deepEqual(runSteps("paused", { step: "check" }).map(step => step.state), ["done", "done", "paused", "todo"]);
+  const task = { id: "t", last_run: { id: "r", state: "paused" } };
+  const message = { role: "rem", kind: "task_update", work: { task_id: "t", run_id: "r" } };
+  assert.deepEqual(resultActions(message, [task]).map(action => action.label), ["Resume"]);
 });

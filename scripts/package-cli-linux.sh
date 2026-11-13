@@ -58,6 +58,7 @@ Section: devel
 Priority: optional
 Architecture: amd64
 Maintainer: ${maintainer}
+Homepage: https://raticode.dev
 Conflicts: ${previous_package_name}
 Replaces: ${previous_package_name}
 Description: ${description}
@@ -80,7 +81,7 @@ Version:        ${version}
 Release:        1%{?dist}
 Summary:        ${description}
 License:        AGPL-3.0-only
-URL:            https://github.com/zacharyivie/Raticode
+URL:            https://raticode.dev
 BuildArch:      x86_64
 Obsoletes:      ${previous_package_name} < %{version}
 

@@ -140,6 +140,9 @@ def test_list_summarizes_staff_and_open_work(manager, tmp_path) -> Any:
             "archived": False,
             "employees": 2,
             "openTasks": 1,
+            "waitingRequests": 0,
+            "autoMode": False,
+            "autoHalt": None,
             "projectRoots": [str(tmp_path)],
         }
     ]
@@ -390,7 +393,11 @@ def test_execution_reuses_rem_and_retains_conversation(manager, tmp_path) -> Any
     current = call(manager, org, "read")
     done = current["runtime"]["tasks"][0]
     assert done["status"] == "in_review" and done["claim"] is None
-    assert done["comments"][-1]["body"] == "Checked the implementation"
+    # The report is the worker's comment; the status entry after it doesn't repeat it.
+    report = [c for c in done["comments"] if c.get("kind") != "status"]
+    assert report[-1] == {**report[-1], "actor": "employee:builder"}
+    assert report[-1]["body"] == "Checked the implementation"
+    assert done["comments"][-1]["kind"] == "status" and done["comments"][-1]["body"] == ""
     assert "Mira" in captured[0]["agent_instructions"]
     assert "cannot configure" in captured[0]["agent_instructions"]
     assert captured[0]["working_dir"] == tmp_path

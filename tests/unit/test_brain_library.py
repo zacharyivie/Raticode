@@ -1437,3 +1437,17 @@ def test_manual_consent_does_not_override_brain_availability(library, tmp_path):
             threading.Event(),
             lambda _: None,
         )
+
+
+def test_note_front_matter_with_yaml_aliases_is_ignored_without_expanding() -> None:
+    """A few hundred bytes of nested aliases would otherwise expand to gigabytes."""
+    levels = ["a0: &a0 [x, x, x, x, x, x, x, x, x, x]"]
+    for level in range(1, 9):
+        refs = ", ".join([f"*a{level - 1}"] * 10)
+        levels.append(f"a{level}: &a{level} [{refs}]")
+    note = "---\n" + "\n".join(levels) + "\ntitle: *a8\n---\nBody text\n"
+
+    result = extract(note.encode(), ".md")
+
+    assert "Body text" in str(result["blocks"])
+    assert len(str(result)) < 10_000

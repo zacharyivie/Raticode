@@ -10,7 +10,7 @@ Send a prompt to Rem and pass its reply to the next steps.
 
 ## When to use it
 
-Use this node when a step needs Rem's answer: a summary, a decision written in words, or a question about your tasks and projects. The prompt goes to Rem's chat, so Rem answers with its memories and context, and the message shows there as coming from the workflow.
+Use it when a step needs Rem's answer: a summary, a decision in words, or a question about your tasks and projects. The prompt goes to Rem's chat, marked as coming from the workflow, so Rem answers with its memories and context.
 
 ## Example
 
@@ -45,17 +45,28 @@ Node save:
 
 ## What Rem may do
 
-By default Rem only answers. If its answer would start, change, cancel or delete a task, save or change a memory, or send a file, that part is dropped and the reply says so; `actions_dropped` is then `true`. Workflow prompts often carry text from files, web pages or commands, and this keeps that text from starting work.
+By default Rem only answers. Workflow prompts often carry text from files, web pages or commands, and this keeps that text from starting work.
 
-Set `allow-actions: true` to let Rem act on the prompt as it would on a message you typed. Tasks it starts still go through Rem's own checks, such as the projects and folders you approved. With `wait-for-tasks: true` the node also waits for the work Rem started and fails if any of it doesn't succeed.
+- If the answer would start, change, cancel or delete a task, save or change a memory, or send a file, that part is dropped. The reply says so, and `actions_dropped` is `true`.
+- `allow-actions: true` lets Rem act on the prompt as it would on a message you typed. Tasks it starts still go through Rem's own checks, such as your approved projects and folders.
+- `wait-for-tasks: true` also waits for the work Rem started, and fails if any of it doesn't succeed.
 
-Be careful with `allow-actions: true` in a workflow that a [webhook or file trigger](../workflows/triggers.md) starts: the webhook's body or the watched file can be written by someone else, and that text can reach the prompt. Raticode tells Rem when a webhook or file trigger started the run, and Rem then does only what the prompt plainly asks and describes, rather than acts on, any work that text inside it asks for. The backend log also records a warning for each such prompt. Keep these prompts answer-only when you can, and pass outside text through a step that checks it first.
+::: warning Prompts from triggers
+Be careful with `allow-actions: true` in a workflow started by a [webhook or file trigger](../workflows/triggers.md). Someone else can write the webhook body or the watched file, and that text can reach the prompt.
+
+- Raticode tells Rem when a webhook or file trigger started the run. Rem then does only what the prompt plainly asks, and describes rather than acts on any work the outside text asks for.
+- The backend log records a warning for each such prompt.
+- Keep these prompts answer-only when you can, and pass outside text through a step that checks it first.
+:::
 
 ## Waiting and stopping
 
-The node waits until Rem has answered. If Rem is replying to something else, the prompt waits in line like any message you send. Rem must be running: with no Raticode backend answering, the node fails with `RATTISH_REM_UNAVAILABLE` instead of waiting. If Rem stops for more than a minute while the node waits, the node fails the same way.
+The node waits until Rem has answered.
 
-When the node times out or the workflow is stopped, a prompt Rem hasn't started on is taken back. A prompt Rem is already answering still gets its answer in Rem's chat. Work Rem started for an `allow-actions` prompt keeps running; it is Rem's work now, as if you had asked.
+- If Rem is replying to something else, the prompt waits in line like a message you send.
+- Rem must be running. With no Raticode backend answering, the node fails at once with `RATTISH_REM_UNAVAILABLE`. It fails the same way if Rem stops for more than a minute while the node waits.
+- On a timeout or a stopped workflow, a prompt Rem hasn't started is taken back. One Rem is already answering still gets its answer in Rem's chat.
+- Work Rem started for an `allow-actions` prompt keeps running. It's Rem's work now, as if you had asked.
 
 ## Configuration
 

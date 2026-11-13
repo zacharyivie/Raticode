@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
-const { gitRepositoryAction, readGitFileBaseline, readGitStatus, runGit } = require("../git-status.cjs");
+const { gitRepositoryAction, parseRepositoryCommandConfig, readGitFileBaseline, readGitStatus, runGit } = require("../git-status.cjs");
 const { scanProject } = require("../project-search.cjs");
 
 async function repository(callback) {
@@ -67,6 +67,44 @@ test("automatic status refresh ignores executable filesystem monitors", async ()
     assert.equal(fs.existsSync(marker), false, "stash preview executed a repository monitor");
     assert.match(preview.diff, /\+changed/);
   });
+});
+
+test("automatic reads never run filter commands from a folder's own git config", async () => {
+  // An unpacked archive or synced folder can carry .git/config. `git status` runs a
+  // clean filter on any file whose timestamps changed, so opening such a folder ran
+  // the folder's command before this fix.
+  await repository(async ({ root, git, marker }) => {
+    const filter = path.join(path.dirname(root), "filter.cjs");
+    fs.writeFileSync(filter, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); process.stdin.pipe(process.stdout);`);
+    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+    const command = `${quote(process.execPath.replaceAll("\\", "/"))} ${quote(filter.replaceAll("\\", "/"))}`;
+    await git("config", "filter.planted.clean", command);
+    await git("config", "filter.planted.process", command);
+    await git("config", "filter.planted.required", "true");
+    fs.writeFileSync(path.join(root, ".git", "info", "attributes"), "*.txt filter=planted\n");
+    fs.writeFileSync(path.join(root, "file.txt"), "changed\n");
+    const old = new Date(Date.now() - 86_400_000);
+    fs.utimesSync(path.join(root, "file.txt"), old, old);
+    const status = await readGitStatus(root);
+    assert.equal(fs.existsSync(marker), false, "status refresh executed a repository filter");
+    assert.ok(status.entries.some(entry => entry.path === "file.txt" && entry.unstaged));
+    const baseline = await readGitFileBaseline(path.join(root, "file.txt"), { group: "unstaged" });
+    assert.equal(fs.existsSync(marker), false, "editor preview executed a repository filter");
+    assert.equal(baseline.modifiedContent, "changed\n");
+  });
+});
+
+test("only repository-scoped command settings are blanked, and git-lfs keeps working", () => {
+  const output = [
+    "local", "filter.planted.clean\ntouch /tmp/x", "worktree", "diff.planted.textconv\nevil",
+    "global", "filter.mine.clean\nmy-filter %f", "local", "filter.lfs.process\ngit-lfs filter-process",
+    "local", "filter.a.b.smudge\nrun",
+  ].join("\0") + "\0";
+  assert.deepEqual(parseRepositoryCommandConfig(output), [
+    "-c", "filter.planted.clean=", "-c", "filter.planted.required=false", "-c", "diff.planted.textconv=",
+    "-c", "filter.a.b.smudge=", "-c", "filter.a.b.required=false",
+  ]);
+  assert.deepEqual(parseRepositoryCommandConfig(""), []);
 });
 
 for (const action of ["merge-preview", "rebase-preview"]) {

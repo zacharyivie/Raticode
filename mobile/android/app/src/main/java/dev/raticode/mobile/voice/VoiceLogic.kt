@@ -1,5 +1,6 @@
 package dev.raticode.mobile.voice
 
+import dev.raticode.mobile.data.LongText
 import dev.raticode.mobile.live.PhoneActionList
 import dev.raticode.mobile.live.PhoneActions
 import dev.raticode.mobile.live.RemHome
@@ -20,8 +21,8 @@ enum class DeskReadiness {
 
 /** Decisions for voice mode that don't need Android. */
 internal object VoiceLogic {
-    /** Rem's message limit from the phone, the same as the Rem chat box. */
-    const val MAX_CHARS = 4000
+    /** Rem's message limit from the phone, the same as the Rem chat box. Longer words go as a text file ([LongText]). */
+    const val MAX_CHARS = LongText.LIMIT
 
     /**
      * [synced] means a desktop sync snapshot arrived since the app started; until then the phone doesn't know whether
@@ -129,6 +130,35 @@ internal object VoiceLogic {
     /** The one line under a reply that wasn't read aloud; none when talking back is off or the voice works. */
     fun replyNote(talkBack: Boolean, ready: Boolean?): String? = if (talkBack && ready == false) NOT_READ else null
 
-    /** The words to send: trimmed and within Rem's limit, or null when nothing was said. */
-    fun outgoing(text: String): String? = text.trim().take(MAX_CHARS).trim().takeIf { it.isNotEmpty() }
+    /**
+     * The words to send: trimmed, or null when nothing was said. Nothing is cut at Rem's message limit: words that
+     * long go as a text file ([asFile]). Only past [LongText.MAX_CHARS], far beyond any dictation, are they cut.
+     */
+    fun outgoing(text: String): String? = text.trim().take(LongText.MAX_CHARS).trim().takeIf { it.isNotEmpty() }
+
+    /** Words long enough to go to Rem as a text file instead of in the message. */
+    fun asFile(words: String): Boolean = LongText.asFile(words)
+
+    /**
+     * Why long words can't go now, or null when they can: as a file when there is room for one more and the desktop
+     * takes files in Rem's chat, otherwise as a message when they fit in one.
+     */
+    fun longProblem(words: String, room: Int, filesThread: Boolean): String? = when {
+        !asFile(words) || (room > 0 && filesThread) -> null
+        words.length <= MAX_CHARS -> null
+        !filesThread -> TOO_LONG_OLD_DESKTOP
+        else -> TOO_LONG_NO_ROOM
+    }
+
+    /** What the voice screen says under long words in the box: their length, and that they go as a file. */
+    fun lengthNote(length: Int): String? = when {
+        length >= LongText.FILE_AT -> "${LongText.characters(length)}. Goes to Rem as an attached text file."
+        length > MAX_CHARS - 200 -> "$length / $MAX_CHARS"
+        else -> null
+    }
+
+    const val TOO_LONG_OLD_DESKTOP = "This is longer than the 4,000 characters Rem takes in one message. Update Raticode on your computer to " +
+        "send long text as a file, or shorten it."
+    const val TOO_LONG_NO_ROOM = "This is longer than the 4,000 characters Rem takes in one message, and the message already carries " +
+        "8 files. Remove one so the words can go as a file, or shorten them."
 }

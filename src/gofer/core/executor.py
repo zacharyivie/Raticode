@@ -130,6 +130,7 @@ from gofer.core.workflow import (
 from gofer.prompts.manager import PromptManager
 from gofer.subscriptions.base import Subscription
 from gofer.utils.logging import get_logger
+from gofer.utils.open_target import checked_open_target
 from gofer.utils.paths import get_data_dir
 from gofer.utils.process import run_subprocess
 from gofer.utils.run_state import clear_stop_marker, clear_workflow_stop, workflow_run_stop_path
@@ -191,8 +192,10 @@ def open_resource_args(
 ) -> list[str]:
     if resource_type == "app":
         return [target, *(args or [])]
+    checked_open_target(target, resource_type)
     if sys.platform == "win32":
-        return ["cmd", "/c", "start", "", target]
+        # Callers on Windows use os.startfile; cmd would read & and | as more commands.
+        raise ValueError("Open resources with os.startfile on Windows")
     if sys.platform == "darwin":
         return ["open", target]
     return ["xdg-open", target]
@@ -203,6 +206,61 @@ def _secret_name(value: str) -> str | None:
     if match is None:
         return None
     return match.group(1) or match.group(2)
+
+
+# Loop item keys come from data (webhook payloads, CSV headers, JSON rows), so only plain
+# names become environment variables, and never ones that change how a shell, loader,
+# interpreter or git behaves: BASH_ENV alone would run its value in every bash node.
+_LOOP_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
+_LOOP_ENV_DENIED = frozenset(
+    {
+        "PATH",
+        "ENV",
+        "IFS",
+        "PS4",
+        "HOME",
+        "SHELL",
+        "SHELLOPTS",
+        "CDPATH",
+        "GLOBIGNORE",
+        "PROMPT_COMMAND",
+        "TMPDIR",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "SSH_ASKPASS",
+        "SUDO_ASKPASS",
+    }
+)
+_LOOP_ENV_DENIED_PREFIXES = (
+    "BASH",
+    "LD_",
+    "DYLD_",
+    "GIT_",
+    "PYTHON",
+    "NODE_",
+    "NPM_CONFIG_",
+    "PERL",
+    "RUBY",
+    "JAVA_TOOL",
+    "_JAVA",
+    "GOFER_",
+    "RATICODE_",
+)
+
+
+def loop_item_env_name(key: object) -> str | None:
+    """The environment variable a loop item field becomes, or None to leave it out."""
+    if not isinstance(key, str):
+        return None
+    name = key.upper()
+    if (
+        not _LOOP_ENV_NAME.fullmatch(name)
+        or name in _LOOP_ENV_DENIED
+        or name.startswith(_LOOP_ENV_DENIED_PREFIXES)
+    ):
+        return None
+    return name
 
 
 def _read_secret(name: str) -> str:
@@ -5786,10 +5844,9 @@ class WorkflowExecutor:
         }
         if loop_item:
             for key, value in loop_item.items():
-                if key.lower() == "path":
-                    continue
-                if isinstance(value, (str, int, float, bool)):
-                    env.setdefault(key.upper(), self._input_text(value))
+                name = loop_item_env_name(key)
+                if name is not None and isinstance(value, (str, int, float, bool)):
+                    env.setdefault(name, self._input_text(value))
         for key, value in self._resolve_node_inputs(
             node,
             ctx,
@@ -6944,6 +7001,7 @@ class WorkflowExecutor:
             resource_type = op.resource_type
             self._log().node(node.node_id, f"open {resource_type}: {target}")
             if resource_type in {"auto", "url"} and "://" in target:
+                checked_open_target(target, "url")
                 opened = webbrowser.open(target)
                 if not opened:
                     raise RuntimeError(f"Could not open URL: {target}")
@@ -6975,8 +7033,9 @@ class WorkflowExecutor:
                             error=stderr or stdout,
                         )
             elif sys.platform == "win32" and resource_type != "app":
-                os.startfile(target)  # type: ignore[attr-defined]
+                os.startfile(checked_open_target(target, resource_type))  # type: ignore[attr-defined]
             else:
+                checked_open_target(target, resource_type)
                 cmd = open_resource_args(target, resource_type, op.args)
                 rc, stdout, stderr = await run_subprocess(
                     cmd,

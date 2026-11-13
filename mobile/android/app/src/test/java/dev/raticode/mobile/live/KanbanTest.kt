@@ -128,7 +128,7 @@ class KanbanTest {
     }
 
     @Test fun readsRealPeopleFromTheDesktop() {
-        // Written by the desktop's own handlers at the revision named in docs/mobile-desktop-v2.md.
+        // Written by the desktop's own handlers.
         fun read(name: String) = JSONObject(javaClass.getResource("/desktop/$name")!!.readText())
         val real = DesktopViews.parse(Kanban.BOARD, read("kanban-board-people.json")) as KanbanBoard
         assertTrue(real.participantsKnown)
@@ -457,5 +457,79 @@ class KanbanTest {
         val empty = DesktopViews.parse(Kanban.SELF_WORK, JSONObject()) as SelfWorkView
         assertFalse(empty.settings.enabled); assertEquals(1, empty.settings.maxThreads); assertNull(empty.report)
         assertEquals(15, empty.settings.idleMinutes)
+    }
+
+    @Test fun aPausedTicketCanOnlyGoBackToInProgressWhichResumesIt() {
+        val json = JSONObject("""{"tickets":[{"ticket_id":"7","scope":"rem","key":"REM-7","title":"Held","status":"blocked","revision":2,
+            "running":false,"paused":"priority","block_reason":"Paused so your own work could run first."}]}""")
+        val paused = (DesktopViews.parse(Kanban.BOARD, json) as KanbanBoard).tickets.single()
+        assertEquals("priority", paused.paused)
+        assertFalse(paused.running)
+        assertTrue((Kanban.move(paused, "running") as OrganizationModel.Move.Allowed).pull)
+        for (column in listOf("todo", "backlog", "done")) assertTrue(Kanban.move(paused, column) is OrganizationModel.Move.Refused)
+        // An older desktop sends no paused field.
+        assertEquals("", ticket("/1").paused)
+        assertEquals("Paused for your work", RunPause.label(paused.paused))
+    }
+
+    @Test fun anOlderDesktopHasNoWindowsAndItsSwitchIsTheSavedOne() {
+        assertNull(selfWork.schedule)
+        assertTrue(selfWork.settings.savedEnabled)
+        assertNull(Kanban.windowNote(selfWork))
+        val off = DesktopViews.parse(Kanban.SELF_WORK, JSONObject(selfJson.toString()).apply { getJSONObject("settings").put("enabled", false) }) as SelfWorkView
+        assertFalse(off.settings.savedEnabled)
+        assertNull(Kanban.windowNote(off))
+    }
+
+    @Test fun readsTimedWindowsAndTheLastPeriod() {
+        val json = JSONObject(selfJson.toString()).apply {
+            getJSONObject("settings").put("saved_enabled", false)
+            put("schedule", JSONObject("""{"timezone":"Asia/Irkutsk",
+                "active":{"id":"w1","start_at":"2026-11-12T03:00:00Z","end_at":"2026-11-12T11:00:00Z","until":"","timezone":"Asia/Irkutsk",
+                  "after_end":"restore","wait_for_idle":false,"label":"Until 7:00 PM today (Asia/Irkutsk)",
+                  "end_label":"7:00 PM Thu 12 Nov (Asia/Irkutsk)","after_label":"then back to off"},
+                "upcoming":[{"id":"w2","start_at":"2026-11-12T15:00:00Z","end_at":null,"until":"running_done","timezone":"Asia/Irkutsk",
+                  "after_end":"off","wait_for_idle":true,"label":"From 11:00 PM","end_label":"when 2 running tasks finish","after_label":"then off"},
+                  {"label":"no id"}],
+                "last_period":{"id":"p1","started_at":"2026-11-11T01:00:00Z","ended_at":"2026-11-11T03:00:00Z","ended_by":"user",
+                  "summary":"Started 3 tasks, finished 2, proposed 1 ticket.","message_id":"self-work-period-p1"}}"""))
+        }
+        val view = DesktopViews.parse(Kanban.SELF_WORK, json) as SelfWorkView
+        assertTrue(view.settings.enabled); assertFalse(view.settings.savedEnabled)
+        val schedule = view.schedule!!
+        assertEquals("Asia/Irkutsk", schedule.timezone)
+        val active = schedule.active!!
+        assertEquals("Until 7:00 PM today (Asia/Irkutsk)", active.label)
+        assertEquals("Ends 7:00 PM Thu 12 Nov (Asia/Irkutsk), then back to off", Kanban.windowDetail(active, 15))
+        assertEquals("On for this window; goes back to off after it.", Kanban.windowNote(view))
+        assertEquals("On for this window; stays on after it.", Kanban.windowNote(view.copy(schedule = schedule.copy(active = active.copy(afterEnd = "on")))))
+        // A window without an id is left out; a condition window has no end time.
+        val next = schedule.upcoming.single()
+        assertEquals("", next.endAt); assertEquals("running_done", next.until)
+        assertEquals("Ends when 2 running tasks finish, then off · Waits for 15 quiet minutes first", Kanban.windowDetail(next, 15))
+        val period = schedule.lastPeriod!!
+        assertEquals("self-work-period-p1", period.messageId)
+        assertEquals("Turned off", Kanban.periodEnd(period))
+        assertEquals("Its window ended", Kanban.periodEnd(period.copy(endedBy = "window")))
+        // Self-work off with its switch off: nothing to note.
+        assertNull(Kanban.windowNote(view.copy(settings = view.settings.copy(enabled = false))))
+    }
+
+    @Test fun anEmptyScheduleShowsNothing() {
+        val view = DesktopViews.parse(Kanban.SELF_WORK, JSONObject(selfJson.toString())
+            .put("schedule", JSONObject().put("active", JSONObject.NULL).put("upcoming", org.json.JSONArray()).put("last_period", JSONObject.NULL))) as SelfWorkView
+        val schedule = view.schedule!!
+        assertTrue(schedule.isEmpty)
+        assertNull(schedule.active)
+    }
+
+    @Test fun selfWorkSaysHowManyTasksArePaused() {
+        val json = JSONObject(selfJson.toString()).apply {
+            getJSONObject("state").put("paused_threads", 2).put("paused_for_you", 1)
+        }
+        val view = DesktopViews.parse(Kanban.SELF_WORK, json) as SelfWorkView
+        assertEquals(2, view.state.pausedThreads)
+        assertEquals(1, view.state.pausedForYou)
+        assertEquals(0, selfWork.state.pausedThreads)
     }
 }

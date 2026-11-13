@@ -20,6 +20,19 @@ class DeviceInvitationTest {
         change(j)
         return "raticode://pair?v=2&data=" + Base64.getUrlEncoder().withoutPadding().encodeToString(j.toString().toByteArray())
     }
+    /** Anything but a well-formed literal would make Java look the host up in DNS, so DNS could pick the address. */
+    @Test fun endpointsMustBeWellFormedIpLiterals() {
+        fun endpoint(host: String) = JSONObject().put("host", host).put("port", 8767)
+        for (good in listOf("192.168.1.20", "10.0.0.5", "100.101.102.103", "fe80::1", "fd7a:115c:a1e0::1", "::ffff:192.168.1.2",
+            "fe80:0:0:0:0:0:0:1")) {
+            DeviceInvitation.validateDesktopEndpoint(endpoint(good))
+        }
+        for (bad in listOf("999.1.1.1", "192.168.1.256", "dead:beef", "1:2", "fe80::1::2", "fd00:::1", "fd00:12345::1",
+            "::ffff:192.168.1.999", "fd00:0:0:0:0:0:0:0:1", ":1:2")) {
+            assertThrows(bad, IllegalArgumentException::class.java) { DeviceInvitation.validateDesktopEndpoint(endpoint(bad)) }
+        }
+    }
+
     @Test fun acceptsBoundedPrivateEndpoint() { assertEquals("Desktop", DeviceInvitation.parse(invite(), 1000).name) }
     @Test fun expiryFailuresExplainClockRecoveryWithoutExtendingTrust() {
         for ((expiry, problem) in listOf(1000 to InvitationProblem.EXPIRED, 999 to InvitationProblem.EXPIRED,

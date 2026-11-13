@@ -130,6 +130,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          # Nothing here pushes; keep the token out of .git/config while install
+          # scripts, tests and packaging run.
+          persist-credentials: false
 
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
@@ -138,16 +141,16 @@ jobs:
           sudo apt-get install -y dpkg-dev rpm xvfb libarchive-tools
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.11.21"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
+          # Signed release builds never restore caches that other branches' runs saved.
+          enable-cache: false
 
       - name: Install Python dependencies
         run: uv sync --locked --extra dev --extra xlsx --group dev
@@ -156,11 +159,9 @@ jobs:
         run: uv run --locked pytest tests/unit/test_atomic_output.py tests/unit/test_native_filesystem_security.py tests/unit/test_resource_security.py tests/unit/test_rattish_workspaces.py
 
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.23.4"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -171,6 +172,12 @@ jobs:
       - name: Download the Electron runtime
         working-directory: frontend
         run: node node_modules/electron/install.js
+
+      # Built in its own step, before the signing keychain exists, so Vite and its
+      # plugins never see the signing secrets or an unlocked signing keychain.
+      - name: Build renderer
+        working-directory: frontend
+        run: npm run build
 
       - name: Require Windows signing credentials
         env:
@@ -240,7 +247,6 @@ jobs:
           done
           # Notarization uses only the keychain profile; never the Apple ID variables.
           unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER
-          npm run build
           case "$RUNNER_OS" in
             macOS) signed="$MACOS_SIGNING" ;;
             Windows) signed="$WINDOWS_SIGNING" ;;
@@ -268,10 +274,6 @@ jobs:
             fi
           fi
           npx --no-install electron-builder ${{ matrix.electron_builder_args }} "${signing_args[@]}" --publish=never
-
-      - name: Test native terminal and Electron security on packaged runtime version
-        working-directory: frontend
-        run: npm run test:platform
 
       - name: Copy Linux CLI artifact
         if: runner.os == 'Linux'
@@ -322,6 +324,11 @@ jobs:
       - name: Delete temporary macOS signing keychain
         if: always() && inputs.macos_signing && runner.os == 'macOS'
         run: python3 scripts/macos-release-signing.py cleanup
+
+      # Runs third-party test code, so it waits until the signing keychain is deleted.
+      - name: Test native terminal and Electron security on packaged runtime version
+        working-directory: frontend
+        run: npm run test:platform
 
       - name: Verify final updater hashes
         run: node scripts/verify-update-metadata.cjs
@@ -383,7 +390,7 @@ jobs:
           cat checksums-macos.txt
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact-name }}
           path: ${{ matrix.artifact-glob }}

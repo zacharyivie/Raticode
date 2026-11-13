@@ -46,6 +46,10 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     companion object {
         /** Sessions kept open at once; other tabs close with their history saved and reopen when shown. */
         const val MAX_LIVE = 5
+        /** How long Open waits for an extension's popup or tab before saying the button works on the page instead. */
+        const val OPEN_FEEDBACK_MS = 2500L
+        /** How long a tab waits after its page process ended before it reopens (see [sessionLost]). */
+        const val REOPEN_AFTER_LOSS_MS = 1500L
         @Volatile private var instance: GeckoBrowser? = null
         fun get(context: Context): GeckoBrowser = instance ?: synchronized(this) {
             instance ?: GeckoBrowser(context.applicationContext as Application).also { instance = it; BrowserMedia.attach(context) }
@@ -55,7 +59,11 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     }
 
     data class Page(val url: String = BrowserRules.HOME, val title: String = "", val progress: Int = 0, val loading: Boolean = false,
-                    val canBack: Boolean = false, val canForward: Boolean = false, val secure: Boolean = false)
+                    val canBack: Boolean = false, val canForward: Boolean = false, val secure: Boolean = false,
+                    /** The page kept stopping, so the tab shows a Reload button instead (see [TabRecovery]). */
+                    val stopped: Boolean = false,
+                    /** Counts automatic reloads after the page's process ended, so the page on screen draws the new one. */
+                    val revived: Int = 0)
     data class Extension(val id: String, val name: String, val version: String, val enabled: Boolean, val summary: String, val options: String?,
                          val action: WebExtension.Action?, val native: WebExtension)
     data class LinkMenu(val tab: String, val link: String?, val image: String?)
@@ -83,7 +91,11 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     var notice by mutableStateOf<String?>(null)
     var menu by mutableStateOf<LinkMenu?>(null)
     var popup by mutableStateOf<Popup?>(null); private set
-    var fullscreen by mutableStateOf(false); private set
+    /** Whether the open [popup]'s page has finished loading. */
+    var popupLoaded by mutableStateOf(false); private set
+    /** The tab whose page is full screen, as a video's full-screen button makes it (see [VideoFullscreen]). */
+    var fullscreenTab by mutableStateOf<String?>(null); private set
+    val fullscreen get() = fullscreenTab != null
     var found by mutableStateOf<Found?>(null); private set
     var playing by mutableStateOf<Set<String>>(emptySet()); private set
 
@@ -95,7 +107,18 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     private val mediaDetails = HashMap<String, MediaDetails>()
     private val documents = GeckoDocuments()
     private val actions = HashMap<String, WebExtension.Action>()
+    private val defaultActions = HashMap<String, WebExtension.Action>()
+    /** The session Gecko's extensions were last told is the tab in view (see [GeckoRules.extensionTab]). */
+    private var extensionTab: GeckoSession? = null
+    /** Counts popups and tabs opened, so Open can tell whether a button press showed anything. */
+    private var windowsOpened = 0
+    /** Tabs whose page kept stopping. They stay closed until Reload, a new address or a tap on the tab. */
     private val crashed = HashSet<String>()
+    /** Tabs whose page process ended. Each reloads by itself once on screen, not before its time (see [TabRecovery]). */
+    private val reviveAt = HashMap<String, Long>()
+    /** Sessions of private tabs whose page process ended, kept to reopen (see [sessionLost]). */
+    private val lostPrivate = HashMap<String, GeckoSession>()
+    private val recovery = TabRecovery()
     private var inFront = true
 
     val tabs get() = saved.tabs.filter { it.profile == saved.currentProfile }
@@ -175,16 +198,31 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         if (saved.tabs.none { it.id == id }) return
         val previous = active
         active = id
-        crashed.remove(id)
+        if (crashed.remove(id)) { recovery.forget(id); setPage(id) { it.copy(stopped = false) } }
+        reviveAt.remove(id)
         update(saved.copy(active = id))
+        // Only the tab in view can be full screen, so a page Rem or a link brings to the front ends it.
+        if (fullscreenTab != null && fullscreenTab != id) exitFullscreen()
         if (previous != id) { found = null; previous?.let { sessions[it] }?.let { if (previous !in playing) it.setActive(false); it.setFocused(false) } }
         if (pages[id]?.url != BrowserRules.HOME) sessionFor(id)?.let { it.setActive(inFront); it.setFocused(inFront) }
+        showExtensionsTab()
+    }
+
+    /** Tells Gecko's extensions which tab is in view, as Firefox does when it switches tabs. See [GeckoRules.extensionTab]. */
+    private fun showExtensionsTab() {
+        val id = GeckoRules.extensionTab(active, isPrivate(active), active?.let { sessions[it] }?.isOpen == true)
+        val now = id?.let { sessions[it] }
+        if (now === extensionTab) return
+        extensionTab?.takeIf { it.isOpen }?.let { runtime.webExtensionController.setTabActive(it, false) }
+        extensionTab = now
+        now?.let { runtime.webExtensionController.setTabActive(it, true) }
     }
 
     fun close(id: String) {
         val remaining = tabs.filter { it.id != id }
         val tab = saved.tabs.firstOrNull { it.id == id }
-        closeSession(id); states.remove(id); pages.remove(id); crashed.remove(id)
+        closeSession(id); states.remove(id); pages.remove(id); crashed.remove(id); reviveAt.remove(id); recovery.forget(id)
+        lostPrivate.remove(id)?.close()
         val closed = if (tab != null && !tab.private && BrowserAddress.isWeb(tab.url)) (listOf(tab) + saved.closed).take(GeckoRules.MAX_CLOSED) else saved.closed
         update(saved.copy(tabs = saved.tabs.filter { it.id != id }, closed = closed))
         if (active == id) {
@@ -202,7 +240,7 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     }
 
     private fun closeSession(id: String) {
-        sessions.remove(id)?.close()
+        sessions.remove(id)?.let { if (it === extensionTab) extensionTab = null; it.close() }
         mediaGone(id)
     }
 
@@ -210,31 +248,47 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     private fun mediaGone(id: String) {
         media.remove(id); mediaDetails.remove(id); documents.loadStopped(id)
         BrowserMedia.forget(mediaKey(id))
-        if (id == active && fullscreen) { fullscreen = false; BrowserMedia.fullscreen = false }
+        fullscreenEnded(id)
         if (id in playing) changePlaying(playing - id)
     }
 
     /**
      * The session the page should show, opening it when the active tab has a page but no session, as after Android ended
-     * the app and it came back with its saved tabs. A tab whose page crashed stays closed until Reload or a tap on it,
-     * so a page that crashes on load can't reopen itself over and over.
+     * the app and it came back with its saved tabs, or after its page process ended (see [sessionLost]). A tab whose page
+     * keeps stopping stays closed until Reload or a tap on it, so a page that crashes on load can't reopen itself forever.
      */
     fun activeSession(): GeckoSession? {
         val id = active ?: return null
         sessions[id]?.let { return it }
         if (id in crashed || pages[id]?.url == BrowserRules.HOME) return null
-        return sessionFor(id)?.also { it.setActive(inFront); it.setFocused(inFront) }
+        reviveAt[id]?.let { at ->
+            if (!inFront || System.currentTimeMillis() < at) return null
+            reviveAt.remove(id); recovery.restored(id)
+        }
+        return sessionFor(id)?.also { it.setActive(inFront); it.setFocused(inFront); showExtensionsTab() }
     }
 
     /** The open session for [id], reopening a tab that was closed to save memory. */
     private fun sessionFor(id: String): GeckoSession? {
         sessions[id]?.let { sessions.remove(id); sessions[id] = it; return it }
         val tab = saved.tabs.firstOrNull { it.id == id } ?: return null
+        val url = pages[id]?.url ?: BrowserRules.HOME
+        // A private tab whose page process ended reopens its own session (see [sessionLost]).
+        lostPrivate.remove(id)?.let { old ->
+            // GeckoView doesn't always mark a session whose process ended as closed; reopen it either way.
+            if (old.isOpen) old.close()
+            old.open(runtime)
+            sessions[id] = old
+            states.remove(id)
+            if (url != BrowserRules.HOME) old.loadUri(url)
+            return old
+        }
         val session = newSession(id, tab.profile, tab.private)
         val state = states.remove(id)
         when {
-            state != null -> session.restoreState(state)
-            (pages[id]?.url ?: BrowserRules.HOME) != BrowserRules.HOME -> session.loadUri(pages.getValue(id).url)
+            // A list whose current page isn't a web page (a page process that ended may leave an empty one) opens the address instead.
+            state != null && (url == BrowserRules.HOME || GeckoRules.restorable(state.getOrNull(state.currentIndex)?.uri)) -> session.restoreState(state)
+            url != BrowserRules.HOME -> session.loadUri(url)
         }
         return session
     }
@@ -275,17 +329,24 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     }
 
     private fun load(id: String, url: String) {
-        crashed.remove(id)
-        setPage(id) { it.copy(url = url, loading = true, progress = 5) }
+        crashed.remove(id); reviveAt.remove(id); recovery.forget(id)
+        setPage(id) { it.copy(url = url, loading = true, progress = 5, stopped = false) }
         (sessions[id] ?: sessionFor(id))?.let { session ->
             session.loadUri(url)
-            if (id == active) { session.setActive(inFront); session.setFocused(inFront) }
+            if (id == active) { session.setActive(inFront); session.setFocused(inFront); showExtensionsTab() }
         }
     }
 
     fun back() { session?.goBack() }
     fun forward() { session?.goForward() }
-    fun reload() { active?.let(crashed::remove); if (session == null) activeSession() else session?.reload() }
+    fun reload() {
+        val id = active ?: return
+        crashed.remove(id); reviveAt.remove(id); recovery.forget(id)
+        if (session != null) return session!!.reload()
+        // Reopens the tab from its saved back/forward list; the page on screen draws it.
+        setPage(id) { it.copy(stopped = false, revived = it.revived + 1) }
+        activeSession()
+    }
     fun stop() { session?.stop() }
     fun find(text: String, backwards: Boolean = false) {
         val finder = session?.finder ?: return
@@ -293,7 +354,16 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         finder.find(text, if (backwards) GeckoSession.FINDER_FIND_BACKWARDS else 0).accept { result -> found = result?.let { Found(it.current, it.total) } }
     }
     fun endFind() { session?.finder?.clear(); found = null }
-    fun exitFullscreen() { session?.exitFullScreen() }
+    /** Ends full screen: the page gets its video back in place, still playing where it was, without a reload. */
+    fun exitFullscreen() {
+        val id = fullscreenTab ?: return
+        sessions[id]?.exitFullScreen()
+        fullscreenEnded(id)
+    }
+    private fun fullscreenEnded(id: String) {
+        if (fullscreenTab == id) fullscreenTab = null
+        VideoFullscreen.leave(BrowserMediaRules.Engine.GECKO, id)
+    }
 
     private fun wire(id: String, session: GeckoSession) {
         session.navigationDelegate = navigation(id)
@@ -361,6 +431,7 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         val session = GeckoSession(sessionSettings(profile, private))
         wire(id, session)
         sessions[id] = session
+        windowsOpened++
         main.post { select(id) }
         return session
     }
@@ -386,7 +457,11 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     private fun escape(text: String) = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("'", "&#39;").replace("\"", "&quot;")
 
     private fun progress(id: String) = object : GeckoSession.ProgressDelegate {
-        override fun onPageStart(session: GeckoSession, url: String) { documents.loadStarted(id); setPage(id) { it.copy(loading = true, progress = 5) } }
+        override fun onPageStart(session: GeckoSession, url: String) {
+            documents.loadStarted(id); setPage(id) { it.copy(loading = true, progress = 5) }
+            // A tab a page or extension opened is only open once Gecko has taken it, after it was shown.
+            if (id == active) showExtensionsTab()
+        }
         override fun onPageStop(session: GeckoSession, success: Boolean) {
             documents.loadStopped(id)
             setPage(id) { it.copy(loading = false, progress = 100) }
@@ -396,7 +471,10 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         }
         override fun onProgressChange(session: GeckoSession, progress: Int) { setPage(id) { it.copy(progress = progress) } }
         override fun onSecurityChange(session: GeckoSession, securityInfo: GeckoSession.ProgressDelegate.SecurityInformation) { setPage(id) { it.copy(secure = securityInfo.isSecure) } }
-        override fun onSessionStateChange(session: GeckoSession, sessionState: GeckoSession.SessionState) { states[id] = sessionState }
+        override fun onSessionStateChange(session: GeckoSession, sessionState: GeckoSession.SessionState) {
+            // A page process that is ending can report an empty list; keep the last real one to reopen the tab from.
+            if (sessionState.isNotEmpty() || states[id] == null) states[id] = sessionState
+        }
     }
 
     private fun content(id: String) = object : GeckoSession.ContentDelegate {
@@ -406,7 +484,12 @@ internal class GeckoBrowser private constructor(private val app: Application) {
             update(saved.copy(tabs = saved.tabs.map { if (it.id == id) it.copy(title = text) else it }))
             publishMedia(id)
         }
-        override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) { if (id == active) { fullscreen = fullScreen; BrowserMedia.fullscreen = fullScreen } }
+        override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) {
+            if (!fullScreen) fullscreenEnded(id)
+            // Only the tab in view goes full screen; a tab behind it is told no at once.
+            else if (id == active) { fullscreenTab = id; VideoFullscreen.enter(BrowserMediaRules.Engine.GECKO, id) }
+            else session.exitFullScreen()
+        }
         override fun onCloseRequest(session: GeckoSession) { close(id) }
         override fun onCrash(session: GeckoSession) { sessionLost(id, session) }
         override fun onKill(session: GeckoSession) { sessionLost(id, session) }
@@ -415,14 +498,39 @@ internal class GeckoBrowser private constructor(private val app: Application) {
             val image = element.srcUri?.takeIf { element.type == GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE && BrowserAddress.isWeb(it) }
             if (link != null || image != null) menu = LinkMenu(id, link, image)
         }
-        override fun onExternalResponse(session: GeckoSession, response: WebResponse) { download(response) }
+        override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
+            // Like questions, a save is only offered for the tab on screen and while few questions wait.
+            if (!GeckoRules.mayAsk(session === this@GeckoBrowser.session, asks.size)) { io.execute { runCatching { response.body?.close() } }; return }
+            download(response)
+        }
     }
 
+    /**
+     * Tab [id]'s page process ended: Android freed its memory while Raticode was away (onKill), or it crashed (onCrash).
+     * Nothing is shown. Gecko already handed over the tab's back/forward list ([states]), so the tab reopens from it by
+     * itself once it's on screen. A page that keeps stopping gets a quiet Reload button instead (see [TabRecovery]).
+     */
     private fun sessionLost(id: String, session: GeckoSession) {
-        if (sessions[id] === session) { sessions.remove(id); session.close(); crashed.add(id) }
+        if (session === extensionTab) extensionTab = null
+        if (sessions[id] !== session) return
+        sessions.remove(id)
+        // A new private session opened after the last one closed stays blank, so a private tab keeps its session and
+        // reopens it, as GeckoView allows after onKill and onCrash. Its private data stays private to it.
+        if (isPrivate(id)) lostPrivate[id] = session else session.close()
         mediaGone(id)
-        setPage(id) { it.copy(loading = false) }
-        notice = "That page stopped working. Reload to try again."
+        when (val decision = recovery.gone(id)) {
+            is TabRecovery.Decision.Restore -> {
+                // Gecko needs a moment after a page process ends before a new page can start.
+                val delay = maxOf(decision.delayMs, REOPEN_AFTER_LOSS_MS)
+                reviveAt[id] = System.currentTimeMillis() + delay
+                setPage(id) { it.copy(loading = false, progress = 0, stopped = false, revived = it.revived + 1) }
+                main.postDelayed({ if (id in reviveAt) setPage(id) { it.copy(revived = it.revived + 1) } }, delay)
+            }
+            TabRecovery.Decision.GiveUp -> {
+                reviveAt.remove(id); crashed.add(id)
+                setPage(id) { it.copy(loading = false, stopped = true) }
+            }
+        }
     }
 
     // Pages get the camera or microphone only by asking each time, and never location or notifications.
@@ -449,35 +557,42 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     }
 
     private inner class Prompts(val id: String) : GeckoSession.PromptDelegate {
-        private fun <T> asked(build: (GeckoResult<GeckoSession.PromptDelegate.PromptResponse>) -> Ask): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> =
-            GeckoResult<GeckoSession.PromptDelegate.PromptResponse>().also { asks.add(build(it)) }
+        /**
+         * Only the tab on screen may ask, and only a few questions wait at once, so a page, even one in a background tab,
+         * can't bury the browser in dialogs that Back doesn't close. Anything else is dismissed as if the user said no.
+         */
+        private fun asked(session: GeckoSession, prompt: GeckoSession.PromptDelegate.BasePrompt, anyTab: Boolean = false,
+                          build: (GeckoResult<GeckoSession.PromptDelegate.PromptResponse>) -> Ask): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+            if (!GeckoRules.mayAsk(anyTab || session === this@GeckoBrowser.session, asks.size)) return GeckoResult.fromValue(prompt.dismiss())
+            return GeckoResult<GeckoSession.PromptDelegate.PromptResponse>().also { asks.add(build(it)) }
+        }
 
-        override fun onAlertPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.AlertPrompt) = asked<Unit> { r ->
+        override fun onAlertPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.AlertPrompt) = asked(session, prompt) { r ->
             Ask.Confirm(site(id), prompt.message.orEmpty(), "OK", null) { r.complete(prompt.dismiss()) } }
-        override fun onButtonPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ButtonPrompt) = asked<Unit> { r ->
+        override fun onButtonPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ButtonPrompt) = asked(session, prompt) { r ->
             Ask.Confirm(site(id), prompt.message.orEmpty(), "OK", "Cancel") { yes ->
                 r.complete(prompt.confirm(if (yes) GeckoSession.PromptDelegate.ButtonPrompt.Type.POSITIVE else GeckoSession.PromptDelegate.ButtonPrompt.Type.NEGATIVE)) } }
-        override fun onTextPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.TextPrompt) = asked<Unit> { r ->
+        override fun onTextPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.TextPrompt) = asked(session, prompt) { r ->
             Ask.Text(site(id), prompt.message.orEmpty(), prompt.defaultValue.orEmpty()) { text -> r.complete(if (text == null) prompt.dismiss() else prompt.confirm(text)) } }
-        override fun onBeforeUnloadPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.BeforeUnloadPrompt) = asked<Unit> { r ->
+        override fun onBeforeUnloadPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.BeforeUnloadPrompt) = asked(session, prompt, anyTab = true) { r ->
             Ask.Confirm(site(id), "Leave this page? Changes you made may not be saved.", "Leave", "Stay") { yes -> r.complete(prompt.confirm(if (yes) AllowOrDeny.ALLOW else AllowOrDeny.DENY)) } }
-        override fun onRepostConfirmPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.RepostConfirmPrompt) = asked<Unit> { r ->
+        override fun onRepostConfirmPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.RepostConfirmPrompt) = asked(session, prompt) { r ->
             Ask.Confirm(site(id), "Send this form again?", "Send", "Cancel") { yes -> r.complete(prompt.confirm(if (yes) AllowOrDeny.ALLOW else AllowOrDeny.DENY)) } }
-        override fun onAuthPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.AuthPrompt) = asked<Unit> { r ->
+        override fun onAuthPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.AuthPrompt) = asked(session, prompt) { r ->
             val passwordOnly = prompt.authOptions.flags and GeckoSession.PromptDelegate.AuthPrompt.AuthOptions.Flags.ONLY_PASSWORD != 0
             Ask.Login(site(id), prompt.message.orEmpty(), !passwordOnly) { user, password ->
                 r.complete(when { password == null -> prompt.dismiss(); passwordOnly -> prompt.confirm(password); else -> prompt.confirm(user.orEmpty(), password) }) } }
-        override fun onChoicePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ChoicePrompt) = asked<Unit> { r ->
+        override fun onChoicePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ChoicePrompt) = asked(session, prompt) { r ->
             val flat = ArrayList<GeckoSession.PromptDelegate.ChoicePrompt.Choice>()
             fun add(list: Array<GeckoSession.PromptDelegate.ChoicePrompt.Choice>) { list.forEach { if (it.items != null) add(it.items!!) else if (!it.disabled && !it.separator) flat.add(it) } }
             add(prompt.choices)
             Ask.Choose(prompt.title ?: site(id), flat.map { it.id to it.label }, prompt.type == GeckoSession.PromptDelegate.ChoicePrompt.Type.MULTIPLE) { picked ->
                 r.complete(if (picked == null) prompt.dismiss() else prompt.confirm(picked.toTypedArray())) } }
-        override fun onFilePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.FilePrompt) = asked<Unit> { r ->
+        override fun onFilePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.FilePrompt) = asked(session, prompt) { r ->
             Ask.Files(prompt.mimeTypes?.toList().orEmpty(), prompt.type == GeckoSession.PromptDelegate.FilePrompt.Type.MULTIPLE) { uris ->
                 r.complete(if (uris.isNullOrEmpty()) prompt.dismiss() else prompt.confirm(app, uris.toTypedArray())) } }
         // Without these two, date, time and color fields do nothing when tapped.
-        override fun onDateTimePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.DateTimePrompt) = asked<Unit> { r ->
+        override fun onDateTimePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.DateTimePrompt) = asked(session, prompt) { r ->
             val kind = when (prompt.type) {
                 GeckoSession.PromptDelegate.DateTimePrompt.Type.MONTH -> GeckoRules.FORM_MONTH
                 GeckoSession.PromptDelegate.DateTimePrompt.Type.WEEK -> GeckoRules.FORM_WEEK
@@ -489,7 +604,7 @@ internal class GeckoBrowser private constructor(private val app: Application) {
                 val value = text?.let { GeckoRules.formValue(kind, it, prompt.minValue, prompt.maxValue) }
                 if (text != null && value == null) notice = "That isn't a $kind this field accepts."
                 r.complete(if (value == null) prompt.dismiss() else prompt.confirm(value)) } }
-        override fun onColorPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ColorPrompt) = asked<Unit> { r ->
+        override fun onColorPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ColorPrompt) = asked(session, prompt) { r ->
             Ask.Text(prompt.title ?: site(id), GeckoRules.formHint(GeckoRules.FORM_COLOR), prompt.defaultValue.orEmpty()) { text ->
                 val value = text?.let { GeckoRules.formValue(GeckoRules.FORM_COLOR, it) }?.takeIf { it.isNotEmpty() }
                 if (text != null && value == null) notice = "That isn't a color this field accepts."
@@ -549,6 +664,10 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         override fun onPlay(session: GeckoSession, mediaSession: MediaSession) { changePlaying(playing + id); publishMedia(id) }
         override fun onPause(session: GeckoSession, mediaSession: MediaSession) { changePlaying(playing - id); publishMedia(id) }
         override fun onStop(session: GeckoSession, mediaSession: MediaSession) { changePlaying(playing - id); publishMedia(id) }
+        // Gecko names the full-screen video's size when the page has a media session, so an upright video stays upright.
+        override fun onFullscreen(session: GeckoSession, mediaSession: MediaSession, enabled: Boolean, meta: MediaSession.ElementMetadata?) {
+            if (enabled && meta != null) VideoFullscreen.size(BrowserMediaRules.Engine.GECKO, id, meta.width, meta.height)
+        }
         override fun onFeatures(session: GeckoSession, mediaSession: MediaSession, features: Long) {
             mediaDetails.getOrPut(id) { MediaDetails() }.features = features
             publishMedia(id)
@@ -629,6 +748,8 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     /** Raticode came to the front ([on]) or left the screen. A tab playing sound stays active, as a music app would. */
     fun appInFront(on: Boolean) {
         inFront = on
+        // A page Android ended while Raticode was away reloads now that it's back on screen.
+        if (on) active?.takeIf { it in reviveAt }?.let { id -> setPage(id) { it.copy(revived = it.revived + 1) } }
         sessions.forEach { (id, session) -> if (id == active) { session.setActive(on || id in playing); session.setFocused(on) } else if (id in playing) session.setActive(true) }
     }
 
@@ -737,28 +858,70 @@ internal class GeckoBrowser private constructor(private val app: Application) {
         session.promptDelegate = Prompts(active ?: "")
         session.navigationDelegate = navigation("")
         session.contentDelegate = object : GeckoSession.ContentDelegate { override fun onCloseRequest(session: GeckoSession) { closePopup() } }
+        session.progressDelegate = object : GeckoSession.ProgressDelegate {
+            override fun onPageStop(session: GeckoSession, success: Boolean) { if (popup?.session === session) popupLoaded = true }
+        }
         session.open(runtime)
+        session.setActive(true)
+        windowsOpened++
+        popupLoaded = false
         popup = Popup(extension.id, session)
         return GeckoResult.fromValue(session)
     }
-    fun closePopup() { popup?.session?.close(); popup = null }
+    fun closePopup() { popup?.session?.close(); popup = null; popupLoaded = false }
 
-    private fun remember(extension: WebExtension, action: WebExtension.Action) { actions[extension.id] = action; extensions = extensions.map { if (it.id == extension.id) it.copy(action = action) else it } }
+    /**
+     * An extension's toolbar button changed. [session] is the tab it changed for, or null for every tab; a tab's own
+     * button only lists what differs, so it is filled in from the one for every tab.
+     */
+    private fun remember(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) {
+        val shown = if (session == null) action.also { defaultActions[extension.id] = it }
+            else if (session === this.session) defaultActions[extension.id]?.let(action::withDefault) ?: action
+            else return
+        actions[extension.id] = shown
+        extensions = extensions.map { if (it.id == extension.id) it.copy(action = shown) else it }
+    }
 
     private val sessionActions = object : WebExtension.ActionDelegate {
-        override fun onBrowserAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) { if (session == null || session === this@GeckoBrowser.session) remember(extension, action) }
-        override fun onPageAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) { if (session == null || session === this@GeckoBrowser.session) remember(extension, action) }
+        override fun onBrowserAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) = remember(extension, session, action)
+        override fun onPageAction(extension: WebExtension, session: GeckoSession?, action: WebExtension.Action) = remember(extension, session, action)
         override fun onTogglePopup(extension: WebExtension, action: WebExtension.Action) = openPopup(extension)
         override fun onOpenPopup(extension: WebExtension, action: WebExtension.Action) = openPopup(extension)
     }
 
+    // A popup that opens a tab (a dashboard, a sign-in page) closes, so the new tab is what shows.
     private val extensionTabs = object : WebExtension.TabDelegate {
-        override fun onNewTab(source: WebExtension, createDetails: WebExtension.CreateTabDetails): GeckoResult<GeckoSession>? =
-            openedTab(createDetails.url ?: BrowserRules.HOME, saved.currentProfile)?.let { GeckoResult.fromValue(it) }
-        override fun onOpenOptionsPage(source: WebExtension) { source.metaData.optionsPageUrl?.let { openOptions(it) } }
+        override fun onNewTab(source: WebExtension, createDetails: WebExtension.CreateTabDetails): GeckoResult<GeckoSession>? {
+            closePopup()
+            return openedTab(createDetails.url ?: BrowserRules.HOME, saved.currentProfile)?.let { GeckoResult.fromValue(it) }
+        }
+        override fun onOpenOptionsPage(source: WebExtension) { closePopup(); source.metaData.optionsPageUrl?.let { openOptions(it) } }
     }
 
     fun openOptions(url: String) { openedTab(url, saved.currentProfile)?.let { session -> session.open(runtime); session.loadUri(url) } }
+
+    /**
+     * Open on an installed extension: presses its toolbar button, which shows its popup, or opens its settings page (see
+     * [GeckoRules.extensionOpen]). Returns why nothing can open, or null when something is on its way. A button press that
+     * shows nothing at all is followed by a notice, since the extension then works on the page by itself.
+     */
+    fun openExtension(extension: Extension): String? {
+        val action = extension.action
+        when (val open = GeckoRules.extensionOpen(extension.name, extension.enabled, action != null, action?.enabled, extension.options, activeIsPrivate)) {
+            is GeckoRules.ExtensionOpen.Refused -> return open.message
+            is GeckoRules.ExtensionOpen.Options -> { openOptions(open.url); return null }
+            GeckoRules.ExtensionOpen.Button -> {
+                // The press goes to the tab in view, so that tab needs a session even on its start page.
+                val id = active ?: return "Open a tab first."
+                if (sessions[id] == null && sessionFor(id) == null) return "This tab couldn't be opened."
+                showExtensionsTab()
+                val before = windowsOpened
+                action!!.click()
+                main.postDelayed({ if (windowsOpened == before && popup == null) notice = GeckoRules.extensionActedOnPage(extension.name) }, OPEN_FEEDBACK_MS)
+                return null
+            }
+        }
+    }
 
     private fun listed(native: WebExtension) = Extension(native.id, native.metaData.name ?: native.id, native.metaData.version, native.metaData.enabled,
         native.metaData.description.orEmpty(), native.metaData.optionsPageUrl, actions[native.id], native)
@@ -795,7 +958,7 @@ internal class GeckoBrowser private constructor(private val app: Application) {
     }
 
     fun uninstall(extension: Extension) {
-        runtime.webExtensionController.uninstall(extension.native).accept({ actions.remove(extension.id); notice = "Removed ${extension.name}."; refreshExtensions() }, { notice = "${extension.name} couldn't be removed." })
+        runtime.webExtensionController.uninstall(extension.native).accept({ actions.remove(extension.id); defaultActions.remove(extension.id); notice = "Removed ${extension.name}."; refreshExtensions() }, { notice = "${extension.name} couldn't be removed." })
     }
     fun setEnabled(extension: Extension, on: Boolean) {
         val controller = runtime.webExtensionController

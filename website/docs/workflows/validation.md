@@ -6,7 +6,7 @@ pageClass: docs-layout
 
 # Validation and preflight
 
-Check what the workflow means, then check whether the machine can execute it.
+First check what the workflow means, then check whether this machine can run it. None of these commands runs a node.
 
 ## The three checks
 
@@ -16,7 +16,7 @@ Check what the workflow means, then check whether the machine can execute it.
 | `Raticode rattish check` | Grammar, contracts, types, bindings, and graph semantics | No |
 | `Raticode rattish preflight` | Compilation plus deployment resources and readiness | No |
 
-Run them against the actual `workflow.rattish` path:
+Run them on the real `workflow.rattish` path:
 
 ```bash
 Raticode rattish format WORKFLOW_PATH
@@ -24,29 +24,46 @@ Raticode rattish check WORKFLOW_PATH --format json
 Raticode rattish preflight WORKFLOW_PATH --format json
 ```
 
-`format` changes the source. Use `format --check` in CI, or `format --stdout` to inspect canonical text without modifying the file.
+`format` rewrites the file. Use `format --check` in CI, or `format --stdout` to see the canonical text without changing anything.
 
 ## Compiler diagnostics
 
-Unknown fields, invalid provider identifiers, incompatible bindings, missing required fields, unreachable failure routes, and contradictory endpoints are source problems. Fix them before investigating credentials or command installation.
+These are source problems. Fix them before you look at credentials or installed commands:
 
-Diagnostics have stable codes, severities, and source locations. JSON output includes `ok`, the source path, cache information, and the diagnostic list. A warning can coexist with `ok: true`; read it rather than treating success as an empty review.
+- Unknown fields and missing required fields
+- Invalid provider identifiers
+- Incompatible bindings
+- Unreachable failure routes
+- Contradictory endpoints
+
+Each diagnostic has a stable code, a severity and a source location. JSON output includes `ok`, the source path, cache information and the diagnostic list. A warning can appear alongside `ok: true`, so read the list even when the check passes.
 
 ## Preflight diagnostics
 
-Preflight checks the current machine each time. Examples include a missing Bash or Python interpreter, an unreadable script or file, an unavailable provider executable, an incompatible profile, missing secret values, and an unwritable destination.
+Preflight checks the current machine every time it runs. Typical failures:
 
-A valid workflow can fail preflight on another machine. Conversely, an authenticated provider cannot fix a source contract error. Preflight does not prove a network request will succeed or that an agent will produce the result you intend.
+- Bash or Python isn't installed
+- A script or file can't be read
+- A provider executable is missing, or a profile doesn't fit
+- A secret value is missing
+- A destination can't be written
+
+A valid workflow can still fail preflight on another machine, and a signed-in provider can't fix a source error. Passing preflight doesn't prove a network request will succeed or that an agent will do what you meant.
 
 ## Exit codes
 
-For check and preflight, `0` means no error diagnostics, `1` means language or readiness errors, and `2` means source, artifact, or usage failure. Run also reports failed execution with `1`; invalid CLI or declared workflow input uses `2`.
+`check` and `preflight` use these codes. `run` adds two cases.
 
-Use `Raticode rattish inspect-ir WORKFLOW_PATH` to inspect validated internal representation. Do not edit that output as the workflow source.
+| Code | Meaning |
+| --- | --- |
+| `0` | No error diagnostics |
+| `1` | Language or readiness errors. For `run`, also a failed execution. |
+| `2` | Source, artifact or usage failure. For `run`, also invalid CLI or workflow input. |
+
+`Raticode rattish inspect-ir WORKFLOW_PATH` shows the validated internal representation. Don't edit that output as source.
 
 ## Validate examples for your environment
 
-File and script examples need their referenced resources. Agent examples need the selected provider and account. A warning about missing local setup belongs in your review even when a documentation example is structurally correct.
+File and script examples need the files they reference. Agent examples need the chosen provider and a signed-in account. Review warnings about missing local setup even when the example itself is valid.
 
 Next: [Runs and approvals](../studio/runs.md) or [Troubleshooting](../reference/troubleshooting.md).
-
